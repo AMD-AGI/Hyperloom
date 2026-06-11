@@ -1,15 +1,9 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Mock Kernel backend — auto-responds to every REQUEST it sees.
 
-Used in P0 main-path tests so Coordinator + Orchestration can exercise the
-Plan A REQUEST/RESPONSE protocol without a real Claude Kernel agent.
-
-Behaviour:
-
-* When the prompt contains an inbox row with ``topic=request`` and a
-  parseable ``msg_id`` + ``kind``, emit ``response{in_reply_to=msg_id,
-  kind=kind, status="ok", result={"source": "mock"}}``.
-* Multiple requests in one inbox window → one response per request.
-* Otherwise emit a heartbeat.
+Used in P0 main-path tests. Emits one ``response`` per visible request, or
+a heartbeat when none are present.
 """
 
 from __future__ import annotations
@@ -17,12 +11,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..intent_parser import Intent, IntentType
+from ...protocol.intent import Intent, IntentType
 from .base import BackendTurnResult
 
 
-# Coordinator renders inbox rows as:
-#   seq=N msg_id=<hex32> from=orchestration topic=request payload={'target_agent': 'kernel', 'kind': 'trace_analyze', ...}
+# Coordinator inbox row format for request topics.
 _REQUEST_RE = re.compile(
     r"^\s*seq=(\d+)\s+msg_id=([a-f0-9]+)\s+from=(\w+)\s+topic=request\s+payload=(.*)$",
     re.MULTILINE,
@@ -34,10 +27,14 @@ class MockKernelBackend:
     """Auto-respond Kernel adapter. Implements :class:`Backend`."""
 
     def __init__(self, name: str = "kernel-mock"):
+        """Initialise the mock Kernel backend.
+
+        Args:
+            name (str): Human-readable backend name used in logs and metadata.
+        """
         self.name = name
         self.calls: list[dict[str, Any]] = []
-        # Don't double-respond if the same request appears in two consecutive
-        # inbox windows (which can happen during reactor fan-out).
+        # Track answered requests so reactor fan-out re-renders don't double-respond.
         self._answered_msg_ids: set[str] = set()
 
     async def run(
@@ -48,6 +45,23 @@ class MockKernelBackend:
         tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
+        """Auto-respond to every visible request, else emit a heartbeat.
+
+        Scans the rendered inbox in ``prompt`` for request rows and emits one
+        ``response`` with ``status="ok"`` per not-yet-answered request, echoing
+        the request ``kind`` as ``<kind>_done``. When no request is visible,
+        emits a single heartbeat message.
+
+        Args:
+            prompt (str): The composed turn prompt containing the rendered inbox.
+            system_prompt (str | None): Unused; accepted for protocol parity.
+            tools (list[str] | None): Unused; accepted for protocol parity.
+            max_turns (int): Unused; accepted for protocol parity.
+
+        Returns:
+            BackendTurnResult: The response and/or heartbeat intents for this
+            turn.
+        """
         self.calls.append({"prompt": prompt})
         intents: list[Intent] = []
         for match in _REQUEST_RE.finditer(prompt):

@@ -1,7 +1,6 @@
-"""Tests for framework_agent.models.* dataclasses.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Hermetic - exercises only ``from_dict`` / derived properties; no I/O.
-"""
+"""Tests for framework_agent.models.* dataclasses. Hermetic - exercises only ``from_dict`` / derived properties; no I/O."""
 
 from __future__ import annotations
 

@@ -1,18 +1,13 @@
-"""Critic-agent web tools — pluggable, off-by-default ``web_search`` and
-``web_fetch`` capability for the critic LLM reasoning step.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Public surface:
+"""Critic-agent web tools — pluggable, off-by-default ``web_search`` /
+``web_fetch`` for the critic LLM reasoning step.
 
-* :class:`WebToolsConfig` — env-driven configuration; build once per process.
-* :class:`WebSearchClient` / :class:`WebFetchClient` — facades that return
-  the formatted string to feed back as an OpenAI ``tool`` message.
-* :func:`build_tool_schemas` — list of OpenAI tool schemas, gated by config.
-* :func:`build_clients` — convenience factory that wires providers and the
-  default ``httpx.Client`` together; tests call the underlying classes
-  directly with their own transports.
-
-See ``Claw/docs/builtin-tools-design.md`` (sections 5.1 / 5.2) for the
-reference design these clients mirror.
+Public surface: :class:`WebToolsConfig` (env-driven, build once per
+process), :class:`WebSearchClient` / :class:`WebFetchClient` (return the
+formatted ``tool`` message string), :func:`build_tool_schemas` (config-gated
+OpenAI schemas), :func:`build_clients` (factory wiring providers + default
+``httpx.Client``). Mirrors ``Claw/docs/builtin-tools-design.md`` §5.1/5.2.
 """
 
 from __future__ import annotations
@@ -61,6 +56,15 @@ def build_clients(
     Tests should construct ``WebSearchClient`` / ``WebFetchClient``
     directly with their own provider list and transport instead of going
     through this factory.
+
+    Args:
+        config (WebToolsConfig): Resolved web-tools configuration.
+        http_client (httpx.Client | None): Transport to reuse; a default
+            client is created when ``None``.
+
+    Returns:
+        WebToolClients: Bundle whose ``search`` / ``fetch`` slots are
+        ``None`` when the corresponding feature is disabled or unusable.
     """
     if not config.critic_web_tools_enabled:
         return WebToolClients(search=None, fetch=None)
@@ -100,6 +104,19 @@ def build_clients(
 def _provider_factory(
     name: str, config: WebToolsConfig, http: httpx.Client,
 ) -> WebSearchProvider:
+    """Construct a search provider by name.
+
+    Args:
+        name (str): Implemented provider name (``tavily`` or ``serper``).
+        config (WebToolsConfig): Configuration holding the API keys.
+        http (httpx.Client): Shared HTTP transport to inject.
+
+    Returns:
+        WebSearchProvider: The constructed provider.
+
+    Raises:
+        ValueError: If ``name`` is not a known provider.
+    """
     if name == "tavily":
         return TavilyProvider(api_key=config.tavily_api_key, http_client=http)
     if name == "serper":

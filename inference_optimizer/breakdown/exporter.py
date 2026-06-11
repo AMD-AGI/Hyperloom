@@ -1,13 +1,10 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Top-level builder for ``session_breakdown.json``.
 
-Three entrypoints share this builder:
-
-* CLI script (``scripts/dump_session_breakdown.py``) — offline / historical
-* Coordinator action (``action_executors/session_breakdown.py``) — agent-driven
-* ``cli.py`` finally block — end-of-session safety net
-
-All three call :func:`build` (pure: no side effects) or
-:func:`write_breakdown_json` (atomic ``state.json``-style write).
+Shared by the dump CLI, the coordinator action, and ``cli.py``'s finally
+safety net, all calling :func:`build` (pure) or :func:`write_breakdown_json`
+(atomic write).
 """
 
 from __future__ import annotations
@@ -29,11 +26,7 @@ BREAKDOWN_FILENAME = "session_breakdown.json"
 
 
 def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
-    """Read ``state.json`` as a plain dict.
-
-    Falls back to an empty dict (recorded as warning) so collectors can
-    still surface manifest-only metadata if state is missing.
-    """
+    """Read ``state.json`` as a plain dict; empty dict + warning when missing."""
     state_path = session_dir / "state.json"
     if not state_path.exists():
         warnings.append(f"state.json missing at {state_path}")
@@ -46,6 +39,17 @@ def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
 
 
 def _load_manifest(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
+    """Read ``manifest.json`` as a plain dict.
+
+    Args:
+        session_dir (Path): The hyperloom session directory.
+        warnings (list[str]): Accumulator appended to when the file is missing
+            or unparseable.
+
+    Returns:
+        dict[str, Any]: The parsed ``manifest.json`` contents, or an empty
+            dict on any failure.
+    """
     manifest_path = session_dir / "manifest.json"
     if not manifest_path.exists():
         warnings.append(f"manifest.json missing at {manifest_path}")
@@ -62,23 +66,14 @@ def build(
     *,
     include_transcripts: bool | None = None,
 ) -> dict[str, Any]:
-    """Build a complete :class:`SessionBreakdown` for ``session_dir``.
-
-    Pure function — reads from disk, never mutates state.
+    """Build a complete :class:`SessionBreakdown` for ``session_dir`` (pure; reads disk, no mutation).
 
     Args:
-        session_dir: absolute path to a hyperloom session directory.
-                     The directory MUST contain at least ``manifest.json``
-                     or ``state.json`` for any usable output; a totally
-                     empty dir returns mostly-empty sections with warnings.
-        include_transcripts: when True, specialist transcripts are
-            inlined under ``specialist_runs[i].transcripts[j].body``.
-            When None (default) we consult the env var
-            ``INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS=1`` so
-            CLI / SDK / agent-action call sites converge through one
-            switch. Defaults to False —
-            transcripts are large and most dashboards prefer a path
-            reference.
+        session_dir: hyperloom session directory (needs ``manifest.json``
+            or ``state.json`` for usable output).
+        include_transcripts: inline specialist transcripts. ``None``
+            consults ``INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS=1``;
+            defaults to False since transcripts are large.
 
     Returns:
         A dict matching :class:`schema.SessionBreakdown`.
@@ -98,7 +93,7 @@ def build(
     from datetime import datetime, timezone
     exported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    # ── Section collectors (each catches its own errors via warnings) ──
+    # Section collectors (each catches its own errors via warnings).
     session_meta      = _safe_collect("session",
                                        lambda: collectors.collect_session(sd, state, manifest, warnings),
                                        warnings)
@@ -136,8 +131,8 @@ def build(
                                             sd, state, geak_invocations, oob_invocations, warnings,
                                         ),
                                         warnings)
-    param_search       = _safe_collect("param_search",
-                                        lambda: collectors.collect_param_search(state, warnings),
+    explore_search     = _safe_collect("explore_search",
+                                        lambda: collectors.collect_explore_search(state, warnings),
                                         warnings)
     sweep              = _safe_collect("sweep",
                                         lambda: collectors.collect_sweep(sd, state, warnings),
@@ -160,10 +155,7 @@ def build(
                                             session_dir, state, manifest, warnings,
                                         ),
                                         warnings)
-    # specialist sub-agent dispatch records. Built
-    # from ``state.specialist_rounds`` + the on-disk transcripts so
-    # capability_summary.specialist and specialist_runs always agree
-    # (Inv-12.2 single source).
+    # specialist sub-agent dispatch records (single source: state + on-disk transcripts).
     specialist_runs    = _safe_collect("specialist_runs",
                                         lambda: collectors.collect_specialist_runs(
                                             sd, state, warnings,
@@ -171,59 +163,77 @@ def build(
                                         ),
                                         warnings,
                                         default=[])
-    # Raw ``state.optimization_stack[]`` passthrough so downstream
-    # tooling can see the full per-entry evidence (tuned_file /
-    # workspace / etc.) without having to re-read state.json. Pure
-    # mirror; never raises.
+    # Raw ``state.optimization_stack[]`` passthrough (full per-entry evidence; never raises).
     optimization_stack = _safe_collect("optimization_stack",
                                         lambda: collectors.collect_optimization_stack(state),
                                         warnings,
                                         default=[])
-    # Hot-kernel roofline table (Dashboard §1). Pulls
-    # ``<sd>/reports/kernel_roofline.json`` so dashboards consume sbd
-    # exclusively and never have to walk the kernel-agent tree.
+    # Hot-kernel roofline table (Dashboard §1) from ``<sd>/reports/kernel_roofline.json``.
     kernel_roofline    = _safe_collect("kernel_roofline",
                                         lambda: collectors.collect_kernel_roofline(
                                             sd, warnings,
                                         ),
                                         warnings,
                                         default={})
-    # Kernel-agent attempt outcome summary (Breakdown 面板对接文档 §A1).
-    # Mirrors ``<sd>/reports/kernel_optimization_summary.json`` (written
-    # by the report action at CLOSE step 1, before this export at step
-    # 2). Empty dict when absent → dashboard hides Block 1.
+    # Kernel-agent attempt outcome summary (Breakdown panel integration spec §A1);
+    # mirrors ``reports/kernel_optimization_summary.json``, empty → dashboard hides Block 1.
     kernel_optimization_summary = _safe_collect(
         "kernel_optimization_summary",
         lambda: collectors.collect_kernel_optimization_summary(sd, warnings),
         warnings,
         default={})
-    # Post-optimization concurrency sweep (Breakdown 面板对接文档 §A2).
-    # Mirrors ``<sd>/reports/conc_sweep_summary.json`` (written by the
-    # conc_sweep action during SWEEP). Empty dict when absent →
-    # dashboard hides Block 2.
+    # Post-optimization concurrency sweep (Breakdown panel integration spec §A2);
+    # mirrors ``reports/conc_sweep_summary.json``, empty → dashboard hides Block 2.
     conc_sweep_summary = _safe_collect(
         "conc_sweep_summary",
         lambda: collectors.collect_conc_sweep_summary(sd, warnings),
         warnings,
         default={})
-    # Per-snapshot roofline comparison list driving the markdown-
-    # report ``## Roofline`` section. Built from
-    # ``state.roofline_snapshots`` history.
+    # Per-snapshot roofline comparison list (markdown ``## Roofline`` source) from ``state.roofline_snapshots``.
     roofline           = _safe_collect("roofline",
                                         lambda: collectors.collect_roofline(
                                             state, warnings,
                                         ),
                                         warnings,
                                         default=[])
-    # Optimization-progress curve (Dashboard §2). Stack ledger +
-    # ceiling/target reference lines, derived from state.json so the
-    # dashboard reads sbd alone. Used to be exported as ``roofline``
-    # but that clashed with the list-shaped section above used by the
-    # markdown renderer; renamed to ``roofline_progress`` so both
-    # surfaces coexist.
+    # Optimization-progress curve (Dashboard §2): stack ledger + ceiling/target
+    # lines from state.json. Renamed from ``roofline`` to avoid clashing with the
+    # list-shaped section above.
     roofline_progress  = _safe_collect("roofline_progress",
                                         lambda: collectors.collect_roofline_progress(
                                             sd, state, manifest, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
+    # Full-trace: unified token + decision timeline. Joins the per-call
+    # token ledger (reports/trace/llm_calls.jsonl + ext/*.jsonl) with the
+    # KEEP/REVERT journal + dynamic_action dispatch history. Empty (zeroed
+    # rollup) on sessions that predate the trace subsystem. Also writes
+    # reports/trace/decision_trace.jsonl as a side effect.
+    decision_trace     = _safe_collect("decision_trace",
+                                        lambda: collectors.collect_decision_trace(
+                                            sd, state, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
+    # Promoted, discoverable token-spend rollup. Pure/derived from
+    # decision_trace's already-computed token_rollup (no second ledger read)
+    # plus an action_timeline correlation on task_id. Surfaces the full
+    # session total + by component/phase + decision attribution at top level
+    # so callers don't have to dig into decision_trace.token_rollup.
+    token_usage        = _safe_collect("token_usage",
+                                        lambda: collectors.collect_token_usage(
+                                            decision_trace, phase_timeline, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
+    # Live-Langfuse push receipt (opt-in second sink): enabled? / redacted
+    # config / counts. Prefers the post-flush ``langfuse_receipt.json``;
+    # falls back to a live emitter read. The local trace jsonl is always
+    # written regardless of this section.
+    langfuse           = _safe_collect("langfuse",
+                                        lambda: collectors.collect_langfuse(
+                                            sd, manifest, warnings,
                                         ),
                                         warnings,
                                         default={})
@@ -246,61 +256,51 @@ def build(
         "baseline":            baseline,
         "final":               final,
         "phase_timeline":      phase_timeline,
-        # phase boundary segments with embedded action events
-        #. Additive: v1
-        # readers keep using ``phase_timeline`` (flat); v2 readers
-        # prefer ``phase_segments``.
+        # Additive: v1 readers use flat ``phase_timeline``, v2 prefer ``phase_segments``.
         "phase_segments":      phase_segments,
-        # top-level v1-reader alias: the flat
-        # per-action timeline used to live under ``phase_timeline``
-        # in v1. Mirrors the same list so an old reader picks it up
-        # without code change.
+        # v1-reader alias mirroring the flat per-action timeline.
         "action_timeline":     phase_timeline,
         "capability_summary":  capability_summary,
         "geak_invocations":    geak_invocations,
         "oob_invocations":     oob_invocations,
         "kernel_lifecycle":    kernel_lifecycle,
-        "param_search":        param_search,
-        # ``explore_search`` is the v2-native name for
-        # the merged ledger. Mirror of
-        # ``param_search`` so v2 readers can switch with a one-line
-        # rename + v1 readers don't break.
-        "explore_search":      param_search,
+        "param_search":        explore_search,
+        # v2-native name for the merged ledger; mirrors ``param_search``.
+        "explore_search":      explore_search,
         "sweep":               sweep,
         "critic_robustness":   critic_robustness,
         "telemetry":           telemetry,
         "attribution":         attribution,
-        # Cortex KB integration audit (KB_design §3.13 M1 §4
-        # "kb_provenance"). Added as a new top-level section rather than
-        # bumping ``schema_version`` because every field is optional; the
-        # v1 reader simply ignores it.
+        # Cortex KB integration audit; optional, so no schema_version bump.
         "kb_provenance":       kb_provenance,
-        # specialist sub-agent dispatch records.
         "specialist_runs":     specialist_runs,
-        # Raw KEEP ledger passthrough. Mirrors
-        # ``state.optimization_stack[]`` verbatim. Empty list on
-        # pre-baseline / fresh sessions.
+        # Raw KEEP ledger passthrough mirroring ``state.optimization_stack[]``.
         "optimization_stack":  optimization_stack,
-        # Hot-kernel roofline table (Dashboard-Roofline 对接清单 §1).
-        # Empty dict when ``<sd>/reports/kernel_roofline.json`` is
-        # absent — the dashboard hides the table on empty.
+        # Hot-kernel roofline table (spec §1); empty → dashboard hides it.
         "kernel_roofline":     kernel_roofline,
-        # Kernel-agent attempt outcome summary (Breakdown 面板对接文档
-        # §A1). Mirror of ``reports/kernel_optimization_summary.json``;
-        # empty dict on absence (dashboard hides Block 1).
+        # Kernel-agent attempt outcome summary (spec §A1); empty → hides Block 1.
         "kernel_optimization_summary": kernel_optimization_summary,
-        # Post-optimization concurrency sweep (Breakdown 面板对接文档
-        # §A2). Mirror of ``reports/conc_sweep_summary.json``; empty
-        # dict on absence (dashboard hides Block 2).
+        # Post-optimization concurrency sweep (spec §A2); empty → hides Block 2.
         "conc_sweep_summary":  conc_sweep_summary,
-        # Per-snapshot roofline comparison list (markdown-report
-        # source). Built from ``state.roofline_snapshots``.
+        # Per-snapshot roofline comparison list (markdown source).
         "roofline":            roofline,
-        # Optimization-progress curve (Dashboard-Roofline 对接清单 §2).
-        # Always populated when baseline ran; ``ceiling_available`` is
-        # False on sessions that never ran the watermark roofline
-        # pipeline (dashboard hides the reference lines).
+        # Optimization-progress curve (spec §2); ``ceiling_available`` False
+        # when the watermark roofline pipeline never ran.
         "roofline_progress":   roofline_progress,
+        # Full-trace token + decision timeline (FULL_TRACE_DESIGN §6).
+        # ``decision_trace`` is the per-decision join (phase/tick/decision
+        # + token rollup); ``token_rollup`` is the by_phase / by_component
+        # / session_total summary. New optional section — v1 readers ignore
+        # it. Empty on pre-trace sessions.
+        "decision_trace":      decision_trace,
+        # Promoted token-spend summary (full total + by component/phase +
+        # decision attribution + action_timeline correlation). Derived from
+        # decision_trace.token_rollup; additive, v1 readers ignore it.
+        "token_usage":         token_usage,
+        # Live-Langfuse push receipt; ``enabled`` False (with a
+        # ``disabled_reason``) on the default path. Local jsonl ledger is
+        # always written regardless.
+        "langfuse":            langfuse,
 
         "warnings":            warnings,
         "source_files":        source_files,
@@ -314,12 +314,7 @@ def _safe_collect(
     *,
     default: Any = None,
 ):
-    """Run a collector with broad exception catching.
-
-    A bug in one collector must never poison the whole export. Each
-    failure becomes a warning entry; the section becomes ``default``
-    (an empty dict / list).
-    """
+    """Run a collector with broad exception catching; failure → warning + ``default`` (a bug in one collector must not poison the export)."""
     try:
         return fn()
     except Exception as exc:  # noqa: BLE001
@@ -336,19 +331,10 @@ def write_breakdown_json(
     output_path: Path | str | None = None,
     include_transcripts: bool | None = None,
 ) -> Path:
-    """Build + atomically write ``session_breakdown.json``.
+    """Build + atomically write ``session_breakdown.json``; returns the absolute path.
 
-    Args:
-        session_dir: hyperloom session directory.
-        output_path: override target path (defaults to
-                     ``<session_dir>/session_breakdown.json``).
-        include_transcripts: see :func:`build` — when None the
-            ``INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS=1``
-            env var (set by CLI ``--breakdown-include-transcripts``)
-            decides.
-
-    Returns:
-        Absolute path to the written JSON file.
+    ``output_path`` defaults to ``<session_dir>/session_breakdown.json``;
+    ``include_transcripts`` is as in :func:`build`.
     """
     sd = Path(session_dir).resolve()
     target = Path(output_path).resolve() if output_path else sd / BREAKDOWN_FILENAME
@@ -377,8 +363,70 @@ def write_breakdown_json(
     return target
 
 
+def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
+    """Refresh only the ``langfuse`` section of an already-written breakdown.
+
+    ``session_breakdown.json`` is written *before* the session-end
+    ``flush_session`` (the flush depends on ``decision_trace.jsonl``, which the
+    breakdown produces). So the breakdown's first ``langfuse`` section carries
+    the pre-flush, in-process counts (``counts_final=False``). Call this right
+    after ``flush_session`` to splice in the post-flush
+    ``langfuse_receipt.json`` (final counts) without rebuilding the whole file.
+
+    Best-effort and self-skipping: returns False (no-op) when no breakdown or
+    no receipt exists yet, when live push was disabled, or on any error. Never
+    raises -- it must not mask the session's stop_reason at shutdown.
+    """
+    from ..orchestrator.trace.langfuse_emitter import read_receipt
+
+    sd = Path(session_dir).resolve()
+    target = sd / BREAKDOWN_FILENAME
+    try:
+        receipt = read_receipt(sd)
+        if receipt is None or not target.exists():
+            return False
+        receipt["receipt_source"] = "receipt_file"
+        breakdown = json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(breakdown, dict):
+            return False
+        if breakdown.get("langfuse") == receipt:
+            return False  # already current
+        breakdown["langfuse"] = receipt
+        payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{BREAKDOWN_FILENAME}.", suffix=".tmp", dir=str(target.parent),
+        )
+        os.close(fd)
+        tmp_path = Path(tmp)
+        try:
+            tmp_path.write_text(payload, encoding="utf-8")
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
+        log.info("session_breakdown: refreshed langfuse section in %s", target)
+        return True
+    except Exception:  # noqa: BLE001
+        log.debug("session_breakdown: langfuse patch failed (non-fatal)", exc_info=True)
+        return False
+
+
 def _json_default(obj: Any) -> Any:
-    """Stringify objects json.dumps can't handle natively (Path, set, ...)."""
+    """Stringify objects json.dumps can't handle natively (Path, set, ...).
+
+    Args:
+        obj (Any): The object ``json.dumps`` could not serialize.
+
+    Returns:
+        Any: ``str(obj)`` for :class:`~pathlib.Path`, a sorted list for
+            ``set``.
+
+    Raises:
+        TypeError: If ``obj`` is of an unsupported type.
+    """
     if isinstance(obj, Path):
         return str(obj)
     if isinstance(obj, set):
@@ -391,23 +439,10 @@ def write_minimal_final_report(
     *,
     output_path: Path | str | None = None,
 ) -> Path:
-    """Issue-I (Saturday May 2026): cli.finally safety-net for
-    ``reports/final.md`` when the CLOSE phase sequencer never reached
-    step 1 (e.g. SIGTERM mid-tick, ``no_more_leverage`` set before any
-    EXPLORE work landed, or the report executor itself failed).
+    """Issue-I: cli.finally safety-net for ``reports/final.md`` when the CLOSE sequencer never reached step 1.
 
-    The full :class:`ReportExecutor` walks the message bus to render
-    rich highlights; this helper deliberately stays minimal (one
-    SharedState read + the breakdown json that ``cli.finally`` already
-    writes alongside) so it never raises and never blocks shutdown. The
-    output is a plain markdown summary that always documents
-    ``stop_reason`` / ``baseline_tput`` / ``current_best`` / ``last_*``
-    + a pointer to ``session_breakdown.json`` for the structured
-    detail.
-
-    Returns the absolute path written. Idempotent: never overwrites a
-    pre-existing ``reports/final.md`` (the sequencer's authoritative
-    output).
+    Stays minimal (one SharedState read) so it never raises or blocks
+    shutdown. Idempotent: never overwrites an existing ``reports/final.md``.
     """
     from ..orchestrator.shared_state import SharedState
     from ..session_paths import reports_dir
@@ -426,6 +461,16 @@ def write_minimal_final_report(
     breakdown_link = sd / BREAKDOWN_FILENAME
 
     def _fmt_attempt(d: dict[str, Any] | None, label: str) -> str:
+        """Format one ``last_*`` attempt record as a markdown bullet.
+
+        Args:
+            d (dict[str, Any] | None): The attempt record (or ``None``).
+            label (str): The bullet label (e.g. ``"last_sweep"``).
+
+        Returns:
+            str: A markdown bullet line; ``"(none)"`` when the record is
+                empty.
+        """
         if not isinstance(d, dict) or not d:
             return f"- **{label}**: (none)"
         ts = d.get("ts") or "-"
@@ -456,13 +501,13 @@ def write_minimal_final_report(
         sw_line = "(none)"
 
     lines = [
-        f"# Inference Optimizer — emergency final report",
+        "# Inference Optimizer — emergency final report",
         "",
         "> **Auto-generated safety-net.** The CLOSE phase 5-step "
-        "sequencer did not run to completion (process exited before "
-        "phase transition, or ``report`` executor failed). For the "
-        "full audit trail open `session_breakdown.json` next to this "
-        "file.",
+        + "sequencer did not run to completion (process exited before "
+        + "phase transition, or ``report`` executor failed). For the "
+        + "full audit trail open `session_breakdown.json` next to this "
+        + "file.",
         "",
         f"- session_id     : `{state.session_id or '-'}`",
         f"- model_path     : `{state.model_path or '-'}`",
@@ -484,7 +529,7 @@ def write_minimal_final_report(
         _fmt_attempt(getattr(state, "last_explore", None), "last_explore"),
         _fmt_attempt(state.last_sweep, "last_sweep"),
         "",
-        f"## Structured detail",
+        "## Structured detail",
         "",
         f"See `{breakdown_link.name}` (sibling of session root) for the "
         f"complete `phase_history` / `critic_robustness` / "

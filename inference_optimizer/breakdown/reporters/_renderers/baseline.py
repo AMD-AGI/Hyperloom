@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Baseline measurement renderer."""
 
 from __future__ import annotations
@@ -10,6 +12,19 @@ from ._invocation import render_invocation_block
 
 @register_renderer("baseline")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the baseline-measurement section.
+
+    Surfaces baseline throughput, accuracy and latency, the attempts
+    history, and the launch invocation block, emitting data-quality
+    warnings (e.g. missing throughput or TTFT). Skipped when neither
+    throughput nor attempts were recorded.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered baseline section.
+    """
     b = breakdown.get("baseline") or {}
     session = breakdown.get("session") or {}
     tput = b.get("throughput_tok_s_per_gpu")
@@ -56,9 +71,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if attempts:
         facts.append(f"Baseline attempts recorded: {len(attempts)}.")
 
-    # Annotate the ttft row inline when it was reconstructed via the
-    # runs/baseline/ disk walk fallback — readers should see at a
-    # glance that the latency didn't come from state.last_baseline.
+    # Annotate ttft inline when reconstructed via the runs/baseline/ disk walk fallback.
     ttft_display: Any = ttft
     if ttft is not None and ttft_source == "runs_baseline_disk":
         ttft_display = f"{float(ttft):.1f} (reconstructed from runs/baseline/ disk walk)"

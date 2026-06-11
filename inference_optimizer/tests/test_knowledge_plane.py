@@ -1,25 +1,6 @@
-"""v0.8 §3.6 / M4 — KnowledgePlane **integration** tests.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-KB_gaps/Gap-02 root cause: ``cli._bootstrap_knowledge_plane`` was
-defined but never invoked from ``_run_optimize``, leaving the
-specialist sub-agent layer (Gap-01) with a ``None`` plane and the
-PR Monitor / Cortex readonly surface effectively unused.
-
-This module covers what was missing from M4 PR6 ("call the
-bootstrap function + wire it into the Coordinator + EXPLORE
-phase-entry warmup + breakdown signal"):
-
-* :meth:`KnowledgePlane.pr_feed_warm_all_domains` batch warmer.
-* Coordinator ``_on_enter_explore`` hook that fires on EXPLORE entry.
-* ``--degraded-pr`` → ``pr_monitor:disabled`` warning in
-  ``breakdown.warnings``.
-* ``--pr-monitor-url`` unreachable → ``pr_monitor:unreachable:<url>``
-  warning.
-
-These tests do **not** mock the cli helpers or the breakdown
-collector. They exercise the real wiring with a minimal in-memory
-``PRMonitorClient`` double.
-"""
+"""v0.8 §3.6 / M4 — KnowledgePlane integration tests (KB_gaps/Gap-02)."""
 
 from __future__ import annotations
 
@@ -32,18 +13,10 @@ from typing import Any
 import pytest
 
 
-# ===========================================================================
 # Fixtures — minimal PR Monitor / cortex client doubles
-# ===========================================================================
 @dataclass
 class _StubPRClient:
-    """Minimal stand-in for :class:`PRMonitorClient`.
-
-    Implements only the surface KnowledgePlane reaches for. Behaviour
-    is parameterised by the ``healthz_ok`` + ``enabled`` flags so tests
-    can flip between ``--degraded-pr``, ``REST unreachable``, and the
-    happy path.
-    """
+    """Minimal stand-in for :class:`PRMonitorClient`."""
 
     enabled: bool = True
     base_url: str = "https://pr-monitor.test"
@@ -72,13 +45,9 @@ class _StubPRClient:
         return list(self.pr_feed_payload), []
 
 
-# ===========================================================================
 # 1. KnowledgePlane.pr_feed_warm_all_domains
-# ===========================================================================
 def test_pr_feed_warm_all_domains_returns_entry_per_known_domain():
-    """KB_design §3.6 + KB_gaps/Gap-02 PR 5.4 — every known specialist
-    domain must appear in the result map, even when PR Monitor is
-    disabled or yields empty PRs."""
+    """KB_gaps/Gap-02 — every known specialist domain appears in the result map."""
     from inference_optimizer.orchestrator.knowledge_plane import (
         KnowledgePlane,
         load_domain_repos,
@@ -93,7 +62,6 @@ def test_pr_feed_warm_all_domains_returns_entry_per_known_domain():
         domain_repos=load_domain_repos(),
     )
     out = plane.pr_feed_warm_all_domains()
-    # Every known domain has an entry, even if (empty list, warnings).
     for domain in SPECIALIST_DOMAIN_KEYS:
         assert domain in out, f"missing {domain!r} in pr_feed_warm_all_domains"
         prs, warns = out[domain]
@@ -102,8 +70,7 @@ def test_pr_feed_warm_all_domains_returns_entry_per_known_domain():
 
 
 def test_pr_feed_warm_all_domains_stashes_warnings():
-    """Aggregated warnings land on ``last_warnings`` so the breakdown
-    collector can surface them in one pass."""
+    """Aggregated warnings land on ``last_warnings`` for one-pass surfacing."""
     from inference_optimizer.orchestrator.knowledge_plane import (
         KnowledgePlane,
         load_domain_repos,
@@ -115,15 +82,13 @@ def test_pr_feed_warm_all_domains_stashes_warnings():
         domain_repos=load_domain_repos(),
     )
     plane.pr_feed_warm_all_domains()
-    # With pr_monitor=None, every domain produces a ``pr_monitor:disabled``
-    # warning (KnowledgePlane.pr_feed_warm fast-path).
+    # pr_monitor=None → every domain yields a ``pr_monitor:disabled`` warning.
     assert plane.last_warnings, "warnings should be aggregated"
     assert any("pr_monitor:disabled" in w for w in plane.last_warnings)
 
 
 def test_pr_feed_warm_all_domains_isolates_per_domain_failures():
-    """A failure on one domain must NOT abort the rest of the batch
-    (defense in depth: KB_design §3.14 R-03 fail-soft contract)."""
+    """A failure on one domain must NOT abort the rest of the batch (KB_design §3.14 R-03)."""
     from inference_optimizer.orchestrator.knowledge_plane import (
         KnowledgePlane,
         load_domain_repos,
@@ -150,17 +115,13 @@ def test_pr_feed_warm_all_domains_isolates_per_domain_failures():
     plane.pr_feed_warm = _flaky_pr_feed_warm  # type: ignore[assignment]
     out = plane.pr_feed_warm_all_domains()
 
-    # Every domain still got a turn.
     assert set(call_log) == set(SPECIALIST_DOMAIN_KEYS)
-    # The poisoned domain has a non-empty warnings entry.
     prs, warns = out["serving_specialist"]
     assert prs == []
     assert any("serving_specialist" in w for w in warns)
 
 
-# ===========================================================================
 # 2. Coordinator EXPLORE phase entry auto-warm
-# ===========================================================================
 class _FakePlane:
     """Lighter-than-KnowledgePlane double that just records calls."""
 
@@ -181,13 +142,7 @@ class _FakePlane:
 
 
 def _make_bare_shared_state():
-    """Minimal SharedState stand-in used by the EXPLORE-entry tests.
-
-    Provides only the attributes the EXPLORE-entry hook reads while
-    the watermark gate is dormant (``last_roofline_tput=0`` short-
-    circuits the check), so the test stays focused on the pr_feed
-    warmup branch.
-    """
+    """Minimal SharedState stand-in for the EXPLORE-entry tests."""
     from dataclasses import dataclass, field
 
     @dataclass
@@ -208,19 +163,13 @@ def _make_bare_shared_state():
 
 @pytest.mark.asyncio
 async def test_on_enter_explore_warms_pr_feed(tmp_path: Path):
-    """Coordinator's EXPLORE-entry hook must call
-    ``KnowledgePlane.pr_feed_warm_all_domains`` exactly once per
-    transition, regardless of where it came from (PRELUDE or
-    resume-inferred)."""
+    """The EXPLORE-entry hook calls ``pr_feed_warm_all_domains`` exactly once."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
     plane = _FakePlane()
     coord.knowledge_plane = plane
     coord.shared_state = _make_bare_shared_state()
-    # Patch in just enough infrastructure for the dispatcher methods
-    # this test touches. The hook itself is pure dispatch + 1 plane
-    # call when composite is off.
 
     await coord._on_enter_explore(from_phase="PRELUDE")
     assert plane.warm_calls == 1
@@ -228,23 +177,18 @@ async def test_on_enter_explore_warms_pr_feed(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_on_enter_explore_graceful_when_plane_is_none(tmp_path: Path):
-    """``--degraded-kb`` runs have plane=None; the hook must short-circuit
-    instead of raising."""
+    """``--degraded-kb`` runs have plane=None; the hook must short-circuit."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
     coord.knowledge_plane = None
     coord.shared_state = _make_bare_shared_state()
-    # Should not raise:
     await coord._on_enter_explore(from_phase="PRELUDE")
 
 
 @pytest.mark.asyncio
 async def test_on_enter_explore_swallows_warmup_exceptions(tmp_path: Path):
-    """If ``pr_feed_warm_all_domains`` raises (e.g. network gone),
-    the hook must log + continue. EXPLORE phase still functions; the
-    per-dispatch warmup in ``_handle_delegate`` is the second line of
-    defence."""
+    """A raising ``pr_feed_warm_all_domains`` must log + continue, not crash."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
     class _BadPlane:
@@ -257,21 +201,12 @@ async def test_on_enter_explore_swallows_warmup_exceptions(tmp_path: Path):
     coord = Coordinator.__new__(Coordinator)
     coord.knowledge_plane = _BadPlane()
     coord.shared_state = _make_bare_shared_state()
-    # Should not raise:
     await coord._on_enter_explore(from_phase="PRELUDE")
 
 
 @pytest.mark.asyncio
 async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path):
-    """The dispatcher table fires PR-feed warmup on EXPLORE and *only*
-    EXPLORE. KERNEL / SWEEP / CLOSE each have their own side effects
-    (Gap-04 auto-profile / Gap-05 auto-sweep / Gap-06 5-step
-    sequencer) but none of them must call into the KnowledgePlane.
-
-    Specifically guards against accidentally wiring
-    ``pr_feed_warm_all_domains`` into a non-EXPLORE branch — that
-    would burn LLM quota / PR Monitor budget for no reason.
-    """
+    """PR-feed warmup fires on EXPLORE and only EXPLORE, never KERNEL/SWEEP/CLOSE."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
@@ -279,13 +214,8 @@ async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path
     plane = _FakePlane()
     coord.knowledge_plane = plane
 
-    # All non-EXPLORE branches now exist (Gap-04 / Gap-05 / Gap-06).
-    # Give the coord enough state for the hooks to short-circuit on
-    # ``kernel_enabled=False`` (KERNEL skip) / empty
-    # phase_history (close_step / evidence helpers no-op) / no cortex_kb
-    # (CLOSE sequencer skips steps 3 + 4). The assertion is
-    # "plane.warm_calls stays 0 for non-EXPLORE", not "hooks are
-    # complete no-ops".
+    # State that lets the non-EXPLORE hooks short-circuit; the assertion
+    # is "plane.warm_calls stays 0 for non-EXPLORE".
     @dataclass
     class _BareState:
         kernel_enabled: bool = False
@@ -294,10 +224,6 @@ async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path
         warm_start_recipe: dict | None = None
         cortex_session_id: str = ""
         cortex_session_summary: dict = field(default_factory=dict)
-        # closing_report_task_id is read by _enqueue_internal_report_task
-        # (step 1 of the CLOSE sequencer); empty string means "no
-        # wall-clock-deadline path enqueued one earlier, fall through
-        # to fresh insert".
         closing_report_task_id: str = ""
         stop_reason: str = ""
         current_best: dict = field(default_factory=dict)
@@ -309,16 +235,12 @@ async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path
             return None
 
         def set_stop_reason(self, value: str) -> str:
-            # Mirror SharedState.set_stop_reason's lenient writer
-            # signature (Inv-8.3 vocab validation is enforced by the
-            # production type, not exercised here).
             self.stop_reason = value
             return value
     coord.shared_state = _BareState()
     coord.role_registry = {}   # _kernel_enabled() reads role_registry
     coord.cortex_kb = None
-    # CLOSE sequencer enqueues real tasks; give it a tasks double so
-    # the steps run + we can still assert plane.warm_calls.
+
     class _StubTaskRegistry:
         async def create_or_return_existing(self, **kwargs):
             from inference_optimizer.orchestrator.task_registry import Task
@@ -348,9 +270,7 @@ async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path
     assert plane.warm_calls == 1
 
 
-# ===========================================================================
 # 3. _bootstrap_knowledge_plane status marker + breakdown.warnings wiring
-# ===========================================================================
 def _build_args(**overrides) -> argparse.Namespace:
     base = dict(
         pr_monitor_enabled=True,
@@ -365,8 +285,7 @@ def _build_args(**overrides) -> argparse.Namespace:
 
 
 def test_bootstrap_writes_status_marker_when_disabled(tmp_path: Path):
-    """``--degraded-pr`` path: marker must declare enabled=False so
-    the breakdown collector surfaces ``pr_monitor:disabled``."""
+    """``--degraded-pr``: marker declares enabled=False for ``pr_monitor:disabled``."""
     from inference_optimizer.cli import _bootstrap_knowledge_plane
     from inference_optimizer.session_paths import pr_monitor_status_json
 
@@ -384,10 +303,7 @@ def test_bootstrap_writes_status_marker_when_disabled(tmp_path: Path):
 def test_bootstrap_marker_records_ir3_auto_degrade(
     tmp_path: Path, monkeypatch,
 ):
-    """IR-3 (in ``_preflight``) sets ``args.pr_monitor_enabled=False`` +
-    ``args.pr_degraded_reason="ir3_auto"`` when PR Monitor is
-    unreachable. The bootstrap honours that — marker shows
-    ``enabled=False`` + the explanatory reason in ``status_text``."""
+    """IR-3 auto-degrade: marker shows ``enabled=False`` + ``ir3_auto`` in status_text."""
     from inference_optimizer.cli import _bootstrap_knowledge_plane
     from inference_optimizer.session_paths import pr_monitor_status_json
     from inference_optimizer.orchestrator import pr_monitor as pr_mod
@@ -430,8 +346,7 @@ def test_bootstrap_marker_records_ir3_auto_degrade(
 def test_collect_kb_provenance_surfaces_pr_monitor_disabled_warning(
     tmp_path: Path,
 ):
-    """Roundtrip: the breakdown collector must emit
-    ``pr_monitor:disabled`` to ``warnings`` when the marker says so."""
+    """The breakdown collector emits ``pr_monitor:disabled`` when the marker says so."""
     from inference_optimizer.breakdown.collectors import collect_kb_provenance
     from inference_optimizer.session_paths import pr_monitor_status_json
 
@@ -480,8 +395,6 @@ def test_collect_kb_provenance_surfaces_pr_monitor_unreachable_warning(
         manifest={},
         warnings=warnings_list,
     )
-    # Either bare ``pr_monitor:unreachable`` or with the URL appended is
-    # acceptable; we assert the prefix.
     assert any(w.startswith("pr_monitor:unreachable") for w in warnings_list)
 
 
@@ -517,10 +430,8 @@ def test_collect_kb_provenance_no_warning_when_plane_healthy(
 def test_collect_kb_provenance_no_warning_when_marker_missing(
     tmp_path: Path,
 ):
-    """Resume path without the marker (e.g. v0.6 session resumed pre-Gap-02)
-    must not produce spurious warnings — absence ≠ failure."""
+    """A missing marker must not produce spurious warnings — absence ≠ failure."""
     from inference_optimizer.breakdown.collectors import collect_kb_provenance
-    # No marker written.
     warnings_list: list = []
     collect_kb_provenance(
         tmp_path,
@@ -531,26 +442,18 @@ def test_collect_kb_provenance_no_warning_when_marker_missing(
     assert not any(w.startswith("pr_monitor:") for w in warnings_list)
 
 
-# ===========================================================================
 # 4. KB_gaps/Gap-16 — CLI flag plumbing reaches _bootstrap_knowledge_plane
-# ===========================================================================
 def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:
-    """Run the cli argparse on a minimal ``optimize`` invocation so we
-    can pin the dest-name + default contract the bootstrap reads."""
+    """Pin the dest-name + default contract the bootstrap reads."""
     from inference_optimizer.cli import _build_parser
     parser = _build_parser()
     return parser.parse_args(["optimize", "--degraded-kb", *extra])
 
 
 def test_cli_pr_monitor_flags_have_expected_dest_and_defaults():
-    """KB_gaps/Gap-16 — ``--pr-monitor-url`` / ``--degraded-pr`` /
-    ``--pr-monitor-mcp-url`` / ``--pr-feed-window-days`` MUST land
-    under the dest names that :func:`_bootstrap_knowledge_plane`
-    reads. A regression that renames the dest would silently
-    decouple the help text from runtime behaviour."""
+    """KB_gaps/Gap-16 — PR-monitor flags land under the dest names the bootstrap reads."""
     args = _parse_optimize_args([])
-    # IR-3 sets pr_monitor_enabled at runtime, not argparse. The dest
-    # is ``degraded_pr`` (store_true, default False).
+    # dest is ``degraded_pr`` (store_true, default False).
     assert args.degraded_pr is False
     assert args.pr_monitor_url is None
     assert args.pr_monitor_mcp_url is None
@@ -585,11 +488,7 @@ def test_cli_pr_feed_window_days_override_reaches_namespace():
 def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
     tmp_path: Path, monkeypatch,
 ):
-    """End-to-end pin: argparse-built ``args`` flow into
-    :func:`_bootstrap_knowledge_plane` and the values it reads
-    propagate to the resulting :class:`KnowledgePlane` instance
-    (URL → client, window_days → plane). Closes KB_gaps/Gap-16's
-    "help text ↔ runtime behaviour" contract."""
+    """KB_gaps/Gap-16 — argparse ``args`` values propagate into the KnowledgePlane."""
     from inference_optimizer.cli import _bootstrap_knowledge_plane
     from inference_optimizer.orchestrator import pr_monitor as pr_mod
 

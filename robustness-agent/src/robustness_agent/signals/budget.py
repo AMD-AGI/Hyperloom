@@ -1,56 +1,17 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Wall-clock budget signals.
 
-Two complementary axes of coverage live here:
+Two complementary axes, both gated on no validated gain:
 
-**Percentage-based (K2, 2026-05-18):**
+* Percentage ladder: ``budget_strategy_drift`` (burn_pct >= 0.5),
+  ``budget_burn_no_gain`` (>= 0.70), ``deadline_imminent`` (>= 0.85, emits ``delegate(report)``).
+* Absolute-time: ``deadline_warning`` (remaining <= 30min) and
+  ``deadline_hard_cutoff`` (remaining <= 5min, always HIGH + ``delegate(report)``).
 
-* ``budget_strategy_drift`` *(new 2026-05-18)* — early-stage warning at
-  ``burn_pct >= strategy_drift_pct`` (default 0.5) with no validated
-  gain. Suggests Orchestration shrink scope from ``kernel_opt`` to
-  faster actions before crossing the more aggressive thresholds below.
-* ``budget_burn_no_gain`` — mid-stage warning at
-  ``burn_pct >= warn_pct`` (default 0.70) with no validated gain.
-* ``deadline_imminent`` — wind-down trigger at
-  ``burn_pct >= imminent_pct`` (default 0.85) with no validated gain.
-  Emits ``delegate(report)``.
-
-**Absolute-time-based (H1 / H2 spec, 2026-05-18):**
-
-* ``deadline_warning`` *(new 2026-05-18)* — fires when
-  ``remaining_minutes <= deadline_warning_minutes`` (default 30) AND
-  the session is not yet in ``closing_phase``. Severity depends on
-  validated gain: HIGH when no gain has been validated yet, MEDIUM
-  when there is shippable gain (so we still nudge towards finalize
-  but do not auto-``delegate(report)``).
-* ``deadline_hard_cutoff`` *(new 2026-05-18)* — fires when
-  ``remaining_minutes <= deadline_hard_cutoff_minutes`` (default 5).
-  Always HIGH, always emits ``delegate(report)``: by this point any
-  new explore proposal will likely be cut by the deadline supervisor.
-  This mirrors the ``WARNING: < 5 min remaining`` line the Coordinator
-  already emits in the orchestration prompt — Robustness now gets the
-  same trigger so it can ACT on it.
-
-The check is intentionally minimal. We rely on the Coordinator-rendered
-``=== Time budget ===`` block parsed into
-:class:`SharedStateSnapshot.elapsed_minutes` /
-:attr:`SharedStateSnapshot.remaining_minutes` /
-:attr:`SharedStateSnapshot.budget_minutes`. When the prompt does not
-carry these fields (legacy host or run without a wall-clock deadline)
-all signals stay silent.
-
-``cumulative_gain_validated`` is the canonical "validated gain" measure;
-``cumulative_gain`` (un-validated) is intentionally NOT used because the
-core scenario we are trying to rescue is: the session shows un-validated
-gains that keep regressing in ``validate_stack`` — exactly the
-``cumulative_gain > 0 but cumulative_gain_validated == 0`` failure mode
-observed in the 2026-05 GPU-leak post-mortem.
-
-The two axes intentionally overlap. For a 6h budget, ``imminent_pct``
-fires at 54 min remaining while ``deadline_warning`` fires at 30 min;
-the latter is the tighter, time-anchored fallback that catches the
-case where the early percentage-based gate was silenced by healthy
-gain. For a 24h budget the ordering reverses (85% = 3.6h remaining,
-well before 30 min); ``deadline_warning`` then arrives first.
+Reads the Coordinator time-budget block via :class:`SharedStateSnapshot`; silent when absent.
+Uses ``cumulative_gain_validated`` to target the regress-in-validate_stack mode. The two axes
+intentionally overlap; absolute-time is the fallback when the percentage gate is silenced by healthy gain.
 """
 
 from __future__ import annotations
@@ -65,43 +26,23 @@ from .symptom import Symptom, SymptomSeverity
 class BudgetConfig:
     """Tunables for :func:`evaluate_budget_signals`.
 
-    Three percentage-based thresholds form an escalating ladder
-    (``strategy_drift_pct < warn_pct < imminent_pct``) plus two
-    absolute-time thresholds (``deadline_warning_minutes >=
-    deadline_hard_cutoff_minutes``) that catch sessions whose budget
-    is so long that percentage gates fire too late. ``min_budget_minutes``
-    suppresses every signal on sub-30-min smoke tests where nothing
-    Robustness can do helps.
+    Escalating percentage ladder (``strategy_drift_pct < warn_pct < imminent_pct``)
+    plus two absolute-time thresholds (``deadline_warning_minutes >= deadline_hard_cutoff_minutes``).
     """
 
-    # Above ``strategy_drift_pct`` budget used AND no validated gain → a
-    # medium-severity early hint that the explore strategy is not
-    # finding wins. Cheaper actions (``params`` / ``sweep``) should
-    # take over from ``kernel_opt`` before we reach the harder gates.
+    # Budget used past this with no validated gain → cheaper actions take over from kernel_opt.
     strategy_drift_pct: float = 0.5
-    # Above ``warn_pct`` budget used → medium severity alert.
     warn_pct: float = 0.70
-    # Above ``imminent_pct`` budget used AND no validated gain → high
-    # severity escalate + ``delegate(report)``.
+    # Past this with no validated gain → HIGH escalate + delegate(report).
     imminent_pct: float = 0.85
-    # ``deadline_warning_minutes`` is the absolute-time backstop that
-    # catches long sessions where the percentage gates are still well
-    # below ``imminent_pct``. Default 30 min matches the SKILL.md
-    # operator playbook: "If <30 min remain, prefer report".
+    # Absolute-time backstop; 30 min matches the SKILL playbook "If <30 min remain, prefer report".
     deadline_warning_minutes: float = 30.0
-    # ``deadline_hard_cutoff_minutes`` is the wall-time emergency cut.
-    # Mirrors the Coordinator's orchestration-prompt
-    # ``WARNING: < 5 min remaining`` line so Robustness can act on the
-    # same trigger that already exists on the Orchestration side.
+    # Wall-time emergency cut, mirrors the Coordinator's "< 5 min remaining".
     deadline_hard_cutoff_minutes: float = 5.0
-    # Sessions shorter than this never trigger the signal; nothing the
-    # robustness role can do helps a sub-30-min smoke test.
+    # Below this budget every signal is suppressed (sub-30-min smoke test).
     min_budget_minutes: float = 30.0
-    # Validated gain (%) above which we consider the run "productive"
-    # and suppress the wind-down for the percentage-based ladder. The
-    # absolute-time signals are NOT silenced by gain because a 30-min
-    # deadline still matters even if the run has shippable progress —
-    # we just downgrade their severity from HIGH to MEDIUM.
+    # Validated gain (%) above which the percentage ladder is suppressed;
+    # absolute-time signals are only downgraded HIGH→MEDIUM, not silenced.
     productive_gain_pct: float = 0.5
 
 
@@ -110,6 +51,23 @@ def evaluate_budget_signals(
     *,
     config: BudgetConfig | None = None,
 ) -> list[Symptom]:
+    """Evaluate the wall-clock budget ladder and absolute-time deadline rules.
+
+    Computes burn percentage and remaining time from the shared-state snapshot
+    and emits the appropriate percentage-based and time-anchored symptoms.
+    Stays silent on sub-``min_budget_minutes`` sessions and during the closing
+    phase.
+
+    Args:
+        ctx (ReactorContext): Reactor context providing the shared-state
+            snapshot.
+        config (BudgetConfig | None): Tunables; defaults to :class:`BudgetConfig`
+            when ``None``.
+
+    Returns:
+        list[Symptom]: Any budget/deadline symptoms for this tick, possibly
+            empty.
+    """
     cfg = config or BudgetConfig()
     snap: SharedStateSnapshot = ctx.shared_state
     budget = float(snap.budget_minutes or 0.0)
@@ -120,18 +78,13 @@ def evaluate_budget_signals(
     if elapsed <= 0.0:
         return []
     if snap.closing_phase:
-        # Already in wind-down; no need to nag.
         return []
 
     burn_pct = elapsed / budget
     validated = float(snap.cumulative_gain_validated or 0.0)
 
-    # ------------------------------------------------------------------
-    # Absolute-time signals — checked FIRST because they bypass the
-    # ``productive_gain_pct`` gate (gain healthy or not, the wall is
-    # coming). The dedup logic in :mod:`signals.classifier` collapses
-    # any overlap with the percentage-based signals below.
-    # ------------------------------------------------------------------
+    # Absolute-time signals checked first; they bypass the
+    # ``productive_gain_pct`` gate. Dedup collapses any overlap below.
     absolute_signals: list[Symptom] = []
     if remaining <= cfg.deadline_hard_cutoff_minutes:
         absolute_signals.append(
@@ -147,10 +100,7 @@ def evaluate_budget_signals(
             )
         )
 
-    # ------------------------------------------------------------------
-    # Percentage-based signals — gated by validated gain so they go
-    # quiet once the run has something shippable.
-    # ------------------------------------------------------------------
+    # Percentage-based signals — gated by validated gain.
     percentage_signal: Symptom | None = None
     if validated < cfg.productive_gain_pct:
         if burn_pct >= cfg.imminent_pct:
@@ -175,6 +125,16 @@ def evaluate_budget_signals(
 def _imminent_symptom(
     snap: SharedStateSnapshot, *, burn_pct: float, cfg: BudgetConfig,
 ) -> Symptom:
+    """Build the HIGH ``deadline_imminent`` wind-down symptom.
+
+    Args:
+        snap (SharedStateSnapshot): Current shared-state snapshot.
+        burn_pct (float): Fraction of the budget already consumed.
+        cfg (BudgetConfig): Budget tunables.
+
+    Returns:
+        Symptom: A HIGH-severity symptom recommending ``delegate(report)``.
+    """
     return Symptom(
         name="deadline_imminent",
         severity=SymptomSeverity.HIGH,
@@ -194,9 +154,7 @@ def _imminent_symptom(
             "imminent_pct": cfg.imminent_pct,
             "productive_gain_pct": cfg.productive_gain_pct,
         },
-        # Session-wide signal; subject empty so dedup key collapses
-        # cleanly across ticks (the ladder cooldown keeps it from
-        # flooding the inbox).
+        # Session-wide; empty subject collapses the dedup key across ticks.
         subject={},
         source="local",
         suggestion=(
@@ -208,6 +166,16 @@ def _imminent_symptom(
 def _burn_no_gain_symptom(
     snap: SharedStateSnapshot, *, burn_pct: float, cfg: BudgetConfig,
 ) -> Symptom:
+    """Build the MEDIUM ``budget_burn_no_gain`` mid-stage warning symptom.
+
+    Args:
+        snap (SharedStateSnapshot): Current shared-state snapshot.
+        burn_pct (float): Fraction of the budget already consumed.
+        cfg (BudgetConfig): Budget tunables.
+
+    Returns:
+        Symptom: A MEDIUM-severity symptom nudging a strategy change.
+    """
     return Symptom(
         name="budget_burn_no_gain",
         severity=SymptomSeverity.MEDIUM,
@@ -236,12 +204,7 @@ def _burn_no_gain_symptom(
 def _strategy_drift_symptom(
     snap: SharedStateSnapshot, *, burn_pct: float, cfg: BudgetConfig,
 ) -> Symptom:
-    """H2 early warning: 50% burnt and the run still has nothing to ship.
-
-    Intentionally low-severity (MEDIUM) — Robustness only diagnoses
-    here; the ActionLadder emits an ``alert(medium)`` so Orchestration
-    can see the early-strategy hint without losing decision authority.
-    """
+    """H2 early warning: 50% burnt and nothing to ship; MEDIUM (diagnose only)."""
     return Symptom(
         name="budget_strategy_drift",
         severity=SymptomSeverity.MEDIUM,
@@ -275,12 +238,7 @@ def _deadline_warning_symptom(
     validated: float,
     cfg: BudgetConfig,
 ) -> Symptom:
-    """H1 absolute-time warning: less than 30 min remain.
-
-    Severity depends on whether the run has validated gain. With gain
-    we only nudge (MEDIUM); without gain we treat the time crunch as
-    HIGH because the run is now both empty AND about to be cut.
-    """
+    """H1 absolute-time warning (<30 min): MEDIUM with validated gain, HIGH without."""
     if validated < cfg.productive_gain_pct:
         severity = SymptomSeverity.HIGH
         tail = "validated_gain still 0; wind the session down now"
@@ -319,12 +277,7 @@ def _deadline_warning_symptom(
 def _hard_cutoff_symptom(
     snap: SharedStateSnapshot, *, remaining: float, cfg: BudgetConfig,
 ) -> Symptom:
-    """H1 absolute-time emergency cut: <= 5 min remain, no exceptions.
-
-    Always HIGH, always emits ``delegate(report)`` in the ladder.
-    Mirrors the Coordinator orchestration prompt's
-    ``WARNING: < 5 min remaining`` warning, just on the Robustness side.
-    """
+    """H1 absolute-time emergency cut (<=5 min): always HIGH + delegate(report)."""
     return Symptom(
         name="deadline_hard_cutoff",
         severity=SymptomSeverity.HIGH,

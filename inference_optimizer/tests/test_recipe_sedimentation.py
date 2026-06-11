@@ -1,14 +1,6 @@
-"""Tests for KEEP/REVERT recipe sedimentation and the warm-start closure.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Covers:
-
-* ``_collect_attempt_provenance`` — maps KEEP attempts to their
-  research-hint source and collects REVERT rows.
-* ``_build_recipe_attrs_from_state`` — sediments ``source`` onto
-  ``what_worked`` and appends REVERTs to ``what_failed`` (toggle aware).
-* ``_warm_recipe_proven_items`` — surfaces warm ``what_worked`` for the scout.
-* cold-start prefers research hints over the domain-focus fallback.
-"""
+"""Tests for KEEP/REVERT recipe sedimentation and the warm-start closure."""
 
 from __future__ import annotations
 
@@ -68,10 +60,7 @@ def test_collect_attempt_provenance_maps_keep_and_revert(tmp_path):
 
 
 def test_provenance_resolves_by_gap_id_when_name_mismatches(tmp_path):
-    """Cross-stage KEEP (kernel integrate) whose stack entry name never
-    matches the explore attempt's ``variant_name`` still sediments its
-    source via the stamped ``gap_canonical_id``.
-    """
+    """A cross-stage KEEP whose stack name never matches the attempt still sediments its source via ``gap_canonical_id``."""
     coord = _make_coordinator(tmp_path)
     ss = coord.shared_state
     ss.optimization_stack = [{
@@ -183,9 +172,7 @@ def test_gap_provenance_round_trips_through_serialization(tmp_path):
     assert restored.gaps[0]["provenance"] == "https://pr/9"
 
 
-# ---------------------------------------------------------------------------
 # Cold-start prefers research hints over the domain-focus fallback (C9).
-# ---------------------------------------------------------------------------
 def test_research_hints_suppress_cold_start():
     from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder import (
         SpecialistPromptInputs, _is_cold_start,

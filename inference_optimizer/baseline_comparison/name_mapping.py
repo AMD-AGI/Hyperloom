@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Map a local model path to the InferenceX upstream's display name.
 
 InferenceX (https://inferencex.semianalysis.com) refers to models by
@@ -58,6 +60,14 @@ def to_inferencex_name(model_path_or_name: str) -> str | None:
     1. Take the basename (``Path.name``).
     2. Strip a leading vendor prefix.
     3. Case-insensitive exact match against the known list.
+
+    Args:
+        model_path_or_name (str): A local weights path, HuggingFace repo
+            string, or bare model name to translate.
+
+    Returns:
+        str | None: The canonical InferenceX display name when a confident
+            match is found, otherwise ``None``.
     """
     if not model_path_or_name:
         return None

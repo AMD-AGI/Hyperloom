@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Section renderer + LLM compose layer that turns a
 ``session_breakdown.json`` dict into a user-facing markdown report.
 
@@ -8,11 +10,8 @@ Public API:
   text.
 
 * :class:`RenderedSection`, :class:`Decision`, :class:`GlobalFacts` —
-  surfaced for callers that want to plug in their own composer or
-  consume the structured facts directly (UI, dashboards).
-
-See :mod:`inference_optimizer.breakdown.reporters.compose` for the
-high-level design notes and ``SKILL.md`` for operator guidance.
+  surfaced for callers that want their own composer or the structured
+  facts directly (UI, dashboards).
 """
 
 from .base import Decision, RenderedSection

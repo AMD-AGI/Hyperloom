@@ -1,17 +1,12 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Anonymous GitHub Search backend for perf PR candidate discovery.
 
-Best-effort, zero-deps fallback used when ``primus_cortex`` is unavailable
-or when an operator wants to union both sources. Policy differs from
-``primus_cortex``:
-
-* **No hard-fail**: rate-limits (HTTP 403/422), transport errors, or a
-  non-GitHub remote all return ``[]`` instead of raising. The caller can
-  still depend on ``primus_cortex`` for the authoritative list.
-* Uses keyword-driven queries derived from
-  ``ExploreRequest.gap_description`` (Arbor's
-  :func:`framework_agent.keywords.extract_keywords`); falls back to a
-  curated PERF_TERMS list when no description is provided.
-* Anonymous (no token), so subject to GitHub's 60 req/h IP limit.
+Best-effort, zero-deps fallback when ``primus_cortex`` is unavailable.
+No hard-fail: rate-limits, transport errors, or a non-GitHub remote return
+``[]``. Queries are keyword-driven from ``gap_description`` via
+:func:`framework_agent.keywords.extract_keywords`, falling back to PERF_TERMS.
+Anonymous (no token), so subject to GitHub's 60 req/h IP limit.
 """
 
 from __future__ import annotations
@@ -30,7 +25,19 @@ PERF_TERMS = (
 
 
 def _build_query(repo: str, gap_description: str) -> str:
-    """Compose a GitHub Search query string from gap_description + repo scope."""
+    """Compose a GitHub Search query string from gap_description + repo scope.
+
+    Keywords extracted from ``gap_description`` drive the OR-term clause;
+    when no keywords are found the curated :data:`PERF_TERMS` list is used.
+
+    Args:
+        repo (str): Repository slug in ``owner/name`` form to scope the search.
+        gap_description (str): Free-text gap description used to derive search
+            keywords.
+
+    Returns:
+        str: A GitHub Search query restricted to open PRs in ``repo``.
+    """
     keywords = extract_keywords(gap_description) if gap_description else []
     if not keywords:
         terms = PERF_TERMS
@@ -58,6 +65,18 @@ def search_perf_prs(
     Best-effort: rate-limits or non-GitHub remotes return an empty list
     rather than raising. Callers that need hard-fail behaviour should
     use the ``primus_cortex`` backend instead.
+
+    Args:
+        repo_url (str): Git URL of the target repo; parsed to an ``owner/name``
+            slug.
+        gap_description (str): Free-text gap description used to derive search
+            keywords. Defaults to empty.
+        limit (int): Maximum number of PRs to return. Defaults to 5.
+        timeout_sec (float): Per-request HTTP timeout in seconds. Defaults to 10.
+
+    Returns:
+        list[GitHubPr]: Matching open PRs (at most ``limit``), or an empty list
+            on any failure or non-GitHub remote.
     """
     try:
         repo = _repo_slug(repo_url)

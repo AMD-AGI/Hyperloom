@@ -1,19 +1,6 @@
-"""Regression tests for the ``--enable-conc-sweep`` default.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Pins three things at once:
-
-1. ``SharedState`` dataclass field ``conc_sweep_enabled`` defaults to
-   ``True`` — so any consumer that builds a ``SharedState`` outside the
-   CLI path (tests, scripted runners) gets the same behaviour.
-2. The CLI ``--enable-conc-sweep`` flag resolves to ``True`` when the
-   operator passes no flag and no env var.
-3. ``INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0`` / ``false`` / ``no`` /
-   ``off`` flips the CLI default to ``False`` (explicit opt-out).
-4. ``--no-enable-conc-sweep`` always wins over env / default.
-
-If somebody later flips the default back to off, all four of these
-assertions will trip — leaving an audit trail for the choice.
-"""
+"""Regression tests pinning the ``--enable-conc-sweep`` default to True (SharedState + CLI flag + env opt-out)."""
 
 from __future__ import annotations
 

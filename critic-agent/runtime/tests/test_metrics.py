@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the in-process metrics shim."""
 
 from __future__ import annotations

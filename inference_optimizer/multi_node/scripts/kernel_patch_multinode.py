@@ -1,40 +1,13 @@
 #!/usr/bin/env python3
-"""Multi-node kernel patch fan-out (apply / revert).
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Counterpart to ``kill_multinode.py`` and ``launch_multinode.py``. Submitted
-via Ray Dashboard REST by ``inference_optimizer.multi_node apply-patch`` /
-``revert-patch`` when the workload has ``nodes >= 2``.
+"""Multi-node kernel patch fan-out (apply / revert), run INSIDE the RayJob pod.
 
-Algorithm (apply):
-
-  1. ``ray.init()`` (no address; in-pod).
-  2. Decode the patch payload (base64-encoded source bytes) from
-     ``--patch-b64`` once on the head; pass through to every actor.
-  3. Enumerate all alive nodes.
-  4. For each node, spawn a ``@ray.remote`` actor pinned via
-     ``NodeAffinitySchedulingStrategy(node_id, soft=False)``.
-  5. Inside each actor:
-     a. Copy ``target_path`` to ``<backup_dir>/<safe_name>.<host>.bak``.
-     b. Atomic write the decoded patch bytes to ``target_path``
-        (write-to-tmp + ``os.replace`` so a half-written file never
-        appears on disk visible to sglang loaders).
-     c. ``py_compile.compile`` if ``target_path`` ends in ``.py`` to catch
-        syntax errors before sglang tries to import it.
-  6. Collect per-node results; emit a single JSON document on stdout
-     so the caller can parse it from Ray Dashboard job_logs.
-
-Algorithm (revert): same actor fan-out, each actor copies its recorded
-backup file back to ``target_path``.
-
-Failure semantics: any actor that raises is treated as a hard failure.
-The caller (sandbox-side ``apply_kernel_patch.py``) is expected to
-issue a follow-up ``revert`` to roll back the actors that did succeed,
-preserving three-way (sandbox + head + worker) source consistency.
-
-ADDENDUM: this script runs INSIDE the RayJob pod (sglang/vllm image),
-not in the Claw sandbox. ``import ray`` is the standard in-pod way to
-talk to the local GCS; sandbox-side code (``cli.py`` etc.) must NOT
-import ray.
+One actor per alive node (NodeAffinity hard-pinned): apply backs up
+``target_path``, atomically writes the decoded patch bytes, and
+``py_compile``s ``.py`` targets (auto-reverting on failure); revert copies
+the recorded backup back. Any actor raising is a hard failure (caller
+issues a follow-up revert). Emits one JSON summary on stdout.
 """
 
 from __future__ import annotations
@@ -57,21 +30,36 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
 def _log(msg: str) -> None:
-    """Stderr-only timestamped log line; stdout is reserved for the
-    final JSON document the dashboard caller parses."""
+    """Stderr-only timestamped log line (stdout is reserved for the final JSON)."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[kernel_patch_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _safe_name(value: str) -> str:
-    """Sanitize a string for use as a filename component."""
+    """Sanitize a string for use as a filename component.
+
+    Args:
+        value (str): The raw string to sanitize.
+
+    Returns:
+        str: A filename-safe slug (alnum plus ``._-``), truncated to 80
+        characters; ``"patch"`` if the result would be empty.
+    """
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
     return cleaned[:80] or "patch"
 
 
 def _atomic_write_bytes(target: Path, data: bytes) -> None:
-    """Write ``data`` to ``target`` atomically (tmp file + os.replace)."""
+    """Write ``data`` to ``target`` atomically (tmp file + os.replace).
+
+    Args:
+        target (Path): Destination file path.
+        data (bytes): Bytes to write.
+
+    Raises:
+        OSError: If writing the temp file or replacing the target fails.
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_str = tempfile.mkstemp(
         prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent),
@@ -96,9 +84,7 @@ def _apply_remote(
     backup_dir: str,
     kernel_id: str,
 ) -> dict:
-    """Apply a single patch on THIS pod. Returns a dict summary; raises
-    on any error so the caller sees the failure via ``ray.get`` exception
-    propagation."""
+    """Apply a single patch on this pod; raises on any error (surfaced via ``ray.get``)."""
     host = socket.gethostname()
     target = Path(target_path)
     if not target.is_file():
@@ -141,8 +127,7 @@ def _revert_remote(
     target_path: str,
     backup_path: str,
 ) -> dict:
-    """Restore ``target_path`` from ``backup_path`` on THIS pod. Idempotent
-    when ``backup_path`` is missing (assumes already-reverted state)."""
+    """Restore ``target_path`` from ``backup_path`` on this pod; noop when the backup is missing."""
     host = socket.gethostname()
     target = Path(target_path)
     backup = Path(backup_path)
@@ -165,9 +150,18 @@ def _revert_remote(
 
 
 def _alive_nodes(min_gpu: int = 0) -> list[dict]:
-    """Return the list of currently-alive Ray nodes. Each entry is the
-    full ``ray.nodes()`` row so the caller can pick per-node IDs and
-    addresses for ``NodeAffinitySchedulingStrategy``."""
+    """Return the list of currently-alive Ray nodes.
+
+    Each entry is the full ``ray.nodes()`` row so the caller can pick
+    per-node IDs and addresses for ``NodeAffinitySchedulingStrategy``.
+
+    Args:
+        min_gpu (int): If > 0, only return nodes with at least this many
+            GPUs.
+
+    Returns:
+        list[dict]: The matching alive node rows from ``ray.nodes()``.
+    """
     nodes = [n for n in ray.nodes() if n.get("Alive")]
     if min_gpu > 0:
         nodes = [n for n in nodes if int(n.get("Resources", {}).get("GPU", 0) or 0) >= min_gpu]
@@ -175,6 +169,16 @@ def _alive_nodes(min_gpu: int = 0) -> list[dict]:
 
 
 def _do_apply(args: argparse.Namespace) -> int:
+    """Fan out the patch-apply actor across every alive node and report.
+
+    Args:
+        args (argparse.Namespace): Parsed ``apply`` arguments
+            (``target_path``, ``patch_b64``, ``backup_dir``, ``kernel_id``,
+            ``timeout_sec``).
+
+    Returns:
+        int: ``0`` if every node applied successfully, otherwise ``1``.
+    """
     ray.init(ignore_reinit_error=True, log_to_driver=True)
     nodes = _alive_nodes()
     _log(f"apply: alive nodes={len(nodes)} target={args.target_path}")
@@ -225,6 +229,16 @@ def _do_apply(args: argparse.Namespace) -> int:
 
 
 def _do_revert(args: argparse.Namespace) -> int:
+    """Fan out the patch-revert actor to each backed-up host and report.
+
+    Args:
+        args (argparse.Namespace): Parsed ``revert`` arguments
+            (``target_path``, ``backup_map_json``, ``timeout_sec``).
+
+    Returns:
+        int: ``0`` if every reachable host reverted successfully, otherwise
+        ``1`` (including when ``backup_map_json`` is empty).
+    """
     ray.init(ignore_reinit_error=True, log_to_driver=True)
     backup_map: dict[str, str] = json.loads(args.backup_map_json or "{}")
     if not backup_map:
@@ -282,6 +296,12 @@ def _do_revert(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    """Parse CLI arguments and dispatch the ``apply`` or ``revert`` command.
+
+    Returns:
+        int: Process exit code; the subcommand's result code, or ``2`` if
+        no recognized subcommand was given.
+    """
     p = argparse.ArgumentParser(
         prog="kernel_patch_multinode.py",
         description=(

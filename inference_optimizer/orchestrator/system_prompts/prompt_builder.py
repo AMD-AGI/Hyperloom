@@ -1,29 +1,11 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Compose the Orchestration agent's system prompt from typed inputs.
 
-Replaces the previous hand-maintained pair ``orchestration.md`` /
-``orchestration.no_kernel.md``:
-
-* ``orchestration.md`` is now only the *rules fragment* (HARD RULES,
-  SESSION_DIR contract, output protocol) — content that doesn't depend
-  on which actions are enabled.
-
-* This module wraps that fragment with:
-    1. MISSION                           (always)
-    2. SESSION CONTEXT                   (objective / framework / max_minutes)
-    3. PIPELINE & TIME BUDGET            (phase ordering + per-phase ETA)
-    4. ACTIONS YOU MAY USE               (filtered by enabled_actions)
-    5. DECISION FRAMEWORK                (always — short, generic)
-    6. KERNEL-OPT REQUEST REFERENCE      (only when "kernel_opt" is enabled)
-    7. RULES FRAGMENT                    (orchestration.md verbatim)
-
-Output is deterministic given the same inputs (sorted action listing,
-fixed section order). The CLI snapshots the output to
-``agents/orchestration/system_prompt.snapshot.md`` for resume / audit.
-
-The builder is a pure function: no IO besides reading the rules
-fragment, no env access, no logging side effects. This makes it
-trivially testable and easy to use as a one-shot CLI introspection
-tool (see ``scripts/print_orchestration_prompt.py`` if added later).
+Wraps the ``orchestration.md`` rules fragment with generated sections
+(mission, session context, pipeline/budget, action catalogue, decision
+framework, optional kernel-opt reference, rules). Deterministic for given
+inputs; the only IO is reading the rules fragment.
 """
 
 from __future__ import annotations
@@ -36,81 +18,15 @@ from ..action_registry import (
     ActionRegistry,
     VALID_PIPELINE_PHASES,
 )
-
-
-# ---------------------------------------------------------------------------
-# Default enabled-action sets (mirrors `cli._register_executors`)
-# ---------------------------------------------------------------------------
-FULL_ENABLED_ACTIONS: tuple[str, ...] = (
-    # prep
-    "target_analysis", "baseline",
-    # analysis — roofline is Coordinator-auto-enqueued (PRELUDE + watermark);
-    # not LLM-proposable. deep_kernel_analysis stays as a kernel-owned REQUEST.
-    "roofline", "deep_kernel_analysis",
-    # explore — the single grid-runner entry (per-KEEP stack rebench
-    # inlined).
-    "explore",
-    # PR-A1 (Arbor-into-Hyperloom): ``specialist`` is the LLM sub-agent
-    # dispatch surface; ``integrate_patch`` is the orchestrator-side
-    # apply+restart+gate that consumes specialist worktree patches.
-    # Both live under pipeline_phase=explore in the registry.
-    "specialist",
-    # Supplementary cross-domain ReAct sub-agent channel; EXPLORE-only,
-    # round-cap 1, sits next to specialist in the catalogue.
-    "dynamic_action",
-    "integrate_patch",
-    "sweep",
-    # deep — kernel-owned, emitted via REQUEST{target_agent='kernel', kind=...}
-    "kernel_opt", "integrate", "operator_tuning", "vendor_kernel_config",
-    "gemm_tuning",
-    # finalize
-    "report",
-    # support — ``recover`` frees leaked VRAM and (when
-    # ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``) attempts
-    # ``rocm-smi --gpureset``. The replacement path for diagnostic work
-    # is a specialist sub-agent.
-    "recover",
+from ...protocol.action_surfaces import (
+    FULL_ENABLED_ACTIONS,
+    GRID_INJECTABLE_ACTIONS,
+    KERNEL_OWNED_ACTIONS,
+    NO_KERNEL_ENABLED_ACTIONS,
 )
 
-NO_KERNEL_ENABLED_ACTIONS: tuple[str, ...] = (
-    # prep
-    "target_analysis", "baseline",
-    # explore (no profile — it only feeds kernel-opt). Carries an
-    # inlined per-KEEP stack rebench.
-    "explore",
-    # PR-A1 (Arbor-into-Hyperloom): specialist + integrate_patch are
-    # always-on; they are EXPLORE-phase actions and unrelated to kernel mode.
-    "specialist",
-    "dynamic_action",
-    "integrate_patch",
-    "sweep",
-    # finalize
-    "report",
-    # support — recover is needed even without kernel-opt because GPU
-    # leaks from baseline / explore / sweep can still hang the session;
-    # the executor itself is kernel-agnostic.
-    "recover",
-)
 
-# Actions that the Kernel agent owns end-to-end (Plan A). Orchestration MUST
-# emit `request{target_agent='kernel', kind=...}` for these instead of
-# `delegate{action_name=...}`. We highlight the difference in the catalogue
-# section so the LLM picks the right transport.
-KERNEL_OWNED_ACTIONS: frozenset[str] = frozenset({
-    "kernel_opt", "integrate", "deep_kernel_analysis",
-    "operator_tuning", "vendor_kernel_config", "gemm_tuning",
-})
-
-# Actions that accept LLM-injected grid candidates via ``params.grid``.
-# The catalogue section appends a grid-override hint for these so the
-# LLM knows it can expand the search space beyond the shipped defaults.
-GRID_INJECTABLE_ACTIONS: frozenset[str] = frozenset({
-    "explore", "sweep",
-})
-
-# Phase ordering for the catalogue section. Any action whose pipeline_phase
-# is not in this tuple is appended at the end (defensive; current registry
-# fully covers the set).
+# Phase ordering for the catalogue; unknown phases appended at the end.
 _PHASE_ORDER: tuple[str, ...] = (
     "prep", "measure", "analysis", "explore", "deep", "validate",
     "finalize", "support",
@@ -127,10 +43,13 @@ _PHASE_HEADERS: dict[str, str] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Section builders (each returns a list[str] of lines, no trailing blank)
-# ---------------------------------------------------------------------------
 def _section_mission() -> list[str]:
+    """Build the MISSION section lines.
+
+    Returns:
+        list[str]: Markdown lines describing the Orchestration agent's
+        cumulative-gain objective and per-tick decision question.
+    """
     return [
         "## 1. MISSION",
         "",
@@ -160,6 +79,23 @@ def _section_session_context(
     max_minutes: int,
     framework_source_roots: tuple[str, ...] | None = None,
 ) -> list[str]:
+    """Build the SESSION CONTEXT section lines.
+
+    Args:
+        framework (str): The framework name shown verbatim.
+        kernel_enabled (bool): Whether kernel-owned actions are enabled.
+        objective_kind (str): The objective kind (e.g. ``time_only``,
+            ``gain_pct``).
+        objective_value (float | str | None): Optional objective target value
+            rendered alongside the kind.
+        max_minutes (int): Wall-clock budget for the run, in minutes.
+        framework_source_roots (tuple[str, ...] | None): Optional framework
+            source roots; a PolicyGate-default note is shown when empty.
+
+    Returns:
+        list[str]: Markdown lines describing static session context and phase
+        awareness.
+    """
     obj = f"{objective_kind}"
     if objective_value not in (None, ""):
         obj = f"{objective_kind}={objective_value}"
@@ -177,11 +113,13 @@ def _section_session_context(
         "Per-tick dynamic context (Mission progress, Time budget, Shared",
         "session state, Coordinator checklist, KB hints, inbox tail) is",
         "appended below the system prompt every tick by the Coordinator.",
-        "The Time-budget block carries `remaining=X.Xmin`. When `remaining` is",
-        "smaller than `report.typical_runtime_min` * 3 you SHOULD propose",
-        "`report` as the next action — the Coordinator will also auto-flush a",
-        "deterministic report at the deadline, but proposing it earlier",
-        "captures any LLM narrative you want surfaced.",
+        "The Time-budget block carries `remaining=X.Xmin`. The Coordinator",
+        "always auto-flushes a deterministic `report` at the wall-clock",
+        "deadline — that is the artefact-contract invariant. As an",
+        "advisory hint, when `remaining` falls under roughly",
+        "`report.typical_runtime_min * 3` you may consider proposing",
+        "`report` earlier to capture any LLM narrative you want",
+        "surfaced; the deadline auto-flush still runs either way.",
         "",
         "**Phase awareness (v0.8 §3.2 / §3.3)**: every tick also brings a",
         "`=== Phase ===` block carrying the current phase, elapsed seconds",
@@ -195,50 +133,71 @@ def _section_session_context(
     ]
 
 
-# ---------------------------------------------------------------------------
-# phase semantics injected into the static system prompt
-# ---------------------------------------------------------------------------
 def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
-    """Render the per-phase allowed-action contract.
+    """Render the per-phase allowed-action contract (current phase injected
+    dynamically by the Coordinator)."""
+    from ..phase_state import (
+        PHASE_NAMES,
+        is_phase_interleave_enabled,
+        llm_proposable_actions_for_with_interleave,
+    )
 
-    The actual *current* phase is injected dynamically by
-    ``Coordinator._compose_prompt``; this section explains what each
-    phase **means** so the LLM has a stable mental model independent
-    of the runtime state.
-    """
-    # Lazy import: phase_state imports only stdlib so this is safe at
-    # module-import time, but keeping it local makes the lazy
-    # dependency explicit (and lets tests stub PHASE_ALLOWED_ACTIONS
-    # without rewriting this file).
-    from ..phase_state import PHASE_ALLOWED_ACTIONS, PHASE_NAMES
-
+    interleave = is_phase_interleave_enabled()
     lines: list[str] = [
         "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "",
         "The Coordinator runs the optimization in a 6-phase linear pipeline",
         "(FRAMEWORK_PR collapses out with `--no-framework`, leaving 5).",
         "Each tick it injects a `=== Phase ===` block with the current",
-        "phase. Per-phase action allowlists (PolicyGate R1 enforces these):",
+        "phase. Per-phase proposable action sets (PolicyGate R1 enforces these):",
         "",
     ]
     for phase in PHASE_NAMES:
-        allowed = sorted(PHASE_ALLOWED_ACTIONS.get(phase, frozenset()))
+        proposable = sorted(
+            llm_proposable_actions_for_with_interleave(
+                phase, interleave=interleave,
+            )
+        )
         if not kernel_enabled and phase == "KERNEL":
-            # No-kernel run will not enter KERNEL phase; render but flag.
             lines.append(
-                f"- **{phase}**: {', '.join(allowed)} (skipped in --no-kernel runs)"
+                f"- **{phase}**: {', '.join(proposable)} (skipped in --no-kernel runs)"
             )
         else:
-            lines.append(f"- **{phase}**: {', '.join(allowed)}")
+            lines.append(f"- **{phase}**: {', '.join(proposable)}")
     lines.extend([
         "",
-        "Phase transitions are Coordinator-owned and based on machine-",
-        "judgeable signals: `baseline_tput > 0` exits PRELUDE; plateau",
-        "judges or budget caps exit EXPLORE / KERNEL / SWEEP; the wall-",
-        "clock deadline (closing phase) exits to CLOSE. You influence",
-        "transitions indirectly — by driving the current phase's signals",
-        "in the right direction — never by writing `phase` directly.",
+        "roofline, profile, replay_warm_recipe and framework_pr are never",
+        "in the sets above: the Coordinator auto-manages them and PolicyGate",
+        "denies any attempt to propose them.",
+        "",
+        "Phase transitions are Coordinator-owned. The hard advance gates",
+        "are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit, the per-",
+        "phase budget cap, or a terminal stop_reason exit EXPLORE / KERNEL",
+        "/ SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
+        "You may also emit `escalate_strategy_change{next_action_hint=",
+        "'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}` directly",
+        "(no longer robustness-only) when you judge the current phase",
+        "exhausted; the Coordinator validates the hint vocab and routes",
+        "the transition on the next tick.",
     ])
+    if interleave:
+        lines.extend([
+            "",
+            "**Phase interleave mode is ON** (on by default; set env "
+            + "`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable):",
+            "- EXPLORE may also REQUEST kernel-owned kinds "
+            + "(kernel_opt / integrate / deep_kernel_analysis / "
+            + "operator_tuning / vendor_kernel_config / gemm_tuning) when "
+            + "a probe of the kernel surface is needed mid-EXPLORE.",
+            "- KERNEL may also propose / delegate explore / specialist /",
+            "  integrate_patch when a config / patch refinement is needed",
+            "  mid-KERNEL.",
+            "- The phase chain stays monotonic for resume / audit / the",
+            "  CLOSE sequencer; only the per-phase action contract is",
+            "  widened. Data-dependency (trace_analyze→run_optimization),",
+            "  the integrate_patch Critic gate, and sweep singletons are",
+            "  unchanged.",
+        ])
     return lines
 
 
@@ -246,6 +205,17 @@ def _filter_actions(
     registry: ActionRegistry,
     enabled: Iterable[str],
 ) -> list[ActionMetadata]:
+    """Resolve enabled action names to their registry metadata.
+
+    Args:
+        registry (ActionRegistry): The loaded action registry to look up.
+        enabled (Iterable[str]): Enabled action names; unknown names are
+            silently skipped (the caller has already validated them).
+
+    Returns:
+        list[ActionMetadata]: Metadata for each resolvable enabled action, in
+        the input order.
+    """
     enabled_set: list[str] = list(enabled)
     out: list[ActionMetadata] = []
     for name in enabled_set:
@@ -257,7 +227,7 @@ def _filter_actions(
 
 
 def _phase_eta_summary(actions: list[ActionMetadata]) -> list[tuple[str, float, list[str]]]:
-    """Group actions by phase preserving _PHASE_ORDER; return (phase, eta_min_sum, names)."""
+    """Group actions by phase in _PHASE_ORDER; return (phase, eta_min_sum, names)."""
     bucket: dict[str, list[ActionMetadata]] = {}
     for a in actions:
         bucket.setdefault(a.pipeline_phase, []).append(a)
@@ -270,8 +240,6 @@ def _phase_eta_summary(actions: list[ActionMetadata]) -> list[tuple[str, float, 
         eta = sum(max(0.0, a.typical_runtime_min) for a in items)
         ordered.append((phase, eta, [a.name for a in items]))
         seen.add(phase)
-    # Defensive: any unknown phases at the end (should never happen for the
-    # shipped registry, but keeps the builder robust against future actions).
     for phase, items in bucket.items():
         if phase in seen:
             continue
@@ -285,6 +253,17 @@ def _section_pipeline_and_budget(
     *,
     max_minutes: int,
 ) -> list[str]:
+    """Build the PIPELINE & TIME BUDGET section lines.
+
+    Args:
+        actions (list[ActionMetadata]): The enabled actions, summarised by
+            phase ETA.
+        max_minutes (int): Wall-clock budget for the run, compared against the
+            summed phase ETAs.
+
+    Returns:
+        list[str]: Markdown lines describing per-phase ETAs and budget guidance.
+    """
     lines: list[str] = [
         "## 3. PIPELINE & TIME BUDGET",
         "",
@@ -318,6 +297,15 @@ def _section_pipeline_and_budget(
 
 
 def _format_gain_pair(meta: ActionMetadata) -> str:
+    """Format an action's expected-gain range as a short string.
+
+    Args:
+        meta (ActionMetadata): The action whose ``expected_gain_pct`` range to
+            format.
+
+    Returns:
+        str: ``"0%"`` when the range is zero, otherwise ``"lo-hi%"``.
+    """
     lo, hi = meta.expected_gain_pct
     if lo == 0.0 and hi == 0.0:
         return "0%"
@@ -325,6 +313,18 @@ def _format_gain_pair(meta: ActionMetadata) -> str:
 
 
 def _format_emit_hint(meta: ActionMetadata) -> str:
+    """Build the per-action ``EMIT:`` hint showing the correct transport.
+
+    Kernel-owned actions render a ``REQUEST{...}`` template; ``specialist`` /
+    ``integrate_patch`` / ``dynamic_action`` render their closed ``delegate``
+    payload contracts; everything else renders a ``propose_action`` template.
+
+    Args:
+        meta (ActionMetadata): The action to build an emit hint for.
+
+    Returns:
+        str: The emit-hint string for the catalogue entry.
+    """
     if meta.name in KERNEL_OWNED_ACTIONS:
         if meta.name == "kernel_opt":
             kind_hint = "run_optimization"
@@ -339,13 +339,6 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
         )
     if meta.name == "report":
         return "propose_action{action_name='report', predicted_gain_pct=0.0}"
-    # PR-A1 (Arbor-into-Hyperloom): ``specialist`` is a synthetic LLM
-    # sub-agent dispatch (no propose_action wrapper — go straight to
-    # delegate with the per-payload contract enforced by PolicyGate's
-    # ``specialist_dispatch_source``). ``integrate_patch`` is the
-    # serving-lane-locked follow-up that consumes a specialist's worktree
-    # patches; expose it as a direct delegate too so the LLM does not
-    # waste a tick proposing it first.
     if meta.name == "specialist":
         return (
             "delegate{action_name='specialist', params={"
@@ -366,27 +359,6 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "keep_threshold_pct?=1.0, "
             "accuracy_baseline?={task: {metric: score}}}}"
         )
-    # Mirrors the specialist emit hint shape: payload field table +
-    # key constraints + PolicyGate reason-code surface for self-correction.
-    if meta.name == "dynamic_action":
-        return (
-            "delegate{action_name='dynamic_action', params={"
-            "motivation_gap_text=<why no single specialist can cover>, "
-            "scope_domains=[<>=2 specialist domain keys>], "
-            "side_effects_declared=[<framework_source|...>], "
-            "budget_hint?=<low|medium|high>}}. "
-            "Constraints: scope_domains length >= 2; "
-            "side_effects_declared must not include any kernel-owned "
-            "action / metric / accuracy_gate / server lifecycle; "
-            "at most 1 dispatch per EXPLORE round. "
-            "PolicyGate reason codes on denial: "
-            "dynamic_phase_violation / dynamic_source_violation / "
-            "dynamic_payload_schema / dynamic_scope_too_narrow / "
-            "dynamic_scope_unknown_domain / "
-            "dynamic_side_effects_red_line / "
-            "dynamic_kernel_only_disallowed / "
-            "dynamic_round_cap_exhausted."
-        )
     return (
         f"propose_action{{action_name='{meta.name}', "
         f"predicted_gain_pct=<your estimate>}}"
@@ -394,7 +366,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
 
 
 def _format_grid_injection_hint(name: str) -> str | None:
-    """Return a per-action one-liner showing the LLM how to override grid."""
+    """Return a per-action one-liner showing how to override grid, or None."""
     if name == "explore":
         return (
             "GRID INPUT (v0.8 M3, REQUIRED): emit "
@@ -407,16 +379,15 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "stack rebench. "
             "**Provenance is audit/advisory, not a hard gate:** "
             "accepted values include provenance='llm_direct' "
-            "(Orchestration-authored), provenance='default_grid', "
-            "provenance='specialist:<domain-or-tag>', and "
-            "provenance='dynamic'. Prefer specialist / research-hint "
+            "(Orchestration-authored), provenance='default_grid', and "
+            "provenance='specialist:<domain-or-tag>'. A specialist variant "
+            "MAY also carry its scope (domain/domains/freeform) as an "
+            "additive analytics tag. Prefer specialist / research-hint "
             "variants when they exist, but use llm_direct for uncovered "
-            "gaps or cold-start hypotheses. **Remaining caps:** up to "
-            "research_lane_capacity variants (clamped to the 2 x visible "
-            "GPU count ceiling) in the grid may carry "
-            "provenance='specialist:*' (rule "
-            "'explore_specialist_grid_max_one'); at most one "
-            "provenance='dynamic' variant may run per explore round. The "
+            "gaps or cold-start hypotheses. **Breadth is bounded by "
+            "resources, not a grid cap:** specialist variants "
+            "fan out up to the research_lane / GPU pool leases (the "
+            "research_lane scales with the 2 x visible GPU ceiling). The "
             "executor dedups against SharedState.explore_search by "
             "canonical_fingerprint, so a rename of an already-tested "
             "(args, envs) collapses to the same row."
@@ -431,6 +402,17 @@ def _format_grid_injection_hint(name: str) -> str | None:
 
 
 def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
+    """Build the ACTIONS YOU MAY USE catalogue section, grouped by phase.
+
+    Each entry lists cost, gain, risks, family, the emit hint, and any
+    grid-injection hint.
+
+    Args:
+        actions (list[ActionMetadata]): The actions enabled for this run.
+
+    Returns:
+        list[str]: Markdown lines for the action catalogue.
+    """
     lines: list[str] = [
         "## 4. ACTIONS YOU MAY USE",
         "",
@@ -469,10 +451,23 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
 
 
 def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
+    """Build the DECISION FRAMEWORK section lines.
+
+    Covers the per-tick selection order, failure-recovery rules (F1–F4), and
+    idea-generation guidance.
+
+    Args:
+        kernel_enabled (bool): Whether kernel-owned actions are enabled for this
+            run.
+
+    Returns:
+        list[str]: Markdown lines for the decision framework.
+    """
     lines = [
-        "## 5. DECISION FRAMEWORK (apply EVERY tick BEFORE emitting)",
+        "## 5. DECISION FRAMEWORK (heuristics + facts — the next action is your call)",
         "",
-        "Read the dynamic SharedState section and apply, in order:",
+        "These are reference heuristics and objective facts, not a forced",
+        "sequence. Read the dynamic SharedState section and decide:",
         "",
         "1. **Stop**: if `stop_reason` is set OR `cumulative_gain >= target_gain_pct`,",
         "   propose `report` once (if not already done) then heartbeat 'goal-reached'.",
@@ -487,11 +482,12 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "4. **Analysis is auto-managed**. Roofline (or profile under "
         "``--no-enable-roofline``) is enqueued by the Coordinator at "
         "PRELUDE and at every +10% validated-gain watermark crossing. "
-        "Do not propose ``profile`` or ``roofline`` — PolicyGate denies "
-        "both with ``rule='analysis_action_not_llm_proposable'``. While "
-        "the analysis task is in flight, ``specialist`` / ``explore`` / "
-        "kernel-owned dispatches are deferred until ``analysis.md`` / "
-        "``last_profile_trace`` refreshes.",
+        "Do not propose ``profile`` or ``roofline`` — they are "
+        "Coordinator-managed and never in the per-phase proposable set, "
+        "so PolicyGate denies both with ``rule='phase_incompatible'``. "
+        "While the analysis task is in flight, ``specialist`` / "
+        "``explore`` / kernel-owned dispatches are deferred until "
+        "``analysis.md`` / ``last_profile_trace`` refreshes.",
     )
     lines.extend([
         "5. **Phase-aware action selection**. v0.8",
@@ -512,27 +508,29 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "      `last_action_failures` + `explore_search.winners_history`.",
         "   c. **KB sub-graphs + warm-start recipe** when present —",
         "      cross-session priors carry "
-        "*qualitative* hints (what worked / what failed last time).",
+        + "*qualitative* hints (what worked / what failed last time).",
         "   d. **specialist proposal_set** (M5+) — when an explore round just",
         "      finished, the proposal_set drives the next `explore` grid.",
-        "   e. **Mandatory MUST-FIRST rules**: baseline before anything else.",
-        "      ``analysis.md`` / ``last_profile_trace`` arrive automatically",
-        "      from the Coordinator-owned analysis task at PRELUDE and at",
-        "      every +10% watermark crossing — do not gate ``kernel_opt`` on",
-        "      a manually-proposed profile.",
+        "   e. **Ordering facts**: baseline runs before anything else",
+        "      (invariant). ``analysis.md`` / ``last_profile_trace`` arrive",
+        "      automatically from the Coordinator-owned analysis task at",
+        "      PRELUDE and at every +10% watermark crossing — you do not",
+        "      need a manually-proposed profile before ``kernel_opt``.",
         "6. **Phase budget awareness**. The `=== Phase ===` block carries",
         "   ``phase_budget_remaining_pct``. As that number falls below 0.2,",
         "   prefer lower-cost / known-good actions (explore over kernel_opt).",
-        "   Plateau judgments fire when the system thinks you're stalled;",
-        "   they auto-advance the phase. Don't fight them — drive the",
-        "   current phase's signal in the right direction or emit",
-        "   ``escalate_strategy_change{hint='skip_to_kernel'}`` via",
-        "   robustness if you know it's time to move on.",
-        "7. **Sweep / report tail**: when EXPLORE plateau fires, the",
-        "   Coordinator routes EXPLORE → KERNEL (kernel_enabled) or →",
-        "   SWEEP (--no-kernel). When SWEEP completes, propose `report`",
-        "   for the LLM narrative (Coordinator also auto-enqueues one at",
-        "   the deadline).",
+        "   The Plateau advisory block is informational only; it does not",
+        "   advance the phase. When you judge the current phase exhausted,",
+        "   emit ``escalate_strategy_change{next_action_hint=",
+        "   'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}`` (no",
+        "   longer robustness-only). Otherwise the Coordinator advances",
+        "   only on IR-6 force-exit, phase-budget exhaustion, or a",
+        "   terminal stop_reason.",
+        "7. **Sweep / report tail**: once EXPLORE / KERNEL exit, the",
+        "   Coordinator routes the run to SWEEP (or directly to it under",
+        "   --no-kernel). When SWEEP completes, propose `report` for the",
+        "   LLM narrative (Coordinator also auto-enqueues one at the",
+        "   deadline).",
         "",
         "If you cannot move forward, emit",
         "`send_message{topic='heartbeat', body_md='blocked: <reason>'}` and let",
@@ -566,12 +564,15 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "Three decision rules apply in order:",
         "",
         "* **RULE F1 — same fingerprint, twice failed → change at least one knob.**",
-        "  If the last two `<action>_attempts` entries share an `extras.fingerprint`",
-        "  with the proposal you're about to emit, PolicyGate WILL deny it with",
-        "  `rule='baseline_self_loop'`. Bump at least one of: `params.benchmark_script`",
-        "  (a sanitized `*.sh` file name — Magpie's `dsr1_fp8_mi300x.sh` hardcodes",
-        "  `--result-dir /workspace/`, but `sglang_mi300x.sh` respects",
-        "  `$RESULT_DIR`), `params.result_dir`, `params.extra_server_args`, or",
+        "  This is now YOUR judgement, not a PolicyGate deny. Because you run",
+        "  as a persistent conversation you remember the attempts you already",
+        "  made this session — do not re-propose a baseline whose params",
+        "  fingerprint matches a recent failure; it will fail the same way.",
+        "  Bump at least one of: `params.benchmark_script`",
+        "  (a sanitized `*.sh` file name that MUST match THIS run's framework —",
+        "  e.g. for a vllm run pin `vllm_mi300x.sh`, never `sglang_*`; a",
+        "  cross-framework script boots the wrong engine and is rejected),",
+        "  `params.result_dir`, `params.extra_server_args`, or",
         "  `params.extra_envs`.",
         "* **RULE F2 — `error_class='no_report'` + no `rescued_from_leaked_path:*`",
         "  warning ⇒ leak salvage missed.** The script wrote results outside the",
@@ -585,26 +586,26 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "  repeatedly nonzero <action>'` and let Robustness intervene. Do NOT",
         "  switch action families just to dodge the failure; Robustness'",
         "  escalation policy needs the heartbeat to fire its RCA.",
-        "* **RULE F4 — `policy_denial_streak` is a fact, not a lock.** When the",
-        "  per-tick `Recent policy denials` block shows `streak≥2` for an",
-        "  (action, rule) pair, the SAME params will keep colliding.",
-        "  v0.8 §3.9 retired the legacy ``locked_reason`` mirror, but the",
-        "  underlying anti-loop is unchanged: at streak≥5 the family is",
-        "  auto-pruned; at streak≥10 the run stops with",
-        "  ``stop_reason='policy_loop'``. Recover by omitting",
-        "  ``idempotency_key`` (Coordinator derives a fresh tick+content",
-        "  fingerprint) AND changing at least one substantive param —",
-        "  a new ``params.grid`` variant, different ``benchmark_script``,",
-        "  or a sibling action family.",
+        "* **RULE F4 — `policy_denial_streak` is a pure fact, not a lock.** The",
+        "  `why_denied` context tool (and the `Recent policy denials` block on a",
+        "  seed turn) shows repeated (action, rule) collisions. The system no",
+        "  longer reacts to the streak — there is NO auto-prune at streak≥5 and",
+        "  NO `policy_loop` stop at streak≥10; the run continues until the",
+        "  wall-clock deadline or another stop_reason fires. So the streak is",
+        "  purely a signal for YOU: the same params keep colliding with the same",
+        "  invariant, so change something substantive — a new `params.grid`",
+        "  variant, a different `benchmark_script`, or a sibling action family.",
+        "  Re-emitting the identical denied intent just wastes a tick.",
         "",
         "Example (baseline failed twice with `error_class='no_report'`):",
         "",
+        "    # Prefer RESULT_DIR rescue first; only override benchmark_script",
+        "    # when you have verified a same-framework script-specific bug.",
         "    propose_action{action_name='baseline',",
-        "        params={benchmark_script: 'sglang_mi300x.sh',",
-        "                result_dir: '<session_dir>/runs/baseline/<task>/leak'},",
+        "        params={result_dir: '<session_dir>/runs/baseline/<task>/leak'},",
         "        predicted_gain_pct: 0,",
-        "        notes: 'recover from no_report streak — sglang_mi300x.sh honors",
-        "                $RESULT_DIR; the default model script hardcodes /workspace/'}",
+        "        notes: 'recover from no_report streak by redirecting RESULT_DIR",
+        "                to the observed leak location'}",
         "",
         "### IDEA GENERATION (apply after EVERY explore round)",
         "",
@@ -643,8 +644,11 @@ a `state.gaps[]` `layer='kernel'` gap with attempts left →
 `last_kernel_opt` (KEEP→integrate next; PARTIAL→retry at most
 `_DEFAULT_KERNEL_OPT_MAX_PARTIAL` then rejected; REVERT→rejected) →
 skip ids in `rejected_kernel_ids` → recover from `last_action_failures`.
-When `plateau_kernel` fires (3 REVERTs across distinct kernels) the
-Coordinator auto-advances KERNEL → SWEEP — stop and let it.
+A KERNEL plateau signal (3 REVERTs across distinct kernels, or low
+recent KEEP gain) is rendered as advisory; KERNEL → SWEEP advance is
+driven by the phase budget, an `escalate_strategy_change` hint, or a
+terminal stop_reason. Read the advisory and emit `skip_to_sweep` if
+you want to wind down sooner.
 
 ### `trace_analyze` — must precede every `run_optimization`
 
@@ -717,6 +721,15 @@ kernels — they're tied to one compile cache and not reusable."""
 
 
 def _read_rules_fragment(path: Path | None) -> str:
+    """Read the ``orchestration.md`` rules fragment, tolerating absence.
+
+    Args:
+        path (Path | None): Path to the rules fragment, or ``None`` to skip.
+
+    Returns:
+        str: The stripped fragment text, or an empty string when the path is
+        ``None`` or unreadable.
+    """
     if path is None:
         return ""
     try:
@@ -725,40 +738,16 @@ def _read_rules_fragment(path: Path | None) -> str:
         return ""
 
 
-# ---------------------------------------------------------------------------
-# Entry declaration for the supplementary cross-domain ReAct channel.
-# Renders only when ``dynamic_action`` is in the enabled action set.
-# No triggering heuristics, examples, or fallback guidance — those
-# would shift the channel from supplementary to default.
-# ---------------------------------------------------------------------------
-def _section_dynamic_action(actions: list[ActionMetadata]) -> list[str] | None:
-    if not any(a.name == "dynamic_action" for a in actions):
-        return None
-    return [
-        "## 6b. DYNAMIC ACTION (supplementary EXPLORE channel)",
-        "",
-        "If you believe a single cross-domain patch combination exists",
-        "that no specialist could surface within its own-domain prompt",
-        "boundary, you MAY dispatch one `dynamic_action` in the EXPLORE",
-        "phase via `delegate{action_name='dynamic_action', params={...}}`.",
-        "",
-        "`dynamic_action` is a **supplementary** channel, not the default.",
-        "Specialists remain the primary EXPLORE entry. At most ONE",
-        "`dynamic_action` dispatch is allowed per EXPLORE round.",
-        "",
-        "After an `explore` KEEP, you MAY pair that winning direction",
-        "with an adjacent domain via one `dynamic_action` deep-dive —",
-        "an encouragement, not a requirement; skip it when no cross-domain",
-        "combination is apparent.",
-        "",
-        "Payload contract is closed; see the EMIT line on the action",
-        "catalogue entry above for the field table + PolicyGate denial",
-        "reason codes. The `=== Dynamic Action History ===` block (when",
-        "non-empty) lists the most recent outcomes of your own dispatches.",
-    ]
-
-
 def _section_rules(rules_md: str) -> list[str]:
+    """Build the RULES & OUTPUT PROTOCOL section wrapping the rules fragment.
+
+    Args:
+        rules_md (str): The raw rules-fragment markdown; a placeholder is used
+            when empty.
+
+    Returns:
+        list[str]: Markdown lines for the RULES & OUTPUT PROTOCOL section.
+    """
     body = rules_md.strip() or (
         "(orchestration.md rules fragment not found — Coordinator will still"
         " enforce PolicyGate hard rules at runtime.)"
@@ -766,9 +755,7 @@ def _section_rules(rules_md: str) -> list[str]:
     return ["## 7. RULES & OUTPUT PROTOCOL", "", body]
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+# Public API.
 def build_orchestration_prompt(
     *,
     action_registry: ActionRegistry,
@@ -781,29 +768,17 @@ def build_orchestration_prompt(
     rules_fragment_path: Path | None = None,
     framework_source_roots: tuple[str, ...] | None = None,
 ) -> str:
-    """Compose the Orchestration system prompt.
+    """Compose the Orchestration system prompt (deterministic for given inputs).
 
     Parameters
     ----------
-    action_registry: pre-loaded ``ActionRegistry`` (caller is responsible
-        for ``.load()``).
-    enabled_actions: names that this run's CLI registered executors for
-        (or that the Kernel agent will service via REQUEST). Order is
-        preserved only for missing-action filtering; final ordering is
-        by pipeline_phase.
-    framework: ``sglang`` / ``vllm`` — printed in the SESSION CONTEXT
-        section.
-    kernel_enabled: explicit override; when ``None``, derived from whether
-        any KERNEL_OWNED action is in ``enabled_actions``.
-    objective_kind / objective_value: matches :mod:`objective` strings;
-        printed verbatim (e.g. ``gain_pct=10`` or ``tput=4500``).
+    action_registry: pre-loaded ``ActionRegistry`` (caller calls ``.load()``).
+    enabled_actions: enabled action names; final ordering is by pipeline_phase.
+    framework: ``sglang`` / ``vllm`` — printed in SESSION CONTEXT.
+    kernel_enabled: explicit override; ``None`` derives from KERNEL_OWNED actions.
+    objective_kind / objective_value: :mod:`objective` strings, printed verbatim.
     max_minutes: wall-clock budget for the run.
-    rules_fragment_path: path to ``orchestration.md`` (the rules-only
-        fragment). When ``None`` or unreadable, a placeholder is emitted.
-
-    Returns
-    -------
-    str: the full system prompt, deterministic for given inputs.
+    rules_fragment_path: path to ``orchestration.md``; placeholder if unreadable.
     """
     actions = _filter_actions(action_registry, enabled_actions)
     if kernel_enabled is None:
@@ -825,26 +800,14 @@ def build_orchestration_prompt(
             framework_source_roots=framework_source_roots,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
-        # phase contract sits between the legacy
-        # PIPELINE & TIME BUDGET (§3, action-runtime view) and the
-        # ACTIONS catalogue (§4) so the LLM sees the *policy* layer
-        # before the *catalogue*.
         _section_phase_semantics(kernel_enabled=kernel_enabled),
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled),
     ]
     if kernel_enabled and any(a.name == "kernel_opt" for a in actions):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
-    # Dynamic action declaration sits after the decision framework so
-    # the LLM sees the supplementary-channel framing after the primary
-    # EXPLORE action catalogue.
-    dyn_section = _section_dynamic_action(actions)
-    if dyn_section is not None:
-        sections.append(dyn_section)
     sections.append(_section_rules(rules_md))
 
-    # Join sections with a blank line between each; ensure single trailing
-    # newline so snapshot files don't accumulate trailing whitespace diffs.
     parts: list[str] = []
     for sect in sections:
         parts.append("\n".join(sect))
@@ -852,7 +815,16 @@ def build_orchestration_prompt(
 
 
 def default_enabled_actions(*, no_kernel: bool) -> tuple[str, ...]:
-    """Return the canonical enabled-action set used by the CLI."""
+    """Return the canonical enabled-action set used by the CLI.
+
+    Args:
+        no_kernel (bool): When ``True``, return the no-kernel action set;
+            otherwise the full set.
+
+    Returns:
+        tuple[str, ...]: :data:`NO_KERNEL_ENABLED_ACTIONS` when ``no_kernel`` is
+        set, else :data:`FULL_ENABLED_ACTIONS`.
+    """
     return NO_KERNEL_ENABLED_ACTIONS if no_kernel else FULL_ENABLED_ACTIONS
 
 

@@ -1,10 +1,6 @@
-"""Smoke tests for the CLI front door.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-We run the parser/dispatch in-process via :func:`runtime.cli.main` so the
-behaviour exercised matches what ``python -m runtime.cli ...`` would do.
-The tests focus on the new commands; the legacy ones (``write-verdict``,
-``write-kb-drafts``, ...) are covered transitively by ``test_kb_writer``.
-"""
+"""Smoke tests for the CLI front door, run in-process via :func:`runtime.cli.main`."""
 
 from __future__ import annotations
 

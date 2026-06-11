@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Delegate idempotency + policy-denial ladder tests."""
 
 from __future__ import annotations
@@ -8,7 +10,7 @@ import pytest
 
 from inference_optimizer.orchestrator.backends import MockBackend, ScriptedPlan
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.paths import make_session_dir
 
 
@@ -109,10 +111,7 @@ async def test_delegate_fallback_key_uses_tick_and_content_fingerprint(session_d
 
 @pytest.mark.asyncio
 async def test_policy_denial_streak_records_streak_at_two(session_dir):
-    """v0.8 §3.9 — the v0.6 scoreboard's ``locked_reason`` was retired.
-    The denial streak is still tracked via
-    :attr:`SharedState.policy_denial_streak` (a pure fact); the LLM
-    sees it as a count, not a priority lock."""
+    """v0.8 §3.9 — the denial streak is tracked via ``SharedState.policy_denial_streak`` as a count, not a priority lock."""
     c = _silent_coordinator(session_dir)
     try:
         from inference_optimizer.orchestrator.policy import PolicyDenied
@@ -135,9 +134,7 @@ async def test_policy_denial_streak_records_streak_at_two(session_dir):
 
 @pytest.mark.asyncio
 async def test_policy_denial_streak_no_longer_prunes_family_at_five(session_dir):
-    """Long-run continuity: the streak >= 5 auto-prune_family reaction
-    was removed. A repeatedly-denied action family is NOT pruned; the
-    streak is still recorded as a fact the LLM can see."""
+    """Long-run continuity: the streak >= 5 auto-prune_family reaction was removed; the family is NOT pruned."""
     c = _silent_coordinator(session_dir)
     try:
         from inference_optimizer.orchestrator.policy import PolicyDenied
@@ -157,9 +154,7 @@ async def test_policy_denial_streak_no_longer_prunes_family_at_five(session_dir)
 
 @pytest.mark.asyncio
 async def test_policy_denial_streak_no_longer_stops_run_at_ten(session_dir):
-    """Long-run continuity: the streak >= 10 ``policy_loop`` stop was
-    removed. A repeatedly-denied action no longer terminates the run;
-    the streak keeps climbing but stop_reason stays unset."""
+    """Long-run continuity: the streak >= 10 ``policy_loop`` stop was removed; stop_reason stays unset."""
     c = _silent_coordinator(session_dir)
     try:
         from inference_optimizer.orchestrator.policy import PolicyDenied
@@ -199,14 +194,12 @@ async def test_successful_delegate_resets_policy_denial_streak(session_dir):
         await c.stop()
 
 
-# ============================================================================
 # PolicyGate denial paths (analysis actions are never LLM-proposable)
-# ============================================================================
 
 import pytest
 
 from inference_optimizer.orchestrator.agent_role import default_role_registry
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent, IntentType,
 )
 from inference_optimizer.orchestrator.phase_state import (
@@ -219,26 +212,18 @@ from inference_optimizer.orchestrator.policy import (
 )
 from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
-    NO_KERNEL_ENABLED_ACTIONS,
 )
 
 
 @pytest.fixture
 def gate() -> PolicyGate:
-    """Plain gate without ActionRegistry / shared_state — the analysis
-    denial rule doesn't depend on either."""
+    """Plain gate without ActionRegistry / shared_state."""
     return PolicyGate(role_registry=default_role_registry())
 
 
-# ===========================================================================
 # Coordinator-internal analysis actions are never LLM-proposable
-# ===========================================================================
-# ``roofline`` and ``profile`` are both Coordinator-enqueued (PRELUDE
-# bootstrap + watermark refresh). Mode is selected by the operator via
-# ``--enable-roofline`` / ``--no-enable-roofline``; the LLM never
-# picks. PolicyGate denies any propose/delegate/request that names
-# either action so the orchestration loop cannot sneak a manual
-# analysis past the auto-enqueue dedup.
+# ``roofline`` and ``profile`` are Coordinator-enqueued; PolicyGate denies any
+# propose/delegate/request that names either action.
 _INTERNAL_ANALYSIS_ACTIONS = ("roofline", "profile")
 
 
@@ -254,9 +239,9 @@ def test_delegate_with_analysis_action_is_denied(gate, action_name):
     )
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "analysis_action_not_llm_proposable"
+    assert exc.value.rule == "phase_incompatible"
     assert action_name in str(exc.value)
-    assert "--enable-roofline" in (exc.value.hint or "")
+    assert "Coordinator-managed" in str(exc.value)
 
 
 @pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
@@ -270,15 +255,13 @@ def test_propose_action_with_analysis_action_is_denied(gate, action_name):
     )
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "analysis_action_not_llm_proposable"
+    assert exc.value.rule == "phase_incompatible"
     assert action_name in str(exc.value)
 
 
 @pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
 def test_request_with_analysis_kind_is_denied(gate, action_name):
-    """A REQUEST whose ``kind`` names roofline/profile is denied with
-    the same rule — the Coordinator-internal enqueue bypasses
-    PolicyGate, but any LLM-routed REQUEST must not."""
+    """A REQUEST whose ``kind`` names roofline/profile is denied by R1 phase_incompatible."""
     intent = Intent(
         type=IntentType.REQUEST,
         payload={
@@ -288,36 +271,23 @@ def test_request_with_analysis_kind_is_denied(gate, action_name):
     )
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "analysis_action_not_llm_proposable"
+    assert exc.value.rule == "phase_incompatible"
 
 
-# ===========================================================================
 # Supporting infrastructure parity
-# ===========================================================================
 def test_phase_explore_allowlist_drops_legacy_actions():
-    """The EXPLORE allowlist contains only the canonical action set:
-    merged grid runner, specialist dispatch, integrate_patch,
-    assess_remaining_gaps (IR-7 self-stop wrapper), dynamic_action
-    (dynamic_action.MD P1 supplementary cross-domain channel), the
-    auto-managed analysis kinds (``roofline`` and ``profile``, both
-    Coordinator-enqueued on watermark crossings; mode picked by
-    ``--enable-roofline``), and ``recover``. PolicyGate's
-    ``analysis_action_not_llm_proposable`` rule keeps the LLM from
-    delegating either analysis kind directly.
-    """
+    """The EXPLORE allowlist contains only the canonical action set."""
     assert PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE] == frozenset({
         "explore", "specialist", "integrate_patch",
-        "assess_remaining_gaps", "dynamic_action",
         "roofline", "profile", "recover",
     })
 
 
 def test_full_enabled_actions_still_contains_explore():
-    """Sanity: the replacement action stays enabled. Same for
-    ``sweep`` / ``recover`` / ``baseline`` (canonical retentions)."""
+    """Sanity: ``explore`` / ``sweep`` / ``baseline`` stay enabled; ``recover`` is intentionally NOT enabled."""
     assert "explore" in FULL_ENABLED_ACTIONS
     assert "sweep" in FULL_ENABLED_ACTIONS
-    assert "recover" in FULL_ENABLED_ACTIONS
+    assert "recover" not in FULL_ENABLED_ACTIONS
     assert "baseline" in FULL_ENABLED_ACTIONS
 
 
@@ -329,13 +299,9 @@ def test_cli_real_executors_still_contains_explore_and_sweep():
     assert "baseline" in cli_mod._REAL_EXECUTORS_FULL
 
 
-# ===========================================================================
 # Mission-summary + robustness prompt point at explore, not retired names
-# ===========================================================================
 def test_dead_c_mission_summary_tag_points_at_explore():
-    """KB_gaps/Dead-C — the mission-summary ``stack changed`` warning
-    must NOT name the retired ``validate_stack`` action; it points the
-    LLM at ``explore`` (which inlines the rebench)."""
+    """KB_gaps/Dead-C — the ``stack changed`` warning points at ``explore``, not the retired ``validate_stack``."""
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     s = SharedState(
@@ -349,18 +315,18 @@ def test_dead_c_mission_summary_tag_points_at_explore():
 
 
 def test_dead_c_robustness_md_prune_branch_family_list():
-    """KB_gaps/Dead-C — the Robustness prompt's ``prune_branch`` family
-    enumeration drops the retired ``validate_stack`` family (and the
-    legacy ``backends`` / ``params`` aliases) and keeps the canonical
-    ``explore`` family."""
+    """KB_gaps/Dead-C — the Robustness ``prune_branch`` family list drops retired ``validate_stack`` / ``backends`` / ``params`` and keeps ``explore``."""
     from inference_optimizer.paths import asset_system_prompts_dir
 
     fragment = (asset_system_prompts_dir() / "robustness.md").read_text(
         encoding="utf-8"
     )
-    prune_lines = [ln for ln in fragment.splitlines() if "prune_branch" in ln]
-    assert prune_lines, "prune_branch row missing from robustness.md"
-    row = prune_lines[0]
+    prune_rows = [
+        ln for ln in fragment.splitlines()
+        if ln.strip().startswith("| `prune_branch")
+    ]
+    assert prune_rows, "prune_branch table row missing from robustness.md"
+    row = prune_rows[0]
     for retired in ("validate_stack", "backends", "params"):
         assert retired not in row, (
             f"prune_branch family list still advertises retired {retired!r}"

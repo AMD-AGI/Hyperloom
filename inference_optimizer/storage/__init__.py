@@ -1,13 +1,8 @@
-"""SQLite WAL atomic storage backend ().
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Single ``$SESSION_DIR/storage/coordinator.db`` consolidates 4 tables:
-
-* ``leases``  — resource lock state (one row per lane)
-* ``events``  — A2A message bus source-of-truth (AUTOINCREMENT seq)
-* ``cursors`` — per-agent ``last_processed_seq`` for idempotent replay
-* ``tasks``   — DelegatedTask lifecycle state machine
-
-WAL + ``BEGIN IMMEDIATE`` gives cross-table atomicity (ADR-33 promise).
+"""SQLite WAL atomic storage backend (single
+``$SESSION_DIR/storage/coordinator.db``). WAL + ``BEGIN IMMEDIATE`` gives
+cross-table atomicity; see :mod:`.schema` for the table layout.
 """
 
 from .connection import SqliteConnection, open_connection

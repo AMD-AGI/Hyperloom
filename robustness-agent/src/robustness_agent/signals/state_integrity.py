@@ -1,41 +1,21 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """State-integrity signals (I1-I5).
 
-Five detectors guard the **session itself** — the files Coordinator
-relies on and the process Coordinator runs as. When any of them
-silently break the run can keep producing intents but no longer have
-the safety net it thinks it does:
+Five detectors guard the session files Coordinator relies on and the
+process it runs as:
 
-* **I1 ``state_json_corrupt``** — ``state.json`` failed to load as
-  JSON, OR the file is now smaller than the previous known-good size
-  (partial write during crash). Coordinator's resume path uses this
-  file to restore baseline / current_best / explore_search ledgers;
-  losing it during a long run silently throws away progress.
-
-* **I2 ``coordinator_wal_bloat``** — ``coordinator.db-wal`` crossed a
-  configurable size threshold (default 1 GiB). The WAL is *supposed*
-  to be checkpointed periodically; left to grow it tanks every
-  SQLite read/write at the worst possible time (mid-handoff between
-  agents).
-
-* **I3 ``stale_lease``** — a row in the ``leases`` table is held by a
-  PID that no longer exists. The Coordinator's resource-lock layer
-  would normally release the lease on graceful task exit; a crashed
-  task leaves the lane locked, freezing every downstream proposal
-  that requires it.
-
-* **I4 ``inbox_bloat``** — any role's ``inbox.jsonl`` or
-  ``outbox.jsonl`` exceeded the configured size threshold. Past
-  ~100 MiB the per-tick parsers slow down dramatically; past ~500 MiB
-  the agent backends start timing out.
-
-* **I5 ``coordinator_zombie``** — the recorded Coordinator PID is no
-  longer alive but ``state.json`` doesn't carry a ``stop_reason``.
-  This is the worst case Robustness can see: the run is technically
-  dead, but session files still claim it's running, so external
-  monitors think everything is fine. Robustness escalates HIGH
-  immediately; the operator has to restart manually because
-  Robustness lives in the same process tree (its own subprocess
-  will exit alongside the Coordinator).
+* **I1 ``state_json_corrupt``** — ``state.json`` failed to parse or
+  shrank below known-good size (partial write); resume would lose
+  baseline / current_best / explore_search ledgers.
+* **I2 ``coordinator_wal_bloat``** — ``coordinator.db-wal`` past the
+  size threshold (default 1 GiB); un-checkpointed WAL tanks SQLite I/O.
+* **I3 ``stale_lease``** — a ``leases`` row held by a dead PID, freezing
+  every downstream proposal on that lane.
+* **I4 ``inbox_bloat``** — a role's ``inbox/outbox.jsonl`` past the
+  threshold; per-tick JSONL parsing slows then agent backends time out.
+* **I5 ``coordinator_zombie``** — recorded PID dead but ``state.json``
+  has no ``stop_reason``; HIGH, operator must restart manually.
 """
 
 from __future__ import annotations
@@ -54,15 +34,10 @@ from .symptom import Symptom, SymptomSeverity
 class StateIntegrityConfig:
     """Tunables for :func:`evaluate_state_integrity_signals`."""
 
-    # I2 — WAL size at which we surface a MEDIUM alert. The actual
-    # WAL-checkpoint trigger is owned by the Coordinator; Robustness
-    # only nags when it grows past a clearly-unhealthy footprint.
+    # I2 — WAL size warn/crit; Robustness only nags, Coordinator owns checkpointing.
     wal_bytes_warn_threshold: int = 1 * 1024 * 1024 * 1024  # 1 GiB
     wal_bytes_critical_threshold: int = 4 * 1024 * 1024 * 1024  # 4 GiB
-    # I3 — minimum age of a stale lease before we fire. Short-lived
-    # crashes can momentarily leave a lease un-released between the
-    # process kill and the Coordinator's reaper tick; the wait keeps
-    # the rule from racing the cleanup path.
+    # I3 — min stale-lease age before firing, to avoid racing the reaper.
     stale_lease_min_age_s: float = 60.0
     # I4 — agent-file thresholds.
     inbox_bloat_warn_bytes: int = 100 * 1024 * 1024     # 100 MiB
@@ -75,6 +50,19 @@ def evaluate_state_integrity_signals(
     *,
     config: StateIntegrityConfig | None = None,
 ) -> list[Symptom]:
+    """Run the I1-I5 state-integrity rules and aggregate their symptoms.
+
+    Args:
+        ctx (ReactorContext): Reactor context for the current tick.
+        data (SourceData): Collected source data including
+            ``local_state_integrity``.
+        config (StateIntegrityConfig | None): Tunables; defaults to
+            :class:`StateIntegrityConfig` when ``None``.
+
+    Returns:
+        list[Symptom]: All state-integrity symptoms found this tick, possibly
+            empty.
+    """
     cfg = config or StateIntegrityConfig()
     si = data.local_state_integrity
     if not isinstance(si, dict) or not si:
@@ -93,19 +81,26 @@ def evaluate_state_integrity_signals(
 # ---------------------------------------------------------------------------
 
 def _state_json_symptoms(si: dict[str, Any]) -> list[Symptom]:
+    """I1: fire ``state_json_corrupt`` when ``state.json`` is unreadable.
+
+    Stays silent for a merely-absent file (normal on tick 0); I5 covers the
+    "should exist but the run died" case.
+
+    Args:
+        si (dict[str, Any]): The state-integrity probe sample.
+
+    Returns:
+        list[Symptom]: A one-element list with the ``state_json_corrupt``
+            symptom on corruption, otherwise an empty list.
+    """
     state = si.get("state_json")
     if not isinstance(state, dict) or not state:
         return []
-    # ``valid=True`` → JSON parsed and is a dict; nothing to do.
     if state.get("valid"):
         return []
     error = str(state.get("error") or "unknown")
-    # "missing" is normal on tick 0 (Coordinator writes state.json on
-    # first persist). We surface corruption (json_parse_failed / read
-    # errors) but stay silent for absent files so a fresh sandbox or
-    # an early reactor tick doesn't false-fire. The Coordinator-zombie
-    # signal (I5) catches the case where state.json *should* exist but
-    # the run died first.
+    # "missing" is normal pre-first-persist; stay silent so a fresh
+    # sandbox doesn't false-fire (I5 covers the should-exist-but-died case).
     if error == "missing":
         return []
     return [
@@ -140,6 +135,17 @@ def _state_json_symptoms(si: dict[str, Any]) -> list[Symptom]:
 def _wal_bloat_symptoms(
     si: dict[str, Any], cfg: StateIntegrityConfig,
 ) -> list[Symptom]:
+    """I2: fire ``coordinator_wal_bloat`` when the SQLite WAL grows too large.
+
+    Args:
+        si (dict[str, Any]): The state-integrity probe sample.
+        cfg (StateIntegrityConfig): Tunables (provides WAL warn/crit
+            thresholds).
+
+    Returns:
+        list[Symptom]: A one-element list with the ``coordinator_wal_bloat``
+            symptom when the WAL crosses a threshold, otherwise an empty list.
+    """
     wal = si.get("wal")
     if not isinstance(wal, dict):
         return []
@@ -188,6 +194,17 @@ def _stale_lease_symptoms(
     si: dict[str, Any],
     cfg: StateIntegrityConfig,
 ) -> list[Symptom]:
+    """I3: fire ``stale_lease`` for leases held by dead PIDs past the min age.
+
+    Args:
+        ctx (ReactorContext): Reactor context (provides the current unix time).
+        si (dict[str, Any]): The state-integrity probe sample.
+        cfg (StateIntegrityConfig): Tunables (provides the minimum stale age).
+
+    Returns:
+        list[Symptom]: One ``stale_lease`` symptom per stale lease, possibly
+            empty.
+    """
     leases = si.get("leases")
     if not isinstance(leases, list) or not leases:
         return []
@@ -198,9 +215,8 @@ def _stale_lease_symptoms(
             continue
         if entry.get("alive") is not False:
             continue
-        # Skip leases whose acquired_at is recent — the reaper hasn't
-        # had a chance yet. ``acquired_at`` may be unix seconds or
-        # ISO-ish; we coerce both.
+        # Skip recently-acquired leases (reaper hasn't run); coerce
+        # unix-seconds or ISO ``acquired_at``.
         acquired_unix = _coerce_unix(entry.get("acquired_at"))
         age_s = (
             (now - acquired_unix)
@@ -240,6 +256,18 @@ def _stale_lease_symptoms(
 
 
 def _coerce_unix(value: Any) -> float | None:
+    """Coerce a timestamp value to unix seconds.
+
+    Accepts numeric epoch seconds or an ISO-8601-ish string (``Z`` suffix
+    tolerated). Booleans are rejected.
+
+    Args:
+        value (Any): The raw timestamp value.
+
+    Returns:
+        float | None: Unix seconds, or ``None`` when the value cannot be
+            interpreted as a timestamp.
+    """
     if value is None:
         return None
     if isinstance(value, bool):
@@ -267,6 +295,16 @@ def _coerce_unix(value: Any) -> float | None:
 def _inbox_bloat_symptoms(
     si: dict[str, Any], cfg: StateIntegrityConfig,
 ) -> list[Symptom]:
+    """I4: fire ``inbox_bloat`` for agent inbox/outbox files over threshold.
+
+    Args:
+        si (dict[str, Any]): The state-integrity probe sample.
+        cfg (StateIntegrityConfig): Tunables (provides the bloat thresholds).
+
+    Returns:
+        list[Symptom]: One ``inbox_bloat`` symptom per oversized agent file,
+            possibly empty.
+    """
     agents = si.get("agents")
     if not isinstance(agents, dict) or not agents:
         return []
@@ -319,14 +357,23 @@ def _inbox_bloat_symptoms(
 # ---------------------------------------------------------------------------
 
 def _coordinator_zombie_symptoms(si: dict[str, Any]) -> list[Symptom]:
+    """I5: fire ``coordinator_zombie`` when the PID is dead but no stop reason.
+
+    Args:
+        si (dict[str, Any]): The state-integrity probe sample.
+
+    Returns:
+        list[Symptom]: A one-element list with the ``coordinator_zombie``
+            symptom when the Coordinator died ungracefully, otherwise an empty
+            list.
+    """
     coord = si.get("coordinator")
     state = si.get("state_json")
     if not isinstance(coord, dict) or not coord:
         return []
     pid = coord.get("recorded_pid")
     alive = coord.get("alive")
-    # Skip cases we can't judge: no PID file, or alive==None (probe
-    # didn't run / ``os.kill`` API missing on this platform).
+    # Skip cases we can't judge: no PID file or alive==None (probe didn't run).
     if pid is None or alive is None:
         return []
     if alive:
@@ -335,8 +382,7 @@ def _coordinator_zombie_symptoms(si: dict[str, Any]) -> list[Symptom]:
     if isinstance(state, dict) and state.get("valid"):
         stop_reason = str(state.get("stop_reason") or "")
     if stop_reason:
-        # Clean wind-down — Coordinator already wrote a terminal
-        # stop_reason; the missing PID is just "the process exited".
+        # Clean wind-down — terminal stop_reason already written.
         return []
     return [
         Symptom(

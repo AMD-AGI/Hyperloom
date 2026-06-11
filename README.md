@@ -21,7 +21,7 @@ Block 5-6 - Validated Delivery: The agent optimizes for throughput while maintai
 | **[DeepSeek-R1 — Fast Scale-Up on a New Workload](docs/CASE_STUDY_DEEPSEEK_R1.md)** | 7 configs to optimal in one session, MTP scheduling fix, +97% over B200 |
 | **[Auth & Environment Guide](docs/ENV_AND_AUTH.md)** | Single authoritative auth/env reference; the inline tables in this README are a convenience excerpt |
 | **[Configuration Reference](docs/CONFIGURATION_REFERENCE.md)** | Every environment variable read by the runtime |
-| **[Knowledge-Base Guide](docs/KB_GUIDE.md)** | How to obtain or skip `INFERENCE_OPTIMIZER_KB_ROOT` and the marathon KB |
+| **[Knowledge-Base Guide](docs/KB_GUIDE.md)** | How to obtain or skip `INFERENCE_OPTIMIZER_KB_ROOT` |
 | **[`session_breakdown.json` Integration](docs/INTEGRATION_SESSION_BREAKDOWN.md)** | Stable contract for downstream consumers (`claw-stats-service`, dashboards) |
 | **[Operations & Self-Host Runbook](docs/OPERATIONS.md)** | k8s sizing, `USER_DATA_PATH` backup, disaster recovery |
 | **[Troubleshooting](docs/TROUBLESHOOTING.md)** | Auth-proxy 401, Ray `--num-gpus`, VRAM IR-1, and other recurring failures |
@@ -67,7 +67,14 @@ Local Mode runs Hyperloom in a remote AMD GPU environment, then uses Cursor to c
 
 #### 1. Prepare the GPU Environment
 
-You need an AMD GPU machine that supports MI300X or MI355X, using an SGLang or vLLM ROCm inference image. Example images:
+You need an AMD GPU machine that supports MI300X or MI355X, using an SGLang or vLLM ROCm inference image.
+
+The SGLang images are available from two sources — pick the one that matches your environment:
+
+- **Public Docker Hub** (`primussafe/sglang:<tag>`) — pull directly from anywhere with `docker pull`. Use these refs when running `docker run` on your own GPU machine. Browse all available tags at **[hub.docker.com/r/primussafe/sglang/tags](https://hub.docker.com/r/primussafe/sglang/tags)**.
+- **Self-hosted Harbor registry** (`harbor.core42.primus-safe.amd.com/proxy/primussafe/sglang:<tag>`) — AMD's internal mirror hosted in the Core42 data center, reachable from our Primus-SaFE platform running there. Use this prefix when selecting an image for a SaFE Authoring Pod.
+
+Example images (Harbor refs for the SaFE Authoring Pod path; drop the `harbor.core42.primus-safe.amd.com/proxy/` prefix to get the public Docker Hub ref):
 
 - SGLang MI300X: `harbor.core42.primus-safe.amd.com/proxy/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix`
 - SGLang MI355X: `harbor.core42.primus-safe.amd.com/proxy/primussafe/sglang:v0.5.11-rocm720-mi35x-profilerfix`
@@ -92,9 +99,11 @@ docker run -d \
   --group-add video \
   -v /path/to/workspace:/workspace \
   -v /path/to/models:/models \
-  harbor.core42.primus-safe.amd.com/proxy/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix \
+  primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix \
   tail -f /dev/null
 ```
+
+> This example uses the public Docker Hub ref (`primussafe/sglang:...`) since it runs on your own GPU machine. Inside Primus-SaFE, use the `harbor.core42.primus-safe.amd.com/proxy/primussafe/sglang:...` mirror instead.
 
 If Hyperloom is already cloned on the host, you can mount that checkout directly into the container, for example by replacing `-v /path/to/workspace:/workspace` with `-v /path/on/host/Hyperloom:/workspace/Hyperloom`. Then open `/workspace/Hyperloom` after attaching Cursor to the container; you do not need to clone Hyperloom again inside the container.
 
@@ -226,7 +235,6 @@ Optimize inference for this workload:
 - CONC: 64
 - ISL: 1024
 - OSL: 1024
-- Precision: bf16
 - Goal: improve throughput by at least 10%
 - Budget: 24 hours
 
@@ -242,6 +250,24 @@ Requirements:
 ````
 
 Follow the script output. In the default flow, users do not need to manually configure GEAK or OOB. Both TraceLens repos must be installed in the container before bootstrap (step 1).
+
+### Quantization (optional): AMD Quark dependency
+
+The optional quantization prelude (`inference_optimizer optimize --quantize ...`, backed by the `quantization_agent` sub-agent) drives [AMD Quark](https://quark.docs.amd.com/) to produce a quantized model before the optimization loop runs. You only need Quark if you use this path; the rest of Hyperloom works without it.
+
+- **Dependency.** `quantization_agent` requires an AMD Quark checkout **at runtime**. It does not bundle Quark or implement quantization itself — it invokes Quark's published skills (`quark-torch-ptq` → `quark-torch-result-validator` → `quark-torch-llm-eval`) end-to-end.
+- **Obtaining Quark.** Quark is published on PyPI (`pip install amd-quark`). However, the current external release does **not** ship the `.claude/skills/quark-torch-*` skill-invocation entry points that the agent drives, so **today you must use the internal Quark repository** checkout. Switch to the public package once it bundles those skills.
+- **Pointing at a local checkout.** The agent resolves the Quark root in this order:
+  1. the explicit `quark_root=` argument (Python API / `--quark-root` CLI flag),
+  2. the `QUARK_ROOT` environment variable,
+  3. the built-in default `/wekafs/hyperloom/Quark`.
+
+  The resolved path must contain `.claude/skills/quark-torch-ptq/SKILL.md` (plus the validator / eval skills under the same tree). If none of the above resolves to an existing directory, the run fails fast with `quark_root_missing` rather than silently optimizing the un-quantized model. Set it in your `.env` when your checkout lives elsewhere:
+
+  ```env
+  # Only needed for the --quantize prelude; path to your internal amd-quark checkout.
+  QUARK_ROOT=/workspace/Quark
+  ```
 
 ### Launch Inference Optimization
 
@@ -277,7 +303,6 @@ Prompt field reference:
 | `CONC` | `CONC` | Benchmark concurrency. | YAML default, commonly `8` |
 | `ISL` | `--isl`, `ISL` | Input sequence length. | `256` |
 | `OSL` | `--osl`, `OSL` | Output sequence length. | `256` |
-| `Precision` | `--precision`, `PRECISION` | Model precision, for example `bf16`. | `bf16` |
 | `Goal` | `--target-gain`, `--target-tput`, `--target-baseline-dir` | Optional stop condition, such as target throughput gain. | unset |
 | `Budget` | `--max-hours` | Maximum optimization time. | `2.0` hours |
 | `Kernel optimization` | `--no-kernel` | Kernel optimization is enabled by default; ask to skip it if you only want parameter/backend search. | enabled |
@@ -321,7 +346,7 @@ PrimusClaw tier:
 
 | Resource                          | Hosted default                                                                 |
 |-----------------------------------|---------------------------------------------------------------------------------|
-| Per-session GPU budget            | 1 ├ù MI300X / MI325X / MI355X for single-node runs; 2–8 GPUs via RayJob for multi-node |
+| Per-session GPU budget            | 1–8 × MI300X / MI325X / MI355X for single-node runs (matches TP); 16+ GPUs via RayJob for multi-node (nodes ≥ 2) |
 | Concurrent sessions per account   | 2                                                                               |
 | Session wall-clock                | 24 hours (extensible on request)                                                |
 | `USER_DATA_PATH` quota            | 200 GB per session, with daily snapshots                                        |

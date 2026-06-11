@@ -1,10 +1,6 @@
-"""framework_agent_client helper-utility tests.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Coverage: ``repo_url_for_framework`` lookup table and ``_resolve_fa_binary``
-env-var precedence. The legacy ``fetch_pr_candidates`` tests were retired
-together with the function itself (no production caller after the
-FRAMEWORK_PR phase migration).
-"""
+"""framework_agent_client helper-utility tests (``repo_url_for_framework`` + ``_resolve_fa_binary``)."""
 
 from __future__ import annotations
 
@@ -36,11 +32,7 @@ def test_repo_url_for_framework_known():
 
 
 def test_repo_url_for_framework_atom():
-    """atom resolves to ROCm/ATOM regardless of whether
-    ``framework_agent`` is on the import path.
-    ``fac.repo_url_for_framework`` delegates to the canonical when
-    available and to the inline fallback otherwise; both must produce
-    the same URL."""
+    """atom resolves to ROCm/ATOM whether or not ``framework_agent`` is importable."""
     assert fac.repo_url_for_framework("atom") == (
         "https://github.com/ROCm/ATOM.git"
     )
@@ -52,14 +44,7 @@ def test_repo_url_for_framework_unknown_returns_empty():
 
 
 def test_fallback_dict_has_atom_entry():
-    """Introspect the ImportError-branch fallback dict directly so
-    the IO-only path's contract is pinned independently of whether
-    the canonical ``framework_agent.repo_map`` is on PYTHONPATH.
-
-    Reads the source via AST so we exercise the literal in the
-    fallback ``except ImportError`` arm — when ``framework_agent`` is
-    importable (the normal install path), the symbol isn't actually
-    bound in the module namespace."""
+    """Introspect the ImportError-branch fallback dict via AST so its contract is pinned regardless of PYTHONPATH."""
     import ast
     import pathlib
 

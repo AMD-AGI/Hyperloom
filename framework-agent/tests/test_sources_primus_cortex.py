@@ -1,8 +1,6 @@
-"""Tests for framework_agent.sources.primus_cortex.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Hermetic - monkeypatches urllib.request.urlopen to return canned
-payloads. No real HTTP traffic.
-"""
+"""Tests for framework_agent.sources.primus_cortex. Hermetic - monkeypatches urllib.request.urlopen to return canned payloads; no real HTTP traffic."""
 
 from __future__ import annotations
 
@@ -20,21 +18,17 @@ class _FakeResp:
     """Minimal urllib response stand-in usable as a context manager."""
 
     def __init__(self, status: int, body: bytes, content_type: str = "application/json"):
-        """Capture status / body / Content-Type for later urlopen() reads."""
         self.status = status
         self._body = body
         self.headers = {"Content-Type": content_type}
 
     def __enter__(self):
-        """Context-manager enter; returns self so .read() works."""
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        """Context-manager exit; nothing to clean up."""
         return None
 
     def read(self) -> bytes:
-        """Return the canned body."""
         return self._body
 
 

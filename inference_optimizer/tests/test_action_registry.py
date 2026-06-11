@@ -1,21 +1,6 @@
-"""P1-1 ActionRegistry + ActionMetadata + PolicyGate integration tests.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Covers:
-
-* ActionMetadata.from_yaml_dict schema validation (required fields,
-  family vocabulary, accuracy/crash_risk range, name match)
-* ActionRegistry.load scans `_meta/*.yaml` and exposes get / all / names /
-  by_family
-* The 5 P1-1 shipped actions load cleanly with v0.6 schema (no
-  allowed_modes field)
-* baseline metadata captures expected lanes / tools / risks
-* PolicyGate.allowed_tools_for_action returns metadata.allowed_tools
-* PolicyGate.delegate rejects unknown action_name when registry is wired
-* PolicyGate.delegate accepts known action_name when registry is wired
-* PolicyGate.propose_action rejects unknown action_name when registry is wired
-* PolicyGate.propose_action accepts kernel-owned action even though they
-  are not in the regular metadata (they have their own ownership rules)
-"""
+"""P1-1 ActionRegistry + ActionMetadata + PolicyGate integration tests."""
 
 from __future__ import annotations
 
@@ -30,13 +15,11 @@ from inference_optimizer.orchestrator.action_registry import (
     VALID_FAMILIES,
 )
 from inference_optimizer.orchestrator.agent_role import default_role_registry
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.policy import PolicyDenied, PolicyGate
 
 
-# ===========================================================================
 # ActionMetadata schema
-# ===========================================================================
 def _good_payload() -> dict:
     return {
         "name": "baseline",
@@ -101,9 +84,7 @@ def test_valid_families_v06():
     })
 
 
-# ===========================================================================
 # ActionRegistry — loads shipped P1-1 actions
-# ===========================================================================
 @pytest.fixture
 def registry() -> ActionRegistry:
     return ActionRegistry().load()
@@ -172,9 +153,7 @@ def test_registry_validates_filename_matches_yaml_name(tmp_path):
         reg.load()
 
 
-# ===========================================================================
 # PolicyGate × ActionRegistry integration
-# ===========================================================================
 @pytest.fixture
 def gate_with_registry(registry) -> PolicyGate:
     return PolicyGate(role_registry=default_role_registry(), action_registry=registry)
@@ -197,8 +176,7 @@ def test_gate_delegate_unknown_action_rejected(gate_with_registry):
 
 
 def test_gate_delegate_kernel_owned_still_kernel_owned_check(gate_with_registry):
-    """Even with registry wired, kernel-owned actions get the kernel_owned reject
-    (which fires before the unknown_action check)."""
+    """Even with registry wired, kernel-owned actions get the kernel_owned reject."""
     with pytest.raises(PolicyDenied) as exc:
         gate_with_registry.validate_intent("orchestration", Intent(
             type=IntentType.DELEGATE,
@@ -217,8 +195,7 @@ def test_gate_propose_action_unknown_rejected(gate_with_registry):
 
 
 def test_gate_propose_action_kernel_owned_allowed_for_proposal(gate_with_registry):
-    """Orchestration may *propose* a kernel-owned action; only delegate is gated.
-    The actual dispatch happens via REQUEST → kernel agent."""
+    """Orchestration may *propose* a kernel-owned action; only delegate is gated."""
     gate_with_registry.validate_intent("orchestration", Intent(
         type=IntentType.PROPOSE_ACTION,
         payload={"action_name": "kernel_opt", "predicted_gain_pct": 12.0},

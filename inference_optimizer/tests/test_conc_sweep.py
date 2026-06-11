@@ -1,18 +1,6 @@
-"""Tests for the post-optimization concurrency sweep runner.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Pins the contract for ``orchestrator.conc_sweep.run_conc_sweep``:
-
-* Skip cases short-circuit before ``run_grid`` is invoked and return
-  a stable envelope with ``status="skipped"`` + ``skip_reason``.
-* Both ``extra_server_args`` and ``extra_envs`` independently count as
-  "optimized" — either being non-empty triggers the run.
-* Two-arm grid (baseline + optimized) × N concs is built correctly,
-  including CONC / ISL / OSL / NUM_PROMPTS env overrides.
-* Aggregation pairs by CONC and produces correct speedup / median.
-* JSON + CSV outputs land under ``reports/`` and final.json gets
-  a ``conc_sweep_summary`` pointer merged in.
-* Aggregation handles failed/missing optimized points gracefully.
-"""
+"""Tests for the post-optimization concurrency sweep runner."""
 
 from __future__ import annotations
 
@@ -41,11 +29,7 @@ from inference_optimizer.orchestrator.conc_sweep import (
 from inference_optimizer.orchestrator.shared_state import SharedState
 
 
-# ---------------------------------------------------------------------------
 # Fixtures
-# ---------------------------------------------------------------------------
-
-
 def _make_state(
     *,
     baseline_tput: float = 100.0,
@@ -78,18 +62,13 @@ def session_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def baseline_yaml(tmp_path: Path) -> Path:
-    """Minimal YAML file that exists on disk so ``run_conc_sweep``
-    passes the ``baseline_config_missing`` skip gate."""
+    """Minimal YAML on disk so ``run_conc_sweep`` passes the missing-config gate."""
     p = tmp_path / "baseline.yaml"
     p.write_text("benchmark:\n  benchmark_script: bench.sh\n")
     return p
 
 
-# ---------------------------------------------------------------------------
 # _has_optimization
-# ---------------------------------------------------------------------------
-
-
 def test_has_optimization_args_only():
     s = SharedState()
     s.current_best = {"extra_server_args": "--a 1", "extra_envs": {}}
@@ -122,11 +101,7 @@ def test_has_optimization_missing_current_best():
     assert has is False
 
 
-# ---------------------------------------------------------------------------
 # _build_grid
-# ---------------------------------------------------------------------------
-
-
 def test_build_grid_two_arms_per_conc():
     grid = _build_grid(
         concs=[1, 4, 16],
@@ -167,11 +142,7 @@ def test_build_grid_num_prompts_floor():
     assert int(baseline.extra_envs["NUM_PROMPTS"]) >= 64
 
 
-# ---------------------------------------------------------------------------
 # _build_comparison
-# ---------------------------------------------------------------------------
-
-
 def test_build_comparison_simple_speedup():
     baseline = [
         {"conc": 1, "output_throughput": 100.0, "status": "succeeded"},
@@ -193,8 +164,7 @@ def test_build_comparison_simple_speedup():
 
 
 def test_build_comparison_partial_failures():
-    """One arm fails on conc=4 → that pair is counted failed,
-    others still pair up."""
+    """One arm fails on conc=4 → that pair is counted failed, others still pair up."""
     baseline = [
         {"conc": 1, "output_throughput": 100.0, "status": "succeeded"},
         {"conc": 4, "output_throughput": 200.0, "status": "succeeded"},
@@ -237,11 +207,7 @@ def test_build_comparison_mismatched_concs_outer_join():
     assert summary["successful_pairs"] == 1
 
 
-# ---------------------------------------------------------------------------
 # Skip paths
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("override, reason", [
     ({"baseline_tput": 0.0}, "no_baseline_tput"),
     ({"isl": 0},             "missing_workload_shape"),
@@ -269,7 +235,6 @@ def test_run_conc_sweep_skip_short_circuits(
     assert payload["status"] == "skipped"
     assert payload["skip_reason"] == reason
     mock_run_grid.assert_not_called()
-    # No reports written on skip.
     assert not (session_dir / "reports" / "conc_sweep_summary.json").exists()
 
 
@@ -284,9 +249,7 @@ def test_run_conc_sweep_skip_empty_conc_list(
     assert payload["status"] == "skipped"
     assert payload["skip_reason"] == "no_optimization_to_compare" or \
            payload["skip_reason"] == "empty_conc_list"
-    # The empty-list gate fires AFTER has_opt check; if has_opt passes,
-    # empty list should be the reason. With our default fixture state
-    # current_best is non-empty so we expect "empty_conc_list".
+    # has_opt passes (non-empty fixture), so empty list is the reason.
     assert payload["skip_reason"] == "empty_conc_list"
     mock_run_grid.assert_not_called()
 
@@ -306,11 +269,7 @@ def test_run_conc_sweep_skip_missing_config(
     mock_run_grid.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
 # Happy path with mocked run_grid
-# ---------------------------------------------------------------------------
-
-
 def _fake_variant(
     name: str, *, throughput: float | None, status: str = "succeeded",
     envs: dict[str, str] | None = None, error: str | None = None,
@@ -359,8 +318,6 @@ def test_run_conc_sweep_happy_path_writes_reports(
             ))
         return out
 
-    # Also bypass materialize_config_with_envs which would otherwise
-    # try to PyYAML-parse the toy fixture.
     def _fake_materialize(src, out_dir, **_kw):
         out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
         out.write_text(Path(src).read_text())
@@ -384,8 +341,7 @@ def test_run_conc_sweep_happy_path_writes_reports(
     assert payload["concs_requested"] == [1, 4, 16]
     assert len(payload["baseline"]["points"]) == 3
     assert len(payload["optimized"]["points"]) == 3
-    # All three pairs should produce a 1.30x speedup (130 / 100 with
-    # the same shape factor in numerator + denominator).
+    # All three pairs should produce a 1.30x speedup.
     speedups = [r["speedup"] for r in payload["comparison"]]
     for s in speedups:
         assert s == pytest.approx(1.30)
@@ -393,7 +349,6 @@ def test_run_conc_sweep_happy_path_writes_reports(
     assert payload["summary"]["best_speedup"] == pytest.approx(1.30)
     assert payload["summary"]["median_speedup"] == pytest.approx(1.30)
 
-    # Reports landed.
     summary_path = session_dir / "reports" / "conc_sweep_summary.json"
     csv_path = session_dir / "reports" / "conc_sweep_raw.csv"
     assert summary_path.exists()
@@ -402,11 +357,8 @@ def test_run_conc_sweep_happy_path_writes_reports(
     disk = json.loads(summary_path.read_text())
     assert disk["status"] == "succeeded"
     assert disk["summary"]["successful_pairs"] == 3
-    # Self-referential paths must land in the on-disk JSON so the
-    # frontend can read them straight off the report file instead of
-    # re-deriving from session_dir. Regression for a payload-mutation-
-    # after-write bug discovered during the breakdown_api_integration
-    # review.
+    # Regression for a payload-mutation-after-write bug: self-referential
+    # paths must land in the on-disk JSON.
     assert disk["report_json_path"] == summary_path.as_posix()
     assert disk["report_csv_path"] == csv_path.as_posix()
 
@@ -414,9 +366,7 @@ def test_run_conc_sweep_happy_path_writes_reports(
     assert len(rows) == 6  # 3 baseline + 3 optimized
     assert {r["arm"] for r in rows} == {"baseline", "optimized"}
 
-    # final.json pointer is owned by report.py (added at CLOSE), not
-    # by run_conc_sweep itself. Confirm we did NOT touch the file
-    # here -- the SWEEP-phase action must run strictly before CLOSE.
+    # final.json pointer is owned by report.py at CLOSE; conc_sweep must not touch it.
     final_json_path = session_dir / "reports" / "final.json"
     assert not final_json_path.exists()
 
@@ -424,8 +374,7 @@ def test_run_conc_sweep_happy_path_writes_reports(
 def test_run_conc_sweep_optimized_oom_yields_failed_pair(
     session_dir: Path, baseline_yaml: Path,
 ):
-    """An optimized variant crashing should yield a failed pair but
-    not abort the overall summary (other concs still pair up)."""
+    """An optimized variant crashing yields a failed pair but doesn't abort the summary."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
@@ -470,16 +419,13 @@ def test_run_conc_sweep_optimized_oom_yields_failed_pair(
     fail_row = next(r for r in payload["comparison"] if r["conc"] == 16)
     assert fail_row["speedup"] is None
     assert fail_row["optimized_status"] == "failed"
-    # Status overall is still "succeeded" because at least one pair worked.
     assert payload["status"] == "succeeded"
 
 
 def test_run_conc_sweep_args_only_optimization_triggers_run(
     session_dir: Path, baseline_yaml: Path,
 ):
-    """An optimized config with only ``extra_server_args`` (no envs)
-    should still trigger the sweep — A/B/C combinations all run, only D
-    (both empty) skips."""
+    """An optimized config with only ``extra_server_args`` still triggers the sweep."""
     state = _make_state(
         baseline_config_path=str(baseline_yaml),
         current_best={
@@ -511,8 +457,7 @@ def test_run_conc_sweep_args_only_optimization_triggers_run(
         ))
 
     assert payload["status"] in ("succeeded", "failed")
-    # Per-variant invocation: 2 arms × 2 concs.
-    assert mock_run.call_count == 4
+    assert mock_run.call_count == 4  # 2 arms × 2 concs
     assert payload["optimized"]["extra_server_args"] == "--enable-torch-compile"
     assert payload["optimized"]["extra_envs"] == {}
 
@@ -551,17 +496,14 @@ def test_run_conc_sweep_envs_only_optimization_triggers_run(
             state, session_dir, concs=[1],
         ))
 
-    # Per-variant invocation: 2 arms × 1 conc.
-    assert mock_run.call_count == 2
+    assert mock_run.call_count == 2  # 2 arms × 1 conc
     assert payload["optimized"]["extra_envs"] == {"SGLANG_MOE_ENABLE": "1"}
 
 
 def test_run_conc_sweep_does_not_touch_final_json(
     session_dir: Path, baseline_yaml: Path,
 ):
-    """conc_sweep is now a SWEEP-phase action that runs strictly
-    BEFORE CLOSE writes final.json. It must never create or modify
-    final.json; the pointer is added later by report.py."""
+    """conc_sweep runs before CLOSE and must never create or modify final.json."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     final_json_path = session_dir / "reports" / "final.json"
     assert not final_json_path.exists()
@@ -590,15 +532,10 @@ def test_run_conc_sweep_does_not_touch_final_json(
 
     assert payload["status"] in ("succeeded", "failed")
     assert (session_dir / "reports" / "conc_sweep_summary.json").exists()
-    # final.json was never created.
     assert not final_json_path.exists()
 
 
-# ---------------------------------------------------------------------------
 # format_summary_line
-# ---------------------------------------------------------------------------
-
-
 def test_format_summary_line_skip():
     payload = {"status": "skipped", "skip_reason": "no_baseline_tput"}
     line = format_summary_line(payload)
@@ -635,26 +572,15 @@ def test_default_total_budget_is_two_and_half_hours():
     assert DEFAULT_TOTAL_BUDGET_SEC == 9000
 
 
-# ---------------------------------------------------------------------------
 # Total wall-clock budget
-# ---------------------------------------------------------------------------
-
-
 def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
     session_dir: Path, baseline_yaml: Path,
 ):
-    """When the wall-clock budget runs out mid-sweep, the remaining
-    variants are recorded as status=skipped error_class=budget_exhausted
-    and the payload flags ``budget_exhausted=true`` — without losing
-    the variants that already finished."""
+    """When the wall-clock budget runs out, remaining variants are skipped."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     calls = {"n": 0}
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
-        # Simulate a per-variant elapsed time roughly equal to 0.6s so
-        # the 1-second total budget covers the first variant cleanly,
-        # the second tips us into the negative-remaining branch on the
-        # next iteration's check.
         import time as _t
         _t.sleep(0.6)
         calls["n"] += 1
@@ -681,7 +607,6 @@ def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
             total_budget_sec=1,
         ))
 
-    # Some variants ran, some were skipped due to budget.
     all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
     statuses = [p["status"] for p in all_points]
     assert "succeeded" in statuses
@@ -691,16 +616,13 @@ def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
         assert p["error_class"] == "budget_exhausted"
     assert payload["budget_exhausted"] is True
     assert payload["total_budget_sec"] == 1
-    # We launched fewer than the full 8 variants because remainder was
-    # short-circuited.
     assert calls["n"] < 8
 
 
 def test_run_conc_sweep_zero_budget_disables_gate(
     session_dir: Path, baseline_yaml: Path,
 ):
-    """``total_budget_sec <= 0`` disables the wall-clock gate; every
-    variant is launched and the payload's ``budget_exhausted`` is False."""
+    """``total_budget_sec <= 0`` disables the gate; every variant is launched."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
@@ -729,15 +651,13 @@ def test_run_conc_sweep_zero_budget_disables_gate(
 
     assert payload["budget_exhausted"] is False
     assert payload["total_budget_sec"] is None
-    # 2 arms × 2 concs = 4 launches, all completed.
-    assert mock_run.call_count == 4
+    assert mock_run.call_count == 4  # 2 arms × 2 concs
 
 
 def test_run_conc_sweep_per_variant_timeout_clamped_to_remaining_budget(
     session_dir: Path, baseline_yaml: Path,
 ):
-    """When the per-variant timeout is larger than the remaining budget,
-    we shrink it so we don't blow past the deadline on the final variant."""
+    """Per-variant timeout is clamped to the remaining budget."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     recorded_timeouts: list[int] = []
 
@@ -767,22 +687,15 @@ def test_run_conc_sweep_per_variant_timeout_clamped_to_remaining_budget(
             total_budget_sec=120,
         ))
 
-    # Every recorded per-variant timeout must be <= the total budget.
     assert all(t <= 120 for t in recorded_timeouts)
     assert all(t >= 1 for t in recorded_timeouts)
 
 
-# ---------------------------------------------------------------------------
 # ActionExecutor integration (SWEEP-phase dispatch)
-# ---------------------------------------------------------------------------
-
-
 def test_conc_sweep_executor_loads_state_and_dispatches(
     session_dir: Path, baseline_yaml: Path,
 ):
-    """ConcSweepExecutor reloads SharedState from session_dir and
-    threads the registry fields (concs / total_budget / variant_timeout)
-    through to ``run_conc_sweep``."""
+    """ConcSweepExecutor reloads SharedState and threads registry fields through."""
     from inference_optimizer.orchestrator.action_executors.conc_sweep import (
         ConcSweepExecutor,
     )
@@ -793,7 +706,6 @@ def test_conc_sweep_executor_loads_state_and_dispatches(
     state.conc_sweep_variant_timeout_sec = 30
     state.save(session_dir)
 
-    # Build a fake RunnerContext.
     class _Task:
         params = {}  # executor should fall back to SharedState values
     class _Ctx:
@@ -839,9 +751,7 @@ def test_conc_sweep_executor_missing_session_dir_yields_failure():
 def test_conc_sweep_executor_remaps_skip_to_succeeded(
     session_dir: Path, baseline_yaml: Path,
 ):
-    """A run_conc_sweep skip is not an executor failure -- the
-    SubAgentRunner only treats Magpie crashes as failed. The wrapper
-    should surface ``was_skipped=True`` + ``status='succeeded'``."""
+    """A run_conc_sweep skip surfaces ``was_skipped=True`` + ``status='succeeded'``."""
     from inference_optimizer.orchestrator.action_executors.conc_sweep import (
         ConcSweepExecutor,
     )
@@ -882,10 +792,7 @@ def test_format_summary_line_budget_exhausted_suffix():
     assert "@7200s" in line
 
 
-# ---------------------------------------------------------------------------
-# Bug #12: record_conc_sweep writes state.last_conc_sweep so
-# exit_normal_sweep can detect SWEEP completion via conc_sweep alone.
-# ---------------------------------------------------------------------------
+# Bug #12: record_conc_sweep writes state.last_conc_sweep for SWEEP completion detection.
 def test_record_conc_sweep_writes_last_conc_sweep():
     s = SharedState()
     assert s.last_conc_sweep == {}
@@ -912,10 +819,7 @@ def test_record_conc_sweep_writes_last_conc_sweep():
 
 
 def test_exit_normal_sweep_returns_conc_sweep_done():
-    """Bug #12: SWEEP→CLOSE must fire on conc_sweep completion too,
-    not only on sweep_done / budget_exhausted. Without this, an orchestration
-    agent that re-proposes conc_sweep (because sweep is singleton-blocked
-    or skipped) keeps SWEEP alive until budget exhaustion."""
+    """Bug #12: SWEEP→CLOSE must fire on conc_sweep completion, not only sweep_done."""
     from inference_optimizer.orchestrator.phase_state import exit_normal_sweep
 
     class _State:
@@ -929,8 +833,6 @@ def test_exit_normal_sweep_returns_conc_sweep_done():
     # No sweep, no conc_sweep => don't exit (budget remaining).
     assert exit_normal_sweep(_State()) is None
 
-    # Mirror what record_conc_sweep writes — status must trigger
-    # exit reason ``conc_sweep_done``.
     _State.last_conc_sweep = {"status": "succeeded"}
     result = exit_normal_sweep(_State())
     assert result is not None
@@ -938,8 +840,7 @@ def test_exit_normal_sweep_returns_conc_sweep_done():
     assert reason == "conc_sweep_done", reason
     assert evidence.get("conc_sweep_status") == "succeeded"
 
-    # Skipped also counts as "done" (the action ran to its terminal
-    # decision); without this guard SWEEP would idle until budget.
+    # Skipped also counts as "done" (action ran to its terminal decision).
     for terminal in ("partial", "completed", "skipped"):
         _State.last_conc_sweep = {"status": terminal}
         result = exit_normal_sweep(_State())
@@ -947,20 +848,11 @@ def test_exit_normal_sweep_returns_conc_sweep_done():
 
 
 def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
-    """Bug #7: KERNEL→SWEEP must drain pending KEEP integrates before
-    enqueuing sweep / conc_sweep. Otherwise the KEEP'd kernel is
-    orphaned (SWEEP allowed set lacks 'integrate') and downstream
-    actions measure the explore-only current_best, masking the kernel's
-    E2E contribution.
-
-    Verifies _on_enter_sweep calls integrate_handler for each pending
-    KEEP via the SharedState ledger queue (next_pending_keep_kernel_id).
-    """
+    """Bug #7: KERNEL→SWEEP must drain pending KEEP integrates before enqueuing sweep."""
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
     from inference_optimizer.orchestrator import kernel_request_handlers
 
-    # Mock integrate_handler so we don't really run sglang.
     fake_integrate = AsyncMock(
         return_value={
             "status": "ok", "decision": "KEEP",
@@ -970,20 +862,15 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
     monkeypatch.setattr(
         kernel_request_handlers, "integrate_handler", fake_integrate,
     )
-    # Also patch the symbol where coordinator imports it from.
     from inference_optimizer.orchestrator import coordinator as coord_mod
     if hasattr(coord_mod, "integrate_handler"):
         monkeypatch.setattr(coord_mod, "integrate_handler", fake_integrate)
 
-    # Minimal coordinator double: only needs shared_state with KEEP queue
-    # and session_dir; verify the drain helper itself, not the full
-    # _on_enter_sweep wiring (which is tested elsewhere).
     coord = MagicMock()
     coord.shared_state = MagicMock()
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.rejected_kernel_ids = []
     coord.shared_state.save = MagicMock()
-    # Pop two KEEPs in sequence then empty.
     pending_queue = ["k001", "k002"]
     coord.shared_state.next_pending_keep_kernel_id = lambda: (
         pending_queue.pop(0) if pending_queue else ""
@@ -993,18 +880,12 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
     from inference_optimizer.orchestrator.coordinator import Coordinator
     asyncio.run(Coordinator._drain_pending_keep_integrates(coord))
 
-    # Both KEEPs got dispatched, save called after each.
     assert fake_integrate.await_count == 2, fake_integrate.await_args_list
-    # State save called at least once per integrate.
     assert coord.shared_state.save.call_count >= 2
 
 
 def test_conc_sweep_phase_singleton_denies_after_auto_enqueue():
-    """Bug #11: ``conc_sweep_phase_singleton`` rule must deny
-    LLM-emitted conc_sweep proposals once the auto-enqueue stamped
-    ``evidence.auto_conc_sweep_task_id`` in the current SWEEP entry.
-    Without this, orchestration loops re-proposing conc_sweep until
-    SWEEP budget exhausts, wasting hours of GPU time."""
+    """Bug #11: ``conc_sweep_phase_singleton`` denies LLM conc_sweep proposals after auto-enqueue."""
     from inference_optimizer.orchestrator.policy import PolicyGate, PolicyDenied
 
     class _State:
@@ -1017,7 +898,6 @@ def test_conc_sweep_phase_singleton_denies_after_auto_enqueue():
     gate = PolicyGate.__new__(PolicyGate)
     gate.shared_state = _State()
 
-    # Auto-enqueue already covered conc_sweep -> deny LLM repeat.
     with pytest.raises(PolicyDenied) as exc_info:
         gate._validate_conc_sweep_singleton(
             {"params": {}}, intent_kind="propose_action",
@@ -1025,7 +905,7 @@ def test_conc_sweep_phase_singleton_denies_after_auto_enqueue():
     assert exc_info.value.rule == "conc_sweep_phase_singleton"
     assert "auto_conc_sweep_task_id" in str(exc_info.value)
 
-    # Operator bypass works (audit trail trace).
+    # Operator bypass works.
     gate._validate_conc_sweep_singleton(
         {"params": {"bypass_conc_sweep_singleton": True}},
         intent_kind="propose_action",

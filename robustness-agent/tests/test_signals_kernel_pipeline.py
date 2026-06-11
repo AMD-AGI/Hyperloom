@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """F1-F5 kernel-pipeline health signal tests."""
 
 from __future__ import annotations
@@ -115,9 +117,8 @@ def test_f2_silent_when_marker_missing():
 
 
 # ---------------------------------------------------------------------------
-# F3 (auth_proxy_unhealthy) was retired with the auth-proxy itself; the
-# AMD primus-safe gateway now accepts ``x-api-key`` directly, so the
-# proxy is no longer needed and the matching detector was removed.
+# F3 (auth_proxy_unhealthy) was retired with the auth-proxy; the gateway
+# now accepts ``x-api-key`` directly, so the detector was removed.
 # ---------------------------------------------------------------------------
 
 

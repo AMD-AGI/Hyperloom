@@ -1,29 +1,17 @@
 #!/usr/bin/env python3
-"""ci/progress.py — promote / dedup batch results.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-After a batch finishes, this script promotes Succeeded models from the
-batch's ``ci_summary.json`` into ``ci/candidates/already_done.json`` so the
-next batch dispatch automatically skips them.
-
-It also supports listing pending candidates for retry or for sanity-checking
-how many of the candidates pool remain unrun.
+"""ci/progress.py — promote / dedup batch results into ci/candidates/already_done.json.
 
 Commands:
   promote <ci_summary.json> [--already-done <path>] [--write]
-      Read ci_summary.json (from build_summary.py output), extract
-      Succeeded rows + Failed rows, merge into already_done.json.
-      Without --write, prints what would change to stdout (dry-run).
+      Merge Succeeded + Failed rows into already_done.json. Without --write, dry-run to stdout.
 
   list-remaining <candidates.json> [--already-done <path>]
       Print repo_ids in candidates.json that are NOT in already_done.json.
-      Useful for retry batches.
 
   stats [--already-done <path>] [--candidates <path>]
       Summarize already_done.json (counts by status, success rate).
-
-The schema produced by ``promote`` matches the existing already_done.json:
-  {"models": [{"repo_id", "status", "framework", "precision", "tp",
-               "params_b", "gain_pct"?, "vs_infx_pct"?, "phase"?, ...}]}
 """
 
 from __future__ import annotations
@@ -38,6 +26,15 @@ DEFAULT_ALREADY = Path(__file__).parent / "candidates" / "already_done.json"
 
 
 def _load_json(path: Path) -> dict:
+    """Load a JSON object from disk, tolerating missing or invalid files.
+
+    Args:
+        path (Path): Path to the JSON file.
+
+    Returns:
+        dict: The parsed object, or an empty dict if the file is missing or
+        cannot be parsed (a warning is printed to stderr in the latter case).
+    """
     if not path.exists():
         return {}
     try:
@@ -48,9 +45,7 @@ def _load_json(path: Path) -> dict:
 
 
 def _summary_rows(summary_path: Path) -> list[dict]:
-    """Extract rows from a ci_summary.json (whatever shape build_summary uses).
-    Accepts both `{"rows": [...]}` and `{"models": [...]}` and a bare list.
-    """
+    """Extract rows from a ci_summary.json; accepts `{"rows": [...]}`, `{"models": [...]}`, or a bare list."""
     data = _load_json(summary_path)
     if isinstance(data, list):
         return data
@@ -58,13 +53,7 @@ def _summary_rows(summary_path: Path) -> list[dict]:
 
 
 def _classify_status(row: dict) -> tuple[str, str | None]:
-    """Return (status, reason) for an already_done entry.
-
-    Status taxonomy:
-      completed — task hit a final phase AND we have baseline+optimized
-      partial   — task ran but only optimized (or only baseline) recorded
-      failed    — submit/sandbox/register error, no usable data at all
-    """
+    """Return (status, reason): completed (baseline+optimized), partial (one only), or failed (no usable data)."""
     fs = row.get("final_status")
     submit = row.get("submit_status")
     has_opt = row.get("optimized_tok_per_gpu") is not None
@@ -83,6 +72,16 @@ def _classify_status(row: dict) -> tuple[str, str | None]:
 
 
 def _row_to_entry(row: dict) -> dict:
+    """Convert a summary row into an already_done.json entry.
+
+    Args:
+        row (dict): A summary row from a ci_summary.json file.
+
+    Returns:
+        dict: An entry with ``repo_id``, ``status``, framework/precision/tp
+        fields, and optional ``reason``, ``gain_pct``, ``vs_infx_pct``, and
+        ``task_id`` keys.
+    """
     status, reason = _classify_status(row)
     e = {
         "repo_id":   row.get("model"),
@@ -104,6 +103,19 @@ def _row_to_entry(row: dict) -> dict:
 
 
 def cmd_promote(args: argparse.Namespace) -> int:
+    """Promote batch summary rows into already_done.json.
+
+    Merges new entries and upgrades existing ones (never downgrading
+    completed > partial > failed). Without ``--write`` the planned changes are
+    printed as a dry-run.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args with ``summary``,
+            ``already_done``, and ``write`` attributes.
+
+    Returns:
+        int: ``0`` on success or no-op, ``1`` if the summary contains no rows.
+    """
     summary = _summary_rows(Path(args.summary))
     if not summary:
         print(f"no rows in {args.summary}", file=sys.stderr)
@@ -171,6 +183,15 @@ def cmd_promote(args: argparse.Namespace) -> int:
 
 
 def cmd_list_remaining(args: argparse.Namespace) -> int:
+    """Print candidate repo_ids that are not yet in already_done.json.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args with ``candidates`` and
+            ``already_done`` attributes.
+
+    Returns:
+        int: ``0`` on success, ``1`` if the candidates file has no entries.
+    """
     cands = _load_json(Path(args.candidates))
     cand_repos = [c["repo_id"] for c in cands.get("candidates", [])]
     if not cand_repos:
@@ -188,6 +209,18 @@ def cmd_list_remaining(args: argparse.Namespace) -> int:
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
+    """Summarize already_done.json counts and gain statistics.
+
+    Prints totals by status, framework, and precision, plus gain stats, and
+    optionally compares against a candidates pool.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args with ``already_done`` and
+            optional ``candidates`` attributes.
+
+    Returns:
+        int: Always ``0``.
+    """
     already = _load_json(Path(args.already_done))
     models = already.get("models", [])
     by_status: dict[str, int] = {}
@@ -229,6 +262,13 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    """Parse CLI arguments and dispatch to the selected subcommand.
+
+    Supports the ``promote``, ``list-remaining``, and ``stats`` subcommands.
+
+    Returns:
+        int: The exit code returned by the dispatched subcommand.
+    """
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
 

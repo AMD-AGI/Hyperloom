@@ -1,30 +1,6 @@
-"""Tests for SharedState.record_kernel_opt overwrite invariants + the
-multi-KEEP integrate queue helpers (next_pending_keep_kernel_id,
-pending_keep_kernel_ids, has_keep_pending_integrate).
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-These tests pin down two regression-prone behaviours that drove the
-Qwen3-30B-A3B-Base session (20260522T093903Z) to leave a 4.13x KEEP
-on the floor:
-
-1. Streaming batch sub-results write to ``last_kernel_opt`` in
-   completion order, not micro_speedup order. Without the "KEEP wins,
-   non-KEEP never overwrites a pending KEEP" invariant, a late
-   REVERT / TimeoutExpired sibling would erase an earlier KEEP and
-   the integrate gate would never reopen.
-
-2. The Coordinator's batch handler exception path wraps timeouts as
-   ``{"status": "failed", "error_class": "handler_exception"}`` -- a
-   metadata-less dict with NO ``kernel_id``. record_kernel_opt must
-   no-op on such inputs instead of clobbering ``last_kernel_opt`` to
-   an empty stub.
-
-And one design-level guarantee: with the next_pending_keep_kernel_id
-queue draining in micro_speedup-descending order, multiple KEEPs
-across different source_files all get a chance to integrate, while
-same source_file KEEPs collapse to the strongest one (because
-``apply_kernel_patch`` is whole-file overwrite and the second integrate
-would silently clobber the first).
-"""
+"""Tests for SharedState.record_kernel_opt invariants + the multi-KEEP integrate queue helpers."""
 
 from __future__ import annotations
 
@@ -60,13 +36,9 @@ def state() -> SharedState:
     return SharedState()
 
 
-# ---------------------------------------------------------------------------
 # Invariant 1: empty kernel_id is a no-op
-# ---------------------------------------------------------------------------
 def test_record_kernel_opt_empty_kernel_id_is_noop_after_keep(state: SharedState):
-    """A metadata-less failure (batch handler exception wrap) must NOT
-    clobber a previously-recorded KEEP. Otherwise the integrate gate
-    keyed off ``last_kernel_opt.decision`` would never reopen."""
+    """A metadata-less failure must NOT clobber a previously-recorded KEEP."""
     keep = _ok_result(
         "k009", "KEEP", micro=4.13,
         source_file="/sgl-workspace/aiter/aiter/ops/rmsnorm.py",
@@ -92,20 +64,15 @@ def test_record_kernel_opt_empty_kernel_id_is_noop_after_keep(state: SharedState
 
 
 def test_record_kernel_opt_empty_kernel_id_noop_on_blank_state(state: SharedState):
-    """No prior data + empty kernel_id => still a no-op (no spurious
-    {kernel_id:'', decision:''} stub written)."""
+    """No prior data + empty kernel_id => still a no-op (no spurious stub written)."""
     state.record_kernel_opt({"status": "failed", "error": "transport"})
     assert state.last_kernel_opt == {}
     assert state.kernel_opt_attempts == {}
 
 
-# ---------------------------------------------------------------------------
 # Invariant 2: KEEP wins; non-KEEP never overwrites a pending KEEP
-# ---------------------------------------------------------------------------
 def test_record_kernel_opt_keep_survives_later_revert(state: SharedState):
-    """Batch streaming order is completion order, not micro order. A
-    later REVERT on a different kernel must not displace an earlier
-    KEEP that hasn't been integrated yet."""
+    """A later REVERT on a different kernel must not displace an un-integrated KEEP."""
     state.record_kernel_opt(_ok_result(
         "k009", "KEEP", 4.13,
         source_file="/sgl-workspace/aiter/aiter/ops/rmsnorm.py",
@@ -117,16 +84,14 @@ def test_record_kernel_opt_keep_survives_later_revert(state: SharedState):
 
     assert state.last_kernel_opt["kernel_id"] == "k009"
     assert state.last_kernel_opt["decision"] == "KEEP"
-    # But the REVERT was still ledgered against k001 (and retired it).
+    # The REVERT was still ledgered against k001 (and retired it).
     assert "k001" in state.kernel_opt_attempts
     assert state.kernel_opt_attempts["k001"]["last_decision"] == "REVERT"
     assert "k001" in state.rejected_kernel_ids
 
 
 def test_record_kernel_opt_keep_always_overrides_prev_keep(state: SharedState):
-    """Two KEEPs in succession => the second one wins (we want the
-    strongest pending KEEP to surface to last_kernel_opt). The earlier
-    KEEP is still queueable via kernel_opt_attempts."""
+    """Two KEEPs in succession => the second wins; the earlier KEEP stays queueable."""
     state.record_kernel_opt(_ok_result(
         "k001", "KEEP", 2.0,
         source_file="/path/moe_op.py", artifact="/tmp/k001.py",
@@ -138,20 +103,16 @@ def test_record_kernel_opt_keep_always_overrides_prev_keep(state: SharedState):
 
     assert state.last_kernel_opt["kernel_id"] == "k009"
     assert state.last_kernel_opt["micro_speedup"] == 4.13
-    # Both KEEPs are queueable.
     assert state.kernel_opt_attempts["k001"]["last_decision"] == "KEEP"
     assert state.kernel_opt_attempts["k009"]["last_decision"] == "KEEP"
 
 
 def test_record_kernel_opt_nonkeep_overwrites_when_prev_already_integrated(state: SharedState):
-    """If the previously-pending KEEP has already been integrated (i.e.
-    it's now on optimization_stack), it is no longer "pending", so a
-    new non-KEEP result IS allowed to overwrite last_kernel_opt."""
+    """An already-integrated KEEP is no longer pending, so a non-KEEP may overwrite it."""
     state.record_kernel_opt(_ok_result(
         "k009", "KEEP", 4.13,
         source_file="/path/rmsnorm.py",
     ))
-    # Simulate the Coordinator's _record_integrate_keep landing k009.
     state.optimization_stack.append({
         "action": "integrate",
         "kernel_id": "k009",
@@ -167,13 +128,9 @@ def test_record_kernel_opt_nonkeep_overwrites_when_prev_already_integrated(state
         "k009 already integrated => no longer pending => k004 PARTIAL may overwrite"
 
 
-# ---------------------------------------------------------------------------
 # next_pending_keep_kernel_id queue semantics
-# ---------------------------------------------------------------------------
 def test_next_pending_keep_drains_in_micro_speedup_order(state: SharedState):
-    """Multiple KEEPs on DIFFERENT source_files: queue returns highest
-    micro first, then after integrate writes its entry to the stack the
-    queue returns the next-highest."""
+    """KEEPs on different source_files drain highest-micro-first as the stack fills."""
     state.record_kernel_opt(_ok_result(
         "k001", "KEEP", 2.5, source_file="/p/file_a.py", artifact="/t/a1.py",
     ))
@@ -219,10 +176,7 @@ def test_next_pending_keep_drains_in_micro_speedup_order(state: SharedState):
 
 
 def test_next_pending_keep_skips_same_source_file_after_integrate(state: SharedState):
-    """``apply_kernel_patch`` is whole-file overwrite. Once an integrate
-    entry on the stack covers source_file X, any other queued KEEP on
-    X must be dropped (otherwise the second integrate would silently
-    clobber the first patch)."""
+    """Whole-file overwrite: a queued KEEP on an already-integrated source_file is dropped."""
     state.record_kernel_opt(_ok_result(
         "k001", "KEEP", 3.0,
         source_file="/sgl-workspace/aiter/aiter/ops/moe_op.py",
@@ -236,15 +190,11 @@ def test_next_pending_keep_skips_same_source_file_after_integrate(state: SharedS
         source_file="/sgl-workspace/aiter/aiter/ops/rmsnorm.py",
     ))
 
-    # Before integrating anything: queue sees the strongest per file
-    # (k001 on moe_op, k009 on rmsnorm); k003 is collapsed away because
-    # it shares moe_op.py with the stronger k001.
+    # Strongest per file; k003 collapses away (shares moe_op.py with stronger k001).
     queue = state.pending_keep_kernel_ids()
     assert queue == ["k009", "k001"], queue
     assert "k003" not in queue
 
-    # Integrate k001 (moe_op.py). Now k003 is also conflict_blocked at
-    # the stack level (target_file matched), and stays out of the queue.
     state.optimization_stack.append({
         "action": "integrate", "kernel_id": "k001",
         "target_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
@@ -256,8 +206,7 @@ def test_next_pending_keep_skips_same_source_file_after_integrate(state: SharedS
 
 
 def test_next_pending_keep_excludes_rejected_and_integrated(state: SharedState):
-    """Both rejected_kernel_ids (e.g. PARTIAL streak retired) AND
-    optimization_stack entries gate kernel_ids out of the queue."""
+    """Both rejected_kernel_ids and optimization_stack entries gate kernels out of the queue."""
     state.record_kernel_opt(_ok_result(
         "k001", "KEEP", 1.5, source_file="/p/a.py",
     ))
@@ -265,18 +214,14 @@ def test_next_pending_keep_excludes_rejected_and_integrated(state: SharedState):
         "k009", "KEEP", 4.0, source_file="/p/b.py",
     ))
 
-    # External rejection (e.g. integrate REVERT'd it).
     state.rejected_kernel_ids.append("k009")
 
-    # k001 still queueable.
     assert state.next_pending_keep_kernel_id() == "k001"
 
-    # k001 lands on stack.
     state.optimization_stack.append({
         "action": "integrate", "kernel_id": "k001",
         "target_file": "/p/a.py", "tput": 4400.0,
     })
-    # Now nothing pending (k009 rejected, k001 integrated).
     assert state.next_pending_keep_kernel_id() == ""
     assert state.has_keep_pending_integrate is False
 
@@ -286,12 +231,10 @@ def test_kernel_opt_attempts_count_property(state: SharedState):
     state.record_kernel_opt(_ok_result("k001", "KEEP", 1.5))
     state.record_kernel_opt(_ok_result("k001", "REVERT", 0.9))  # same kid
     state.record_kernel_opt(_ok_result("k002", "PARTIAL", 1.0))
-    assert state.kernel_opt_attempts_count == 2  # unique kernels
+    assert state.kernel_opt_attempts_count == 2
 
 
-# ---------------------------------------------------------------------------
 # PR-C: failure_count + max_failures = 1 retirement
-# ---------------------------------------------------------------------------
 def _failed_result(kernel_id: str, *, status: str = "failed",
                    error_class: str = "subtask_exception",
                    source_file: str = "") -> dict:
@@ -314,14 +257,7 @@ def test_record_kernel_opt_failure_count_increments_on_status_failed(state: Shar
 
 
 def test_record_kernel_opt_one_failure_retires_kernel(state: SharedState):
-    """PR-C max_failures=1: one completed-ladder-without-KEEP retires.
-
-    Operator decision: GEAK->Claude->Codex runs once; if every backend
-    fails to produce a KEEP, the kernel "cannot be optimized" and must
-    not be re-dispatched. Without this, Qwen3-30B-A3B-Base 164405Z
-    burned 8h re-running the same k002/k004 GEAK->Claude->Codex chain
-    every time the LLM proposed a fresh run_optimization batch.
-    """
+    """PR-C max_failures=1: one completed-ladder-without-KEEP retires the kernel."""
     state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
     assert "k001" in state.rejected_kernel_ids
     assert state.kernel_opt_attempts["k001"]["rejected_reason"].startswith(
@@ -337,16 +273,10 @@ def test_record_kernel_opt_revert_retires_immediately(state: SharedState):
 
 
 def test_record_kernel_opt_keep_resets_failure_count(state: SharedState):
-    """An earlier failure must not retire a kernel once a later KEEP
-    arrives -- e.g. GEAK timeout that streamed first, then Claude KEEP
-    that streamed second within the same _run_kernel_backend_sequence
-    aggregation."""
+    """A later KEEP clears the failure streak so the kernel is usable again."""
     state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
-    # failed once, retired
     assert "k001" in state.rejected_kernel_ids
-    # but a subsequent KEEP (e.g. operator resumed, re-dispatched
-    # explicitly) clears the streak so the kernel is usable again from
-    # the queue's perspective.
+    # A subsequent KEEP clears the streak.
     state.rejected_kernel_ids.remove("k001")
     state.record_kernel_opt(_ok_result("k001", "KEEP", 4.0,
                                        source_file="/p/a.py"))
@@ -358,15 +288,12 @@ def test_record_kernel_opt_keep_resets_failure_count(state: SharedState):
 def test_record_kernel_opt_max_failures_env_override(state: SharedState, monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "2")
     state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
-    # First failure -> not yet retired with env=2
     assert "k001" not in state.rejected_kernel_ids
     state.record_kernel_opt(_failed_result("k001", source_file="/p/a.py"))
     assert "k001" in state.rejected_kernel_ids
 
 
-# ---------------------------------------------------------------------------
 # PR-C: untried_hot_reusable_kernels report gate
-# ---------------------------------------------------------------------------
 def _set_trace(state: SharedState, *, hot_kernels, task_groups=None):
     state.last_trace_analyze = {
         "hot_kernels": hot_kernels,
@@ -394,12 +321,7 @@ def test_untried_hot_kernels_returns_only_reusable_above_threshold(state: Shared
 
 
 def test_untried_hot_kernels_reproduces_log1_session_164910Z(state: SharedState):
-    """Real numbers from /wekafs/users/.../20260522T164910Z/.../kernel_candidates.json.
-
-    That session emitted ``report`` at tick=8 with zero kernel_opt
-    attempts despite k001=23.7%, k002=37.3%, k004=9.7% all reusable.
-    The new gate should report 3 untried hot kernels and block report.
-    """
+    """Real numbers from session 20260522T164910Z: 3 reusable hot kernels report untried."""
     _set_trace(state, hot_kernels=[
         {"kernel_id": "k001", "gpu_pct": 23.7, "reusable_native_kernel": True,
          "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py"},
@@ -417,10 +339,8 @@ def test_untried_hot_kernels_reproduces_log1_session_164910Z(state: SharedState)
          "source_file": ""},
     ])
     untried = state.untried_hot_reusable_kernels()
-    # k001/k002/k004 must all be flagged untried -- log1 dropped these
     assert set(untried) >= {"k001", "k002", "k004"}
-    # Sorted strongest-first (k002 37% > k001 24% > k004 9.7%)
-    assert untried[0] == "k002"
+    assert untried[0] == "k002"  # strongest-first
 
 
 def test_untried_hot_kernels_collapses_by_task_group(state: SharedState):
@@ -434,15 +354,12 @@ def test_untried_hot_kernels_collapses_by_task_group(state: SharedState):
         {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
     ])
     untried = state.untried_hot_reusable_kernels()
-    # Both kernels share a task_group -> only one slot reported
-    assert len(untried) == 1
-    # And it picks the highest-gpu_pct member (k002)
-    assert untried[0] == "k002"
+    assert len(untried) == 1  # shared task_group -> one slot
+    assert untried[0] == "k002"  # highest-gpu_pct member
 
 
 def test_untried_hot_kernels_skips_when_any_group_member_attempted(state: SharedState):
-    """If k002 of group [k001,k002] has been attempted, k001 is also
-    considered tried (same AST function -> same patch target)."""
+    """An attempted group member marks the whole task_group tried."""
     _set_trace(state, hot_kernels=[
         {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
          "source_file": "/p/moe_op.py"},
@@ -451,15 +368,13 @@ def test_untried_hot_kernels_skips_when_any_group_member_attempted(state: Shared
     ], task_groups=[
         {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
     ])
-    # Mark k002 as attempted
     state.record_kernel_opt(_failed_result("k002", source_file="/p/moe_op.py"))
     untried = state.untried_hot_reusable_kernels()
     assert untried == []
 
 
 def test_untried_hot_kernels_skips_when_source_file_integrated(state: SharedState):
-    """Whole-file overwrite: once an integrate touches a source file,
-    no further KEEP on the same file is meaningful."""
+    """Once an integrate touches a source file, no further KEEP on it is meaningful."""
     _set_trace(state, hot_kernels=[
         {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
          "source_file": "/p/moe_op.py"},
@@ -471,7 +386,7 @@ def test_untried_hot_kernels_skips_when_source_file_integrated(state: SharedStat
         "target_file": "/p/moe_op.py", "tput": 4500.0,
     })
     untried = state.untried_hot_reusable_kernels()
-    assert untried == ["k009"]  # k001's whole file is integrated
+    assert untried == ["k009"]
 
 
 def test_untried_hot_kernels_caps_at_top_n(state: SharedState, monkeypatch):

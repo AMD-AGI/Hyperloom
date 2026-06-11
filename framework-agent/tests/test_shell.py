@@ -1,8 +1,6 @@
-"""Tests for framework_agent.shell.render_template + run_command.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Hermetic - run_command uses ``/bin/echo`` / ``/bin/false`` so no
-network/GPU is required.
-"""
+"""Tests for framework_agent.shell.render_template + run_command. Hermetic - run_command uses ``/bin/echo`` / ``/bin/false`` so no network/GPU is required."""
 
 from __future__ import annotations
 

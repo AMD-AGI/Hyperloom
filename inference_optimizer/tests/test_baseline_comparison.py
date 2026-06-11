@@ -1,18 +1,6 @@
-"""Unit tests for the ``baseline_comparison`` package.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Covers:
-
-* :func:`name_mapping.to_inferencex_name` — prefix stripping + match.
-* :func:`inferencex_client.fetch_rows` — happy path with a local HTTP
-  server, timeout path, gzip decoding, retry budget.
-* :func:`target_analyzer.analyze` — every status branch (ok / skipped /
-  fetch_error / no_match) end-to-end with mocked upstream rows, plus
-  on-disk persistence (JSON + MD) under the session dir.
-
-These tests deliberately avoid hitting the real InferenceX endpoint;
-they spin up a ``http.server`` thread on 127.0.0.1 so the assertions
-stay deterministic and offline-friendly.
-"""
+"""Unit tests for the ``baseline_comparison`` package."""
 
 from __future__ import annotations
 
@@ -29,9 +17,7 @@ from typing import Any
 import pytest
 
 
-# ---------------------------------------------------------------------------
 # name_mapping
-# ---------------------------------------------------------------------------
 def test_name_mapping_known_display_name_passthrough():
     from inference_optimizer.baseline_comparison.name_mapping import to_inferencex_name
     assert to_inferencex_name("MiniMax-M2.5") == "MiniMax-M2.5"
@@ -60,9 +46,7 @@ def test_known_models_list_is_nonempty():
     assert len(KNOWN_INFERENCEX_MODELS) >= 5
 
 
-# ---------------------------------------------------------------------------
 # inferencex_client — happy path against a local HTTP server
-# ---------------------------------------------------------------------------
 _SAMPLE_ROW = {
     "hardware":      "b300",
     "framework":     "vllm",
@@ -95,11 +79,7 @@ _SAMPLE_ROW = {
 
 
 class _StaticHandler(http.server.BaseHTTPRequestHandler):
-    """Serves a fixed JSON payload, optionally gzipped, on every GET.
-
-    Used by :func:`_mock_server` below. Test code installs the payload
-    via :attr:`_StaticHandler.payload`.
-    """
+    """Serves a fixed JSON payload, optionally gzipped, on every GET."""
 
     payload: list[dict[str, Any]] = []
     delay_sec: float = 0.0
@@ -127,12 +107,7 @@ class _StaticHandler(http.server.BaseHTTPRequestHandler):
 
 
 def _mock_server(payload, *, delay_sec=0.0, gzip_response=False, status=200):
-    """Start a local HTTP server thread on a free port.
-
-    Returns ``(base_url, shutdown_fn)``. ``base_url`` is suitable for
-    ``INFERENCEX_BASE_URL`` (no trailing slash — caller appends
-    ``/benchmarks?...``).
-    """
+    """Start a local HTTP server thread on a free port."""
     handler = _StaticHandler
     handler.payload = payload
     handler.delay_sec = delay_sec
@@ -223,27 +198,21 @@ def test_fetch_rows_empty_model_returns_none(mock_inferencex):
     assert "empty" in warning.lower()
 
 
-# ---------------------------------------------------------------------------
 # target_analyzer — end-to-end with mocked upstream
-# ---------------------------------------------------------------------------
 def _make_rows() -> list[dict[str, Any]]:
-    """Construct a small, realistic-shaped row set covering multiple
-    (gpu, precision, conc) combinations."""
+    """Construct a small, realistic-shaped row set covering multiple combos."""
     base = _SAMPLE_ROW
     out: list[dict[str, Any]] = []
     for conc, tput in [(4, 412.5), (16, 1167.9), (64, 2781.5), (256, 6624.1)]:
-        row = json.loads(json.dumps(base))  # deep-copy via JSON
+        row = json.loads(json.dumps(base))
         row["conc"] = conc
         row["metrics"]["tput_per_gpu"] = tput
         out.append(row)
-    # Add a mi300x fp8 row with smaller numbers so filter selectivity
-    # is visible.
     mi = json.loads(json.dumps(base))
     mi["hardware"] = "mi300x"
     mi["conc"] = 64
     mi["metrics"]["tput_per_gpu"] = 1596.05
     out.append(mi)
-    # A different precision row that should be filtered out.
     fp4 = json.loads(json.dumps(base))
     fp4["precision"] = "fp4"
     fp4["metrics"]["tput_per_gpu"] = 4066.79
@@ -339,8 +308,7 @@ def test_analyze_mapping_miss_writes_skipped_summary(tmp_path):
 
 
 def test_analyze_no_target_gpu_writes_marker(tmp_path):
-    """``compare_against_gpu=""`` short-circuits and persists a marker JSON.
-    Mirrors the path used when ``--compare-against-gpu`` is unset."""
+    """``compare_against_gpu=""`` short-circuits and persists a marker JSON."""
     from inference_optimizer.baseline_comparison import analyze
     summary = analyze(
         session_dir=tmp_path,
@@ -378,11 +346,9 @@ def test_analyze_no_competitor_target(tmp_path):
 
 
 def test_analyze_sourceless_target_dropped(tmp_path):
-    """Per-conc rows without a source are discarded; if all lack a source
-    the summary degrades to ``no_match`` rather than fabricating a best."""
+    """Per-conc rows without a source are discarded; all-sourceless degrades to no_match."""
     from inference_optimizer.orchestrator import research_hints
-    # write_competitor_target itself drops sourceless rows, so emulate a
-    # hand-edited file with a sourceless row to exercise load-time filter.
+    # Emulate a hand-edited file with a sourceless row to exercise load-time filter.
     from inference_optimizer import session_paths
     path = session_paths.competitor_target_json(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -402,9 +368,7 @@ def test_analyze_sourceless_target_dropped(tmp_path):
     assert summary.reason == "no_competitor_target"
 
 
-# ---------------------------------------------------------------------------
 # report.py renderer — _format_external_baseline_section branches on reason
-# ---------------------------------------------------------------------------
 def _ext_payload(**overrides) -> dict[str, Any]:
     base: dict[str, Any] = {
         "query": {

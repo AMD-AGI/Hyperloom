@@ -1,37 +1,19 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared workload-env materialization (single source of truth).
 
-The optimizer used to have TWO YAML-rendering paths:
+Two YAML-rendering paths used to diverge — baseline injected the full process-
+env workload contract while the grid runner dropped it — so downstream variants
+ran at YAML smoke defaults and every one looked like a regression (SKILL Lesson
+4 "Benchmark fairness"). This module is the single source of truth for rendering
+a Magpie YAML with the user's actual workload contract:
 
-* baseline executor's ``_materialize_config_with_envs`` — injected the full
-  set of process-env knobs (TP/CONC/ISL/OSL/MAX_MODEL_LEN/PRECISION/
-  RUN_EVAL/ROCR_VISIBLE_DEVICES + adaptive NUM_PROMPTS/NUM_WARMUPS).
-* grid runner's ``_build_variant_yaml`` (used by params/backends/sweep) —
-  only set ``model``, ``runner_type``, ``EXTRA_*_ARGS``, and per-variant
-  ``extra_envs``. Process-env workload knobs were silently dropped.
+* :func:`materialize_config_with_envs` — write a per-run YAML honoring process
+  env (+ optional caller overrides).
+* :func:`default_baseline_config` — pick the shipped YAML by ``$FRAMEWORK``.
 
-The result was a "Benchmark fairness" bug (SKILL Lesson 4): baseline ran at
-the user's real workload (e.g. CONC=64, ISL=1024, OSL=1024) while every
-downstream variant ran at the YAML smoke defaults (CONC=8, ISL=256, OSL=256).
-Throughput numbers were 10x apart, every variant looked like a regression.
-
-This module is the **single source of truth** for "render a Magpie YAML
-with the user's actual workload contract":
-
-* :func:`materialize_config_with_envs` — write a per-run YAML file
-  honoring process env (and optional caller overrides).
-* :func:`default_baseline_config` — pick the shipped sglang / vllm /
-  atom YAML based on ``$FRAMEWORK``.
-
-Callers:
-
-* ``baseline.py`` — runs first, materializes the contract once and
-  surfaces the rendered YAML path in its result so downstream actions
-  can reuse it verbatim (no env re-read race).
-* ``params.py`` / ``backends.py`` — fall back to materializing on
-  their own if Coordinator has not yet plumbed the baseline path
-  through ``task.params["config_path"]``.
-* ``sweep.py`` — same fallback; per-variant CONC/ISL/OSL still win
-  because ``_build_variant_yaml`` applies ``variant.extra_envs`` last.
+Used by ``baseline.py`` (materializes once, surfaces the path) and the
+``explore`` / ``sweep`` grid runs (fall back to materializing on their own).
 """
 
 from __future__ import annotations
@@ -46,7 +28,13 @@ from typing import Any
 import yaml
 
 from ...paths import asset_root
-from ._grid_runner import server_args_env_name
+from ._grid_runner import (
+    inject_sglang_attention_backend,
+    inject_sglang_context_length,
+    inject_sglang_moe_runner_backend,
+    inject_sglang_watchdog_timeout,
+    server_args_env_name,
+)
 from ._server_patcher import (
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
@@ -54,27 +42,26 @@ from ._server_patcher import (
 
 log = logging.getLogger(__name__)
 
-# Module-level flag — the RUN_EVAL=false default is the expected steady
-# state on most checkouts (see docstring at materialize_config_with_envs);
-# the warning is for first-time awareness, not per-variant noise. Emit it
-# once per process to keep the log readable.
+# Emit the RUN_EVAL=false default warning once per process to keep logs
+# readable.
 _RUN_EVAL_DEFAULT_WARN_EMITTED = False
+
+
+class FrameworkScriptMismatchError(ValueError):
+    """Raised when benchmark_script targets a different framework than the run.
+
+    Subclasses ValueError so callers can catch it specifically and turn it
+    into a structured action failure instead of an uncaught exception.
+    """
 
 
 def _visible_gpu_count() -> int:
     """Return how many GPUs are visible to this pod (0 = none / unknown).
 
-    Prefers ``torch.cuda.device_count`` because that's the count sglang /
-    vllm actually see (and it doesn't shell out, which keeps the
-    BaselineExecutor unit tests that mock ``subprocess.run`` happy). Falls
-    back to ``rocm-smi --showid`` (matches ``cli._check_gpu_visibility``)
-    when torch is missing or its driver probe hits a fluke. Returns 0 on
-    every failure path so callers can skip the clamp and let downstream
-    surface the real "no GPU" error instead of inventing a wrong TP.
-
-    Override (escape hatch for hosts where torch + rocm-smi disagree, or
-    for unit tests that exercise the clamp without GPU hardware):
-    ``$INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT=N``.
+    Prefers ``torch.cuda.device_count`` (no shell-out, keeps subprocess-mock
+    tests happy), falls back to ``rocm-smi --showid``. Returns 0 on every
+    failure so callers skip the clamp. Override via
+    ``$INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT``.
     """
     override = os.environ.get("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "").strip()
     if override:
@@ -101,12 +88,8 @@ def _visible_gpu_count() -> int:
         except (subprocess.TimeoutExpired, PermissionError, OSError):
             return 0
         if proc.returncode == 0:
-            # ``rocm-smi --showid`` emits 6+ lines per device
-            # (``GPU[N] : Device Name``, ``GPU[N] : Device ID``, etc.).
-            # Counting raw lines that start with ``GPU[`` over-counts by 6x
-            # (a 4-GPU pod reports 24 "visible" GPUs and the clamp never
-            # fires). Deduplicate by GPU index so 4 distinct ``GPU[0..3]``
-            # prefixes return 4.
+            # ``rocm-smi --showid`` emits multiple ``GPU[N]`` lines per device;
+            # dedup by index so 4 GPUs return 4, not 24.
             indices: set[str] = set()
             for line in (proc.stdout or "").splitlines():
                 stripped = line.strip()
@@ -121,19 +104,9 @@ def _visible_gpu_count() -> int:
 def _tracelens_patch_enabled() -> bool:
     """Read the ``HYPERLOOM_ENABLE_PATCH`` kill switch (default on).
 
-    Set ``HYPERLOOM_ENABLE_PATCH=0`` to disable runtime patching of
-    vLLM / SGLang — Hyperloom then keeps today's safe behaviour
-    (no TraceLens-only profiler flags injected). Useful when:
-
-    * the user runs a custom vLLM/SGLang fork they don't want touched,
-    * the patcher itself ships a bug and the user needs an escape hatch
-      without a Hyperloom release,
-    * compliance / audit forbids modifying installed packages at runtime.
-
-    Default is ``"1"`` (patching on) because the patches are backward-
-    compatible and add no flags by themselves — they only enable
-    capabilities Hyperloom requests via ``EXTRA_VLLM_ARGS`` /
-    ``EXTRA_SGLANG_ARGS`` when patching succeeds.
+    Set ``HYPERLOOM_ENABLE_PATCH=0`` to disable runtime patching of vLLM /
+    SGLang (keeps today's safe behaviour, no TraceLens-only flags injected).
+    Default on because the patches are backward-compatible.
     """
     return os.environ.get("HYPERLOOM_ENABLE_PATCH", "1").strip() != "0"
 
@@ -143,6 +116,9 @@ def default_baseline_config() -> Path:
 
     Returns the sglang YAML when ``$FRAMEWORK`` is unset/unknown so existing
     sglang-default tests keep passing.
+
+    Returns:
+        Path: The shipped Magpie YAML config path for the resolved framework.
     """
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
     if fw == "atom":
@@ -162,49 +138,25 @@ def materialize_config_with_envs(
     extra_envs: dict[str, Any] | None = None,
     model_path: str | None = None,
     gpu_type: str | None = None,
+    inferencex_path: str | None = None,
     benchmark_script: str | None = None,
     out_name: str = "baseline_config.with_envs.yaml",
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
-    Process-env precedence on top of the YAML defaults (env wins):
+    Process env wins over YAML defaults: ``MODEL_PATH`` → ``benchmark.model``;
+    ``GPU_TYPE`` → ``runner_type`` + pinned generic ``{framework}_{gpu_type}.sh``
+    (so Magpie doesn't fall through to a native script hardcoding
+    ``--result-dir /workspace/``); ``benchmark_script`` (pre-sanitized) re-pins
+    after that; ``PRECISION`` → ``precision``; ``CONC/ISL/OSL/MAX_MODEL_LEN/TP/
+    RANDOM_RANGE_RATIO`` → ``benchmark.envs``; ``ROCR_VISIBLE_DEVICES``
+    reconciled against TP; ``RUN_EVAL`` defaulted; ``NUM_PROMPTS`` /
+    ``NUM_WARMUPS`` computed adaptively. ``inferencex_path`` explicitly pins
+    ``benchmark.inferencex_path`` for one task (falling back to
+    ``$INFERENCEX_PATH`` for existing callers). ``extra_server_args`` routes
+    into the framework env; ``extra_envs`` overrides any of the above.
 
-    * ``MODEL_PATH`` / ``model_path`` arg → ``benchmark.model`` (overrides
-      the legacy hardcoded ``Qwen-Qwen3-8B`` default that ships in every YAML).
-    * ``GPU_TYPE`` / ``gpu_type`` arg → ``benchmark.runner_type`` AND pin
-      ``benchmark.benchmark_script`` to the generic
-      ``{framework}_{gpu_type}.sh`` so Magpie's resolver hits priority 1
-      (explicit user override) and never silently falls through to the
-      InferenceX native script (e.g. ``dsr1_fp8_mi300x.sh``) which
-      hardcodes ``--result-dir /workspace/`` and ignores
-      ``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS``. See
-      ``design/magpie-generic-script-and-user-data-path.md``.
-    * ``benchmark_script`` arg (when non-empty, must be sanitized by the
-      executor via :func:`_grid_runner.sanitize_script_name`) re-pins
-      ``benchmark.benchmark_script`` AFTER the gpu_type-derived generic
-      script above so an operator-supplied override (typically a model
-      script the operator deliberately wants tested) wins. See SKILL.md
-      "Magpie leak-path salvage" for use cases.
-    * ``PRECISION`` → ``benchmark.precision``.
-    * ``CONC, ISL, OSL, MAX_MODEL_LEN, TP, RANDOM_RANGE_RATIO`` → injected
-      as integers into ``benchmark.envs``.
-    * ``ROCR_VISIBLE_DEVICES`` → reconciled against TP (if YAML pins fewer
-      devices than TP requires, expanded to ``0..TP-1``; logs a warning).
-    * ``RUN_EVAL=true`` is set as a default so accuracy eval (GSM8K) runs
-      while the server is alive.
-    * ``NUM_PROMPTS`` and ``NUM_WARMUPS`` are computed adaptively from
-      ``CONC`` and ``ISL+OSL`` (longer sequences → fewer prompts to keep
-      each variant under ~3-5 min wall time).
-    * ``extra_server_args`` is the framework-neutral payload-surface
-      slot (the legacy name was ``extra_sglang_args``). The
-      materializer routes its value into the framework-specific env
-      name (``EXTRA_SGLANG_ARGS`` / ``EXTRA_VLLM_ARGS`` /
-      ``EXTRA_ATOM_ARGS``) based on the framework declared in the
-      YAML's ``benchmark.framework``.
-    * ``extra_envs`` overrides any of the above.
-
-    Returns the path to the materialized YAML written under ``output_dir``.
-    Reuses the file name across calls so callers can locate it predictably.
+    Returns the materialized YAML path (stable file name across calls).
     """
     server_args = (extra_server_args or "").strip()
     with config_path.open(encoding="utf-8") as f:
@@ -224,14 +176,32 @@ def materialize_config_with_envs(
             bench.pop("benchmark_script", None)
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
-    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
-    if inferencex_path:
-        # Magpie resolves an empty benchmark.inferencex_path to its sibling
-        # checkout (usually $MAGPIE_DIR/InferenceX). Hyperloom's profile path
-        # patches the checkout addressed by $INFERENCEX_PATH, so persist the
-        # same path into the YAML to keep Magpie's runtime and Hyperloom's
-        # patch target aligned.
-        bench["inferencex_path"] = inferencex_path
+    # Fail fast on framework/script mismatch (e.g. vllm image + sglang script):
+    # guards the QRWKV-72B bug where $FRAMEWORK fell back to sglang and booted
+    # `sglang.launch_server` in a vllm-only image -> ModuleNotFoundError. Only
+    # trip when the script carries a DIFFERENT known framework's prefix, so
+    # custom/non-prefixed scripts are not falsely rejected.
+    _script = str(bench.get("benchmark_script") or "").lower()
+    _fw = str(bench.get("framework") or "").lower()
+    _known_fw = ("sglang", "vllm", "atom")
+    if _script and _fw in _known_fw:
+        _other = [k for k in _known_fw if k != _fw and _script.startswith(f"{k}_")]
+        if _other:
+            raise FrameworkScriptMismatchError(
+                f"framework/script mismatch: framework={_fw!r} but "
+                f"benchmark_script={_script!r} targets {_other[0]!r}; refusing "
+                f"to boot server (would launch the wrong framework's entrypoint)"
+            )
+    effective_inferencex_path = (
+        str(inferencex_path or "").strip()
+        or os.environ.get("INFERENCEX_PATH", "").strip()
+    )
+    if effective_inferencex_path:
+        # Persist the resolved InferenceX checkout into the YAML so Magpie's
+        # runtime checkout matches Hyperloom's patch target. Baseline/Profile
+        # pass the per-task local mirror explicitly to avoid process-wide env
+        # races; legacy callers still fall back to $INFERENCEX_PATH.
+        bench["inferencex_path"] = effective_inferencex_path
     envs = bench.setdefault("envs", {})
     for env_key in (
         "CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP",
@@ -239,9 +209,8 @@ def materialize_config_with_envs(
         val = os.environ.get(env_key, "").strip()
         if val:
             envs[env_key] = int(val)
-    # RANDOM_RANGE_RATIO is a float (skill default 1.0; common values include
-    # 0.5). It feeds the steady-state delay/max formulas below; do not coerce
-    # to int or the prefill window estimate collapses for fractional ratios.
+    # RANDOM_RANGE_RATIO is a float feeding the steady-state formulas below; do
+    # NOT coerce to int or fractional ratios collapse the prefill estimate.
     r_env = os.environ.get("RANDOM_RANGE_RATIO", "").strip()
     if r_env:
         envs["RANDOM_RANGE_RATIO"] = float(r_env)
@@ -255,17 +224,13 @@ def materialize_config_with_envs(
     if tp_from_env:
         resolved_tp = int(tp_from_env)
     elif rocr_yaml and not tp_from_yaml:
-        # Derive TP from user-pinned GPU list when the YAML template
-        # doesn't set TP — avoids inheriting a stale TP from templates
-        # built for a different GPU count.
+        # Derive TP from the user-pinned GPU list when the YAML doesn't set TP.
         resolved_tp = len(rocr_devices)
         envs["TP"] = resolved_tp
     else:
         resolved_tp = int(tp_from_yaml or 1)
-    # Auto-clamp TP to the pod's visible GPU count. The shipped YAML defaults
-    # to TP=8 (full DGX-style node), so a 4-GPU sandbox would otherwise launch
-    # sglang/vllm with `--tensor-parallel-size=8` and crash with `HIP error:
-    # invalid device ordinal`. Override via
+    # Auto-clamp TP to the visible GPU count so a 4-GPU sandbox doesn't launch
+    # with the YAML's TP=8 and crash on `invalid device ordinal`. Override via
     # $INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP=1.
     if os.environ.get("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "").strip() != "1":
         visible = _visible_gpu_count()
@@ -294,20 +259,11 @@ def materialize_config_with_envs(
     osl_val = int(os.environ.get("OSL") or envs.get("OSL") or 256)
     conc_val = int(os.environ.get("CONC") or envs.get("CONC") or 8)
 
-    # TraceLens #194: compute steady-state window for profiling configs.
-    # Only inject when this is a profile yaml — detected by PROFILE env or
-    # `profiler.torch_profiler.enabled: true` in the YAML. The formulas
-    # match the TraceLens magpie-benchmark-profiling skill (Option A:
-    # targeted steady-state window) so that Hyperloom-driven profiles
-    # capture the same decode-heavy slice as a manual TraceLens run.
-    #
-    # Skill formulas (RANDOM_RANGE_RATIO defaults to 1.0 if absent):
+    # Steady-state window for profiling configs (detected by PROFILE env or
+    # ``profiler.torch_profiler.enabled``). Formulas match the TraceLens
+    # profiling skill (RANDOM_RANGE_RATIO defaults to 1.0):
     #   max_iters   = min(1024, max(256, OSL * 16 / CONC))
     #   delay_iters = OSL * (R + 1) * 3 - max_iters / 2
-    #
-    # Example OSL=1024 / CONC=32 / R=1 → max=512, delay=5888 (vs. the
-    # previous 5*CONC / clamp(16*OSL/CONC,4,64) which gave 160 / 64 —
-    # roughly 1/8 of the steady-state window the skill recommends).
     is_profile = (
         str(envs.get("PROFILE", "")).strip() == "1"
         or (bench.get("profiler", {}).get("torch_profiler", {}).get("enabled") is True)
@@ -322,19 +278,14 @@ def materialize_config_with_envs(
         safe_osl = max(osl_val, 1)
         max_iters = min(1024, max(256, (osl_val * 16) // safe_conc))
         delay_iters = int(osl_val * (r_val + 1) * 3 - max_iters / 2)
-        # Guard against pathological inputs (tiny OSL / huge R producing a
-        # negative delay collapses to "profile from step 0", which still
-        # captures warmup). Clamp to >= 0.
+        # Clamp >= 0 (tiny OSL / huge R can produce a negative delay).
         if delay_iters < 0:
             delay_iters = 0
-        # Operator override for a SMALL eager FlyDSL profile: the default
-        # >=256-step capture is unsavable in eager (--disable-cuda-graph)
-        # mode for a 30B MoE (multi-GB with-stack torch trace hangs the
-        # profiler export), but eager is the only mode that records the
-        # aiter/fused_moe.py:flydsl_moe_stage1/2 python frames PR#668 keys on
-        # to inject the moe_flydsl pseudo-op. A handful of steps still yields
-        # plenty of MoE-layer frames. Set HYPERLOOM_PROFILE_MAX_ITERS to a
-        # small value (e.g. 8) together with the eager profile patch.
+        # Operator override for a small eager FlyDSL profile: the default
+        # >=256-step capture is unsavable in eager mode for a 30B MoE, but
+        # eager is the only mode recording the flydsl_moe frames PR#668 keys
+        # on. Set HYPERLOOM_PROFILE_MAX_ITERS small (e.g. 8) with the eager
+        # profile patch.
         _ovr = os.environ.get("HYPERLOOM_PROFILE_MAX_ITERS", "").strip()
         if _ovr.isdigit() and int(_ovr) > 0:
             max_iters = int(_ovr)
@@ -346,41 +297,25 @@ def materialize_config_with_envs(
                 delay_iters = 8
             if delay_iters < 0:
                 delay_iters = 0
-        # TraceLens #194 §2: NUM_PROMPTS must be large enough that the
-        # benchmark engine reaches `delay_iters + max_iters` decode steps
-        # before it runs out of prompts. With continuous batching at
-        # concurrency CONC and average output length OSL, processing N
-        # prompts costs roughly N * OSL / CONC engine iterations; invert
-        # to get the prompt floor, then apply a 2x safety buffer for
-        # prefill / scheduling drift. Hyperloom owns this — we ignore any
-        # NUM_PROMPTS the caller passes when PROFILE is on, otherwise an
-        # under-sized value silently empties the trace.
+        # TraceLens #194 §2: NUM_PROMPTS must let the engine reach
+        # ``delay_iters + max_iters`` decode steps before running out of
+        # prompts (N prompts ≈ N * OSL / CONC iters; invert + 2x buffer).
+        # Hyperloom owns this under PROFILE; a caller value is ignored.
         required_iters = delay_iters + max_iters
         iters_to_prompts = max(
             1, (required_iters * safe_conc + safe_osl - 1) // safe_osl,
         )
         profile_num_prompts = max(safe_conc, iters_to_prompts * 2)
         fw = str(bench.get("framework") or "").lower()
-        # atom check must precede vllm/sglang branches: atom doesn't
-        # contain a vllm/sglang substring today but the explicit
-        # ordering keeps a future framework name (e.g. "atom-vllm") from
-        # accidentally falling into the wrong branch. atom's HTTP
-        # start_profile/stop_profile path is driven by the InferenceX
-        # bench client's --profile flag (added by benchmark_lib.sh when
-        # PROFILE=1), and the trace directory is wired via
-        # atom_mi*x.sh's --torch-profiler-dir, so this Python layer has
-        # no profiler envs to set for atom — and must NOT inject
-        # --profiler-config.* style flags (atom argparse rejects them).
+        # atom checked first so a future overlapping name can't fall into the
+        # wrong branch. atom's profiler is HTTP-driven via atom_mi*x.sh, so
+        # this layer sets no atom profiler envs and must NOT inject
+        # --profiler-config.* flags (atom argparse rejects them).
         is_atom = "atom" in fw
-        # Issue #194 §4 / §5: TraceLens-required profiler flags exist
-        # only in patched vLLM / SGLang builds. Try to apply the
-        # TraceLens patch set to the in-container install; on success
-        # we inject the extra flags below, on failure we silently fall
-        # back to today's safe set so vanilla images keep working.
-        # Default-on, disable via HYPERLOOM_ENABLE_PATCH=0. atom has no
-        # TraceLens patch set (atom's torch_profiler integration is
-        # native), so we skip the patcher entirely for atom — calling
-        # the sglang patcher would no-op but spam install warnings.
+        # #194 §4/§5: TraceLens profiler flags exist only in patched vLLM /
+        # SGLang builds; try to patch, fall back to the safe set on failure.
+        # Default-on (HYPERLOOM_ENABLE_PATCH=0 disables); skip for atom (native
+        # profiler, no patch set).
         tracelens_patch_ok = False
         if _tracelens_patch_enabled() and not is_atom:
             if "vllm" in fw:
@@ -388,27 +323,12 @@ def materialize_config_with_envs(
             else:
                 tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
         if is_atom:
-            # atom writes trace files to
-            # <torch_profiler_dir>/rank_<N>/*.pt.trace.json.gz which our
-            # _candidate_trace_dirs probe matches unchanged.
-            #
-            # atom's profiler is HTTP-driven (POST /start_profile at server-up,
-            # /stop_profile at run end) and — unlike sglang's start_step/num_steps
-            # or vLLM's delay_iterations/max_iterations — has NO internal capture
-            # window: it records the ENTIRE bench-client run. The only lever that
-            # bounds atom's profiled decode-iteration count is the *workload
-            # length* (OSL) + prompt count, and OSL can only be clamped at the
-            # Magpie client layer (`--output-len`), never from this Python layer.
-            #
-            # Therefore the atom profile window lives in ONE place — Magpie's
-            # atom_mi*x.sh, which clamps OSL + NUM_PROMPTS when PROFILE=1 (see
-            # ATOM_PROFILE_OSL / ATOM_PROFILE_NUM_PROMPTS). We must NOT also force
-            # the sglang/vllm steady-state NUM_PROMPTS here: at OSL=1024 that
-            # ~780-prompt window is ~4096 decode iters, which starves aiter's
-            # shared-memory broadcast ring ("No available shared memory broadcast
-            # block found in 60s") until a tiny BROADCAST collective trips the
-            # 600s NCCL watchdog and aborts the run *before* /stop_profile flushes
-            # — leaving rank_*/ empty. Defer to Magpie (single source of truth).
+            # atom's profiler records the entire bench-client run (no internal
+            # window); its profile window lives only in Magpie's atom_mi*x.sh
+            # (ATOM_PROFILE_OSL / ATOM_PROFILE_NUM_PROMPTS). Forcing the
+            # sglang/vllm steady-state NUM_PROMPTS here would starve aiter's
+            # broadcast ring and abort before /stop_profile flushes. Defer to
+            # Magpie.
             profile_num_prompts = None
         elif "vllm" in fw:
             existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
@@ -417,12 +337,9 @@ def materialize_config_with_envs(
                 f"--profiler-config.max_iterations {max_iters}",
             ]
             if tracelens_patch_ok:
-                # #194 §4: a TraceLens-patched vLLM exposes
-                # capture_torch_profiler_dir + detailed_trace_annotation
-                # on its ProfilerConfig. Both are new dataclass fields
-                # with safe defaults — unpatched vLLM rejects them as
-                # unknown JSON keys, which is why we gate on the
-                # patcher result.
+                # #194 §4: TraceLens-patched vLLM exposes
+                # capture_torch_profiler_dir + detailed_trace_annotation;
+                # unpatched vLLM rejects them, so gate on the patcher result.
                 capture_dir = output_dir / "capture_traces"
                 profiler_args_parts.append(
                     "--profiler-config.capture_torch_profiler_dir "
@@ -442,17 +359,13 @@ def materialize_config_with_envs(
                 extra_body = _json.loads(str(envs.get("PROFILE_EXTRA_BODY", "{}")))
             except (ValueError, TypeError):
                 extra_body = {}
-            # Always override start_step/num_steps with computed values —
-            # the yaml template has placeholder defaults for CONC=8.
+            # Always override start_step/num_steps (the template has CONC=8
+            # placeholders).
             extra_body["start_step"] = delay_iters
             extra_body["num_steps"] = max_iters
-            # shape_discovery enables the kernel_shape_profiler (1457-ref
-            # instrumentation) which is cuda-graph-oriented and balloons an
-            # eager+with_stack trace until export_chrome_trace times out. The
-            # per-step user_annotations the TraceLens splitter needs come from
-            # roofline_annotations (scheduler patch), independent of
-            # shape_discovery, so allow disabling the latter via env for the
-            # eager FlyDSL-frame profile.
+            # shape_discovery balloons an eager+with_stack trace; the splitter's
+            # per-step annotations come from roofline_annotations independently,
+            # so allow disabling shape_discovery via env for eager profiles.
             _shape_disc = os.environ.get(
                 "HYPERLOOM_PROFILE_SHAPE_DISCOVERY", "1",
             ).strip().lower() not in {"0", "false", "no", "off"}
@@ -460,11 +373,9 @@ def materialize_config_with_envs(
             extra_body.setdefault("roofline_annotations", True)
             envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
             if tracelens_patch_ok and _shape_disc:
-                # #194 §5: a TraceLens-patched SGLang exposes
-                # --enable-shape-discovery-for-cuda-graph-profile as a
-                # server CLI flag. Without the patch SGLang's argparse
-                # errors out on this flag — gate strictly on the
-                # patcher result.
+                # #194 §5: TraceLens-patched SGLang exposes
+                # --enable-shape-discovery-for-cuda-graph-profile; unpatched
+                # SGLang errors on it, so gate strictly on the patcher result.
                 existing_sglang = str(envs.get("EXTRA_SGLANG_ARGS", ""))
                 if "shape-discovery-for-cuda-graph-profile" not in existing_sglang:
                     envs["EXTRA_SGLANG_ARGS"] = (
@@ -473,9 +384,8 @@ def materialize_config_with_envs(
                     ).strip()
 
     if profile_num_prompts is not None:
-        # Profile mode: force-override caller/YAML NUM_PROMPTS — we need a
-        # specific minimum to reach the steady-state window, and an
-        # under-sized value silently empties the trace.
+        # Profile mode: force-override NUM_PROMPTS to reach the steady-state
+        # window (an under-sized value empties the trace).
         envs["NUM_PROMPTS"] = profile_num_prompts
     else:
         seq_cost = isl_val + osl_val
@@ -492,15 +402,9 @@ def materialize_config_with_envs(
     if "NUM_WARMUPS" not in envs:
         envs["NUM_WARMUPS"] = min(conc_val, 8)
     if server_args:
-        # PR-B: merge into the yaml-default EXTRA_SGLANG_ARGS / EXTRA_VLLM_ARGS
-        # rather than overwriting. The profile path's
-        # ``--enable-profile-cuda-graph`` / ``--enable-shape-discovery-for-
-        # cuda-graph-profile`` flags are injected upstream (lines ~295 /
-        # ~321) into ``envs[<framework_env>]``; a plain overwrite here
-        # silently drops them whenever the caller supplies any
-        # ``extra_sglang_args`` (e.g. watermark roofline inheriting
-        # ``current_best.extra_sglang_args``), and the profile sub-step
-        # ends up running without graph capture instrumentation.
+        # Merge into (not overwrite) the framework env so the profile path's
+        # upstream-injected graph-capture flags aren't dropped when the caller
+        # also supplies extra args.
         from ._grid_runner import merge_server_args
         framework_env = server_args_env_name(bench.get("framework"))
         existing = str(envs.get(framework_env, "")).strip()
@@ -510,19 +414,119 @@ def materialize_config_with_envs(
             envs[framework_env] = server_args
     for key, value in (extra_envs or {}).items():
         envs[str(key)] = str(value)
-    # Accuracy eval (GSM8K) is OFF by default because Magpie main and
-    # InferenceX main currently disagree on the lm-eval CLI shape:
-    # Magpie's benchmark scripts call `run_eval ... --concurrent-requests N`,
-    # but InferenceX's `run_lm_eval` rejects `--concurrent-requests` (it
-    # reads `EVAL_CONCURRENT_REQUESTS` from env instead, and the unknown
-    # flag makes the wrapper return 1, failing the whole benchmark). Magpie
-    # does not pin InferenceX, so any fresh clone hits this. Until upstream
-    # realigns, leave RUN_EVAL off and let the user opt in via env or
-    # extra_envs. The accuracy gate in coordinator.py treats a missing
-    # GSM8K result as "no regression", which is the safe behaviour for a
-    # flag-only run. NOTE: this is resolved after extra_envs merging so
-    # callers (params/backends/sweep variants) that explicitly pass
-    # RUN_EVAL=true via extra_envs do not trigger the warning.
+    # ── Per-model MI300X baseline work-arounds ─────────────────────────
+    # A handful of flagship models SIGABRT during CUDA-graph capture on the
+    # sglang ROCm image because their DEFAULT fused kernels are buggy on
+    # gfx942. Inject the verified per-model work-around UNLESS the caller
+    # already pinned it (explore variants may legitimately re-try the fused
+    # path once the agent knows the model loads — hence setdefault/merge,
+    # never overwrite). Matched on the model basename so it fires for both
+    # the HF repo id and the /wekafs/models/<org>-<repo> local path.
+    _model_basename = Path(
+        str(model_path or os.environ.get("MODEL_PATH", ""))
+    ).name.lower()
+    if "kimi-k2" in _model_basename:
+        # Kimi K2.x at tp8 (8 heads/GPU) takes sglang's ROCm
+        # fused-decode-MLA path, whose RoPE kernel aborts during CUDA-graph
+        # capture (forward_mla_fused_rope_rocm.py: "cannot unpack
+        # non-iterable ForwardMetadata"). Disabling the fused decode
+        # pipeline keeps the configured tp8 + the clean aiter MLA path.
+        # Verified on MI300X: capture passes, decode correct.
+        envs.setdefault("SGLANG_ROCM_FUSED_DECODE_MLA", "0")
+        # Kimi's client-side tokenizer lives behind custom model code. The
+        # server path already passes --trust-remote-code; mirror that on
+        # Magpie's remote benchmark client without changing other models.
+        envs.setdefault("MAGPIE_TRUST_REMOTE_CODE", "1")
+    if "qwen3.6-35b-a3b" in _model_basename or (
+        "qwen3-6-35b-a3b" in _model_basename
+    ):
+        # Qwen3.6 MoE also uses a custom text-generation implementation behind
+        # a config that advertises vision_config. Keep trust scoped to this
+        # exact daily candidate family instead of enabling it globally.
+        envs.setdefault("MAGPIE_TRUST_REMOTE_CODE", "1")
+        _qwen_fw_env = server_args_env_name(bench.get("framework"))
+        _qwen_existing = str(envs.get(_qwen_fw_env, "")).strip()
+        if "trust-remote-code" not in _qwen_existing:
+            from ._grid_runner import merge_server_args
+            envs[_qwen_fw_env] = (
+                merge_server_args(_qwen_existing, "--trust-remote-code")
+                if _qwen_existing
+                else "--trust-remote-code"
+            )
+    if "mimo-v2" in _model_basename:
+        # MiMo-V2.x (moe_swa) loads MiMoV2ForCausalLM fine but its DEFAULT
+        # aiter attention backend SIGABRTs during CUDA-graph capture on
+        # gfx942 (mimo_v2.py forward -> GPU coredump -> "Rank N scheduler
+        # died during initialization (exit code: -6)"). Pin the triton
+        # attention backend, which sidesteps the buggy aiter fused-attention
+        # path. Pairs with the mimo-profilerfix image (the undated v0.5.11
+        # profilerfix base does not register MiMoV2ForCausalLM at all; the
+        # image picked in optimize_submit._sglang_image_for carries the
+        # dated 20260508 arch). Merge (never overwrite) and skip when the
+        # caller already pinned an --attention-backend so explore variants
+        # can re-test the fused path once the model is known to load.
+        from ._grid_runner import merge_server_args
+        _mimo_fw_env = server_args_env_name(bench.get("framework"))
+        _mimo_existing = str(envs.get(_mimo_fw_env, "")).strip()
+        if "attention-backend" not in _mimo_existing:
+            envs[_mimo_fw_env] = (
+                merge_server_args(_mimo_existing, "--attention-backend triton")
+                if _mimo_existing
+                else "--attention-backend triton"
+            )
+    # sglang server-arg guards, applied at the FINAL framework env (after the
+    # server_args + extra_envs merges above) so any operator-pinned flag (via
+    # extra_server_args, extra_envs, or the YAML) is honored and never doubled.
+    # Both are no-ops for vllm/atom. This is the single choke point every
+    # benchmark path (baseline / profile / sweep / explore / framework_pr /
+    # conc_sweep) funnels through before the YAML is handed to Magpie, so the
+    # flags reach every sglang launch.
+    #
+    # 1. --context-length cap: sglang defaults context_length=None and sizes
+    #    max_total_tokens off the model's max_position_embeddings; a huge
+    #    native window (e.g. Mistral-Nemo's 1024000) balloons the aiter
+    #    workspace_buffer past GPU memory -> HIP OOM -> baseline_failed. We cap
+    #    to ISL+OSL+headroom (floored, clamped to the native window). vllm
+    #    already passes --max-model-len $MAX_MODEL_LEN, so this only fixes the
+    #    sglang asymmetry; sglang ignores MAX_MODEL_LEN entirely.
+    # 2. MI300X cold-compile guard: ensure sglang's scheduler watchdog is long
+    #    enough to survive the first-request aiter ``mha_batch_prefill`` JIT
+    #    compile. sglang's 300s default fires SIGQUIT mid-warmup on a cold
+    #    aiter cache and the server dies -> baseline_failed / throughput 0.
+    framework_env = server_args_env_name(bench.get("framework"))
+    resolved_server_args = str(envs.get(framework_env, "")).strip()
+    resolved_server_args = inject_sglang_context_length(
+        resolved_server_args, bench.get("framework"),
+        bench.get("model"), isl_val, osl_val,
+    )
+    resolved_server_args = inject_sglang_watchdog_timeout(
+        resolved_server_args, bench.get("framework"),
+    )
+    # 3. Dual-chunk attention backend: Qwen 1M models declare
+    #    dual_chunk_attention_config; sglang rejects the default aiter
+    #    backend for them and demands dual_chunk_flash_attn. Inject it
+    #    unless the operator already pinned --attention-backend.
+    resolved_server_args = inject_sglang_attention_backend(
+        resolved_server_args, bench.get("framework"), bench.get("model"),
+        gpu_type=gpu_type or bench.get("runner_type"),
+    )
+    # 4. MoE runner backend: MoE models on ROCm route through aiter's CK
+    #    2-stage fused-MoE kernel, whose first-request JIT build is broken in
+    #    some images (missing cub header -> hipcc fail -> stale lock -> 600s
+    #    warmup timeout). Inject the ROCm-capable triton MoE runner unless the
+    #    operator already pinned --moe-runner-backend.
+    resolved_server_args = inject_sglang_moe_runner_backend(
+        resolved_server_args, bench.get("framework"), bench.get("model"),
+        gpu_type=gpu_type or bench.get("runner_type"),
+    )
+    if resolved_server_args:
+        envs[framework_env] = resolved_server_args
+    # Accuracy eval (GSM8K) is OFF by default: Magpie's scripts pass
+    # `run_eval --concurrent-requests N` but InferenceX's `run_lm_eval`
+    # rejects that flag (fails the whole benchmark). Until upstream realigns,
+    # the user opts in via env / extra_envs; the accuracy gate treats a missing
+    # result as "no regression". Resolved after extra_envs merging so an
+    # explicit RUN_EVAL=true doesn't trigger the warning.
     if "RUN_EVAL" not in envs:
         env_run_eval = os.environ.get("RUN_EVAL")
         if env_run_eval is not None:

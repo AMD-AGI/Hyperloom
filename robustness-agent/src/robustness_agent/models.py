@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Shared data models used across providers, monitors, and checks."""
 
 from __future__ import annotations
@@ -25,7 +27,12 @@ class GpuSnapshot:
 
     @property
     def vram_used_pct(self) -> float:
-        """VRAM utilization percentage (0 if total is zero)."""
+        """VRAM utilization percentage (0 if total is zero).
+
+        Returns:
+            float: Used VRAM as a percentage of total, or ``0.0`` when
+            the total is non-positive.
+        """
         if self.vram_total_mb <= 0:
             return 0.0
         return (self.vram_used_mb / self.vram_total_mb) * 100.0
@@ -51,7 +58,12 @@ class DiskSnapshot:
 
     @property
     def used_pct(self) -> float:
-        """Disk utilization percentage (0 if total is zero)."""
+        """Disk utilization percentage (0 if total is zero).
+
+        Returns:
+            float: Used space as a percentage of total, or ``0.0`` when
+            the total is non-positive.
+        """
         if self.total_gb <= 0:
             return 0.0
         return (self.used_gb / self.total_gb) * 100.0
@@ -83,12 +95,28 @@ class FaultEvent:
 # ---------------------------------------------------------------------------
 
 class Severity(str, Enum):
+    """Severity level attached to an alert.
+
+    Attributes:
+        INFO (str): Informational, no action required.
+        WARNING (str): Degraded condition worth attention.
+        CRITICAL (str): Severe condition requiring intervention.
+    """
+
     INFO = "info"
     WARNING = "warning"
     CRITICAL = "critical"
 
 
 class CheckResult(str, Enum):
+    """Outcome classification for a completed check.
+
+    Attributes:
+        OK (str): The check passed with no issues.
+        WARN (str): The check found a non-critical issue.
+        CRITICAL (str): The check found a critical issue.
+    """
+
     OK = "ok"
     WARN = "warn"
     CRITICAL = "critical"

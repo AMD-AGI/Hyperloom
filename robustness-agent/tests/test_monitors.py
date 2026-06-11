@@ -1,10 +1,6 @@
-"""Tests for process, GPU, server health, and log-tailer monitors.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The process / GPU monitors are exercised via the shared FakeProvider
-fixture from ``conftest.py``. The log tailer and server health
-monitors are tested in isolation with patched httpx clients and tmp
-files.
-"""
+"""Tests for process, GPU, server health, and log-tailer monitors (process/GPU via the shared FakeProvider; log/server-health with patched httpx clients)."""
 
 from __future__ import annotations
 

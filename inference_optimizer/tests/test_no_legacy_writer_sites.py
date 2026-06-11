@@ -1,23 +1,6 @@
-"""Static guard: only the explicit back-compat surfaces are allowed to
-mention ``extra_sglang_args``.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The payload-surface field ``extra_sglang_args`` was renamed to
-``extra_server_args``. The legacy name is kept alive as a *read-only*
-deprecation alias. Every in-repo reference to the legacy string falls
-into exactly one of the categories enumerated in
-:data:`ALLOWED_FILES`:
-
-* The compat helper modules (Hyperloom + per-sub-agent shims).
-* The SharedState / GridVariant back-compat code paths.
-* Tests that explicitly assert on the deprecation alias behaviour.
-* Prompt / SKILL / explanatory text that names both keys so the LLM
-  knows the alias exists for one release.
-
-Any *new* reference to the legacy name outside this allowlist is a
-regression. When the deprecation alias is finally removed the
-allowlist shrinks to the empty set and this guard becomes an absolute
-"no `extra_sglang_args` anywhere" assertion until retired.
-"""
+"""Static guard: only back-compat surfaces in :data:`ALLOWED_FILES` may mention ``extra_sglang_args`` (renamed to ``extra_server_args``)."""
 
 from __future__ import annotations
 
@@ -27,19 +10,11 @@ from pathlib import Path
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# Repo root resolution. The test file lives at
-# ``<repo>/inference_optimizer/tests/test_no_legacy_writer_sites.py``;
-# the repo root is its great-great-grandparent.
-# ---------------------------------------------------------------------------
+# Repo root: this file's great-great-grandparent.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-# ---------------------------------------------------------------------------
-# Allowlist. Keys are repo-relative POSIX paths; values explain why the
-# file is allowed to mention the legacy key. Adding a new entry MUST
-# include a justification — the allowlist is meant to shrink, not grow.
-# ---------------------------------------------------------------------------
+# Allowlist: repo-relative POSIX path -> justification. Meant to shrink, not grow.
 ALLOWED_FILES: dict[str, str] = {
     # Compat helper modules (the only canonical reader of the legacy
     # key). Mentions are mechanical: constants, docstrings, error
@@ -84,11 +59,6 @@ ALLOWED_FILES: dict[str, str] = {
         "legacy v0.6 reader: raw optimization_stack carries pre-rename "
         "candidate_extra_sglang_args (breakdown loads state without the "
         "SharedState key migration)",
-    # The materializer keeps the legacy name in its env-routing docstring
-    # because the per-framework env names (EXTRA_SGLANG_ARGS / VLLM_ /
-    # ATOM_) are intentionally unchanged.
-    "inference_optimizer/orchestrator/action_executors/_workload_envs.py":
-        "docstring naming the renamed payload field for context",
     # CI transform reads legacy-keyed session_breakdown.json artefacts.
     "ci/transform_to_session_summary_v2.py":
         "legacy session-breakdown JSON reader (operator-side back-compat)",
@@ -96,10 +66,6 @@ ALLOWED_FILES: dict[str, str] = {
     # Prompt / orientation text that names both keys explicitly so the
     # LLM and any human reader of the prompt knows the alias exists
     # for one release.
-    "inference_optimizer/cli.py":
-        "warm-replay executor registration comment names RecipeKB "
-        "best_config field names",
-
     # Pytest marker registration mentions the legacy name in the
     # marker's description.
     "pyproject.toml":
@@ -111,8 +77,6 @@ ALLOWED_FILES: dict[str, str] = {
         "compat helper test surface",
     "inference_optimizer/tests/test_back_compat_legacy_field_name.py":
         "back-compat regression tests",
-    "inference_optimizer/tests/test_explore_roofline_filter.py":
-        "roofline filter tests exercise GridVariant.extra_sglang_args",
     "inference_optimizer/tests/test_grid_runner.py":
         "GridVariant back-compat tests exercise extra_sglang_args kwarg",
     "inference_optimizer/tests/test_coordinator_kb_writes.py":
@@ -137,12 +101,12 @@ ALLOWED_FILES: dict[str, str] = {
     "inference_optimizer/orchestrator/coordinator.py":
         "comments explain the read_extra_server_args call at the LLM "
         "intent / sub-agent envelope read boundaries",
+    "inference_optimizer/orchestrator/coordinator_helpers.py":
+        "holds the extracted _merge_cumulative_extra_sglang_args helper "
+        "that merges the legacy KB best_config arg stacks",
     "inference_optimizer/orchestrator/kernel_request_handlers.py":
         "comments explain the read_extra_server_args call at the "
         "integrate_patch sub-agent envelope read boundary",
-    "robustness-agent/src/robustness_agent/signals/repeated_payload.py":
-        "_normalise_extra_server_args_key uses the shim to fold "
-        "legacy-keyed envelopes into the same fingerprint",
     "robustness-agent/tests/test_signals_repeated_payload.py":
         "regression test that legacy + canonical envelopes hash to "
         "the same fingerprint",
@@ -175,8 +139,10 @@ ALLOWED_FILES: dict[str, str] = {
 
 # Files under these top-level prefixes are skipped entirely.
 _SKIP_DIRECTORIES: tuple[str, ...] = (
-    # Plan / migration narrative tree (slated for deletion).
+    # Plan / migration narrative trees (slated for deletion). These describe
+    # the legacy key as a removal target, not a live writer site.
     "atom_plan/",
+    "code_cleansing_plan/",
     ".git/",
     "node_modules/",
     "__pycache__/",
@@ -223,14 +189,9 @@ def _files_with_legacy_key() -> set[str]:
     return hits
 
 
-# ---------------------------------------------------------------------------
 # Guards
-# ---------------------------------------------------------------------------
 def test_no_legacy_writer_sites_outside_allowlist():
-    """Every file mentioning ``extra_sglang_args`` must be on the
-    allowlist. Catches a future regression where a new writer site
-    accidentally emits the legacy key, or where a previously-renamed
-    site gets reverted."""
+    """Every file mentioning ``extra_sglang_args`` must be on the allowlist."""
     actual = _files_with_legacy_key()
     allowed = set(ALLOWED_FILES.keys())
     unexpected = sorted(actual - allowed)
@@ -245,9 +206,7 @@ def test_no_legacy_writer_sites_outside_allowlist():
 
 
 def test_allowlist_is_minimal():
-    """Every allowlist entry must actually contain a legacy-key hit.
-    Forces the allowlist to evolve with the code — once a back-compat
-    surface is removed, the corresponding allowlist entry must go too."""
+    """Every allowlist entry must actually contain a legacy-key hit (no dead rows)."""
     actual = _files_with_legacy_key()
     dead_entries = sorted(set(ALLOWED_FILES.keys()) - actual)
     assert not dead_entries, (
@@ -258,8 +217,7 @@ def test_allowlist_is_minimal():
 
 
 def test_allowlist_paths_resolve():
-    """Sanity: every allowlist key must point at an existing file.
-    Catches typos / paths that move."""
+    """Sanity: every allowlist key must point at an existing file."""
     missing = [
         p for p in ALLOWED_FILES
         if not (_REPO_ROOT / p).exists()
@@ -272,9 +230,7 @@ def test_allowlist_paths_resolve():
 
 @pytest.mark.parametrize("path,_reason", sorted(ALLOWED_FILES.items()))
 def test_allowlist_entries_have_justification(path: str, _reason: str):
-    """Every allowlist value must be a non-empty justification string.
-    The empty / placeholder reason is a code smell — it signals that
-    the entry was added without a clear rationale."""
+    """Every allowlist value must be a non-empty justification string."""
     reason = ALLOWED_FILES[path]
     assert reason and reason.strip(), (
         f"ALLOWED_FILES[{path!r}] has an empty justification; add a "

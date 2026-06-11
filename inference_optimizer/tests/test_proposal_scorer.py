@@ -1,21 +1,10 @@
-"""Tests for the advisory specialist-proposal scorer (ProposalScorer).
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Covers:
-
-* Scorer unit — group prompt shape, JSON parse, per-model independent
-  degrade (timeout / bad JSON / one model raises / unknown-slug 404),
-  score clamping + unknown-name drop.
-* Coordinator wiring — ``_record_specialist_result`` attaches
-  ``ensemble_scores`` to the round entry when a scorer is present;
-  absent scorer → no key; scorer exception → entry still recorded.
-* Renderer — ``SharedState.to_proposal_scores_summary`` text + the
-  section is omitted when no round carries scores.
-* Resume idempotency — re-recording the same ``round_id`` does not
-  duplicate (delegated to existing ``record_specialist_round``).
-"""
+"""Tests for the advisory specialist-proposal scorer (ProposalScorer)."""
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,11 +18,19 @@ from inference_optimizer.orchestrator.proposal_scorer import (
     _extract_scores_json,
 )
 from inference_optimizer.orchestrator.policy import SPECIALIST_FROM_AGENT_PREFIX
+from inference_optimizer.session_paths import (
+    conversations_path,
+    llm_calls_path,
+)
 
 
-# ===========================================================================
 # Fake OpenAI client (test seam)
-# ===========================================================================
+@dataclass
+class _FakeUsage:
+    prompt_tokens: int
+    completion_tokens: int
+
+
 @dataclass
 class _FakeMessage:
     content: str
@@ -47,15 +44,11 @@ class _FakeChoice:
 @dataclass
 class _FakeResp:
     choices: list[_FakeChoice]
+    usage: _FakeUsage | None = None
 
 
 class _FakeCompletions:
-    """Per-model scripted behaviour keyed by ``model=``.
-
-    ``behaviour`` maps a model slug to either a string (returned as the
-    reply content) or an Exception instance (raised to simulate a
-    gateway error / 404 / timeout).
-    """
+    """Per-model scripted behaviour keyed by ``model=`` (string reply or Exception)."""
 
     def __init__(self, behaviour: dict[str, Any]):
         self._behaviour = behaviour
@@ -66,7 +59,10 @@ class _FakeCompletions:
         result = self._behaviour.get(model)
         if isinstance(result, BaseException):
             raise result
-        return _FakeResp(choices=[_FakeChoice(_FakeMessage(result or ""))])
+        return _FakeResp(
+            choices=[_FakeChoice(_FakeMessage(result or ""))],
+            usage=_FakeUsage(prompt_tokens=120, completion_tokens=30),
+        )
 
 
 class _FakeChat:
@@ -118,9 +114,7 @@ def _scores_json(*pairs: tuple[str, float, str]) -> str:
     return f'```json\n{{"scores": {{{body}}}}}\n```'
 
 
-# ===========================================================================
 # 1. Scorer unit
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_score_two_models_happy_path():
     behaviour = {
@@ -143,6 +137,61 @@ async def test_score_two_models_happy_path():
     assert out["errors"] == {}
 
 
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_scoring_call_writes_full_conversation_trace(tmp_path: Path):
+    """With ``session_dir`` set, each scoring call records both a token row
+    (component=proposal_scorer) and a full prompt/reply conversation row."""
+    session_dir = tmp_path / "SESSION"
+    session_dir.mkdir()
+    client = _FakeClient({
+        "claude-opus-4-7": _scores_json(("cuda_graph_bs_512", 8.0, "fit")),
+    })
+    scorer = ProposalScorer(
+        models=("claude-opus-4-7",),
+        client_factory=lambda: client,
+        session_dir=session_dir,
+    )
+    await scorer.score(gap=_GAP, proposals=_PROPOSALS)
+
+    conv_rows = _read_jsonl(conversations_path(session_dir))
+    assert len(conv_rows) == 1
+    row = conv_rows[0]
+    assert row["component"] == "proposal_scorer"
+    assert row["role"] == "proposal_scorer"
+    assert row["model"] == "claude-opus-4-7"
+    # The prompt carries the scoring instructions + proposals; the reply is
+    # the model's verbatim (fenced) scores JSON.
+    assert "cuda_graph_bs_512" in row["prompt"]
+    assert "cuda_graph_bs_512" in row["response"]
+
+    token_rows = _read_jsonl(llm_calls_path(session_dir))
+    assert any(
+        r["component"] == "proposal_scorer"
+        and r["input_tokens"] == 120
+        and r["output_tokens"] == 30
+        for r in token_rows
+    )
+
+
+@pytest.mark.asyncio
+async def test_scoring_without_session_dir_writes_no_trace(tmp_path: Path):
+    """The default (tests / no full-trace) path writes no conversation file."""
+    scorer = _make_scorer({"m1": _scores_json(("cuda_graph_bs_512", 7.0, "x"))})
+    await scorer.score(gap=_GAP, proposals=_PROPOSALS)
+    # session_dir is None → nothing on disk (and no crash).
+    assert scorer.session_dir is None
+
+
 @pytest.mark.asyncio
 async def test_group_prompt_contains_all_proposals_and_gap():
     behaviour = {"m1": _scores_json(("cuda_graph_bs_512", 7.0, "x"))}
@@ -150,11 +199,10 @@ async def test_group_prompt_contains_all_proposals_and_gap():
     await scorer.score(gap=_GAP, proposals=_PROPOSALS)
     client = scorer._client
     sent = client.chat.completions.calls[0]["messages"][0]["content"]
-    # group scoring → one prompt names every proposal + the gap.
     assert "cuda_graph_bs_512" in sent
     assert "disable_radix" in sent
     assert "cuda graph capture stalls" in sent
-    assert "0 to 10" in sent  # instruction present
+    assert "0 to 10" in sent
 
 
 @pytest.mark.asyncio
@@ -203,7 +251,6 @@ async def test_empty_proposals_returns_empty_envelope():
     out = await scorer.score(gap=_GAP, proposals=[])
     assert out["models"] == {}
     assert out["errors"] == {}
-    # No model call should have been made.
     assert scorer._client.chat.completions.calls == []
 
 
@@ -224,9 +271,7 @@ def test_default_models_constant():
     )
 
 
-# ===========================================================================
 # 2. Coordinator wiring
-# ===========================================================================
 @dataclass
 class _StubTask:
     task_id: str
@@ -331,7 +376,6 @@ async def test_coordinator_scorer_exception_still_records(tmp_path):
         task=task, done_payload=_done(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
     )
-    # Round still recorded, just without scores.
     assert len(c.shared_state.specialist_rounds) == 1
     assert "ensemble_scores" not in c.shared_state.specialist_rounds[0]
 
@@ -352,9 +396,7 @@ async def test_coordinator_empty_proposals_not_scored(tmp_path):
     assert scorer._client.chat.completions.calls == []
 
 
-# ===========================================================================
 # 3. Renderer
-# ===========================================================================
 def _real_state():
     from inference_optimizer.orchestrator.shared_state import SharedState
     return SharedState()
@@ -392,14 +434,11 @@ def test_render_shows_per_model_side_by_side():
     text = st.to_proposal_scores_summary()
     assert "Advisory only" in text
     assert "cuda_graph_bs_512" in text
-    # Identities are anonymized: real model slugs MUST NOT leak into the
-    # orchestration-facing render. Sorted slugs map claude-opus-4-7 ->
-    # rater_1, gpt-5.4 -> rater_2 (stable within a render).
+    # Model slugs are anonymized to rater_N (sorted, stable).
     assert "claude-opus-4-7" not in text
     assert "gpt-5.4" not in text
     assert "rater_1=8.0" in text
     assert "rater_2=6.5" in text
-    # rater_2 omitted disable_radix → rendered as n/a.
     assert "rater_2=n/a" in text
 
 
@@ -416,15 +455,13 @@ def test_render_reports_unavailable_models():
         },
     }]
     text = st.to_proposal_scores_summary()
-    # Anonymized: the failing model slug "bad" must not leak; sorted
-    # slugs map bad -> rater_1, good -> rater_2.
+    # Anonymized: failing slug "bad" -> rater_1, must not leak.
     assert "bad" not in text
     assert "raters unavailable this round: rater_1" in text
 
 
 def test_render_rater_labels_stable_across_rounds():
-    """The same model maps to the same rater_N in every rendered round,
-    and no real model slug ever appears in the orchestration text."""
+    """The same model maps to the same rater_N across rounds; no slug leaks."""
     st = _real_state()
     st.specialist_rounds = [
         {
@@ -447,8 +484,7 @@ def test_render_rater_labels_stable_across_rounds():
             "ensemble_scores": {
                 "scale": "0-10",
                 "models": {
-                    # Deliberately different dict order to prove the label
-                    # is keyed on the slug, not on iteration order.
+                    # Different dict order: the label keys on slug, not order.
                     "gpt-5.5": {"v2": {"score": 5.0, "reason": "c"}},
                     "claude-opus-4-8": {"v2": {"score": 9.0, "reason": "d"}},
                 },
@@ -459,17 +495,14 @@ def test_render_rater_labels_stable_across_rounds():
     text = st.to_proposal_scores_summary(max_rounds=2)
     for slug in ("claude-opus-4-8", "gpt-5.5", "claude", "gpt"):
         assert slug not in text, f"model slug {slug!r} leaked into prompt"
-    # claude-opus-4-8 sorts before gpt-5.5 → rater_1 / rater_2, stable
-    # across both rounds: rater_1 carries claude's 8.0 then 9.0.
+    # claude-opus-4-8 sorts first → rater_1, stable across rounds.
     assert "rater_1=8.0" in text
     assert "rater_2=6.0" in text
     assert "rater_2=5.0" in text
     assert "rater_1=9.0" in text
 
 
-# ===========================================================================
 # 4. Resume idempotency
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_resume_idempotent_on_round_id(tmp_path):
     scorer = _make_scorer({
@@ -477,12 +510,10 @@ async def test_resume_idempotent_on_round_id(tmp_path):
     })
     c = _coord(tmp_path, scorer)
     task = _StubTask(task_id="t1", params={}, )
-    # round_id defaults to task_id; record twice.
     for _ in range(2):
         await c._record_specialist_result(
             task=task, done_payload=_done(),
             source=f"{SPECIALIST_FROM_AGENT_PREFIX}t1",
         )
-    # Idempotent on round_id → exactly one row.
     assert len(c.shared_state.specialist_rounds) == 1
     assert "ensemble_scores" in c.shared_state.specialist_rounds[0]

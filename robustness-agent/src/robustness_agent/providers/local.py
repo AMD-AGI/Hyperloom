@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Local metrics provider — collects via shell commands on the sandbox host.
 
 Used when Primus-Robust-Internal is not available (single-machine / dev mode).
@@ -23,10 +25,21 @@ class _RingBuffer:
     """In-memory time-series buffer for local GPU metrics."""
 
     def __init__(self, max_age_seconds: int = 3600):
+        """Initialise an empty per-GPU ring buffer.
+
+        Args:
+            max_age_seconds (int): Maximum age of retained snapshots; older
+                entries are evicted on push.
+        """
         self.max_age = max_age_seconds
         self._data: dict[int, deque[tuple[float, GpuSnapshot]]] = defaultdict(deque)
 
     def push(self, snapshot: GpuSnapshot) -> None:
+        """Append a snapshot and evict any entries older than ``max_age``.
+
+        Args:
+            snapshot (GpuSnapshot): The GPU snapshot to store.
+        """
         buf = self._data[snapshot.gpu_id]
         buf.append((snapshot.timestamp, snapshot))
         cutoff = snapshot.timestamp - self.max_age
@@ -34,6 +47,16 @@ class _RingBuffer:
             buf.popleft()
 
     def get(self, gpu_id: int, window_seconds: int) -> list[GpuSnapshot]:
+        """Return snapshots for a GPU within a trailing time window.
+
+        Args:
+            gpu_id (int): The GPU identifier to query.
+            window_seconds (int): Width of the trailing window, in seconds.
+
+        Returns:
+            list[GpuSnapshot]: Snapshots newer than the window cutoff; empty
+            when the GPU has no buffered data.
+        """
         if not self._data.get(gpu_id):
             return []
         latest_ts = self._data[gpu_id][-1][0]
@@ -42,6 +65,19 @@ class _RingBuffer:
 
 
 async def _run_cmd(cmd: str, timeout: float = 10.0) -> tuple[int, str]:
+    """Run a shell command and capture its return code and stdout.
+
+    Timeouts and other exceptions are logged and degraded to a ``-1`` return
+    code rather than raised.
+
+    Args:
+        cmd (str): The shell command to execute.
+        timeout (float): Maximum seconds to wait before giving up.
+
+    Returns:
+        tuple[int, str]: The process return code (``-1`` on failure/timeout)
+        and the decoded stdout.
+    """
     try:
         proc = await asyncio.create_subprocess_shell(
             cmd,
@@ -62,9 +98,24 @@ class LocalProvider(MetricsProvider):
     """Collect metrics locally via rocm-smi / ps / df."""
 
     def __init__(self, history_seconds: int = 3600):
+        """Initialise the provider with a GPU-metrics ring buffer.
+
+        Args:
+            history_seconds (int): Retention window for buffered GPU history.
+        """
         self._ring = _RingBuffer(max_age_seconds=history_seconds)
 
     async def get_gpu_metrics(self, gpu_id: Optional[int] = None) -> list[GpuSnapshot]:
+        """Collect current GPU snapshots via rocm-smi (falling back to nvidia).
+
+        Collected snapshots are timestamped and pushed into the ring buffer.
+
+        Args:
+            gpu_id (Optional[int]): If given, restrict the result to this GPU.
+
+        Returns:
+            list[GpuSnapshot]: The current GPU snapshots.
+        """
         snapshots = await self._collect_rocm_smi()
         if not snapshots:
             snapshots = await self._collect_nvidia_smi()
@@ -77,9 +128,24 @@ class LocalProvider(MetricsProvider):
         return snapshots
 
     async def get_gpu_history(self, gpu_id: int, window_seconds: int) -> list[GpuSnapshot]:
+        """Return buffered GPU history for a GPU over a trailing window.
+
+        Args:
+            gpu_id (int): The GPU identifier to query.
+            window_seconds (int): Width of the trailing window, in seconds.
+
+        Returns:
+            list[GpuSnapshot]: The buffered snapshots within the window.
+        """
         return self._ring.get(gpu_id, window_seconds)
 
     async def get_process_list(self) -> list[ProcessInfo]:
+        """Return the host process list parsed from ``ps aux``.
+
+        Returns:
+            list[ProcessInfo]: One entry per parseable process; empty when the
+            command fails.
+        """
         code, output = await _run_cmd("ps aux --no-headers")
         if code != 0:
             return []
@@ -101,6 +167,15 @@ class LocalProvider(MetricsProvider):
         return results
 
     async def get_disk_usage(self, path: str = "/") -> list[DiskSnapshot]:
+        """Return disk usage for a path parsed from ``df -BG``.
+
+        Args:
+            path (str): Filesystem path to inspect.
+
+        Returns:
+            list[DiskSnapshot]: One entry per parseable mount; empty when the
+            command fails.
+        """
         code, output = await _run_cmd(f"df -BG {path}")
         if code != 0:
             return []
@@ -122,14 +197,33 @@ class LocalProvider(MetricsProvider):
         return results
 
     async def get_fault_events(self, since: float) -> list[FaultEvent]:
+        """Return fault events; the local provider has no fault source.
+
+        Args:
+            since (float): Lower-bound Unix timestamp (unused locally).
+
+        Returns:
+            list[FaultEvent]: Always an empty list.
+        """
         return []
 
     async def check_available(self) -> bool:
+        """Report provider availability.
+
+        Returns:
+            bool: Always ``True``; the local provider is always usable.
+        """
         return True
 
     # -- internal collectors --
 
     async def _collect_rocm_smi(self) -> list[GpuSnapshot]:
+        """Collect GPU snapshots by parsing ``rocm-smi`` JSON output.
+
+        Returns:
+            list[GpuSnapshot]: Parsed AMD GPU snapshots; empty when rocm-smi is
+            unavailable or its output cannot be parsed.
+        """
         code, output = await _run_cmd(
             "rocm-smi --showuse --showmeminfo vram --showtemp --showpower --json",
         )
@@ -161,6 +255,12 @@ class LocalProvider(MetricsProvider):
         return snapshots
 
     async def _collect_nvidia_smi(self) -> list[GpuSnapshot]:
+        """Collect GPU snapshots by parsing ``nvidia-smi`` CSV output.
+
+        Returns:
+            list[GpuSnapshot]: Parsed NVIDIA GPU snapshots; empty when
+            nvidia-smi is unavailable or its output cannot be parsed.
+        """
         code, output = await _run_cmd(
             "nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,"
             "temperature.gpu,power.draw --format=csv,noheader,nounits",

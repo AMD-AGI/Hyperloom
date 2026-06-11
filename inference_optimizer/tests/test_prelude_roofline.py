@@ -1,23 +1,10 @@
-"""PRELUDE-bootstrap analysis-task enqueue test.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The PRELUDE phase ends with an auto-enqueued analysis task driven by
-the baseline-completion hook inside ``_promote_to_shared_state``.
-That hook delegates the actual enqueue to
-:meth:`Coordinator._enqueue_internal_analysis_task` with the fixed
-``reason='prelude_initial'`` idempotency key. The task kind is
-``roofline`` when ``shared_state.enable_roofline`` is True (default)
-and ``profile`` when False — picked by ``_internal_analysis_kind``.
-
-This file pins:
-
-* The internal-analysis task contract: kind, idempotency key,
-  reason param, and benchmark-script wiring from ``last_baseline``.
-* Idempotency: a second enqueue with the same reason returns the
-  existing task instead of creating a duplicate.
-"""
+"""PRELUDE-bootstrap analysis-task enqueue tests (kind/idempotency/benchmark-script wiring of ``_enqueue_internal_analysis_task``)."""
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,9 +14,7 @@ import pytest
 from inference_optimizer.orchestrator.coordinator import Coordinator
 
 
-# ---------------------------------------------------------------------------
 # Stubs — minimal SharedState + TaskRegistry doubles.
-# ---------------------------------------------------------------------------
 @dataclass
 class _BareState:
     baseline_tput: float = 100.0
@@ -85,12 +70,8 @@ def coord(tmp_path: Path) -> Coordinator:
     return c
 
 
-@pytest.mark.asyncio
-async def test_prelude_initial_roofline_task_contract(coord: Coordinator):
-    """The PRELUDE-bootstrap enqueue produces a ``roofline`` task with
-    idempotency key ``internal-analysis-prelude_initial`` and carries
-    forward the baseline's benchmark-script + current_best extra args
-    so the profile sub-step bench against the same workload."""
+def test_prelude_initial_roofline_task_contract(coord: Coordinator):
+    """The PRELUDE-bootstrap roofline represents baseline, not current_best."""
     coord.shared_state.current_best = {
         "extra_server_args": "--tp 8 --enable-mla",
     }
@@ -98,21 +79,43 @@ async def test_prelude_initial_roofline_task_contract(coord: Coordinator):
         "benchmark_script": "magpie_serving_bench.sh",
     }
 
-    task = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
+    task = asyncio.run(
+        coord._enqueue_internal_analysis_task(reason="prelude_initial"),
+    )
 
     assert task.kind == "roofline"
     assert task.idempotency_key == "internal-analysis-prelude_initial"
     assert task.params["reason"] == "prelude_initial"
     assert task.params["source"] == "coordinator_internal"
-    assert task.params["base_extra_args"] == "--tp 8 --enable-mla"
+    assert "base_extra_args" not in task.params
     assert task.params["benchmark_script"] == "magpie_serving_bench.sh"
+
+
+def test_prelude_initial_roofline_uses_baseline_server_args(
+    coord: Coordinator, monkeypatch,
+):
+    """PRELUDE roofline injects baseline's own server args, never current_best's."""
+    coord.shared_state.current_best = {
+        "extra_server_args": "--enable-torch-compile --quantization fp8",
+    }
+    import inference_optimizer.orchestrator.roofline_ceiling as rc
+    monkeypatch.setattr(
+        rc, "_read_baseline_yaml_server_args",
+        lambda _state: "--attention-backend AITER",
+    )
+
+    task = asyncio.run(
+        coord._enqueue_internal_analysis_task(reason="prelude_initial"),
+    )
+
+    assert task.params["base_extra_args"] == "--attention-backend AITER"
+    assert "--enable-torch-compile" not in task.params["base_extra_args"]
+    assert "fp8" not in task.params["base_extra_args"]
 
 
 @pytest.mark.asyncio
 async def test_prelude_initial_roofline_is_idempotent(coord: Coordinator):
-    """A second call with ``reason='prelude_initial'`` returns the
-    same task — resume after the baseline-completion edge must not
-    double-enqueue."""
+    """A second call with the same reason returns the same task (no double-enqueue on resume)."""
     first = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
     second = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
     assert first.task_id == second.task_id
@@ -121,10 +124,7 @@ async def test_prelude_initial_roofline_is_idempotent(coord: Coordinator):
 
 @pytest.mark.asyncio
 async def test_distinct_reasons_produce_distinct_tasks(coord: Coordinator):
-    """A subsequent watermark-driven roofline (reason
-    ``explore_keep_watermark``) is a separate task from the PRELUDE
-    initial — the idempotency key is reason-scoped so the two never
-    collapse."""
+    """A watermark-driven roofline is a separate task; the idempotency key is reason-scoped."""
     prelude = await coord._enqueue_internal_analysis_task(
         reason="prelude_initial",
     )
@@ -136,12 +136,23 @@ async def test_distinct_reasons_produce_distinct_tasks(coord: Coordinator):
     assert "internal-analysis-explore_keep_watermark" in coord.tasks._by_idem
 
 
+def test_watermark_roofline_inherits_current_best_args(coord: Coordinator):
+    """Watermark roofline still profiles the optimized current_best config."""
+    coord.shared_state.current_best = {
+        "extra_server_args": "--tp 8 --enable-mla",
+    }
+
+    task = asyncio.run(
+        coord._enqueue_internal_analysis_task(reason="explore_keep_watermark"),
+    )
+
+    assert task.params["reason"] == "explore_keep_watermark"
+    assert task.params["base_extra_args"] == "--tp 8 --enable-mla"
+
+
 @pytest.mark.asyncio
 async def test_enable_roofline_false_picks_profile_kind(coord: Coordinator):
-    """When ``shared_state.enable_roofline`` is False, the internal
-    analysis task switches kind to ``profile`` (the lighter
-    Coordinator-internal analysis path) while keeping the same
-    reason-scoped idempotency key prefix."""
+    """When ``enable_roofline`` is False, the task switches kind to ``profile`` keeping the reason-scoped key."""
     coord.shared_state.enable_roofline = False
     task = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
     assert task.kind == "profile"

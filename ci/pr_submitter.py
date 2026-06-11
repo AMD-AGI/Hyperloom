@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Submit InferenceX PRs based on Hyperloom CI optimization results.
 
 Flow: read ci_summary.json + optimization reports → extract changes via
@@ -62,7 +64,17 @@ Report:
 
 
 def _llm_extract_changes(report_content: str, api_key: str) -> dict:
-    """Use LLM to extract structured changes from optimization report."""
+    """Use an LLM to extract structured changes from an optimization report.
+
+    Args:
+        report_content (str): The optimization report text (truncated to the
+            first 6000 chars before sending).
+        api_key (str): Bearer token for the LLM proxy endpoint.
+
+    Returns:
+        dict: Parsed change object with ``flag_changes`` / ``env_var_changes``
+            etc., or an empty dict on any failure.
+    """
     import requests
 
     prompt = LLM_EXTRACT_PROMPT.replace("{report_content}", report_content[:6000])
@@ -93,7 +105,15 @@ def _llm_extract_changes(report_content: str, api_key: str) -> dict:
 
 
 def _parse_flags_string(s: str) -> dict[str, str]:
-    """Parse '--flag1 val1 --flag2 val2 ...' into a dict."""
+    """Parse '--flag1 val1 --flag2 val2 ...' into a dict.
+
+    Args:
+        s (str): A flag string (line continuations are folded into spaces).
+
+    Returns:
+        dict[str, str]: Flag name -> value, with valueless flags mapped to an
+            empty string.
+    """
     flags: dict[str, str] = {}
     try:
         tokens = shlex.split(s.replace("\\\n", " "), posix=True)
@@ -123,7 +143,14 @@ _LAUNCH_CMD_RE = re.compile(
 
 
 def _extract_fenced_bash_blocks(report: str) -> list[str]:
-    """Return bodies of ``` / ```bash fenced blocks (linear-time scan)."""
+    """Return bodies of ``` / ```bash fenced blocks (linear-time scan).
+
+    Args:
+        report (str): Markdown-ish report text to scan.
+
+    Returns:
+        list[str]: The inner text of each fenced code block, in order.
+    """
     blocks: list[str] = []
     opener = re.compile(r"```(?:bash)?\s*\n", re.IGNORECASE)
     pos = 0
@@ -145,6 +172,13 @@ def _extract_optimized_flags(report: str) -> dict[str, str]:
 
     Supports: EXTRA_SGLANG_ARGS="...", EXTRA_VLLM_ARGS in YAML,
     and full bash blocks with launch_server/vllm serve.
+
+    Args:
+        report (str): The optimization report text.
+
+    Returns:
+        dict[str, str]: The extracted optimized flag set, or an empty dict if
+            no recognizable launch config was found.
     """
     m = re.search(r'EXTRA_SGLANG_ARGS="([^"]+)"', report)
     if m:
@@ -172,7 +206,15 @@ def _extract_optimized_flags(report: str) -> dict[str, str]:
 
 
 def _parse_script_flags(script_content: str) -> tuple[dict[str, str], dict[str, str]]:
-    """Extract env vars and server flags from an InferenceX .sh script."""
+    """Extract env vars and server flags from an InferenceX .sh script.
+
+    Args:
+        script_content (str): The shell script contents.
+
+    Returns:
+        tuple[dict[str, str], dict[str, str]]: ``(env_vars, flags)`` parsed
+            from ``export`` lines and the launch command.
+    """
     env_vars: dict[str, str] = {}
     flags: dict[str, str] = {}
 
@@ -203,6 +245,14 @@ def _diff_flags(baseline: dict[str, str],
 
     Does not generate 'remove' actions because EXTRA_*_ARGS in reports
     only contain the subset of flags, not the full command.
+
+    Args:
+        baseline (dict[str, str]): Flags from the current script.
+        optimized (dict[str, str]): Flags from the optimization report.
+
+    Returns:
+        list[dict]: ``add``/``modify`` change descriptors (model/host/port and
+            other infra flags are skipped).
     """
     changes = []
     skip = {"--model-path", "--model", "--host", "--port",
@@ -226,6 +276,16 @@ def extract_changes_vs_script(report_content: str,
 
     Primary: parse report final config + diff against InferenceX script.
     Fallback: LLM-based extraction.
+
+    Args:
+        report_content (str): The optimization report text.
+        script_content (str | None): The current InferenceX script, or
+            ``None`` to treat all optimized flags as additions.
+        api_key (str | None): LLM proxy token enabling the fallback path.
+
+    Returns:
+        dict: A change object with ``flag_changes`` / ``env_var_changes``, or
+            an empty dict when nothing actionable is found.
     """
     opt_flags = _extract_optimized_flags(report_content)
     if not opt_flags:
@@ -256,7 +316,18 @@ def extract_changes_vs_script(report_content: str,
 
 def _apply_flag_to_script(content: str, flag: str, value: str | None,
                           action: str) -> str:
-    """Apply a single flag change to a benchmark shell script."""
+    """Apply a single flag change to a benchmark shell script.
+
+    Args:
+        content (str): The current script text.
+        flag (str): The flag name to add/modify/remove.
+        value (str | None): The flag value (may be ``None`` for valueless
+            flags).
+        action (str): One of ``"add"``, ``"modify"``, or ``"remove"``.
+
+    Returns:
+        str: The updated script text (unchanged if nothing matched).
+    """
     if action == "modify" and value is not None:
         pattern = re.compile(
             rf"({re.escape(flag)}[\s=])(\S+)",
@@ -299,7 +370,17 @@ def _apply_flag_to_script(content: str, flag: str, value: str | None,
 
 def _apply_env_to_script(content: str, var: str, value: str,
                          action: str) -> str:
-    """Apply an env var change to a benchmark shell script."""
+    """Apply an env var change to a benchmark shell script.
+
+    Args:
+        content (str): The current script text.
+        var (str): The environment variable name.
+        value (str): The value to set (ignored for ``remove``).
+        action (str): One of ``"add"``, ``"modify"``, or ``"remove"``.
+
+    Returns:
+        str: The updated script text.
+    """
     export_line = f"export {var}={value}\n"
     if action in ("add", "modify"):
         pattern = re.compile(rf"^export\s+{re.escape(var)}=.*$", re.MULTILINE)
@@ -318,7 +399,16 @@ def _apply_env_to_script(content: str, var: str, value: str,
 
 
 def apply_changes_to_script(script_path: Path, changes: dict) -> bool:
-    """Apply extracted changes to an InferenceX benchmark script."""
+    """Apply extracted changes to an InferenceX benchmark script.
+
+    Args:
+        script_path (Path): Path to the benchmark shell script to edit.
+        changes (dict): A change object with ``flag_changes`` and
+            ``env_var_changes`` lists.
+
+    Returns:
+        bool: True if the file content changed and was written, else False.
+    """
     if not script_path.exists():
         log.warning("Script not found: %s", script_path)
         return False
@@ -347,7 +437,15 @@ def apply_changes_to_script(script_path: Path, changes: dict) -> bool:
 
 def append_perf_changelog(changelog_path: Path, config_keys: list[str],
                           descriptions: list[str], pr_link: str = ""):
-    """Prepend a new entry to perf-changelog.yaml."""
+    """Prepend a new entry to perf-changelog.yaml.
+
+    Args:
+        changelog_path (Path): Path to ``perf-changelog.yaml`` (created if
+            absent).
+        config_keys (list[str]): InferenceX config keys touched by the entry.
+        descriptions (list[str]): Human-readable change descriptions.
+        pr_link (str): The PR URL; a placeholder is used when empty.
+    """
     entry = {
         "config-keys": config_keys,
         "description": descriptions,
@@ -369,7 +467,15 @@ def append_perf_changelog(changelog_path: Path, config_keys: list[str],
 # ── PR body generation ──
 
 def _generate_pr_body(model_results: list[dict]) -> str:
-    """Generate PR body following InferenceX PR template."""
+    """Generate PR body following InferenceX PR template.
+
+    Args:
+        model_results (list[dict]): Eligible model results, each carrying
+            metrics and a ``_changes`` descriptor.
+
+    Returns:
+        str: The rendered markdown PR body.
+    """
     lines = [
         "## Description\n",
         "Automated performance optimization update from Hyperloom CI.\n",
@@ -432,12 +538,30 @@ def _generate_pr_body(model_results: list[dict]) -> str:
 # ── Git + PR operations ──
 
 def _run_git(args: list[str], cwd: str, check: bool = True) -> subprocess.CompletedProcess:
+    """Run a git subcommand and capture its output.
+
+    Args:
+        args (list[str]): Git arguments (without the leading ``git``).
+        cwd (str): Working directory to run the command in.
+        check (bool): Raise on non-zero exit when True.
+
+    Returns:
+        subprocess.CompletedProcess: The completed process with captured
+            text stdout/stderr.
+    """
     cmd = ["git"] + args
     log.debug("git %s (cwd=%s)", " ".join(args), cwd)
     return subprocess.run(cmd, cwd=cwd, check=check, capture_output=True, text=True)
 
 
 def clone_fork(fork_url: str, target_dir: str, branch: str = "main"):
+    """Clone a fork at a specific branch into a target directory.
+
+    Args:
+        fork_url (str): The git URL of the fork to clone.
+        target_dir (str): Destination directory for the clone.
+        branch (str): Branch to check out (default ``"main"``).
+    """
     subprocess.run(
         ["git", "clone", f"--branch={branch}", fork_url, target_dir],
         check=True, capture_output=True, text=True,
@@ -448,10 +572,8 @@ def sync_fork_from_upstream(repo_dir: str, upstream_url: str,
                             branch: str, token: str | None) -> None:
     """Merge upstream into the fork branch before creating a PR branch.
 
-    The fork keeps verify-pr/sync workflow files that upstream does not have.
-    Rebase is fragile with fork-only merge commits, while reset would make the
-    later PR appear to delete fork-only files. Merge preserves those files and
-    keeps the fork base current.
+    Merge (not rebase/reset) preserves the fork-only verify-pr/sync workflow
+    files while keeping the base current.
     """
     _run_git(["remote", "add", "upstream", upstream_url], repo_dir, check=False)
     _run_git(["fetch", "upstream", branch], repo_dir)
@@ -485,11 +607,30 @@ def sync_fork_from_upstream(repo_dir: str, upstream_url: str,
 
 
 def create_pr_branch(repo_dir: str, branch_name: str):
+    """Create and check out a new branch for the PR.
+
+    Args:
+        repo_dir (str): Local path to the repository.
+        branch_name (str): Name of the branch to create.
+    """
     _run_git(["checkout", "-b", branch_name], repo_dir)
 
 
 def commit_and_push(repo_dir: str, branch_name: str, message: str,
                     token: str | None = None):
+    """Commit all changes and push the branch to the fork.
+
+    Args:
+        repo_dir (str): Local path to the repository.
+        branch_name (str): Branch to push.
+        message (str): Commit message.
+        token (str | None): Optional token used to build an authenticated
+            push URL; falls back to ``origin`` when absent.
+
+    Returns:
+        bool: True if a commit was pushed, False if there was nothing to
+            commit or the push failed.
+    """
     _run_git(["config", "user.email", "hyperloom-ci@noreply.github.com"], repo_dir)
     _run_git(["config", "user.name", "Hyperloom CI"], repo_dir)
     _run_git(["add", "-A"], repo_dir)
@@ -525,7 +666,20 @@ def commit_and_push(repo_dir: str, branch_name: str, message: str,
 
 def create_github_pr(owner: str, repo: str, branch: str, base: str,
                      title: str, body: str, token: str):
-    """Create a PR within the same repo using gh CLI or GitHub API."""
+    """Create a PR within the same repo using gh CLI or GitHub API.
+
+    Args:
+        owner (str): Repository owner/org.
+        repo (str): Repository name.
+        branch (str): Head branch for the PR.
+        base (str): Base branch to merge into.
+        title (str): PR title.
+        body (str): PR body markdown.
+        token (str): GitHub token for ``gh`` or the REST API.
+
+    Returns:
+        str | None: The created PR URL, or ``None`` on failure.
+    """
     try:
         result = subprocess.run(
             ["gh", "pr", "create",
@@ -563,7 +717,14 @@ def create_github_pr(owner: str, repo: str, branch: str, base: str,
 
 
 def _parse_pr_number(pr_url: str) -> int | None:
-    """Extract the numeric PR id from a GitHub PR URL."""
+    """Extract the numeric PR id from a GitHub PR URL.
+
+    Args:
+        pr_url (str): A GitHub PR URL (may be empty/None-like).
+
+    Returns:
+        int | None: The PR number, or ``None`` if not found.
+    """
     m = re.search(r"/pull/(\d+)", pr_url or "")
     return int(m.group(1)) if m else None
 
@@ -574,6 +735,17 @@ def add_pr_labels(owner: str, repo: str, pr_url: str,
 
     Prefers `gh pr edit` since PAT scopes are already verified for push;
     falls back to REST API POST /issues/{n}/labels.
+
+    Args:
+        owner (str): Repository owner/org.
+        repo (str): Repository name.
+        pr_url (str): URL of the PR to label.
+        labels (list[str]): Labels to attach (no-op if empty).
+        token (str): GitHub token for ``gh`` or the REST API.
+
+    Returns:
+        bool: True if labels were attached (or none were requested), else
+            False.
     """
     if not labels:
         return True
@@ -617,6 +789,15 @@ def add_pr_labels(owner: str, repo: str, pr_url: str,
 # ── Main orchestration ──
 
 def load_config(path: str | None = None) -> dict:
+    """Load the CI YAML config.
+
+    Args:
+        path (str | None): Path to the config file; uses
+            :data:`DEFAULT_CONFIG` when ``None``.
+
+    Returns:
+        dict: The parsed configuration mapping.
+    """
     p = Path(path) if path else DEFAULT_CONFIG
     with open(p) as f:
         return yaml.safe_load(f)
@@ -624,7 +805,16 @@ def load_config(path: str | None = None) -> dict:
 
 def _find_script_in_repo(repo_dir: Path, ifx_key: str,
                          scripts_path: str) -> Path | None:
-    """Find benchmark script by inferenceX key (exact match then prefix)."""
+    """Find benchmark script by inferenceX key (exact match then prefix).
+
+    Args:
+        repo_dir (Path): Root of the cloned InferenceX repo.
+        ifx_key (str): InferenceX key used to locate the script.
+        scripts_path (str): Relative path to the benchmark scripts directory.
+
+    Returns:
+        Path | None: The matching ``.sh`` path, or ``None`` if none matched.
+    """
     scripts_dir = repo_dir / scripts_path
     if not scripts_dir.is_dir():
         return None
@@ -640,7 +830,16 @@ def _find_script_in_repo(repo_dir: Path, ifx_key: str,
 
 
 def _load_report(model_result: dict, reports_dir: Path) -> str:
-    """Load report content from inline data or file."""
+    """Load report content from inline data or file.
+
+    Args:
+        model_result (dict): A CI model result, possibly with inline
+            ``report_content``.
+        reports_dir (Path): Directory holding per-model report files.
+
+    Returns:
+        str: The report markdown, or ``""`` if none is found.
+    """
     content = model_result.get("report_content", "")
     if content:
         return content
@@ -657,7 +856,17 @@ def process_results(
     config: dict,
     dry_run: bool = False,
 ) -> list[dict]:
-    """Filter CI results by gain threshold; return candidates for PR."""
+    """Filter CI results by gain threshold; return candidates for PR.
+
+    Args:
+        ci_summary (dict): Parsed ``ci_summary.json`` with a ``models`` list.
+        reports_dir (Path): Directory holding per-model reports.
+        config (dict): The CI config (provides ``pr_submission.min_gain_pct``).
+        dry_run (bool): Reserved flag, unused here (kept for call symmetry).
+
+    Returns:
+        list[dict]: Eligible model results, each annotated with ``_report``.
+    """
     pr_cfg = config.get("pr_submission", {})
     min_gain = pr_cfg.get("min_gain_pct", 3.0)
 
@@ -695,7 +904,22 @@ def submit_pr(
     ci_summary: dict,
     dry_run: bool = False,
 ):
-    """Clone InferenceX repo, apply changes, and submit PR."""
+    """Clone InferenceX repo, apply changes, and submit PR.
+
+    Clones the fork, optionally syncs from upstream, extracts and applies
+    per-model changes, updates the changelog, and creates the PR (skipped in
+    ``dry_run``).
+
+    Args:
+        eligible (list[dict]): Candidate model results from
+            :func:`process_results`.
+        config (dict): The CI config.
+        ci_summary (dict): The full CI summary (passed through for context).
+        dry_run (bool): Preview changes without committing or creating a PR.
+
+    Returns:
+        None: Nothing is returned; the PR is created as a side effect.
+    """
     pr_cfg = config.get("pr_submission", {})
     repo_url = pr_cfg.get("repo_url", "https://github.com/lishuoshuo-amd/InferenceX.git")
     repo_owner = pr_cfg.get("repo_owner", "lishuoshuo-amd")
@@ -810,6 +1034,15 @@ def submit_pr(
 
 
 def main():
+    """CLI entry point: load the CI summary and submit eligible PRs.
+
+    Parses arguments, configures logging, loads the config and summary, filters
+    eligible models, and dispatches PR submission.
+
+    Returns:
+        None: Nothing is returned; exits non-zero if the summary file is
+            missing.
+    """
     parser = argparse.ArgumentParser(description="Submit InferenceX PRs from CI results")
     parser.add_argument("--config", default=None, help="Path to ci-config.yaml")
     parser.add_argument("--summary", required=True, help="Path to ci_summary.json")

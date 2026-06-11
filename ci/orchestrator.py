@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """CI orchestrator: parse config → create Claw sessions → monitor → report."""
 
 from __future__ import annotations
@@ -43,39 +45,25 @@ CI_DIR = Path(__file__).resolve().parent
 PROMPT_TEMPLATE = (CI_DIR / "prompt_template.md").read_text()
 PROMPT_TEMPLATE_PR = (CI_DIR / "prompt_template_pr.md").read_text()
 
-# Two prompt paths exist:
-#
-#   1. prompt_template.md (default, scheduled / workflow_dispatch CI):
-#      Agent cd's into /wekafs/HyperloomV2 (= the deployed Hyperloom snapshot
-#      on the WekaFS mount) and runs the Python `inference_optimizer optimize`
-#      CLI from there. This validates the *deployed* version, not main HEAD —
-#      wekafs is hand-maintained and may lag main by 50+ commits with local
-#      uncommitted edits. That is the *intended* behavior for schedule runs:
-#      we want to know what the production-deployed Hyperloom does today.
-#
-#   2. prompt_template_pr.md (PR-approve trigger only):
-#      Agent first git-clones the PR head commit into the sandbox at
-#      /tmp/Hyperloom-pr, installs from there, and drives the skill out of
-#      the cloned tree. This validates the *unmerged PR code*, not the
-#      wekafs snapshot — required so reviewer-visible numbers actually
-#      reflect what the PR proposes to ship. The GitHub token is formatted
-#      into the prompt (Claw API has no env-injection field; ClawClient.
-#      create_session/send_message bodies only accept name/agent_id/
-#      sandbox_image/content/tools/pluginId/workspaceId). The workflow
-#      passes ${{ github.token }} (per-run installation token,
-#      contents:read on this repo only, lifetime ≤ workflow run) — chosen
-#      over a user-created PAT because AMD-AGI org policy bans Classic
-#      PATs and gates fine-grained PATs behind admin approval. The flag
-#      `--gh-token-env` keeps it pluggable: any env-var holding a token
-#      that can clone AMD-AGI/Hyperloom works.
-#
-# Both paths share the same plugin 4 (tools 3 + 85). The skill runtime IS
-# the inference_optimizer Python package — there is no marketplace skill
-# download or /workspace/.skills/ layout. ci-mix300 (tool 74) is
-# intentionally NOT bundled in plugin 4.
+# prompt_template.md (default schedule/workflow_dispatch): validates the
+# /wekafs/HyperloomV2 deployed snapshot (may lag main). prompt_template_pr.md
+# (PR-approve): agent git-clones the PR head into /tmp/Hyperloom-pr so numbers
+# reflect proposed code; GH token is formatted into the prompt (Claw API has no
+# env-injection field), uses per-run ${{ github.token }} because AMD-AGI bans
+# Classic PATs. Both share plugin 4 (tools 3 + 85); the skill runtime IS the
+# inference_optimizer package. ci-mix300 (tool 74) is NOT bundled in plugin 4.
 
 
 def load_config(config_path: str | None = None) -> dict:
+    """Load the CI configuration YAML.
+
+    Args:
+        config_path (str | None): Path to the config file; defaults to
+            ``ci/ci-config.yaml`` when None.
+
+    Returns:
+        dict: The parsed configuration.
+    """
     path = Path(config_path) if config_path else CI_DIR / "ci-config.yaml"
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -86,17 +74,9 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
                   gh_token: str | None = None) -> str:
     """Render the agent prompt for the inference_optimizer skill.
 
-    Two paths:
-      - pr_mode=False (default): use prompt_template.md, agent cd's into
-        /wekafs/HyperloomV2 (deployed snapshot). Used by schedule /
-        workflow_dispatch.
-      - pr_mode=True: use prompt_template_pr.md, agent first git-clones
-        the PR head commit into /tmp inside the sandbox, then installs +
-        drives the skill from there. Required so reviewer-visible numbers
-        on PR-approve trigger reflect the proposed code, not the
-        wekafs-deployed snapshot. Requires both git_ref (PR head sha)
-        and gh_token (any GitHub token that can clone AMD-AGI/Hyperloom;
-        the workflow passes the per-run GITHUB_TOKEN).
+    pr_mode=False (default): prompt_template.md against /wekafs/HyperloomV2.
+    pr_mode=True: prompt_template_pr.md, agent git-clones PR head; requires
+    git_ref (PR head sha) and gh_token (clones AMD-AGI/Hyperloom).
     """
     isl, osl = merged["isl_osl_configs"][0]
     ifx_text = format_benchmark_for_prompt(
@@ -107,19 +87,12 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
         conc=merged.get("conc"),
     )
 
-    # NOTE: SAFE_API_KEY / SAFE_BASE_URL are NOT injected into the prompt
-    # body. The previous templates leaked the key by interpolating it into an
-    # "Auth: SAFE_API_KEY={safe_api_key}" block; the agent already has those
-    # values in its sandbox env (via kernel-agent.env.sh) and does not need
-    # them rendered into the prompt text — that path landed the key into Claw
-    # session history, Actions logs, and uploaded artifacts. Keep this comment
-    # so a future contributor doesn't add the variable back without thinking.
+    # Do NOT inject SAFE_API_KEY / SAFE_BASE_URL into the prompt body: the agent
+    # already has them in its sandbox env, and rendering them leaked the key into
+    # Claw history, Actions logs, and artifacts.
 
-    # Multi-node entries (nodes > 1) need an explicit "Task submission" block
-    # describing the RayJob image / per-node resources / RDMA env so the agent
-    # can spawn the SaFE RayJob with the right topology and bnxt_re tar package.
-    # Single-node entries (nodes == 1, the default) get an empty section — the
-    # Claw sandbox is the only execution context they need.
+    # Multi-node entries (nodes > 1) need a "Task submission" block with RayJob
+    # image / per-node resources / RDMA env; single-node gets an empty section.
     nodes = int(merged.get("nodes", 1) or 1)
     if nodes > 1:
         rayjob_image = merged.get("rayjob_image", "") or merged.get("sandbox_image", "")
@@ -148,10 +121,8 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
         gpu_type_lc=str(merged["gpu_type"]).lower(),
         target_gpu=merged["target_gpu"],
         inferenceX_data=ifx_text,
-        inferencex_path=merged.get("inferencex_path", ""),
         oob_path=merged.get("oob_path", ""),
         tracelens_root=merged.get("tracelens_root", ""),
-        # Multi-node / Hyperloom-skill knobs (defaults match legacy single-node CI).
         nodes=nodes,
         target_gain=merged.get("target_gain", 10),
         max_hours=merged.get("max_hours", 2),
@@ -181,15 +152,27 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
     return PROMPT_TEMPLATE.format(**common_fields)
 
 
-_STREAM_TRUNCATION_MIN_TOOL_CALLS = 3  # fewer tool calls than this in <10min = likely truncation
-_STREAM_TRUNCATION_MAX_ELAPSED_S = 600  # session completed in under this → suspect truncation
-_MAX_RETRY_ATTEMPTS = 4  # 1 initial + up to 3 retries (covers transient Vertex overload bursts)
-_OVERLOADED_BACKOFF_S = (180, 360, 720)  # 3min, 6min, 12min — exponential for Vertex overloads
-_TRUNCATION_BACKOFF_S = 60                # 1min — fast retry, truncations are usually transient
+_STREAM_TRUNCATION_MIN_TOOL_CALLS = 3  # fewer tool calls in <10min = likely truncation
+_STREAM_TRUNCATION_MAX_ELAPSED_S = 600  # completed under this → suspect truncation
+_MAX_RETRY_ATTEMPTS = 4  # 1 initial + up to 3 retries (transient Vertex overloads)
+_OVERLOADED_BACKOFF_S = (180, 360, 720)  # exponential backoff for Vertex overloads
+_TRUNCATION_BACKOFF_S = 60                # fast retry; truncations are usually transient
 
 
 def _is_stream_truncated(status: str, sse_events: list[dict], elapsed_s: float) -> bool:
-    """Detect Vertex AI stream truncation: session 'completed' suspiciously fast with no work."""
+    """Detect Vertex AI stream truncation.
+
+    A session is suspected truncated when it reports ``completed`` suspiciously
+    fast while performing very few tool calls.
+
+    Args:
+        status (str): The session's final status string.
+        sse_events (list[dict]): The collected SSE events.
+        elapsed_s (float): Wall-clock duration of the session in seconds.
+
+    Returns:
+        bool: True if the stream looks truncated.
+    """
     if status != "completed":
         return False
     if elapsed_s > _STREAM_TRUNCATION_MAX_ELAPSED_S:
@@ -199,21 +182,20 @@ def _is_stream_truncated(status: str, sse_events: list[dict], elapsed_s: float) 
 
 
 def _detect_vertex_overloaded(sse_events: list[dict]) -> bool:
-    """Detect Anthropic Vertex `overloaded_error` in SSE event tail.
+    """Detect Anthropic Vertex `overloaded_error` in the SSE event tail.
 
-    Pattern observed in real failures:
-      {"type":"error","error":{"details":null,"type":"overloaded_error",
-       "message":"Overloaded"},"request_id":"req_vrtx_..."}
-
-    The error is usually emitted within the last few events before the session
-    terminates. Scan a window large enough to catch it but small enough to
+    Scans the last 50 events — wide enough to catch the error, narrow enough to
     avoid false positives from `overloaded` appearing in user content.
+
+    Args:
+        sse_events (list[dict]): The collected SSE events.
+
+    Returns:
+        bool: True if an ``overloaded_error`` is detected in the event tail.
     """
-    # Inspect tail of the stream — last 50 events is enough for any real session.
     for evt in sse_events[-50:]:
         if not isinstance(evt, dict):
             continue
-        # Direct error events
         evt_type = evt.get("type", "")
         if evt_type in ("error", "agent_error", "stream_error"):
             err = evt.get("error") if isinstance(evt.get("error"), dict) else evt
@@ -221,10 +203,8 @@ def _detect_vertex_overloaded(sse_events: list[dict]) -> bool:
             err_msg = (err.get("message") or "").lower() if isinstance(err, dict) else ""
             if "overloaded" in err_type or "overloaded" in err_msg:
                 return True
-        # Sometimes errors get embedded inside chatDelta/statusUpdate as the
-        # provider response. Use a narrow JSON-string match keyed on req_vrtx_
-        # so we don't false-positive on the literal word "overloaded" in chat
-        # content.
+        # Narrow match keyed on req_vrtx_ to avoid false-positives on the literal
+        # word "overloaded" embedded in chatDelta/statusUpdate chat content.
         blob = json.dumps(evt, default=str)
         if "overloaded_error" in blob and "req_vrtx_" in blob:
             return True
@@ -243,9 +223,7 @@ def run_model(
 ) -> dict:
     """Execute the full optimization flow for a single model.
 
-    pr_mode + git_ref + gh_token are forwarded to render_prompt to switch
-    between schedule path (/wekafs/HyperloomV2) and PR-approve path
-    (sandbox-internal git clone of PR head). See render_prompt() docstring.
+    pr_mode + git_ref + gh_token are forwarded to render_prompt. See its docstring.
     """
     model_name = merged["model_hf"].split("/")[-1]
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
@@ -260,7 +238,7 @@ def run_model(
 
     prompt = render_prompt(merged, pr_mode=pr_mode,
                            git_ref=git_ref, gh_token=gh_token)
-    # NEVER log full prompt in pr_mode — it contains the GH token.
+    # NEVER log the full prompt in pr_mode — it contains the GH token.
     log.info("Prompt length: %d chars (pr_mode=%s)", len(prompt), pr_mode)
 
     status = "failed"
@@ -269,7 +247,6 @@ def run_model(
     last_failure_reason: str | None = None  # "overloaded" | "truncated" | None
     for attempt in range(1, _MAX_RETRY_ATTEMPTS + 1):
         if attempt > 1:
-            # Pick backoff based on what killed the previous attempt.
             if last_failure_reason == "overloaded":
                 idx = min(attempt - 2, len(_OVERLOADED_BACKOFF_S) - 1)
                 wait_s = _OVERLOADED_BACKOFF_S[idx]
@@ -286,7 +263,7 @@ def run_model(
             time.sleep(wait_s)
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
 
-        # Step 1: Create session — pass sandbox_image to get GPU sandbox
+        # Create session — sandbox_image selects the GPU sandbox.
         session_name = f"ci-{model_name}-{timestamp}"
         if attempt > 1:
             session_name = f"ci-{model_name}-{timestamp}-retry{attempt - 1}"
@@ -300,13 +277,23 @@ def run_model(
 
         log.info("Session created: %s (attempt %d)", session_id, attempt)
 
-        # Step 2: Subscribe SSE in background thread, then send message
+        # Subscribe SSE in a background thread, then send the message.
         sse_events: list[dict] = []
         status_holder = {"status": "running"}
         attempt_start = time.time()
 
         def _monitor():
+            """Subscribe to the session SSE stream and record events.
+
+            Runs in a background thread, appending each event to ``sse_events``
+            and logging assistant/tool activity as it arrives.
+            """
             def _on_event(evt):
+                """Handle a single SSE event: record it and log notable activity.
+
+                Args:
+                    evt (dict): The SSE event payload.
+                """
                 sse_events.append(evt)
                 evt_type = evt.get("type", "")
                 if evt_type == "chatDelta" and evt.get("sender") == "assistant":
@@ -325,11 +312,8 @@ def run_model(
         time.sleep(1)
 
         try:
-            # Per-entry plugin_id override (merged["claw_plugin_id"] defaults
-            # to 4 for entries that don't set it; null in ci-config opts the
-            # entry out of the Hyperloom plugin entirely — claw_client.
-            # send_message will omit the pluginId field from the JSON body
-            # when plugin_id is None).
+            # Per-entry plugin_id override (defaults to 4; null opts the entry
+            # out of the Hyperloom plugin — send_message omits pluginId then).
             entry_plugin_id = merged.get("claw_plugin_id", 4)
             claw.send_message(session_id, prompt, plugin_id=entry_plugin_id)
             log.info(
@@ -352,11 +336,9 @@ def run_model(
         log.info("Session %s finished with status: %s (elapsed %.0fs, %d tool calls)",
                  session_id, status, elapsed, sum(1 for e in sse_events if e.get("type") == "toolUsed"))
 
-        # Decide whether the failure looks like one we can recover from:
-        #   - overloaded_error: upstream Vertex capacity blip; exponential backoff
-        #   - stream truncation: session marked completed too quickly; short retry
-        # Order matters — overloaded check is broader and may catch sessions that
-        # report status="failed", not just status="completed".
+        # Recoverable failures: overloaded_error (Vertex blip, exponential
+        # backoff) or stream truncation (short retry). Check overloaded first —
+        # it's broader and may catch status="failed" sessions too.
         if _detect_vertex_overloaded(sse_events):
             last_failure_reason = "overloaded"
             log.warning(
@@ -384,26 +366,19 @@ def run_model(
             status = "failed"
         break
 
-    # Step 3: Download optimization report from Claw, with NFS fallback
-    # No sleep here — sandbox is already gone after session ends; download immediately.
+    # Download the optimization report from Claw, with NFS fallback.
     report_content = None
     os.makedirs(result_dir, exist_ok=True)
-    # All three suffixes are part of the canonical Required Artifacts
-    # contract (see ci/prompt_prefix.txt and DEFAULT_ARTIFACT_PATTERNS /
-    # _KEY_RESULT_SUFFIXES in optimize_submit.py). session_breakdown.json
-    # is the V2 dashboard contract emitted by inference_optimizer/cli.py's
-    # finally block (or, for non-cli pipelines, manually written by the
-    # agent with the documented schema). claw-stats-service prefers
-    # session_breakdown.json over ci_metrics.json for dashboard rollup, so
-    # this list MUST stay in sync with optimize_submit.py — adding or
-    # removing entries should happen in both places.
+    # Canonical Required Artifacts contract; MUST stay in sync with
+    # optimize_submit.py's DEFAULT_ARTIFACT_PATTERNS / _KEY_RESULT_SUFFIXES.
+    # claw-stats-service prefers session_breakdown.json over ci_metrics.json.
     download_suffixes = (
         "optimization_report.md",
         "ci_metrics.json",
         "session_breakdown.json",
     )
 
-    # 3a. Try Claw file API (sandbox /workspace)
+    # Try the Claw file API (sandbox /workspace) first.
     try:
         if not session_id:
             raise RuntimeError("No session_id — session never created")
@@ -423,7 +398,7 @@ def run_model(
     except Exception as e:
         log.warning("Failed to list/download files for %s: %s", session_id, e)
 
-    # 3b. NFS fallback: scan NFS for results written by PyTorchJob/RayJob.
+    # NFS fallback: scan for results written by PyTorchJob/RayJob.
     if not report_content:
         nfs_root = get_nfs_root()
         nfs_scan_dirs = [
@@ -459,7 +434,6 @@ def run_model(
             if report_content:
                 break
 
-    # Step 4: Build result
     ifx_ref = None
     if merged.get("inferenceX_benchmarks"):
         isl, osl = merged["isl_osl_configs"][0]
@@ -481,6 +455,16 @@ def run_model(
 
 
 def main():
+    """Parse CLI arguments and run the CI orchestration flow.
+
+    Loads the config, resolves the model subset, runs each model (or prints
+    prompts in ``--dry-run``), and writes the markdown/JSON/GitHub summary
+    reports and optional webhook notification.
+
+    Returns:
+        None: Nothing is returned; the process exits non-zero (via
+            ``sys.exit``) only when every model failed.
+    """
     parser = argparse.ArgumentParser(description="Hyperloom CI/CD Orchestrator")
     parser.add_argument("--config", default=None, help="Path to ci-config.yaml")
     parser.add_argument("--models", default=None,
@@ -538,13 +522,17 @@ def main():
         if "model_path_override" in m:
             m["model_path_override"] = resolve_var(m["model_path_override"])
 
-    # Resolve which models to run
-    # Each ci-config entry has either an explicit `key` (matrix display id) or
-    # falls back to `inferenceX_key`. We filter by the effective key so multiple
-    # entries can share the same `inferenceX_key` (e.g. single-node + multi-node
-    # DSR1 both look up `dsr1-fp8-mi300x-sglang` in amd-master.yaml but expose
-    # distinct keys to the matrix).
+    # Resolve which models to run. Filter by effective key (`key`, else
+    # `inferenceX_key`) so multiple entries can share one inferenceX_key.
     def _entry_key(m: dict) -> str:
+        """Return a model entry's effective matrix key.
+
+        Args:
+            m (dict): A ci-config model entry.
+
+        Returns:
+            str: The explicit ``key`` if present, else ``inferenceX_key``.
+        """
         return m.get("key") or m["inferenceX_key"]
 
     model_list = config.get("models", [])
@@ -557,7 +545,7 @@ def main():
 
     log.info("Models to process: %s", [_entry_key(m) for m in model_list])
 
-    # Fetch InferenceX config + benchmark scripts in a single shallow clone
+    # Fetch InferenceX config + benchmark scripts in a single shallow clone.
     log.info("Fetching InferenceX config from main...")
     ifx_commit = get_latest_commit(ifx_cfg["repo"])
     scripts_path = ifx_cfg.get("scripts_path", "benchmarks/single_node")
@@ -571,10 +559,8 @@ def main():
         )
         yaml_path = Path(_tmpdir) / ifx_cfg["config_path"]
 
-        # Read-only image version report. We deliberately don't pass --update —
-        # CI baselines must stay pinned to the InferenceX image tag (otherwise
-        # tok/s comparisons across runs are apples-to-oranges). Operators who
-        # need a different image override it explicitly via ci-config.yaml.
+        # Read-only image version report (no --update): CI baselines stay pinned
+        # to the InferenceX image tag so tok/s comparisons stay comparable.
         check_script = CI_DIR.parent / "inference_optimization" / "InferenceX" / "utils" / "check_image_versions.py"
         if check_script.exists():
             cmd = [sys.executable, str(check_script), "--config-files", str(yaml_path)]
@@ -598,8 +584,7 @@ def main():
         for model_cfg in model_list:
             ifx_key = model_cfg.get("inferenceX_key", "")
             if not ifx_key:
-                # Self-contained entry (no upstream InferenceX baseline). The
-                # agent constructs the server launch directly from the prompt.
+                # Self-contained entry (no upstream InferenceX baseline).
                 continue
             script = find_benchmark_script(_tmpdir, ifx_key, scripts_path)
             ifx_scripts[ifx_key] = script
@@ -611,19 +596,16 @@ def main():
                 log.warning("No benchmark script found for %s", ifx_key)
                 ifx_script_contents[ifx_key] = ""
 
-    # Merge configs and fetch API data
     merged_models = []
     for model_cfg in model_list:
         ifx_key = model_cfg.get("inferenceX_key", "")
         entry_label = ifx_key or model_cfg.get("key", "<unnamed>")
 
         if ifx_key and ifx_key in amd_master:
-            # Standard path: pull image/precision/framework/etc. from amd-master.yaml.
             ifx_entry = amd_master[ifx_key]
         elif model_cfg.get("model_hf") and model_cfg.get("image"):
-            # Self-contained Hyperloom-internal entry (no InferenceX baseline).
-            # Build a synthetic amd-master-style entry directly from ci-config
-            # fields so the rest of the merge flow works unchanged.
+            # Self-contained entry: synthesize an amd-master-style entry from
+            # ci-config so the rest of the merge flow works unchanged.
             ifx_entry = synthesize_entry_from_ci_config(model_cfg)
             log.info(
                 "Model %s: using self-contained ci-config entry "
@@ -679,8 +661,7 @@ def main():
         log.info("PR-CI mode enabled: git_ref=%s, gh_token=*** (from %s)",
                  git_ref[:12] if len(git_ref) > 12 else git_ref, args.gh_token_env)
 
-    # Dry run: print prompts and exit. Mask the GH token in pr_mode so the
-    # log doesn't leak it.
+    # Dry run: print prompts and exit, masking the GH token in pr_mode.
     if args.dry_run:
         for merged in merged_models:
             prompt = render_prompt(merged, pr_mode=pr_mode,
@@ -714,8 +695,8 @@ def main():
                  result["model"], result["status"],
                  f"{result['gain_pct']}%" if result.get("gain_pct") is not None else "N/A")
 
-    # Generate reports — wrap in try/except so report-generation bugs never
-    # discard the expensive LLM results that already completed successfully.
+    # Wrap report generation in try/except so a reporting bug never discards
+    # expensive LLM results that already completed.
     ci_run_id = f"ci-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}"
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -737,7 +718,7 @@ def main():
         (out_dir / "ci_summary_raw.json").write_text(
             json.dumps(results, indent=2, default=str))
 
-    # Per-model report files (for individual artifact downloads)
+    # Per-model report files (for individual artifact downloads).
     for r in results:
         try:
             model_dir = out_dir / r["model"]
@@ -788,7 +769,7 @@ def main():
     except Exception:
         log.exception("Webhook notification failed")
 
-    # Exit non-zero only if ALL models failed (never discard partial success)
+    # Exit non-zero only if ALL models failed (never discard partial success).
     completed_count = (json_summary["stats"]["completed"] if json_summary
                        else sum(1 for r in results if r.get("status") == "completed"))
     if completed_count == 0:
@@ -799,7 +780,18 @@ def main():
 
 
 def _send_webhook(webhook: str, summary: dict):
-    """Send notification via webhook. Uses Adaptive Card for Teams, plain text fallback."""
+    """Send a run notification via webhook.
+
+    Builds an Adaptive Card (Teams) for the first model in the summary, with a
+    plain-text fallback.
+
+    Args:
+        webhook (str): The destination webhook URL.
+        summary (dict): The JSON summary produced by :func:`generate_json_summary`.
+
+    Returns:
+        None: Nothing is returned; the card is POSTed as a side effect.
+    """
     import requests as req
     r = summary["models"][0] if summary["models"] else {}
     model = r.get("model", "unknown")
@@ -808,10 +800,29 @@ def _send_webhook(webhook: str, summary: dict):
     trigger = summary.get("trigger", "manual")
 
     def _val(key, fmt=".2f"):
+        """Format a metric value from the first model row.
+
+        Args:
+            key (str): The metric key to look up.
+            fmt (str): Format spec applied when the value is present.
+
+        Returns:
+            str: The formatted value, or ``"N/A"`` when missing.
+        """
         v = r.get(key)
         return f"{v:{fmt}}" if v is not None else "N/A"
 
     def _row(label, value, color=None):
+        """Build an Adaptive Card table row with a label and value cell.
+
+        Args:
+            label (str): The left-hand label text.
+            value: The right-hand value (coerced to ``str``).
+            color: Optional text color for the value cell.
+
+        Returns:
+            dict: The TableRow element dict.
+        """
         items = [{"type": "TextBlock", "text": str(value)}]
         if color:
             items[0]["color"] = color

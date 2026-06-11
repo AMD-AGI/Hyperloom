@@ -1,13 +1,6 @@
-"""Tests for ``_reconcile_crash_count`` in ``cli.py``.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The ReportExecutor and breakdown writer both reload state from
-``state.json``, so a reactor-pass crash increment that lost a write
-race could leave ``state.json`` / ``reports/final.json`` showing a
-stale (lower) ``crash_count`` than the live coordinator object — and
-therefore the console final summary. ``_reconcile_crash_count`` bumps
-both disk artifacts up to the authoritative live value at teardown so
-all three sources agree.
-"""
+"""Tests for ``_reconcile_crash_count`` in ``cli.py``."""
 
 from __future__ import annotations
 

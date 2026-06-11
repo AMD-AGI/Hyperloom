@@ -1,8 +1,6 @@
-"""Tests for :class:`runtime.web_tools.fetch_client.WebFetchClient`.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-httpx is mocked with ``MockTransport``; SSRF DNS resolution is patched
-through ``runtime.web_tools.fetch_client._resolve_or_raise``.
-"""
+"""Tests for :class:`runtime.web_tools.fetch_client.WebFetchClient` (httpx mocked, SSRF DNS patched)."""
 
 from __future__ import annotations
 

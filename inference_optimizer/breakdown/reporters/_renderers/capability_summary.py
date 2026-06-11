@@ -1,14 +1,9 @@
-"""Capability summary renderer.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Renders the ``capability_summary`` section into:
+"""Capability summary renderer — status/attempts/keeps table + per-capability decisions.
 
-* a markdown table listing each capability's status / attempts / keeps,
-* one ``Decision`` per non-``not_attempted`` capability so the LLM has
-  structured verdicts to reference,
-* ``key_facts`` that paraphrase each row in one line each.
-
-This renderer is the canonical example used as the design reference
-for the other 13 renderers — keep it terse and deterministic.
+This renderer is the canonical design reference for the others — keep it
+terse and deterministic.
 """
 
 from __future__ import annotations
@@ -18,10 +13,7 @@ from typing import Any
 from ..base import Decision, RenderedSection, fmt_pct, md_table, register_renderer
 
 _CAPABILITY_ORDER = (
-    # ``explore`` is the primary row for sessions
-    #. backends / params / validate_stack
-    # remain as compatibility aliases so legacy resume reports stay
-    # readable.
+    # ``explore`` is primary; legacy rows remain for archived sessions.
     "explore",
     "backends", "params", "sweep", "geak", "oob", "validate_stack",
 )
@@ -29,14 +21,26 @@ _CAPABILITY_ORDER = (
 
 @register_renderer("capability_summary")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the capability-summary section.
+
+    Produces a status/attempts/keeps table for each capability in a
+    stable order, one structured :class:`Decision` per non-``not_attempted``
+    capability, and a one-line fact per row. Skipped when no capabilities
+    were recorded.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered capability-summary section.
+    """
     cap = breakdown.get("capability_summary") or {}
     rows: list[list[Any]] = []
     facts: list[str] = []
     decisions: list[Decision] = []
     warnings: list[str] = []
 
-    # Stable ordering: known capabilities first, then any extras the
-    # exporter started writing without a renderer update.
+    # Stable ordering: known capabilities first, then any unknown extras.
     keys = list(_CAPABILITY_ORDER) + [k for k in cap if k not in _CAPABILITY_ORDER]
     for name in keys:
         v = cap.get(name)
@@ -45,11 +49,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         status   = str(v.get("status") or "not_attempted")
         attempts = int(v.get("attempts") or 0)
         keeps    = int(v.get("keeps") or 0)
-        # Disambiguate the validate_stack "not_attempted but I have a
-        # validated_gain" case: it means the validate_stack action did
-        # not re-run this session, but state carries a validated gain
-        # from an earlier round. Show that as ``stale_validated`` so
-        # the row is no longer self-contradicting.
+        # validate_stack "not_attempted" but with a prior validated gain ->
+        # ``stale_validated`` so the row isn't self-contradicting.
         if (
             name == "validate_stack"
             and status == "not_attempted"
@@ -67,7 +68,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             extras.append(f"validated_gain={fmt_pct(v['last_validated_gain_pct'])}")
         if "grid_size" in v and v["grid_size"] is not None:
             extras.append(f"grid={v['grid_size']}")
-        # v0.8 M3 explore extras.
+        # explore extras.
         if "keep_unstable_count" in v and v["keep_unstable_count"]:
             extras.append(f"keep_unstable={v['keep_unstable_count']}")
         if "winners_history" in v and v["winners_history"]:

@@ -1,19 +1,6 @@
-"""``_fill_integrate_defaults_from_state`` + integrate_handler defaulting.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Pre-existing ``_resolve_integrate_payload`` fills ``patch_path`` and
-``source_file`` from SharedState when Orchestration sends only
-``kernel_id``. The sibling helper added here fills the three other
-Magpie re-baseline inputs that Orchestration omits just as often:
-
-* ``base_tput``         from ``state.baseline_tput``
-* ``config_path``       from ``state.baseline_config_path``
-* ``extra_server_args`` from ``state.current_best["extra_server_args"]``
-
-These tests pin (a) per-field defaulting, (b) explicit-payload wins,
-and (c) the wiring through ``integrate_handler`` so the pre-existing
-hard ``base_tput > 0`` check no longer panics when the value is
-already on disk.
-"""
+"""``_fill_integrate_defaults_from_state`` + integrate_handler defaulting (base_tput/config_path/extra_server_args from SharedState)."""
 
 from __future__ import annotations
 
@@ -152,13 +139,7 @@ class TestIntegrateHandlerHonoursStateDefault:
     async def test_missing_base_tput_in_payload_still_runs_when_state_has_one(
         self, session_dir, monkeypatch,
     ):
-        """Pre-existing hard-check must not fire when state has a baseline.
-
-        We don't run the full re-baseline pipeline — just confirm that
-        integrate_handler advances PAST the ``base_tput <= 0`` early-out
-        and reports a different failure mode (e.g. missing patch_path).
-        That's enough to lock the defaulting wiring.
-        """
+        """The ``base_tput <= 0`` hard-check must not fire when state has a baseline."""
         _seed_state(session_dir, baseline_tput=800.0)
 
         result = await krh.integrate_handler(

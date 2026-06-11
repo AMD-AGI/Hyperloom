@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Generate GitHub Actions matrix JSON from ci-config.yaml."""
 
 import json
@@ -9,26 +11,12 @@ import yaml
 
 
 def _entry_key(m: dict) -> str:
-    """Effective matrix/filter key: explicit `key` field overrides `inferenceX_key`.
-
-    Two reasons an entry sets its own `key` instead of inheriting from
-    `inferenceX_key`:
-
-    1. Self-contained entries with no upstream amd-master baseline. The GLM-5
-       multi-node entry (`key: glm5-multinode-fp8-mi300x-sglang`) is the
-       canonical case — `inferenceX_parser.synthesize_entry_from_ci_config`
-       builds the lookup row from the ci-config fields themselves.
-    2. Two ci-config entries sharing the same `inferenceX_key` (e.g. variants
-       of the same amd-master row) need unique matrix display names to avoid
-       dedupe.
-    """
+    """Effective matrix/filter key: explicit `key` field overrides `inferenceX_key`."""
     return m.get("key") or m["inferenceX_key"]
 
 
 def generate_matrix(config_path: str = "ci-config.yaml", selected_models: str = "") -> dict:
-    # Force UTF-8 — ci-config.yaml uses box-drawing chars (──) in section
-    # comments. Linux runners default to UTF-8, but Windows defaults to
-    # cp1252 which raises UnicodeDecodeError on byte 0x9d.
+    # Force UTF-8: ci-config.yaml uses box-drawing chars (──); Windows cp1252 would raise UnicodeDecodeError.
     with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
@@ -44,6 +32,12 @@ def generate_matrix(config_path: str = "ci-config.yaml", selected_models: str = 
 
 
 def main():
+    """Generate the matrix and write it to the GitHub Actions output.
+
+    Reads the model selection from the ``INPUT_MODELS`` environment variable,
+    builds the matrix, and appends it to the file named by ``GITHUB_OUTPUT``.
+    When that variable is unset, the matrix is pretty-printed to stdout instead.
+    """
     selected = os.environ.get("INPUT_MODELS", "")
     matrix = generate_matrix(selected_models=selected)
 

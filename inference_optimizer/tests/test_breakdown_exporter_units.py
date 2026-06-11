@@ -1,10 +1,6 @@
-"""Targeted unit tests for ``inference_optimizer.breakdown.exporter`` helpers.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The end-to-end ``build`` flow has integration coverage via
-``test_breakdown_smoke`` and friends; this module pins the small
-internal helpers (``_load_state`` / ``_load_manifest``) plus the
-malformed-JSON branches that integration tests skip.
-"""
+"""Targeted unit tests for ``inference_optimizer.breakdown.exporter`` helpers."""
 
 from __future__ import annotations
 
@@ -14,9 +10,7 @@ from inference_optimizer.breakdown import collectors as col
 from inference_optimizer.breakdown import exporter as ex
 
 
-# ---------------------------------------------------------------------------
 # _load_state
-# ---------------------------------------------------------------------------
 
 class TestLoadState:
     def test_missing_returns_empty_and_warns(self, tmp_path):
@@ -40,9 +34,7 @@ class TestLoadState:
         assert any("failed to parse state.json" in w for w in warnings)
 
 
-# ---------------------------------------------------------------------------
 # _load_manifest
-# ---------------------------------------------------------------------------
 
 class TestLoadManifest:
     def test_missing_returns_empty_and_warns(self, tmp_path):
@@ -65,9 +57,7 @@ class TestLoadManifest:
         assert any("failed to parse manifest.json" in w for w in warnings)
 
 
-# ---------------------------------------------------------------------------
 # collect_specialist_runs — round_id coercion (fail-soft)
-# ---------------------------------------------------------------------------
 
 class TestCoerceRoundId:
     def test_numeric_string_becomes_int(self):
@@ -92,9 +82,7 @@ class TestCoerceRoundId:
 
 class TestCollectSpecialistRuns:
     def test_hash_round_id_does_not_crash_and_is_preserved(self, tmp_path):
-        """Regression: a specialist round whose ``round_id`` is a task-id
-        hash used to raise ``ValueError`` in the collector and drop the
-        whole specialist_runs section."""
+        """Regression: a task-id-hash ``round_id`` used to raise ``ValueError`` and drop the whole specialist_runs section."""
         warnings: list[str] = []
         state = {
             "specialist_rounds": [
@@ -120,9 +108,7 @@ class TestCollectSpecialistRuns:
         assert not any("invalid literal" in w for w in warnings)
 
     def test_singular_domain_task_id_and_confidence_fallbacks(self, tmp_path):
-        """Rounds written by ``record_specialist_round`` carry singular
-        ``domain`` / ``task_id`` + bare ``confidence``; the collector must
-        surface them rather than emitting empty fields."""
+        """Rounds with singular ``domain`` / ``task_id`` + bare ``confidence`` must be surfaced rather than emitting empty fields."""
         runs_dir = tmp_path / "runs" / "specialist" / "abc123"
         runs_dir.mkdir(parents=True)
         (runs_dir / "specialist_done.json").write_text(

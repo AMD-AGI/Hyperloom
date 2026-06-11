@@ -1,24 +1,10 @@
-"""Tests for ``CriticAgentBackend._run_reasoning_loop`` — issue #170 web
-tools (web_search / web_fetch) integration.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-We reuse the runtime-subprocess fake from ``test_critic_agent_backend``
-so the focus stays on the LLM tool-call loop:
+"""Tests for ``CriticAgentBackend._run_reasoning_loop`` — issue #170 web tools (web_search / web_fetch) integration.
 
-* When web tools are disabled, the backend makes exactly ONE
-  ``chat.completions.create`` call with no ``tools`` kwarg (legacy path).
-* When web tools are enabled and the model replies with text only on the
-  first turn, the loop returns immediately after one call.
-* When the model issues ``web_search`` / ``web_fetch`` tool calls, the
-  loop invokes the injected client, appends the result as a ``tool``
-  message, and continues until the model emits text.
-* When the tool budget is exhausted, the loop forces one final no-tool
-  call so a verdict is always produced.
-* Argument / dispatch errors return human-readable strings to the LLM
-  rather than raising.
-
-Web tool clients are injected via ``web_tool_clients_factory`` with tiny
-fake classes — the underlying providers (Tavily / Serper) and httpx are
-covered by ``runtime/tests/test_web_tools_*``.
+Reuses the runtime-subprocess fake from ``test_critic_agent_backend`` so the
+focus stays on the LLM tool-call loop. Web tool clients are injected via
+``web_tool_clients_factory`` with fakes.
 """
 
 from __future__ import annotations
@@ -33,29 +19,25 @@ import pytest
 
 from inference_optimizer.orchestrator.backends import CriticAgentBackend, RuntimeCall
 
-# Reuse the runtime-cli fake + envelope helpers from the main test module.
 from inference_optimizer.tests.test_critic_agent_backend import (
     _make_fake_runtime,
 )
 
 
-# critic-agent ships its own ``runtime`` package; resolve the on-disk
-# location so ``from runtime.web_tools import ...`` inside
-# ``CriticAgentBackend._init_web_tools`` succeeds at test time.
+# Resolve critic-agent's on-disk ``runtime`` package so its web_tools import succeeds at test time.
 REAL_CRITIC_AGENT_ROOT = (
     Path(__file__).resolve().parents[2] / "critic-agent"
 )
 
 
-# Skip the entire module when critic-agent isn't checked out alongside the
-# parent project — same posture as the existing ``critic_agent_e2e`` mark.
+# Skip the module when critic-agent isn't checked out alongside the parent project.
 pytestmark = pytest.mark.skipif(
     not (REAL_CRITIC_AGENT_ROOT / "runtime" / "web_tools" / "__init__.py").is_file(),
     reason="critic-agent runtime.web_tools not present on disk",
 )
 
 
-# ── OpenAI-shaped fakes that support tool_calls ────────────────────────
+# OpenAI-shaped fakes that support tool_calls
 
 @dataclass
 class _FakeFunction:
@@ -129,7 +111,7 @@ class _ScriptedOpenAIClient:
         self.chat = type("_C", (), {"completions": self.completions})()
 
 
-# ── Fake web tool clients ──────────────────────────────────────────────
+# Fake web tool clients
 
 @dataclass
 class _RecordingSearchClient:
@@ -162,7 +144,7 @@ class _FakeWebClients:
     fetch: _RecordingFetchClient | None = None
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────
+# Helpers
 
 def _bundle(session_id: str, *, proposals: list[dict] | None = None) -> dict[str, Any]:
     """Minimum judge-bundle shape that drives the LLM path (proposals!=[])."""
@@ -206,14 +188,7 @@ def _tool_call(
 
 
 def _import_web_tools_config():
-    """Late import so REAL_CRITIC_AGENT_ROOT is on sys.path first.
-
-    A sibling test module may have created a ``runtime`` namespace
-    package backed by a tmp directory (see ``_evict_stale_runtime_modules``
-    in critic_agent.py for the same issue); explicitly evict the stale
-    cache before importing so we always load ``web_tools`` from the
-    real critic-agent checkout.
-    """
+    """Late import so REAL_CRITIC_AGENT_ROOT is on sys.path first; evicts a stale ``runtime`` namespace cache."""
     real = str(REAL_CRITIC_AGENT_ROOT)
     if real not in sys.path:
         sys.path.insert(0, real)
@@ -280,7 +255,7 @@ def tmp_session(tmp_path: Path) -> Path:
     return sd
 
 
-# ── Tests: legacy single-call path (web tools off) ─────────────────────
+# Tests: legacy single-call path (web tools off)
 
 @pytest.mark.asyncio
 async def test_disabled_web_tools_keeps_single_call_path(tmp_session: Path):
@@ -296,7 +271,7 @@ async def test_disabled_web_tools_keeps_single_call_path(tmp_session: Path):
     assert "tools" not in fake.completions.calls[0]["kwargs"]
 
 
-# ── Tests: enabled but no tool_calls on first turn ─────────────────────
+# Tests: enabled but no tool_calls on first turn
 
 @pytest.mark.asyncio
 async def test_enabled_with_immediate_text_makes_one_call(tmp_session: Path):
@@ -314,11 +289,10 @@ async def test_enabled_with_immediate_text_makes_one_call(tmp_session: Path):
     tool_names = [t["function"]["name"] for t in kwargs["tools"]]
     assert tool_names == ["web_search"]
     assert kwargs["tool_choice"] == "auto"
-    # The injected client was never called because the model didn't ask.
     assert search.calls == []
 
 
-# ── Tests: model issues a search tool call ─────────────────────────────
+# Tests: model issues a search tool call
 
 @pytest.mark.asyncio
 async def test_search_tool_call_is_dispatched_and_result_appended(tmp_session: Path):
@@ -336,21 +310,17 @@ async def test_search_tool_call_is_dispatched_and_result_appended(tmp_session: P
 
     result = await backend.run(prompt="inbox", system_prompt="You are critic.")
 
-    # Two LLM calls (tool-use turn + final text turn).
     assert len(fake.completions.calls) == 2
-    # The search client was called with the model's arguments.
     assert search.calls == [{"query": "sglang fp8"}]
-    # Second call's messages must include both assistant(tool_calls) and tool reply.
     msgs = fake.completions.calls[1]["messages"]
     assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in msgs)
     tool_msgs = [m for m in msgs if m.get("role") == "tool"]
     assert tool_msgs and tool_msgs[0]["tool_call_id"] == "c1"
     assert tool_msgs[0]["content"] == "SEARCH_RESULT_OK"
-    # The intent envelope must still come back valid.
     assert any(i.type.value == "review_verdict" for i in result.intents)
 
 
-# ── Tests: fetch tool call is dispatched too ──────────────────────────
+# Tests: fetch tool call is dispatched too
 
 @pytest.mark.asyncio
 async def test_fetch_tool_call_dispatched(tmp_session: Path):
@@ -373,7 +343,7 @@ async def test_fetch_tool_call_dispatched(tmp_session: Path):
     assert any(m.get("role") == "tool" and m["content"] == "PAGE_OK" for m in msgs)
 
 
-# ── Tests: multiple parallel tool_calls in one assistant turn ──────────
+# Tests: multiple parallel tool_calls in one assistant turn
 
 @pytest.mark.asyncio
 async def test_parallel_tool_calls_all_dispatched(tmp_session: Path):
@@ -394,14 +364,13 @@ async def test_parallel_tool_calls_all_dispatched(tmp_session: Path):
 
     await backend.run(prompt="inbox", system_prompt="You are critic.")
     assert search.calls and fetch.calls
-    # Tool message order matches tool_call order.
     msgs = fake.completions.calls[1]["messages"]
     tool_msgs = [m for m in msgs if m.get("role") == "tool"]
     assert [m["tool_call_id"] for m in tool_msgs] == ["c1", "c2"]
     assert [m["content"] for m in tool_msgs] == ["S", "F"]
 
 
-# ── Tests: bad JSON arguments propagate as a tool error message ─────────
+# Tests: bad JSON arguments propagate as a tool error message
 
 @pytest.mark.asyncio
 async def test_invalid_tool_arguments_returns_error_message(tmp_session: Path):
@@ -420,7 +389,6 @@ async def test_invalid_tool_arguments_returns_error_message(tmp_session: Path):
         search_client=search,
     )
     await backend.run(prompt="inbox", system_prompt="You are critic.")
-    # The provider was never called because arg-parsing failed.
     assert search.calls == []
     tool_msgs = [
         m for m in fake.completions.calls[1]["messages"]
@@ -457,7 +425,7 @@ async def test_non_object_tool_arguments_returns_error_message(
     assert "JSON object" in tool_msgs[0]["content"]
 
 
-# ── Tests: unknown tool name yields an inline error ────────────────────
+# Tests: unknown tool name yields an inline error
 
 @pytest.mark.asyncio
 async def test_unknown_tool_name_returns_error_message(tmp_session: Path):
@@ -480,22 +448,18 @@ async def test_unknown_tool_name_returns_error_message(tmp_session: Path):
     assert "unknown" in tool_msgs[0]["content"]
 
 
-# ── Tests: max_tool_turns exhausted forces a final no-tool call ────────
+# Tests: max_tool_turns exhausted forces a final no-tool call
 
 @pytest.mark.asyncio
 async def test_max_tool_turns_forces_final_no_tool_call(tmp_session: Path):
     search = _RecordingSearchClient(output="S")
-    # max_turns=1 means: turn 0 issues a tool call → turn 1 (final) is
-    # forced as no-tool. The loop must not loop forever even if the model
-    # keeps trying to call tools.
+    # max_turns=1: turn 0 issues a tool call → turn 1 (final) is forced no-tool.
     backend, fake = _make_backend(
         tmp_session=tmp_session,
         scripted_replies=[
-            # Turn 0 — model issues a tool call (tools available)
             _ScriptedReply(tool_calls=[
                 _tool_call("c1", "web_search", {"query": "x"}),
             ]),
-            # Forced final turn — tools NOT in kwargs; model emits text
             _ScriptedReply(text=_build_review_reply()),
         ],
         search_client=search,
@@ -504,22 +468,18 @@ async def test_max_tool_turns_forces_final_no_tool_call(tmp_session: Path):
 
     await backend.run(prompt="inbox", system_prompt="You are critic.")
 
-    # Exactly two LLM calls: tool-use turn + forced final turn.
     assert len(fake.completions.calls) == 2
-    # First call MUST expose tools.
     assert "tools" in fake.completions.calls[0]["kwargs"]
-    # Final call MUST NOT expose tools (forces a text answer).
     assert "tools" not in fake.completions.calls[1]["kwargs"]
 
 
-# ── Tests: web tools enabled by config but no clients usable ──────────
+# Tests: web tools enabled by config but no clients usable
 
 @pytest.mark.asyncio
 async def test_enabled_config_but_empty_clients_falls_back_to_no_tools(
     tmp_session: Path,
 ):
-    """When build_clients returns search=None, fetch=None the loop must
-    silently degrade to a single no-tool call (regression guard)."""
+    """When build_clients returns no usable clients the loop degrades to a single no-tool call."""
     Cfg = _import_web_tools_config()
     cfg = Cfg(critic_web_tools_enabled=True, search_provider="tavily")
     fake_client = _ScriptedOpenAIClient([_ScriptedReply(text=_build_review_reply())])
@@ -537,14 +497,12 @@ async def test_enabled_config_but_empty_clients_falls_back_to_no_tools(
         static_context={"model": "Qwen3", "framework": "sglang"},
     )
     await backend.run(prompt="inbox", system_prompt="You are critic.")
-    # No tools attached because clients are empty.
     assert "tools" not in fake_client.completions.calls[0]["kwargs"]
 
 
 @pytest.mark.asyncio
 async def test_fetch_only_config_exposes_fetch_schema_not_search(tmp_session: Path):
-    """When search provider is configured but has no API key, only
-    ``web_fetch`` must appear in the tool list."""
+    """When the search provider has no API key, only ``web_fetch`` appears in the tool list."""
     Cfg = _import_web_tools_config()
     cfg = Cfg(
         critic_web_tools_enabled=True,
@@ -577,15 +535,13 @@ async def test_fetch_only_config_exposes_fetch_schema_not_search(tmp_session: Pa
     assert tool_names == ["web_fetch"]
 
 
-# ── Tests: web tool client raising propagates as BackendError context ─
+# Tests: web tool client raising propagates as BackendError context
 
 @pytest.mark.asyncio
 async def test_search_client_exception_is_not_swallowed_as_text(
     tmp_session: Path,
 ):
-    """If the search client itself raises (real bug, not provider error),
-    the backend propagates the exception so we see it in CI rather than
-    quietly returning empty results."""
+    """If the search client itself raises, the backend propagates rather than returning empty results."""
     search = _RecordingSearchClient(raises=RuntimeError("kaboom"))
     backend, _ = _make_backend(
         tmp_session=tmp_session,

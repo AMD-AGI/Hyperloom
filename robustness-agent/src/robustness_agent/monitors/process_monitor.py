@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Process-level monitor — detects server/benchmark process anomalies."""
 
 from __future__ import annotations
@@ -17,12 +19,28 @@ class ProcessMonitor:
     """Track server and benchmark processes, detect zombies and stalls."""
 
     def __init__(self, config: Config, provider: MetricsProvider):
+        """Initialise the process monitor.
+
+        Args:
+            config (Config): Agent configuration carrying server and
+                benchmark process patterns and timeouts.
+            provider (MetricsProvider): Source of the current process
+                list.
+        """
         self._config = config
         self._provider = provider
         self._server_seen_at: dict[str, float] = {}
         self._benchmark_started_at: Optional[float] = None
 
     async def check(self) -> list[Alert]:
+        """Run server, benchmark, and zombie process checks.
+
+        Also raises a ``server_disappeared`` alert when a previously
+        seen server process is no longer alive within the recent window.
+
+        Returns:
+            list[Alert]: Alerts raised across all process checks.
+        """
         alerts: list[Alert] = []
         processes = await self._provider.get_process_list()
 
@@ -46,14 +64,27 @@ class ProcessMonitor:
         return alerts
 
     def notify_benchmark_started(self) -> None:
+        """Mark the current time as the benchmark start for timeout checks."""
         self._benchmark_started_at = time.time()
 
     def notify_benchmark_ended(self) -> None:
+        """Clear the recorded benchmark start time."""
         self._benchmark_started_at = None
 
     def _check_server_processes(
         self, processes: list[ProcessInfo], alerts: list[Alert],
     ) -> bool:
+        """Detect live server processes and zombie server processes.
+
+        Args:
+            processes (list[ProcessInfo]): Current process list.
+            alerts (list[Alert]): Mutable list that zombie-server alerts
+                are appended to.
+
+        Returns:
+            bool: ``True`` if any configured server pattern matched a
+            live process.
+        """
         found = False
         for pattern in self._config.server_process_patterns:
             matching = [p for p in processes if pattern in p.cmd]
@@ -74,6 +105,13 @@ class ProcessMonitor:
     def _check_benchmark_processes(
         self, processes: list[ProcessInfo], alerts: list[Alert],
     ) -> None:
+        """Alert when a benchmark runs past the configured timeout.
+
+        Args:
+            processes (list[ProcessInfo]): Current process list.
+            alerts (list[Alert]): Mutable list that a benchmark-timeout
+                alert is appended to.
+        """
         if self._benchmark_started_at is None:
             return
         elapsed = time.time() - self._benchmark_started_at
@@ -98,6 +136,13 @@ class ProcessMonitor:
     def _check_zombie_processes(
         self, processes: list[ProcessInfo], alerts: list[Alert],
     ) -> None:
+        """Warn when an excessive number of zombie processes exist.
+
+        Args:
+            processes (list[ProcessInfo]): Current process list.
+            alerts (list[Alert]): Mutable list that an excessive-zombies
+                alert is appended to.
+        """
         zombies = [p for p in processes if p.state.startswith("Z")]
         if len(zombies) > 5:
             alerts.append(Alert(

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Symptom data shape produced by signal rules and consumed by ActionLadder."""
 
 from __future__ import annotations
@@ -8,12 +10,25 @@ from typing import Any
 
 
 class SymptomSeverity(str, Enum):
+    """Severity level of a :class:`Symptom`.
+
+    Attributes:
+        LOW: Informational; soft actions only.
+        MEDIUM: Actionable alert; strategy nudges become reachable.
+        HIGH: Urgent; hard actions and wind-down become reachable.
+    """
+
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
 
     @property
     def rank(self) -> int:
+        """Ordinal rank used for severity comparison and sorting.
+
+        Returns:
+            int: ``0`` for LOW, ``1`` for MEDIUM, ``2`` for HIGH.
+        """
         return {"low": 0, "medium": 1, "high": 2}[self.value]
 
 
@@ -24,25 +39,19 @@ class Symptom:
     Attributes
     ----------
     name:
-        Stable identifier the ActionLadder dispatches on
-        (e.g. ``"agent_stall"``, ``"repeated_failure"``).
+        Stable identifier the ActionLadder dispatches on.
     severity:
-        :class:`SymptomSeverity`. Maps to the alert severity emitted
-        downstream and gates whether soft / hard actions are reachable.
+        :class:`SymptomSeverity`; gates whether soft / hard actions are reachable.
     summary:
-        Human-readable one-line summary surfaced in alerts and findings.
+        One-line summary surfaced in alerts and findings.
     evidence:
-        Structured payload the alert ``detail`` field carries through;
-        keep it small (Coordinator persists it verbatim).
+        Structured ``detail`` payload; keep it small (persisted verbatim).
     subject:
-        Identifying tuple for de-duplication and downstream targetting
-        (e.g. ``{"agent": "kernel"}`` / ``{"pod": "brain-0", "namespace": "..."}``).
+        Identifying tuple for de-dup and downstream targetting.
     source:
-        Label of the data source that produced the signal
-        (``"server"`` / ``"local"``).
+        Data source that produced the signal (``"server"`` / ``"local"``).
     suggestion:
-        Optional hint the ActionLadder uses when it builds the
-        ``next_action_hint`` for an ``escalate_strategy_change`` intent.
+        Optional hint for the ``escalate_strategy_change`` next_action_hint.
     """
 
     name: str
@@ -54,7 +63,12 @@ class Symptom:
     suggestion: str = ""
 
     def dedup_key(self) -> tuple[str, ...]:
-        """Stable identity used by the classifier to drop duplicates."""
+        """Stable identity used by the classifier to drop duplicates.
+
+        Returns:
+            tuple[str, ...]: ``(name,)`` when there is no subject, otherwise the
+                name followed by sorted ``key=value`` subject pairs.
+        """
         if not self.subject:
             return (self.name,)
         return (self.name, *sorted(f"{k}={v}" for k, v in self.subject.items()))

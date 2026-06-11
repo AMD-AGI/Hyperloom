@@ -1,30 +1,18 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tiny CI — long-running queue controller for the full 3B-12B pool.
 
-A single process keeps up to ``--sandbox-cap`` + ``--hyperloom-cap`` SaFE
-optimization tasks in flight at once across two *independent* submit
-workspaces (default 150 + 150 = 300 concurrent), pulls the next model from a
-shared queue the instant a slot frees, and emits an incremental CI summary +
-Teams webhook every ``--report-every`` completed models (default every 10).
+A single process keeps up to ``--sandbox-cap`` + ``--hyperloom-cap`` SaFE tasks
+in flight across two independent submit workspaces (default 150+150=300),
+pulls the next model from a shared queue as slots free, and webhooks an
+incremental summary every ``--report-every`` completed models. Run as one job
+instead of a GHA matrix (which caps at ~256 concurrent jobs).
 
-Why a controller instead of a GitHub Actions matrix
-----------------------------------------------------
-GitHub Actions caps a single workflow's matrix at ~256 concurrent jobs, and a
-5341-model matrix would be unmanageable. Instead this runs as ONE job that
-manages its own 300-wide thread pool, so concurrency, replenishment and
-progressive reporting are all controlled in-process.
-
-Everything heavy is reused verbatim from ``optimize_submit.py``:
-  * ``process_model``        — auto-detect + register + download + submit.
-  * ``wait_and_collect_one`` — wait for the task (4h cap) + SaFE-artifact and
-                               NFS-fallback collection + wekafs in-place backfill.
-  * ``write_manifest``       — the same ``submission_manifest.{json,md}`` the
-                               existing summarize stage feeds to build_summary.
-
-The only new logic is the scheduler: two worker pools (one per submit
-workspace), a shared work queue, a registration-concurrency gate so the
-download burst stays bounded, crash-safe progress checkpointing, and the
-"every K completions -> build_summary.py + send_webhook.py" reporting hook.
+Reuses ``process_model`` / ``wait_and_collect_one`` / ``write_manifest`` from
+``optimize_submit.py``; the new logic is the scheduler: two worker pools, a
+shared queue, a register-concurrency gate, crash-safe checkpointing, and the
+per-K-completions reporting hook.
 """
 
 from __future__ import annotations
@@ -41,9 +29,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-# tiny_submit.py lives next to optimize_submit.py in ci/. Make the import
-# work regardless of the caller's CWD (workflow uses working-directory: ci,
-# but local debugging may run from the repo root).
+# Import optimize_submit regardless of the caller's CWD.
 _CI_DIR = Path(__file__).resolve().parent
 if str(_CI_DIR) not in sys.path:
     sys.path.insert(0, str(_CI_DIR))
@@ -51,12 +37,9 @@ if str(_CI_DIR) not in sys.path:
 from optimize_submit import (  # noqa: E402
     DEFAULT_API_URL,
     DEFAULT_GPU_TYPE,
-    DEFAULT_INFERENCEX_PATH,
-    DEFAULT_OOB_PATH,
     DEFAULT_REGISTER_WORKSPACE,
     DEFAULT_RESULTS_PATH,
     DEFAULT_TARGET_GAIN,
-    DEFAULT_TRACELENS_ROOT,
     DEFAULT_VOLUME,
     HuggingFaceClient,
     SafeOptimizeClient,
@@ -70,15 +53,13 @@ from optimize_submit import (  # noqa: E402
 
 log = logging.getLogger("tiny")
 
-# Default workspaces for the two independent pools. Register happens in the
-# RW workspace (where /wekafs writes + the canonical Model CR live), submit
-# spreads across sandbox + hyperloom so each can run its own GPU pool.
+# Register happens in the RW workspace; submit spreads across sandbox +
+# hyperloom so each runs its own GPU pool.
 DEFAULT_SANDBOX_WORKSPACE = "core42-sandbox"
 DEFAULT_HYPERLOOM_WORKSPACE = "core42-hyperloom"
 DEFAULT_CANDIDATES_FILE = "candidates/hf_3b_12b_base_inference_2026-06-01.json"
 
-# Tiny runs each model for 4h (vs optimize-submit's 12h) per the user's
-# spec, so a 5341-model pool at 300-wide finishes in ~3 days instead of ~9.
+# Tiny runs each model for 4h (vs optimize-submit's 12h).
 DEFAULT_MAX_HOURS = 4.0
 DEFAULT_TASK_TIMEOUT_MIN = 240  # == 4h; the per-task wait deadline.
 
@@ -90,6 +71,12 @@ def load_candidates(path: Path) -> list[dict]:
 
     Returns the candidate dicts in pool order, dropping any without a repo_id.
     Each dict keeps pool_id / pool_index so the manifest can carry provenance.
+
+    Args:
+        path (Path): Path to the candidates JSON file.
+
+    Returns:
+        list[dict]: De-duplicated candidate dicts in pool order.
     """
     data = json.loads(path.read_text(encoding="utf-8"))
     raw = data.get("candidates") or data.get("models") or []
@@ -112,6 +99,13 @@ def load_done_records(progress_path: Path) -> dict[str, SubmissionRecord]:
     The progress file is append-only NDJSON, one ``asdict(record)`` per line.
     On resume we skip any repo that already reached a terminal state so the
     controller can pick up a multi-day run after an interruption.
+
+    Args:
+        progress_path (Path): Path to the append-only NDJSON progress log.
+
+    Returns:
+        dict[str, SubmissionRecord]: Map of model -> reconstructed record for
+            every valid line; empty if the file is absent.
     """
     done: dict[str, SubmissionRecord] = {}
     if not progress_path.is_file():
@@ -139,14 +133,39 @@ def load_done_records(progress_path: Path) -> dict[str, SubmissionRecord]:
 # ── The controller ──────────────────────────────────────────────────────────────
 
 class TinyController:
+    """Long-running scheduler that keeps many SaFE optimization tasks in flight.
+
+    Drives two independent submit-workspace worker pools off a shared work
+    queue, throttles the register/download burst with a semaphore, checkpoints
+    progress for crash-safe resume, and emits incremental per-batch CI
+    summaries plus webhooks while building a full ranked summary at the end.
+
+    Attributes:
+        args (argparse.Namespace): Parsed CLI arguments controlling the run.
+        artifacts_dir (Path): Where downloaded task artifacts are stored.
+        manifests_dir (Path): Where manifests + progress NDJSON are written.
+        summary_out (Path): Where the full ranked summary is written.
+        records (list[SubmissionRecord]): All completed submission records.
+        register_sem (threading.Semaphore): Bounds the register/download burst.
+        stop (threading.Event): Set to ask workers to stop after the current
+            model.
+        completed (int): Count of completed models.
+        total_planned (int): Total models planned (done + pending).
+    """
+
     def __init__(self, args: argparse.Namespace):
+        """Initialize controller state, output dirs, and SaFE clients.
+
+        Args:
+            args (argparse.Namespace): Parsed CLI arguments; also consulted
+                with env-var fallbacks for SaFE connection and cluster fields.
+        """
         self.args = args
         self.artifacts_dir = Path(args.artifacts_dir)
         self.manifests_dir = Path(args.output_dir)
         self.summary_out = Path(args.summary_out_dir)
-        # Per-batch webhook manifests live OUTSIDE manifests_dir: build_summary
-        # scans for submission_manifest.json *recursively*, so keeping them under
-        # manifests_dir would make the full-summary build double-count records.
+        # Per-batch webhook manifests live outside manifests_dir; build_summary
+        # scans recursively, so co-locating them would double-count records.
         self.batch_root = self.manifests_dir.parent / "tiny-batch-reports"
         self.progress_path = self.manifests_dir / "progress.ndjson"
         for d in (self.artifacts_dir, self.manifests_dir, self.summary_out,
@@ -158,9 +177,8 @@ class TinyController:
         self.progress_lock = threading.Lock()
         self.emit_lock = threading.Lock()
         self.manifest_lock = threading.Lock()
-        # Bound the register+download+submit burst. The 4h optimization wait
-        # runs OUTSIDE this gate, so we still reach full 300-wide concurrency;
-        # only the storage-heavy download fan-out is throttled.
+        # Bound only the register+download+submit burst; the 4h wait runs
+        # outside this gate, so full 300-wide concurrency is still reached.
         self.register_sem = threading.Semaphore(max(1, args.register_concurrency))
         self.stop = threading.Event()
 
@@ -175,8 +193,8 @@ class TinyController:
         self.prompt_prefix = self._resolve_prompt_prefix()
         self.kernel_backends = parse_kernel_backends(args.kernel_opt_backends)
 
-        # Resolve SaFE connection + cluster prompt fields with env fallbacks,
-        # mirroring optimize_submit.main() so a dispatch can configure either.
+        # Resolve SaFE connection fields with env fallbacks (mirrors
+        # optimize_submit.main()).
         self.base_url = (args.api_url or os.environ.get("SAFE_BASE_URL")
                          or os.environ.get("SAFE_API_URL") or DEFAULT_API_URL)
         self.api_key = (args.api_key or os.environ.get("CLAW_API_KEY")
@@ -193,14 +211,14 @@ class TinyController:
                        or DEFAULT_VOLUME)
         self.gpu_type = (args.gpu_type or os.environ.get("SAFE_OPTIMIZE_GPU_TYPE")
                          or DEFAULT_GPU_TYPE)
+        # Unset by default: install.sh clones a writable per-session copy.
         self.inferencex_path = (args.inferencex_path
                                 or os.environ.get("SAFE_OPTIMIZE_INFERENCEX_PATH")
-                                or DEFAULT_INFERENCEX_PATH)
+                                or "")
         self.oob_path = (args.oob_path or os.environ.get("SAFE_OPTIMIZE_OOB_PATH")
-                         or DEFAULT_OOB_PATH)
+                         or "")
         self.tracelens_root = (args.tracelens_root
-                               or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT")
-                               or DEFAULT_TRACELENS_ROOT)
+                               or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT", ""))
         self.hf_token = args.hf_token or os.environ.get("HF_TOKEN", "")
         self.webhook_url = args.webhook_url or os.environ.get("WEBHOOK_URL", "")
         self.dashboard_url = args.dashboard_url or os.environ.get("DASHBOARD_URL", "")
@@ -210,6 +228,12 @@ class TinyController:
         self.safe_hyperloom = self._make_client(self.hyperloom_workspace, args.hyperloom_cap)
 
     def _resolve_prompt_prefix(self) -> str:
+        """Resolve the prompt prefix from file, inline arg, or the default.
+
+        Returns:
+            str: The prompt prefix text (the packaged default if neither a
+                file nor an inline value is provided).
+        """
         a = self.args
         if a.prompt_prefix_file:
             p = Path(a.prompt_prefix_file)
@@ -221,6 +245,16 @@ class TinyController:
         return _load_default_prompt_prefix()
 
     def _make_client(self, submit_workspace: str, cap: int) -> SafeOptimizeClient:
+        """Create a SaFE client sized for one submit workspace's worker pool.
+
+        Args:
+            submit_workspace (str): Workspace to submit tasks into.
+            cap (int): Worker count for this pool; used to size the HTTP
+                connection pool.
+
+        Returns:
+            SafeOptimizeClient: A configured client with a per-workspace cap.
+        """
         client = SafeOptimizeClient(
             self.base_url, self.api_key or "dry-run",
             register_workspace=self.register_workspace,
@@ -228,8 +262,8 @@ class TinyController:
             volume=self.volume,
             submit_workspaces_pool=None,  # hard per-workspace cap, no round-robin
         )
-        # Size the urllib3 pool to the worker count so 150 concurrent requests
-        # don't serialize behind a default 10-connection pool.
+        # Size the urllib3 pool to the worker count to avoid serializing behind
+        # the default 10-connection pool.
         try:
             from requests.adapters import HTTPAdapter
             adapter = HTTPAdapter(pool_connections=2, pool_maxsize=cap + 16,
@@ -243,12 +277,25 @@ class TinyController:
     # ── progress / reporting ────────────────────────────────────────────────
 
     def _append_progress(self, rec: SubmissionRecord) -> None:
+        """Append one record to the crash-safe NDJSON progress log.
+
+        Args:
+            rec (SubmissionRecord): The completed record to checkpoint.
+
+        Returns:
+            None
+        """
         line = json.dumps(asdict(rec), separators=(",", ":"))
         with self.progress_lock:
             with self.progress_path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
 
     def _write_manifest_snapshot(self) -> None:
+        """Write a submission manifest from a snapshot of all current records.
+
+        Returns:
+            None
+        """
         with self.records_lock:
             snapshot = list(self.records)
         with self.manifest_lock:
@@ -268,6 +315,14 @@ class TinyController:
         yields just these rows -> a single 10-row Teams card. The full ranked
         table is produced separately by _write_full_summary() as the run
         artifact; it is never pushed to the webhook.
+
+        Args:
+            seq (int): Monotonic batch sequence number (used for the dir name).
+            batch (list[SubmissionRecord]): Records completed since the last
+                report.
+
+        Returns:
+            None
         """
         if not batch:
             return
@@ -340,6 +395,19 @@ class TinyController:
             log.warning("[summary] full build_summary failed: %s", e)
 
     def _on_complete(self, rec: SubmissionRecord, pool_label: str) -> None:
+        """Record a finished model, update counters, and maybe emit a batch.
+
+        Thread-safe: appends to the progress log and records list, bumps the
+        submitted/succeeded tallies, logs progress, and triggers a webhook
+        batch report once ``report_every`` new completions accumulate.
+
+        Args:
+            rec (SubmissionRecord): The completed record.
+            pool_label (str): Label of the pool that handled it (for logging).
+
+        Returns:
+            None
+        """
         self._append_progress(rec)
         batch: list[SubmissionRecord] | None = None
         seq = 0
@@ -370,6 +438,17 @@ class TinyController:
     # ── per-model work ────────────────────────────────────────────────────────
 
     def _try_prewarm(self, repo: str) -> None:
+        """Best-effort pre-pull of a model into ``/wekafs`` before register.
+
+        No-op when prewarm is disabled or the NFS models root is not writable;
+        timeouts/errors are logged and SaFE downloads the model instead.
+
+        Args:
+            repo (str): HuggingFace repo id to prewarm.
+
+        Returns:
+            None
+        """
         if not self.args.prewarm:
             return
         nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
@@ -392,6 +471,19 @@ class TinyController:
             log.warning("[%s] prewarm error %s — SaFE will download", repo, e)
 
     def _handle_one(self, safe: SafeOptimizeClient, cand: dict) -> SubmissionRecord:
+        """Process one candidate: prewarm, register/submit, then wait+collect.
+
+        Register/download/submit run under the concurrency gate; the long
+        per-task wait runs outside it so full concurrency is reached.
+
+        Args:
+            safe (SafeOptimizeClient): Client for this candidate's pool.
+            cand (dict): Candidate dict (requires ``repo_id``).
+
+        Returns:
+            SubmissionRecord: The resulting record (possibly ``skipped`` when
+                the controller is stopping, or unwaited in dry-run mode).
+        """
         repo = cand["repo_id"]
         pool_metadata = {
             "pool_id": cand.get("pool_id") or self.args.pool_id,
@@ -400,8 +492,7 @@ class TinyController:
             "batch_size": "",
             "source_task_id": "",
         }
-        # Register + download + submit happen under the concurrency gate so the
-        # storage fan-out stays bounded. The long 4h wait is OUTSIDE the gate.
+        # Register/download/submit under the gate; the 4h wait runs outside it.
         with self.register_sem:
             if self.stop.is_set():
                 return SubmissionRecord(model=repo, status="skipped",
@@ -435,6 +526,19 @@ class TinyController:
 
     def _worker(self, safe: SafeOptimizeClient, work_q: "queue.Queue[dict]",
                 pool_label: str) -> None:
+        """Worker loop: pull candidates off the queue and process each one.
+
+        Exceptions from a single model are caught so one failure never kills
+        the worker; each result is forwarded to ``_on_complete``.
+
+        Args:
+            safe (SafeOptimizeClient): Client for this worker's pool.
+            work_q (queue.Queue[dict]): Shared queue of candidate dicts.
+            pool_label (str): Label of this worker's pool (for logging).
+
+        Returns:
+            None
+        """
         while not self.stop.is_set():
             try:
                 cand = work_q.get_nowait()
@@ -470,6 +574,20 @@ class TinyController:
     # ── run ─────────────────────────────────────────────────────────────────
 
     def run(self, candidates: list[dict]) -> int:
+        """Run the full controller over a candidate list until drained.
+
+        Optionally resumes from the progress log, starts the heartbeat and
+        both worker pools, joins them, flushes the final partial batch to the
+        webhook, and writes the full ranked summary.
+
+        Args:
+            candidates (list[dict]): Candidate dicts to process (pool order).
+
+        Returns:
+            int: Exit code — ``0`` if at least one task submitted (or there is
+                nothing to do), ``2`` on missing API key / empty prompt
+                prefix, else ``1``.
+        """
         if not self.api_key and not self.args.dry_run:
             log.error("no API key (CLAW_API_KEY / SAFE_API_KEY / --api-key)")
             return 2
@@ -582,6 +700,12 @@ class TinyController:
 # ── CLI ──────────────────────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the Tiny CI command-line argument parser.
+
+    Returns:
+        argparse.ArgumentParser: Parser with all controller, pool, SaFE,
+            prewarm, and reporting options.
+    """
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 
@@ -671,6 +795,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """CLI entrypoint: load candidates, build the controller, and run it.
+
+    Returns:
+        int: Process exit code — ``2`` if the candidates file is missing or no
+            candidates are selected, otherwise the controller's exit code.
+    """
     args = _build_parser().parse_args()
     logging.basicConfig(
         level=args.log_level,

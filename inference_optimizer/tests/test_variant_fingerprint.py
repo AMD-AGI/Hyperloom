@@ -1,15 +1,9 @@
-"""Content fingerprint regression tests.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The fingerprint is the cross-action dedup-ledger key (used by
-``explore_search``). It MUST satisfy:
+"""Content fingerprint regression tests for the ``explore_search`` dedup-ledger key.
 
-* ``name`` is not an input → renames cannot bypass dedup.
-* ``extra_server_args`` is normalized by ``shlex.split`` + sort →
-  permutations of the same flags collide.
-* ``extra_envs`` is normalized by sorted ``(str(k), str(v))`` pairs →
-  dict insertion order and ``"1"`` vs ``1`` collide.
-* ``GridVariant.fingerprint`` and ``VariantResult.fingerprint`` agree
-  with the standalone function when given identical content.
+Pins: name is not an input; args/envs are order-normalized; env values are
+string-coerced; GridVariant/VariantResult fingerprints match the function.
 """
 
 from __future__ import annotations

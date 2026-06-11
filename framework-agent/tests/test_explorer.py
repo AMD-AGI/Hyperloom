@@ -1,13 +1,6 @@
-"""Tests for framework_agent.explorer pure logic, plan mode, and
-end-to-end ranking_mode / keep_winner_only / build_concurrency flows.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Hermetic - no GPU / git / network. The plan-mode test stubs out
-``sources.enumerate_candidates`` and the per-candidate audit-material
-writer so it exercises explore() control flow without I/O to primus.
-The ranking / keep_winner_only tests stub workspace + commands + metric
-evaluation so we exercise explore() main-loop control flow without git
-/ venv / GPU.
-"""
+"""Tests for framework_agent.explorer pure logic, plan mode, and e2e ranking_mode / keep_winner_only / build_concurrency flows. Hermetic - stubs enumerate_candidates, workspace, commands, and metric evaluation to exercise explore() control flow."""
 
 from __future__ import annotations
 
@@ -215,11 +208,7 @@ def _stub_explore(
     metrics_table: dict[str, tuple[float, float, str]],
     n_candidates: int = 3,
 ) -> list[Candidate]:
-    """Wire up workspace + commands + metric stubs.
-
-    ``metrics_table`` maps candidate.ref to (throughput, accuracy, completed)
-    so each test can choose how many winners exist.
-    """
+    """Wire up workspace + commands + metric stubs; ``metrics_table`` maps candidate.ref to (throughput, accuracy, completed)."""
     candidates = [
         Candidate(ref=f"PR:{i}", repo="r", source="explicit")
         for i in range(1, n_candidates + 1)

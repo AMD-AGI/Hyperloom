@@ -1,19 +1,9 @@
-"""Regression tests for the Ray-cluster pre-flight gate on the backend
-submit paths.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Defect 2 from /home/sapmajum/hyperloom_work/logs/geak_dispatch_audit.md:
-``geak_submit.submit`` and ``oob_submit.submit`` used to call
-``quiet_ray_init()`` directly inside their ``run_via_ray`` wrapper, which
-spends 30 seconds retrying ``global_state_accessor.cc:500`` GCS handshake
-attempts when the raylet is wedged. These tests pin down two behaviours:
+"""Regression tests for the Ray-cluster pre-flight gate on backend submit (Defect 2, geak_dispatch_audit.md).
 
-  1. ``submit`` calls ``ensure_ray_cluster()`` *before* attempting to use Ray
-     so a wedged cluster gets restarted (or the failure surfaces fast).
-  2. When ``ensure_ray_cluster()`` raises, ``submit`` returns the
-     dispatch-failure envelope with the diagnostic hint string in
-     ``stderr_tail`` (so downstream
-     ``kernel_optimization.build_verification`` can record
-     ``artifact_error`` and ``make_proposal`` can surface it).
+Pins that ``submit`` calls ``ensure_ray_cluster()`` before Ray, and on its
+failure returns the dispatch-failure envelope with a hint in ``stderr_tail``.
 """
 
 from __future__ import annotations
@@ -41,13 +31,12 @@ def tmp_output_dir(tmp_path: Path) -> Path:
 
 
 def test_geak_submit_calls_ensure_ray_cluster_before_run_via_ray(tmp_output_dir, tmp_path):
-    """``ensure_ray_cluster`` must run before ``run_via_ray`` so we don't
-    burn the 30 s ray.init retry budget on a wedged cluster."""
+    """``ensure_ray_cluster`` must run before ``run_via_ray`` to avoid the 30s ray.init retry on a wedged cluster."""
     call_order: list[str] = []
 
     def _fake_ensure(num_gpus=None, log_path=None):
         call_order.append("ensure_ray_cluster")
-        return False  # cluster already healthy
+        return False
 
     def _fake_run_via_ray(*args, **kwargs):
         call_order.append("run_via_ray")
@@ -71,10 +60,7 @@ def test_geak_submit_calls_ensure_ray_cluster_before_run_via_ray(tmp_output_dir,
 def test_geak_submit_returns_dispatch_failure_envelope_on_ensure_failure(
     tmp_output_dir, tmp_path,
 ):
-    """When ``ensure_ray_cluster`` fails (raylet wedged, ray start cannot
-    recover), ``submit`` must return a dispatch-failure envelope whose
-    ``stderr_tail`` carries the diagnostic hint so kernel_optimization can
-    record ``artifact_error`` and ``make_proposal`` can surface it."""
+    """When ``ensure_ray_cluster`` fails, ``submit`` returns a dispatch-failure envelope whose ``stderr_tail`` carries the diagnostic hint."""
     def _boom(num_gpus=None, log_path=None):
         raise RuntimeError("failed to start Ray; see ray_lifecycle.log")
 

@@ -60,7 +60,7 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
         ├── state.json
         ├── storage/coordinator.db
         ├── agents/{orchestration,kernel,critic,robustness}/
-        ├── runs/{baseline,profile,roofline,backends,params,...}/<task_id>/
+        ├── runs/{baseline,profile,roofline,explore,sweep,...}/<task_id>/
         ├── kernel-agent/runs/<session_id>/
         ├── kernel-agent-workspace/<kernel_id>/
         ├── optimizer_runs/               # per-session launcher logs / PID / monitor
@@ -104,17 +104,26 @@ the mirrors by hand.
 **Session rule:** never treat ``$USER_DATA_PATH`` as the session dir when
 ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` is set. Read
 ``manifest.json`` / ``state.json`` / ``coordinator.db`` from the
-**session dir**. For monitoring after launch, parse the CLI's
-``Session dir : …`` line first; if it is unavailable, walk
-``$USER_DATA_PATH/<model_basename>/`` for the latest ``*T*Z/`` timestamp
-dir.
+**session dir**. For monitoring after launch, learn the session dir from
+the **launch-info JSON** written by ``--launch-info-file`` (``jq -r
+.session_dir <file>``) or, equivalently, from the single
+``HYPERLOOM_LAUNCH key=value …`` sentinel line the CLI prints to stdout
+(``session_dir=…``). Those are the authoritative, machine-readable
+sources. Never guess by walking ``$USER_DATA_PATH/<model_basename>/`` for
+the latest ``*T*Z/`` timestamp dir — overlapping sessions on the same
+host make "latest" pick the wrong run.
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
-`/wekafs/hyperloom/TraceLens-internal`, the shared cluster checkout; base repo
-[AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens))
-with an **optional** internal extension at `$TRACELENS_INTERNAL_ROOT` (no
-default; internal users set it to their own existing checkout to opt in,
+`$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`; when unset,
+`kernel-agent/scripts/install.sh` clones
+[AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins
+it to a fixed SHA. A pre-existing checkout you maintain is only used as
+an explicit operator override — export `TRACELENS_ROOT=<path>` to opt
+in, which skips both the clone and the SHA pin) with an **optional**
+internal
+extension at `$TRACELENS_INTERNAL_ROOT` (no default; internal users set
+it to their own existing checkout to opt in,
 otherwise open-source-only; rehydration module — Hyperloom keeps no internal
 URL/path). See README Local Mode step 1. The per-version
 `sglang_roofline_patches/sglang_<minor>_<patch>/` layout under
@@ -206,11 +215,12 @@ brief:
   research-backed variants when available, but `llm_direct`,
   `default_grid`, `specialist:<domain-or-tag>`, and `dynamic` provenance
   values are all accepted audit labels when phase and sequence gates pass.
-  Specialist-sourced variants are capped by `research_lane_capacity`
-  (clamped to the `2 × visible GPU count` ceiling); dynamic variants use
-  their own per-round cap. Specialists author patches into an isolated
-  worktree; `integrate_patch` does the actual `git apply` +
-  throughput/accuracy gate after Critic review.
+  Specialist- and dynamic-sourced variants are not grid-size capped;
+  per-round breadth is bounded by the `research_lane` / GPU pool leases
+  (the `research_lane` scales with the `2 × visible GPU count` ceiling).
+  Specialists author patches into an isolated worktree; `integrate_patch`
+  does the actual `git apply` + throughput/accuracy gate after Critic
+  review.
   Optional GPU specialists are off by default: launch with
   `--gpu-specialist-capacity N` (or
   `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=N`) before Orchestration may
@@ -221,10 +231,12 @@ brief:
   < `--explore-force-exit-hours-remaining` (default 3.0 h) OR phase
   budget < `--explore-force-exit-budget-pct` (default 20%). Non-negotiable
   — leaves buffer for KERNEL → SWEEP → CLOSE + report.
-- **IR-7 honest self-stop**: on EXPLORE plateau a
-  `session_steward_specialist` recommends `stop_session` /
-  `advance_to_kernel` / `continue_explore` (at most one continuation per
-  session). Disable with `--steward-disabled`. IR-6 always overrides it.
+- **Plateau advisory**: EXPLORE / KERNEL / FRAMEWORK_PR plateau signals
+  are computed every tick and rendered as advisory in the orchestration
+  prompt. They do NOT drive phase advance — the LLM may emit
+  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
+  when it judges further effort unproductive. IR-6 force-exit and the
+  per-phase budget remain the only hard advance gates.
 
 ### FRAMEWORK_PR phase (Coordinator-internal)
 
@@ -252,31 +264,28 @@ under **Framework Selection** below.
 
 ## Retired modules and rules (do not re-introduce)
 
-These orchestrator modules were intentionally removed; the
-`actions/_meta/*.yaml` registry + `_grid_runner.py` + the unified,
-specialist-informed EXPLORE flow replaced them. Re-adding them
-re-creates conflicting decision paths:
+The live runtime uses `actions/_meta/*.yaml`, `_grid_runner.py`, and the
+unified specialist-informed `explore` flow. Do not recreate the retired
+`backends` / `params` / `validate_stack` / scoring modules.
 
-- `orchestrator/backends.py` (the action-routing one — distinct from
-  the LLM-adapter directory `orchestrator/backends/`)
-- `orchestrator/params.py`
-- `orchestrator/validate_stack.py`
-- `orchestrator/scoring.py`
-
-Related rules that look reasonable but break things:
+Rules that look reasonable but break the current flow:
 
 - **No `framework_pr first-explore priority` rule** in
   `system_prompts/orchestration.md` — conflicts with the EXPLORE
   specialist-informed flow.
   Framework-agent runs in the dedicated **FRAMEWORK_PR** phase
   before EXPLORE; the LLM never proposes the `framework_pr`
-  action (PolicyGate denies it via
-  `framework_pr_action_not_llm_proposable`). Use `--no-framework`
-  to skip the phase entirely.
-- **`kernel_opt` sequencing** is gated by
-  `explore_attempts_minimum_before_kernel_opt`, which reads
-  `gain_per_stack_entry` (at least one successful explore round on
-  record) rather than any per-action attempt counter.
+  action — it is Coordinator-managed and absent from
+  `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 denies any
+  LLM-side propose / delegate with `rule='phase_incompatible'`.
+  Use `--no-framework` to skip the phase entirely.
+- **`kernel_opt` sequencing** is no longer gated by an
+  explore-minimum check (the
+  `explore_attempts_minimum_before_kernel_opt` rule was retired
+  in loosen_plan P1_06). KERNEL phase may propose `kernel_opt`
+  directly; the `trace_analyze → run_optimization` data
+  dependency (P2_11 handler-level check) and the reusable
+  `kernel_id` validation still keep the inputs valid.
 
 ## Setup
 
@@ -319,7 +328,7 @@ remember). Direct steps in `inference_optimizer/scripts/install.sh`:
 |---|---|
 | `inference_optimizer` pkg + `claude_agent_sdk` extras (`pip install -e .[test]`) | `ensure_inference_optimizer` |
 | **Magpie** (`git clone --depth 1 $MAGPIE_REPO $MAGPIE_DIR` + `pip install -e`; default `$MAGPIE_DIR=$HYPERLOOM_RUNTIME_DIR/Magpie`) | `ensure_magpie` |
-| `INFERENCEX_PATH` auto-detection (scans `$MAGPIE_DIR/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX` → WekaFS fallbacks) | `ensure_inferencex` |
+| `INFERENCEX_PATH` resolution (scans `$MAGPIE_DIR/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX`, else clones a fresh writable checkout; read-only host mounts are no longer used) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 
 Chained from `kernel-agent/scripts/install.sh` (single chain at the end
@@ -438,6 +447,57 @@ supply session metadata directly via CLI flags / env vars:
 | GPU type | `--gpu-type` | `GPU_TYPE` | rocm-smi auto-detect when unset |
 | Model class | `--model-class` | `MODEL_CLASS` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); defaults to `moe_mla` when unset. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | External reference GPU | `--compare-against-gpu` | — | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
+| Quantization prelude | `--quantize` | — | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Ignored on `--resume`. |
+
+### Step 2b — Optional quantization prelude (`--quantize`)
+
+When the user asks to **quantize the model before optimizing** (e.g. "quantize
+to FP8 then optimize", "run this in MX-FP4"), pass `--quantize "<scheme prompt>"`
+to the same `optimize` command. This runs the **quantization-agent once as a
+prelude**, before any baseline/session work: it drives AMD Quark PTQ from the
+prompt, then rewrites `--model` to the exported quantized model so the entire
+optimization loop runs on the quantized model.
+
+```bash
+inference_optimizer optimize \
+  --model "$MODEL_PATH" \
+  --framework vllm \
+  --quantize "fp8 global scheme, fp8 kv_cache, exclude lm_head; accept up to 5% relative eval gap" \
+  --max-hours 2
+```
+
+- The `--quantize` text is the quantization request only (scheme / kv-cache /
+  excluded layers / acceptable eval gap). **Do not** repeat the model path or
+  export dir — the adapter folds `--model` + a per-model export dir under the
+  workspace root (`<workspace_root>/quantization/<model>/quantized`) into the
+  prompt automatically.
+- **Structured path for UI/backends**: instead of free text, pass
+  `--quantize-scheme <enum>` (one of `none` / `fp8` / `ptpc_fp8` / `mxfp4` /
+  `mxfp4_fp8`); `mxfp4` / `mxfp4_fp8` are **MI355X-only**. It resolves to a
+  curated prompt internally (`orchestrator/quantization_schemes.py`). `none` or
+  omit = no quantization. Free-text `--quantize` takes priority when both given.
+- **Keep `--precision` consistent with the quantization.** When a quantization
+  scheme is requested, also set `--precision`/`PRECISION` to that scheme (e.g.
+  `--quantize-scheme fp8` → `--precision fp8`). Otherwise the
+  benchmark configs, display names, and the optimization report carry the stale
+  operator-supplied precision label (e.g. `fp8`/`bf16`) and **mislabel** an
+  actually-quantized model. Never leave a conflicting precision when quantizing.
+- Behavior: one-shot, **skipped on `--resume`**. On a failed/unusable
+  quantization the run **hard-stops (`SystemExit(3)`)** — it never silently
+  optimizes the un-quantized source after an explicit `--quantize`.
+  The one exception is a **pre-flight scheme/GPU mismatch** via
+  `--quantize-scheme` (e.g. `mxfp4` on a non-MI355X target): this is **skipped**
+  (not a hard stop) and continues on the un-quantized model, emitting a
+  `QUANTIZATION_SKIPPED:` line on stdout and setting
+  `$HYPERLOOM_QUANTIZATION_SKIPPED` so the caller can detect it.
+- Prerequisites (in addition to the normal Setup): `$QUARK_ROOT` must point at
+  a Quark checkout containing `.claude/skills/quark-torch-*`, and the installed
+  `amd-quark` package version must match that checkout (install editable from
+  `$QUARK_ROOT` to keep them consistent). Claude SDK auth is the same
+  `ANTHROPIC_*` env the rest of the loop uses.
+- After it finishes, the `Quantization prelude: model -> <dir>` line on stdout
+  shows the quantized model path that the rest of the run will use; include it
+  in status reports.
 
 A user request to optimize a model is approval to run Step 1 on a fresh
 node; do not stop for an extra confirmation. After IR-2, smoke-test the
@@ -447,7 +507,12 @@ CLI:
 export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
-export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+# TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens
+# to $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens and pin it to a
+# fixed SHA. Only export it as an operator override to point at a
+# pre-existing checkout you maintain; this skips both the clone and the
+# SHA pin.
+# export TRACELENS_ROOT=/path/to/your/TraceLens
 # Optional internal extension; export only to enable it (open-source-only if unset):
 # export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 
@@ -608,9 +673,9 @@ Operators only interact through two `task.params` knobs (full schema in
 each `actions/_meta/<action>.yaml`): `params.benchmark_script` (bare
 sanitized `*.sh` name; overrides the gpu_type auto-pick) and
 `params.result_dir` (forwarded as `$RESULT_DIR`). The Coordinator's
-`baseline_self_loop` PolicyGate rule denies a third baseline attempt
-that repeats a twice-failed param fingerprint, pointing FAILURE RECOVERY
-at the next override surface.
+`baseline_no_param_change` PolicyGate rule denies any baseline proposal
+that changes params after a failure — the agent must retry with
+identical params and the run terminates after 3 consecutive failures.
 
 ### Workload-contract reuse (baseline → explore/sweep)
 
@@ -625,18 +690,16 @@ tput). Per-variant `extra_envs` still win (applied last).
 
 ## Critic Backend Selection
 
-The Critic role has three backend modes, picked by mutually-exclusive
-CLI flags. Default is `--critic-agent` (no flag needed).
+The Critic role has two backend modes. Default is `--critic-agent` (no
+flag needed).
 
 | Flag | Backend class | Behaviour |
 |---|---|---|
 | (none) / `--critic-agent` | `CriticAgentBackend` | Drives the standalone `critic-agent/` skill runtime via `python -m runtime.cli prepare-review` → Codex chat completion → `python -m runtime.cli commit-review`. Adds KB priors lookup (with circuit-breaker for unreachable services), per-session memory + idempotent `reviewed_msg_ids` (no double-verdict), `judge_bundle.review_constraints` injected into the LLM prompt, and `needs_review` / `critic_unavailable` source when context is missing. |
 | `--critic-mock` | `MockCriticBackend` | Always-approve adapter. Use for offline / smoke tests when Codex creds aren't available. |
-| `--critic-codex-bare` | `CodexBackend` | Legacy direct chat-completion path with no KB / session memory / `review_constraints`. Available for debugging the LLM layer in isolation. (`--critic-real` is a hidden back-compat alias.) |
 
 Default is overridable per pod via
-`INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` (one of `mock` / `agent` /
-`codex_bare`).
+`INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` (one of `mock` / `agent`).
 
 ### Required env when `--critic-agent` is active
 
@@ -651,9 +714,9 @@ Default is overridable per pod via
 
 `_preflight()` checks `CRITIC_AGENT_ROOT` resolves to a real directory
 with `runtime/cli.py`, then runs `python -m runtime.cli --help` (5s
-timeout) before the Coordinator boots. Missing or broken runtime
-aborts the run with a clear error pointing at `--critic-mock` /
-`--critic-codex-bare` as bypasses.
+timeout) before the Coordinator boots. Missing or broken runtime aborts
+the run with a clear error pointing at `--critic-mock` as the offline
+bypass.
 
 ### Per-turn artefacts (audit trail)
 
@@ -695,7 +758,7 @@ What this controls:
   cold-start with no LLM input.
 - Which extra-args env name `_grid_runner` writes
   (`EXTRA_VLLM_ARGS` / `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS`)
-- Which Marathon KB partition orchestration reads for hints
+- Which KB partition orchestration reads for hints
 
 Mixing frameworks in a single session is not supported; the CLI
 locks `$FRAMEWORK` for the run. Resume re-reads `$FRAMEWORK` from the
@@ -779,8 +842,10 @@ if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
-# RUN_LOG/PID under workspace until session_dir is known; move or re-tail
-# from $session_dir/optimizer_runs/ after parsing "Session dir" from stdout.
+# RUN_LOG/PID/launch-info live under the workspace until the session_dir
+# is known; move or re-tail from $session_dir/optimizer_runs/ after reading
+# session_dir from the launch-info JSON below.
+# /workspace/hyperloom is only the fallback when $USER_DATA_PATH is unset.
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 export RUN_LOG="$RUN_DIR/run_${RUN_TAG}.log"
 export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
@@ -793,6 +858,7 @@ setsid nohup inference_optimizer --verbose optimize \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
   --kernel-claude \
+  --launch-info-file "$RUN_DIR/launch_${RUN_TAG}.json" \
   > "$RUN_LOG" 2>&1 < /dev/null &
 echo $! > "$PID_FILE"
 ```
@@ -801,8 +867,8 @@ echo $! > "$PID_FILE"
 shell can die on SSH disconnect.
 
 Critic defaults to `--critic-agent`; Robustness defaults to `--robustness-agent`.
-See [Critic Backend Selection](#critic-backend-selection) for `--critic-mock` /
-`--critic-codex-bare` overrides; pod-level overrides via
+See [Critic Backend Selection](#critic-backend-selection) for `--critic-mock`;
+pod-level overrides via
 `INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` /
 `INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND`.
 
@@ -812,11 +878,16 @@ After launching, do a short health check:
 sleep 30
 pid="$(cat "$PID_FILE")"
 test -d "/proc/$pid" && echo "optimizer_alive=true pid=$pid"
-# Parse session dir from RUN_LOG or resolve latest timestamp subdir:
-session_dir="$(grep -m1 '^Session dir' "$RUN_LOG" 2>/dev/null | sed 's/^Session dir[[:space:]]*:[[:space:]]*//')"
+# Authoritative session dir from the launch-info JSON (--launch-info-file).
+# Never guess by timestamp: overlapping sessions break any "latest dir" pick.
+launch_info="$RUN_DIR/launch_${RUN_TAG}.json"
+session_dir="$(jq -r '.session_dir // empty' "$launch_info" 2>/dev/null)"
 if [ -z "$session_dir" ]; then
-  model_base="$(basename "$MODEL_PATH")"
-  session_dir="$(ls -d "${USER_DATA_PATH:-/workspace/hyperloom}/$model_base/"*T*Z 2>/dev/null | sort | tail -1)"
+  echo "ERROR: no .session_dir in $launch_info (launch-info JSON missing or" \
+       "malformed). The optimizer likely died before emitting launch info;" \
+       "inspect the HYPERLOOM_LAUNCH line and errors in $RUN_LOG." \
+       "Refusing to guess the session dir from timestamps." >&2
+  return 1 2>/dev/null || exit 1
 fi
 test -f "$session_dir/manifest.json" && echo "manifest_present=true session_dir=$session_dir"
 test -f "$session_dir/state.json" && echo "state_exists=true" \
@@ -851,6 +922,10 @@ without those markers (unexpected crash).
 ```bash
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 mkdir -p "$RUN_DIR"
+# Point the monitor at the authoritative session dir: it reads
+# $INFERENCE_OPTIMIZER_SESSION_DIR first, else .session_dir from the
+# launch-info JSON in $LAUNCH_INFO_FILE (written by --launch-info-file).
+export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 cp "$REPO_ROOT/optimizer_runs/robustness_monitor.sh.example" \
    "$RUN_DIR/robustness_monitor.sh"
 chmod +x "$RUN_DIR/robustness_monitor.sh"
@@ -859,9 +934,12 @@ setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
   2>&1 < /dev/null &
 ```
 
-Reads `$PID_FILE` and (optional) `$USER_DATA_PATH` / `$MAX_HOURS` /
-`$TARGET_GAIN`. Edit the example before copying if defaults need to
-change. `stop_reason` interpretation matches the `## Monitoring` reader.
+Reads `$PID_FILE` plus (optional) `$INFERENCE_OPTIMIZER_SESSION_DIR` /
+`$LAUNCH_INFO_FILE` / `$MAX_HOURS` / `$TARGET_GAIN`. The session dir comes
+from `$INFERENCE_OPTIMIZER_SESSION_DIR` when set, else from `.session_dir`
+in the launch-info JSON at `$LAUNCH_INFO_FILE` (never from a timestamp
+guess). Edit the example before copying if defaults need to change.
+`stop_reason` interpretation matches the `## Monitoring` reader.
 
 ## Monitoring
 
@@ -877,8 +955,43 @@ for k in ("stop_reason", "baseline_tput", "cumulative_gain", "current_best",
     print(f"{k}: {s.get(k)}")
 print("explore_last_round:", s.get("explore_search", {}).get("last_round"))
 print("phase:", s.get("phase"))
+
+# #266 lifecycle: a structured, append-only log of every phase/step
+# boundary. Each entry says which step ran (human label + real phase),
+# whether it STARTed / ENDed / errored, how long it took, and WHERE its
+# artifacts landed on disk. Surface these lines in chat verbatim so the
+# operator can tell — without reading the run log — that a phase ran, where
+# its outputs went, and which artifact feeds the next phase.
+#
+# Reading tip: step-level events pair up. A START with no matching END for
+# the same step means that step is still running (or died without
+# finishing); an ERROR means the handler raised. Two rows intentionally do
+# NOT pair: (a) phase-boundary rows use status ENTER (step == the phase
+# name) and are point-in-time "entered <phase>" markers — the next phase's
+# ENTER implies the previous one finished, so they never get an END; and
+# (b) a lone END with no START is a step that produced a response without
+# running its handler (detail=cache_hit when served from the trace_analyze
+# cache, detail=rejected when an integrate hit an already-exhausted patch).
+# Follow the printed artifact paths to inspect intermediates during
+# execution (e.g. the TraceLens run dir that contains analysis.md /
+# kernel_candidates.json / agent_transcript.jsonl).
+events = s.get("lifecycle") or []
+print(f"\n--- lifecycle (last 12 of {len(events)}) ---")
+for e in events[-12:]:
+    dur = f" {e['duration_s']}s" if e.get("duration_s") is not None else ""
+    detail = f" [{e['detail']}]" if e.get("detail") else ""
+    arts = " ".join(f"{k}={v}" for k, v in (e.get("artifacts") or {}).items())
+    line = (f"#{e.get('seq')} {e.get('label')} [{e.get('phase')}] "
+            f"{e.get('status')}{dur}{detail}")
+    if arts:
+        line += f" -> {arts}"
+    print(line)
 PY
 ```
+
+The `label` column uses the simplified pipeline names from #266 (TraceLens /
+GEAK / Integrate / Validate / Report); the `[phase]` column carries the exact
+coordinator phase (`PRELUDE` … `CLOSE`) so both naming dimensions are visible.
 
 Recent action counts from SQLite (last 500 events grouped by category):
 
@@ -895,9 +1008,12 @@ The optimizer should:
   PRELUDE (after baseline) and at each validated-tput watermark
   (`current_tput / last_roofline_tput >= 1.10`; compound). Default is
   `roofline` (profile + trace_analyze + analysis.md); `--no-enable-roofline`
-  switches to plain `profile`. The LLM cannot propose either
-  (`analysis_action_not_llm_proposable`), and while one is in flight all
-  explore / kernel dispatches are deferred (`wait_for_auto_roofline`).
+  switches to plain `profile`. The LLM cannot propose either —
+  both names are Coordinator-managed and absent from
+  `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 returns
+  `rule='phase_incompatible'`. Concurrent GPU work is
+  serialised by the lane / GPU lease rather than a policy deny, so
+  explore / kernel dispatches keep flowing while analysis refreshes.
   Each analysis also stamps a decode roofline ceiling
   (`orchestrator/roofline_ceiling.py`) for the report's
   `## Roofline Comparison` section.
@@ -1034,8 +1150,8 @@ gate is intentional — opus-4-5 / haiku silently degraded prior runs.
 ### Critic-agent runtime errors
 
 Inspect `$SESSION_DIR/critic-workdir/<latest>/{request,judge_bundle,review,emit}.json`.
-Bypass with `--critic-mock` (offline / smoke) or `--critic-codex-bare` (legacy
-direct Codex). See `## Critic Backend Selection`.
+Bypass with `--critic-mock` for offline / smoke runs. See
+`## Critic Backend Selection`.
 
 | Symptom | Fix |
 |---|---|
@@ -1059,6 +1175,6 @@ Report concise status:
 
 - session id (from `manifest.json`) and log path
 - `cumulative_gain` and `current_best`
-- params accepted/rejected summary
+- explore accepted/rejected summary
 - last kernel optimized, correctness, micro speedup, E2E gain, decision
 - whether the process is still running or stopped and why

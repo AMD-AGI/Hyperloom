@@ -1,14 +1,6 @@
-"""Consolidated tests for ``orchestrator.action_executors._grid_runner``.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Combines four previously separate modules:
-
-* abort marker (``_write_variant_abort_marker`` + ``VariantResult.error_class``)
-* helper-level units (skip-spec parsing, MN/SN invalid-variant filters,
-  ``apply_user_skip_list``, ``VariantResult.to_dict``, sanitisers)
-* per-variant mtime gating for Magpie leak-path salvage (regression for
-  stale ``inferencex_result.json`` adoption)
-* parameter override + ``RESULT_DIR`` plumbing
-"""
+"""Consolidated tests for ``orchestrator.action_executors._grid_runner``."""
 
 from __future__ import annotations
 
@@ -31,9 +23,8 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
     _build_variant_yaml,
     _parse_skip_spec,
     _run_magpie,
-    apply_multi_node_invalid_variants,
+    annotate_multi_node_cuda_graph_max_bs,
     apply_runtime_benchmark_overrides,
-    apply_single_node_invalid_variants,
     apply_user_skip_list,
     coerce_extra_envs,
     resolve_skip_spec,
@@ -41,9 +32,7 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
 )
 
 
-# ==============================================================================
 # Section 1: _write_variant_abort_marker (formerly test_grid_runner_abort_marker.py)
-# ==============================================================================
 
 
 def _read_marker(slot):
@@ -171,9 +160,7 @@ def test_variant_result_carries_error_class_field():
     assert vr_ok.to_dict()["error_class"] == ""
 
 
-# ==============================================================================
 # Section 2: helper-level units (formerly test_grid_runner_helpers_units.py)
-# ==============================================================================
 
 
 class TestResolveSkipSpec:
@@ -204,17 +191,15 @@ class TestParseSkipSpec:
         assert _parse_skip_spec("") == []
 
 
-class TestMultiNodeInvalidFilter:
-    def test_short_circuits_in_single_node(self, monkeypatch):
+class TestMultiNodeCudaGraphMaxBsAdvisory:
+    def test_no_notes_in_single_node(self, monkeypatch):
         grid = [
             GridVariant(name="a", extra_server_args="--cuda-graph-max-bs 8"),
         ]
-        kept, dropped = apply_multi_node_invalid_variants(grid)
-        assert kept == grid
-        assert dropped == []
+        notes = annotate_multi_node_cuda_graph_max_bs(grid)
+        assert notes == []
 
-    def test_drops_undersized_cuda_graph_max_bs_in_multi_node(self, monkeypatch):
-        monkeypatch.setattr(gr, "is_multi_node", lambda: True, raising=False)
+    def test_emits_advisory_in_multi_node_without_dropping(self, monkeypatch):
         from inference_optimizer.orchestrator.action_executors import (
             _multi_node_env as mne,
         )
@@ -225,42 +210,11 @@ class TestMultiNodeInvalidFilter:
             GridVariant(name="bad", extra_server_args="--cuda-graph-max-bs 8"),
             GridVariant(name="ok",  extra_server_args="--max-num-seqs 128"),
         ]
-        kept, dropped = apply_multi_node_invalid_variants(grid)
-        assert [k.name for k in kept] == ["ok"]
-        assert [d["name"] for d in dropped] == ["bad"]
-        assert "CONC=64" in dropped[0]["reason"]
-
-
-class TestSingleNodeInvalidFilter:
-    def test_drops_multi_node_only_in_single_node(self):
-        grid = [
-            GridVariant(name="legacy", extra_server_args="--foo 1"),
-            GridVariant(
-                name="mn_only",
-                extra_server_args="--enable-deepep-moe",
-                note="multi_node_only_moe",
-            ),
-        ]
-        kept, dropped = apply_single_node_invalid_variants(grid)
-        assert [k.name for k in kept] == ["legacy"]
-        assert [d["name"] for d in dropped] == ["mn_only"]
-
-    def test_short_circuits_in_multi_node(self, monkeypatch):
-        from inference_optimizer.orchestrator.action_executors import (
-            _multi_node_env as mne,
-        )
-
-        monkeypatch.setattr(mne, "is_multi_node", lambda: True)
-        grid = [
-            GridVariant(
-                name="mn_only",
-                extra_server_args="--enable-deepep-moe",
-                note="multi_node_only_moe",
-            ),
-        ]
-        kept, dropped = apply_single_node_invalid_variants(grid)
-        assert [k.name for k in kept] == ["mn_only"]
-        assert dropped == []
+        notes = annotate_multi_node_cuda_graph_max_bs(grid)
+        assert [n["name"] for n in notes] == ["bad"]
+        assert "CONC=64" in notes[0]["reason"]
+        # Grid itself is unchanged: nothing is dropped.
+        assert [v.name for v in grid] == ["bad", "ok"]
 
 
 class TestApplyUserSkipList:
@@ -432,30 +386,18 @@ class TestCoerceExtraEnvs:
         assert isinstance(v.fingerprint, str) and len(v.fingerprint) > 0
 
 
-# ==============================================================================
 # Section 3: per-variant mtime gating + param overrides
-# (formerly test_grid_runner_mtime_gating.py + test_grid_runner_param_overrides.py)
-#
-# Both source modules used an autouse fixture pinning
-# INFERENCE_OPTIMIZER_LEAK_ROOTS to an empty sandbox so the runner's
-# always-on artifact harvest doesn't scrape the host's real /workspace
-# during the test run. Hoisted to module-level here so it applies to both
-# subsections.
-# ==============================================================================
+# The autouse fixture below pins INFERENCE_OPTIMIZER_LEAK_ROOTS to an empty sandbox so the harvest doesn't scrape the host's /workspace.
 
 
 @pytest.fixture(autouse=True)
 def _isolate_leak_root(request, tmp_path_factory, monkeypatch):
-    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox for the
-    grid-runner subprocess tests below. Applied unconditionally: the
-    helper-level tests (sections 1/2) never spin up ``run_grid`` so the
-    extra env var is harmless there.
-    """
+    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox for the grid-runner subprocess tests."""
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
 
 
-# ---- mtime gating subsection helpers ----------------------------------------
+# mtime gating subsection helpers
 
 
 def _write_baseline_yaml_mtime(path: Path) -> None:
@@ -581,7 +523,7 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
     )
 
 
-# ---- param overrides subsection helpers -------------------------------------
+# param overrides subsection helpers
 
 
 def _write_baseline_yaml_overrides(path: Path) -> None:
@@ -642,16 +584,7 @@ def test_apply_runtime_overrides_pins_benchmark_script_after_gpu_pop():
 
 
 def test_apply_runtime_overrides_yaml_tp_wins_over_env_on_resume(monkeypatch):
-    """Regression: on resume, a stale ``state.tp`` re-exported as
-    ``os.environ['TP']`` must NOT silently downgrade a YAML-pinned TP.
-
-    Reproduces the 2026-06-02 conc_sweep bug where the baseline session
-    ran with TP=2 (baseline_config.with_envs.yaml ``envs.TP: 2``) but
-    ``state.tp`` was 1 (never synced from yaml). Resume re-exported
-    ``TP=1`` to os.environ, and apply_runtime_benchmark_overrides used
-    it to overwrite the yaml TP=2 → sglang launched with TP=1,
-    making conc_sweep curves incomparable to the original baseline.
-    """
+    """Regression (2026-06-02 conc_sweep bug): a stale ``state.tp`` re-exported as ``os.environ['TP']`` on resume must NOT downgrade a YAML-pinned TP."""
     monkeypatch.setenv("TP", "1")
     bench = {
         "framework": "sglang",
@@ -670,9 +603,7 @@ def test_apply_runtime_overrides_yaml_tp_wins_over_env_on_resume(monkeypatch):
 
 
 def test_apply_runtime_overrides_env_tp_used_when_yaml_silent(monkeypatch):
-    """Companion: when yaml has no TP, env TP is still applied
-    (the original behaviour). Guards against an over-broad fix that
-    would lock TP from being set at all."""
+    """Companion: when yaml has no TP, env TP is still applied (guards against an over-broad fix)."""
     monkeypatch.setenv("TP", "4")
     bench = {"framework": "sglang", "envs": {}}
     apply_runtime_benchmark_overrides(bench, gpu_type="mi355x")
@@ -836,15 +767,12 @@ async def test_run_grid_default_result_dir_is_per_variant_slot(tmp_path):
     assert len({rd for _, rd in captured_envs}) == 2
 
 
-# ==============================================================================
 # Framework-aware help-text probe (atom + multi-framework cache)
-# ==============================================================================
 
 
 @pytest.fixture(autouse=False)
 def _reset_help_cache():
-    """Clear the framework-keyed help-text cache before/after each test
-    so per-test mocks don't leak across the class."""
+    """Clear the framework-keyed help-text cache before/after each test."""
     _grid_runner._HELP_TEXT_CACHE.clear()
     yield
     _grid_runner._HELP_TEXT_CACHE.clear()
@@ -853,10 +781,7 @@ def _reset_help_cache():
 def test_probe_server_help_text_atom_returns_help_when_importable(
     _reset_help_cache, monkeypatch,
 ):
-    """The atom branch invokes
-    ``atom.model_engine.arg_utils:EngineArgs.add_cli_args``. We mock
-    subprocess.run to return a synthetic atom-help payload; the probe
-    must return it verbatim and cache it for the second call."""
+    """The atom probe returns the mocked help verbatim and caches it for the second call."""
     call_count = {"n": 0}
     synthetic_help = (
         "usage: atom-engine [-h] [--tensor-parallel-size INT] "
@@ -883,9 +808,7 @@ def test_probe_server_help_text_atom_returns_help_when_importable(
 def test_probe_server_help_text_atom_returns_empty_on_failure(
     _reset_help_cache, monkeypatch,
 ):
-    """Subprocess failures must surface as ``""`` and NOT be cached —
-    a transient failure (e.g. unrelated test-time mock) must not
-    poison the slot for the rest of the session."""
+    """Subprocess failures surface as ``""`` and are NOT cached (transient failures must not poison the slot)."""
     raised = {"n": 0}
 
     def fake_run(*args, **kwargs):
@@ -894,8 +817,7 @@ def test_probe_server_help_text_atom_returns_empty_on_failure(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert _grid_runner._probe_server_help_text("atom") == ""
-    # Re-probe — must invoke subprocess again rather than serving an
-    # empty cached value (so transient failures recover automatically).
+    # Re-probe invokes subprocess again rather than serving an empty cached value.
     assert _grid_runner._probe_server_help_text("atom") == ""
     assert raised["n"] == 2
 
@@ -903,8 +825,7 @@ def test_probe_server_help_text_atom_returns_empty_on_failure(
 def test_probe_server_help_text_cache_keyed_by_framework(
     _reset_help_cache, monkeypatch,
 ):
-    """Cache slots must be per-framework so a sglang-default test box
-    doesn't leak its help text into the vllm or atom slot."""
+    """Cache slots must be per-framework so sglang's help text doesn't leak into the vllm/atom slot."""
     payload_map = {
         "sglang": "USAGE_SGLANG --enable-flashinfer-mla",
         "atom": "USAGE_ATOM --torch-profiler-dir",
@@ -934,9 +855,7 @@ def test_probe_server_help_text_cache_keyed_by_framework(
 def test_probe_server_help_text_supports_all_three_frameworks(
     _reset_help_cache, monkeypatch,
 ):
-    """Cross-cutting guard: every first-class framework must have a
-    registered probe command and the helper must return a ``str`` for
-    each (success or failure path, doesn't matter)."""
+    """Cross-cutting guard: every first-class framework has a registered probe command and returns a ``str``."""
     monkeypatch.setattr(
         subprocess, "run",
         lambda cmd, *a, **kw: subprocess.CompletedProcess(
@@ -955,9 +874,7 @@ def test_probe_server_help_text_supports_all_three_frameworks(
 def test_probe_server_help_text_unknown_framework_returns_empty(
     _reset_help_cache,
 ):
-    """Unregistered framework names short-circuit to ``""`` without
-    invoking subprocess. Same conservative shape as the existing
-    failure path."""
+    """Unregistered framework names short-circuit to ``""`` without invoking subprocess."""
     assert _grid_runner._probe_server_help_text("tensorrt") == ""
     assert _grid_runner._probe_server_help_text("") == ""
 
@@ -965,9 +882,7 @@ def test_probe_server_help_text_unknown_framework_returns_empty(
 def test_probe_sglang_help_text_back_compat_shim(
     _reset_help_cache, monkeypatch,
 ):
-    """The legacy ``_probe_sglang_help_text`` name is preserved as a
-    thin wrapper around the framework-keyed probe. Pre-existing test
-    fixtures that monkey-patch this exact name must keep working."""
+    """The legacy ``_probe_sglang_help_text`` name is preserved as a thin wrapper so fixtures patching it keep working."""
     monkeypatch.setattr(
         subprocess, "run",
         lambda cmd, *a, **kw: subprocess.CompletedProcess(
@@ -983,26 +898,18 @@ def test_probe_sglang_help_text_back_compat_shim(
 def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
     _reset_help_cache, monkeypatch,
 ):
-    """When ``$FRAMEWORK=atom`` the compatibility filter must validate
-    variant flag literals against the atom --help output, not sglang's. We mock the probe so atom's
-    help advertises one flag but not another and confirm the variant
-    with the unrecognised flag is dropped with a reason mentioning
-    ``atom --help``."""
+    """When ``$FRAMEWORK=atom`` the compatibility filter validates variant flags against atom --help, dropping a sglang-only flag with a reason mentioning ``atom --help``."""
     monkeypatch.setenv("FRAMEWORK", "atom")
-    # MoE keyword so the model-class predicate doesn't drop the variant
-    # before the help-text check runs.
+    # MoE keyword so the model-class predicate doesn't drop the variant first.
     monkeypatch.setenv("MODEL_PATH", "/wekafs/models/DeepSeek-R1-0528")
 
-    # Pre-populate the cache so the test doesn't have to mock subprocess
-    # for the underlying probe — the predicate reads from the cache when
-    # populated.
+    # Pre-populate the cache so the predicate reads from it without mocking subprocess.
     _grid_runner._HELP_TEXT_CACHE["atom"] = (
         "usage: atom-engine [--tensor-parallel-size INT] "
         "[--enable-deepep-moe]"
     )
 
-    # Two variants: one whose flag IS in the atom help (kept), one that
-    # references a sglang-only flag (dropped).
+    # One variant's flag IS in the atom help (kept); one references a sglang-only flag (dropped).
     kept_variant = GridVariant(
         name="atom_compatible",
         extra_server_args="--enable-deepep-moe",

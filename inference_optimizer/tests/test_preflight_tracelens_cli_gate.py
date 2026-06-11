@@ -1,20 +1,6 @@
-"""Regression tests for ``_check_tracelens_cli`` hard-gate.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Pins SKILL Step 2 step 8.5 contract:
-
-* Missing ``TraceLens_generate_perf_report_pytorch_inference`` on PATH ->
-  ``sys.exit(2)`` with an actionable error pointing at ``install.sh``.
-* Present on PATH -> returns silently (no exit, no print).
-
-Why this gate exists: brain-generated ``launch.sh`` / ``relaunch.sh``
-wrappers that source only ``runtime/kernel-agent.env.sh`` and skip
-``install.sh`` look healthy until kernel-agent shells out to
-``tracelens_analysis.py``, ~1h into the session. Without this gate the
-robustness agent's J3 ``tracelens_cli_missing`` HIGH signal at tick ~6 was
-the first surfacing. Moving discovery to launch (mirroring
-``_gate_claude_model`` step 10) turns a delayed silent strike into an
-upfront fail-fast.
-"""
+"""Regression tests for the ``_check_tracelens_cli`` hard-gate."""
 
 from __future__ import annotations
 

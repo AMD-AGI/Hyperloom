@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ci/optimize_submit.py — Hyperloom CI variant of SaFE optimize_submit.
 
 Submits SaFE inference optimization tasks. Reuses the same SaFE bearer token
@@ -50,7 +52,6 @@ import logging
 import os
 import random
 import re
-import shlex
 import shutil
 import sys
 import time
@@ -66,56 +67,54 @@ log = logging.getLogger("optimize-submit")
 # ── Defaults ────────────────────────────────────────────────────────────────────
 
 DEFAULT_API_URL = "https://core42.primus-safe.amd.com"
-# Two-workspace split — necessary because of conflicting K8s constraints:
-#
-#   register: core42-hyperloom + /wekafs
-#     - core42-hyperloom workspace has /wekafs mounted ReadWriteMany so model
-#       weights can actually be downloaded there.
-#     - The path /wekafs/models/<repo> is on a shared weka volume that ALL
-#       sandbox pods (including core42-sandbox) can read via their own
-#       ReadOnlyMany /wekafs mount — i.e. it's effectively global storage.
-#
-#   submit: core42-sandbox
-#     - Only workspaces whose spec.scopes includes 'Sandbox' can host the
-#       Sandbox-typed K8s workload that SaFE creates for an optimization
-#       task. core42-hyperloom intentionally excludes Sandbox (ops design)
-#       and the admission webhook (vworkload.kb.io) rejects with
-#       Primus.00003 if you try.
-#
-# Requires SaFE backend selectLocalPath to do path-accessible fallback when
-# submit_workspace != register_workspace (see SaFE/.../optimization/
-# model_helper.go — same pattern as sft.go:resolveModelLocalPathFromK8sModel).
-# Until that lands, submit_task will 400; --submit-workspace can be set equal
-# to --register-workspace as a workaround.
+# Two-workspace split due to conflicting K8s constraints: register =
+# core42-hyperloom (has /wekafs RWX for downloads; shared volume is readable by
+# all sandboxes); submit = core42-sandbox (only Sandbox-scoped workspaces can
+# host the optimization task; core42-hyperloom rejects with Primus.00003).
+# Needs SaFE selectLocalPath path-accessible fallback when submit != register,
+# else submit_task 400s; workaround: set --submit-workspace == --register-workspace.
 DEFAULT_REGISTER_WORKSPACE = "core42-hyperloom"
 DEFAULT_SUBMIT_WORKSPACE = "core42-sandbox"
 DEFAULT_VOLUME = "/wekafs"
 DEFAULT_PROXY = "harbor.core42.primus-safe.amd.com/proxy"
-# Cluster-aware defaults: SaFE backend's NormalizePromptConfig uses MI355X /
-# /hyperloom/InferenceX which are wrong for core42 (it's MI300X and the
-# canonical hyperloom-managed InferenceX checkout lives at
-# /wekafs/hyperloom/InferenceX). Without overriding here the generated prompt
-# sends the agent on a 5-10 min wild goose chase looking for
-# /hyperloom/InferenceX, and it picks GPU-architecture-wrong heuristics later.
-#
-# /wekafs/hyperloom/InferenceX is the same priority path that:
-#   - inference_optimizer/cli.py:1586          uses as the V2 skill default
-#   - inference_optimizer/scripts/install.sh   bootstraps into
-#   - .github/workflows/inference-optimization-ci.yml lists FIRST after
-#     ${NFS_ROOT}/InferenceX in the config-file probe loop
-# Keeping this aligned avoids the agent landing on a stale /wekafs/InferenceX
-# checkout (left over from earlier non-hyperloom layouts on some sandboxes).
+# core42 is MI300X; override the Claw prompt-builder's wrong MI355X default so
+# the prompt and TP policy use the right arch. Tool source paths are
+# deliberately NOT pinned: install.sh clones writable per-session copies, and
+# pinning the shared read-only /wekafs/hyperloom/InferenceX caused
+# "Read-only file system" errors on first session. OOB/TraceLens are opt-in too.
 DEFAULT_GPU_TYPE = "MI300X"
-DEFAULT_INFERENCEX_PATH = "/wekafs/hyperloom/InferenceX"
-# OOB + TraceLens live next to InferenceX on the same hyperloom-managed mount.
-# Like DEFAULT_INFERENCEX_PATH these are core42 fallbacks; --oob-path /
-# --tracelens-root (or SAFE_OPTIMIZE_* env) override per-cluster.
-DEFAULT_OOB_PATH = "/wekafs/hyperloom/OOB"
-DEFAULT_TRACELENS_ROOT = "/wekafs/hyperloom/TraceLens-internal"
+DEFAULT_GPU_PROFILE = "mi300x"
 DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
 DEFAULT_MAX_HOURS = 12.0
 DEFAULT_TARGET_GAIN = 100.0
 DEFAULT_RESULTS_PATH = "$RESULT_DIR"
+DEFAULT_CONTEXT_RESERVE_TOKENS = 16
+
+# Hardware facts from AMD Instinct datasheets. tp_thresholds_b is CI policy:
+# MI300X baseline (32/128/256B) scaled by per-GPU HBM capacity.
+GPU_PROFILES = {
+    "mi300x": {
+        "gpu_type": "MI300X",
+        "llvm_target": "gfx942",
+        "hbm_gb": 192,
+        "hbm_bandwidth_tb_s": 5.3,
+        "tp_thresholds_b": (32, 128, 256),
+    },
+    "mi325x": {
+        "gpu_type": "MI325X",
+        "llvm_target": "gfx942",
+        "hbm_gb": 256,
+        "hbm_bandwidth_tb_s": 6.0,
+        "tp_thresholds_b": (43, 171, 341),
+    },
+    "mi355x": {
+        "gpu_type": "MI355X",
+        "llvm_target": "gfx950",
+        "hbm_gb": 288,
+        "hbm_bandwidth_tb_s": 8.0,
+        "tp_thresholds_b": (48, 192, 384),
+    },
+}
 
 _KERNEL_BACKEND_ALIASES = {
     "geak": "GEAK",
@@ -126,25 +125,40 @@ _KERNEL_BACKEND_ALIASES = {
     "cursor": "Cursor",
 }
 
-# Canonical prompt prefix lives in ci/prompt_prefix.txt next to this script.
-# Single source of truth — same file is read by the GitHub workflow Submit
-# step (.github/workflows/optimize-submit.yml) as the schedule-trigger
-# fallback, and also serves as the argparse default here so any direct
-# CLI invocation (manual debugging, peer scripts, etc.) gets the same
-# prefix without having to set $SAFE_OPTIMIZE_PROMPT_PREFIX every time.
+
+def normalize_gpu_profile(gpu_type: str | None, *, warn: bool = True) -> str | None:
+    """Return the GPU profile key when ``gpu_type`` maps to a known CI profile."""
+    raw = (gpu_type or "").strip()
+    compact = re.sub(r"[^a-z0-9]", "", raw.lower())
+    for key, profile in GPU_PROFILES.items():
+        profile_type = str(profile["gpu_type"])
+        aliases = {
+            re.sub(r"[^a-z0-9]", "", key.lower()),
+            re.sub(r"[^a-z0-9]", "", profile_type.lower()),
+        }
+        if compact in aliases or compact.endswith(key):
+            return key
+    if warn and raw:
+        log.warning("unknown gpu_type=%r; using %s for TP policy only",
+                    raw, GPU_PROFILES[DEFAULT_GPU_PROFILE]["gpu_type"])
+    return None
+
+
+def canonical_gpu_type(gpu_type: str | None) -> str:
+    profile_key = normalize_gpu_profile(gpu_type, warn=False)
+    if profile_key:
+        return str(GPU_PROFILES[profile_key]["gpu_type"])
+    return (gpu_type or DEFAULT_GPU_TYPE).strip() or DEFAULT_GPU_TYPE
+
+# Canonical prompt prefix (ci/prompt_prefix.txt) — single source of truth,
+# also read by .github/workflows/optimize-submit.yml and used as the argparse
+# default so direct CLI invocations get the same prefix.
 _PROMPT_PREFIX_FILE = Path(__file__).resolve().parent / "prompt_prefix.txt"
 
 
 def _load_default_prompt_prefix() -> str:
-    """Resolve the default prompt prefix for ``--prompt-prefix``.
-
-    Resolution order:
-      1. ``$SAFE_OPTIMIZE_PROMPT_PREFIX`` (lets ops override per-run without
-         editing the file or argparse call)
-      2. ``ci/prompt_prefix.txt`` next to this script (canonical content)
-      3. empty string (caller is responsible — submit then refuses to ship
-         an empty prefix)
-    """
+    """Resolve the default ``--prompt-prefix``: $SAFE_OPTIMIZE_PROMPT_PREFIX,
+    else ci/prompt_prefix.txt, else empty string."""
 
     env_value = os.environ.get("SAFE_OPTIMIZE_PROMPT_PREFIX", "")
     if env_value:
@@ -157,23 +171,53 @@ def _load_default_prompt_prefix() -> str:
     return ""
 
 
-def _with_image_env_prompt_prefix(prompt_prefix: str | None, image: str | None) -> str | None:
-    """Append per-task image exports so V2 writes manifest.image at startup."""
-    image = (image or "").strip()
-    if not image:
-        return prompt_prefix
-    block = "\n".join([
-        "CI SANDBOX IMAGE (export before launching `inference_optimizer optimize`):",
-        f"  export HYPERLOOM_IMAGE={shlex.quote(image)}",
-        "  export CONTAINER_IMAGE=\"${CONTAINER_IMAGE:-$HYPERLOOM_IMAGE}\"",
-        "  export KERNEL_OPT_IMAGE=\"${KERNEL_OPT_IMAGE:-$HYPERLOOM_IMAGE}\"",
-    ])
-    prefix = (prompt_prefix or "").rstrip()
-    return f"{prefix}\n\n{block}\n" if prefix else f"{block}\n"
+# RDMA bnxt_re tar package staged on WekaFS — same path the validated
+# ci-config.yaml multi-node entries hand the agent. Kept as a module constant
+# so the orchestrator (Claw-direct) and this SaFE path stay in sync.
+_MULTINODE_BNXT_TAR = "/wekafs/primus/data/libbnxt/libbnxt_re-234.0.154.0.tar.gz"
+
+
+def _multinode_prompt_suffix(nodes: int, rayjob_image: str) -> str:
+    """RayJob topology block injected into the prompt when nodes > 1.
+
+    The SaFE tasks body has no node-count field, so multi-node is expressed the
+    same way the Claw-direct CI does: tell the agent to fan out to an N-node
+    RayJob with the exact topology. Returns "" for single-node (unchanged path).
+    """
+    if nodes <= 1:
+        return ""
+    return (
+        f"\n\nMulti-node run ({nodes} nodes): this model does NOT fit on a single "
+        f"8-GPU sandbox node. You CANNOT benchmark it directly in the sandbox -- "
+        f"launch it as a SaFE RayJob (Claw fan-out) and export NODES={nodes} "
+        f"before starting `inference_optimizer optimize` so the Coordinator sizes "
+        f"the cluster for {nodes}x8 GPUs (TP spans all nodes).\n"
+        f"Task submission ({nodes}-node):\n"
+        f"RayJob image: {rayjob_image}\n"
+        f"RayJob resource per node: CPU=96, GPU=8, memory=1024Gi, ephemeralStorage=400Gi\n"
+        f"RayJob node count: {nodes}\n"
+        f"env:\n"
+        f"- NODES={nodes}\n"
+        f"- PATH_TO_BNXT_TAR_PACKAGE={_MULTINODE_BNXT_TAR}\n"
+    )
 
 
 def parse_kernel_backends(raw: str | None) -> list[str]:
-    """Normalize user-facing kernel backend names for SaFE's API payload."""
+    """Normalize user-facing kernel backend names for SaFE's API payload.
+
+    Splits on commas/semicolons, lowercases, and maps each alias to its
+    canonical SaFE name, de-duplicating while preserving order.
+
+    Args:
+        raw (str | None): Comma/semicolon-separated backend names, or None.
+
+    Returns:
+        list[str]: Canonical backend names, or the default list when ``raw`` is
+            empty or yields nothing.
+
+    Raises:
+        ValueError: If a token is not a recognised backend alias.
+    """
 
     if not raw:
         return list(DEFAULT_KERNEL_BACKENDS)
@@ -216,10 +260,8 @@ VLLM_REQUIRED_ARCHS: set[str] = {
 # Quantization types that require vLLM.
 VLLM_QUANT_TYPES: set[str] = {"mxfp4", "nvfp4", "int4", "gptq", "awq"}
 
-# Architecture name suffixes that indicate the model is a generative LM (i.e.
-# something we can run inference benchmarks on). Used to filter out embedding
-# models, encoders, classifiers, etc. — for those, sglang/vllm won't even
-# start a server.
+# Arch suffixes marking a generative LM; used to filter out embedding/encoder/
+# classifier models that sglang/vllm can't serve.
 GENERATIVE_ARCH_SUFFIXES: tuple[str, ...] = (
     "ForCausalLM",
     "ForConditionalGeneration",
@@ -229,30 +271,31 @@ GENERATIVE_ARCH_SUFFIXES: tuple[str, ...] = (
 
 
 def is_generative_arch(arch: str) -> bool:
-    """True if the HF model architecture is suitable for causal-LM-style
-    inference. Falls back to False for empty / unknown arch — better to
-    skip than to waste a sandbox slot on something that won't run.
-    """
+    """True if the HF arch is causal-LM-style inference; False for empty/unknown
+    (better to skip than waste a sandbox slot)."""
     if not arch:
         return False
     return any(arch.endswith(s) for s in GENERATIVE_ARCH_SUFFIXES)
 
 
 def _proxy() -> str:
+    """Return the container registry proxy prefix.
+
+    Returns:
+        str: ``$HARBOR_PREFIX`` when set, otherwise the default proxy prefix.
+    """
     return os.environ.get("HARBOR_PREFIX", DEFAULT_PROXY)
 
 
 def _default_sglang_image() -> str:
-    # v0.5.11 (2026-05-05): Spec V2 by default + DFLASH on ROCm + all-reduce/RMSNorm fusion.
-    # profilerfix: patched libamdhip64/libroctracer so rocprofiler captures kernels under
-    # HipGraphLaunch (issue #352). Drop the suffix once the fix lands in upstream ROCm.
-    # Pre-profilerfix image (restore when reverting): f"{_proxy()}/lmsysorg/sglang:v0.5.11-rocm720-mi30x"
-    return f"{_proxy()}/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix"
+    # profilerfix: patched libamdhip64/libroctracer so rocprofiler captures
+    # kernels under HipGraphLaunch (issue #352). Pre-profilerfix image (revert):
+    # lmsysorg/sglang:v0.5.11-rocm720-mi30x
+    return "primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix"
 
 
 def _default_vllm_image() -> str:
-    # v0.19.0 (skip-listed v0.20.0 to stay one minor ahead of InferenceX baseline v0.17.0
-    # while avoiding any v0.20 breakage; bump to v0.20 once stability is confirmed).
+    # v0.19.0: one minor ahead of InferenceX baseline v0.17.0, avoiding v0.20 breakage.
     return f"{_proxy()}/vllm/vllm-openai-rocm:v0.19.0"
 
 
@@ -264,6 +307,12 @@ class HuggingFaceClient:
     BASE = "https://huggingface.co"
 
     def __init__(self, token: str = "", timeout: int = 15):
+        """Initialise the HF client session.
+
+        Args:
+            token (str): Optional HuggingFace token for gated-model access.
+            timeout (int): Per-request timeout in seconds.
+        """
         self.timeout = timeout
         self._sess = requests.Session()
         self._sess.headers["User-Agent"] = "hyperloom-optimize-submit/1.0"
@@ -271,29 +320,49 @@ class HuggingFaceClient:
             self._sess.headers["Authorization"] = f"Bearer {token}"
 
     def _get(self, path: str) -> dict | list:
+        """GET a HuggingFace API path and return the parsed JSON body.
+
+        Args:
+            path (str): Path appended to the HF base URL.
+
+        Returns:
+            dict | list: The decoded JSON response.
+
+        Raises:
+            requests.HTTPError: If the response status indicates an error.
+        """
         resp = self._sess.get(f"{self.BASE}{path}", timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
 
     def model_info(self, repo_id: str) -> dict:
+        """Fetch a repo's model metadata from the HF API.
+
+        Args:
+            repo_id (str): HuggingFace repo id (e.g. ``Qwen/Qwen3-8B``).
+
+        Returns:
+            dict: The model-info JSON (pipeline_tag, safetensors, tags, etc.).
+        """
         return self._get(f"/api/models/{repo_id}")  # type: ignore[return-value]
 
     def model_config(self, repo_id: str) -> dict:
+        """Fetch a repo's ``config.json`` from the HF resolve endpoint.
+
+        Args:
+            repo_id (str): HuggingFace repo id.
+
+        Returns:
+            dict: The parsed ``config.json`` contents.
+        """
         return self._get(f"/{repo_id}/resolve/main/config.json")  # type: ignore[return-value]
 
     def top_models(self, limit: int, min_params_b: float = 0.0) -> list[str]:
-        """Return top-N text-generation repos by downloads, optionally filtered by size.
+        """Return top-N text-generation repos by downloads, optionally size-filtered.
 
-        Pool-then-filter: the listing API's ``filter=text-generation`` matches
-        on tags only and lets through embedding / sentence-similarity / classifier
-        models that happen to carry that tag. We re-validate per-repo against:
-
-          1. ``pipeline_tag == "text-generation"`` (model card classification)
-          2. ``architectures[0]`` ends in a generative suffix (ForCausalLM /
-             ForConditionalGeneration / LMHeadModel / ForSeq2SeqLM)
-
-        Either signal failing → skip. Saves a sandbox slot per garbage candidate.
-        Gated repos that 401 on metadata also get silently skipped.
+        Pool-then-filter: the listing API matches on tags only, so re-validate
+        per-repo on pipeline_tag == "text-generation" AND a generative
+        architectures[0] suffix; either failing (or a gated 401) → skip.
         """
         pool_size = max(limit * 10, 100)
         listing = self._get(
@@ -308,13 +377,10 @@ class HuggingFaceClient:
             if not repo or "/" not in repo:
                 continue
 
-            # We need model_info() for both pipeline_tag and (optionally)
-            # safetensors.total — fetch once.
             try:
                 info = self.model_info(repo)
             except Exception:
-                # Gated / network error → skip silently
-                continue
+                continue  # gated / network error
 
             pipeline_tag = (info.get("pipeline_tag") or "").strip()
             if pipeline_tag and pipeline_tag != "text-generation":
@@ -327,12 +393,8 @@ class HuggingFaceClient:
                 if (total / 1e9) < min_params_b:
                     continue
 
-            # Final gate: config.json must be reachable AND architectures[0]
-            # must be a generative LM. If config.json 401/403s (gated repo
-            # whose model card is public but the actual files aren't grant-ed
-            # to our HF token), skip the candidate so the pool auto-replaces
-            # it with the next eligible repo. Same treatment for non-generative
-            # architectures (BertModel / Qwen3Model / classifier / etc.).
+            # Final gate: config.json reachable AND architectures[0] generative.
+            # Skip gated (401/403) or non-generative repos so the pool refills.
             try:
                 cfg = self.model_config(repo)
             except Exception as e:
@@ -353,6 +415,17 @@ class HuggingFaceClient:
 
 @dataclass
 class DetectedConfig:
+    """Auto-detected launch configuration for a model.
+
+    Attributes:
+        arch (str): HF ``architectures[0]`` class name.
+        framework (str): Chosen serving framework (``sglang`` / ``vllm``).
+        precision (str): Detected precision tag (e.g. ``FP8`` / ``INT4``).
+        tp (int): Tensor-parallel size.
+        concurrency (int): Benchmark concurrency.
+        image (str): Container image to run.
+        params_b (float): Parameter count in billions.
+    """
     arch: str
     framework: str
     precision: str
@@ -360,25 +433,14 @@ class DetectedConfig:
     concurrency: int
     image: str
     params_b: float
+    max_context_tokens: int
 
 
 def _quant_type(config: dict) -> str:
-    """Read the quantization tag from a HF config.json.
-
-    HF doesn't standardize on a single field name across vendors:
-      - quant_algo           : NVIDIA modelopt (NVFP4 / FP8 / W4A8_AWQ / INT8_SQ).
-                               Quant_method on these is "modelopt" — that's the
-                               *tool name* not the precision, so we have to
-                               look at quant_algo. Highest priority.
-      - quant_type           : transformers built-in (older / GPTQ flow).
-      - quantization_type    : legacy variant seen on a few older repos.
-      - quant_method         : the de-facto current standard for most other
-                               vendors (gpt-oss mxfp4, AWQ via autoawq,
-                               DeepSeek-V3.x fp8, ...).
-      - method               : occasional corner case.
-    Try them in order; first non-empty wins. Always lowercase so callers can
-    just do string contains/equality checks against {fp8, mxfp4, nvfp4, awq, ...}.
-    """
+    """Read the quantization tag from HF config.json (vendors disagree on the
+    field name). Priority: quant_algo (NVIDIA modelopt — quant_method there is
+    just the tool name) > quant_type > quantization_type > quant_method
+    (current de-facto standard) > method. First non-empty wins, lowercased."""
     quant = config.get("quantization_config") or {}
     raw = (
         quant.get("quant_algo")
@@ -392,6 +454,18 @@ def _quant_type(config: dict) -> str:
 
 
 def detect_framework(config: dict) -> str:
+    """Choose the serving framework for a model from its config.
+
+    vLLM is selected for architectures that require it or for quantization
+    types it handles better; SGLang is used for known-good architectures;
+    otherwise vLLM is the broader-support fallback.
+
+    Args:
+        config (dict): A HF ``config.json`` dict.
+
+    Returns:
+        str: ``"vllm"`` or ``"sglang"``.
+    """
     arch = (config.get("architectures") or [""])[0]
     qt = _quant_type(config)
     if arch in VLLM_REQUIRED_ARCHS:
@@ -405,6 +479,15 @@ def detect_framework(config: dict) -> str:
 
 
 def detect_precision(config: dict) -> str:
+    """Detect the serving precision from a model's quantization tag.
+
+    Args:
+        config (dict): A HF ``config.json`` dict.
+
+    Returns:
+        str: One of ``FP8`` / ``FP4`` / ``INT4``, defaulting to ``FP8`` for
+            unquantized models on MI300X.
+    """
     qt = _quant_type(config)
     if "fp8" in qt:   return "FP8"
     if "mxfp4" in qt: return "FP4"
@@ -416,6 +499,18 @@ def detect_precision(config: dict) -> str:
 
 
 def detect_param_count(hf_info: dict, config: dict) -> float:
+    """Estimate a model's parameter count in billions.
+
+    Prefers the exact ``safetensors.total`` count from HF metadata; otherwise
+    approximates from hidden size, layer count, and vocab size.
+
+    Args:
+        hf_info (dict): The HF model-info JSON.
+        config (dict): The HF ``config.json`` dict.
+
+    Returns:
+        float: Parameter count in billions, or 0.0 when it cannot be estimated.
+    """
     total = (hf_info.get("safetensors") or {}).get("total", 0)
     if total:
         return total / 1e9
@@ -427,54 +522,86 @@ def detect_param_count(hf_info: dict, config: dict) -> float:
     return 0.0
 
 
-def detect_tp(params_b: float, precision: str = "BF16") -> int:
-    """Pick a tensor-parallel size based on quantization-aware weight footprint.
+def detect_max_context_tokens(config: dict) -> int:
+    """Return the model context length from HF config.json when present."""
+    candidates = []
+    for key in ("max_position_embeddings", "max_sequence_length", "n_positions", "seq_length"):
+        value = config.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            candidates.append(int(value))
+    return min(candidates) if candidates else 0
 
-    The old logic only looked at params_b and hit two real bugs in production:
-      - gpt-oss-20b   (21.5B FP4 → ~11 GB weights) was given TP=4 even though
-        it fits comfortably on 1× MI300X (192 GB). TP=4 then failed the
-        baseline benchmark (vllm + EP=1 + non-divisible shape on a 21B MoE).
-      - 30B FP8 models (e.g. Qwen3-Coder-30B-A3B) similarly got TP=4 when
-        TP=1 would have been fine.
 
-    Bytes per param by precision:
-      FP4 / INT4 / NVFP4   = 0.5
-      FP8                  = 1.0
-      BF16 / FP16 (default)= 2.0
+def context_too_short(
+    max_context_tokens: int,
+    isl: int,
+    osl: int,
+    reserve_tokens: int = DEFAULT_CONTEXT_RESERVE_TOKENS,
+) -> bool:
+    if max_context_tokens <= 0:
+        return False
+    return max_context_tokens < (isl + osl + reserve_tokens)
 
-    Snap-to thresholds (after ~30% headroom for KV cache + activations):
-      weight_gb < 50   → TP=1   (single-GPU comfortable)
-      weight_gb < 280  → TP=4   (single GPU technically fits but multi-GPU
-                                 gives better throughput; matches MI300X
-                                 memory budget for 1024/1024 ISL/OSL @ conc=64)
-      weight_gb ≥ 280  → TP=8   (must shard across the full node)
-    """
+
+def detect_tp(params_b: float, precision: str = "BF16",
+              gpu_type: str | None = None) -> int:
+    """Pick tensor parallelism from param count and GPU profile. precision is
+    kept for API compatibility but unused — CI policy stays predictable across
+    precision variants of the same model family."""
     if params_b <= 0:
         return 1
-    p = (precision or "").upper()
-    if p in ("FP4", "INT4", "NVFP4", "MXFP4"):
-        bytes_per_param = 0.5
-    elif p == "FP8":
-        bytes_per_param = 1.0
-    else:                       # BF16 / FP16 / unknown
-        bytes_per_param = 2.0
-    weight_gb = params_b * bytes_per_param
-    if weight_gb < 50:   return 1
-    if weight_gb < 280:  return 4
+    profile_key = normalize_gpu_profile(gpu_type) or DEFAULT_GPU_PROFILE
+    profile = GPU_PROFILES[profile_key]
+    tp1_max, tp2_max, tp4_max = profile["tp_thresholds_b"]
+    if params_b <= tp1_max:  return 1
+    if params_b <= tp2_max:  return 2
+    if params_b <= tp4_max:  return 4
     return 8
 
 
 def detect_concurrency(tp: int, framework: str) -> int:
+    """Pick a benchmark concurrency from tensor-parallel size and framework.
+
+    Args:
+        tp (int): Tensor-parallel size.
+        framework (str): Serving framework (``vllm`` / ``sglang``).
+
+    Returns:
+        int: The chosen concurrency level.
+    """
     if framework == "vllm":
         return 64 if tp <= 4 else 16
     return 64 if tp == 1 else 32 if tp <= 4 else 64
 
 
-def detect_image(framework: str) -> str:
-    return _default_vllm_image() if framework == "vllm" else _default_sglang_image()
+def _sglang_image_for(repo_id: str = "") -> str:
+    """Pick the sglang image, honoring per-model baseline-arch needs.
+
+    Default is the profilerfix image. MiMo-V2.x is the exception: the undated
+    v0.5.11 profilerfix base does NOT register ``MiMoV2ForCausalLM`` (the
+    server dies at model-loader registration, three baseline attempts in a
+    row -> ``baseline_failed``), so it needs the image that carries the dated
+    20260508 sglang arch. That image is profilerfix's two patched ROCm libs
+    (libamdhip64/libroctracer, issue #352) layered onto the dated 20260508
+    build, so rocprofiler kernel capture under HipGraphLaunch still works.
+    Must be paired with ``--attention-backend triton`` (injected in
+    ``_workload_envs.materialize_config_with_envs``) to dodge the aiter
+    attention CUDA-graph-capture SIGABRT. Matched on the repo basename so it
+    fires for the HF repo id (the /wekafs/<org>-<repo> local path is derived
+    downstream from this same id).
+    """
+    basename = (repo_id or "").split("/")[-1].lower()
+    if "mimo-v2" in basename:
+        return "primussafe/sglang:v0.5.11-rocm720-mi30x-mimo-profilerfix"
+    return _default_sglang_image()
 
 
-def auto_detect(hf: HuggingFaceClient, repo_id: str) -> DetectedConfig | None:
+def detect_image(framework: str, repo_id: str = "") -> str:
+    return _default_vllm_image() if framework == "vllm" else _sglang_image_for(repo_id)
+
+
+def auto_detect(hf: HuggingFaceClient, repo_id: str,
+                gpu_type: str | None = None) -> DetectedConfig | None:
     log.info("[%s] fetching HF metadata", repo_id)
     try:
         info = hf.model_info(repo_id)
@@ -485,10 +612,8 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str) -> DetectedConfig | None:
 
     arch = (config.get("architectures") or ["unknown"])[0]
 
-    # Defensive: even when the user passes --model X explicitly, refuse to
-    # submit non-generative repos. sglang/vllm won't start a server for these
-    # (Qwen3-Embedding-8B, BertModel, etc.) and the task would just burn a
-    # sandbox slot before failing in phase 0.
+    # Refuse non-generative repos even with explicit --model: sglang/vllm won't
+    # start a server for them and the task would just burn a sandbox slot.
     if not is_generative_arch(arch):
         log.error("[%s] arch=%s is not a generative LM "
                   "(expected ForCausalLM / ForConditionalGeneration / LMHeadModel / ForSeq2SeqLM "
@@ -505,16 +630,19 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str) -> DetectedConfig | None:
     framework = detect_framework(config)
     precision = detect_precision(config)
     params_b = detect_param_count(info, config)
-    tp = detect_tp(params_b, precision)
+    max_context_tokens = detect_max_context_tokens(config)
+    tp = detect_tp(params_b, precision, gpu_type)
     conc = detect_concurrency(tp, framework)
-    image = detect_image(framework)
+    image = detect_image(framework, repo_id)
 
     cfg = DetectedConfig(
         arch=arch, framework=framework, precision=precision,
         tp=tp, concurrency=conc, image=image, params_b=params_b,
+        max_context_tokens=max_context_tokens,
     )
-    log.info("[%s] arch=%s params=%.1fB framework=%s precision=%s tp=%d conc=%d",
-             repo_id, arch, params_b, framework, precision, tp, conc)
+    log.info("[%s] arch=%s params=%.1fB context=%d framework=%s precision=%s gpu=%s tp=%d conc=%d",
+             repo_id, arch, params_b, max_context_tokens, framework, precision,
+             canonical_gpu_type(gpu_type), tp, conc)
     return cfg
 
 
@@ -538,19 +666,27 @@ class SafeOptimizeClient:
         timeout: int = 30,
         submit_workspaces_pool: list[str] | None = None,
     ):
+        """Initialise the SaFE client and its authenticated HTTP session.
+
+        Args:
+            base_url (str): SaFE base URL (trailing slash trimmed).
+            token (str): Bearer token for the Authorization header.
+            register_workspace (str): Workspace where models are registered and
+                downloaded (must allow RW writes to ``volume``).
+            submit_workspace (str): Workspace where optimization tasks run (must
+                allow the Sandbox scope).
+            volume (str): Wekafs volume mounted RW in ``register_workspace``.
+            timeout (int): Per-request timeout in seconds.
+            submit_workspaces_pool (list[str] | None): Optional round-robin pool
+                of submit workspaces; when set, each submit cycles through it.
+        """
         self.base_url = base_url.rstrip("/")
-        # Where the model gets registered + downloaded (must allow RW writes
-        # to the configured volume).
+        # Where the model registers + downloads (needs RW to the volume).
         self.register_workspace = register_workspace
-        # Where the optimization task is created (must allow Sandbox scope).
-        # Can equal register_workspace when both constraints are satisfied
-        # by a single workspace (rare in practice on core42).
+        # Where the task is created (needs Sandbox scope); may equal register.
         self.submit_workspace = submit_workspace
-        # Optional round-robin pool: when set, each submit_task picks the
-        # next workspace from the list instead of always using
-        # self.submit_workspace. Lets a large batch span both
-        # core42-sandbox (128 GPU) and core42-hyperloom (256 GPU)
-        # without manually splitting the model list.
+        # Optional round-robin pool: each submit_task picks the next workspace,
+        # letting a batch span multiple workspaces without manual splitting.
         self.submit_workspaces_pool = [
             w.strip() for w in (submit_workspaces_pool or []) if w and w.strip()
         ] or None
@@ -566,22 +702,19 @@ class SafeOptimizeClient:
         self._sess.verify = os.environ.get(
             "SSL_CERT_FILE", os.environ.get("REQUESTS_CA_BUNDLE", True))
 
-    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+    def _request(self, method: str, path: str, body: dict | None = None,
+                 timeout: float | None = None) -> dict:
         url = f"{self.base_url}/{path.lstrip('/')}"
-        resp = self._sess.request(method, url, json=body, timeout=self.timeout)
+        resp = self._sess.request(method, url, json=body,
+                                  timeout=timeout or self.timeout)
         if resp.status_code >= 400:
             raise RuntimeError(
                 f"{method} {path} -> HTTP {resp.status_code}: {resp.text[:300]}")
         return resp.json() if resp.content else {}
 
     def find_model(self, repo_id: str) -> dict | None:
-        """Look up an existing SaFE Model by HF source URL, scoped to register_workspace.
-
-        We filter by the *register* workspace because that's where the
-        canonical Model CR + LocalPaths live. Submitting to a different
-        submit_workspace later relies on selectLocalPath's path-accessible
-        fallback to find the file via shared storage.
-        """
+        """Look up an existing SaFE Model by HF source URL, scoped to
+        register_workspace (where the canonical Model CR + LocalPaths live)."""
         hf_url = f"https://huggingface.co/{repo_id}".rstrip("/")
         from urllib.parse import quote
         try:
@@ -602,39 +735,21 @@ class SafeOptimizeClient:
     ) -> str:
         """Register a model record with SaFE so submit_task has a model_id.
 
-        Two flavors:
-          * ``local_path`` set → accessMode=local_path. SaFE skips its own
-            Download Job entirely (model_controller.go:97 sets phase=Ready
-            directly) because we promise the files are already on disk at
-            ``local_path``. This is the path the prewarm step writes to.
-          * ``local_path`` empty → accessMode=local. SaFE creates a K8s
-            Download Job and pulls from HuggingFace itself (slow / fragile
-            on big repos). Kept as a fallback when prewarm cannot run.
+        local_path set → accessMode=local_path: SaFE skips its Download Job
+        (phase=Ready immediately) since files are already on disk (prewarm path).
+        local_path empty → accessMode=local: SaFE downloads from HF (slow
+        fallback when prewarm can't run).
         """
         if local_path:
-            # local_path mode bypasses SaFE's HF metadata fetch, so the
-            # caller MUST provide displayName (validated by
-            # handlers/model-handlers/models.go::createModelFromLocalPath:380).
-            # We mirror the convention SaFE uses for HF-downloaded models —
-            # the trailing path segment of the repo ID (e.g. "Qwen3-Coder-Next").
-            #
-            # Sanitization: SaFE feeds displayName straight into
-            # commonutils.GenerateName which becomes the K8s Model.amd.com
-            # metadata.name. That field must satisfy RFC 1123 (lowercase
-            # [a-z0-9-.], 1-63 chars, start/end alphanumeric). Without this
-            # sanitization the K8s API rejects displayName="Qwen3-Coder-Next"
-            # with HTTP 500 "Model.amd.com \"Qwen3-Coder-Next-xxxxx\" is
-            # invalid: metadata.name: Invalid value ...". SaFE should ideally
-            # sanitize on the backend, but for now we hand-deliver a clean
-            # name. Keep the original repo basename in the source.url field
-            # so the dashboard can still show pretty-cased text via metadata
-            # lookups.
+            # local_path mode bypasses SaFE's HF metadata fetch, so we MUST
+            # provide displayName. SaFE feeds it into GenerateName → K8s
+            # metadata.name, which must satisfy RFC 1123 (lowercase [a-z0-9-.],
+            # 1-63 chars); sanitize here since the backend doesn't.
             import re
             raw = repo_id.split("/")[-1] or repo_id
             cleaned = re.sub(r"[^a-z0-9.-]+", "-",
                              raw.lower()).strip(".-") or "model"
-            # Trim to 50 chars to leave headroom for the -xxxxx suffix
-            # GenerateName appends (K8s metadata.name max is 63).
+            # Trim to 50 to leave headroom for GenerateName's -xxxxx suffix (max 63).
             display_name = cleaned[:50].rstrip(".-") or "model"
             body = {
                 "displayName": display_name,
@@ -667,6 +782,17 @@ class SafeOptimizeClient:
     def wait_ready(
         self, model_id: str, timeout_min: int = 480, poll_s: int = 30,
     ) -> bool:
+        """Poll a SaFE model until it reaches the Ready phase.
+
+        Args:
+            model_id (str): SaFE model id to poll.
+            timeout_min (int): Maximum minutes to wait before giving up.
+            poll_s (int): Seconds between polls.
+
+        Returns:
+            bool: True once the model is Ready; False if it reaches Failed or
+                the timeout elapses.
+        """
         log.info("waiting for model %s to be Ready (timeout=%dm)", model_id, timeout_min)
         deadline = time.time() + timeout_min * 60
         last_phase = ""
@@ -711,13 +837,9 @@ class SafeOptimizeClient:
         target_gain: float | None = None,
         results_path: str | None = None,
     ) -> dict:
-        # Pick the workspace for this submit. Default = self.submit_workspace
-        # (single-workspace mode). When a round-robin pool is configured,
-        # cycle through it so a batch of N tasks spreads across the pool
-        # evenly. Counter is per-instance and not thread-safe — fine because
-        # process_model calls submit_task serially in the dispatch loop;
-        # only wait_and_collect is run in parallel and that's after
-        # submit_task already returned.
+        # Pick the workspace: single submit_workspace, or round-robin across the
+        # pool. Counter is per-instance, not thread-safe — fine since submit_task
+        # runs serially (only wait_and_collect is parallel, after submit returns).
         if self.submit_workspaces_pool:
             chosen_ws = self.submit_workspaces_pool[
                 self._submit_ws_counter % len(self.submit_workspaces_pool)
@@ -751,20 +873,17 @@ class SafeOptimizeClient:
             body["resultsPath"] = results_path
         if image:
             body["image"] = image
-        # Override SaFE backend's wrong-for-core42 defaults (MI355X /
-        # /hyperloom/InferenceX). See DEFAULT_GPU_TYPE/_INFERENCEX_PATH above.
+        # Override SaFE's wrong-for-core42 MI355X default (see DEFAULT_GPU_TYPE).
         if gpu_type:
             body["gpuType"] = gpu_type
-        if inferencex_path:
-            body["inferencexPath"] = inferencex_path
+        # Always send inferencexPath (even empty) to suppress SaFE's Zod default
+        # "/hyperloom/InferenceX"; empty lets install.sh clone a writable copy.
+        body["inferencexPath"] = inferencex_path or ""
         if oob_path:
             body["oobPath"] = oob_path
         if tracelens_root:
             body["tracelensRoot"] = tracelens_root
-        # Optional prefix/suffix forwarded to BuildHyperloomPrompt on the
-        # SaFE side. We use this to point the skill at the alternate
-        # inference_optimizer SKILL.md the batch lives in, before the
-        # auto-generated body kicks in.
+        # Optional prefix/suffix forwarded to BuildHyperloomPrompt on the SaFE side.
         if prompt_prefix:
             body["promptPrefix"] = prompt_prefix
         if prompt_suffix:
@@ -772,14 +891,23 @@ class SafeOptimizeClient:
         attempts = 8
         for attempt in range(1, attempts + 1):
             try:
-                return self._request("POST", "api/v1/optimization/tasks", body)
-            except RuntimeError as e:
+                # The submit POST can be slow when the core42 apiserver is
+                # under load from many parallel daily jobs. Give it a generous
+                # read timeout so a busy-but-alive backend doesn't trip the
+                # default 30s and get misreported as a hard submit failure.
+                return self._request(
+                    "POST", "api/v1/optimization/tasks", body, timeout=120)
+            except Exception as e:
                 msg = str(e)
+                low = msg.lower()
                 transient = (
                     "HTTP 500" in msg
                     or "HTTP 502" in msg
                     or "HTTP 503" in msg
                     or "HTTP 504" in msg
+                    or "timed out" in low      # requests ReadTimeout/ConnectTimeout
+                    or "timeout" in low
+                    or "connection" in low     # ConnectionError / HTTPSConnectionPool
                 )
                 if not transient or attempt >= attempts:
                     raise
@@ -798,36 +926,35 @@ class SafeOptimizeClient:
 
     # ── Task lifecycle ──
 
-    # Lifecycle states observed in SaFE (see types.go OptimizationTaskStatus).
+    # Lifecycle states from SaFE types.go OptimizationTaskStatus.
     TERMINAL_TASK_STATUSES = {"Succeeded", "Failed", "Interrupted"}
 
     def get_task(self, task_id: str) -> dict:
+        """Fetch the current state of an optimization task.
+
+        Args:
+            task_id (str): SaFE optimization task id.
+
+        Returns:
+            dict: The task record JSON.
+        """
         return self._request("GET", f"api/v1/optimization/tasks/{task_id}")
 
     def wait_task_done(
         self, task_id: str, timeout_min: int = 480, poll_s: int = 60,
     ) -> tuple[str, dict]:
-        """Wait until the task reaches a terminal status. Returns (status, last_task_dict).
+        """Wait until the task reaches a terminal status. Returns (status, last_task).
 
-        Strategy: prefer Claw SSE stream (sees the agent's `ResultMessage` event the
-        instant phase 11 finishes). Fall back to SaFE optimization-API polling if
-        no clawSessionId is available yet, or if the SSE stream fails.
-
-        Why SSE: SaFE's optimization-task `status` field is updated by a
-        background controller and frequently lags Claw by minutes (often shows
-        Timeout while the agent is still running phase 9/10/11). SSE on the
-        underlying Claw session is the source of truth for actual completion.
-
-        Returns ('Timeout', {}) if neither stream nor polling sees a terminal
-        status before the deadline.
+        Prefer the Claw SSE stream (SaFE's task status lags Claw by minutes), and
+        fall back to SaFE polling when no clawSessionId exists or SSE fails.
+        Returns ('Timeout', {}) if neither sees a terminal status by the deadline.
         """
         log.info("[task %s] waiting for completion (timeout=%dm, poll=%ds)",
                  task_id, timeout_min, poll_s)
         deadline = time.time() + timeout_min * 60
 
-        # Step 1: wait briefly for clawSessionId to materialize. SaFE creates the
-        # Claw session as part of submit_task, so this almost always returns
-        # immediately; cap the wait at 60s to fall through to polling if not.
+        # Wait briefly (cap 60s) for clawSessionId to materialize, else fall
+        # through to polling.
         sid = None
         for _ in range(12):
             sid = self._claw_session_id_for(task_id)
@@ -846,14 +973,10 @@ class SafeOptimizeClient:
             except Exception:
                 last_task = {}
             sf_status = last_task.get("status", "") if last_task else ""
-            # If SaFE already shows terminal, trust it.
             if sf_status in self.TERMINAL_TASK_STATUSES:
                 return sf_status, last_task
-            # Stopped = sandbox pod exited. That's our real end-of-task
-            # signal. SaFE's controller usually lags the sandbox shutdown
-            # by 10-180s before flipping the task to Succeeded/Failed
-            # (writes the optimization report check, etc.), so short-poll
-            # SaFE for up to 5 minutes to pick up its verdict.
+            # Stopped = sandbox pod exited (real end-of-task). SaFE's controller
+            # lags shutdown by 10-180s, so short-poll up to 5min for its verdict.
             if sse_reason == "Stopped":
                 log.info("[task %s] sandbox stopped — short-polling SaFE "
                          "for terminal status (up to 5min)", task_id)
@@ -870,30 +993,22 @@ class SafeOptimizeClient:
                         log.info("[task %s] SaFE settled on %s after sandbox stop",
                                  task_id, sf_status)
                         return sf_status, last_task
-                # Sandbox is gone but SaFE controller hasn't settled. Treat
-                # as Succeeded so build_summary still has a chance to read
-                # whatever ci_metrics.json the agent wrote — Stage A/B of
-                # collect_artifacts will pull from /wekafs/users/... and
-                # the actual gain numbers tell the real story.
+                # Sandbox gone but SaFE hasn't settled — treat as Succeeded so
+                # collect_artifacts can still read whatever the agent wrote.
                 log.info("[task %s] SaFE never settled within 5min after "
                          "sandbox stop — returning Succeeded (collect "
                          "step will read ci_metrics.json directly)",
                          task_id)
                 return "Succeeded", last_task
-            # deadline = we've burned the per-task wall clock.
             if sse_reason == "deadline":
                 return "Timeout", last_task
-            # Anything else (idle_timeout, stream_error) is *inconclusive*:
-            # Claw's `/chat/sessions/.../messages` stream sometimes goes quiet
-            # (only `: keepalive` heartbeats) for many minutes while the agent
-            # is busy in tool calls, and we can't tell that apart from the agent
-            # having actually finished. Don't trust SSE alone — fall through to
-            # SaFE polling and wait for a real terminal status.
+            # idle_timeout / stream_error are inconclusive (the SSE stream goes
+            # quiet during long tool calls), so fall through to SaFE polling.
             log.info("[task %s] SSE inconclusive (reason=%s, sf_status=%s) — "
                      "falling back to SaFE polling for terminal status",
                      task_id, sse_reason, sf_status or "?")
 
-        # Step 2 (fallback / continuation): SaFE optimization-API polling.
+        # Fallback / continuation: SaFE optimization-API polling.
         if not sse_used:
             log.info("[task %s] no clawSessionId yet — using SaFE polling", task_id)
         last_status = ""
@@ -920,28 +1035,13 @@ class SafeOptimizeClient:
     def _sse_wait_until_done(self, session_id: str, deadline: float) -> str:
         """Subscribe to the Claw session SSE stream, return when the agent ends.
 
-        Stream protocol (text/event-stream over /claw-api/v1/chat/sessions/<id>/messages):
-          - Each event is `id:`/`event:`/`data:` lines + blank-line separator.
-          - Historical events are replayed from the beginning, then the stream
-            stays open with `: keepalive` heartbeats.
+        IMPORTANT: do NOT return on ResultMessage — it fires at the end of EVERY
+        agent turn (dozens over 1-3h), so the first turn was being mistaken for
+        completion. The only reliable signal is sandboxStatus
+        phase=Stopped/Terminated/Failed (sandbox pod actually exits).
 
-        End-of-task signal — IMPORTANT — we used to return on the first
-        ``ResultMessage``, but that's emitted at the end of EVERY agent
-        turn (V2 skill runs phase 0-10 over 1-3h with dozens of turns, and
-        each one fires a ResultMessage). The first turn's ResultMessage
-        was being mistaken for task completion, leaving phase=0 tasks
-        marked Succeeded with artifact_count=0.
-
-        The only reliable end-of-task signal is the sandbox lifecycle
-        event ``sandboxStatus phase=Stopped/Terminated/Failed`` — that
-        fires when the sandbox pod actually exits, well after phase 10
-        finishes (or when SaFE's controller kills it).
-
-        Returns one of:
-          - "Stopped":       sandboxStatus phase reached Stopped/Terminated/Failed
-          - "idle_timeout":  no events for >10min after replay finished
-          - "deadline":      hit the per-task wall-clock deadline
-          - "stream_error":  HTTP error or socket exception (caller will fall back)
+        Returns: "Stopped" | "idle_timeout" (no events >10min) | "deadline"
+        (per-task wall clock) | "stream_error" (caller falls back).
         """
         url = f"{self.base_url}/claw-api/v1/chat/sessions/{session_id}/messages"
         last_evt = time.time()
@@ -978,10 +1078,8 @@ class SafeOptimizeClient:
                         continue
                     last_evt = now
                     et = d.get("type") or current_event
-                    # NOTE: ResultMessage is intentionally not a return
-                    # signal — see _sse_wait_until_done docstring. It still
-                    # refreshes last_evt above so the idle-timeout window
-                    # only starts ticking when the agent goes silent.
+                    # ResultMessage is intentionally not a return signal (see
+                    # docstring); it still refreshes last_evt above.
                     if et == "sandboxStatus":
                         ph = (d.get("phase") or "").lower()
                         if ph in ("stopped", "terminated", "failed"):
@@ -994,20 +1092,12 @@ class SafeOptimizeClient:
             log.warning("SSE stream unexpected error for session %s: %s",
                         session_id[:8], e)
             return "stream_error"
-        # Stream closed cleanly without ResultMessage — treat as idle.
+        # Stream closed cleanly without a Stopped signal — treat as idle.
         return "idle_timeout"
 
-    # _claw_session_id_for() is kept because _sse_wait_until_done() still needs
-    # the Claw session id to subscribe to the SSE stream for real-time completion
-    # detection. It is no longer used by list_artifacts / download_artifact.
-
     def _claw_session_id_for(self, task_id: str) -> str | None:
-        """Resolve clawSessionId for a task, with a small per-instance cache.
-
-        Calls GET /api/v1/optimization/tasks/<id> once and caches the result.
-        Returns None if SaFE doesn't have a session attached (e.g. task that
-        failed before Claw session creation).
-        """
+        """Resolve clawSessionId for a task (per-instance cached). None when
+        SaFE has no session attached (e.g. task failed before session creation)."""
         if not hasattr(self, "_claw_session_cache"):
             self._claw_session_cache = {}
         if task_id in self._claw_session_cache:
@@ -1025,17 +1115,9 @@ class SafeOptimizeClient:
     def list_artifacts(self, task_id: str) -> list[dict]:
         """List task artifacts via the SaFE standard endpoint.
 
-        The bug that returned only 1 file ("ListSessionFiles") was fixed in
-        SaFE backend (2026-05-12); the endpoint now returns the full artifact
-        tree, including files under sandbox subdirectories like
-        ``hyperloom/ci_metrics.json``. Verified by
-        .github/workflows/verify-safe-api.yml (run 25709271562).
-
-        Returned items shape:
-          ``{"path": "...", "size": ..., "lastModified": "...", "downloadPath": "..."}``
-        ``downloadPath`` is server-relative; download_artifact() uses it
-        directly when present, otherwise falls back to constructing the
-        ``/artifacts/download?path=`` URL from ``path``.
+        Returns items shaped {path, size, lastModified, downloadPath}.
+        downloadPath is server-relative; download_artifact() uses it when present,
+        else builds the /artifacts/download?path= URL from path.
         """
         try:
             data = self._request(
@@ -1051,13 +1133,8 @@ class SafeOptimizeClient:
         return items
 
     def download_artifact(self, task_id: str, path_or_item: "str | dict") -> bytes:
-        """Download a single task artifact via the SaFE standard endpoint.
-
-        Accepts either a string path (e.g. ``"hyperloom/ci_metrics.json"``) or
-        an item dict returned by list_artifacts. When given an item dict and
-        the dict has a ``downloadPath`` field, that URL is used directly
-        (preferred — SaFE may change query-string format).
-        """
+        """Download a single task artifact. Accepts a string path or a
+        list_artifacts item dict; prefers the item's downloadPath when present."""
         if isinstance(path_or_item, dict):
             download_path = (path_or_item.get("downloadPath") or "").strip()
             if download_path:
@@ -1081,6 +1158,18 @@ class SafeOptimizeClient:
     def download_artifact_to(
         self, task_id: str, path_or_item: "str | dict", local_path: str,
     ) -> int:
+        """Download an artifact and write it to a local file.
+
+        Creates parent directories as needed.
+
+        Args:
+            task_id (str): SaFE optimization task id.
+            path_or_item (str | dict): Artifact path string or item dict.
+            local_path (str): Destination file path.
+
+        Returns:
+            int: Number of bytes written.
+        """
         data = self.download_artifact(task_id, path_or_item)
         os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
         with open(local_path, "wb") as f:
@@ -1092,14 +1181,43 @@ class SafeOptimizeClient:
 
 @dataclass
 class SubmissionRecord:
+    """Per-model record tracking submission, completion, and CI delivery.
+
+    Accumulates state across the submit → wait → collect pipeline and is
+    serialised into the submission manifest.
+
+    Attributes:
+        model (str): HuggingFace repo id for this entry.
+        status (str): Local submit stage (submitted/dry-run/skipped/failed).
+        task_id (str | None): SaFE optimization task id once submitted.
+        claw_session_id (str | None): Claw session UUID SaFE created.
+        display_name (str | None): Task display name.
+        model_path (str | None): Resolved model path reported by SaFE.
+        safe_user_id (str | None): SaFE user id owning the task.
+        safe_started_at (str | None): SaFE task start timestamp.
+        safe_finished_at (str | None): SaFE task finish timestamp.
+        detected (dict | None): Auto-detected config as a dict.
+        overrides (dict): User/CLI overrides applied.
+        pool (dict): Production-pool audit metadata.
+        error (str | None): Error message when submit failed/skipped.
+        category (str | None): Coarse model shape (moe/dense/"").
+        sandbox_duration_seconds (float | None): SaFE wallclock duration.
+        final_status (str | None): SaFE terminal status.
+        final_phase (int | None): Current phase at the terminal moment.
+        final_message (str | None): SaFE task message.
+        ci_status (str | None): CI delivery status (separate from SaFE status).
+        ci_success (bool): Whether usable artifacts were delivered.
+        delivery_reason (str | None): Explanation for the CI delivery status.
+        artifacts_dir (str | None): Local directory artifacts landed in.
+        artifact_count (int): Number of collected artifacts.
+        artifact_files (list[str]): Collected artifact file paths.
+        artifact_sources (list[dict]): Provenance entries per artifact.
+    """
     model: str
     status: str = "pending"            # local stage: submitted/dry-run/skipped/failed
     task_id: str | None = None
-    # Claw session UUID (e.g. 1c11a036-9ef5-47d1-8f52-ca2398d05078) that
-    # SaFE creates when submit_task runs. Used by the dashboard to deep-link
-    # back to the chat transcript + by us to correlate ci_metrics.json on
-    # /wekafs/users/<uid>/<session>/ with the SaFE task. Populated from
-    # last_task.clawSessionId in wait_and_collect_one.
+    # Claw session UUID SaFE creates at submit; used to correlate ci_metrics.json
+    # under /wekafs/users/<uid>/<session>/ with the task (set in wait_and_collect_one).
     claw_session_id: str | None = None
     display_name: str | None = None
     model_path: str | None = None
@@ -1110,18 +1228,14 @@ class SubmissionRecord:
     overrides: dict = field(default_factory=dict)
     pool: dict = field(default_factory=dict)
     error: str | None = None
-    # Audit fields surfaced through manifest / ci_metrics / session_breakdown
-    # so each persisted artifact is self-describing.
+    # Audit fields so each persisted artifact is self-describing.
     category: str | None = None             # moe / dense / "" — from detected.arch
     sandbox_duration_seconds: float | None = None  # SaFE startedAt -> finishedAt
-    # Filled in by process_completion when --wait-for-completion is on.
     final_status: str | None = None    # SaFE: Succeeded/Failed/Interrupted/Timeout
     final_phase: int | None = None     # currentPhase at terminal moment
     final_message: str | None = None   # task.Message
-    # CI delivery status is intentionally separate from SaFE final_status.
-    # A task may time out in SaFE after writing a useful session_breakdown; CI
-    # should still summarize and publish that data instead of marking the
-    # whole matrix row failed.
+    # CI delivery status is separate from SaFE final_status: a SaFE timeout may
+    # still have written a useful session_breakdown worth publishing.
     ci_status: str | None = None        # Delivered / Missing artifacts / ...
     ci_success: bool = False
     delivery_reason: str | None = None
@@ -1156,13 +1270,48 @@ def process_model(
     results_path: str | None = None,
     pool_metadata: dict | None = None,
 ) -> SubmissionRecord:
+    """Run the full submit flow for one model: detect, register, submit.
+
+    Auto-detects (or uses manual overrides for) the launch config, ensures the
+    model is registered and Ready in SaFE (preferring prewarmed local_path
+    mode), then submits the optimization task. Short-circuits for dry-run and
+    for skip/failure conditions.
+
+    Args:
+        repo_id (str): HuggingFace repo id.
+        hf (HuggingFaceClient): Client for HF metadata lookups.
+        safe (SafeOptimizeClient): Client for SaFE register/submit calls.
+        overrides (dict): Field overrides (framework/precision/tp/...).
+        isl (int): Input sequence length.
+        osl (int): Output sequence length.
+        dry_run (bool): When True, plan only without registering/submitting.
+        hf_token (str): HuggingFace token for gated downloads.
+        manual_mode (bool): Skip auto-detect; requires ``framework`` override.
+        mode (str): Execution mode passed to SaFE (``local`` / ``claw``).
+        gpu_type (str | None): GPU type override for the prompt.
+        inferencex_path (str | None): InferenceX checkout path override.
+        oob_path (str | None): OOB checkout path override.
+        tracelens_root (str | None): TraceLens checkout path override.
+        prompt_prefix (str | None): Prompt prefix forwarded to SaFE.
+        prompt_suffix (str | None): Prompt suffix forwarded to SaFE.
+        kernel_backends (list[str] | None): Kernel optimization backends.
+        max_hours (float | None): Max optimization wall-clock hours.
+        target_gain (float | None): Target gain percentage.
+        results_path (str | None): Results path passed to the prompt builder.
+        pool_metadata (dict | None): Production-pool audit metadata.
+
+    Returns:
+        SubmissionRecord: The record describing the outcome of this model.
+    """
     rec = SubmissionRecord(
         model=repo_id,
         overrides={k: v for k, v in overrides.items() if v is not None},
         pool={k: v for k, v in (pool_metadata or {}).items() if v not in (None, "")},
     )
+    gpu_type = canonical_gpu_type(gpu_type)
+    gpu_profile = normalize_gpu_profile(gpu_type, warn=False) or DEFAULT_GPU_PROFILE
 
-    detected = None if manual_mode else auto_detect(hf, repo_id)
+    detected = None if manual_mode else auto_detect(hf, repo_id, gpu_type=gpu_type)
     if not detected and not manual_mode:
         rec.status = "skipped"
         rec.error = "auto-detect failed"
@@ -1174,17 +1323,28 @@ def process_model(
     if detected:
         rec.detected = asdict(detected)
         rec.category = _category_from_arch(rec.detected.get("arch", ""))
+        max_context = int(rec.detected.get("max_context_tokens") or 0)
+        if context_too_short(max_context, isl, osl):
+            required = isl + osl + DEFAULT_CONTEXT_RESERVE_TOKENS
+            rec.status = "skipped"
+            rec.error = (
+                "context_too_short: "
+                f"max_context_tokens={max_context} < required={required} "
+                f"(isl={isl}, osl={osl}, reserve={DEFAULT_CONTEXT_RESERVE_TOKENS})"
+            )
+            log.warning("[%s] skipping: %s", repo_id, rec.error)
+            return rec
 
     framework = overrides.get("framework") or (detected.framework if detected else "")
     precision = overrides.get("precision") or (detected.precision if detected else "FP8")
     tp        = overrides.get("tp")        or (detected.tp if detected else 1)
     conc      = overrides.get("concurrency") or (detected.concurrency if detected else 64)
-    image     = overrides.get("image") or (detected.image if detected else detect_image(framework))
+    image     = overrides.get("image") or (detected.image if detected else detect_image(framework, repo_id))
 
     log.info("[%s] => mode=%s framework=%s precision=%s tp=%d conc=%d image=%s",
              repo_id, mode, framework, precision, tp, conc, image)
 
-    display_name = f"{repo_id.split('/')[-1]}-{precision.lower()}-{framework}-mi300x"
+    display_name = f"{repo_id.split('/')[-1]}-{precision.lower()}-{framework}-{gpu_profile}"
     rec.display_name = display_name
     rec.overrides["mode"] = mode
     if kernel_backends:
@@ -1200,21 +1360,16 @@ def process_model(
         rec.status = "dry-run"
         return rec
 
-    # Detect whether the prewarm step has already populated /wekafs/models/<slug>/
-    # with the model files. When it has, we use SaFE's `local_path` accessMode
-    # which makes model_controller.go set phase=Ready immediately without
-    # creating any Download Job (no second-pass HF pull). This is the whole
-    # point of prewarm — without local_path mode, SaFE re-downloads on top of
-    # our files and we get nothing for the prewarm work.
+    # If prewarm already populated /wekafs/models/<slug>/, use local_path mode so
+    # SaFE sets phase=Ready immediately without re-downloading over our files.
     nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
     target_slug = repo_id.replace("/", "-")
     target_dir = f"{nfs_root}/models/{target_slug}"
     use_local_path = False
     try:
         if os.path.isdir(target_dir):
-            # Heuristic: any HF repo has at least config.json + tokenizer.* +
-            # one weight shard. 5 files is well under that floor while
-            # tolerating sparse model layouts.
+            # Heuristic floor: any real HF repo has >=5 files (config + tokenizer
+            # + weight shard).
             n_files = sum(1 for _ in os.scandir(target_dir))
             if n_files >= 5:
                 use_local_path = True
@@ -1228,17 +1383,10 @@ def process_model(
         log.warning("[%s] could not probe %s: %s — falling back to SaFE download",
                     repo_id, target_dir, e)
 
-    # Model resolution: find existing SaFE record OR register fresh.
-    #
-    # Stale Failed records are the common foot-gun: a previous run's download
-    # job aborted (HF rate limit, transient NFS hang, etc.) and left a model
-    # in phase=Failed. Without intervention, wait_ready sees Failed and
-    # returns False instantly, so submit can never succeed even though our
-    # prewarm step has since written the real files into /wekafs/models/.
-    # When that happens we re-register: SaFE's POST /api/v1/playground/models
-    # either issues a new model_id (preferred) or resets the existing one to
-    # Pending and re-triggers the Download Job, which now sees prewarmed
-    # files on /wekafs and finishes in seconds.
+    # Find existing SaFE record OR register fresh. Stale phase=Failed records
+    # (aborted prior download) would make wait_ready return False forever, so we
+    # re-register: SaFE issues a new model_id or resets to Pending, and the
+    # Download Job now sees prewarmed files and finishes in seconds.
     safe_model = safe.find_model(repo_id)
     if safe_model and safe_model.get("phase") != "Failed":
         model_id = safe_model["id"]
@@ -1277,7 +1425,7 @@ def process_model(
             return rec
 
     try:
-        task_prompt_prefix = _with_image_env_prompt_prefix(prompt_prefix, image)
+        task_prompt_prefix = prompt_prefix
         result = safe.submit_task(
             model_id, display_name, framework, precision, tp, conc, isl, osl, image,
             mode=mode, gpu_type=gpu_type, inferencex_path=inferencex_path,
@@ -1298,17 +1446,13 @@ def process_model(
 
 # ── Post-submission: wait for completion + collect artifacts ───────────────────
 
-# Default artifact filter — matches what SaFE prompt_builder.go forces the agent
-# to copy at end of Phase 10 (cp .../optimization_report.md .../ci_metrics.json
-# /workspace/), plus reasonable variants observed in production.
+# Default artifact filter — files SaFE has the agent copy to /workspace at end of
+# Phase 10, plus variants seen in production.
 DEFAULT_ARTIFACT_PATTERNS = (
-    "optimization_report",   # matches optimization_report.md / *-optimization_report.md / etc.
+    "optimization_report",   # optimization_report.md / *-optimization_report.md / ...
     "ci_metrics.json",
-    # Promoted to a key result alongside optimization_report.md +
-    # ci_metrics.json in 2026-05 — claw-stats-service / V2 dashboard prefer
-    # this over ci_metrics.json. Now part of ``_KEY_RESULT_SUFFIXES``, so
-    # missing it WILL trigger the wekafs NFS fallback (same as the other
-    # two contract files).
+    # Key result preferred by claw-stats-service / V2 dashboard over ci_metrics;
+    # part of _KEY_RESULT_SUFFIXES, so missing it triggers the NFS fallback.
     "session_breakdown.json",
     "baseline_summary.json",
     "sweep_results.csv",
@@ -1323,6 +1467,16 @@ DEFAULT_ARTIFACT_PATTERNS = (
 
 
 def _is_wanted_artifact(path: str, all_artifacts: bool) -> bool:
+    """Decide whether an artifact path should be downloaded.
+
+    Args:
+        path (str): The remote artifact path.
+        all_artifacts (bool): When True, accept every artifact.
+
+    Returns:
+        bool: True when ``all_artifacts`` is set or the path matches a default
+            artifact pattern.
+    """
     if all_artifacts:
         return True
     p = path.lower()
@@ -1330,11 +1484,8 @@ def _is_wanted_artifact(path: str, all_artifacts: bool) -> bool:
 
 
 def _safe_local_path(artifacts_dir: Path, task_id: str, remote_path: str) -> Path:
-    """Map a session-relative remote path to a local file path.
-
-    Strips leading slashes and normalizes separators so we never escape the
-    artifacts dir even if the remote returns absolute or '../' paths.
-    """
+    """Map a session-relative remote path to a local file path, stripping leading
+    slashes / '..' so we never escape the artifacts dir."""
     rel = remote_path.lstrip("/").replace("\\", "/")
     parts = [seg for seg in rel.split("/") if seg and seg != ".." and seg != "."]
     return artifacts_dir / task_id / Path(*parts) if parts else artifacts_dir / task_id / "artifact.bin"
@@ -1349,6 +1500,16 @@ def _record_artifact_source(
     source_path: str | None = None,
     session_dir: str | None = None,
 ) -> None:
+    """Append a provenance entry describing where an artifact came from.
+
+    Args:
+        rec (SubmissionRecord): Record whose ``artifact_sources`` is appended.
+        local_path (Path): Local path the artifact was written to.
+        source_type (str): Origin label (e.g. ``safe_artifact_api``, ``nfs_*``).
+        remote_path (str | None): Remote artifact path, when applicable.
+        source_path (str | None): Source filesystem path, when applicable.
+        session_dir (str | None): Originating session directory, when known.
+    """
     entry = {
         "source_type": source_type,
         "local_path": str(local_path).replace("\\", "/"),
@@ -1364,6 +1525,14 @@ def _record_artifact_source(
 
 
 def _write_artifact_sources(task_dir: Path, rec: SubmissionRecord) -> None:
+    """Write the per-task ``artifact_sources.json`` provenance file.
+
+    No-op when the record has no recorded artifact sources.
+
+    Args:
+        task_dir (Path): Per-task directory the file is written into.
+        rec (SubmissionRecord): Record carrying the artifact source entries.
+    """
     if not rec.artifact_sources:
         return
     payload = {
@@ -1380,12 +1549,8 @@ def _write_artifact_sources(task_dir: Path, rec: SubmissionRecord) -> None:
     )
 
 
-# Files that MUST be present in the task directory for the run to count as
-# "delivered". session_breakdown.json was promoted from optional/audit to a
-# key result in 2026-05 because claw-stats-service / the V2 dashboard prefer
-# it over ci_metrics.json. NFS legacy fallback scans for any of these
-# suffixes; missing any one of them is what triggers the wekafs PERSIST_DIR
-# rescue path in `_nfs_user_session_fallback`.
+# Files required for a run to count as "delivered". The NFS legacy fallback
+# scans these suffixes; a miss triggers the wekafs rescue path.
 _KEY_RESULT_SUFFIXES: tuple[str, ...] = (
     "optimization_report.md",
     "ci_metrics.json",
@@ -1394,11 +1559,32 @@ _KEY_RESULT_SUFFIXES: tuple[str, ...] = (
 
 
 def _norm_token(s: str) -> str:
+    """Aggressively normalise a string for fuzzy equality comparison.
+
+    Lowercases and strips dashes, underscores, dots, slashes, and spaces.
+
+    Args:
+        s (str): String to normalise.
+
+    Returns:
+        str: The normalised token.
+    """
     return (s or "").lower().replace("-", "").replace("_", "") \
         .replace(".", "").replace("/", "").replace(" ", "")
 
 
 def _slug_token(s: str) -> str:
+    """Convert a string to a lowercase dash-separated slug.
+
+    Collapses any run of non-alphanumeric characters to a single dash and
+    trims leading/trailing dashes.
+
+    Args:
+        s (str): String to slugify.
+
+    Returns:
+        str: The slugified token.
+    """
     out = []
     prev_dash = False
     for ch in (s or "").lower():
@@ -1412,7 +1598,15 @@ def _slug_token(s: str) -> str:
 
 
 def _metrics_have_positive_throughput(path: str) -> bool:
-    """True when ``ci_metrics.json`` carries real, non-zero throughput."""
+    """Report whether a ci_metrics.json file has real, non-zero throughput.
+
+    Args:
+        path (str): Path to a ``ci_metrics.json`` file.
+
+    Returns:
+        bool: True when both baseline and optimized throughput parse to values
+            greater than zero; False on any read/parse error.
+    """
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
@@ -1427,6 +1621,17 @@ def _metrics_have_positive_throughput(path: str) -> bool:
 
 
 def _json_has_any_number(value) -> bool:
+    """Recursively test whether a JSON value contains any real number.
+
+    Booleans are not counted as numbers; lists are scanned up to the first 100
+    elements.
+
+    Args:
+        value: Any JSON-decoded value.
+
+    Returns:
+        bool: True when an int/float (non-bool) is found anywhere within.
+    """
     if isinstance(value, bool):
         return False
     if isinstance(value, (int, float)):
@@ -1439,12 +1644,9 @@ def _json_has_any_number(value) -> bool:
 
 
 def _breakdown_has_basic_data(path: Path) -> bool:
-    """True when a session_breakdown JSON carries usable audit/perf payload.
-
-    Throughput may legitimately be zero for aborted/fallback runs. The CI
-    delivery contract is therefore "has structured data", not "has positive
-    gain".
-    """
+    """True when a session_breakdown JSON carries usable audit/perf payload. The
+    delivery contract is "has structured data", not "has positive gain" (aborted
+    runs may legitimately be zero)."""
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
@@ -1465,7 +1667,15 @@ def _breakdown_has_basic_data(path: Path) -> bool:
 
 
 def _mark_record_delivery(rec: SubmissionRecord) -> None:
-    """Set CI-level delivery status from collected artifacts."""
+    """Set CI-level delivery status from collected artifacts.
+
+    Scans the record's artifact files/dir for a publishable
+    ``session_breakdown`` JSON and updates ``ci_success``, ``ci_status``, and
+    ``delivery_reason`` accordingly.
+
+    Args:
+        rec (SubmissionRecord): The submission record to mutate in place.
+    """
     candidates: list[Path] = []
     for raw in rec.artifact_files:
         p = Path(raw)
@@ -1478,7 +1688,7 @@ def _mark_record_delivery(rec: SubmissionRecord) -> None:
                 p for p in root.glob("**/session_breakdown*.json")
                 if p.is_file()
             )
-    # Preserve order while de-duplicating.
+    # De-duplicate while preserving order.
     seen: set[str] = set()
     unique = []
     for p in candidates:
@@ -1503,7 +1713,15 @@ def _mark_record_delivery(rec: SubmissionRecord) -> None:
 
 
 def _timestamp_hint_variants(value: str) -> set[str]:
-    """Return path-matchable variants for skill session timestamps."""
+    """Return path-matchable variants for skill session timestamps.
+
+    Args:
+        value (str): A session timestamp string (e.g. ``"20260512T010203Z"``).
+
+    Returns:
+        set[str]: Case- and separator-normalized variants for substring
+            matching against paths; empty if ``value`` is blank.
+    """
     raw = value.strip()
     if not raw:
         return set()
@@ -1515,6 +1733,15 @@ def _timestamp_hint_variants(value: str) -> set[str]:
 
 
 def _session_hints_from_artifact_items(items: list[dict]) -> set[str]:
+    """Collect session-timestamp hints from artifact item metadata.
+
+    Args:
+        items (list[dict]): Artifact item dicts with ``path``/``downloadPath``/
+            ``name`` fields.
+
+    Returns:
+        set[str]: Timestamp hint variants discovered across the items.
+    """
     hints: set[str] = set()
     for item in items or []:
         if not isinstance(item, dict):
@@ -1529,6 +1756,15 @@ def _session_hints_from_artifact_items(items: list[dict]) -> set[str]:
 
 
 def _path_has_session_hint(path: str, hints: set[str]) -> bool:
+    """Report whether a path contains any of the session timestamp hints.
+
+    Args:
+        path (str): The path to test.
+        hints (set[str]): Timestamp hint variants to look for.
+
+    Returns:
+        bool: True if any hint appears in the normalized path.
+    """
     if not hints:
         return False
     norm_path = _norm_token(path)
@@ -1536,6 +1772,15 @@ def _path_has_session_hint(path: str, hints: set[str]) -> bool:
 
 
 def _parse_safe_timestamp(value: str | None) -> datetime | None:
+    """Parse a SaFE ISO-8601 timestamp into a UTC datetime.
+
+    Args:
+        value (str | None): An ISO-8601 string (``Z`` suffix accepted).
+
+    Returns:
+        datetime | None: A timezone-aware UTC datetime, or ``None`` if blank
+            or unparseable.
+    """
     raw = (value or "").strip()
     if not raw:
         return None
@@ -1549,6 +1794,14 @@ def _parse_safe_timestamp(value: str | None) -> datetime | None:
 
 
 def _parse_session_timestamp(value: str) -> datetime | None:
+    """Parse a compact ``YYYYMMDDTHHMMSSZ`` session timestamp.
+
+    Args:
+        value (str): The compact session timestamp string.
+
+    Returns:
+        datetime | None: A UTC datetime, or ``None`` if blank or unparseable.
+    """
     raw = value.strip()
     if not raw:
         return None
@@ -1559,11 +1812,29 @@ def _parse_session_timestamp(value: str) -> datetime | None:
 
 
 def _session_timestamp_from_path(path: str) -> str:
+    """Extract the last ``YYYYMMDDTHHMMSSZ`` timestamp found in a path.
+
+    Args:
+        path (str): The path to scan.
+
+    Returns:
+        str: The matched timestamp (upper-cased), or ``""`` if none found.
+    """
     matches = re.findall(r"\b\d{8}T\d{6}Z\b", path, flags=re.IGNORECASE)
     return matches[-1].upper() if matches else ""
 
 
 def _timestamp_in_task_window(timestamp: str, rec: SubmissionRecord, margin_hours: int = 2) -> bool:
+    """Check whether a session timestamp falls within the task's run window.
+
+    Args:
+        timestamp (str): A compact session timestamp string.
+        rec (SubmissionRecord): The record providing SaFE start/finish times.
+        margin_hours (int): Slack added on each side of the window.
+
+    Returns:
+        bool: True if the timestamp lies within the (padded) task window.
+    """
     ts = _parse_session_timestamp(timestamp)
     start = _parse_safe_timestamp(rec.safe_started_at)
     end = _parse_safe_timestamp(rec.safe_finished_at)
@@ -1575,40 +1846,248 @@ def _timestamp_in_task_window(timestamp: str, rec: SubmissionRecord, margin_hour
 
 
 def _record_has_task_window(rec: SubmissionRecord) -> bool:
+    """Report whether a record has a usable SaFE start timestamp.
+
+    Args:
+        rec (SubmissionRecord): The submission record to inspect.
+
+    Returns:
+        bool: True if ``safe_started_at`` parses into a timestamp.
+    """
     return _parse_safe_timestamp(rec.safe_started_at) is not None
 
 
-def _category_from_arch(arch: str | None) -> str:
-    """Coarse model-shape classification used for cron pool reporting.
+def _env_float(name: str, default: float) -> float:
+    """Read a float environment setting with a safe fallback."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning("%s=%r is not a float; using %.1f", name, raw, default)
+        return default
 
-    HF `architectures[0]` follows a stable naming convention: anything with
-    "Moe" in the class name is a Mixture-of-Experts variant; everything
-    else (Llama/Qwen/Mistral/Gemma/...) is a dense transformer. Returns
-    ``""`` when arch is unknown so downstream JSON stays "n/a" rather than
-    a misleading "dense".
+
+def _read_session_state(session_dir: str | Path) -> dict:
+    """Best-effort read of a session's state.json."""
+    path = Path(session_dir) / "state.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _session_has_terminal_marker(session_dir: str | Path) -> bool:
+    """True when a session has reached a state where CI should collect now."""
+    root = Path(session_dir)
+    if (root / "session_breakdown.json").is_file():
+        return True
+    if (root / "complete").is_file():
+        return True
+    state = _read_session_state(root)
+    if state.get("close_sequence_done") is True:
+        return True
+    return False
+
+
+def _session_activity_mtime(session_dir: str | Path) -> float:
+    """Return a bounded best-effort activity timestamp for a session.
+
+    ``state.json`` can be quiet while long Magpie subprocesses append logs or
+    traces, so include the runtime subtrees CI relies on. The file cap avoids
+    expensive walks for very large sessions.
     """
+    root = Path(session_dir)
+    mtimes: list[float] = []
+    for rel in (
+        "state.json",
+        "session_breakdown.json",
+        "complete",
+        "reports/final.md",
+        "reports/final.json",
+    ):
+        p = root / rel
+        try:
+            if p.exists():
+                mtimes.append(p.stat().st_mtime)
+        except OSError:
+            continue
+
+    seen = 0
+    for sub in ("optimizer_runs", "runs", "reports"):
+        base = root / sub
+        if not base.exists():
+            continue
+        for walk_root, _dirs, files in os.walk(base):
+            for name in files:
+                seen += 1
+                if seen > 5000:
+                    return max(mtimes) if mtimes else 0.0
+                if not name.endswith((".log", ".json", ".txt", ".md", ".csv", ".gz")):
+                    continue
+                try:
+                    mtimes.append((Path(walk_root) / name).stat().st_mtime)
+                except OSError:
+                    continue
+    return max(mtimes) if mtimes else 0.0
+
+
+def _find_nfs_state_session_dir(
+    rec: SubmissionRecord,
+    current_session_hints: set[str] | None = None,
+) -> str | None:
+    """Locate the current NFS session using state.json, not breakdown files."""
+    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    users_root = Path(nfs_root) / "users"
+    if not rec.safe_user_id or not users_root.is_dir():
+        return None
+    uid_path = users_root / rec.safe_user_id
+    if not uid_path.is_dir():
+        return None
+
+    hints = set(current_session_hints or set())
+    candidates: list[tuple[int, float, str]] = []
+    for model_dir_name in _candidate_model_dir_names(rec):
+        model_dir = uid_path / model_dir_name
+        if not model_dir.is_dir():
+            continue
+        try:
+            ts_entries = sorted(os.listdir(model_dir), reverse=True)
+        except OSError:
+            continue
+        for ts_entry in ts_entries:
+            session_dir = model_dir / ts_entry
+            if not session_dir.is_dir():
+                continue
+            state_path = session_dir / "state.json"
+            if not state_path.is_file():
+                continue
+            if hints:
+                if not _path_has_session_hint(str(session_dir), hints):
+                    continue
+                score = 40
+            else:
+                ts = _session_timestamp_from_path(ts_entry)
+                if not _timestamp_in_task_window(ts, rec):
+                    continue
+                score = 30
+            state = _read_session_state(session_dir)
+            workload = state.get("workload") if isinstance(state.get("workload"), dict) else {}
+            model_field = str(
+                state.get("model")
+                or state.get("model_name")
+                or workload.get("model_name")
+                or ""
+            )
+            if model_field and not _record_model_field_matches(rec, model_field):
+                continue
+            if model_field:
+                score += 100
+            try:
+                mtime = state_path.stat().st_mtime
+            except OSError:
+                continue
+            candidates.append((score, mtime, str(session_dir)))
+
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][2]
+
+
+def _wait_for_nfs_session_delivery(
+    rec: SubmissionRecord,
+    current_session_hints: set[str] | None = None,
+    poll_s: int = 60,
+    grace_min: float | None = None,
+    idle_min: float | None = None,
+) -> str | None:
+    """After SaFE early terminal, wait while the NFS session is still active."""
+    grace_min = _env_float("SAFE_OPTIMIZE_NFS_LIVE_GRACE_MIN", 180.0) \
+        if grace_min is None else grace_min
+    idle_min = _env_float("SAFE_OPTIMIZE_NFS_IDLE_GRACE_MIN", 20.0) \
+        if idle_min is None else idle_min
+    if grace_min <= 0 or idle_min <= 0:
+        return None
+
+    session_dir = _find_nfs_state_session_dir(rec, current_session_hints)
+    if not session_dir:
+        return None
+
+    now = time.time()
+    activity = _session_activity_mtime(session_dir)
+    if not activity:
+        return session_dir
+    if now - activity > idle_min * 60 and not _session_has_terminal_marker(session_dir):
+        log.info(
+            "[task %s] NFS session %s found but inactive for %.1fmin; "
+            "collecting without grace wait",
+            rec.task_id, session_dir, (now - activity) / 60,
+        )
+        return session_dir
+
+    deadline = now + grace_min * 60
+    idle_deadline = activity + idle_min * 60
+    log.warning(
+        "[task %s] SaFE status=%s but NFS session still appears active: %s; "
+        "waiting up to %.1fmin (idle %.1fmin) for delivery contract files",
+        rec.task_id, rec.final_status, session_dir, grace_min, idle_min,
+    )
+    while time.time() < deadline:
+        if _session_has_terminal_marker(session_dir):
+            log.info(
+                "[task %s] NFS session reached terminal/delivery marker: %s",
+                rec.task_id, session_dir,
+            )
+            return session_dir
+        latest = _session_activity_mtime(session_dir)
+        if latest > activity:
+            activity = latest
+            idle_deadline = latest + idle_min * 60
+            log.info(
+                "[task %s] NFS session still active (last activity %s)",
+                rec.task_id,
+                datetime.fromtimestamp(latest, tz=timezone.utc).isoformat(),
+            )
+        if time.time() > idle_deadline:
+            log.warning(
+                "[task %s] NFS session idle for %.1fmin without delivery "
+                "marker; proceeding to collect",
+                rec.task_id, idle_min,
+            )
+            return session_dir
+        time.sleep(max(1, min(poll_s, 60)))
+
+    log.warning(
+        "[task %s] NFS live-session grace wait expired after %.1fmin; "
+        "proceeding to collect",
+        rec.task_id, grace_min,
+    )
+    return session_dir
+
+
+def _category_from_arch(arch: str | None) -> str:
+    """Coarse model-shape classification: "moe" if arch contains "moe", else
+    "dense"; "" when unknown so downstream JSON stays "n/a"."""
     if not arch:
         return ""
     return "moe" if "moe" in arch.lower() else "dense"
 
 
 def _sandbox_duration_seconds(last_task: dict) -> float | None:
-    """SaFE-side sandbox wallclock = finishedAt - startedAt.
-
-    Both timestamps come from SaFE's optimization-task API
-    (``startedAt`` is when the K8s sandbox pod actually transitioned to
-    Running; ``finishedAt`` is when the agent process exited and SaFE
-    sealed the task). Returns None when either field is missing or
-    unparseable so we don't fabricate a duration.
-    """
+    """SaFE-side sandbox wallclock = finishedAt - startedAt (from the task API).
+    None when either field is missing/unparseable so we don't fabricate a duration."""
     from datetime import datetime
     start = (last_task or {}).get("startedAt") or ""
     end = (last_task or {}).get("finishedAt") or ""
     if not start or not end:
         return None
     try:
-        # SaFE serializes UTC with trailing 'Z' — Python's fromisoformat
-        # only accepts '+00:00', so normalise first.
+        # SaFE serializes UTC with trailing 'Z'; fromisoformat needs '+00:00'.
         s = datetime.fromisoformat(start.replace("Z", "+00:00"))
         e = datetime.fromisoformat(end.replace("Z", "+00:00"))
     except Exception:
@@ -1620,24 +2099,9 @@ def _sandbox_duration_seconds(last_task: dict) -> float | None:
 def _find_hyperloom_commit_sha(start: Path) -> str:
     """Resolve the Hyperloom git SHA the sandbox cloned (for audit fields).
 
-    Strategy (tried in order, first hit wins):
-
-      1. ``hyperloom_source_commit.txt`` written by the agent inside the
-         sandbox. The PERSIST step in ``ci/prompt_prefix.txt`` writes it
-         at ``$RESULT_DIR/hyperloom_source_commit.txt`` and inside the V2
-         session dir, so by the time NFS Stage B pulls things back it can
-         show up at ``task_dir/hyperloom_source_commit.txt`` or
-         ``task_dir/session/hyperloom_source_commit.txt`` (depth varies
-         by which fallback collected the artifacts).
-
-      2. CI runner environment. The agent doesn't always write the txt
-         file (e.g. when it exits before the PERSIST snippet runs, or
-         when V2 cli's session_dir eats the file), but the runner that
-         dispatched the workflow ALWAYS knows the commit it pinned the
-         sandbox to: it's ``HYPERLOOM_SOURCE_REF`` (set by ``optimize-
-         submit.yml`` step 'Submit + wait + collect'), or ``GITHUB_SHA``
-         (the head of the branch the workflow ran on, identical to
-         ``HYPERLOOM_SOURCE_REF`` for any push-triggered run).
+    First hit wins: (1) hyperloom_source_commit.txt written by the agent (depth
+    varies by which fallback collected it), then (2) the CI runner env
+    (HYPERLOOM_SOURCE_REF, else GITHUB_SHA).
     """
     candidates = [
         start.parent / "hyperloom_source_commit.txt",
@@ -1651,16 +2115,12 @@ def _find_hyperloom_commit_sha(start: Path) -> str:
             sha = sha_path.read_text(encoding="utf-8").strip()
         except Exception:
             continue
-        # accept anything that looks like a SHA (or short SHA) — never trust
-        # garbage from an empty / corrupted file.
+        # Accept only SHA-shaped strings; never trust a corrupted file.
         if 7 <= len(sha) <= 80 and all(c in "0123456789abcdef" for c in sha.lower()):
             return sha
 
-    # Fallback: ask the CI runner environment. HYPERLOOM_SOURCE_REF is the
-    # commit we explicitly pinned the sandbox to (preferred over GITHUB_SHA
-    # when set, because HYPERLOOM_SOURCE_REF survives even dispatch with a
-    # custom ref input). GITHUB_SHA is the unconditional fallback — every
-    # GitHub Actions step has it.
+    # Fallback: CI runner env. HYPERLOOM_SOURCE_REF is the pinned commit
+    # (preferred); GITHUB_SHA is the unconditional fallback.
     for env_var in ("HYPERLOOM_SOURCE_REF", "GITHUB_SHA"):
         env_sha = (os.environ.get(env_var) or "").strip()
         if 7 <= len(env_sha) <= 80 and all(c in "0123456789abcdef" for c in env_sha.lower()):
@@ -1669,30 +2129,13 @@ def _find_hyperloom_commit_sha(start: Path) -> str:
 
 
 def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
-    """Backfill task metadata into the three persisted-artifact shapes
-    (ci_metrics.json / session_breakdown.json / manifest.json) so each is
-    self-describing without cross-referencing GitHub Actions logs.
+    """Backfill task metadata (model, image, hyperloom_commit, category,
+    sandbox_duration_seconds) into ci_metrics.json / session_breakdown.json /
+    manifest.json so each artifact is self-describing.
 
-    Originally added because missing ``model`` blocked correlation with
-    /wekafs/users entries (Run 25813519878). Extended in 2026-05 to also
-    cover audit fields the sandbox / V2 cli collectors don't always reach:
-
-    * ``image``                     — registry-qualified container image
-                                      (auto-detected at register time)
-    * ``hyperloom_commit``          — git SHA of the Hyperloom source tree
-                                      the agent actually cloned
-    * ``category``                  — moe / dense (from detected arch)
-    * ``sandbox_duration_seconds``  — SaFE startedAt → finishedAt wallclock
-
-    The function sniffs the filename and writes the right shape:
-    * ``ci_metrics.json``       → flat top-level keys
-    * ``session_breakdown.json``→ under ``session_meta`` sub-dict
-    * ``manifest.json``         → flat top-level (matches the V2 cli
-                                  schema v3 used by ``inference_optimizer/
-                                  manifest.py``); ``category`` /
-                                  ``sandbox_duration_seconds`` are extra
-                                  keys we add — V2 cli ignores unknown
-                                  fields on re-read.
+    Writes the right shape per filename: ci_metrics.json → flat top-level;
+    session_breakdown.json → under session_meta; manifest.json → flat top-level
+    (V2 cli schema; category/duration are extra keys V2 ignores on re-read).
     """
     if path.name not in ("ci_metrics.json", "session_breakdown.json", "manifest.json"):
         return
@@ -1738,10 +2181,8 @@ def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
             changed = True
 
     elif path.name == "session_breakdown.json":
-        # The breakdown is keyed by a `session_meta` sub-dict (see
-        # inference_optimizer/breakdown/schema.py::SessionMeta). Only write
-        # when the field is currently empty so we don't overwrite anything
-        # the V2 collectors did fill in.
+        # Keyed by a `session_meta` sub-dict; only write empty fields so we don't
+        # overwrite what the V2 collectors filled in.
         meta = data.get("session_meta")
         if not isinstance(meta, dict):
             meta = {}
@@ -1755,23 +2196,17 @@ def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
         if hyperloom_sha and not meta.get("code_revision"):
             meta["code_revision"] = hyperloom_sha
             changed = True
-        # session_duration_seconds is already declared in the v1.1 schema,
-        # we just need to set it when the V2 collector left it blank.
         if rec.sandbox_duration_seconds is not None and not meta.get("session_duration_seconds"):
             meta["session_duration_seconds"] = rec.sandbox_duration_seconds
             changed = True
-        # `category` isn't in the schema today but unknown fields are
-        # tolerated; dashboards can pick it up without a schema bump.
+        # `category` isn't in the schema but unknown fields are tolerated.
         if rec.category and not meta.get("category"):
             meta["category"] = rec.category
             changed = True
 
     elif path.name == "manifest.json":
-        # V2 cli schema (inference_optimizer/manifest.py): flat top-level
-        # keys for image / code_revision / framework / tp / model_name.
-        # These often ship as null when the sandbox didn't set the
-        # HYPERLOOM_IMAGE env or when cwd-based `git rev-parse` failed;
-        # we authoritatively backfill them from the CI side.
+        # V2 cli schema: flat top-level keys, often null when the sandbox didn't
+        # set HYPERLOOM_IMAGE or git rev-parse failed; backfill from the CI side.
         for key, value in {
             "model_name": rec.model,
             "claw_session_id": rec.claw_session_id,
@@ -1801,29 +2236,14 @@ def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
 
 
 def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
-    """Reverse-write the audit fields back to the wekafs SOURCE files so
-    operators ssh-ing into /wekafs/users/<uid>/<sess>/ see them directly
-    without going through GHA artifact zips.
+    """Reverse-write audit fields back into the wekafs SOURCE files so operators
+    see them under /wekafs/users/<uid>/<sess>/ without GHA artifact zips
+    (image/category/duration are SaFE-side facts the agent/V2 cli never had).
 
-    Without this, the audit fields landed only in CI-runner-local
-    artifacts/<task_id>/ci_metrics.json. wekafs originals stayed bare
-    because they were written by the sandbox agent / V2 cli, neither of
-    which knows the image/category/duration (those are SaFE-side facts
-    only the CI runner sees after wait_task_done).
-
-    Match strategy mirrors _nfs_user_session_fallback (Stage B):
-      * exact `model` field match in the candidate ci_metrics.json, or
-      * conservative session-dir-name match via _record_matches_session_dir.
-    Only sessions modified in the last 24h are considered, to avoid
-    backfilling stale runs on the same uid.
-
-    Files updated per matching session: ci_metrics.json, manifest.json,
-    session_breakdown.json, session_breakdown_v2.json (also under
-    phase10_report/, results/, v2_session/ subdirs). Each is fed through
-    _backfill_ci_metrics_file which already knows the right shape per
-    filename — and which no-ops on files whose fields are already set.
-
-    No-op when wekafs is not mounted (e.g. CI runner doesn't have NFS).
+    Match (mirrors Stage B): exact `model` field, else conservative session-dir
+    match; only sessions modified in the last 24h. Updates ci_metrics.json,
+    manifest.json, session_breakdown[_v2].json across subdirs via
+    _backfill_ci_metrics_file. No-op when wekafs isn't mounted.
     """
     nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
     users_root = os.path.join(nfs_root, "users")
@@ -1893,9 +2313,8 @@ def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
                     continue
             except OSError:
                 continue
-            # Confirm this session belongs to our task: a `model` field
-            # match in any ci_metrics.json is the strongest signal; else
-            # fall back to the conservative session-dir-name heuristic.
+            # Confirm session ownership: `model` field match (strongest), else
+            # the conservative session-dir-name heuristic.
             matched = False
             for sub in subdirs:
                 ci = os.path.join(sess_path, sub, "ci_metrics.json") if sub \
@@ -1918,10 +2337,8 @@ def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
                 continue
             n += _backfill_files(sess_path)
 
-        # HyperloomV2 current layout:
-        # /wekafs/users/<uid>/<model-path-basename>/<YYYYmmddTHHMMSSZ>/...
-        # A deleted ci_metrics.json must not prevent image/session metadata
-        # backfill into the original V2 manifest.json.
+        # Current layout: /wekafs/users/<uid>/<model-basename>/<YYYYmmddTHHMMSSZ>/.
+        # A deleted ci_metrics.json must not block manifest.json backfill.
         if rec.safe_user_id and uid_dir != rec.safe_user_id:
             continue
         for model_dir_name in _candidate_model_dir_names(rec):
@@ -1955,13 +2372,9 @@ def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
 
 
 def _record_matches_session_dir(rec: SubmissionRecord, sess_name: str) -> bool:
-    """Conservative directory-name match for /wekafs/users fallback.
-
-    Prefer exact displayName slug because SaFE constructs it from model +
-    precision + framework + gpu. Fall back to basename only with hard guards
-    to avoid cross-wiring adjacent repos (Qwen2.5 vs Qwen2.5-AWQ, Nano vs
-    Super, bnb vs non-bnb, etc.).
-    """
+    """Conservative directory-name match for the /wekafs/users fallback. Prefer
+    the displayName slug; fall back to basename with strict-term guards to avoid
+    cross-wiring adjacent repos (Qwen2.5 vs -AWQ, Nano vs Super, bnb, etc.)."""
     sess_slug = _slug_token(sess_name)
     sess_norm = _norm_token(sess_name)
     display = rec.display_name or ""
@@ -2002,6 +2415,15 @@ def _record_model_field_matches(rec: SubmissionRecord, model_field: str) -> bool
 
 
 def _candidate_model_dir_names(rec: SubmissionRecord) -> list[str]:
+    """Derive plausible per-model directory basenames for a record.
+
+    Args:
+        rec (SubmissionRecord): The record supplying model path / id / display
+            name candidates.
+
+    Returns:
+        list[str]: De-duplicated basename candidates, in priority order.
+    """
     names: list[str] = []
     for value in (
         rec.model_path or "",
@@ -2016,7 +2438,25 @@ def _candidate_model_dir_names(rec: SubmissionRecord) -> list[str]:
 
 
 def _json_positive_perf(data: dict) -> bool:
+    """Report whether a breakdown JSON has positive baseline AND optimized perf.
+
+    Args:
+        data (dict): A parsed session-breakdown/metrics JSON object.
+
+    Returns:
+        bool: True only if at least one positive baseline throughput and one
+            positive optimized throughput are present.
+    """
     def positive(value: object) -> bool:
+        """Return True for a positive, non-bool numeric value.
+
+        Args:
+            value (object): Candidate value to test.
+
+        Returns:
+            bool: True if ``value`` is an ``int``/``float`` (not ``bool``)
+                greater than zero.
+        """
         return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
 
     baseline = data.get("baseline") if isinstance(data.get("baseline"), dict) else {}
@@ -2042,6 +2482,14 @@ def _json_positive_perf(data: dict) -> bool:
 
 
 def _json_model_field(data: dict) -> str:
+    """Extract the model id from a breakdown/metrics JSON, trying known keys.
+
+    Args:
+        data (dict): A parsed session-breakdown/metrics JSON object.
+
+    Returns:
+        str: The first non-empty model field found, or ``""``.
+    """
     workload = data.get("workload") if isinstance(data.get("workload"), dict) else {}
     session = data.get("session") if isinstance(data.get("session"), dict) else {}
     meta = data.get("session_meta") if isinstance(data.get("session_meta"), dict) else {}
@@ -2059,6 +2507,14 @@ def _json_model_field(data: dict) -> str:
 
 
 def _json_claw_session_id(data: dict) -> str:
+    """Extract the Claw session id from a breakdown/metrics JSON.
+
+    Args:
+        data (dict): A parsed session-breakdown/metrics JSON object.
+
+    Returns:
+        str: The first non-empty ``claw_session_id`` found, or ``""``.
+    """
     session = data.get("session") if isinstance(data.get("session"), dict) else {}
     meta = data.get("session_meta") if isinstance(data.get("session_meta"), dict) else {}
     for value in (
@@ -2072,21 +2528,25 @@ def _json_claw_session_id(data: dict) -> str:
 
 
 def _env_truthy(name: str) -> bool:
+    """Report whether an environment variable is set to a truthy value.
+
+    Args:
+        name (str): The environment variable name.
+
+    Returns:
+        bool: True if the value is one of 1/true/yes/y/on (case-insensitive).
+    """
     return (os.environ.get(name) or "").strip().lower() in {
         "1", "true", "yes", "y", "on",
     }
 
 
 def _copy_session_tree(src_dir: str, dst_dir: Path) -> int:
-    """Copy an entire persisted session directory into ``dst_dir``.
-
-    Returns the number of files copied. Existing files are left untouched so
-    previously downloaded SaFE artifacts keep their timestamp/content.
-    """
+    """Copy an entire persisted session directory into ``dst_dir`` (existing files
+    untouched). Returns the number of files copied."""
     copied = 0
     dst_dir.mkdir(parents=True, exist_ok=True)
     for root, dirnames, filenames in os.walk(src_dir):
-        # Avoid recursively copying accidental nested CI artifact dirs.
         dirnames[:] = [
             d for d in dirnames
             if d not in {".git", "__pycache__", ".pytest_cache"}
@@ -2114,29 +2574,12 @@ def _nfs_fallback_collect(
     copy_full_session: bool = False,
     current_session_hints: set[str] | None = None,
 ) -> int:
-    """Scan NFS result directories for files matching this model.
+    """Scan NFS result directories for files matching this model, used when the
+    SaFE artifact API returns nothing (V2 writes under /wekafs/users/<uid>/...).
 
-    Used when Claw API list_artifacts returned nothing useful (the very common
-    case where the HyperloomV2 orchestrator writes outputs under its own
-    session directory under /wekafs/users/<uid>/<arbitrary_dir>/, which SaFE's
-    artifact API doesn't know about). Two-stage scan:
-
-      A. Canonical CI dirs (legacy, kept for back-compat):
-            /wekafs/hyperloom-results, /wekafs/results/ci,
-            /wekafs/inference-optimization/results
-         Match by directory name containing the model basename.
-
-      B. Per-user session dirs (the one that actually matters for V2 today):
-            /wekafs/users/<uid>/<session_name>/{,phase10_report,results}/ci_metrics.json
-         Match by reading every ci_metrics.json under the tree and comparing
-         its `model` JSON field to rec.model basename — much more accurate
-         than directory-name fuzzy match (agent picks arbitrary names like
-         `qwen25-coder-14b-awq-opt` vs canonical `Qwen2.5-Coder-14B-Instruct-AWQ`).
-
-    Stage B is required for the 2026-05-12 batch onward where the runner now
-    mounts /wekafs RW. Mirrors the fallback in ci/orchestrator.py (3a → 3b)
-    so optimize_submit is consistent with the main CI pipeline.
-
+    Two stages: A. legacy canonical CI dirs, matched by dir name; B. per-user
+    session dirs, matched by each ci_metrics.json's `model` field (more accurate
+    than dir-name fuzzy match). Mirrors ci/orchestrator.py's fallback.
     Returns count of files copied.
     """
     current_session_hints = set(current_session_hints or set())
@@ -2220,15 +2663,21 @@ def _nfs_fallback_collect(
     if not os.path.isdir(users_root):
         return copied
 
-    # Primary match: exact equality via JSON model fields when the agent wrote
-    # them. Secondary match: conservative session-dir match. The secondary path
-    # is needed for HyperloomV2 runs that persist result JSON without a `model`
-    # field in the JSON (observed in Run 25813519878).
+    # Primary match: JSON model fields when present. Secondary: conservative
+    # session-dir match (needed for runs that persist JSON without a `model` field).
     target = _norm_token(model_basename)
     if not target:
         return copied
 
     def _model_field_matches(model_field: str) -> bool:
+        """Check a JSON ``model`` field against the record's expected names.
+
+        Args:
+            model_field (str): The model id read from a candidate result file.
+
+        Returns:
+            bool: True if it normalizes to one of the record's allowed names.
+        """
         observed = _norm_token(model_field)
         allowed = {
             target,
@@ -2239,6 +2688,17 @@ def _nfs_fallback_collect(
         return observed in allowed or _norm_token(model_field.split("/")[-1]) in allowed
 
     def _consider_result_file(path: str, session_dir: str, score_base: int) -> None:
+        """Score a candidate result file and append it to ``candidates``.
+
+        Validates the file's model/session/claw fields against the record and,
+        when it matches, records a ``(score, mtime, path, session_dir)`` tuple
+        for later best-match selection.
+
+        Args:
+            path (str): Path to a candidate result JSON file.
+            session_dir (str): The session directory containing the file.
+            score_base (int): Base score reflecting match-source confidence.
+        """
         if not os.path.isfile(path):
             return
         try:
@@ -2281,10 +2741,6 @@ def _nfs_fallback_collect(
             return
         candidates.append((score, mtime, path, session_dir))
 
-    # rglob with depth 4/5 is enough for the legacy layouts we've seen:
-    #   /wekafs/users/<uid>/<session>/ci_metrics.json                (depth 4)
-    #   /wekafs/users/<uid>/<session>/phase10_report/ci_metrics.json (depth 5)
-    #   /wekafs/users/<uid>/<session>/results/ci_metrics.json        (depth 5)
     candidates: list[tuple[int, float, str, str]] = []  # (score, mtime, marker_path, session_dir)
     uid_dirs = [rec.safe_user_id] if rec.safe_user_id else os.listdir(users_root)
     for uid_dir in uid_dirs:
@@ -2304,16 +2760,9 @@ def _nfs_fallback_collect(
                     if sub else os.path.join(sess_path, "ci_metrics.json")
                 _consider_result_file(ci_path, sess_path, 0)
 
-        # Current HyperloomV2 layout on core42:
-        #   /wekafs/users/<uid>/<model-path-basename>/<YYYYmmddTHHMMSSZ>/
-        #     session_breakdown.json
-        #     reports/final.md
-        #
-        # SaFE's artifact API may list only workspace source files for these
-        # runs, so there is no artifact-derived timestamp hint. In that case,
-        # accept timestamp directories only when they are under this exact
-        # SaFE user id + exact model dir and fall inside the task's
-        # startedAt/finishedAt window.
+        # Current layout: /wekafs/users/<uid>/<model-basename>/<YYYYmmddTHHMMSSZ>/.
+        # With no artifact-derived hint, accept timestamp dirs only under this
+        # exact user id + model dir and inside the task's startedAt/finishedAt window.
         if rec.safe_user_id and uid_dir == rec.safe_user_id:
             for model_dir_name in _candidate_model_dir_names(rec):
                 model_dir = os.path.join(uid_path, model_dir_name)
@@ -2356,16 +2805,14 @@ def _nfs_fallback_collect(
                  "yes" if _record_has_task_window(rec) else "no")
         return copied
 
-    # Pick highest-confidence, then freshest match — same model can be re-run
-    # several times.
+    # Highest-confidence, then freshest (same model may be re-run).
     candidates.sort(reverse=True)
     _score, _mtime, best_ci, best_sess = candidates[0]
     log.info("[task %s] NFS user-session match: %s (from %d candidate(s), "
              "session=%s)", rec.task_id, best_ci, len(candidates), best_sess)
 
-    # Copy the ci_metrics + any optimization_report.md sitting alongside or
-    # under phase10_report/. Everything lands flat under task_dir/, same shape
-    # build_summary.py expects.
+    # Copy ci_metrics + any optimization_report.md flat under task_dir/ (the
+    # shape build_summary.py expects).
     targets = [best_ci]
     for cand in [
         os.path.join(best_sess, "optimization_report.md"),
@@ -2375,7 +2822,7 @@ def _nfs_fallback_collect(
         if os.path.isfile(cand):
             targets.append(cand)
             break
-    # Optional audit artifact — pull it back when the agent emitted it.
+    # Optional audit artifact, when the agent emitted it.
     for cand in [
         os.path.join(best_sess, "session_breakdown.json"),
         os.path.join(best_sess, "phase10_report", "session_breakdown.json"),
@@ -2435,14 +2882,9 @@ def wait_and_collect_one(
     collect: bool,
     all_artifacts: bool,
 ) -> SubmissionRecord:
-    """Wait for one task to finish, then optionally download its artifacts.
-
-    Two-stage collection:
-      1. SaFE API: list_artifacts(task_id) -> download each via /artifacts/download
-      2. NFS fallback: if we still don't have session_breakdown.json (the CI
-         delivery contract), walk the canonical NFS result directories for a
-         matching model dir
-    """
+    """Wait for one task to finish, then optionally download its artifacts:
+    (1) SaFE artifacts API, then (2) NFS fallback when session_breakdown.json
+    (the CI delivery contract) is still missing."""
     if not rec.task_id:
         return rec  # nothing to wait for (skipped/failed during submit)
 
@@ -2467,11 +2909,8 @@ def wait_and_collect_one(
         rec.delivery_reason = "artifact collection disabled"
         return rec
 
-    # Stage 1: SaFE artifacts API. This is the most reliable path when the
-    # agent copied final files to /workspace/hyperloom (SaFE exposes them as
-    # hyperloom/ci_metrics.json and hyperloom/optimization_report.md). Retry a
-    # few times because task terminal status can beat Claw's file index by
-    # seconds.
+    # Stage 1: SaFE artifacts API (most reliable when the agent copied files to
+    # /workspace/hyperloom). Retry — terminal status can beat Claw's file index.
     items = []
     wanted = []
     for attempt in range(3):
@@ -2484,10 +2923,8 @@ def wait_and_collect_one(
         wanted = [it for it in items
                   if _is_wanted_artifact(it.get("path", ""), all_artifacts)]
         wanted_paths = [it.get("path", "").lower() for it in wanted]
-        # session_breakdown.json is the CI delivery contract — the optimizer's
-        # cli.finally always writes it (even on abort). ci_metrics.json /
-        # optimization_report.md are no longer hand-written by the prompt, so
-        # we retry only until the breakdown shows up.
+        # session_breakdown.json is the CI delivery contract (cli.finally always
+        # writes it, even on abort), so retry only until it shows up.
         has_safe_breakdown = any(
             p.endswith("session_breakdown.json") for p in wanted_paths
         )
@@ -2503,6 +2940,33 @@ def wait_and_collect_one(
     if current_session_hints:
         log.info("[task %s] current session timestamp hints from artifacts: %s",
                  rec.task_id, ", ".join(sorted(current_session_hints)))
+
+    if not has_safe_breakdown:
+        waited_session = _wait_for_nfs_session_delivery(
+            rec,
+            current_session_hints=current_session_hints,
+            poll_s=poll_s,
+        )
+        if waited_session:
+            # The SaFE artifact index may lag behind the agent's final writes.
+            # Re-list once after the grace wait before falling back to NFS.
+            try:
+                items = safe.list_artifacts(rec.task_id)
+                wanted = [
+                    it for it in items
+                    if _is_wanted_artifact(it.get("path", ""), all_artifacts)
+                ]
+                wanted_paths = [it.get("path", "").lower() for it in wanted]
+                has_safe_breakdown = any(
+                    p.endswith("session_breakdown.json") for p in wanted_paths
+                )
+                current_session_hints.update(_session_hints_from_artifact_items(items))
+                log.info("[task %s] safe artifacts after NFS grace wait: "
+                         "%d total, %d to download",
+                         rec.task_id, len(items), len(wanted))
+            except Exception as e:
+                log.warning("[task %s] post-grace list_artifacts failed: %s",
+                            rec.task_id, e)
 
     task_dir = artifacts_dir / rec.task_id
     rec.artifacts_dir = str(task_dir)
@@ -2526,11 +2990,8 @@ def wait_and_collect_one(
         except Exception as e:
             log.warning("[task %s] failed to download %s: %s", rec.task_id, path, e)
 
-    # Stage 2: NFS fallback if Stage 1 didn't deliver the key result file.
-    # The CI delivery contract is session_breakdown.json (auto-written by the
-    # optimizer's cli.finally to the wekafs session dir, then discovered here
-    # by the recursive NFS scan). ci_metrics.json / optimization_report.md are
-    # no longer required (the prompt no longer hand-writes them), so they no
+    # Stage 2: NFS fallback when Stage 1 didn't deliver session_breakdown.json
+    # (the CI delivery contract). ci_metrics.json / optimization_report.md no
     # longer gate the fallback.
     has_breakdown = any(
         p.endswith("session_breakdown.json") for p in rec.artifact_files
@@ -2555,10 +3016,8 @@ def wait_and_collect_one(
         log.info("[task %s] CI delivery status: %s (%s)",
                  rec.task_id, rec.ci_status, rec.delivery_reason or "-")
 
-    # Stage 3: reverse-backfill the audit fields directly into the wekafs
-    # SOURCE files so operators ssh-ing into /wekafs/users/<uid>/<sess>/
-    # see image/hyperloom_commit/category/sandbox_duration_seconds without
-    # downloading the GHA artifact zip. No-op when wekafs isn't mounted.
+    # Stage 3: reverse-backfill audit fields into the wekafs SOURCE files so
+    # operators see them without the GHA artifact zip. No-op when wekafs unmounted.
     if rec.artifact_count:
         try:
             n_wkfs = _backfill_wekafs_in_place(rec)
@@ -2589,7 +3048,19 @@ def process_completion(
     all_artifacts: bool,
     parallel: int,
 ) -> None:
-    """Wait + collect for all submitted records, in parallel up to ``parallel``."""
+    """Wait + collect for all submitted records, in parallel up to ``parallel``.
+
+    Args:
+        safe (SafeOptimizeClient): Client used to poll and download artifacts.
+        records (list[SubmissionRecord]): All submission records; only
+            ``submitted`` ones with a task id are awaited.
+        artifacts_dir (Path): Destination root for downloaded artifacts.
+        task_timeout_min (int): Max minutes to wait per task.
+        poll_s (int): Polling interval in seconds.
+        collect (bool): When True, collect artifacts after each task finishes.
+        all_artifacts (bool): When True, also copy full session trees.
+        parallel (int): Max concurrent wait/collect workers (<=1 runs serially).
+    """
     pending = [r for r in records if r.status == "submitted" and r.task_id]
     if not pending:
         log.info("no submitted tasks to wait for")
@@ -2643,6 +3114,16 @@ def write_manifest(
     submit_workspace: str,
     volume: str,
 ) -> None:
+    """Write the submission manifest as JSON and a markdown summary table.
+
+    Args:
+        out_dir (Path): Output directory (created if absent).
+        records (list[SubmissionRecord]): The submission records to serialize.
+        base_url (str): SaFE API base URL recorded in the manifest.
+        register_workspace (str): Workspace used for registration.
+        submit_workspace (str): Workspace used for submission.
+        volume (str): Storage volume name recorded in the manifest.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -2666,7 +3147,7 @@ def write_manifest(
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in records:
-        # Final status only meaningful when --wait-for-completion was on.
+        # final_status is only meaningful when --wait-for-completion was on.
         final = r.final_status or ("-" if r.status == "submitted" else "")
         phase = "-" if r.final_phase is None else str(r.final_phase)
         artifacts_cell = (
@@ -2691,13 +3172,12 @@ def write_manifest(
                 f"<br/>batch={batch_idx if batch_idx not in (None, '') else '-'}/"
                 f"{batch_size if batch_size not in (None, '') else '-'}"
             )
-        # Image cell: keep just the tag suffix (e.g. `sglang:v0.5.11-rocm720-mi30x`)
-        # so the manifest is readable; full registry path is in JSON.
+        # Image cell: tag suffix only for readability; full path is in JSON.
         image_cell = "-"
         image_full = (r.detected or {}).get("image", "") if r.detected else ""
         if image_full:
             image_cell = "`" + image_full.split("/")[-1] + "`"
-        # Duration cell: rounded minutes for readability, ms-precision in JSON.
+        # Duration cell: rounded minutes; ms-precision is in JSON.
         duration_cell = "-"
         if r.sandbox_duration_seconds is not None:
             mins = r.sandbox_duration_seconds / 60.0
@@ -2718,6 +3198,12 @@ def write_manifest(
 # ── CLI ─────────────────────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the command-line argument parser for the optimize-submit CLI.
+
+    Returns:
+        argparse.ArgumentParser: The configured parser with model selection,
+            override, SaFE connection, and collection options.
+    """
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2736,8 +3222,10 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Override detected framework")
     parser.add_argument("--precision", choices=["FP8", "FP4", "BF16", "INT4"],
                         help="Override detected precision")
-    parser.add_argument("--tp", type=int, choices=[1, 2, 4, 8],
-                        help="Override detected tensor parallel size")
+    parser.add_argument("--tp", type=int, choices=[1, 2, 4, 8, 16, 32],
+                        help="Override detected tensor parallel size. Values >8 "
+                             "require --nodes>1 (multi-node RayJob); tp must be "
+                             "<= nodes*8.")
     parser.add_argument("--concurrency", type=int,
                         help="Override detected concurrency")
     parser.add_argument("--image", help="Override container image")
@@ -2746,6 +3234,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=["local", "claw"], default="local",
                         help="Execution mode passed to SaFE (default: local — "
                              "agent runs in sandbox directly; 'claw' routes via RayJob)")
+    parser.add_argument("--nodes", type=int, default=1, metavar="N",
+                        help="Node count for the run. N>1 spreads the model across "
+                             "an N-node RayJob (8 GPUs/node): forces --mode claw and "
+                             "injects the RayJob topology (image, per-node resources, "
+                             "NODES=N, bnxt tar) into the agent prompt — mirrors the "
+                             "validated ci-config.yaml multi-node entries. Default 1.")
+    parser.add_argument("--rayjob-image", default="",
+                        help="Container image for the multi-node RayJob (used only "
+                             "when --nodes>1). Falls back to --image when empty.")
 
     parser.add_argument("--api-url", default="",
                         help="SaFE base URL (defaults to $SAFE_BASE_URL or $SAFE_API_URL)")
@@ -2778,19 +3275,26 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gpu-type", default="",
                         help=f"GPU type tag for the prompt (defaults to "
                              f"$SAFE_OPTIMIZE_GPU_TYPE then '{DEFAULT_GPU_TYPE}'). "
+                             f"Known profiles: {', '.join(GPU_PROFILES)}. "
                              f"SaFE backend default is MI355X — must override on core42.")
     parser.add_argument("--inferencex-path", default="",
-                        help=f"InferenceX checkout path inside the sandbox "
-                             f"(defaults to $SAFE_OPTIMIZE_INFERENCEX_PATH then "
-                             f"'{DEFAULT_INFERENCEX_PATH}'). SaFE backend default is "
-                             f"/hyperloom/InferenceX which doesn't exist on core42.")
+                        help="Explicit InferenceX checkout path inside the "
+                             "sandbox (dev override; also $SAFE_OPTIMIZE_"
+                             "INFERENCEX_PATH). Leave empty (the default) so "
+                             "install.sh clones a writable per-session copy "
+                             "instead of pinning a shared read-only mount.")
     parser.add_argument("--oob-path", default="",
-                        help=f"OOB checkout path inside the sandbox (defaults to "
-                             f"$SAFE_OPTIMIZE_OOB_PATH then '{DEFAULT_OOB_PATH}').")
+                        help="Optional OOB checkout override inside the sandbox. "
+                             "Default is unset: sandbox-side install.sh prepares "
+                             "and exports OOB paths.")
     parser.add_argument("--tracelens-root", default="",
-                        help=f"TraceLens checkout path inside the sandbox (defaults "
-                             f"to $SAFE_OPTIMIZE_TRACELENS_ROOT then "
-                             f"'{DEFAULT_TRACELENS_ROOT}').")
+                        help="TraceLens checkout path inside the sandbox. "
+                             "Leave empty (the default) so install.sh clones "
+                             "AMD-AGI/TraceLens into "
+                             "$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens "
+                             "and pins it to a fixed SHA. Override via "
+                             "$SAFE_OPTIMIZE_TRACELENS_ROOT or this flag only "
+                             "to point at an existing cluster checkout.")
     parser.add_argument("--prompt-prefix",
                         default=_load_default_prompt_prefix(),
                         help="Free-form prefix prepended to the SaFE-generated "
@@ -2823,9 +3327,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""),
                         help="HuggingFace token (or set $HF_TOKEN)")
 
-    # Production-pool audit metadata. These fields do not affect submission;
-    # they are copied into submission_manifest.json so we can answer "which
-    # fixed leaderboard pool entry did this task rerun?" after the fact.
+    # Production-pool audit metadata: copied into submission_manifest.json (does
+    # not affect submission) to trace which pool entry a task reran.
     parser.add_argument("--pool-id", default=os.environ.get("HYPERLOOM_POOL_ID", ""))
     parser.add_argument("--pool-index", default=os.environ.get("HYPERLOOM_POOL_INDEX", ""))
     parser.add_argument("--pool-batch-index", default=os.environ.get("HYPERLOOM_POOL_BATCH_INDEX", ""))
@@ -2869,10 +3372,27 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="How often to poll task status, seconds (default: 60)")
     parser.add_argument("--wait-parallel", type=int, default=8,
                         help="How many tasks to wait for in parallel (default: 8)")
+    parser.add_argument(
+        "--submit-jitter-sec", type=int,
+        default=int(os.environ.get("SAFE_OPTIMIZE_SUBMIT_JITTER_SEC", "0") or 0),
+        help="Pre-submit random delay window in seconds. Each (parallel matrix) "
+             "job sleeps random(0..N) before touching SaFE so register/submit "
+             "calls de-sync instead of stampeding Claw-session creation all at "
+             "once (the thundering herd that the backend answers with HTTP 500 "
+             "'failed to create Claw session' / 504). 0 = off (default).")
     return parser
 
 
 def main() -> int:
+    """CLI entry point: register, submit, wait/collect, and write the manifest.
+
+    Parses arguments, resolves the model set and SaFE connection, submits
+    optimization tasks, optionally waits for completion and collects artifacts,
+    and writes the submission manifest.
+
+    Returns:
+        int: Process exit code (0 on success, non-zero on fatal errors).
+    """
     args = _build_parser().parse_args()
 
     logging.basicConfig(
@@ -2889,8 +3409,7 @@ def main() -> int:
                or os.environ.get("CLAW_API_KEY")
                or os.environ.get("SAFE_API_KEY")
                or "")
-    # --workspace is shorthand for "set both to the same value" (back-compat
-    # with single-workspace usage from before the split). Explicit
+    # --workspace shorthand sets both to the same value (back-compat); explicit
     # --register-workspace / --submit-workspace override it.
     shared_ws = (args.workspace
                  or os.environ.get("SAFE_OPTIMIZE_WORKSPACE")
@@ -2903,8 +3422,8 @@ def main() -> int:
                         or os.environ.get("SAFE_OPTIMIZE_SUBMIT_WORKSPACE")
                         or shared_ws
                         or DEFAULT_SUBMIT_WORKSPACE)
-    # Round-robin pool: --submit-workspaces overrides single submit_workspace.
-    # Empty -> single workspace mode (back-compat with existing dispatches).
+    # Round-robin pool: --submit-workspaces overrides single submit_workspace;
+    # empty -> single-workspace mode.
     submit_workspaces_raw = (args.submit_workspaces
                              or os.environ.get("SAFE_OPTIMIZE_SUBMIT_WORKSPACES")
                              or "")
@@ -2913,18 +3432,21 @@ def main() -> int:
     volume = (args.volume
               or os.environ.get("SAFE_OPTIMIZE_VOLUME")
               or DEFAULT_VOLUME)
-    gpu_type = (args.gpu_type
-                or os.environ.get("SAFE_OPTIMIZE_GPU_TYPE")
-                or DEFAULT_GPU_TYPE)
+    gpu_type_input = (args.gpu_type
+                      or os.environ.get("SAFE_OPTIMIZE_GPU_TYPE")
+                      or DEFAULT_GPU_TYPE)
+    gpu_type = canonical_gpu_type(gpu_type_input)
+    gpu_profile = normalize_gpu_profile(gpu_type, warn=False) or DEFAULT_GPU_PROFILE
+    # Unset by default (install.sh clones a writable per-session copy); only an
+    # explicit path pins one. Empty -> inferencexPath="" suppresses SaFE's default.
     inferencex_path = (args.inferencex_path
                        or os.environ.get("SAFE_OPTIMIZE_INFERENCEX_PATH")
-                       or DEFAULT_INFERENCEX_PATH)
+                       or "")
     oob_path = (args.oob_path
                 or os.environ.get("SAFE_OPTIMIZE_OOB_PATH")
-                or DEFAULT_OOB_PATH)
+                or "")
     tracelens_root = (args.tracelens_root
-                      or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT")
-                      or DEFAULT_TRACELENS_ROOT)
+                      or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT", ""))
     try:
         kernel_backends = parse_kernel_backends(args.kernel_opt_backends)
     except ValueError as e:
@@ -2937,8 +3459,8 @@ def main() -> int:
 
     log.info("SaFE base_url=%s register_workspace=%s submit_workspace=%s volume=%s",
              base_url, register_workspace, submit_workspace, volume)
-    log.info("Cluster prompt fields: gpu_type=%s inferencex_path=%s oob_path=%s tracelens_root=%s",
-             gpu_type, inferencex_path, oob_path, tracelens_root)
+    log.info("Cluster prompt fields: gpu_type=%s gpu_profile=%s inferencex_path=%s oob_path=%s tracelens_root=%s",
+             gpu_type, gpu_profile, inferencex_path, oob_path, tracelens_root)
     log.info("Kernel backends: %s", ", ".join(kernel_backends))
     if submit_workspaces_pool:
         log.info("submit round-robin pool: %s (overrides --submit-workspace)",
@@ -2948,7 +3470,7 @@ def main() -> int:
                  "fallback to be deployed; will 400 on submit_task otherwise")
 
     hf = HuggingFaceClient(args.hf_token)
-    # Dry-run never hits SaFE; pass an empty token so callers don't need a real one.
+    # Dry-run never hits SaFE, so a placeholder token is fine.
     safe = SafeOptimizeClient(
         base_url, api_key or "dry-run",
         register_workspace=register_workspace,
@@ -2996,6 +3518,50 @@ def main() -> int:
         "source_task_id": args.pool_source_task_id,
     }
 
+    # ── Multi-node resolution ──────────────────────────────────────────────
+    # --nodes>1 spans an N-node RayJob. The SaFE task body has no node count, so
+    # force mode=claw and append the RayJob topology to the prompt suffix
+    # (mirrors the Claw-direct CI). --nodes is global but effectively per-model.
+    effective_mode = args.mode
+    effective_prompt_suffix = args.prompt_suffix or None
+    _nodes = args.nodes or 1
+    # tp must fit nodes*8 GPUs (enforced for single-node too) so a stray --tp 16
+    # is rejected at submit time, not at runtime on an 8-GPU sandbox.
+    if args.tp and args.tp > _nodes * 8:
+        log.error("--tp %d exceeds --nodes %d * 8 GPUs = %d; lower --tp or raise "
+                  "--nodes (tp>8 requires multi-node).",
+                  args.tp, _nodes, _nodes * 8)
+        return 2
+    if _nodes > 1:
+        if effective_mode != "claw":
+            log.warning("--nodes %d > 1 needs RayJob fan-out; forcing --mode claw "
+                        "(was %r)", _nodes, effective_mode)
+            effective_mode = "claw"
+        rayjob_image = (args.rayjob_image or args.image or "").strip()
+        if not rayjob_image:
+            log.warning("--nodes %d > 1 but no --rayjob-image/--image set; the agent "
+                        "must pick a RayJob image itself", args.nodes)
+        effective_prompt_suffix = (
+            (args.prompt_suffix or "")
+            + _multinode_prompt_suffix(args.nodes, rayjob_image)
+        ) or None
+        log.info("multi-node: nodes=%d tp=%s mode=%s rayjob_image=%s",
+                 args.nodes, args.tp, effective_mode,
+                 rayjob_image or "(agent-chosen)")
+
+    # Pre-submit jitter. When a large matrix fans out, every job otherwise hits
+    # register/submit (and Claw-session creation) in the same instant — the
+    # backend then sheds load with HTTP 500 "failed to create Claw session" /
+    # 504. A per-process random(0..N) sleep here spreads the herd across an
+    # N-second window so the backend sees a trickle rather than a spike. The
+    # submit_task retry loop still backstops any residual collision.
+    jitter = max(0, args.submit_jitter_sec)
+    if jitter > 0 and not args.dry_run:
+        d = random.uniform(0, jitter)
+        log.info("submit jitter: sleeping %.1fs (window 0-%ds) to de-sync from "
+                 "other parallel jobs before hitting SaFE", d, jitter)
+        time.sleep(d)
+
     records: list[SubmissionRecord] = []
     for repo in repos:
         log.info("=" * 60)
@@ -3004,13 +3570,13 @@ def main() -> int:
             repo, hf, safe, overrides,
             args.isl, args.osl, args.dry_run, args.hf_token,
             manual_mode=args.manual,
-            mode=args.mode,
+            mode=effective_mode,
             gpu_type=gpu_type,
             inferencex_path=inferencex_path,
             oob_path=oob_path,
             tracelens_root=tracelens_root,
             prompt_prefix=args.prompt_prefix or None,
-            prompt_suffix=args.prompt_suffix or None,
+            prompt_suffix=effective_prompt_suffix,
             kernel_backends=kernel_backends,
             max_hours=args.max_hours,
             target_gain=args.target_gain,
@@ -3027,7 +3593,7 @@ def main() -> int:
     for r in submit_failed:
         log.warning("  submit failed: %s — %s", r.model, r.error)
 
-    # Wait + collect (default on). Skip on dry-run since nothing was submitted.
+    # Wait + collect (default on); skip on dry-run.
     if not args.dry_run and submitted > 0 and args.wait_for_completion:
         process_completion(
             safe, records,
@@ -3039,7 +3605,6 @@ def main() -> int:
             parallel=args.wait_parallel,
         )
 
-        # Per-status summary after completion.
         from collections import Counter
         final_counts = Counter(r.final_status or "Pending"
                                for r in records if r.task_id)
@@ -3069,7 +3634,7 @@ def main() -> int:
     else:
         non_success = []
 
-    # Manifest is written *after* wait/collect so it captures final_status etc.
+    # Manifest written after wait/collect so it captures final_status etc.
     if args.output_dir:
         write_manifest(Path(args.output_dir), records,
                        base_url, register_workspace, submit_workspace, volume)
@@ -3083,6 +3648,13 @@ def main() -> int:
                       for r in non_success
                   ))
         return 2
+    context_skipped = [
+        r for r in records
+        if r.status == "skipped" and (r.error or "").startswith("context_too_short:")
+    ]
+    if submitted == 0 and records and len(context_skipped) == len(records):
+        log.info("All models skipped by policy: context_too_short")
+        return 0
     return 0 if submitted > 0 else 1
 
 

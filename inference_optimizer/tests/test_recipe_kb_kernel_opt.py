@@ -1,19 +1,9 @@
-"""Regression tests: KEEP'd kernel optimizations (incl. E2E-verified-but-
-no-gain) must be persisted into the recipe row.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Bug context (overnight 12h Qwen3-32B session 20260529T132829Z):
-``k006`` rmsnorm_quant kernel optimization reached micro_speedup=1.32x,
-compiled + passed correctness, was KEEP'd, AND went through E2E integrate
-verification (new_tput=2477.82, gain_pct=-0.094%). Yet recipe.json had
-``what_worked=[]`` and no trace of k006 at all — the entire kernel-opt +
-E2E-verification outcome was dropped because ``what_worked`` is built
-ONLY from ``optimization_stack`` (which a micro-only / no-E2E-gain kernel
-never enters).
+"""Regression: KEEP'd kernel optimizations must be persisted into the recipe row.
 
-These tests pin the fix: a ``kernel_optimizations`` array on the recipe
-that captures BOTH the micro result and the E2E verification outcome, so
-a future warm-start can see "k006 tried: micro 1.32x but E2E flat" and
-skip re-doing it.
+Bug context (session 20260529T132829Z): k006 reached micro 1.32x but flat
+E2E and was dropped from recipe.json; the ``kernel_optimizations`` array fixes it.
 """
 
 from __future__ import annotations
@@ -45,8 +35,7 @@ def test_kernel_optimization_roundtrip() -> None:
 
 
 def test_recipe_carries_kernel_optimizations_roundtrip() -> None:
-    """Recipe.kernel_optimizations is a first-class field that round-trips
-    through to_dict/from_dict and lands at the top level on disk."""
+    """Recipe.kernel_optimizations round-trips and lands at the top level on disk."""
     r = Recipe(
         canonical_id="inference:qwen-qwen3-32b:mi355x:sglang:0.5.11:bf16",
         kernel_optimizations=[
@@ -66,7 +55,6 @@ def test_recipe_carries_kernel_optimizations_roundtrip() -> None:
     assert "kernel_optimizations" in out, out.keys()
     assert out["kernel_optimizations"][0]["kernel_id"] == "k006"
     assert out["kernel_optimizations"][0]["micro_speedup"] == 1.3202
-    # Re-parse: the field must NOT get bucketed into extras.
     back = Recipe.from_dict(out)
     assert len(back.kernel_optimizations) == 1
     assert back.kernel_optimizations[0].kernel_id == "k006"
@@ -83,5 +71,4 @@ def test_recipe_from_dict_tolerates_missing_field() -> None:
     }
     r = Recipe.from_dict(legacy)
     assert r.kernel_optimizations == []
-    # And re-serializing always emits the key (empty list).
     assert r.to_dict()["kernel_optimizations"] == []

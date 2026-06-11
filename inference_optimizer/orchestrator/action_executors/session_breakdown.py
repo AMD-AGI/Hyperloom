@@ -1,14 +1,10 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ActionRunner for the ``session_breakdown`` action.
 
 Thin wrapper around :func:`inference_optimizer.breakdown.write_breakdown_json`
-so the Coordinator / orchestration agent can refresh
-``$SESSION_DIR/session_breakdown.json`` on demand (after every
-``validate_stack`` KEEP, before a planned ``report``, when a live
-dashboard is observing this session, etc.).
-
-The end-of-session safety net lives in ``cli.py``'s finally block — this
-action is the agent-driven path used **during** a session for live
-refreshes.
+for on-demand refreshes of ``$SESSION_DIR/session_breakdown.json`` during a
+session (the end-of-session safety net lives in cli.py's finally block).
 
 Returned shape::
 
@@ -40,6 +36,17 @@ class SessionBreakdownExecutor:
     """
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Write ``session_breakdown.json`` and return its path + metadata.
+
+        Args:
+            ctx: The runner context carrying ``task.params`` (optional
+                ``session_dir`` / ``output_path`` overrides) and ``extra``.
+
+        Returns:
+            dict[str, Any]: On success, ``status="succeeded"`` with
+                ``breakdown_path``, ``warnings`` and ``size_bytes``; on failure,
+                ``status="failed"`` with an ``error`` message.
+        """
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
             return {
@@ -60,8 +67,7 @@ class SessionBreakdownExecutor:
                 "error":  f"{type(exc).__name__}: {exc}",
             }
 
-        # Re-read the rendered JSON to surface warnings + size to the bus
-        # event without parsing it back.
+        # Surface warnings + size to the bus event.
         try:
             warnings = build(session_dir).get("warnings") or []
         except Exception:  # noqa: BLE001
@@ -81,7 +87,16 @@ class SessionBreakdownExecutor:
 
     @staticmethod
     def _resolve_session_dir(ctx) -> Path | None:
-        """Same resolution order as :class:`ReportExecutor`."""
+        """Same resolution order as :class:`ReportExecutor`.
+
+        Args:
+            ctx: The runner context whose ``extra`` / ``task.params`` may carry
+                a ``session_dir``.
+
+        Returns:
+            Path | None: The resolved session directory, or ``None`` when none
+                resolves to an existing session with a manifest.
+        """
         extra = getattr(ctx, "extra", None) or {}
         if extra.get("session_dir"):
             return Path(extra["session_dir"])
@@ -90,8 +105,8 @@ class SessionBreakdownExecutor:
             return Path(params["session_dir"])
         from ...paths import session_dir as _sd
         candidate = _sd()
-        # Don't require state.json — a fresh session with only manifest can
-        # still produce a partial breakdown (with a warning).
+        # manifest.json (not state.json) so a fresh session yields a partial
+        # breakdown.
         if candidate.exists() and (candidate / "manifest.json").exists():
             return candidate
         return None

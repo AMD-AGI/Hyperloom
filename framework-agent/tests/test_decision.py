@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for framework_agent.decision (winner_decision + candidate_score)."""
 
 from __future__ import annotations
@@ -46,12 +48,7 @@ def test_winner_decision_throughput_below_ratio() -> None:
 
 
 def test_winner_decision_zero_baseline_throughput_rejects() -> None:
-    """Baseline throughput == 0 cannot produce a ratio; defence-in-depth reject.
-
-    ``Baseline.from_dict`` already enforces ``> 0`` so this branch is normally
-    unreachable from JSON inputs; this guards against a future code path that
-    builds Baseline programmatically (e.g. a unit test stub).
-    """
+    """Baseline throughput == 0 rejects (defence-in-depth; from_dict enforces >0, but a programmatic Baseline could bypass it)."""
     req = _req()
     bad_baseline = replace(req.baseline, throughput=0.0)
     bad_req = replace(req, baseline=bad_baseline)

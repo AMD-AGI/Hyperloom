@@ -1,22 +1,10 @@
-"""``§ 5b. RELATED LESSONS`` specialist prompt section + ``warm_start_lessons``
-plumbing tests.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The ``kind=lesson`` writes added by ``_record_fact_per_task`` were
-write-only in KB until this PR — no reader path existed, so the
-positive-prior lessons LLMs accumulated were dead data. This module
-locks in the reader → prompt-render plumbing:
+"""``§ 5b. RELATED LESSONS`` specialist prompt section + ``warm_start_lessons`` plumbing tests.
 
-* ``Coordinator._warm_specialist_params`` populates the
-  ``warm_start_lessons`` task param when
-  :attr:`SharedState.warm_start_lessons` is non-empty.
-* ``build_specialist_prompts`` renders the new "## 5b. RELATED
-  LESSONS" section between section 5 (recipe) and section 6 (PR feed).
-* Empty ``warm_start_lessons`` falls back to the "(none …)"
-  placeholder so the prompt layout stays stable.
-* Each rendered lesson includes ``statement`` + ``measured_impact``
-  + optional ``confidence`` / ``source_session_id`` metadata; lessons
-  with empty statements are dropped (defensive against partial
-  writes from older clients).
+Locks the reader → prompt-render path for ``kind=lesson`` KB writes: the
+warmer populates the task param, ``build_specialist_prompts`` renders the
+section with metadata, and empty/malformed rows fall back gracefully.
 """
 
 from __future__ import annotations
@@ -39,9 +27,7 @@ from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder i
 )
 
 
-# ---------------------------------------------------------------------------
 # Coordinator-warmer integration
-# ---------------------------------------------------------------------------
 @dataclass
 class _BareState:
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
@@ -71,9 +57,7 @@ def _make_coord(tmp_path: Path, *, state: _BareState) -> Coordinator:
 
 @pytest.mark.asyncio
 async def test_warm_specialist_params_populates_warm_start_lessons(tmp_path: Path):
-    """When SharedState.warm_start_lessons is non-empty, the warmer
-    must copy it to the task params dict so the specialist subprocess
-    receives it."""
+    """A non-empty SharedState.warm_start_lessons is copied to the task params dict."""
     lessons = [
         {
             "canonical_id": "lesson:abc",
@@ -96,18 +80,14 @@ async def test_warm_specialist_params_populates_warm_start_lessons(tmp_path: Pat
 async def test_warm_specialist_params_omits_warm_start_lessons_when_empty(
     tmp_path: Path,
 ):
-    """No lessons → no key in params (avoids leaking an empty list
-    that downstream readers might mis-treat as 'KB returned [],
-    nothing to learn from this anchor')."""
+    """No lessons → no key in params (avoids leaking a misleading empty list)."""
     coord = _make_coord(tmp_path, state=_BareState(warm_start_lessons=[]))
     params: dict[str, Any] = {}
     await coord._warm_specialist_params(params)
     assert "warm_start_lessons" not in params
 
 
-# ---------------------------------------------------------------------------
 # Prompt section
-# ---------------------------------------------------------------------------
 def _make_inp(
     lessons: list[dict[str, Any]] | None = None,
     pitfalls: list[dict[str, Any]] | None = None,
@@ -161,9 +141,7 @@ def test_section_lessons_renders_each_lesson_with_metadata():
 
 def test_section_lessons_renders_dict_measured_impact_as_human_readable_line(
 ):
-    """GAP 3 — new ``measured_impact`` is a dict, not a string. The
-    renderer formats it as ``+12.3%, tput=678.0, depth=2, 2026-05-26``
-    so the specialist sees a parseable summary instead of raw JSON."""
+    """GAP 3 — a dict ``measured_impact`` is rendered as a human-readable summary instead of raw JSON."""
     lessons = [
         {
             "canonical_id": "lesson:dict",
@@ -188,9 +166,7 @@ def test_section_lessons_renders_dict_measured_impact_as_human_readable_line(
 
 
 def test_section_lessons_renders_validated_count_when_above_1():
-    """GAP 4 — when multiple sessions have validated a lesson, surface
-    the count so the specialist can prioritize community-validated
-    lessons over single-session ones."""
+    """GAP 4 — when multiple sessions validated a lesson, surface the count."""
     lessons = [
         {
             "canonical_id": "lesson:multi",
@@ -206,15 +182,12 @@ def test_section_lessons_renders_validated_count_when_above_1():
     rows = _section_lessons(_make_inp(lessons))
     text = "\n".join(rows)
     assert "validated=5" in text
-    # Prefers the latest session id (tail of source_session_ids[]) over
-    # the legacy singular source_session_id field.
+    # Prefers the latest session id (tail of source_session_ids[]).
     assert "recent=s-e" in text
 
 
 def test_section_lessons_singleton_validation_omits_validated_tag():
-    """When validated_count == 1, the renderer skips the ``validated=N``
-    bit (no need to label as "1 session validated this"; that's the
-    default assumption for any lesson)."""
+    """When validated_count == 1, the renderer skips the ``validated=N`` bit."""
     lessons = [
         {
             "canonical_id": "lesson:single",
@@ -229,14 +202,12 @@ def test_section_lessons_singleton_validation_omits_validated_tag():
     rows = _section_lessons(_make_inp(lessons))
     text = "\n".join(rows)
     assert "validated=" not in text
-    # ``recent=`` still surfaces so the operator knows which session
-    # produced it.
+    # ``recent=`` still surfaces so the operator knows which session produced it.
     assert "recent=s-only" in text
 
 
 def test_section_lessons_skips_lessons_with_empty_statement():
-    """Defensive: a KB row with empty ``statement`` is skipped (avoids
-    rendering a meaningless ``- **** (conf=…)`` bullet)."""
+    """Defensive: a KB row with empty ``statement`` is skipped."""
     lessons = [
         {"canonical_id": "lesson:empty", "attrs": {"statement": ""}},
         {"canonical_id": "lesson:real",
@@ -250,8 +221,7 @@ def test_section_lessons_skips_lessons_with_empty_statement():
 
 
 def test_build_specialist_prompts_inserts_5b_between_recipe_and_pr_feed():
-    """End-to-end: build_specialist_prompts inserts section 5b after
-    section 5 (recipe) and before section 5c (pitfalls)."""
+    """End-to-end: section 5b is inserted between section 5 (recipe) and 5c (pitfalls)."""
     inp = _make_inp([
         {"canonical_id": "lesson:x",
          "attrs": {"statement": "x → +1%"}},
@@ -264,9 +234,7 @@ def test_build_specialist_prompts_inserts_5b_between_recipe_and_pr_feed():
     assert recipe_idx < lessons_idx < pitfalls_idx < pr_idx
 
 
-# ---------------------------------------------------------------------------
 # § 5c pitfalls section — symmetric mirror of § 5b lessons
-# ---------------------------------------------------------------------------
 def test_section_pitfalls_empty_falls_back_to_placeholder():
     rows = _section_pitfalls(_make_inp())
     text = "\n".join(rows)
@@ -306,9 +274,7 @@ def test_section_pitfalls_renders_each_pitfall_with_metadata():
 
 
 def test_section_pitfalls_skips_pitfalls_with_empty_description():
-    """Defensive against partial / legacy rows (e.g. resumed sessions
-    with the pre-fix ``[{"raw": <json_blob>}]`` shape that lacks
-    ``attrs.description``)."""
+    """Defensive against partial / legacy rows lacking ``attrs.description``."""
     pitfalls = [
         {"canonical_id": "pitfall:empty", "attrs": {"description": ""}},
         # Legacy shape from the broken traps(symptom=) era.

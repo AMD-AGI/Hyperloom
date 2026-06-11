@@ -1,8 +1,6 @@
-"""Tests for :mod:`runtime.inbox_parser`.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The corpus mirrors what ``Coordinator._compose_prompt`` actually emits, plus a
-handful of degraded inputs that we want to handle without crashing.
-"""
+"""Tests for :mod:`runtime.inbox_parser` against Coordinator prompt output and degraded inputs."""
 
 from __future__ import annotations
 

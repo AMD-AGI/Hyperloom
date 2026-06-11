@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for :class:`runtime.dead_letter.DeadLetter`."""
 
 from __future__ import annotations
@@ -85,7 +87,7 @@ def test_replay_empty_dir_returns_zero_summary(tmp_path):
 def test_replay_handles_corrupt_lines_as_failures(tmp_path):
     dlq = DeadLetter(root=tmp_path)
     dlq.append("upsert", {"k": 1}, attempts=1, last_error="x")
-    # Append a bad line manually.
+    # Corrupt the JSONL by appending an unparseable line.
     p = dlq.files()[0]
     with p.open("a", encoding="utf-8") as fp:
         fp.write("{not json\n")

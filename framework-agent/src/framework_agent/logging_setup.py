@@ -1,29 +1,19 @@
-"""Structured logging setup for framework-agent.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Addresses the zhenggong "0-observability" gap noted in the merged design
-(§4.4.1): long-running build/benchmark stages used to be a black box.
+"""Structured logging setup for framework-agent.
 
 Public API:
 
-* :func:`configure_logging`       — explicit init (called by ``fa`` CLI).
-* :func:`get_logger`              — module-level helper that lazy-inits.
-* :func:`stage_log`               — context manager emitting structured
-                                    start/done/failed envelopes around a
-                                    per-stage block (per-candidate build,
-                                    bench, accuracy, kb-sediment, ...).
+* :func:`configure_logging`  — explicit init (called by ``fa`` CLI).
+* :func:`get_logger`         — module-level helper that lazy-inits.
+* :func:`stage_log`          — context manager emitting start/done/failed
+                               envelopes around a per-stage block.
 
-Design choices:
-
-* No import-time side effects (safe to import from libraries / tests).
-* Single root logger ``framework_agent`` with module-prefixed children;
-  callers use ``get_logger(__name__)`` to inherit.
-* Text format by default (human-readable); JSON Lines optional via
-  ``FRAMEWORK_AGENT_LOG_JSON=1`` for machine ingest.
-* Level resolution: explicit arg > ``FRAMEWORK_EXPLORER_LOG_LEVEL`` env
-  > ``FRAMEWORK_AGENT_LOG_LEVEL`` env (alias) > ``INFO``.
-* Optional file sink (``--log-file`` / env) appended alongside stderr.
-* Re-entrant: a second ``configure_logging`` call replaces handlers but
-  preserves child loggers' levels (so tests can override safely).
+No import-time side effects. Single root logger ``framework_agent`` with
+module-prefixed children. Text format by default; JSON Lines via
+``FRAMEWORK_AGENT_LOG_JSON=1``. Level resolution: explicit arg >
+``FRAMEWORK_EXPLORER_LOG_LEVEL`` > ``FRAMEWORK_AGENT_LOG_LEVEL`` > ``INFO``.
+Optional file sink via ``--log-file`` / env. Re-entrant (replaces handlers).
 """
 
 from __future__ import annotations
@@ -38,13 +28,11 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-# Single root for the package; all module loggers descend from this so a
-# single configure call propagates to every emitter.
+# All module loggers descend from this root so one configure call propagates.
 _ROOT_NAME = "framework_agent"
 _DEFAULT_FMT = (
     "%(asctime)s %(levelname)-5s %(name)s :: %(message)s"
 )
-# Env vars surfaced in the merged design §14.3.
 _LEVEL_ENVS: tuple[str, ...] = (
     "FRAMEWORK_EXPLORER_LOG_LEVEL",
     "FRAMEWORK_AGENT_LOG_LEVEL",
@@ -54,7 +42,17 @@ _FILE_ENV = "FRAMEWORK_AGENT_LOG_FILE"
 
 
 def _resolve_level(explicit: str | int | None) -> int:
-    """Pick the effective log level (explicit > env > INFO)."""
+    """Pick the effective log level (explicit > env > INFO).
+
+    Args:
+        explicit (str | int | None): An explicit level as an int, a numeric
+            string, or a level name (e.g. ``"DEBUG"``). ``None`` defers to the
+            environment variables in :data:`_LEVEL_ENVS`.
+
+    Returns:
+        int: The resolved :mod:`logging` level constant, defaulting to
+            ``logging.INFO``.
+    """
     if explicit is not None:
         if isinstance(explicit, int):
             return explicit
@@ -83,6 +81,18 @@ class _JsonLineFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:  # noqa: D401
+        """Serialise a log record to a single JSON line.
+
+        Promotes any ``extra_*`` record attribute to a top-level field (with
+        the ``extra_`` prefix stripped) and includes a formatted traceback when
+        exception info is present.
+
+        Args:
+            record (logging.LogRecord): The record to format.
+
+        Returns:
+            str: A JSON object encoded as a single line.
+        """
         payload: dict[str, Any] = {
             "ts":     time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record.created)),
             "level":  record.levelname,
@@ -104,13 +114,10 @@ def configure_logging(
     log_file: str | Path | None = None,
     quiet_third_party: bool = True,
 ) -> logging.Logger:
-    """Initialise the framework-agent root logger.
+    """Initialise the framework-agent root logger and return it.
 
-    Idempotent: each call clears previously attached handlers on the
-    root so re-running (e.g. in tests, or when the CLI re-parses args)
+    Idempotent: each call clears previously attached handlers so re-running
     does not stack duplicates.
-
-    Returns the root logger so callers may chain ``.info(...)``.
     """
     use_json = (
         json_output
@@ -142,10 +149,8 @@ def configure_logging(
         try:
             file_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            # Best-effort: read-only mount / permission denied / non-dir
-            # parent should not abort logging setup. The FileHandler call
-            # below will raise a more specific OSError if the parent is
-            # still unwritable, so report and continue rather than swallow.
+            # A read-only mount / bad parent shouldn't abort logging setup;
+            # report and continue (FileHandler below raises if still unwritable).
             print(
                 f"[framework-agent logging_setup] WARN: mkdir({file_path.parent}) "
                 f"failed: {exc!r}; FileHandler may also fail",
@@ -168,6 +173,14 @@ def get_logger(name: str | None = None) -> logging.Logger:
 
     When ``name`` is a fully-qualified module name (``framework_agent.xxx``),
     it is returned as-is; otherwise it is treated as a leaf under the root.
+
+    Args:
+        name (str | None): Logger name. ``None`` or empty returns the root
+            logger; a name already under the root is used verbatim; any other
+            name becomes a leaf under ``framework_agent``.
+
+    Returns:
+        logging.Logger: The resolved child (or root) logger.
     """
     if not name:
         return logging.getLogger(_ROOT_NAME)
@@ -188,12 +201,6 @@ def stage_log(
 
     Yields a mutable dict so the caller can attach result metrics (e.g.
     ``ctx["throughput"] = 1234.5``) before the ``done`` envelope fires.
-
-    Example::
-
-        with stage_log(log, "build", candidate="PR:25748") as ctx:
-            run_build(...)
-            ctx["wall_sec"] = 412.3
     """
     started = time.monotonic()
     base: dict[str, Any] = {"stage": stage}

@@ -1,8 +1,6 @@
-"""Tests for :mod:`runtime.web_tools.config`.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Covers env normalization, provider chain resolution, and the
-``has_search_api_key`` guard. No HTTP calls.
-"""
+"""Tests for :mod:`runtime.web_tools.config`: env normalization, provider chain, ``has_search_api_key`` guard."""
 
 from __future__ import annotations
 

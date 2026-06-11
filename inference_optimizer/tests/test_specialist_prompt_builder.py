@@ -1,19 +1,6 @@
-"""Specialist prompt hint blocks switch to atom paths when the active
-session framework is ``atom``.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Three contracts pinned here:
-
-* When ``SpecialistPromptInputs.framework == 'atom'``, the per-domain
-  ``_focus_*`` blocks for serving / kernel-switch / comm render
-  atom-equivalent ``what to read first`` bullets (e.g.
-  ``atom/entrypoints/openai_server.py``).
-* The same blocks NEVER mention literal ``vllm/v1/`` or
-  ``sglang/python/sglang/srt/`` paths under atom — those directories
-  don't exist on an atom-only box, so referring to them wastes the
-  specialist's first tool call.
-* Sglang / vllm / empty-framework dispatches still render the
-  canonical (legacy) hint blocks unchanged (regression guard).
-"""
+"""Specialist prompt hint blocks switch to atom paths when framework == 'atom'."""
 
 from __future__ import annotations
 
@@ -43,9 +30,7 @@ def _render(domain_key: str, *, framework: str = "") -> str:
     return system + "\n" + user
 
 
-# ---------------------------------------------------------------------------
 # 1. Atom hint blocks: serving / kernels / dist render atom paths
-# ---------------------------------------------------------------------------
 def test_focus_serving_renders_atom_paths_when_framework_atom():
     text = _render("serving_specialist", framework="atom")
     for marker in (
@@ -61,7 +46,6 @@ def test_focus_kernels_mentions_aiter_shared_with_sglang_vllm_under_atom():
     text = _render("kernel_switch_specialist", framework="atom")
     assert "atom/model_ops/" in text
     assert "atom/quantization/" in text
-    # The "shared aiter" note is the key cross-reference.
     lower = text.lower()
     assert "aiter" in lower
     assert "shared" in lower
@@ -69,43 +53,31 @@ def test_focus_kernels_mentions_aiter_shared_with_sglang_vllm_under_atom():
 
 def test_focus_dist_notes_single_node_only_under_atom():
     text = _render("comm_specialist", framework="atom")
-    # Single-node disclaimer is the most important content.
     assert "single-node" in text.lower()
     assert "atom/utils/distributed/utils.py" in text
 
 
-# ---------------------------------------------------------------------------
 # 2. Atom hint blocks DROP literal sglang/vllm paths
-# ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "domain_key",
     ["serving_specialist", "kernel_switch_specialist", "comm_specialist"],
 )
 def test_no_sglang_or_vllm_paths_in_atom_focus_blocks(domain_key):
-    """Render the focus block alone (not the full prompt) and assert
-    the off-framework path literals are absent. We slice on the block
-    header so unrelated mentions in section 9 prose (e.g. "we share
-    aiter with sglang and vllm") don't count as misses.
-    """
+    """The atom focus block must not mention sglang/vllm path literals."""
     text = _render(domain_key, framework="atom")
     head = text.find("**What to read first**")
     tail = text.find("**Pitfalls", head)
     assert head >= 0 and tail > head, "focus block boundaries not found"
     block = text[head:tail]
-    # vLLM-specific source tree.
     assert "vllm/v1/" not in block, (
         f"atom {domain_key} block mentions vllm/v1/: {block!r}"
     )
-    # SGLang-specific source tree.
     assert "sglang/python/sglang/srt/" not in block, (
         f"atom {domain_key} block mentions sglang srt: {block!r}"
     )
 
 
-# ---------------------------------------------------------------------------
-# 3. Cross-framework regression guard — sglang / vllm / empty still
-#    render the canonical (legacy) hint block.
-# ---------------------------------------------------------------------------
+# 3. Cross-framework regression guard — non-atom still renders canonical hints.
 @pytest.mark.parametrize("framework", ["", "sglang", "vllm"])
 def test_focus_serving_renders_canonical_paths_under_non_atom(framework):
     text = _render("serving_specialist", framework=framework)

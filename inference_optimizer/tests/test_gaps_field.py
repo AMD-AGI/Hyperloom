@@ -1,31 +1,10 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """v0.8 KB_gaps/Gap-09 — structured gaps[] ledger tests.
 
-Covers the four contracts the Gap-09 cheatsheet pins down:
-
-* PR 5.1 — :class:`SharedState` exposes the ``gaps: list[dict]`` field
-  with default ``[]`` and provides :meth:`upsert_gap` /
-  :meth:`append_gap_attempt` / :meth:`find_gap` /
-  :meth:`replace_gaps` helpers that respect the per-gap attempt cap
-  and the global ``_GAPS_MAX_ENTRIES`` bound.
-* PR 5.2 — :data:`policy.CORE_STATE_FIELDS` locks ``gaps`` so a
-  rogue ``update_state{changes={gaps: ...}}`` is denied.
-* PR 5.3 / 5.4 — Coordinator's :meth:`_refresh_gaps` upserts gaps
-  from baseline / attempts / Cortex traverse signals, and the explore
-  KEEP/REVERT path appends one attempt per variant outcome.
-* PR 5.5 — :meth:`SharedState.to_gaps_summary` renders a bounded,
-  human-readable block (one ``- canonical_id [layer/severity]
-  symptom`` row per gap) so the Orchestration prompt sees structured
-  facts rather than the v0.6 ``last_action_failures`` proxy.
-* PR 5.6 — :meth:`Coordinator._warm_specialist_params` plumbs
-  ``gap_symptom`` / ``gap_layer`` / ``gap_evidence`` onto specialist
-  task params before dispatch.
-
-The tests run against the real :class:`SharedState` dataclass (no
-stubs — Gap-09 is a fact-layer field plus pure-write helpers, so we
-exercise the canonical implementation). Coordinator tests use the
-``Coordinator.__new__`` shortcut (same idiom as
-``test_v08_m5_specialist_lifecycle``) to avoid pulling in the full
-reactor loop.
+Covers PR 5.1-5.6: the SharedState ``gaps`` field + write helpers,
+the PolicyGate lock, Coordinator ``_refresh_gaps`` extraction, the
+``to_gaps_summary`` rendering, and specialist-param warmup.
 """
 
 from __future__ import annotations
@@ -36,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent, IntentType,
 )
 from inference_optimizer.orchestrator.policy import (
@@ -52,14 +31,9 @@ from inference_optimizer.orchestrator.shared_state import (
 from inference_optimizer.orchestrator.agent_role import default_role_registry
 
 
-# ===========================================================================
 # 1. Field surface
-# ===========================================================================
 def test_gaps_field_exists_default_empty_list():
-    """KB_gaps/Gap-09 PR 5.1 — the SharedState dataclass exposes a
-    ``gaps: list[dict]`` field defaulting to an empty list. Existence
-    is the core contract: prompt_builder's structured-gaps section
-    short-circuits on empty, so callers never crash on cold start."""
+    """KB_gaps/Gap-09 PR 5.1 — SharedState exposes a ``gaps: list[dict]`` field defaulting to ``[]``."""
     s = SharedState()
     assert hasattr(s, "gaps")
     assert s.gaps == []
@@ -91,20 +65,14 @@ def test_gaps_field_roundtrip_through_state_json(tmp_path):
     assert loaded.gaps[0]["layer"] == "kernel"
 
 
-# ===========================================================================
 # 2. PolicyGate lock (Inv-1 / Inv-10.2)
-# ===========================================================================
 def test_core_state_fields_includes_gaps():
-    """``CORE_STATE_FIELDS`` MUST contain ``gaps``; the prompt's
-    structured-gap block is only trustworthy when the LLM can't
-    fabricate entries via ``update_state``."""
+    """``CORE_STATE_FIELDS`` MUST contain ``gaps`` so the LLM can't fabricate entries via ``update_state``."""
     assert "gaps" in CORE_STATE_FIELDS
 
 
 def test_policy_gate_rejects_update_state_for_gaps():
-    """KB_gaps/Gap-09 PR 5.2 — orchestration cannot mutate gaps[]
-    through ``update_state``. The denial surfaces as
-    ``rule='state_field'``."""
+    """KB_gaps/Gap-09 PR 5.2 — orchestration cannot mutate gaps[] via ``update_state`` (rule='state_field')."""
     gate = PolicyGate(role_registry=default_role_registry())
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", Intent(
@@ -114,9 +82,7 @@ def test_policy_gate_rejects_update_state_for_gaps():
     assert exc.value.rule == "state_field"
 
 
-# ===========================================================================
 # 3. SharedState helpers
-# ===========================================================================
 def test_upsert_gap_inserts_then_merges_by_canonical_id():
     s = SharedState()
     e1 = s.upsert_gap({
@@ -209,12 +175,9 @@ def test_replace_gaps_dedups_and_caps_attempts():
     assert s.find_gap("issue.b") is not None
 
 
-# ===========================================================================
 # 4. Prompt rendering (to_gaps_summary)
-# ===========================================================================
 def test_to_gaps_summary_empty_returns_empty_string():
-    """Cold-start sessions skip the whole block — callers add the
-    ``=== Current gaps ===`` header only when the body is non-empty."""
+    """Cold-start sessions skip the whole block; the header is added only when the body is non-empty."""
     assert SharedState().to_gaps_summary() == ""
 
 
@@ -257,9 +220,7 @@ def test_to_gaps_summary_caps_entries_at_max():
     assert "older gaps elided" in out
 
 
-# ===========================================================================
 # 5. Coordinator helpers (_refresh_gaps / _extract_* / _warm_specialist_params)
-# ===========================================================================
 @dataclass
 class _StubTask:
     task_id: str
@@ -269,8 +230,7 @@ class _StubTask:
 
 @pytest.fixture
 def coord(tmp_path: Path):
-    """Coordinator stand-in — same shortcut used by other v0.8 unit
-    tests (``Coordinator.__new__`` skips the full constructor)."""
+    """Coordinator stand-in via ``Coordinator.__new__`` (skips the full constructor)."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
@@ -284,17 +244,14 @@ def coord(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_refresh_gaps_no_op_until_baseline(coord):
-    """Before baseline, no canonical surface exists — _refresh_gaps
-    keeps gaps[] empty (extraction helpers gate on baseline_tput > 0)."""
+    """Before baseline, _refresh_gaps keeps gaps[] empty (extractors gate on baseline_tput > 0)."""
     await coord._refresh_gaps(reason="baseline_done")
     assert coord.shared_state.gaps == []
 
 
 @pytest.mark.asyncio
 async def test_refresh_gaps_seeds_throughput_gap_from_baseline(coord):
-    """After baseline + a non-zero target_gap_pct, the baseline
-    extractor emits a `throughput_below_target` gap row anchored to
-    the workload canonical id."""
+    """After baseline + non-zero target_gap_pct, the extractor emits a `throughput_below_target` gap row anchored to the workload id."""
     s = coord.shared_state
     s.baseline_tput = 1000.0
     s.target_gap_pct = 12.0
@@ -326,8 +283,7 @@ async def test_refresh_gaps_emits_baseline_unstable_gap(coord):
 
 @pytest.mark.asyncio
 async def test_refresh_gaps_dedupes_recurring_failures(coord):
-    """The attempts extractor folds repeated (action, error_class)
-    failures into a single gap row, with one attempt per failure."""
+    """The attempts extractor folds repeated (action, error_class) failures into a single gap row, one attempt per failure."""
     s = coord.shared_state
     s.baseline_tput = 700.0
     s.last_action_failures = [
@@ -404,9 +360,7 @@ async def test_record_explore_round_gaps_appends_attempts(coord):
 
 @pytest.mark.asyncio
 async def test_record_explore_round_gaps_falls_back_to_anchor(coord):
-    """When the task did not carry a ``gap_canonical_id`` we still
-    record the attempts — folded under the workload anchor — so the
-    velocity counter advances on cold-start sessions."""
+    """Without a ``gap_canonical_id`` the attempts are still recorded under the workload anchor."""
     s = coord.shared_state
     s.baseline_tput = 900.0
     task = _StubTask(
@@ -426,9 +380,7 @@ async def test_record_explore_round_gaps_falls_back_to_anchor(coord):
     assert any(a["variant_name"] == "v1" for a in gap["attempts"])
 
 
-# ===========================================================================
 # 6. specialist warmup (PR 5.6) — gap fields flow into task.params
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
     s = coord.shared_state
@@ -458,8 +410,7 @@ async def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
 
 @pytest.mark.asyncio
 async def test_warm_specialist_params_uses_domain_hint_when_domain_missing(coord):
-    """When the LLM omits ``domain`` we let the gap's ``domain_hint``
-    fill in (PolicyGate R2 still validates the routing)."""
+    """When the LLM omits ``domain`` the gap's ``domain_hint`` fills in (PolicyGate R2 still validates routing)."""
     s = coord.shared_state
     s.baseline_tput = 1000.0
     s.upsert_gap({
@@ -475,8 +426,7 @@ async def test_warm_specialist_params_uses_domain_hint_when_domain_missing(coord
 
 @pytest.mark.asyncio
 async def test_warm_specialist_params_noop_when_gap_unknown(coord):
-    """Unknown ``gap_canonical_id`` must not clobber existing params
-    (no silent reset of ``domain`` / ``gap_symptom``)."""
+    """Unknown ``gap_canonical_id`` must not clobber existing params."""
     params: dict[str, Any] = {
         "domain": "serving_specialist",
         "gap_canonical_id": "issue.unknown",
@@ -487,13 +437,9 @@ async def test_warm_specialist_params_noop_when_gap_unknown(coord):
     assert params["gap_symptom"] == "preset"
 
 
-# ===========================================================================
 # 7. Cortex traverse fallback (defensive)
-# ===========================================================================
 class _StubKnowledgePlane:
-    """Minimal KnowledgePlane double that returns one issue_node row
-    from a ``cortex_traverse_issues`` call. Mirrors the Gap-09 §5.3
-    contract: rows arrive as plain dicts already in the gap schema."""
+    """Minimal KnowledgePlane double returning one issue_node row from ``cortex_traverse_issues`` (Gap-09 §5.3)."""
 
     def __init__(self, rows: list[dict[str, Any]] | None = None,
                  raises: Exception | None = None):
@@ -530,8 +476,7 @@ async def test_refresh_gaps_merges_cortex_traverse_rows(coord):
 
 @pytest.mark.asyncio
 async def test_refresh_gaps_absorbs_cortex_traverse_exception(coord):
-    """Cortex outages must NOT crash the refresh — Inv on the reactor
-    loop says best-effort facets cannot block the calling path."""
+    """Cortex outages must NOT crash the refresh (best-effort facets can't block the calling path)."""
     coord.knowledge_plane = _StubKnowledgePlane(
         raises=RuntimeError("traverse down"),
     )

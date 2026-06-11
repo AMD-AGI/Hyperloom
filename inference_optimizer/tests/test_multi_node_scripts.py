@@ -1,9 +1,8 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``multi_node/scripts`` launch and kill helpers.
 
-The scripts depend on ``ray`` at import time (in-cluster runtime). Tests
-install a tiny ``sys.modules`` stub so CI can import the modules without
-installing Ray, then exercise pure helpers and a few side-effect paths
-with mocks / ``tmp_path``.
+A tiny ``sys.modules`` ray stub lets CI import the scripts without Ray.
 """
 
 from __future__ import annotations
@@ -158,15 +157,7 @@ def test_kill_remote_sigterms_then_process_exits(tmp_path, monkeypatch):
 
 
 def test_pd_decode_dist_init_port_derives_from_prefill():
-    """PD-disaggregated decode rendezvous port = prefill port + 1.
-
-    Covers operator override scenario: if `$RAYJOB_DIST_INIT_PORT` shifts
-    prefill (e.g. to 29501), decode must shift in lock-step (29502) so
-    the two endpoints never collide when both groups land on the same
-    host. Regression guard for the previous bug where decode was the
-    hard-coded constant `_PD_DECODE_DIST_INIT_PORT = 29501` and silently
-    clashed with an override of prefill to 29501.
-    """
+    """PD-disaggregated decode rendezvous port = prefill port + 1, so an operator override shifts both in lock-step (regression guard for the hard-coded `_PD_DECODE_DIST_INIT_PORT`)."""
     lm = _load_script_module("lm_test_pd_decode_port", "launch_multinode.py")
     # Default: 29500 → 29501
     assert lm._pd_decode_dist_init_port(lm._DEFAULT_DIST_INIT_PORT) == 29501
@@ -471,12 +462,9 @@ def test_build_rayjob_entrypoints_empty_submitter_tail():
     assert dec == "tail -f /dev/null"
 
 
-# ===========================================================================
 # (formerly test_multi_node_env_ray.py)
-# ===========================================================================
 
-# Common kwargs for builder tests below. Keeps each test focused on the
-# one field under test instead of repeating the 8 required arguments.
+# Common kwargs for builder tests; keeps each test focused on the one field under test.
 _BUILDER_MIN_KWARGS = dict(
     workspace="ws-a",
     display_name="t",
@@ -490,10 +478,7 @@ _BUILDER_MIN_KWARGS = dict(
 
 
 def test_extra_env_rayjob_long_lived_passthrough():
-    # RAYJOB_LONG_LIVED was a legacy SaFE toggle stripped by an earlier
-    # version of the builder. The strip is gone; user-supplied values
-    # must now reach body.env unchanged so callers can opt into the
-    # legacy code path explicitly if SaFE still honours it.
+    # RAYJOB_LONG_LIVED is no longer stripped; user-supplied values reach body.env unchanged.
     from inference_optimizer.multi_node._internal import workload_spec
 
     b = workload_spec.build_rayjob_workload_body(
@@ -505,10 +490,7 @@ def test_extra_env_rayjob_long_lived_passthrough():
 
 
 def test_extra_env_ray_job_entrypoint_still_stripped_and_forced():
-    # RAY_JOB_ENTRYPOINT remains reserved: the builder strips any
-    # user-supplied value and overwrites with base64("tail -f /dev/null")
-    # so KubeRay's spec.entrypoint never exits and the cluster lives
-    # for the whole session.
+    # RAY_JOB_ENTRYPOINT is reserved: the builder overwrites it with base64("tail -f /dev/null") so the cluster lives the whole session.
     import base64
 
     from inference_optimizer.multi_node._internal import workload_spec
@@ -522,9 +504,7 @@ def test_extra_env_ray_job_entrypoint_still_stripped_and_forced():
 
 
 def test_session_id_injects_primus_claw_label():
-    # When the CLI passes session_id (resolved from $CLAW_SESSION_ID),
-    # the builder must emit the primus-claw/session-id label so Brain
-    # can correlate the RayJob with its parent sandbox session.
+    # session_id emits the primus-claw/session-id label so Brain can correlate the RayJob with its parent session.
     from inference_optimizer.multi_node._internal import workload_spec
 
     b = workload_spec.build_rayjob_workload_body(
@@ -532,17 +512,14 @@ def test_session_id_injects_primus_claw_label():
         **_BUILDER_MIN_KWARGS,
     )
     assert b["labels"].get("primus-claw/session-id") == "sess-123"
-    # No primus-safe.* labels are written by the builder (SaFE strips
-    # that namespace from caller input -- empty would be a no-op).
+    # The builder writes no primus-safe.* labels.
     assert not any(
         k.startswith("primus-safe.") for k in b["labels"]
     )
 
 
 def test_session_id_omitted_skips_label():
-    # No session_id (sandbox env var unset) means the label is absent
-    # rather than being written with an empty value. Mirrors the
-    # ownerId / description optional-field semantics.
+    # No session_id → the label is absent rather than written with an empty value.
     from inference_optimizer.multi_node._internal import workload_spec
 
     b_none = workload_spec.build_rayjob_workload_body(
@@ -559,10 +536,7 @@ def test_session_id_omitted_skips_label():
 
 
 def test_extra_label_primus_claw_prefix_still_stripped():
-    # The reserved-namespace guard for caller-supplied extra_labels must
-    # remain intact even though the builder now writes a primus-claw/*
-    # label itself. Users cannot inject their own session-id by bypassing
-    # the builder parameter.
+    # The reserved-namespace guard for extra_labels stays intact: users can't inject their own session-id.
     from inference_optimizer.multi_node._internal import workload_spec
 
     b = workload_spec.build_rayjob_workload_body(
@@ -582,7 +556,6 @@ def test_extra_label_primus_claw_prefix_still_stripped():
     assert b["labels"].get("custom.example/team") == "infra"
 
 
-# ---------------------------------------------------------------------------
 # _write_rayjob_meta sidecar JSON tests.
 
 
@@ -602,8 +575,7 @@ def _write_meta_kwargs(**overrides):
 
 
 def test_write_rayjob_meta_writes_expected_payload(tmp_path, monkeypatch):
-    # Happy path: meta lands at <profile_traces>/<wid>/<session_id> with
-    # all the documented fields populated and JSON-decodable.
+    # Meta lands at <profile_traces>/<wid>/<session_id> with all fields populated and JSON-decodable.
     import json as _json
 
     from inference_optimizer.multi_node import cli as mn_cli
@@ -628,9 +600,7 @@ def test_write_rayjob_meta_writes_expected_payload(tmp_path, monkeypatch):
 
 
 def test_write_rayjob_meta_skipped_when_session_id_missing(tmp_path, monkeypatch):
-    # Empty / None session_id leaves us without a filename, so the helper
-    # MUST short-circuit and create nothing under profile-traces/. Matches
-    # the label-skip semantics in cmd_create_rayjob.
+    # Empty/None session_id → the helper short-circuits and creates nothing under profile-traces/.
     from inference_optimizer.multi_node import cli as mn_cli
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -645,9 +615,7 @@ def test_write_rayjob_meta_skipped_when_session_id_missing(tmp_path, monkeypatch
 
 
 def test_write_rayjob_meta_allows_null_owner_id(tmp_path, monkeypatch):
-    # owner_id is optional in the workload body (no $WORKLOAD_ID exported
-    # in dev). The meta must still serialize cleanly with owner_id=None
-    # so callers don't need to special-case it.
+    # owner_id is optional; the meta must still serialize cleanly with owner_id=None.
     import json as _json
 
     from inference_optimizer.multi_node import cli as mn_cli
@@ -662,10 +630,7 @@ def test_write_rayjob_meta_allows_null_owner_id(tmp_path, monkeypatch):
 
 
 def test_write_rayjob_meta_best_effort_on_oserror(tmp_path, monkeypatch):
-    # Filesystem failure (read-only mount, quota, permission) MUST NOT
-    # propagate: meta is audit data and failing RayJob creation over it
-    # would be a worse outcome. We force Path.mkdir to raise OSError and
-    # assert the call returns normally.
+    # A filesystem failure must NOT propagate (meta is audit data); force Path.mkdir to raise OSError.
     from inference_optimizer.multi_node import cli as mn_cli
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))

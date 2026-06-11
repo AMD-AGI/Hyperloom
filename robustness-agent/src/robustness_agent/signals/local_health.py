@@ -1,21 +1,11 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Symptoms derived from LocalProbe-only data.
 
-These rules fire only when DegradeRouter has handed control to
-:class:`LocalProbeSource` (i.e. robustness-server is unreachable),
-which is exactly the single-mode dev / disconnected scenario M1.5
-exists to support.  When the server is healthy the corresponding
-signals come from cluster sources (M2+) and these rules stay silent
-because the SourceData fields are empty.
-
-Three sub-rules:
-
-* ``server_unreachable`` — a configured local HTTP probe target is
-  down. Medium severity by default; promoted to high if every probed
-  target fails.
-* ``log_error_pattern`` — :data:`SourceData.local_log_errors` contains
-  one or more matches. OOM / NCCL → high; anything else → medium.
-* ``gpu_thermal_high`` — any GPU's ``temperature_c`` exceeds the
-  configured warn / crit thresholds.
+Fire only when DegradeRouter hands control to :class:`LocalProbeSource` (robustness-server
+unreachable); silent otherwise since the SourceData fields are empty. Covers
+``server_unreachable`` (HIGH if all targets fail), ``log_error_pattern`` (OOM/NCCL → HIGH),
+``gpu_thermal_high``, plus disk/shm/ray-head/fd pressure rules.
 """
 
 from __future__ import annotations
@@ -30,35 +20,45 @@ from .symptom import Symptom, SymptomSeverity
 
 @dataclass
 class LocalHealthConfig:
+    """Thresholds for the LocalProbe-derived health rules.
+
+    Attributes:
+        gpu_temp_warn_c (float): GPU temperature (Celsius) at/above which a
+            MEDIUM thermal symptom fires.
+        gpu_temp_crit_c (float): GPU temperature (Celsius) at/above which a HIGH
+            thermal symptom fires.
+        disk_used_warn_pct (float): Non-SHM mountpoint used-percent for a MEDIUM
+            disk-pressure symptom.
+        disk_used_crit_pct (float): Non-SHM mountpoint used-percent for a HIGH
+            disk-pressure symptom.
+        shm_mountpoints (tuple[str, ...]): Mountpoints treated as shared memory
+            (stricter thresholds, handled separately from disk).
+        shm_used_warn_pct (float): SHM used-percent for a MEDIUM symptom.
+        shm_used_crit_pct (float): SHM used-percent for a HIGH symptom.
+        ray_head_unreachable_severity (str): Severity label used when the Ray
+            head is unreachable.
+        fd_warn_used_pct (float): File-descriptor used-percent for a MEDIUM
+            symptom.
+        fd_crit_used_pct (float): File-descriptor used-percent for a HIGH
+            symptom.
+    """
+
     gpu_temp_warn_c: float = 90.0
     gpu_temp_crit_c: float = 100.0
-    # ``disk_pressure`` thresholds (percentage of mountpoint used). 6h
-    # sessions can produce 50-200 GB under $USER_DATA_PATH; at 90% the
-    # Coordinator's ``state.json`` writes start partial-failing. The
-    # ``crit`` threshold also triggers a ``prune_branch(profile)`` hint
-    # because profile traces are the single biggest contributor.
+    # disk_pressure thresholds (% used); crit also emits a prune_branch(profile) hint.
     disk_used_warn_pct: float = 85.0
     disk_used_crit_pct: float = 95.0
-    # Mountpoints we treat as ``shm`` rather than ``disk``. Different
-    # thresholds because SHM is much smaller (typically 16-64 GiB) and
-    # SGLang / vLLM crash hard when it runs out — there is no
-    # graceful degrade.
+    # SHM gets stricter thresholds — small (16-64 GiB) and SGLang/vLLM crash hard when it fills.
     shm_mountpoints: tuple[str, ...] = ("/dev/shm",)
     shm_used_warn_pct: float = 75.0
     shm_used_crit_pct: float = 90.0
-    # Ray-head probe + aiter-JIT signals each have their own thresholds;
-    # kept in this dataclass for a single source of truth even though
-    # the actual rules live in :mod:`signals.local_health` (Ray) and
-    # :mod:`signals.aiter_jit` (JIT cache).
+    # Ray-head severity kept here for a single source of truth (rule lives below).
     ray_head_unreachable_severity: str = "high"
     fd_warn_used_pct: float = 80.0
     fd_crit_used_pct: float = 95.0
 
 
-# Patterns we treat as high severity (vs the default medium). Anything
-# else from ``local_log_errors`` falls back to medium. The 2026-05-19
-# extension (D1) promotes 11 newly-added inference-framework patterns
-# whose presence almost certainly aborts the run.
+# HIGH-severity log patterns; anything else from ``local_log_errors`` falls back to MEDIUM.
 _HIGH_SEVERITY_PATTERNS: frozenset[str] = frozenset({
     # Existing OOM / fatal-signal patterns.
     "CUDA out of memory",
@@ -98,6 +98,18 @@ def evaluate_local_health_signals(
     *,
     config: LocalHealthConfig | None = None,
 ) -> list[Symptom]:
+    """Run all LocalProbe-only health rules and aggregate their symptoms.
+
+    Args:
+        ctx (ReactorContext): Reactor context for the current tick.
+        data (SourceData): Collected LocalProbe source data.
+        config (LocalHealthConfig | None): Thresholds; defaults to
+            :class:`LocalHealthConfig` when ``None``.
+
+    Returns:
+        list[Symptom]: All local-health symptoms found this tick, possibly
+            empty.
+    """
     cfg = config or LocalHealthConfig()
     out: list[Symptom] = []
     out.extend(_server_unreachable(data))
@@ -111,6 +123,17 @@ def evaluate_local_health_signals(
 
 
 def _server_unreachable(data: SourceData) -> list[Symptom]:
+    """Emit ``local_server_unreachable`` for each failed local HTTP probe.
+
+    Severity is HIGH when every probed target is unreachable, otherwise MEDIUM.
+
+    Args:
+        data (SourceData): Collected source data including
+            ``local_server_health``.
+
+    Returns:
+        list[Symptom]: One symptom per unreachable probe target, possibly empty.
+    """
     if not data.local_server_health:
         return []
     bad = [entry for entry in data.local_server_health if not entry.get("reachable")]
@@ -147,6 +170,17 @@ def _server_unreachable(data: SourceData) -> list[Symptom]:
 
 
 def _log_error_symptoms(data: SourceData) -> list[Symptom]:
+    """Emit ``log_error_pattern`` symptoms grouped by matched log pattern.
+
+    Patterns in :data:`_HIGH_SEVERITY_PATTERNS` fire HIGH; all others MEDIUM.
+
+    Args:
+        data (SourceData): Collected source data including
+            ``local_log_errors``.
+
+    Returns:
+        list[Symptom]: One symptom per matched pattern, possibly empty.
+    """
     if not data.local_log_errors:
         return []
     by_pattern: dict[str, list[dict[str, Any]]] = {}
@@ -187,6 +221,15 @@ def _gpu_thermal_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
+    """Emit ``gpu_thermal_high`` for GPUs over the warn/crit temperature.
+
+    Args:
+        data (SourceData): Collected source data including ``local_gpu``.
+        cfg (LocalHealthConfig): Thresholds (provides warn/crit temperatures).
+
+    Returns:
+        list[Symptom]: One symptom per over-temperature GPU, possibly empty.
+    """
     gpus = data.local_gpu.get("gpus") if isinstance(data.local_gpu, dict) else None
     if not isinstance(gpus, list):
         return []
@@ -227,12 +270,8 @@ def _disk_pressure_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
-    """Emit ``disk_pressure`` for non-SHM mountpoints under capacity stress.
-
-    The data shape is the dict that :func:`local_probe._sample_disk`
-    populates: ``{mountpoint: {used_pct, used_gb, free_gb, total_gb}}``.
-    SHM mountpoints are handled by :func:`_shm_pressure_symptoms` (it
-    has stricter thresholds) so we skip them here to avoid double-firing.
+    """Emit ``disk_pressure`` for non-SHM mountpoints under capacity stress; SHM is handled
+    separately with stricter thresholds, so it's skipped here to avoid double-firing.
     """
     if not isinstance(data.local_disk, dict) or not data.local_disk:
         return []
@@ -289,11 +328,8 @@ def _shm_pressure_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
-    """SHM mountpoints get stricter thresholds because SGLang / vLLM
-    crash hard when /dev/shm fills up (no graceful degrade). The
-    SKILL preflight requires ≥ 16 GiB free at boot; we surface this at
-    runtime so the operator catches it before the next server start
-    fails opaquely with ``shared memory allocation failed``.
+    """Emit ``shm_pressure`` (stricter thresholds): SGLang/vLLM crash hard when /dev/shm fills,
+    surfaced at runtime before the next server start fails with ``shared memory allocation failed``.
     """
     if not isinstance(data.local_disk, dict) or not data.local_disk:
         return []
@@ -346,15 +382,8 @@ def _shm_pressure_symptoms(
 
 
 def _ray_head_dead_symptoms(data: SourceData) -> list[Symptom]:
-    """Emit ``ray_head_dead`` when LocalProbe could not reach the Ray head.
-
-    The probe is performed by :func:`local_probe._probe_ray_head` and
-    written into ``data.local_ray``. We accept three shapes:
-
-    * ``{}`` / missing key → no data → silent (probe not configured).
-    * ``{"healthy": True, ...}`` → healthy, no symptom.
-    * ``{"healthy": False, "reason": "...", ...}`` → fire HIGH so
-      Orchestration prunes ``kernel_opt`` (which submits Ray tasks).
+    """Emit ``ray_head_dead`` (HIGH) when ``data.local_ray`` reports ``healthy=False``;
+    silent when the probe slot is empty or healthy. Prompts Orchestration to prune kernel_opt.
     """
     ray_info = getattr(data, "local_ray", None)
     if not isinstance(ray_info, dict) or not ray_info:
@@ -387,13 +416,8 @@ def _fd_pressure_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
-    """Emit ``fd_pressure`` when the Coordinator's FD usage approaches limit.
-
-    LocalProbe writes ``data.local_fd = {"used": int, "limit": int,
-    "used_pct": float, "pid": int}`` (or empty when /proc was
-    unreadable). Magpie/Ray long-runs leak sockets; ``ulimit -n``
-    hitting the wall manifests as agent_stall(kernel) but the real
-    cause is here.
+    """Emit ``fd_pressure`` from ``data.local_fd`` when Coordinator FD usage nears the limit;
+    leaked sockets hitting ``ulimit -n`` surface as agent_stall(kernel) whose real cause is here.
     """
     fd_info = getattr(data, "local_fd", None)
     if not isinstance(fd_info, dict) or not fd_info:

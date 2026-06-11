@@ -1,8 +1,9 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """SQLite-backed GPU pool for specialist sub-agents.
 
-The serving lanes continue to protect benchmark/profile/server lifecycle
-work. This pool is separate: it only constrains specialists that explicitly
-request ``needs_gpu=true`` for short GPU experiments or microbenchmarks.
+Separate from the serving lanes: only constrains specialists that request
+``needs_gpu=true`` for short GPU experiments or microbenchmarks.
 """
 
 from __future__ import annotations
@@ -40,9 +41,8 @@ def _parse_gpu_list(raw: str) -> list[int]:
 def resolve_gpu_specialist_devices(capacity: int) -> list[int]:
     """Resolve the GPU ids available to GPU specialists.
 
-    ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES`` may name an explicit
-    comma-separated pool. When absent, we use ``range(capacity)``. Capacity
-    zero disables GPU specialist dispatch.
+    ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES`` may name an explicit pool;
+    absent → ``range(capacity)``. Capacity zero disables dispatch.
     """
     cap = max(0, int(capacity or 0))
     if cap <= 0:

@@ -1,7 +1,6 @@
-"""Tests for framework_agent.keywords.extract_keywords.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Hermetic - pure-Python, no network/GPU/disk.
-"""
+"""Tests for framework_agent.keywords.extract_keywords. Hermetic - pure-Python, no network/GPU/disk."""
 
 from __future__ import annotations
 
@@ -13,13 +12,7 @@ from framework_agent.keywords import (
 
 
 def test_extract_whitelist_hits_are_lowercase_and_sorted() -> None:
-    """Whitelist hits should be returned sorted in lowercase.
-
-    ``mi300x`` is asserted explicitly to guard the GPU-hardware codename
-    extension (without it the primus_cortex search drops the hardware
-    constraint and picks unrelated NVIDIA PRs; see fa-keywords-hardware
-    fix rationale in _TECHNICAL_TERMS).
-    """
+    """Whitelist hits returned sorted+lowercase; ``mi300x`` asserted to guard the GPU-codename extension (else primus search drops the hardware constraint)."""
     out = extract_keywords("improve vLLM fp8 MoE attention on ROCm AMD MI300X")
     assert out == sorted(out)
     assert "vllm" in out
@@ -70,9 +63,7 @@ def test_extract_nvidia_codenames() -> None:
 
 
 def test_extract_atom_framework_token() -> None:
-    """``atom`` must survive extract_keywords so PR scouting can rank
-    ROCm/ATOM titles correctly. Listed alongside ``sglang``/``vllm``
-    in the technical-term whitelist."""
+    """``atom`` must survive extract_keywords so PR scouting can rank ROCm/ATOM titles correctly."""
     out = extract_keywords("improve atom fp8 moe throughput on mi300x")
     assert "atom" in out
     assert "fp8" in out
@@ -81,10 +72,7 @@ def test_extract_atom_framework_token() -> None:
 
 
 def test_extract_atom_specific_terms() -> None:
-    """atom-flavoured PR titles often mention MTP / DP attention /
-    kv_cache_dtype / torch_profiler_dir. Pinning these here keeps the
-    primus_cortex search relevance on the atom-shaped axis instead of
-    collapsing to generic moe / attention matches."""
+    """Pin atom-flavoured terms (MTP / DP attention / kv_cache_dtype / torch_profiler_dir) so search relevance stays on the atom axis."""
     out = extract_keywords(
         "atom mtp dp_attention kv_cache_dtype fp8 torch_profiler_dir on mi355x"
     )
@@ -97,28 +85,15 @@ def test_extract_atom_specific_terms() -> None:
 
 
 def test_extract_realistic_io_framework_gap() -> None:
-    """End-to-end check on the actual IO ``--framework-gap`` template.
-
-    Mirrors the gap inference_optimizer's SKILL.md Launch template renders
-    by default (``improve {fw} {prec} {model_class} throughput on {gpu}``).
-    Before the hardware-codename extension, ``mi300x`` was silently dropped,
-    which caused the primus_cortex search query to collapse to
-    ``"bf16 sglang"`` and surface NVIDIA SM90 PRs as the winner.
-    """
+    """End-to-end check on the IO ``--framework-gap`` template; before the codename extension ``mi300x`` was dropped and NVIDIA SM90 PRs wrongly won."""
     out = extract_keywords("improve sglang bf16 dense throughput on mi300x")
-    # All four salient dimensions must be present.
     assert "sglang" in out, "framework token must be kept"
     assert "bf16" in out, "precision token must be kept"
     assert "mi300x" in out, "hardware codename must be kept"
 
 
 def test_extract_keeps_camelcase_identifiers() -> None:
-    """Strict PascalCase identifiers (alternating cap+lower) survive and are lowercased.
-
-    Note: the regex [A-Z][a-z]+(?:[A-Z][a-z]+)+ does NOT match identifiers
-    that contain runs of multiple capital letters (e.g. ``AsyncLLMEngine``);
-    those are deliberately filtered to avoid noise from acronyms.
-    """
+    """Strict PascalCase identifiers survive (lowercased); runs of multiple caps (e.g. AsyncLLMEngine) are deliberately filtered to avoid acronym noise."""
     out = extract_keywords("RadixCache and KvCache interact at AsyncEngine boundary")
     assert "radixcache" in out
     assert "kvcache" in out
@@ -180,13 +155,8 @@ def test_score_title_snake_case_token() -> None:
 
 # ---------------------------------------------------------------------------
 # score_title_with_anti_signal (B3 anti-correlation reranker).
-#
-# Anti pairs are gated on the gap keyword being present so the behaviour is
-# strictly additive: a gap with no anti-trigger reduces to the same ordering
-# as score_title_against_keywords. The tests below cover the four orthogonal
-# axes that surfaced in session f219629b (dense vs MoE, AMD vs NVIDIA,
-# bf16 vs low-bit), plus the trigger-gating, the zero-clamp floor, and the
-# bug-driven PR:25769 regression.
+# Anti pairs are gated on the gap keyword being present, so scoring is strictly
+# additive (no trigger -> same ordering as score_title_against_keywords).
 # ---------------------------------------------------------------------------
 
 
@@ -224,12 +194,7 @@ def test_score_anti_bf16_vs_low_bit_pr_demoted() -> None:
 
 
 def test_score_anti_inactive_when_trigger_absent() -> None:
-    """Anti is gated on the gap keyword being present.
-
-    A gap of just ['throughput'] does NOT carry the ``dense`` trigger, so a
-    MoE-heavy PR title must score the same as it would under the legacy
-    positive-only scorer (no demotion fires).
-    """
+    """Anti is gated on the gap keyword: gap=['throughput'] lacks the ``dense`` trigger, so a MoE title scores the same as the legacy positive-only scorer."""
     gap = ["throughput"]
     moe_title = "MegaMoE throughput optimization"
     score = score_title_with_anti_signal(moe_title, gap)
@@ -282,13 +247,7 @@ def test_score_anti_penalty_coefficient_tunable() -> None:
 
 
 def test_score_anti_pr25769_regression_session_f219629b() -> None:
-    """Bug-driven: session f219629b on Qwen-Qwen3-32B (dense, bf16, mi300x).
-
-    fa picked PR:25769 ("Enable MegaMoE for NextN with TP attn A2A scatter
-    padding") because positive-only overlap matched ``throughput``. With the
-    anti-signal fix, the MegaMoE PR must rank below a hypothetical dense /
-    mi300x PR that targets the correct axis.
-    """
+    """Bug-driven (session f219629b, dense/bf16/mi300x): positive-only overlap wrongly picked PR:25769 MegaMoE; anti-signal must rank it below a dense/mi300x PR."""
     gap = ["sglang", "bf16", "dense", "mi300x", "throughput"]
     pr25769 = "Enable MegaMoE for NextN with TP attn A2A scatter padding"
     relevant = "optimize sglang bf16 attention prefill on mi300x"

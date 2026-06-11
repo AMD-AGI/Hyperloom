@@ -1,35 +1,26 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """ExploreExecutor — v0.8 M3.
 
 Merges the legacy ``backends`` / ``params`` / ``validate_stack`` actions
-into one unified ``explore`` action:
-
-* one yaml meta (``actions/_meta/explore.yaml``),
-* one ledger (``SharedState.explore_search``, see ``shared_state.py``),
-* one executor (this module).
+into one unified ``explore`` action (one yaml meta, one
+``SharedState.explore_search`` ledger, one executor).
 
 Per-variant flow:
 
 1. canonical_fingerprint dedup against ``explore_search.tested``
-   (rename-resistant; LLM/specialist/default_grid all collapse to the
-   same row when content matches).
+   (rename-resistant).
 2. Render the variant's Magpie YAML, run E2E bench.
-3. Immediate KEEP/REVERT decision (0.2% gain threshold + accuracy gate
-   when the variant trips ``_accuracy_gate.is_high_accuracy_risk``).
-4. KEEP triggers an inlined stack rebench: re-bench the cumulative
-   stack including the just-KEEP'd variant. If the rebench tput is
-   below the configurable threshold (default: baseline_tput * 1.005),
-   the variant is evicted (``KEEP_UNSTABLE``) and treated as REVERT.
+3. Immediate KEEP/REVERT decision (``DEFAULT_KEEP_THRESHOLD_PCT`` gain
+   threshold + accuracy gate when ``is_high_accuracy_risk``).
+4. KEEP triggers an inlined stack rebench; if the rebench tput is below
+   the threshold (default baseline_tput * 1.005) the variant is evicted
+   (``KEEP_UNSTABLE`` → REVERT).
 
-This deliberately differs from v0.6 backends/params which were "run
-the whole batch, then pick best" — v0.8 follows the TBO "one change at
-a time" rule (KB_design §3.4 §"Inv-3 serving GPU single tenant" +
-KB_design.MD §3 "iron rules").
-
-NOTE on M3 layering: this milestone does NOT yet route specialist
-provenance (M5/M6). variants come in with ``provenance ∈
-{'default_grid', 'llm_direct'}``; the executor passes provenance through
-unchanged to the ledger so the M5 specialist path can fill the third
-case (``'specialist:<domain>'``) without touching this file again.
+Follows the TBO "one change at a time" rule (KB_design §3.4 "Inv-3
+serving GPU single tenant" + §3 "iron rules"), unlike v0.6's
+run-batch-then-pick-best. ``provenance`` passes through to the ledger
+unchanged so the M5 specialist path can fill ``'specialist:<domain>'``.
 
 Result schema (returned to the bus):
 
@@ -61,7 +52,7 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from ._canonical_fingerprint import canonical_fingerprint, workload_signature
-from ._explore_roofline_filter import filter_variants_by_roofline
+from ._explore_roofline_filter import compute_saturation_advisory
 from ._grid_runner import (
     GridVariant,
     _resolve_session_dir,
@@ -70,6 +61,7 @@ from ._grid_runner import (
     sanitize_script_name,
 )
 from ._workload_envs import (
+    FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
 )
@@ -78,27 +70,33 @@ from ._workload_envs import (
 log = logging.getLogger(__name__)
 
 
-# Per-variant KEEP threshold ("0.2% 阈值 + accuracy
-# gate"). Looser than v0.6 backends (1.0%) and ``ParamsExecutor`` (0.5%)
-# because the inlined stack rebench acts as the second gate — even a
-# marginal +0.3% won't survive into ``optimization_stack`` unless the
-# cumulative stack still wins after this variant is layered onto it.
+# Per-variant KEEP threshold (gain-pct + accuracy gate); the inlined stack
+# rebench is the second gate. Override per-task via ``params['keep_threshold_pct']``.
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 
-# Stack rebench stability threshold. After a KEEP, the stack-applied
-# rebench tput must beat ``base_tput * (1 + DEFAULT_STACK_STABLE_PCT/100)``;
-# otherwise the variant is evicted (KEEP_UNSTABLE → REVERT). Set below
-# the single-variant KEEP threshold so a genuine win that loses a little
-# headroom when layered onto the cumulative stack is not immediately
-# evicted.
+# Stack rebench stability threshold: after a KEEP, rebench tput must beat
+# ``base_tput * (1 + DEFAULT_STACK_STABLE_PCT/100)`` else evict
+# (KEEP_UNSTABLE → REVERT). Set below the KEEP threshold so a genuine win
+# losing a little headroom when layered isn't immediately evicted. Override
+# via ``params['stack_stable_threshold_pct']``.
 DEFAULT_STACK_STABLE_PCT = 0.5
 
 def _now_iso() -> str:
+    """Return the current UTC time as an ISO 8601 string.
+
+    Returns:
+        str: The current UTC timestamp in ISO 8601 format.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
 def _initial_explore_search_state() -> dict[str, Any]:
-    """Empty :attr:`SharedState.explore_search` ledger (M3 schema v1)."""
+    """Empty :attr:`SharedState.explore_search` ledger (M3 schema v1).
+
+    Returns:
+        dict[str, Any]: A fresh explore-search ledger with all sections
+        initialized to their empty defaults.
+    """
     return {
         "schema_version": 1,
         "tested": {},
@@ -114,35 +112,52 @@ def _initial_explore_search_state() -> dict[str, Any]:
     }
 
 
+def _coerce_args_str(value: Any) -> str:
+    """Coerce a payload ``extra_args`` / ``extra_server_args`` value into a
+    shell-arg string.
+
+    The Orchestration/specialist LLM sometimes emits the server flags as a
+    JSON list (``["--max-num-batched-tokens", "32768"]``) instead of a single
+    string. A naive ``str(list)`` yields the Python repr
+    (``"['--max-num-batched-tokens', '32768']"``) which Magpie's
+    ``vllm serve ... $EXTRA_VLLM_ARGS`` splices verbatim, so the server rejects
+    it as ``unrecognized arguments`` and every server-arg variant aborts.
+    Lists/tuples are space-joined into individual tokens.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(v).strip() for v in value if str(v).strip())
+    return str(value)
+
+
 def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     """Convert the LLM/specialist grid payload into GridVariant objects.
 
-    Variant dict accepted shape (M3, KB_design §3.4 §5.1):
+    Variant dict shape (M3, KB_design §3.4 §5.1):
 
         {
           "name": str (required, unique-in-round),
           "extra_args" | "extra_server_args": str,
           "extra_envs": dict[str,str],
           "note": str,
-          "provenance": str,            # llm_direct / default_grid / specialist:<tag> / dynamic
-          "kb_evidence": list,          # passthrough (M5/M6 uses)
+          "provenance": str,            # llm_direct / default_grid / specialist:<tag>
+          "scope": str,                 # specialist dial: domain / domains / freeform (advisory)
+          "kb_evidence": list,          # passthrough
           "pr_evidence": list,          # passthrough
           "source_evidence": list,      # passthrough
         }
 
-    Unknown keys are ignored. ``provenance`` defaults to ``'default_grid'``
-    when the LLM/specialist forgot to stamp it.
-
-    Unstamped variants default to ``'default_grid'`` so generated seed
-    grids remain distinguishable from deliberate ``'llm_direct'``
-    Orchestration hypotheses. PolicyGate treats provenance as an audit
-    label; only specialist/dynamic per-round caps are enforced.
+    Unknown keys ignored; unstamped ``provenance`` defaults to
+    ``'default_grid'`` (keeps seed grids distinct from ``'llm_direct'``).
     """
     out: list[GridVariant] = []
     for raw in payload or []:
         if not isinstance(raw, dict) or not raw.get("name"):
             continue
-        args = str(raw.get("extra_args") or raw.get("extra_server_args") or "").strip()
+        args = _coerce_args_str(
+            raw.get("extra_args") or raw.get("extra_server_args") or ""
+        ).strip()
         envs_raw = raw.get("extra_envs") or {}
         envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
         gv = GridVariant(
@@ -151,12 +166,10 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
             extra_envs=envs,
             note=str(raw.get("note") or raw.get("provenance") or ""),
         )
-        # Stash the extra M3 metadata on the GridVariant instance so the
-        # ledger writer below can pull provenance / evidence without
-        # round-tripping through a parallel list. GridVariant is a plain
-        # dataclass, so adding attrs is safe (they just aren't part of
-        # equality).
+        # Stash extra metadata on the GridVariant so the ledger writer can
+        # pull provenance/evidence; safe on the plain dataclass.
         gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
+        gv.scope = str(raw.get("scope") or "")                       # type: ignore[attr-defined]
         gv.kb_evidence = list(raw.get("kb_evidence") or [])         # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])         # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or []) # type: ignore[attr-defined]
@@ -164,28 +177,16 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Atom default grid seed
-#
-# ``_atom_default_grid`` returns a curated list of ``GridVariant`` objects
-# seeded from atom's CLI flag space (via ``EngineArgs.add_cli_args``).
-# Sglang and vllm don't have analogous helpers today — the LLM is hinted
-# via system-prompt prose to emit variants from their flag spaces — so
-# ``_default_grid_for_framework`` only dispatches a non-empty grid for
-# atom. Sglang / vllm callers receive ``[]`` and continue to rely on the
-# LLM-emitted ``default_grid`` provenance variants.
-#
-# Each variant is gated *up-front* on ``model_class`` so MoE / MLA / MTP
-# variants are NOT emitted for dense models. ``apply_compatibility_filter``
-# (see ``_grid_runner.py``) is a second-line gate that drops any variant
-# whose flag literal is missing from ``atom --help`` (the atom help-text
-# probe is wired into ``apply_compatibility_filter``).
-# ---------------------------------------------------------------------------
+# Atom default grid seed: ``_atom_default_grid`` returns a curated grid from
+# atom's CLI flag space; only atom has a programmatic seed today (sglang/vllm
+# callers get ``[]`` and rely on LLM-emitted ``default_grid`` variants).
+# Variants are gated up-front on ``model_class``; ``apply_compatibility_filter``
+# (``_grid_runner.py``) is the second-line drop for flags missing from
+# ``atom --help``.
 
-# Curated MTP-capable model class set. MTP requires the model architecture
-# to expose multi-token-prediction heads (DeepSeek family today). Adding
-# new entries should be cross-referenced with atom's MTP runtime support
-# in ``atom/model_engine/`` rather than guessed from the model name alone.
+# Curated MTP-capable model class set (needs multi-token-prediction heads,
+# DeepSeek family today). Cross-reference atom's ``atom/model_engine/``
+# before adding entries rather than guessing from the model name.
 _ATOM_MTP_CAPABLE_MODEL_CLASSES: frozenset[str] = frozenset({
     "moe_mla",
     "moe_mla_nsa",
@@ -201,27 +202,11 @@ def _atom_default_grid(
 ) -> list[GridVariant]:
     """Atom EXPLORE default grid, seeded from atom's known perf knobs.
 
-    The variants below cover the atom CLI surface:
-
-    * compile / cudagraph bracket (``--level``,
-      ``--cudagraph-capture-sizes``)
-    * prefix cache toggle (``--enable_prefix_caching``)
-    * KV-cache fp8 (``--kv_cache_dtype fp8``) — gated on FP8 models
-    * MoE expert parallel (``--enable-expert-parallel``) — gated on
-      MoE models
-    * MLA DP-attention (``--enable-dp-attention``) — gated on MLA
-      models
-    * MTP speculative decoding (``--method mtp
-      --num-speculative-tokens {1,3}``) — gated on the curated
-      MTP-capable model class set above.
-
-    The atom box's ``apply_compatibility_filter`` (with the atom
-    help-text probe live) is the second-line gate: anything whose flag
-    literal isn't in ``atom --help`` is dropped pre-dispatch.
-
-    Variant naming convention: every variant name is prefixed with
-    ``atom_`` so cross-session reports can disambiguate from
-    sglang/vllm-named variants at a glance.
+    Covers the atom CLI surface (compile/cudagraph bracket, prefix cache,
+    KV fp8, MoE EP, MLA DP-attention, MTP), each gated on model_class.
+    ``apply_compatibility_filter`` is the second-line drop for flags not in
+    ``atom --help``. Variant names are ``atom_``-prefixed for cross-session
+    disambiguation.
     """
     mc_l = (model_class or "").strip().lower()
     is_moe = "moe" in mc_l
@@ -232,6 +217,15 @@ def _atom_default_grid(
     variants: list[GridVariant] = []
 
     def _add(name: str, args: str) -> None:
+        """Append a ``default_grid``-provenance variant to the grid.
+
+        Args:
+            name (str): Unique variant name (``atom_`` prefixed).
+            args (str): The extra server args for the variant.
+
+        Returns:
+            None: Appends to the enclosing ``variants`` list.
+        """
         gv = GridVariant(
             name=name,
             extra_server_args=args,
@@ -241,15 +235,11 @@ def _atom_default_grid(
         gv.provenance = "default_grid"  # type: ignore[attr-defined]
         variants.append(gv)
 
-    # ``atom_level_3`` (PIECEWISE + cudagraph) is atom's upstream default
-    # and Magpie's atom_mi*x.sh injects ``--level 3`` as the bare
-    # baseline; adding a level-3 variant here would A/B against itself
-    # and waste ~3-5 min of EXPLORE budget. Keep ``atom_level_2``
-    # (DYNAMO_ONCE) as the off-default contrast variant. (Level 2 has a
-    # latent ``compile_sizes is None`` crash in
-    # cuda_piecewise_backend.py:54 *only when combined with
-    # ``--torch-profiler-dir``*; plain EXPLORE variants don't pass the
-    # profiler dir so this remains safe.)
+    # ``atom_level_3`` is atom's default (atom_mi*x.sh injects ``--level 3``),
+    # so a level-3 variant would A/B against itself; use ``atom_level_2`` as
+    # the off-default contrast. (Level 2's ``compile_sizes is None`` crash in
+    # cuda_piecewise_backend.py:54 only fires with ``--torch-profiler-dir``,
+    # which EXPLORE variants don't pass.)
     _add("atom_level_2", "--level 2")
     _add("atom_prefix_cache", "--enable_prefix_caching")
 
@@ -273,9 +263,8 @@ def _atom_default_grid(
         )
 
     if conc and conc > 0:
-        # Bracket the live concurrency in the cudagraph capture list so
-        # the cudagraph hits the actual decode batch sizes the workload
-        # spends most of its time at.
+        # Bracket the live concurrency so cudagraph captures the actual
+        # decode batch sizes the workload spends most of its time at.
         cg_sizes = sorted({1, 2, 4, 8, 16, int(conc)})
         cg_str = "[" + ",".join(str(s) for s in cg_sizes) + "]"
         _add(
@@ -296,14 +285,8 @@ def _default_grid_for_framework(
 ) -> list[GridVariant]:
     """Framework-keyed default grid dispatch.
 
-    Atom returns a curated seed grid (see :func:`_atom_default_grid`).
-    Sglang / vllm continue to rely on LLM-emitted variants stamped with
-    ``provenance='default_grid'`` — no programmatic seed exists for
-    those frameworks today. Unknown frameworks also return ``[]``.
-
-    Callers MUST treat an empty list as "no programmatic seed for this
-    framework"; the EXPLORE flow continues to accept LLM-emitted
-    ``default_grid`` variants exactly as before.
+    Atom returns a curated seed grid; sglang / vllm / unknown return ``[]``
+    ("no programmatic seed") and rely on LLM-emitted ``default_grid`` variants.
     """
     fw = (framework or "").strip().lower()
     if fw == "atom":
@@ -314,6 +297,16 @@ def _default_grid_for_framework(
 
 
 def _gain_pct(tput: float | None, base_tput: float) -> float | None:
+    """Compute the percentage throughput gain over a baseline.
+
+    Args:
+        tput (float | None): The variant's throughput.
+        base_tput (float): The baseline throughput to compare against.
+
+    Returns:
+        float | None: The gain as a percentage, or ``None`` when either
+        input is non-positive or ``tput`` is not numeric.
+    """
     if (
         not isinstance(tput, (int, float))
         or tput <= 0
@@ -323,24 +316,13 @@ def _gain_pct(tput: float | None, base_tput: float) -> float | None:
     return (float(tput) - base_tput) / base_tput * 100.0
 
 
-# ---------------------------------------------------------------------------
-# Auto-derived per-variant hard timeout
-# ---------------------------------------------------------------------------
-# The legacy class default (``variant_timeout_sec=2400``) is a smoke-workload
-# floor: it works for fast benches (small models, high TP, short OSL) where
-# the baseline run lands in well under 40 min, but on Qwen3-32B TP=1 BF16
-# CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 the baseline itself takes ~70 min
-# and every variant times out before producing a measurement. Rather than
-# pick a new universal constant (which would just push the failure mode to
-# the next slow-workload combination), we auto-derive the cap from the
-# *measured* baseline runtime that the Coordinator already injects, with a
-# safety margin above the soft kill ratio so the layered design (soft kill
-# → hard cap) is preserved.
-#
-# Operator can still override per-task via ``params['variant_timeout_sec']``
-# or globally via ``--explore-variant-timeout-sec`` (mirrored into
-# SharedState by cli.py and re-injected into every explore task by the
-# Coordinator). Floor + ceiling guard against pathological inputs.
+# Auto-derived per-variant hard timeout: rather than a universal constant
+# (the legacy 2400s smoke floor times out slow workloads like Qwen3-32B TP=1
+# ~70 min baselines), derive the cap from the Coordinator-injected measured
+# baseline runtime plus a safety margin above the soft-kill ratio (preserves
+# soft-kill → hard-cap layering). Override per-task via
+# ``params['variant_timeout_sec']`` or ``--explore-variant-timeout-sec``;
+# floor/ceiling guard pathological inputs.
 DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC = 2400      # 40 min — legacy smoke-workload default
 DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC = 14400   # 4 h — matches roofline composite budget
 DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN = 0.5   # hard cap ≥ baseline × (kill_ratio + 0.5)
@@ -356,34 +338,20 @@ def _compute_explore_variant_timeout(
 ) -> int:
     """Derive the per-variant hard timeout from the measured baseline.
 
-    Returns ``floor_sec`` when ``baseline_runtime_sec`` is unknown / non-positive
-    (cold start, baseline failed, fresh resume before baseline replays). Once
-    baseline lands, scales with the actual workload runtime so slow models
-    get appropriate budget without operator tuning.
-
-    The hard cap is intentionally **above** the soft kill ratio
-    (``baseline_runtime_sec × kill_ratio``); the soft kill is the designed
-    upper bound for "this variant is slower than baseline" and the hard cap
-    is the catastrophic backstop for hung subprocesses. Inverting them — as
-    the legacy 2400 s constant does on slow workloads — defeats the layered
-    design (the hard cap fires before the soft kill ever gets a chance).
+    Returns ``floor_sec`` when ``baseline_runtime_sec`` is non-positive;
+    otherwise scales with the workload runtime. The hard cap stays **above**
+    the soft kill ratio (the catastrophic backstop sits above the designed
+    "slower than baseline" bound); inverting them defeats the layering.
 
     Args:
-        baseline_runtime_sec: Measured wall-clock of the baseline action.
-            Coordinator-injected via ``task.params['baseline_runtime_sec']``.
-            Pass ``0`` (or any non-positive) to force the ``floor_sec``
-            fallback.
-        kill_ratio: ``--explore-overtime-kill-ratio``. Treated as ``1.0`` if
-            below 1.0 so the derived timeout never underflows the soft kill.
-        floor_sec: Lower bound. Default preserves legacy smoke-workload
-            behaviour (40 min) for any path that calls with no baseline.
-        ceiling_sec: Upper bound. Default 4 h matches the roofline composite
-            timeout; bumping further would risk a single hung variant
-            burning a meaningful slice of the wall-clock budget.
-        safety_margin: Additive margin on top of ``kill_ratio`` so the hard
-            cap stays above the soft kill. ``0.5`` ≈ 50 % of the baseline
-            runtime as headroom for one-off variant cold starts (e.g.
-            ``--enable-torch-compile`` AOTI compile, fresh aiter shapes).
+        baseline_runtime_sec: Measured baseline wall-clock (Coordinator-
+            injected). Non-positive forces the ``floor_sec`` fallback.
+        kill_ratio: ``--explore-overtime-kill-ratio``; clamped to ≥1.0 so the
+            derived timeout never underflows the soft kill.
+        floor_sec: Lower bound (default 40 min smoke-workload behaviour).
+        ceiling_sec: Upper bound (default 4 h, roofline composite timeout).
+        safety_margin: Additive margin on ``kill_ratio`` keeping the hard cap
+            above the soft kill (~50% headroom for one-off variant cold starts).
     """
     if baseline_runtime_sec <= 0:
         return int(floor_sec)
@@ -393,16 +361,23 @@ def _compute_explore_variant_timeout(
 
 
 def _join_args(*parts: str) -> str:
+    """Join non-empty, stripped argument fragments with single spaces.
+
+    Args:
+        *parts (str): Argument fragments; empty/whitespace ones are
+            dropped.
+
+    Returns:
+        str: The space-joined argument string.
+    """
     return " ".join(p.strip() for p in parts if p and p.strip())
 
 
 class ExploreExecutor:
     """ActionRunner for the merged ``explore`` action.
 
-    Subsumes the retired v0.6 ``backends`` / ``params`` /
-    ``validate_stack`` executors.
-    Per-variant KEEP/REVERT gating plus an inlined per-KEEP stack
-    rebench replace the standalone ``validate_stack`` step.
+    Subsumes the retired v0.6 ``backends`` / ``params`` / ``validate_stack``
+    executors via per-variant KEEP/REVERT gating + inlined per-KEEP stack rebench.
     """
 
     def __init__(
@@ -415,6 +390,22 @@ class ExploreExecutor:
         stack_stable_threshold_pct: float = DEFAULT_STACK_STABLE_PCT,
         enable_stack_rebench: bool = True,
     ):
+        """Initialize the explore executor and its gating thresholds.
+
+        Args:
+            default_config_path (Path | str | None): Fallback benchmark
+                config path; resolved from defaults when ``None``.
+            session_dir (Path | str | None): Session output directory;
+                auto-resolved when ``None``.
+            variant_timeout_sec (int): Legacy per-variant hard timeout
+                floor. Defaults to ``2400``.
+            keep_threshold_pct (float): Minimum gain to KEEP a variant.
+                Defaults to :data:`DEFAULT_KEEP_THRESHOLD_PCT`.
+            stack_stable_threshold_pct (float): Stability band for the
+                stack rebench. Defaults to :data:`DEFAULT_STACK_STABLE_PCT`.
+            enable_stack_rebench (bool): Whether to run the inlined
+                per-KEEP stack rebench. Defaults to ``True``.
+        """
         self.default_config_path = (
             Path(default_config_path) if default_config_path else None
         )
@@ -424,12 +415,25 @@ class ExploreExecutor:
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
         self.stack_stable_threshold_pct = float(stack_stable_threshold_pct)
-        # Stack-rebench can be disabled for unit tests / fast smoke runs.
-        # KB_design §3.4 §4.4 says the inlined rebench is the legacy
-        # default; flipping this off recovers behaviour.
+        # Stack-rebench (default on) can be disabled for tests / fast smoke runs.
         self.enable_stack_rebench = bool(enable_stack_rebench)
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Run the merged ``explore`` action for one task.
+
+        Resolves the benchmark config and output workspace, builds the
+        candidate grid (programmatic seed and/or LLM/specialist variants),
+        benchmarks each variant with per-variant KEEP/REVERT gating, and
+        optionally performs an inlined per-KEEP stack rebench.
+
+        Args:
+            ctx: The action runner context carrying the task and params.
+
+        Returns:
+            dict[str, Any]: The explore result payload (status plus the
+            accepted/rejected variants and ledger updates), or a failure
+            dict on error.
+        """
         params = dict(ctx.task.params or {})
         # ----- Config / output workspace -----------------------------------
         config_path = Path(
@@ -452,9 +456,8 @@ class ExploreExecutor:
         output_root.mkdir(parents=True, exist_ok=True)
 
         # ----- Workload-contract materialization ---------------------------
-        # Same pattern as backends/params: re-run materialize_config_with_envs
-        # so the variant YAMLs honour the operator's actual workload
-        # (CONC / ISL / OSL / TP / MAX_MODEL_LEN / PRECISION).
+        # Re-materialize so variant YAMLs honour the operator's actual
+        # workload (CONC / ISL / OSL / TP / MAX_MODEL_LEN / PRECISION).
         resolved_model = (
             str(params.get("model_path") or "").strip()
             or os.environ.get("MODEL_PATH", "").strip()
@@ -472,19 +475,41 @@ class ExploreExecutor:
                 "error_class": "bad_param",
                 "error": str(exc),
             }
-        config_path = materialize_config_with_envs(
-            config_path,
-            output_root,
-            model_path=resolved_model or None,
-            gpu_type=resolved_gpu or None,
-            benchmark_script=override_script,
-            out_name="explore_base.with_envs.yaml",
-        )
+        try:
+            config_path = materialize_config_with_envs(
+                config_path,
+                output_root,
+                model_path=resolved_model or None,
+                gpu_type=resolved_gpu or None,
+                benchmark_script=override_script,
+                out_name="explore_base.with_envs.yaml",
+            )
+        except FrameworkScriptMismatchError as exc:
+            return {
+                "status": "failed",
+                "error_class": "framework_script_mismatch",
+                "error": str(exc),
+            }
 
         # ----- Inputs ------------------------------------------------------
         base_extra_args = str(params.get("base_extra_args") or "").strip()
         base_extra_envs = dict(params.get("base_extra_envs") or {})
         base_tput = float(params.get("base_tput") or 0.0)
+        # Backstop: when params carries no positive ``base_tput``, recover the
+        # comparison anchor from live SharedState (else every ``_gain_pct``
+        # returns None and real wins get marked FAILED). Prefer running best,
+        # fall back to the original baseline.
+        if base_tput <= 0:
+            ss = extra.get("shared_state") or extra.get("state")
+            if ss is not None:
+                cb = getattr(ss, "current_best", None) or {}
+                cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+                if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                    base_tput = float(cb_tput)
+                else:
+                    base_tput = float(
+                        getattr(ss, "baseline_tput", 0.0) or 0.0
+                    )
         baseline_accuracy = (
             float(params.get("accuracy_baseline") or 0.0)
             or float(params.get("baseline_accuracy") or 0.0)
@@ -499,13 +524,11 @@ class ExploreExecutor:
             "enable_stack_rebench", self.enable_stack_rebench,
         ))
 
-        # Fix E (per-variant overtime kill — Q1: anchored on baseline
-        # wall-clock; Q4: single-variant runs only, NOT stack_rebench).
-        # The Coordinator injects ``baseline_runtime_sec`` and
-        # ``explore_overtime_kill_ratio`` into task.params from
-        # SharedState. When either is missing / non-positive the
-        # deadline stays None and the legacy ``variant_timeout_sec``
-        # hard cap is the only gate.
+        # per-variant overtime kill — anchored on baseline wall-clock,
+        # single-variant runs only (not stack_rebench). Coordinator injects
+        # ``baseline_runtime_sec`` + ``explore_overtime_kill_ratio``; if
+        # either is missing the deadline stays None and only the
+        # ``variant_timeout_sec`` hard cap gates.
         baseline_runtime_sec_raw = params.get("baseline_runtime_sec")
         try:
             baseline_runtime_sec = (
@@ -529,25 +552,16 @@ class ExploreExecutor:
         else:
             overtime_deadline_sec = None
 
-        # Resolve the per-variant hard cap. Precedence:
-        #   1. ``params['variant_timeout_sec']`` — explicit per-task override
-        #      (LLM proposal, operator-injected via Coordinator from the
-        #      ``--explore-variant-timeout-sec`` CLI flag, or
-        #      ``INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SEC`` env).
-        #   2. Auto-derive from the measured baseline runtime + soft kill
-        #      ratio (both Coordinator-injected). Scales with the actual
-        #      workload so slow models don't time out before producing a
-        #      measurement; see ``_compute_explore_variant_timeout``.
-        #   3. ``self.variant_timeout_sec`` — class default, retained as a
-        #      conservative floor when the auto-derive has no baseline yet
-        #      (cold start / first round).
+        # Per-variant hard cap precedence: explicit
+        # ``params['variant_timeout_sec']`` → auto-derive from baseline
+        # runtime + kill ratio (see ``_compute_explore_variant_timeout``) →
+        # ``self.variant_timeout_sec`` floor (no baseline yet).
         explicit_timeout = params.get("variant_timeout_sec")
         if explicit_timeout is not None:
             timeout_sec = int(explicit_timeout)
         else:
-            # Operator-tunable headroom. When unset (or negative), fall back
-            # to the helper's default. Negative values clamp to 0 (no
-            # headroom — hard cap collapses onto the soft kill ratio).
+            # Operator-tunable headroom; unset uses the helper default,
+            # negative clamps to 0 (hard cap collapses onto the soft kill).
             safety_margin_raw = params.get("variant_timeout_safety_margin")
             try:
                 safety_margin = (
@@ -564,21 +578,16 @@ class ExploreExecutor:
                 safety_margin=safety_margin,
             )
 
-        # Resolve framework from materialized YAML. Used both for the
-        # informational ledger and for the cold-start seed-grid fallback
-        # below — atom is the only framework with a programmatic seed
-        # today; sglang / vllm still rely on the LLM-emitted
-        # ``default_grid`` variants.
+        # Resolve framework from materialized YAML (for the ledger + the
+        # atom seed-grid fallback below).
         try:
             with config_path.open(encoding="utf-8") as _f:
                 _cfg = yaml.safe_load(_f) or {}
             framework = str(
                 (_cfg.get("benchmark") or {}).get("framework") or ""
             ).lower()
-            # The materialised YAML carries the live workload envs
-            # (CONC / ISL / OSL); pull CONC so the seed grid's
-            # cudagraph-bracket variant brackets the actual decode
-            # concurrency.
+            # Pull CONC so the seed grid's cudagraph-bracket variant brackets
+            # the live decode concurrency.
             _yaml_envs = (_cfg.get("benchmark") or {}).get("envs") or {}
         except Exception:  # noqa: BLE001
             framework = ""
@@ -587,15 +596,9 @@ class ExploreExecutor:
         # ----- Variant grid ------------------------------------------------
         grid_payload = params.get("grid") or []
         if not isinstance(grid_payload, list) or not grid_payload:
-            # When no LLM-emitted variants arrived AND a programmatic
-            # seed grid exists for the active framework, fall through
-            # to the seed instead of failing the task. Stamps each
-            # variant with
-            # ``provenance='default_grid'`` so cold-start seed variants
-            # are visibly distinct from Orchestration-authored
-            # ``llm_direct`` hypotheses. The seed honours
-            # ``provenance='default_grid'`` already (see
-            # ``_atom_default_grid``); no extra stamping needed.
+            # No LLM variants: fall through to the framework's programmatic
+            # seed grid (stamped ``provenance='default_grid'``) instead of
+            # failing the task.
             seed_model_class = (
                 str(params.get("model_class") or "").strip()
                 or os.environ.get("MODEL_CLASS", "").strip()
@@ -693,6 +696,16 @@ class ExploreExecutor:
             search.setdefault(key, default)
 
         def _entry_fp(entry: Any) -> str:
+            """Resolve a ledger entry's variant fingerprint.
+
+            Args:
+                entry (Any): A ledger entry; expected to be a dict with
+                    a ``fingerprint`` or server-args/envs to derive one.
+
+            Returns:
+                str: The stored or canonically-derived fingerprint, or
+                ``""`` when ``entry`` is not a dict.
+            """
             if not isinstance(entry, dict):
                 return ""
             fp = entry.get("fingerprint")
@@ -714,11 +727,8 @@ class ExploreExecutor:
         seen_fps.discard("")
         name_index = dict(search.get("name_index") or {})
 
-        # Per-variant fingerprint. We attach
-        # the fingerprint as an attribute so the result loop doesn't
-        # have to recompute. GridVariant.fingerprint already uses the
-        # content-only hash; canonical_fingerprint is the same hash so
-        # the two are interchangeable here.
+        # Attach the per-variant fingerprint as an attribute so the result
+        # loop needn't recompute (content-only hash, same as canonical).
         ws_sig = workload_signature()
 
         unique_in_round: dict[str, GridVariant] = {}
@@ -749,45 +759,26 @@ class ExploreExecutor:
             len(grid), len(runnable), len(skipped_dup),
         )
 
-        # Opt-in roofline-categorized filter (PR-B).
-        # Coordinator-injected ``roofline_hard_gate=True`` together with a
-        # non-empty ``roofline_saturation_snapshot`` activates the gate;
-        # the executor drops variants whose flags target only directions
-        # the latest roofline run reports above the saturation threshold.
-        # Dropped variants land in ``skipped_dup`` with
-        # ``reason='roofline_saturated'`` so the per-variant outcomes
-        # collector and ``state.json`` audit trail surface them next to
-        # the dedup skips. Default is off — when ``roofline_hard_gate``
-        # is missing / falsy, the soft advisory remains the only signal
-        # (legacy behaviour).
-        if bool(params.get("roofline_hard_gate", False)) and runnable:
-            saturation_snapshot = params.get("roofline_saturation_snapshot")
-            if isinstance(saturation_snapshot, dict) and saturation_snapshot:
-                kept_runnable, dropped_by_roofline = filter_variants_by_roofline(
-                    runnable, saturation_snapshot,
+        # Roofline saturation advisory (annotates, never drops): flags
+        # variants targeting only already-saturated directions so the
+        # Orchestration prompt can reprioritise without code dropping work.
+        roofline_advisory: list[dict[str, Any]] = []
+        saturation_snapshot = params.get("roofline_saturation_snapshot")
+        if isinstance(saturation_snapshot, dict) and saturation_snapshot and runnable:
+            roofline_advisory = compute_saturation_advisory(
+                runnable, saturation_snapshot,
+            )
+            if roofline_advisory:
+                log.info(
+                    "explore roofline advisory: %d/%d variants flagged "
+                    "as likely_saturated (saturated=%s)",
+                    len(roofline_advisory),
+                    len(runnable),
+                    ",".join(sorted(
+                        d for d, p in saturation_snapshot.items()
+                        if isinstance(p, (int, float)) and float(p) >= 80.0
+                    )),
                 )
-                if dropped_by_roofline:
-                    for entry in dropped_by_roofline:
-                        skipped_dup.append({
-                            "name": entry.get("name", ""),
-                            "extra_server_args": entry.get("extra_server_args", ""),
-                            "reason": "roofline_saturated",
-                            "categories": entry.get("categories", []),
-                            "saturated_directions": entry.get(
-                                "saturated_directions", [],
-                            ),
-                        })
-                    log.info(
-                        "explore roofline gate: %d/%d variants dropped "
-                        "(saturated=%s)",
-                        len(dropped_by_roofline),
-                        len(runnable),
-                        ",".join(sorted(
-                            d for d, p in saturation_snapshot.items()
-                            if isinstance(p, (int, float)) and float(p) >= 80.0
-                        )),
-                    )
-                runnable = kept_runnable
 
         round_id_seed = int(search.get("cursor") or 0) + 1
         round_id = f"explore-{round_id_seed:03d}"
@@ -803,17 +794,12 @@ class ExploreExecutor:
         )
 
         # ``stack_extra_args`` / ``stack_extra_envs`` carry the running
-        # accumulation; after a KEEP they get extended with the KEEP'd
-        # variant so the *next* variant in the same batch is benched on
-        # top of the freshest stack ("重新
-        # 计算 base_extra_args 给后续 variant").
+        # accumulation; after a KEEP they extend with the KEEP'd variant so
+        # the next variant is benched on the freshest stack.
         stack_extra_args = base_extra_args
         stack_extra_envs = dict(base_extra_envs)
         running_base_tput = base_tput
-        # Track the in-batch stack of KEEP'd entries so the per-KEEP
-        # stack rebench can recompose the full args from scratch (vs
-        # incrementally) if the operator passes ``stack_rebench='full'``
-        # — defaults to incremental which matches the runtime semantics.
+        # In-batch KEEP'd entries (for full vs incremental stack recompose).
         in_batch_keeps: list[dict[str, Any]] = []
 
         last_run_tput: float | None = None  # rebench/single-variant tput
@@ -822,11 +808,12 @@ class ExploreExecutor:
             for idx, gv in enumerate(runnable):
                 fp = getattr(gv, "canonical_fp", "")
                 provenance = getattr(gv, "provenance", "llm_direct")
+                scope = str(getattr(gv, "scope", "") or "")
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
-                # 1. Run the single variant on top of the running stack.
-                #    ``soft_deadline_sec`` is the Fix-E overtime kill;
-                #    stack_rebench below intentionally omits it (Q4).
+                # 1. Run the single variant on the running stack.
+                #    ``soft_deadline_sec`` is the overtime kill; stack_rebench
+                #    below intentionally omits it (Q4).
                 results = await run_grid(
                     base_yaml_path=config_path,
                     base_extra_args=stack_extra_args,
@@ -840,21 +827,14 @@ class ExploreExecutor:
                     soft_deadline_sec=overtime_deadline_sec,
                 )
                 if not results:
-                    # Defensive — run_grid returns a list of the same
-                    # length as the input grid; we only fall here if a
-                    # serialization bug ate the result.
+                    # Defensive — run_grid returns one result per grid entry.
                     log.warning("explore: variant %s produced no result", gv.name)
                     continue
                 r = results[0]
 
-                # Fix E (Q3c): the per-variant overtime gate fired.
-                # Record a dedicated ``KILLED_OVERTIME`` row carrying
-                # ``runtime_sec`` + ``wall_clock_ratio_vs_baseline``
-                # (no tput, no gain — Q3 explicitly said "don't fake a
-                # number"). Skip every downstream gate (KEEP / REVERT /
-                # accuracy / stack_rebench) and dedup so a re-proposal
-                # of the same fingerprint hits the ``tested`` ledger
-                # immediately. The running stack is NOT advanced.
+                # Overtime gate fired: record a ``KILLED_OVERTIME`` row with
+                # runtime_sec + wall_clock_ratio (no faked tput/gain, per Q3),
+                # skip all downstream gates + dedup, leave the stack unadvanced.
                 if getattr(r, "killed_overtime", False):
                     variant_runtime = float(r.runtime_sec or 0.0)
                     wall_clock_ratio = (
@@ -925,13 +905,10 @@ class ExploreExecutor:
                     )
                     continue
 
-                # Carry the variant's content-only fingerprint forward
-                # (run_grid recomputes from args/envs which match exactly).
                 gain = _gain_pct(r.output_throughput, running_base_tput)
                 outcome = "FAILED"
                 reason: str = ""
                 if r.status != "succeeded" or gain is None:
-                    outcome = "FAILED"
                     reason = (r.error or "")[-256:] or "no_measurement"
                 elif gain < keep_threshold_pct:
                     outcome = "REVERT"
@@ -954,12 +931,9 @@ class ExploreExecutor:
                                 baseline_accuracy, float(accuracy_value),
                             )
                         else:
-                            # No eval result emitted; KB_design §3.4 §7
-                            # is silent on this exact case but we follow
-                            # the legacy BackendsExecutor convention of
-                            # "no accuracy data => skip the gate" so
-                            # high-risk flags without an eval don't get
-                            # auto-rejected on a benign measurement gap.
+                            # No eval result: follow the legacy "no accuracy
+                            # data => skip the gate" convention so high-risk
+                            # flags aren't auto-rejected on a benign gap.
                             accuracy_ok = True
                     if not accuracy_ok:
                         outcome = "REVERT"
@@ -1019,8 +993,8 @@ class ExploreExecutor:
                         rebench_slot.mkdir(parents=True, exist_ok=True)
                         rebench_variant = GridVariant(
                             name=f"{gv.name}__stack_rebench",
-                            extra_server_args="",  # all args are in next_args
-                            extra_envs={},          # all envs are in next_envs
+                            extra_server_args="",  # all args in next_args
+                            extra_envs={},          # all envs in next_envs
                             note="stack_rebench",
                         )
                         rebench_results = await run_grid(
@@ -1035,17 +1009,10 @@ class ExploreExecutor:
                             result_dir=override_result_dir,
                         )
                         rb = rebench_results[0] if rebench_results else None
-                        # ALWAYS apply the in-batch env stack to the
-                        # rebench step (run_grid doesn't see envs via
-                        # base_extra_envs — we have to materialise via
-                        # the variant.extra_envs path).  Patch the
-                        # rebench variant with the merged envs and
-                        # re-run if needed.
+                        # Apply the in-batch env stack to the rebench step
+                        # (run_grid only sees envs via variant.extra_envs),
+                        # re-running when the merged envs aren't present.
                         if rb is not None and next_envs:
-                            # If the merged envs aren't already on the
-                            # rebench result, re-run with them. This is
-                            # cheap-ish (an extra dict update on the YAML)
-                            # but only when envs are non-empty.
                             if rb.extra_envs != next_envs:
                                 rebench_variant_envs = GridVariant(
                                     name=f"{gv.name}__stack_rebench_envs",
@@ -1083,8 +1050,8 @@ class ExploreExecutor:
                         stable_floor = base_tput * (
                             1.0 + stack_stable_threshold_pct / 100.0
                         )
-                        # KEEP_UNSTABLE: rebench didn't beat the cumulative
-                        # stability floor — evict the KEEP and treat as REVERT.
+                        # KEEP_UNSTABLE: rebench missed the stability floor —
+                        # evict the KEEP and treat as REVERT.
                         if (
                             stack_rebench_tput is None
                             or stack_rebench_tput < stable_floor
@@ -1120,14 +1087,12 @@ class ExploreExecutor:
                                 "ts": _now_iso(),
                                 "provenance": provenance,
                             })
-                            # Pop the just-added entry — the stack
-                            # rolls back to the prior accumulation.
+                            # Roll the stack back to the prior accumulation.
                             in_batch_keeps.pop()
                             continue
                         else:
-                            # Stable — fold the variant onto the
-                            # cumulative stack so the NEXT variant is
-                            # benched against the new baseline.
+                            # Stable — fold the variant onto the stack so the
+                            # next variant benches against the new baseline.
                             stack_extra_args = next_args
                             stack_extra_envs = next_envs
                             running_base_tput = stack_rebench_tput
@@ -1139,9 +1104,8 @@ class ExploreExecutor:
                             tested_update[fp]["stack_rebench_workspace"] = stack_rebench_workspace
                             tested_update[fp]["stack_rebench_warnings"] = stack_rebench_warnings
                     else:
-                        # Stack rebench disabled — KEEP based on the
-                        # single-variant measurement and update the
-                        # running baseline naively.
+                        # Stack rebench disabled — KEEP on the single-variant
+                        # measurement, advance the running baseline naively.
                         stack_extra_args = next_args
                         stack_extra_envs = next_envs
                         running_base_tput = r.output_throughput or running_base_tput
@@ -1156,6 +1120,7 @@ class ExploreExecutor:
                         "extra_args": gv.extra_server_args,
                         "extra_envs": dict(gv.extra_envs),
                         "provenance": provenance,
+                        "scope": scope,
                         "ts": _now_iso(),
                     })
                     continue
@@ -1198,13 +1163,9 @@ class ExploreExecutor:
                 continue
             rejected_dedup[fp] = entry
 
-        # KB_gaps/Gap-08 / flat
-        # per-variant outcomes for the Coordinator's per-variant T3
-        # hook. Built from ``tested_update`` (this round only) plus
-        # ``skipped_dup`` so KEEP / REVERT / FAILED / KEEP_UNSTABLE /
-        # SKIPPED_DEDUP are all exposed. The Coordinator iterates
-        # this list and calls ``cortex_kb.verify`` once per variant.
-        # Stays JSON-friendly so v0.6 readers stay happy.
+        # Flat per-variant outcomes for the Coordinator's per-variant
+        # fact-write hook (KEEP / REVERT / FAILED / KEEP_UNSTABLE /
+        # SKIPPED_DEDUP from this round). JSON-friendly for older readers.
         reasons_by_fp: dict[str, str] = {
             str(r.get("fingerprint") or ""): str(r.get("reason") or "")
             for r in rejected_update
@@ -1227,9 +1188,8 @@ class ExploreExecutor:
                 metrics["gain_pct"] = te.get("gain_pct")
             if te.get("stack_rebench_tput") is not None:
                 metrics["stack_rebench_tput"] = te.get("stack_rebench_tput")
-            # Fix E: surface wall-clock + kill ratio so the orchestration
-            # LLM (and downstream KB writers) see "ran too slow → early
-            # kill" instead of an opaque FAILED row with no signal.
+            # surface wall-clock + kill ratio so the LLM/KB sees "ran too
+            # slow → early kill" instead of an opaque FAILED row.
             if te.get("runtime_sec") is not None:
                 metrics["runtime_sec"] = te.get("runtime_sec")
             if te.get("wall_clock_ratio_vs_baseline") is not None:
@@ -1305,12 +1265,9 @@ class ExploreExecutor:
         else:
             output_throughput = None
 
-        # Successful in the M3 sense = at least one bench actually
-        # produced a measurement (KEEP, REVERT-with-gain, KEEP_UNSTABLE)
-        # OR was deliberately reaped by the Fix-E overtime gate
-        # (KILLED_OVERTIME) — the latter is a real, useful signal the
-        # LLM needs to see in ``per_variant_outcomes`` to avoid
-        # re-proposing the same heavy variant on the next round.
+        # Successful = at least one bench produced a measurement (KEEP /
+        # REVERT / KEEP_UNSTABLE) or was reaped by the overtime gate
+        # (KILLED_OVERTIME is a real signal the LLM needs to see).
         produced_measurement = any(
             t.get("outcome") in (
                 "KEEP", "REVERT", "KEEP_UNSTABLE", "KILLED_OVERTIME",
@@ -1331,7 +1288,8 @@ class ExploreExecutor:
             "losers": losers,
             "keep_unstable_in_stack": keep_unstable,
             "skipped_dup": skipped_dup,
-            # flat per-variant outcomes for T3.
+            "roofline_advisory": roofline_advisory,
+            # flat per-variant outcomes.
             "per_variant_outcomes": per_variant_outcomes,
             "explore_search_update": search_update,
             "discovered_flags_update": None,
@@ -1345,7 +1303,15 @@ class ExploreExecutor:
 
 
 def _safe(name: str) -> str:
-    """Filesystem-safe slug for variant directory names."""
+    """Filesystem-safe slug for variant directory names.
+
+    Args:
+        name (str): The raw variant name.
+
+    Returns:
+        str: A slug with non-alphanumeric characters replaced by ``_``,
+        truncated to 60 characters.
+    """
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
 
 

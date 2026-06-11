@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Smoke tests for the M1 factory."""
 
 from __future__ import annotations
@@ -154,12 +156,7 @@ async def test_factory_propagates_severity_min_config(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_factory_uses_quiet_fallback_when_local_probe_disabled(tmp_path: Path):
-    """``disable_local_probe`` swaps the LocalProbe for the quiet stub.
-
-    The quiet stub never yields high-severity local symptoms — exactly
-    the policy we want when the agent runs on a Ray worker that does
-    not host the inference server.
-    """
+    """``disable_local_probe`` swaps the LocalProbe for a quiet stub that never yields high-severity local symptoms (Ray-worker policy)."""
     from robustness_agent.factory import _QuietFallback
     from robustness_agent.sources.local_probe import LocalProbeSource
 

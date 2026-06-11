@@ -1,27 +1,6 @@
-"""End-to-end test: real robustness-agent runtime + Coordinator.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Mirrors :mod:`test_p2_critic_agent_e2e` for the robustness role: actually
-shells out to ``python -m robustness_agent.runtime.cli tick`` against the
-real ``robustness-agent`` checkout (sibling of ``inference_optimizer/``)
-and verifies the Coordinator surfaces emitted intents on the bus and on
-disk.
-
-Marker: ``robustness_agent_e2e`` — devs without a robustness-agent
-checkout in their tree skip via ``pytest -m 'not robustness_agent_e2e'``.
-
-Verifies:
-
-* Heartbeat path (zero crash, no inbox): real runtime emits a
-  ``send_message{topic=heartbeat}`` envelope; Coordinator records it on
-  the bus.
-* Alert path (high crash count): real runtime emits
-  ``alert(severity=high)`` + ``escalate_strategy_change``; both land on
-  the bus with ``from=robustness``.
-* Filesystem audit: per-turn
-  ``<session_dir>/robustness-workdir/000000/{request.json,emit.json}``
-  exists; ``emit.json`` carries a valid ``intent_envelope`` whose schema
-  matches what :func:`validate_envelope` would accept.
-"""
+"""End-to-end test: real robustness-agent runtime + Coordinator (marker ``robustness_agent_e2e``)."""
 
 from __future__ import annotations
 
@@ -39,7 +18,7 @@ from inference_optimizer.orchestrator.backends import (
     ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import make_session_dir
 
@@ -93,23 +72,13 @@ async def test_robustness_agent_real_runtime_heartbeat(
     backend = RobustnessAgentBackend(
         robustness_agent_root=robustness_agent_root,
         session_dir=session_dir,
-        # IMPORTANT: do NOT pass runtime_caller_factory — we want the
-        # real subprocess path here.
-        # Heartbeat path: explicitly disable the LocalProbe family
-        # probes so an inert CI host (no inference server / no Ray
-        # head on 127.0.0.1) doesn't fire ``local_server_unreachable``
-        # / ``ray_head_dead`` HIGH alerts that would mask the expected
-        # heartbeat ``send_message``. ``ray_probe_enabled`` was added
-        # by PR #239 and defaults to True; the e2e heartbeat test
-        # needs both off.
+        # IMPORTANT: do NOT pass runtime_caller_factory — we want the real subprocess path.
+        # Disable LocalProbe / ray / external_deps probes so an inert CI host doesn't fire
+        # HIGH alerts that would mask the expected heartbeat send_message.
         options={
             "robustness_server_url": "",
             "auto_probe_inference_server": False,
             "ray_probe_enabled": False,
-            # CI runners lack the TraceLens CLI and WekaFS mounts the
-            # J external_deps probe expects; disable it so the heartbeat
-            # is not buried under ``tracelens_cli_missing`` /
-            # ``wekafs_degraded`` alerts.
             "external_deps_enabled": False,
         },
     )
@@ -157,9 +126,7 @@ async def test_robustness_agent_real_runtime_heartbeat(
 async def test_robustness_agent_real_runtime_emits_alert_on_high_crash(
     session_dir: Path, robustness_agent_root: Path,
 ):
-    """``crash_count >= 10`` flips the reactor into the high-severity ladder
-    rung; the runtime must emit ``alert(high)`` + ``escalate_strategy_change``
-    and the Coordinator must mirror both onto the bus with ``from=robustness``."""
+    """P3_19: ``crash_count >= 10`` emits ``alert(high)`` only (no auto-escalate); Coordinator mirrors it from=robustness."""
     _seed_state(session_dir, crash_count=10)
 
     backend = RobustnessAgentBackend(
@@ -200,8 +167,8 @@ async def test_robustness_agent_real_runtime_emits_alert_on_high_crash(
     emit = json.loads((workdir / "emit.json").read_text())
     intent_types = {i["intent_type"] for i in emit["intent_envelope"]["intents"]}
     assert "alert" in intent_types
-    assert "escalate_strategy_change" in intent_types, (
-        f"high-severity ladder must escalate, got {intent_types}"
+    assert "escalate_strategy_change" not in intent_types, (
+        f"strategic HIGH symptoms must NOT auto-escalate any more, got {intent_types}"
     )
 
 

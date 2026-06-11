@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 claw:
   endpoint: ${SAFE_BASE_URL}/claw-api/v1
   api_key_env: CLAW_API_KEY
@@ -32,7 +34,7 @@ results:
   artifact_retention_days: 90
 
 notification:
-  webhook_env: WEBHOOK_URL                # Slack / Teams Incoming Webhook 均可
+  webhook_env: WEBHOOK_URL                # Slack / Teams Incoming Webhook both work
 
 pr_submission:
   repo_url: https://github.com/lishuoshuo-amd/InferenceX.git

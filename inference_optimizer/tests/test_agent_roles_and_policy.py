@@ -1,21 +1,6 @@
-"""P0-2 agent role + PolicyGate tests.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Covers:
-
-* default_role_registry returns the 4 v0.6 PascalCase-capable roles
-* Orchestration permission matrix (DELEGATE / REQUEST / no kernel-owned)
-* Kernel permission matrix (RESPONSE only / no PROPOSE_ACTION / no REQUEST)
-* Critic permission matrix (REVIEW_VERDICT only; no DELEGATE / REQUEST)
-* Robustness permission matrix (KILL_TASK + scheduling police; no propose)
-* PolicyGate REVIEW_VERDICT validation (verdict allowlist + critic-only source)
-* PolicyGate kernel-owned action delegate rejection
-* PolicyGate REQUEST routing (only orchestration→kernel)
-* PolicyGate kill_task source allowlist + scope guard
-* PolicyGate prune_branch / force_dispatch / escalate_strategy_change source guard
-* PolicyGate state field guard (no role can mutate CORE_STATE_FIELDS)
-* allowed_tools_for_agent semantics (Codex no-tools / Claude → ["emit_intent"])
-* All 4 system_prompts/*.md files exist and are non-empty
-"""
+"""P0-2 agent role + PolicyGate tests."""
 
 from __future__ import annotations
 
@@ -28,7 +13,7 @@ from inference_optimizer.orchestrator.agent_role import (
     default_role_registry,
     roles_for_run,
 )
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
 )
@@ -50,9 +35,7 @@ from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.paths import asset_system_prompts_dir
 
 
-# ===========================================================================
 # agent_role
-# ===========================================================================
 def test_default_role_registry_has_4_v06_agents():
     reg = default_role_registry()
     assert set(reg.keys()) == {"orchestration", "kernel", "critic", "robustness"}
@@ -72,9 +55,11 @@ def test_orchestration_permissions():
     assert IntentType.DELEGATE in role.allowed_intents
     assert IntentType.REQUEST in role.allowed_intents
     assert IntentType.UPDATE_STATE in role.allowed_intents
-    # Cannot review / kill / scheduling-police / response
+    assert IntentType.PRUNE_BRANCH in role.allowed_intents
+    assert IntentType.ESCALATE_STRATEGY_CHANGE in role.allowed_intents
     assert IntentType.REVIEW_VERDICT not in role.allowed_intents
     assert IntentType.KILL_TASK not in role.allowed_intents
+    assert IntentType.FORCE_DISPATCH not in role.allowed_intents
     assert IntentType.RESPONSE not in role.allowed_intents
 
 
@@ -83,7 +68,6 @@ def test_kernel_responder_only():
     assert role.backend_type == BackendType.CLAUDE
     assert role.can_delegate_side_effects is False
     assert IntentType.RESPONSE in role.allowed_intents
-    # Cannot initiate
     assert IntentType.PROPOSE_ACTION not in role.allowed_intents
     assert IntentType.DELEGATE not in role.allowed_intents
     assert IntentType.REQUEST not in role.allowed_intents
@@ -95,11 +79,9 @@ def test_critic_review_only_codex_no_tools():
     assert role.model == DEFAULT_CODEX_MODEL
     assert role.no_tools is True
     assert IntentType.REVIEW_VERDICT in role.allowed_intents
-    # Cannot delegate / request / propose
     assert IntentType.DELEGATE not in role.allowed_intents
     assert IntentType.REQUEST not in role.allowed_intents
     assert IntentType.PROPOSE_ACTION not in role.allowed_intents
-    # Cannot kill / scheduling-police
     assert IntentType.KILL_TASK not in role.allowed_intents
     assert IntentType.FORCE_DISPATCH not in role.allowed_intents
 
@@ -111,15 +93,12 @@ def test_robustness_scheduling_police():
     assert IntentType.FORCE_DISPATCH in role.allowed_intents
     assert IntentType.PRUNE_BRANCH in role.allowed_intents
     assert IntentType.ESCALATE_STRATEGY_CHANGE in role.allowed_intents
-    # Cannot propose / request / review_verdict
     assert IntentType.PROPOSE_ACTION not in role.allowed_intents
     assert IntentType.REQUEST not in role.allowed_intents
     assert IntentType.REVIEW_VERDICT not in role.allowed_intents
 
 
-# ===========================================================================
 # PolicyGate constants
-# ===========================================================================
 def test_kernel_owned_actions_include_gemm_tuning():
     assert KERNEL_OWNED_ACTIONS == frozenset({
         "kernel_opt", "integrate", "deep_kernel_analysis",
@@ -154,9 +133,7 @@ def test_core_state_fields_includes_current_best():
     assert "stop_reason" in CORE_STATE_FIELDS
 
 
-# ===========================================================================
 # PolicyGate validation
-# ===========================================================================
 @pytest.fixture
 def gate() -> PolicyGate:
     return PolicyGate(role_registry=default_role_registry())
@@ -211,18 +188,9 @@ def test_gate_orchestration_delegate_normal_action_ok(gate):
     ))
 
 
-# ---------------------------------------------------------------------------
-# Per-action delegate source allowlist (DELEGATE_ACTION_SOURCE_ALLOWLIST)
-#
-# ``recover`` walks SIGTERM/SIGKILL against matching processes and is
-# env-gated to optionally invoke ``rocm-smi --gpureset``. The
-# robustness-agent path emits it as the tail of the gpu_memory_leaked
-# action ladder; any other source must be rejected so PolicyGate is the
-# single chokepoint between an LLM-generated intent and a kill spree.
-# ---------------------------------------------------------------------------
+# Per-action delegate source allowlist: recover is robustness-only so PolicyGate is the single chokepoint against a kill spree.
 def test_delegate_action_source_allowlist_constant_shape():
-    """``recover`` is the only entry today; if more side-effecting
-    actions need source gating the test should be extended deliberately."""
+    """``recover`` is the only entry today."""
     assert DELEGATE_ACTION_SOURCE_ALLOWLIST == {
         "recover": frozenset({"robustness"}),
     }
@@ -251,9 +219,7 @@ def test_gate_robustness_delegate_recover_with_evidence_ok(gate):
 
 
 def test_gate_robustness_delegate_recover_with_nested_params_ok(gate):
-    """Real-world shape: ``build_delegate`` nests ``reason`` / ``evidence``
-    inside ``payload["params"]`` so the executor reads them via
-    ``ctx.task.params``. The gate must accept that shape too."""
+    """The gate must accept the nested ``payload["params"]`` shape from ``build_delegate``."""
     gate.validate_intent("robustness", Intent(
         type=IntentType.DELEGATE,
         payload={
@@ -272,8 +238,7 @@ def test_gate_robustness_delegate_recover_with_nested_params_ok(gate):
 
 
 def test_gate_orchestration_delegate_recover_rejected_by_source(gate):
-    """Orchestration must NOT initiate ``recover`` even with full payload —
-    the only valid path is robustness escalation via the action ladder."""
+    """Orchestration must NOT initiate ``recover`` even with full payload."""
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", Intent(
             type=IntentType.DELEGATE,
@@ -287,16 +252,54 @@ def test_gate_orchestration_delegate_recover_rejected_by_source(gate):
     assert "robustness" in str(exc.value)
 
 
+def test_gate_orchestration_propose_recover_rejected_by_source(gate):
+    """Orchestration must NOT reach ``recover`` through propose_action either; the source allowlist gates both intent kinds."""
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", Intent(
+            type=IntentType.PROPOSE_ACTION,
+            payload={"action_name": "recover"},
+        ))
+    assert exc.value.rule == "propose_action_source"
+    assert "robustness" in str(exc.value)
+
+
+def test_gate_robustness_delegate_recover_in_phase_ok():
+    """The robustness ``gpu_memory_leaked`` ladder still delegates ``recover`` with a live phase set via the ROBUSTNESS_DELEGATE_ONLY bypass."""
+    state = SharedState(phase="EXPLORE", framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    gate.validate_intent("robustness", Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "recover",
+            "params": {
+                "reason": "gpu_memory_leaked",
+                "force_gpu_cleanup": True,
+                "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]},
+            },
+        },
+    ))
+
+
+def test_gate_orchestration_propose_recover_in_phase_rejected():
+    """With a live phase set, Orchestration's propose(recover) is denied (the source gate fires first)."""
+    state = SharedState(phase="EXPLORE", framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", Intent(
+            type=IntentType.PROPOSE_ACTION,
+            payload={"action_name": "recover"},
+        ))
+    assert exc.value.rule == "propose_action_source"
+
+
 def test_gate_robustness_delegate_recover_missing_evidence_rejected(gate):
-    """Even from robustness, ``recover`` without evidence is denied so the
-    audit trail always captures the symptom that justified the kill."""
+    """Even from robustness, ``recover`` without evidence is denied."""
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("robustness", Intent(
             type=IntentType.DELEGATE,
             payload={
                 "action_name": "recover",
                 "reason": "gpu_memory_leaked",
-                # no `evidence`
             },
         ))
     assert exc.value.rule == "delegate_action_evidence"
@@ -309,7 +312,6 @@ def test_gate_robustness_delegate_recover_missing_reason_rejected(gate):
             type=IntentType.DELEGATE,
             payload={
                 "action_name": "recover",
-                # no `reason`
                 "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]},
             },
         ))
@@ -318,15 +320,14 @@ def test_gate_robustness_delegate_recover_missing_reason_rejected(gate):
 
 
 def test_gate_robustness_delegate_recover_empty_evidence_rejected(gate):
-    """Empty dict / empty string count as missing — the gate is asserting
-    *information presence*, not just key existence."""
+    """Empty dict / empty string count as missing (gate asserts information presence)."""
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("robustness", Intent(
             type=IntentType.DELEGATE,
             payload={
                 "action_name": "recover",
-                "reason": "   ",  # whitespace-only string
-                "evidence": {},   # empty dict
+                "reason": "   ",
+                "evidence": {},
             },
         ))
     assert exc.value.rule == "delegate_action_evidence"
@@ -454,12 +455,7 @@ def test_gate_robustness_prune_branch_requires_family(gate):
 
 
 def test_gate_orchestration_prune_branch_allowed_with_family(gate):
-    """Roofline-v2 C3: Orchestration was granted PRUNE_BRANCH so it can
-    forward the structured ``suggested_prunes`` advice from the ``roofline``
-    action to the Coordinator. FORCE_DISPATCH / ESCALATE_STRATEGY_CHANGE
-    remain robustness-only; see
-    ``test_orchestration_prune_branch_permission.py`` for the boundary tests.
-    """
+    """Roofline-v2 C3: Orchestration was granted PRUNE_BRANCH so it can forward ``suggested_prunes`` advice to the Coordinator."""
     gate.validate_intent("orchestration", Intent(
         type=IntentType.PRUNE_BRANCH,
         payload={"family": "deep_kernel", "reason": "x"},
@@ -483,18 +479,13 @@ def test_gate_orchestration_update_state_core_field_rejected(gate):
 
 
 def test_core_state_fields_includes_model_arch_tags():
-    """``model_architectures`` / ``model_type`` are fact-layer tags lifted
-    from the model weights' config.json (launcher / CLI owned). Locking
-    them keeps an LLM ``update_state`` from polluting the recipe-snapshot
-    tags that ``_kb_amend_recipe`` stamps into the KB."""
+    """``model_architectures`` / ``model_type`` are config.json fact-layer tags; locking them stops an LLM ``update_state`` from polluting the recipe snapshot."""
     assert "model_architectures" in CORE_STATE_FIELDS
     assert "model_type" in CORE_STATE_FIELDS
 
 
 def test_gate_update_state_model_arch_tags_rejected(gate):
-    """A non-core-mutating role must not overwrite the config.json
-    architecture tags via ``update_state`` (else the next
-    ``_kb_amend_recipe`` writes the polluted value into the recipe row)."""
+    """A non-core-mutating role must not overwrite the config.json architecture tags via ``update_state``."""
     for field_name in ("model_architectures", "model_type"):
         with pytest.raises(PolicyDenied) as exc:
             gate.validate_intent("orchestration", Intent(
@@ -504,13 +495,39 @@ def test_gate_update_state_model_arch_tags_rejected(gate):
         assert exc.value.rule == "state_field", field_name
 
 
-# ===========================================================================
+def test_core_state_fields_includes_degraded_markers():
+    """``degraded_mode`` / ``model_warnings`` are preflight-authored facts that
+    drive the final report's degraded warning; locking them stops an LLM from
+    forging or clearing a degraded-run verdict."""
+    assert "degraded_mode" in CORE_STATE_FIELDS
+    assert "model_warnings" in CORE_STATE_FIELDS
+
+
+def test_gate_update_state_degraded_markers_rejected(gate):
+    """A non-core-mutating role must not forge/clear the degraded-run markers."""
+    for field_name, value in (("degraded_mode", False), ("model_warnings", [])):
+        with pytest.raises(PolicyDenied) as exc:
+            gate.validate_intent("orchestration", Intent(
+                type=IntentType.UPDATE_STATE,
+                payload={"changes": {field_name: value}},
+            ))
+        assert exc.value.rule == "state_field", field_name
+
+
 # allowed_tools_for_agent
-# ===========================================================================
 def test_allowed_tools_claude_returns_emit_intent(gate):
-    assert gate.allowed_tools_for_agent("orchestration") == ["emit_intent"]
     assert gate.allowed_tools_for_agent("kernel") == ["emit_intent"]
     assert gate.allowed_tools_for_agent("robustness") == ["emit_intent"]
+    from inference_optimizer.orchestrator.backends.mcp_context_tools import (
+        CONTEXT_TOOL_NAMES,
+    )
+    orch = gate.allowed_tools_for_agent("orchestration")
+    assert orch[0] == "emit_intent"
+    assert "Read" in orch
+    for name in CONTEXT_TOOL_NAMES:
+        assert name in orch
+    assert "get_recent_outcomes" in orch
+    assert "run_action_now" in orch
 
 
 def test_allowed_tools_codex_returns_empty(gate):
@@ -522,9 +539,7 @@ def test_allowed_tools_unknown_agent_returns_empty(gate):
     assert gate.allowed_tools_for_agent("ghost") == []
 
 
-# ===========================================================================
 # system_prompts assets
-# ===========================================================================
 @pytest.mark.parametrize("name", ["orchestration", "kernel", "critic", "robustness"])
 def test_system_prompt_files_exist_and_nonempty(name):
     p = asset_system_prompts_dir() / f"{name}.md"

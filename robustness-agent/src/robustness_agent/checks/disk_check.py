@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Disk usage check — detects low disk space and Triton cache bloat."""
 
 from __future__ import annotations
@@ -13,12 +15,26 @@ log = logging.getLogger(__name__)
 
 
 class DiskCheck:
+    """Detect low disk space on the session's filesystem."""
 
     def __init__(self, config: Config, provider: MetricsProvider):
+        """Initialise the disk check.
+
+        Args:
+            config (Config): Agent configuration carrying disk usage
+                warn/critical thresholds and the session directory.
+            provider (MetricsProvider): Source of disk usage metrics.
+        """
         self._config = config
         self._provider = provider
 
     async def check(self) -> list[Alert]:
+        """Sample disk usage and raise alerts past warn/critical limits.
+
+        Returns:
+            list[Alert]: One alert per mount whose usage exceeds the
+            warning or critical threshold.
+        """
         alerts: list[Alert] = []
         disks = await self._provider.get_disk_usage(str(self._config.session_dir))
         for d in disks:

@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """GPU monitor — detects VRAM leaks, temperature spikes, ECC errors, utilization drops."""
 
 from __future__ import annotations
@@ -16,12 +18,25 @@ class GpuMonitor:
     """Stateful GPU health monitor with trend detection."""
 
     def __init__(self, config: Config, provider: MetricsProvider):
+        """Initialise the GPU monitor.
+
+        Args:
+            config (Config): Agent configuration carrying GPU thresholds.
+            provider (MetricsProvider): Source of per-GPU metric
+                snapshots.
+        """
         self._config = config
         self._provider = provider
         self._prev_snapshots: dict[int, GpuSnapshot] = {}
         self._baseline_util: dict[int, float] = {}
 
     async def check(self) -> list[Alert]:
+        """Run all GPU health checks against the latest snapshots.
+
+        Returns:
+            list[Alert]: Alerts raised for VRAM, temperature, ECC, and
+            utilization-drop conditions across all GPUs.
+        """
         alerts: list[Alert] = []
         snapshots = await self._provider.get_gpu_metrics()
 
@@ -35,9 +50,23 @@ class GpuMonitor:
         return alerts
 
     def set_baseline_utilization(self, gpu_id: int, util: float) -> None:
+        """Record a baseline utilization for drop detection.
+
+        Args:
+            gpu_id (int): The GPU index.
+            util (float): Baseline utilization percentage to compare
+                future samples against.
+        """
         self._baseline_util[gpu_id] = util
 
     def _check_vram(self, snap: GpuSnapshot, alerts: list[Alert]) -> None:
+        """Append VRAM warning/critical alerts for a snapshot.
+
+        Args:
+            snap (GpuSnapshot): The current GPU snapshot.
+            alerts (list[Alert]): Mutable list that matching alerts are
+                appended to.
+        """
         pct = snap.vram_used_pct
         if pct >= self._config.gpu_vram_crit_pct:
             alerts.append(Alert(
@@ -58,6 +87,13 @@ class GpuMonitor:
             ))
 
     def _check_temperature(self, snap: GpuSnapshot, alerts: list[Alert]) -> None:
+        """Append a temperature alert when the warn threshold is crossed.
+
+        Args:
+            snap (GpuSnapshot): The current GPU snapshot.
+            alerts (list[Alert]): Mutable list that matching alerts are
+                appended to.
+        """
         if snap.temperature_c >= self._config.gpu_temp_warn_c:
             alerts.append(Alert(
                 check_name="gpu_temperature_high",
@@ -68,6 +104,16 @@ class GpuMonitor:
             ))
 
     def _check_ecc(self, snap: GpuSnapshot, alerts: list[Alert]) -> None:
+        """Append a critical alert when new ECC errors appear.
+
+        Compares against the previous snapshot to count only newly
+        observed ECC errors.
+
+        Args:
+            snap (GpuSnapshot): The current GPU snapshot.
+            alerts (list[Alert]): Mutable list that matching alerts are
+                appended to.
+        """
         prev = self._prev_snapshots.get(snap.gpu_id)
         if snap.ecc_errors > 0:
             new_errors = snap.ecc_errors
@@ -86,6 +132,16 @@ class GpuMonitor:
     async def _check_utilization_drop(
         self, snap: GpuSnapshot, alerts: list[Alert],
     ) -> None:
+        """Append an alert when utilization drops below the baseline.
+
+        No-op until a meaningful baseline (>= 10%) has been recorded for
+        the GPU.
+
+        Args:
+            snap (GpuSnapshot): The current GPU snapshot.
+            alerts (list[Alert]): Mutable list that matching alerts are
+                appended to.
+        """
         baseline = self._baseline_util.get(snap.gpu_id)
         if baseline is None or baseline < 10:
             return

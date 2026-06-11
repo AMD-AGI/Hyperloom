@@ -1,34 +1,12 @@
-"""Regression tests for the baseline cold-start "warmup artifact".
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Root cause (see hyperloom_models_jun1.csv rows tagged ``warmup``):
-``BaselineExecutor`` used to run Magpie exactly once and take that
-throughput as ``baseline_tput``. The baseline action is the FIRST step of
-the optimization flow, so the server is always freshly booted for the
-model under test. The first benchmark window is contaminated by one-time
-cold-start costs (kernel JIT / torch.compile first-compile, CUDA/HIP-graph
-first-capture, KV-cache cold allocation, GPU not yet at boost clocks). The
-client-side ``--num-warmups`` (hardcoded ``2 * CONC``) is far too small to
-absorb them, so the measured baseline lands well below the real hot-state
-value. Every later optimization round runs against an already-hot server,
-so ``gain = final/baseline - 1`` is inflated into a fictitious
-1600%-2160% "improvement".
-
-Fix: run the benchmark TWICE against the SAME persistent server via
-Magpie's ``server_lifecycle`` reuse protocol. Round 1 boots the server and
-pays every cold cost; round 2 re-attaches to the now-hot server (client
-only, no restart) and its throughput is the clean baseline.
-
-These tests mock ``run_with_session_kill`` so the first (warmup) round
-returns a cold throughput and the second (measured) round returns a hot
-throughput, then assert the executor reports the HOT value as the
-baseline and that each round's Magpie config carries the right
-``server_lifecycle`` block.
-"""
+"""Regression tests for the baseline cold-start "warmup artifact"."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -47,7 +25,6 @@ from inference_optimizer.orchestrator.action_executors.baseline import (
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
     sandbox = tmp_path_factory.mktemp("isolated_leak_root_warmup")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-    # Keep TP clamp deterministic on CPU-only CI (no GPU visible).
     monkeypatch.setenv("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "8")
 
 
@@ -103,21 +80,14 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-# Cold first round / hot second round throughputs, modelled on the
-# MaralGPT-Maral-7B-alpha-1 CSV row (baseline 270.9 -> final 4701.6).
+# Cold/hot throughputs modelled on the MaralGPT-Maral-7B-alpha-1 CSV row.
 _COLD_TPUT = 270.9
 _HOT_TPUT = 4701.6
 
 
 def _cold_then_hot_fake_run(captured: list | None = None):
     """Return a ``run_with_session_kill`` stand-in that emits a cold
-    throughput on its first call and a hot throughput thereafter.
-
-    Each call materializes a ``benchmark_*`` workspace under the
-    ``--output-dir`` slot the executor passed, and (if ``captured`` is
-    given) records the parsed ``--benchmark-config`` YAML so tests can
-    assert the per-round ``server_lifecycle`` block.
-    """
+    throughput on its first call and a hot throughput thereafter."""
     state = {"calls": 0}
 
     def fake_run(cmd, *args, **kwargs):
@@ -144,9 +114,7 @@ def _executor(base: Path, tmp_path: Path) -> BaselineExecutor:
 
 
 def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path):
-    """The executor reports the HOT (second-round) throughput as the
-    baseline, runs two rounds, and each round carries a server_lifecycle
-    block sharing one pid_dir so round 2 reuses round 1's hot server."""
+    """The executor reports the HOT (second-round) throughput as the baseline."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -169,21 +137,16 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path):
 
     assert result["status"] == "succeeded"
     assert state["calls"] == 2
-    # Reported baseline is the HOT value, not the cold one.
     assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
-    # Discarded cold value surfaced for auditability.
     assert result.get("warmup_round_tput") == pytest.approx(_COLD_TPUT)
     assert "baseline_double_run_discarded_first" in result["nonfatal_warnings"]
 
-    # Both rounds requested server_lifecycle on a built-in vllm script.
     assert len(captured) == 2
     warmup_lc = captured[0]["benchmark"]["server_lifecycle"]
     measure_lc = captured[1]["benchmark"]["server_lifecycle"]
     assert warmup_lc["enabled"] is True and measure_lc["enabled"] is True
-    # Round 1 persists the server; round 2 tears it down.
     assert warmup_lc["cleanup"] is False
     assert measure_lc["cleanup"] is True
-    # Shared pid_dir + port so round 2 re-attaches to round 1's server.
     assert warmup_lc["pid_dir"] == measure_lc["pid_dir"] == str(output_dir)
     assert captured[0]["benchmark"]["envs"]["PORT"] == (
         captured[1]["benchmark"]["envs"]["PORT"]
@@ -192,9 +155,7 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path):
 
 
 def test_baseline_single_round_when_double_run_disabled(tmp_path, monkeypatch):
-    """``INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN=0`` reverts to the legacy
-    single-round behaviour (which reproduces the artifact) — an operator
-    escape hatch. No server_lifecycle is injected."""
+    """``INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN=0`` reverts to legacy single-round."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
@@ -224,9 +185,7 @@ def test_baseline_single_round_when_double_run_disabled(tmp_path, monkeypatch):
 
 
 def test_baseline_single_round_when_script_not_builtin(tmp_path):
-    """When the resolved benchmark script is NOT a Magpie built-in
-    (server_lifecycle unsupported), the guard falls back to one round
-    even with double-run enabled."""
+    """A non-builtin benchmark script falls back to one round even with double-run on."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -234,7 +193,6 @@ def test_baseline_single_round_when_script_not_builtin(tmp_path):
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
     executor = _executor(base, tmp_path)
-    # A model-specific InferenceX script (not in MAGPIE_BUILTIN_SCRIPTS).
     ctx = _make_ctx({
         "output_dir": str(output_dir),
         "timeout_sec": 10,
@@ -256,9 +214,7 @@ def test_baseline_single_round_when_script_not_builtin(tmp_path):
 
 
 def test_baseline_warmup_round_failure_short_circuits(tmp_path):
-    """If the warmup round fails (server never came up), the executor
-    returns the failure immediately and does NOT run a second round. The
-    finally teardown runs but is a no-op (no pid file)."""
+    """A failed warmup round returns immediately and does NOT run a second round."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -287,10 +243,456 @@ def test_baseline_warmup_round_failure_short_circuits(tmp_path):
     assert "baseline_warmup_round_failed" in result.get("nonfatal_warnings", [])
 
 
+def test_baseline_no_workspace_persists_stderr_to_file(tmp_path):
+    """When Magpie exits nonzero before creating a benchmark_* workspace
+    (no server.log ever written), the executor must persist the captured
+    stderr to ``baseline_stderr.log`` so the failure leaves an on-disk
+    artifact that survives the NFS clone / S3 archive."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="sglang")
+    output_dir = tmp_path / "ws"
+    crash_text = "torch.OutOfMemoryError: HIP out of memory (workspace_buffer)"
+
+    def fake_run(cmd, *args, **kwargs):
+        # Nonzero exit, no benchmark_* workspace created.
+        return subprocess.CompletedProcess(cmd, 1, "", crash_text)
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "subprocess_nonzero"
+    log_path = result.get("stderr_log_path")
+    assert log_path is not None, result
+    saved = Path(log_path)
+    assert saved.exists() and saved.name == "baseline_stderr.log"
+    assert crash_text in saved.read_text(encoding="utf-8")
+
+
+def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
+    tmp_path, monkeypatch,
+):
+    """#524: a vLLM engine-core bootstrap failure — server.log carries
+    ``Engine core initialization failed`` while Magpie exits nonzero without a
+    benchmark_* workspace — is classified ``server_init_dead`` with the
+    server.log root cause surfaced in ``error`` (not a generic
+    ``subprocess_nonzero`` from Magpie's wrapper noise)."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        slot.mkdir(parents=True, exist_ok=True)
+        (slot / "server.log").write_text(
+            "(APIServer pid=16160)   File '.../vllm/v1/engine/utils.py', "
+            "line 1057, in wait_for_engine_startup\n"
+            "(APIServer pid=16160) RuntimeError: Engine core initialization "
+            "failed. See root cause above. Failed core proc(s): {}\n",
+            encoding="utf-8",
+        )
+        # Magpie exits nonzero, no benchmark_* workspace produced.
+        return subprocess.CompletedProcess(cmd, 1, "", "magpie wrapper noise")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "server_init_dead", result
+    assert "Engine core initialization failed" in result["error"]
+
+
+def test_baseline_server_dead_returncode_classifies_server_init_dead(
+    tmp_path, monkeypatch,
+):
+    """#524: when the liveness watchdog reaps a hung server
+    (``SERVER_DEAD_RETURNCODE``), baseline classifies it ``server_init_dead``
+    even when no server.log marker is independently visible."""
+    from inference_optimizer.orchestrator.action_executors._subprocess_kill import (
+        SERVER_DEAD_RETURNCODE,
+    )
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="sglang")
+    output_dir = tmp_path / "ws"
+
+    def fake_run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(cmd, SERVER_DEAD_RETURNCODE, "", "")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "server_init_dead", result
+
+
+def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
+    tmp_path, monkeypatch,
+):
+    """#524: when Magpie DOES create a benchmark_* workspace but it carries no
+    valid measurement, a server.log death marker takes precedence — the
+    failure is classified ``server_init_dead`` (not the generic ``no_report`` /
+    ``invalid_measurement``) and the real engine fault is surfaced in
+    ``error``."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        # Workspace exists (clears the no_workspace guard) but has no
+        # benchmark_report.json, so the measurement is invalid.
+        (slot / "benchmark_vllm_20260602_010101").mkdir(parents=True)
+        (slot / "server.log").write_text(
+            "(APIServer pid=42) RuntimeError: Engine core initialization "
+            "failed. See root cause above. Failed core proc(s): {}\n",
+            encoding="utf-8",
+        )
+        # Magpie exits 0 here on purpose: classification must be driven by the
+        # server.log marker, not the wrapper returncode.
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "server_init_dead", result
+    assert "Engine core initialization failed" in result["error"]
+
+
+def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
+    """#524 hardening: a stale server.log death marker left behind in a reused
+    output_dir must NOT bias a fresh attempt's classification. The executor
+    clears the prior log before launching, so an attempt that boots fine but
+    yields no report is classified by its own outcome (``no_report``) — never
+    the previous attempt's ``server_init_dead``."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    output_dir.mkdir(parents=True)
+    # Stale death marker from a PRIOR attempt in the same slot.
+    (output_dir / "server.log").write_text(
+        "(APIServer pid=1) RuntimeError: Engine core initialization failed. "
+        "Failed core proc(s): {}\n",
+        encoding="utf-8",
+    )
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        # This attempt boots fine but produces no report; crucially it does
+        # NOT (re)write a death marker into server.log.
+        (slot / "benchmark_vllm_20260602_010101").mkdir(parents=True)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed"
+    assert result["error_class"] != "server_init_dead", result
+    assert result["error_class"] == "no_report", result
+
+
+def test_ensure_local_inferencex_noop_for_local_path(tmp_path, monkeypatch):
+    """#523: a checkout already on a local filesystem is returned unchanged
+    (no needless copy)."""
+    from inference_optimizer.orchestrator.action_executors import baseline as bl
+
+    src = tmp_path / "InferenceX"
+    (src / "benchmarks").mkdir(parents=True)
+    (src / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
+    monkeypatch.setattr(bl, "_is_network_fs", lambda p: False)
+
+    assert bl._ensure_local_inferencex(str(src)) == str(src)
+
+
+def test_ensure_local_inferencex_mirrors_network_path(tmp_path, monkeypatch):
+    """#523: a checkout on a (simulated) network mount is mirrored to local
+    disk and the returned path points at the local copy, not the original."""
+    from inference_optimizer.orchestrator.action_executors import baseline as bl
+
+    src = tmp_path / "wekafs_InferenceX"
+    (src / "benchmarks").mkdir(parents=True)
+    (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched lib")
+    (src / "utils").mkdir()
+    (src / "utils" / "marker.txt").write_text("payload")
+
+    local_root = tmp_path / "local_cache"
+    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", str(local_root),
+    )
+
+    dest = bl._ensure_local_inferencex(str(src))
+
+    assert dest != str(src)
+    assert str(local_root) in dest
+    # Mirror is complete (benchmark_lib.sh + the rest of the patched tree).
+    assert (Path(dest) / "benchmarks" / "benchmark_lib.sh").read_text() == (
+        "# patched lib"
+    )
+    assert (Path(dest) / "utils" / "marker.txt").read_text() == "payload"
+
+
+def test_ensure_local_inferencex_isolates_per_task_mirrors(
+    tmp_path, monkeypatch,
+):
+    """#523: callers can include a task/output-dir key in the mirror hash so
+    two overlapping baselines sharing one wekafs checkout never rmtree/replace
+    a directory that another server is currently ``cd``-ed into."""
+    from inference_optimizer.orchestrator.action_executors import baseline as bl
+
+    src = tmp_path / "wekafs_InferenceX"
+    (src / "benchmarks").mkdir(parents=True)
+    (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched lib")
+    local_root = tmp_path / "local_cache"
+    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", str(local_root),
+    )
+
+    dest_a = bl._ensure_local_inferencex(str(src), mirror_key="task-a")
+    dest_b = bl._ensure_local_inferencex(str(src), mirror_key="task-b")
+
+    assert dest_a != dest_b
+    assert (Path(dest_a) / "benchmarks" / "benchmark_lib.sh").is_file()
+    assert (Path(dest_b) / "benchmarks" / "benchmark_lib.sh").is_file()
+
+
+def test_ensure_local_inferencex_disabled_by_env(tmp_path, monkeypatch):
+    """#523: the relocation can be opted out of via env even on a network
+    mount (escape hatch for multi-node / shared-mount setups)."""
+    from inference_optimizer.orchestrator.action_executors import baseline as bl
+
+    src = tmp_path / "wekafs_InferenceX"
+    (src / "benchmarks").mkdir(parents=True)
+    (src / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
+    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "1")
+
+    assert bl._ensure_local_inferencex(str(src)) == str(src)
+
+
+def test_ensure_local_inferencex_falls_back_on_copy_failure(
+    tmp_path, monkeypatch,
+):
+    """#523: when the mirror copy itself fails (e.g. local disk full), the
+    helper degrades to the original network-mount path instead of raising, so
+    the run still proceeds (pre-fix behaviour) rather than aborting."""
+    from inference_optimizer.orchestrator.action_executors import baseline as bl
+
+    src = tmp_path / "wekafs_InferenceX"
+    (src / "benchmarks").mkdir(parents=True)
+    (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched")
+    local_root = tmp_path / "local_cache"
+    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", str(local_root),
+    )
+
+    def _boom(*_a, **_k):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(bl.shutil, "copytree", _boom)
+
+    assert bl._ensure_local_inferencex(str(src)) == str(src)
+
+
+def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
+    tmp_path, monkeypatch,
+):
+    """#523: if the copy lands but the mirror is missing the load-bearing
+    ``benchmarks/benchmark_lib.sh`` (partial / corrupt tree), the helper
+    rejects it and returns the original path rather than handing Magpie a
+    broken ``cd`` target."""
+    from inference_optimizer.orchestrator.action_executors import baseline as bl
+
+    # Source has NO benchmark_lib.sh, so the post-copy completeness check fails.
+    src = tmp_path / "wekafs_InferenceX"
+    (src / "utils").mkdir(parents=True)
+    (src / "utils" / "marker.txt").write_text("payload")
+    local_root = tmp_path / "local_cache"
+    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", str(local_root),
+    )
+
+    assert bl._ensure_local_inferencex(str(src)) == str(src)
+    assert not [p for p in local_root.iterdir() if p.is_dir()]
+
+
+def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
+    """#523 end-to-end (unit): when INFERENCEX_PATH is on a network mount, the
+    local mirror is what Magpie actually ``cd``-s into. Asserts BOTH channels:
+
+    * the materialized YAML's ``benchmark.inferencex_path`` (the field Magpie's
+      ``_build_local_command`` honours — the real ``cd`` target), and
+    * the ``MAGPIE_INFERENCEX_PATH`` env fallback.
+
+    The YAML assertion is the load-bearing one: an earlier iteration only
+    rewrote the env fallback and the pickle still dumped onto wekafs because
+    Magpie reads the YAML field, not the env, when it is populated.
+    """
+    from inference_optimizer.orchestrator.action_executors import baseline as bl
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="sglang")
+    output_dir = tmp_path / "ws"
+
+    ix_src = tmp_path / "wekafs_InferenceX"
+    (ix_src / "benchmarks").mkdir(parents=True)
+    (ix_src / "benchmarks" / "benchmark_lib.sh").write_text("# patched")
+    local_root = tmp_path / "local_cache"
+    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setenv("INFERENCEX_PATH", str(ix_src))
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", str(local_root),
+    )
+
+    seen: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        seen["env"] = kwargs.get("env")
+        cfg_idx = cmd.index("--benchmark-config")
+        seen["materialized_cfg"] = yaml.safe_load(
+            Path(cmd[cfg_idx + 1]).read_text()
+        )
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=_HOT_TPUT)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    # Load-bearing: the YAML field Magpie's `cd <inferencex>` reads.
+    yaml_ix = seen["materialized_cfg"]["benchmark"]["inferencex_path"]
+    assert yaml_ix != str(ix_src), seen["materialized_cfg"]
+    assert str(local_root) in yaml_ix
+    # Env fallback also points at the mirror.
+    magpie_ix = seen["env"]["MAGPIE_INFERENCEX_PATH"]
+    assert magpie_ix != str(ix_src), seen["env"]
+    assert str(local_root) in magpie_ix
+    # Relocation is task-local; the process-wide env remains the original
+    # source path, avoiding cross-task races between concurrent materializers.
+    assert os.environ["INFERENCEX_PATH"] == str(ix_src)
+
+
+def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
+    """The Magpie *parent* subprocess cwd is anchored to the stable task
+    output_dir (never the default ``/tmp``) as defence-in-depth. (The actual
+    #523 cuda-graph fix is the local-InferenceX mirror — see
+    ``test_baseline_points_magpie_at_local_inferencex`` — because Magpie
+    re-roots the server via ``cd <inferencex>``.)"""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    seen: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        seen["cwd"] = kwargs.get("cwd")
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=_HOT_TPUT)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert seen["cwd"] is not None
+    assert seen["cwd"] != "/tmp"
+    assert str(output_dir) in seen["cwd"]
+
+
 def test_atom_engages_double_run_like_vllm_sglang(tmp_path):
-    """Atom is a Magpie built-in (phase-aware) framework per
-    AMD-AGI/Magpie#34, so an atom baseline engages the lifecycle
-    double-run just like vllm/sglang."""
+    """AMD-AGI/Magpie#34 — atom baseline engages the lifecycle double-run like vllm/sglang."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="atom")
     output_dir = tmp_path / "ws"
@@ -319,16 +721,7 @@ def test_atom_engages_double_run_like_vllm_sglang(tmp_path):
 
 
 def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path):
-    """The overtime-kill anchor (``subprocess_runtime_sec`` ->
-    ``baseline_runtime_sec``) must reflect round 1's FULL server-boot +
-    client wall-clock, NOT round 2's client-only reuse time.
-
-    Otherwise the ExploreExecutor's soft-kill deadline
-    (``baseline_runtime_sec * kill_ratio``) is anchored to the tiny
-    client-only round-2 time and would kill normal full-run variants as
-    KILLED_OVERTIME. Round 1 (full run) sleeps longer than round 2
-    (reuse) here so the assertion is deterministic.
-    """
+    """The overtime-kill anchor must reflect round 1's FULL run, not round 2's reuse time."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -338,9 +731,6 @@ def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path):
     def fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
-        # Round 1 (full boot + client) is slow; round 2 (client-only
-        # reuse) is fast. The executor measures wall-clock around this
-        # call, so distinct sleeps make the anchor check deterministic.
         if state["calls"] == 0:
             time.sleep(0.6)
             tput = _COLD_TPUT
@@ -366,21 +756,18 @@ def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path):
 
     assert result["status"] == "succeeded"
     assert state["calls"] == 2
-    # Anchor reflects the slow round-1 full run...
     assert result["subprocess_runtime_sec"] >= 0.5
-    # ...and round 2's client-only time is kept separately and is smaller.
     assert "measure_round_runtime_sec" in result
     assert result["measure_round_runtime_sec"] < result["subprocess_runtime_sec"]
 
 
 def test_teardown_lifecycle_server_removes_state_files(tmp_path):
-    """The defensive teardown unlinks stale pid/meta files (no live
-    server in the unit env) without raising."""
+    """The defensive teardown unlinks stale pid/meta files without raising."""
     executor = _executor(tmp_path / "base.yaml", tmp_path)
     _write_yaml(tmp_path / "base.yaml", framework="vllm")
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
-    # No real process: use a PID that is essentially never alive.
+    # PID that is essentially never alive.
     (pid_dir / "vllm_8888.pid").write_text("2147483646")
     (pid_dir / "vllm_8888.json").write_text("{}")
 

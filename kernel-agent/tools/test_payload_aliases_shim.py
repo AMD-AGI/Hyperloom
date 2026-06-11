@@ -1,12 +1,6 @@
-"""Smoke tests for the kernel-agent payload-aliases compat shim.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Mirrors the contract surface of
-:mod:`inference_optimizer.compat.payload_aliases`. The shim is a
-duplicated copy (sub-agents are standalone packages by design — see
-``framework_agent.repo_map`` for the same isolation pattern), so the
-tests here pin the shim's behaviour against drift from the Hyperloom
-helper.
-"""
+"""Smoke tests for the kernel-agent payload-aliases compat shim (duplicated copy of inference_optimizer.compat.payload_aliases; pins behaviour against drift)."""
 
 from __future__ import annotations
 

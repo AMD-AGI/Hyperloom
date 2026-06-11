@@ -1,71 +1,14 @@
-"""Session manifest writer ().
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The manifest is the **first** file written to a session directory after
-``make_session_dir()`` runs and is the canonical session-resume tag.
-Atomic write via tmp + ``os.replace``.
+"""Session manifest writer — the first file written after
+``make_session_dir()`` and the canonical session-resume tag (atomic write
+via tmp + ``os.replace``).
 
-Why this lives in its own module:
-
-* Separation of concerns — ``paths.py`` owns where things live;
-  ``manifest.py`` owns what's in the resume tag.
-* Avoids a hard dependency from ``paths`` (called by everything) on
-  ``argparse`` and Python version helpers.
-
-Schema v3 (dependencies added)::
-
-    {
-      "schema_version":    3,
-      "session_id":        "<UTC_YYYYMMDDTHHMMSSZ>_<uuid8>",
-      "claw_session_id":   "<uuid>" or null,   # Primus-Claw session UUID
-      "sandbox_user_id":   "<str>"  or null,   # Primus-Claw sandbox user
-      "created_at_utc":    "...",
-      "host":              "...",
-      "image":             "<registry>/<repo>:<tag>" or null,
-      "model_path":        "...",
-      "model_name":        "...",
-      "framework":         "sglang|vllm|atom",
-      "gpu_type":          "mi300x|mi325x|mi355x|''",
-      "tp":                N or null,
-      "workload":          {"isl":..., "osl":..., "max_model_len":...,
-                            "precision":..., "conc":...},
-      "objective":         {"kind":"gain_pct|tput|baseline|time_only",
-                            "value":...},
-      "max_minutes":       N,
-      "code_revision":     "<git sha or empty>",
-      "dependencies":      {
-        "magpie":     {"path": "...", "commit": "<git sha or empty>",
-                        "remote": "<origin url or empty>"},
-        "inferencex": {"path": "...", "commit": "<git sha or empty>",
-                        "remote": "<origin url or empty>"},
-      },
-      "pid":               N
-    }
-
-The ``dependencies`` block records the on-disk Magpie / InferenceX
-checkout each session ran against. With install.sh now `git clone`-ing
-a fresh InferenceX per install (rather than scanning a shared `wekafs`
-mirror, see `bugs.md` §C #1 root-cause fix), the commit fields are the
-only reliable provenance for "which upstream did this run actually
-exercise". The block is best-effort: each subfield is empty when the
-path is unset or the directory is not a git checkout. We do **not**
-fail the manifest write on git lookup failures — provenance gaps must
-not block session bring-up.
-
-``claw_session_id`` / ``sandbox_user_id`` are read from the
-``CLAW_SESSION_ID`` / ``SANDBOX_USER_ID`` env vars (set by the
-Primus-Claw spawn path); they are ``null`` when Hyperloom runs standalone
-outside the claw sandbox.
-
-``image`` records the container image the run executed inside, for
-later reproducibility / dashboard provenance. Detection priority:
-
-1. ``HYPERLOOM_IMAGE`` env var (preferred — explicitly set by the spawn).
-2. ``CONTAINER_IMAGE`` / ``IMAGE`` env vars (fallback for non-claw spawns).
-3. ``/etc/podinfo/image`` (k8s downward API mount).
-4. ``/etc/hyperloom-image`` (legacy spawn-script convention).
-5. Best-effort parse of ``/proc/1/cgroup`` (extracts the container hash;
-   reported as ``unknown@<sha256_short>``).
-6. ``None`` when nothing matches; consumers warn rather than fabricate.
+Schema v3 records: identity (session_id, claw_session_id, sandbox_user_id),
+host/image, model + workload + objective, code_revision, ``dependencies``
+(per-tree Magpie/InferenceX path+commit+remote, best-effort), and
+``stack_fingerprint``. All provenance fields degrade to empty/null on
+lookup failure — manifest writing never fails on missing provenance.
 """
 
 from __future__ import annotations
@@ -83,26 +26,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import paths as _paths
 from .session_paths import manifest_path
 
 log = logging.getLogger(__name__)
 
-# Schema bumped to 3 in the legacy release to add ``stack_fingerprint`` (rocm / aiter /
-# sglang / vllm versions, mandatory attrs for Cortex KB ``session begin``
-# per KB_design §3.6.5.1 + §3.13 M1) plus the ``dependencies`` provenance
-# block (Magpie / InferenceX commit + remote — bugs.md §C #1). Older v2
-# readers stay compatible because all new fields are additive.
+# v3 adds stack_fingerprint + the dependencies provenance block (additive;
+# v2 readers stay compatible).
 SCHEMA_VERSION = 3
 
 
 def _utc_now_compact() -> str:
+    """Format the current UTC time as a compact session-id timestamp.
+
+    Returns:
+        str: Timestamp in ``YYYYMMDDTHHMMSSZ`` form.
+    """
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-# Environment variables consulted by :func:`_detect_stack_fingerprint`.
-# Operators may pin them ahead of launch when the auto-detect heuristic
-# (importing the framework + reading a marker file) is too slow or runs
-# inside a sandbox that doesn't expose the source tree.
+# Env vars consulted by _detect_stack_fingerprint (operator pins that
+# bypass the import/marker-file auto-detect).
 _STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
     "rocm":   ("ROCM_VERSION", "HIP_VERSION"),
     "aiter":  ("AITER_COMMIT", "AITER_VERSION"),
@@ -112,6 +56,15 @@ _STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
 
 
 def _read_first_line(path: Path) -> str:
+    """Return the first non-empty, stripped line of a file.
+
+    Args:
+        path (Path): File to read.
+
+    Returns:
+        str: First non-blank line stripped of surrounding whitespace, or an
+        empty string when the file is missing, empty, or unreadable.
+    """
     try:
         if not path.exists():
             return ""
@@ -125,18 +78,9 @@ def _read_first_line(path: Path) -> str:
 
 
 def _detect_stack_fingerprint() -> dict[str, str]:
-    """Best-effort ``stack_fingerprint`` per KB_design §3.6.5.1.
-
-    Resolution order per component (first non-empty wins):
-
-    1. Explicit env var (operator pin / cluster spawn injection).
-    2. ``/opt/rocm/.info/version`` (ROCm only).
-    3. Importing the python package and reading ``__version__`` /
-       ``__commit__`` (best-effort, swallows ImportError).
-
-    Returns a fixed-shape dict where missing components map to the
-    sentinel ``"unknown"``. The dict is JSON-serializable and small, so
-    it's safe to include in manifest.json + Cortex session attrs.
+    """Best-effort ``stack_fingerprint`` (KB_design §3.6.5.1). Per component,
+    first non-empty wins: env var -> /opt/rocm marker (rocm only) -> package
+    __version__/__commit__. Missing components map to ``"unknown"``.
     """
     out: dict[str, str] = {}
     for component, env_vars in _STACK_FINGERPRINT_ENVS.items():
@@ -173,13 +117,26 @@ def _detect_stack_fingerprint() -> dict[str, str]:
 
 
 def _git_revision() -> str:
-    """Best-effort short git SHA of the repo containing this package; empty on failure."""
+    """Best-effort short git SHA of the repo containing this package.
+
+    Returns:
+        str: Short HEAD SHA, or an empty string when the package directory is
+        not a git checkout or the lookup fails.
+    """
     here = Path(__file__).resolve().parent
     return _git_revision_at(here)
 
 
 def _git_revision_at(path: Path) -> str:
-    """Best-effort short git SHA at ``path``; empty when not a checkout."""
+    """Best-effort short git SHA at ``path``.
+
+    Args:
+        path (Path): Directory expected to be (within) a git checkout.
+
+    Returns:
+        str: Short HEAD SHA, or an empty string when ``path`` is not a checkout
+        or the git invocation fails.
+    """
     try:
         out = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--short", "HEAD"],
@@ -193,7 +150,15 @@ def _git_revision_at(path: Path) -> str:
 
 
 def _git_remote_at(path: Path) -> str:
-    """Best-effort ``origin`` remote URL at ``path``; empty on failure."""
+    """Best-effort ``origin`` remote URL at ``path``.
+
+    Args:
+        path (Path): Directory expected to be (within) a git checkout.
+
+    Returns:
+        str: ``remote.origin.url`` value, or an empty string when unset or the
+        git invocation fails.
+    """
     try:
         out = subprocess.run(
             ["git", "-C", str(path), "config", "--get", "remote.origin.url"],
@@ -206,15 +171,73 @@ def _git_remote_at(path: Path) -> str:
         return ""
 
 
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    """Return True when ``path`` is inside ``root`` after best-effort resolution."""
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except (OSError, ValueError, RuntimeError):
+        # ELOOP symlink loop -> RuntimeError, broken mount -> OSError; treat
+        # as "not provably inside root" rather than crashing manifest gen.
+        return False
+
+
+# Pod-local, non-persistent roots: a dependency checkout under one of these is
+# erased on pod recycle (the "artefacts disappeared" failure mode). A shared
+# checkout elsewhere (WekaFS mirror) is legitimate and must NOT warn.
+_POD_LOCAL_PREFIXES = ("/workspace", "/tmp", "/root")
+
+
+def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
+    """Warn when a dependency checkout points at a pod-local, non-persistent
+    path (erased on pod recycle); a shared checkout outside USER_DATA_PATH is
+    legitimate and does not warn.
+    """
+    user_data = (os.environ.get(_paths.ENV_USER_DATA_PATH) or "").strip()
+    if not user_data:
+        return
+    dep_path = Path(raw)
+    if _path_is_relative_to(dep_path, Path(user_data)):
+        return
+    try:
+        resolved = str(dep_path.resolve(strict=False))
+    except (OSError, RuntimeError):
+        # Unresolvable path can't be proven pod-local; skip the warning
+        # rather than crash (provenance capture must never raise).
+        return
+    is_pod_local = any(
+        resolved == p or resolved.startswith(p + "/")
+        for p in _POD_LOCAL_PREFIXES
+    )
+    if not is_pod_local:
+        return
+    log.warning(
+        "%s=%s is a pod-local path outside %s=%s; runtime artefacts there are "
+        "erased on pod recycle. install.sh now defaults open-source "
+        "dependencies to pod-local storage; set a stable %s or "
+        "HYPERLOOM_OPEN_SOURCE_ROOT only when the checkout must persist.",
+        env_var, raw, _paths.ENV_USER_DATA_PATH, user_data, env_var,
+    )
+
+
 def _describe_dep(env_var: str) -> dict[str, str]:
     """Build a `{path, commit, remote}` provenance dict for one dependency
     pointed at by ``$env_var``. All fields default to empty string when
     the env var is unset, the directory is missing, or git is unhappy —
     we never raise out of here.
+
+    Args:
+        env_var (str): Name of the environment variable holding the dependency
+            checkout path.
+
+    Returns:
+        dict[str, str]: Mapping with ``path``, ``commit``, and ``remote`` keys;
+        any unresolved field is an empty string.
     """
     raw = (os.environ.get(env_var) or "").strip()
     if not raw:
         return {"path": "", "commit": "", "remote": ""}
+    _warn_if_dependency_escapes_user_data(env_var, raw)
     path = Path(raw)
     if not path.is_dir():
         return {"path": raw, "commit": "", "remote": ""}
@@ -226,13 +249,8 @@ def _describe_dep(env_var: str) -> dict[str, str]:
 
 
 def _build_dependencies() -> dict[str, dict[str, str]]:
-    """Provenance for the third-party trees this session executes against.
-
-    Magpie / InferenceX are cloned per-install by ``install.sh``
-    (bugs.md §C #1 root-cause fix — see ``ensure_inferencex`` there).
-    Recording the commit SHA + remote URL is how downstream debuggers
-    answer "which upstream did this run hit?" once the clones have
-    moved on.
+    """Provenance (path/commit/remote) for the Magpie / InferenceX trees this
+    session executes against, so debuggers can answer "which upstream?" later.
     """
     return {
         "magpie":     _describe_dep("MAGPIE_DIR"),
@@ -241,14 +259,8 @@ def _build_dependencies() -> dict[str, dict[str, str]]:
 
 
 def _detect_image() -> str | None:
-    """Best-effort container image detection.
-
-    Tries env vars first (most reliable + easiest for operators to
-    override), then well-known mount points, finally a best-effort
-    cgroup probe. Returns ``None`` when nothing matches; the breakdown
-    layer surfaces a warning rather than fabricating a value.
-
-    Never raises — every disk / parse failure is swallowed.
+    """Best-effort container image detection: env vars -> known mount points
+    -> cgroup probe. Returns None when nothing matches (never raises).
     """
     for var in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
         val = (os.environ.get(var) or "").strip()
@@ -269,24 +281,29 @@ def _detect_image() -> str | None:
             for line in cgroup.read_text(encoding="utf-8", errors="replace").splitlines():
                 if "docker" not in line and "containerd" not in line:
                     continue
-                # Lines look like
-                # ``12:devices:/docker/<sha256>`` — pull a 12+ hex token.
+                # e.g. ``12:devices:/docker/<sha256>`` — pull a 12+ hex token.
                 import re as _re
                 m = _re.search(r"([0-9a-f]{12,64})", line)
                 if m:
                     short = m.group(1)[:12]
                     return f"unknown@{short}"
     except OSError as exc:
-        # /proc/1/cgroup may be unreadable in restricted sandboxes,
-        # non-Linux hosts, or stripped-down containers. Best-effort
-        # source — fall through to None so the breakdown layer surfaces
-        # an honest "image not detected" rather than fabricating one.
+        # /proc/1/cgroup may be unreadable; fall through to None.
         log.debug("cgroup-based image detection failed: %r", exc)
     return None
 
 
 def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
-    """Mirror cli._run_optimize's objective derivation, without importing it."""
+    """Mirror cli._run_optimize's objective derivation, without importing it.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args; checked for
+            ``target_gain``, ``target_tput``, and ``target_baseline_dir``.
+
+    Returns:
+        dict[str, Any]: Objective mapping with ``kind`` (one of ``gain_pct``,
+        ``tput``, ``baseline``, ``time_only``) and an associated ``value``.
+    """
     if getattr(args, "target_gain", None):
         return {"kind": "gain_pct", "value": float(args.target_gain)}
     if getattr(args, "target_tput", None):
@@ -297,13 +314,8 @@ def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def build_session_id(model_name: str = "") -> str:
-    """Derive an internal session_id label.
-
-    The label is **not** used for any path computation (paths are
-    computed from :func:`paths.session_dir`); it only goes into
-    manifest.json, SharedState.session_id, and log/report metadata so
-    multiple archived sessions are distinguishable.
-    """
+    """Derive an internal session_id label for manifest / SharedState / report
+    metadata (not used for path computation)."""
     stem = (model_name or "session").strip().replace("/", "_") or "session"
     return f"{stem}_{_utc_now_compact()}_{uuid.uuid4().hex[:8]}"
 
@@ -314,6 +326,22 @@ def build_manifest(
     args: argparse.Namespace | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
+    """Assemble the schema-v3 session manifest dictionary.
+
+    Merges environment variables and (optional) parsed CLI args into the
+    canonical resume tag, including workload, objective, dependency
+    provenance, stack fingerprint, image, and warm-replay settings.
+
+    Args:
+        session_dir (Path): Session directory the manifest describes.
+        args (argparse.Namespace | None): Parsed CLI args overriding env-based
+            defaults; ``None`` uses environment/defaults only.
+        session_id (str | None): Explicit session-id label; derived from the
+            model name when ``None``.
+
+    Returns:
+        dict[str, Any]: JSON-serializable manifest mapping.
+    """
     model_path = ""
     model_name = ""
     framework = os.environ.get("FRAMEWORK", "")
@@ -363,32 +391,26 @@ def build_manifest(
         "pid":               os.getpid(),
         "host":              platform.node() or socket.gethostname() or "",
         "image":             _detect_image(),
-        # Cortex KB ``session begin`` requires the stack
-        # fingerprint as a mandatory attribute. We
-        # snapshot it on manifest write so resume-after-redeploy can
-        # detect drift (``--cortex-strict-fingerprint``).
+        # Snapshotted so resume-after-redeploy can detect drift
+        # (--cortex-strict-fingerprint).
         "stack_fingerprint": _detect_stack_fingerprint(),
-        # research_lane capacity locked at session start
-        #. Resume reads this back into SharedState
-        # so a mid-session restart can't change concurrency semantics.
+        # Locked at session start; resume reads it back so a restart can't
+        # change concurrency semantics.
         "research_lane_capacity": int(
             getattr(args, "research_lane_capacity", 1) or 1
         ) if args is not None else 1,
         "gpu_specialist_capacity": int(
             getattr(args, "gpu_specialist_capacity", 0) or 0
         ) if args is not None else 0,
-        # IR-3 soft-degrade audit.
+        # IR-3 soft-degrade audit
         "kb_degraded_reason": (
             getattr(args, "kb_degraded_reason", None) if args is not None else None
         ),
         "pr_degraded_reason": (
             getattr(args, "pr_degraded_reason", None) if args is not None else None
         ),
-        # GAP 1 — Warm-recipe replay flags. Persisted into manifest so
-        # robustness_monitor.sh resume / cross-machine resume picks up
-        # the same gate thresholds rather than reverting to defaults.
-        # The ``warm_replay_enabled`` field is the inverted form of
-        # ``--no-warm-replay`` so the YAML reads more naturally.
+        # Warm-recipe replay flags; persisted so resume picks up the same gate
+        # thresholds. warm_replay_enabled is the inverted --no-warm-replay.
         "warm_replay_enabled": (
             not bool(getattr(args, "no_warm_replay", False))
             if args is not None else True
@@ -410,11 +432,8 @@ def write_manifest(
     args: argparse.Namespace | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """Atomically write ``manifest.json`` under session_dir.
-
-    Returns the manifest dict (so the caller can echo it / reuse the
-    derived session_id label without re-reading the file).
-    """
+    """Atomically write ``manifest.json`` under session_dir; returns the
+    manifest dict."""
     sd = Path(session_dir)
     manifest = build_manifest(sd, args=args, session_id=session_id)
     target = manifest_path(sd)
@@ -431,11 +450,9 @@ def write_manifest(
 
 
 def load_manifest(session_dir: Path) -> dict[str, Any]:
-    """Read ``manifest.json`` for an existing session.
-
-    Raises ``FileNotFoundError`` if the file is missing — that signal
-    is what ``--resume`` uses to refuse a fresh sandbox.
-    """
+    """Read ``manifest.json`` for an existing session. Raises
+    ``FileNotFoundError`` if missing (the signal ``--resume`` uses to refuse a
+    fresh sandbox)."""
     p = manifest_path(Path(session_dir))
     if not p.exists():
         raise FileNotFoundError(

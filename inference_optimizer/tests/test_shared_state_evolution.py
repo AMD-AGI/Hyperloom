@@ -1,19 +1,6 @@
-"""v0.8 §3.10 — SharedState evolution / migration tests.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Covers KB_design/3.10_shared_state_evolution/README.md acceptance
-criteria:
-
-* Inv-10.1 — fact-layer fields survive v0.6 → v0.8 migration unchanged.
-* Inv-10.2 — Coordinator is the sole writer for §4.1 new fields (the
-  PolicyGate ``CORE_STATE_FIELDS`` denial check enforces this).
-* Inv-10.3 — migration is idempotent: ``from_dict(from_dict(x))`` ≡
-  ``from_dict(x)`` at the level of serialized JSON.
-* §5.1 — top-level ``schema_version`` field; v0.6 absence → 1, v0.8
-  default → 2.
-* §5.3 — ``--migration-mode={strict,lenient}`` strictness; ``--reset-state``
-  backs up the legacy file.
-* §9 — fresh v0.8 session writes ``schema_version=2`` to state.json.
-"""
+"""v0.8 §3.10 — SharedState evolution / migration tests (KB_design §3.10, Inv-10.1/10.2/10.3)."""
 
 from __future__ import annotations
 
@@ -28,20 +15,16 @@ from inference_optimizer.orchestrator.shared_state import (
 )
 
 
-# ===========================================================================
 # 1. schema_version surface
-# ===========================================================================
 def test_fresh_session_has_latest_schema_version():
-    """KB_design §3.10 §5.1 — fresh SharedState carries the current
-    schema version so the next save imprints it on state.json."""
+    """KB_design §3.10 §5.1 — fresh SharedState carries the current schema version."""
     s = SharedState()
     assert s.schema_version == LATEST_STATE_SCHEMA_VERSION
     assert LATEST_STATE_SCHEMA_VERSION >= 2
 
 
 def test_save_writes_schema_version_to_state_json(tmp_path):
-    """KB_design §3.10 §9 — top-level ``schema_version=2`` visible in
-    a fresh state.json."""
+    """KB_design §3.10 §9 — top-level ``schema_version=2`` visible in a fresh state.json."""
     sd = tmp_path / "session"
     sd.mkdir()
     s = SharedState()
@@ -54,8 +37,7 @@ def test_save_writes_schema_version_to_state_json(tmp_path):
 
 
 def test_v06_state_without_schema_version_is_migrated(tmp_path):
-    """KB_design §3.10 §5.1 — a v0.6 state.json has no
-    ``schema_version`` field. Loading bumps it to the v0.8 default."""
+    """KB_design §3.10 §5.1 — a v0.6 state.json with no ``schema_version`` is bumped to the v0.8 default."""
     sd = tmp_path / "session"
     sd.mkdir()
     legacy = {
@@ -64,7 +46,6 @@ def test_v06_state_without_schema_version_is_migrated(tmp_path):
         "current_best": {"variant_name": "warm-mla", "tput": 880.0},
         "cumulative_gain": 10.0,
         "optimization_stack": [],
-        # Various v0.6 cruft we expect to drop.
         "action_scores": {"backends": {"base_score": 5.0}},
         "cooldown_until_tick": {"backends": 12},
     }
@@ -73,9 +54,7 @@ def test_v06_state_without_schema_version_is_migrated(tmp_path):
     assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
 
 
-# ===========================================================================
 # 2. Inv-10.1 — fact-layer survives migration unchanged
-# ===========================================================================
 _FACT_LAYER_PAYLOAD: dict = {
     "session_id": "legacy",
     "baseline_tput": 1234.5,
@@ -100,9 +79,7 @@ _FACT_LAYER_PAYLOAD: dict = {
 
 
 def test_fact_layer_fields_survive_v06_resume(tmp_path):
-    """Inv-10.1 — baseline / current_best / cumulative_gain /
-    optimization_stack / gain_per_stack_entry are bit-equal across
-    the v0.6 → v0.8 migration."""
+    """Inv-10.1 — fact-layer fields are bit-equal across the v0.6 → v0.8 migration."""
     sd = tmp_path / "session"
     sd.mkdir()
     payload = dict(_FACT_LAYER_PAYLOAD)
@@ -118,10 +95,7 @@ def test_fact_layer_fields_survive_v06_resume(tmp_path):
 
 
 def test_fact_layer_md5_matches_post_save(tmp_path):
-    """Inv-10.1 stronger form — round-trip through migration +
-    persistence keeps the fact-layer projection byte-identical (we
-    compare a sorted-key JSON projection so ordering / whitespace
-    don't trip the test)."""
+    """Inv-10.1 stronger form — a migration + save round-trip keeps the fact-layer projection byte-identical."""
     import hashlib
     sd = tmp_path / "session"
     sd.mkdir()
@@ -145,13 +119,9 @@ def test_fact_layer_md5_matches_post_save(tmp_path):
     )
 
 
-# ===========================================================================
 # 3. Inv-10.3 — migration idempotence
-# ===========================================================================
 def test_migration_is_idempotent(tmp_path):
-    """Inv-10.3 — re-loading a state.json that has already been
-    migrated produces the identical SharedState (modulo the same
-    schema_version=2 tag)."""
+    """Inv-10.3 — re-loading an already-migrated state.json produces the identical SharedState."""
     sd = tmp_path / "session"
     sd.mkdir()
     payload = dict(_FACT_LAYER_PAYLOAD)
@@ -161,7 +131,6 @@ def test_migration_is_idempotent(tmp_path):
     first.save(sd)
     second = SharedState.load_or_init(sd)
     third = SharedState.load_or_init(sd)
-    # Three loads → identical core projection.
     snap1 = {k: getattr(second, k) for k in _FACT_LAYER_PAYLOAD}
     snap2 = {k: getattr(third, k) for k in _FACT_LAYER_PAYLOAD}
     assert snap1 == snap2
@@ -169,8 +138,7 @@ def test_migration_is_idempotent(tmp_path):
 
 
 def test_v08_payload_short_circuits_migration(monkeypatch, caplog):
-    """A v0.8 payload (schema_version == LATEST) skips the migration
-    log line entirely."""
+    """A v0.8 payload (schema_version == LATEST) skips the migration log line."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_MIGRATION_MODE", raising=False)
     payload = {
@@ -188,12 +156,9 @@ def test_v08_payload_short_circuits_migration(monkeypatch, caplog):
     assert migrated == [], "fresh v0.8 payload should not log a migration line"
 
 
-# ===========================================================================
 # 4. Migration log content
-# ===========================================================================
 def test_v06_migration_log_lists_scoreboard_drop(monkeypatch, caplog):
-    """A v0.6 payload with action_scores produces a log line that
-    names the §3.9 drop + the migrated schema_version."""
+    """A v0.6 payload with action_scores logs the §3.9 drop + migrated schema_version."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_MIGRATION_MODE", raising=False)
     payload = {
         "session_id": "legacy",
@@ -213,24 +178,17 @@ def test_v06_migration_log_lists_scoreboard_drop(monkeypatch, caplog):
     assert "§3.9 dropped scoreboard fields" in msg
 
 
-# ===========================================================================
 # 5. Strict / lenient migration mode
-# ===========================================================================
 def test_lenient_mode_allows_continue_on_fact_field_drop(monkeypatch, caplog):
-    """KB_design §3.10 §5.3 — lenient mode downgrades a fact-layer
-    discrepancy to WARNING and continues."""
+    """KB_design §3.10 §5.3 — lenient mode downgrades a fact-layer discrepancy to WARNING and continues."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MIGRATION_MODE", "lenient")
-    # Manually craft an inner discrepancy by patching the dataclass
-    # field set the loader filters against. We monkey-patch
-    # ``__dataclass_fields__`` to PRETEND ``baseline_tput`` is no longer
-    # known — that's the only way to exercise the "raw has it,
-    # filtered doesn't" branch without modifying the real schema.
+    # Drop ``baseline_tput`` from the known field set to force the "raw has it, filtered doesn't" branch.
     real_fields = SharedState.__dataclass_fields__
     fake_fields = {k: v for k, v in real_fields.items() if k != "baseline_tput"}
     monkeypatch.setattr(SharedState, "__dataclass_fields__", fake_fields)
     payload = {
         "session_id": "legacy",
-        "baseline_tput": 100.0,  # field will be filtered out
+        "baseline_tput": 100.0,
     }
     with caplog.at_level(logging.WARNING,
                           logger="inference_optimizer.orchestrator.shared_state"):
@@ -244,8 +202,7 @@ def test_lenient_mode_allows_continue_on_fact_field_drop(monkeypatch, caplog):
 
 
 def test_strict_mode_raises_on_fact_field_drop(monkeypatch):
-    """KB_design §3.10 §5.3 — strict mode raises a ValueError when
-    a fact-layer field would be silently lost."""
+    """KB_design §3.10 §5.3 — strict mode raises ValueError when a fact-layer field would be lost."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_MIGRATION_MODE", raising=False)
     real_fields = SharedState.__dataclass_fields__
     fake_fields = {k: v for k, v in real_fields.items() if k != "baseline_tput"}
@@ -258,24 +215,18 @@ def test_strict_mode_raises_on_fact_field_drop(monkeypatch):
         SharedState.from_dict(payload)
 
 
-# ===========================================================================
 # 6. --reset-state behavior
-# ===========================================================================
 def test_reset_state_backs_up_state_json(tmp_path):
-    """KB_design §3.10 §5.3 bottom — ``--reset-state`` renames the
-    existing state.json so the next ``load_or_init`` starts blank."""
+    """KB_design §3.10 §5.3 — ``--reset-state`` renames state.json so the next load starts blank."""
     from inference_optimizer.cli import _reset_state_file
     sd = tmp_path / "session"
     sd.mkdir()
     payload = dict(_FACT_LAYER_PAYLOAD)
     (sd / "state.json").write_text(json.dumps(payload))
     _reset_state_file(sd)
-    # state.json is gone.
     assert not (sd / "state.json").exists()
-    # A pre-reset backup is present.
     backups = [p for p in sd.iterdir() if p.name.startswith("state.json.preReset.")]
     assert len(backups) == 1, "exactly one pre-reset backup expected"
-    # Fresh load starts blank.
     loaded = SharedState.load_or_init(sd)
     assert loaded.baseline_tput == 0.0
     assert loaded.session_id == ""
@@ -290,9 +241,7 @@ def test_reset_state_is_safe_when_no_state_file(tmp_path):
     assert not (sd / "state.json").exists()
 
 
-# ===========================================================================
 # 7. CLI flag wiring
-# ===========================================================================
 def test_cli_exposes_migration_mode_flag():
     from inference_optimizer.cli import _build_parser
     parser = _build_parser()
@@ -331,13 +280,9 @@ def test_cli_exposes_reset_state_flag():
     assert args2.reset_state is False
 
 
-# ===========================================================================
 # 8. Inv-10.2 — CORE_STATE_FIELDS blocks LLM update_state phase change
-# ===========================================================================
 def test_core_state_fields_contains_v08_new_additions():
-    """KB_design §3.10 §6.2 — verify the v0.8 §4.1 new fields are in
-    the CORE_STATE_FIELDS lock so an LLM ``update_state`` cannot
-    overwrite them."""
+    """KB_design §3.10 §6.2 — the v0.8 §4.1 new fields are locked in CORE_STATE_FIELDS."""
     from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
     must_be_locked = {
         "phase",
@@ -363,12 +308,11 @@ def test_core_state_fields_contains_v08_new_additions():
 
 
 def test_policy_blocks_llm_phase_write():
-    """KB_design §3.10 §9 acceptance: LLM ``update_state`` that tries
-    to set ``phase=KERNEL`` must be denied."""
+    """KB_design §3.10 §9 — LLM ``update_state`` setting ``phase=KERNEL`` is denied."""
     from inference_optimizer.orchestrator.agent_role import (
         default_role_registry,
     )
-    from inference_optimizer.orchestrator.intent_parser import (
+    from inference_optimizer.protocol.intent import (
         Intent, IntentType,
     )
     from inference_optimizer.orchestrator.policy import (
@@ -384,12 +328,11 @@ def test_policy_blocks_llm_phase_write():
 
 
 def test_policy_blocks_llm_schema_version_write():
-    """KB_design §3.10 §5.1 — an LLM cannot rewrite the migration
-    breadcrumb to roll the state.json back to a v0.6 reader."""
+    """KB_design §3.10 §5.1 — an LLM cannot rewrite the ``schema_version`` migration breadcrumb."""
     from inference_optimizer.orchestrator.agent_role import (
         default_role_registry,
     )
-    from inference_optimizer.orchestrator.intent_parser import (
+    from inference_optimizer.protocol.intent import (
         Intent, IntentType,
     )
     from inference_optimizer.orchestrator.policy import (
@@ -405,13 +348,11 @@ def test_policy_blocks_llm_schema_version_write():
 
 
 def test_policy_blocks_llm_optimization_stack_write():
-    """KB_design §3.10 §6.2 — Coordinator is the sole writer for the
-    KEEP ledger. An LLM update_state with ``optimization_stack`` in
-    its changes set must be denied."""
+    """KB_design §3.10 §6.2 — an LLM update_state with ``optimization_stack`` is denied (Coordinator-only)."""
     from inference_optimizer.orchestrator.agent_role import (
         default_role_registry,
     )
-    from inference_optimizer.orchestrator.intent_parser import (
+    from inference_optimizer.protocol.intent import (
         Intent, IntentType,
     )
     from inference_optimizer.orchestrator.policy import (
@@ -426,13 +367,9 @@ def test_policy_blocks_llm_optimization_stack_write():
         gate.validate_intent("orchestration", intent)
 
 
-# ===========================================================================
 # 9. KB_gaps/Gap-14 — search ledgers locked under CORE_STATE_FIELDS
-# ===========================================================================
 def test_search_ledgers_in_core_state_fields():
-    """KB_design §3.10 §6.2 — the unified ``explore_search`` ledger is a
-    Coordinator-only fact-layer write. Locking it as CORE closes the
-    Inv-10.2 defense surface KB_gaps/Gap-14 flagged."""
+    """KB_design §3.10 §6.2 — the ``explore_search`` ledger is locked as CORE (KB_gaps/Gap-14)."""
     from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
     assert "explore_search" in CORE_STATE_FIELDS, (
         "'explore_search' must be in CORE_STATE_FIELDS so LLM "
@@ -442,12 +379,11 @@ def test_search_ledgers_in_core_state_fields():
 
 @pytest.mark.parametrize("field_name", ["explore_search"])
 def test_policy_blocks_llm_search_ledger_write(field_name):
-    """LLM ``update_state{changes: {<ledger>: ...}}`` must surface a
-    ``state_field`` denial."""
+    """LLM ``update_state`` of a search ledger surfaces a ``state_field`` denial."""
     from inference_optimizer.orchestrator.agent_role import (
         default_role_registry,
     )
-    from inference_optimizer.orchestrator.intent_parser import (
+    from inference_optimizer.protocol.intent import (
         Intent, IntentType,
     )
     from inference_optimizer.orchestrator.policy import (

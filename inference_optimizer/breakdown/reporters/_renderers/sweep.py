@@ -1,12 +1,6 @@
-"""Sweep matrix renderer.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Sweeps are concurrency / ISL-OSL grids run on the final stack so users
-can see end-of-session frontier coverage. The renderer surfaces:
-
-* grid size, accepted vs failed count,
-* the best (highest output_throughput) point,
-* all variants in a small table (truncated to 50 rows).
-"""
+"""Sweep matrix renderer — concurrency/ISL-OSL grid on the final stack (grid size, best point, variants ≤50 rows)."""
 
 from __future__ import annotations
 
@@ -19,6 +13,19 @@ _MAX_ROWS = 50
 
 @register_renderer("sweep")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the sweep section: grid coverage, best point and variants.
+
+    Surfaces the concurrency / ISL-OSL grid run on the final stack,
+    including success/failure counts, the best-throughput point, and a
+    truncated variant table. Skipped when no sweep ran this session.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered section, or a skipped placeholder when
+            there are no sweep variants.
+    """
     sw = breakdown.get("sweep") or {}
     raw_variants = sw.get("all_variants") or []
     variants: list[dict[str, Any]] = [
@@ -44,6 +51,15 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     failures = [v for v in variants if v.get("status") != "success"]
 
     def _ot(v: dict[str, Any]) -> float:
+        """Extract a variant's output throughput as a float sort key.
+
+        Args:
+            v (dict[str, Any]): A sweep variant record.
+
+        Returns:
+            float: The ``output_throughput`` value, or ``0.0`` when missing or
+                non-numeric.
+        """
         try:
             return float(v.get("output_throughput") or 0.0)
         except (TypeError, ValueError):

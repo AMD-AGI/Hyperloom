@@ -1,10 +1,6 @@
-"""Unit tests for the small helpers inside ``kernel_request_handlers``.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The handler entry points are exercised by full Coordinator e2e tests, but
-several module-level helpers (env coercion, candidate enrichment,
-materialized-config parsing) have private branches that current tests
-miss. We target those here so the helper contracts stay locked.
-"""
+"""Unit tests for the small helpers inside ``kernel_request_handlers``."""
 
 from __future__ import annotations
 
@@ -31,10 +27,7 @@ def _ensure_torch_module(monkeypatch):
     return torch
 
 
-# ---------------------------------------------------------------------------
 # _coerce_runtime_value
-# ---------------------------------------------------------------------------
-
 class TestCoerceRuntimeValue:
     @pytest.mark.parametrize(
         "value, expected",
@@ -53,18 +46,14 @@ class TestCoerceRuntimeValue:
         assert krh._coerce_runtime_value(value) == expected
 
 
-# ---------------------------------------------------------------------------
 # _candidate_env_allowed
-# ---------------------------------------------------------------------------
-
 class TestCandidateEnvAllowed:
     @pytest.mark.parametrize("name", ["AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY"])
     def test_sensitive_env_blocked(self, name):
         assert krh._candidate_env_allowed(name) is False
 
     def test_known_prefix_allowed(self):
-        # Probe at least one well-known prefix without depending on the
-        # full allowlist contents (which are product-internal).
+        # Probe one prefix without depending on the product-internal allowlist.
         prefixes = krh._CANDIDATE_ENV_PREFIXES
         assert prefixes  # registry not empty
         sample = next(iter(prefixes))
@@ -78,14 +67,9 @@ class TestCandidateEnvAllowed:
         assert krh._candidate_env_allowed(sample) is True
 
 
-# ---------------------------------------------------------------------------
 # _is_runtime_generated_kernel
-# ---------------------------------------------------------------------------
-
 class TestRuntimeGeneratedKernel:
     def test_runtime_generated_path_treats_as_generated(self):
-        # Pick whichever marker the production list publishes and ensure
-        # the source-file check fires.
         markers = krh._RUNTIME_GENERATED_SOURCE_MARKERS
         if not markers:
             pytest.skip("no runtime markers in build")
@@ -109,10 +93,7 @@ class TestRuntimeGeneratedKernel:
         )
 
 
-# ---------------------------------------------------------------------------
 # _split_server_args
-# ---------------------------------------------------------------------------
-
 class TestSplitServerArgs:
     def test_empty_returns_empty(self):
         assert krh._split_server_args("") == []
@@ -127,10 +108,7 @@ class TestSplitServerArgs:
         assert argv == []
 
 
-# ---------------------------------------------------------------------------
 # _load_candidate_metadata
-# ---------------------------------------------------------------------------
-
 class TestLoadCandidateMetadata:
     def test_uses_inline_candidate(self):
         out = krh._load_candidate_metadata({"candidate": {"kernel_id": "x"}})
@@ -171,10 +149,7 @@ class TestLoadCandidateMetadata:
         }) == {}
 
 
-# ---------------------------------------------------------------------------
 # _load_materialized_workload_metadata
-# ---------------------------------------------------------------------------
-
 class TestLoadMaterializedWorkloadMetadata:
     def test_empty_when_no_path(self):
         assert krh._load_materialized_workload_metadata("") == {}
@@ -200,12 +175,10 @@ class TestLoadMaterializedWorkloadMetadata:
         runtime = out["runtime_args"]
         assert runtime["framework"] == "sglang"
         assert runtime["server_args"] == "--foo 1"
-        # ARGV split is preserved.
         assert runtime["server_args_argv"] == ["--foo", "1"]
         workload = runtime["workload"]
         assert workload["tp"] == 1
         assert workload["conc"] == 16
-        # Env vars passed through the allowlist guard.
         assert "TP" in out["env_vars"]
 
     @pytest.mark.parametrize(
@@ -220,12 +193,7 @@ class TestLoadMaterializedWorkloadMetadata:
     def test_server_args_read_from_per_framework_env_key(
         self, tmp_path, framework, env_name, expected_args,
     ):
-        """The handler must read the per-framework
-        ``EXTRA_<FRAMEWORK>_ARGS`` slot, not silently default to
-        ``EXTRA_SGLANG_ARGS`` on non-sglang sessions. Otherwise atom
-        sessions resolve to an empty ``EXTRA_SGLANG_ARGS`` and drop
-        every atom-side flag from the kernel-opt metadata.
-        """
+        """The handler reads the per-framework ``EXTRA_<FRAMEWORK>_ARGS`` slot, not always ``EXTRA_SGLANG_ARGS``."""
         cfg = tmp_path / f"magpie_{framework}.yaml"
         cfg.write_text(
             "benchmark:\n"
@@ -242,18 +210,13 @@ class TestLoadMaterializedWorkloadMetadata:
         out = krh._load_materialized_workload_metadata(str(cfg))
         runtime = out["runtime_args"]
         assert runtime["framework"] == framework
-        # The per-framework slot wins regardless of which framework
-        # the session is on.
         assert runtime["server_args"] == expected_args, (
             f"framework={framework!r} expected server_args="
             f"{expected_args!r}; got {runtime['server_args']!r}."
         )
 
     def test_atom_server_args_not_read_from_extra_sglang_args(self, tmp_path):
-        """When an atom YAML carries BOTH ``EXTRA_ATOM_ARGS`` (real) AND
-        a stray ``EXTRA_SGLANG_ARGS`` (left over from a copy-paste), the
-        handler MUST pick the atom slot, not the sglang one.
-        """
+        """When an atom YAML carries both EXTRA_ATOM_ARGS and a stray EXTRA_SGLANG_ARGS, the atom slot wins."""
         cfg = tmp_path / "magpie_atom_mixed.yaml"
         cfg.write_text(
             "benchmark:\n"
@@ -275,10 +238,7 @@ class TestLoadMaterializedWorkloadMetadata:
         assert "--should-be-ignored" not in runtime["server_args"]
 
 
-# ---------------------------------------------------------------------------
 # enrichment helpers
-# ---------------------------------------------------------------------------
-
 class TestEnrichCandidate:
     def test_enrich_candidate_runtime_metadata_setdefault_semantics(self):
         candidates = [{"kernel_id": "k", "env_vars": {"TP": "8"}}]
@@ -298,25 +258,17 @@ class TestEnrichCandidate:
         assert "trace_report_path" not in candidates[0]
 
     def test_enrich_candidates_artifact_noop_when_missing_path(self):
-        # Should not raise even though path does not exist.
         krh._enrich_candidates_artifact("", {"env_vars": {}}, trace_report_path="")
 
 
-# ---------------------------------------------------------------------------
 # atom-aware reusable kernel detection
-# ---------------------------------------------------------------------------
-
 class TestReusableSourceRootsAtom:
     """atom layout prefixes participate in cross-task kernel reuse
     alongside aiter/sglang/vllm."""
 
     def test_includes_atom_editable_path(self):
-        # The matcher (``_is_runtime_generated_kernel``) lowercases its
-        # source-file input before substring matching, so the stored
-        # prefix is lowercase ``/app/atom/atom/`` even though the real
-        # filesystem path is ``/app/ATOM/atom/``. PolicyGate uses a
-        # case-sensitive ``startswith`` and keeps the canonical case in
-        # ``framework_paths._DEFAULT_SOURCE_ROOTS`` separately.
+        # The matcher lowercases its source-file input, so the stored prefix is
+        # lowercase ``/app/atom/atom/`` even though the real path is ``/app/ATOM/atom/``.
         assert any(
             "/app/atom/atom/" in r.lower()
             for r in krh._reusable_source_roots()
@@ -335,11 +287,7 @@ class TestReusableSourceRootsAtom:
         )
 
     def test_atom_path_classified_as_reusable(self):
-        """A representative atom-owned kernel source (model_runner.py) at
-        /app/ATOM/atom/ must NOT be flagged as runtime-generated even
-        when its kernel name matches an inductor / triton compile
-        marker. This is the exact condition the reusable-roots check
-        guards against in ``_is_runtime_generated_kernel``."""
+        """An atom-owned kernel source under /app/ATOM/atom/ is NOT runtime-generated even if its name matches a compile marker."""
         markers = krh._COMPILE_GENERATED_NAME_MARKERS
         if not markers:
             pytest.skip("compile markers empty in build")
@@ -347,29 +295,22 @@ class TestReusableSourceRootsAtom:
         result = krh._is_runtime_generated_kernel(
             marker, "/app/ATOM/atom/model_engine/model_runner.py",
         )
-        # Same logic as the existing sglang/vllm test (line 84): the
-        # name marker would normally classify as runtime-generated, but
-        # the source path lives under a reusable root so the kernel is
-        # treated as patchable framework code.
         assert result is False
 
     def test_non_framework_path_under_app_is_not_reusable(self):
-        """A non-atom path under /app/ (e.g. /app/session_dir/runs/...)
-        must NOT match the atom reusable-source-root prefix — only
-        /app/ATOM/atom/ specifically."""
+        """A non-atom path under /app/ must NOT match the atom reusable-source-root prefix."""
         markers = krh._COMPILE_GENERATED_NAME_MARKERS
         if not markers:
             pytest.skip("compile markers empty in build")
         marker = next(iter(markers))
-        # Path under /app/ but NOT /app/ATOM/atom/ — must classify as
-        # runtime-generated (i.e. not reusable).
+        # Under /app/ but not /app/ATOM/atom/ → runtime-generated (not reusable).
         result = krh._is_runtime_generated_kernel(
             marker, "/app/session_dir/runs/baseline/foo.py",
         )
         assert result is True
-# run_gemm_tuning_handler
-# ---------------------------------------------------------------------------
 
+
+# run_gemm_tuning_handler
 class TestRunGemmTuningHandler:
     def test_skips_non_fp8_without_kernel_agent_root(self, tmp_path):
         state = SharedState(precision="bf16", framework="sglang")
@@ -478,14 +419,8 @@ class TestRunGemmTuningHandler:
         assert result["status"] == "ok"
 
 
-# ---------------------------------------------------------------------------
-# _default_geak_budget_minutes / _geak_budget_minutes
-#
-# Orchestrator-side mirror of the kernel-agent default (PR #301). The
-# legacy hard-coded 90 forced quick-mode timing on the orchestrator path
-# even when ``install.sh`` had set ``GEAK_RUN_MODE=full``.
-# ---------------------------------------------------------------------------
-
+# _default_geak_budget_minutes / _geak_budget_minutes — orchestrator-side mirror
+# of the kernel-agent default (PR #301); the legacy 90 forced quick-mode timing.
 class TestDefaultGeakBudgetMinutes:
     @pytest.mark.parametrize(
         "geak_run_mode, expected",
@@ -513,13 +448,11 @@ class TestGeakBudgetMinutes:
     def test_payload_override_wins(self, monkeypatch):
         monkeypatch.setenv("GEAK_RUN_MODE", "quick")
         monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "500")
-        # payload wins over both env signals
         assert krh._geak_budget_minutes({"geak_budget_min": 100}) == 100.0
 
     def test_env_override_beats_default(self, monkeypatch):
         monkeypatch.setenv("GEAK_RUN_MODE", "quick")
         monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "115")
-        # env wins over the GEAK_RUN_MODE-derived default
         assert krh._geak_budget_minutes({}) == 115.0
 
     @pytest.mark.parametrize("geak_run_mode, expected", [
@@ -540,14 +473,8 @@ class TestGeakBudgetMinutes:
         assert krh._geak_budget_minutes({}) == 130.0
 
 
-# ---------------------------------------------------------------------------
-# _default_kernel_batch_parallel
-#
-# Adaptive batch fanout. The legacy hard-coded 8 over-admitted on smaller
-# pods (4-GPU labs, partial-node CI shards), letting the asyncio
-# semaphore queue up siblings that Ray could not actually schedule.
-# ---------------------------------------------------------------------------
-
+# _default_kernel_batch_parallel — adaptive batch fanout; the legacy 8
+# over-admitted on smaller pods (4-GPU labs, partial-node CI shards).
 class TestDefaultKernelBatchParallel:
     @pytest.fixture
     def patch_torch(self, monkeypatch):
@@ -618,9 +545,192 @@ class TestDefaultKernelBatchParallel:
 
 
 # ---------------------------------------------------------------------------
-# _reconcile_kernel_id
+# _should_parallelize_backends
+#
+# GPU-rich mode: race GEAK against the OOB ladder per kernel whenever the
+# node can fit ONE kernel's GEAK + OOB ladder side-by-side
+# (``visible_gpus >= 2 * per_task``). The decision is independent of
+# ``num_candidates`` -- batch width is throttled separately by the batch
+# handler's concurrency cap. Below ``2 * per_task`` there is no room for a
+# second ladder, so keep the sequential GEAK-first / OOB-fallback ladder.
+# Operators / tests can force the decision via payload or env.
 # ---------------------------------------------------------------------------
 
+class TestShouldParallelizeBackends:
+    @pytest.fixture
+    def patch_torch(self, monkeypatch):
+        """Override ``torch.cuda.device_count`` + ``$KERNEL_AGENT_NUM_GPUS``
+        and clear the env override so the GPU-aware math is exercised."""
+        torch = _ensure_torch_module(monkeypatch)
+
+        def _set(n_gpus, per_task=None):
+            monkeypatch.setattr(torch.cuda, "device_count", lambda: n_gpus)
+            if per_task is None:
+                monkeypatch.delenv("KERNEL_AGENT_NUM_GPUS", raising=False)
+            else:
+                monkeypatch.setenv("KERNEL_AGENT_NUM_GPUS", str(per_task))
+            monkeypatch.delenv("KERNEL_OPT_PARALLEL_BACKENDS", raising=False)
+
+        return _set
+
+    @pytest.mark.parametrize(
+        "n_gpus, per_task, num_candidates, expected",
+        [
+            # 1 GPU/task: need room for both ladders -> visible_gpus >= 2.
+            # The kernel count is irrelevant (batch width is capped elsewhere).
+            (8, 1, 3, True),     # 8 >= 2
+            (8, 1, 7, True),     # 8 >= 2 (kernel count no longer gates)
+            (8, 1, 100, True),   # 8 >= 2 even when candidates >> gpus
+            (2, 1, 1, True),     # 2 >= 2 boundary
+            (1, 1, 1, False),    # 1 < 2 -> no room for a second ladder
+            # Multi-GPU reservations: need room for TWO per_task backends.
+            (8, 4, 1, True),     # 8 >= 8 boundary
+            (8, 4, 5, True),     # 8 >= 8 (candidate count irrelevant)
+            (8, 8, 1, False),    # 8 < 16 -> can't fit a 2nd 8-GPU backend
+            (16, 8, 1, True),    # 16 >= 16
+        ],
+    )
+    def test_gpu_aware_threshold(
+        self, patch_torch, n_gpus, per_task, num_candidates, expected,
+    ):
+        patch_torch(n_gpus, per_task=per_task)
+        assert krh._should_parallelize_backends({}, num_candidates) is expected
+
+    def test_non_positive_candidates_is_false(self, patch_torch):
+        patch_torch(64, per_task=1)  # plenty of GPUs
+        assert krh._should_parallelize_backends({}, 0) is False
+        assert krh._should_parallelize_backends({}, -1) is False
+
+    def test_zero_visible_gpus_is_false(self, patch_torch):
+        patch_torch(0, per_task=1)
+        assert krh._should_parallelize_backends({}, 1) is False
+
+    def test_torch_unknown_is_false(self, monkeypatch):
+        torch = _ensure_torch_module(monkeypatch)
+
+        def _boom():
+            raise RuntimeError("driver init failed")
+
+        monkeypatch.setattr(torch.cuda, "device_count", _boom)
+        monkeypatch.delenv("KERNEL_OPT_PARALLEL_BACKENDS", raising=False)
+        assert krh._should_parallelize_backends({}, 1) is False
+
+    def test_payload_override_enables_below_threshold(self, patch_torch):
+        patch_torch(1, per_task=1)  # GPU-aware math is False (1 < 2*1)
+        assert krh._should_parallelize_backends(
+            {"parallel_backends": True}, 5,
+        ) is True
+        assert krh._should_parallelize_backends(
+            {"parallel_backends": "on"}, 5,
+        ) is True
+
+    def test_payload_override_disables_above_threshold(self, patch_torch):
+        patch_torch(64, per_task=1)  # GPU-aware math would say True
+        assert krh._should_parallelize_backends(
+            {"parallel_backends": False}, 1,
+        ) is False
+        assert krh._should_parallelize_backends(
+            {"parallel_backends": "no"}, 1,
+        ) is False
+
+    def test_env_override(self, patch_torch, monkeypatch):
+        patch_torch(1, per_task=1)  # GPU-aware math is False (1 < 2*1)
+        monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")
+        assert krh._should_parallelize_backends({}, 5) is True
+        monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "0")
+        assert krh._should_parallelize_backends({}, 1) is False
+
+
+# ---------------------------------------------------------------------------
+# _run_optimization_batch concurrency cap (parallel-backends mode)
+#
+# Each parallel kernel launches TWO before_kernel_opt rocprof subprocesses
+# (GEAK + OOB) *before* entering Ray, bypassing the Ray GPU lease. The batch
+# caps concurrent kernels to ``visible_gpus // (2 * per_task)`` so those
+# pre-Ray profilers (and the Ray tasks that follow) stay within the real GPU
+# budget even when ``max_parallel`` is set higher.
+# ---------------------------------------------------------------------------
+
+class TestBatchParallelConcurrencyCap:
+    def test_caps_concurrency_to_gpu_budget(self, tmp_path, monkeypatch):
+        # 8 visible GPUs, 1 GPU/task -> safe concurrency = 8 // (2*1) = 4.
+        monkeypatch.setattr(krh, "_visible_gpu_count", lambda: 8)
+        monkeypatch.setenv("KERNEL_AGENT_NUM_GPUS", "1")  # per_task = 1
+        monkeypatch.delenv("KERNEL_OPT_PARALLEL_BACKENDS", raising=False)
+
+        state = {"in_flight": 0, "peak": 0}
+
+        async def fake_sequence(
+            base_payload, candidate, *, session_dir, parallel_backends=False,
+        ):
+            assert parallel_backends is True
+            state["in_flight"] += 1
+            state["peak"] = max(state["peak"], state["in_flight"])
+            try:
+                await asyncio.sleep(0.02)  # hold the slot so siblings overlap
+            finally:
+                state["in_flight"] -= 1
+            return {
+                "status": "ok",
+                "kernel_id": candidate["kernel_id"],
+                "source_file": candidate.get("source_file"),
+                "proposal": {"decision": "REVERT"},
+                "verification": {"micro_speedup": 1.0},
+            }
+
+        monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
+        candidates = [
+            {"kernel_id": f"k{i}", "source_file": f"/p/{i}.py",
+             "reusable_native_kernel": True}
+            for i in range(10)
+        ]
+        out = asyncio.run(krh._run_optimization_batch(
+            payload={"candidates_path": "/dummy", "max_parallel": 10},
+            candidates=candidates,
+            session_dir=tmp_path,
+        ))
+
+        assert out["parallel_backends"] is True
+        # max_parallel echoes the capped value (10 -> 4).
+        assert out["max_parallel"] == 4
+        # Cap binds: 4 kernels * 2 ladders = 8 pre-Ray profilers == 8 GPUs.
+        assert state["peak"] == 4, state["peak"]
+
+    def test_no_cap_when_gpu_count_unknown(self, tmp_path, monkeypatch):
+        # torch can't report a count (None) -> cap math is skipped so the
+        # operator-supplied max_parallel is preserved (matches CI / mocks).
+        monkeypatch.setattr(krh, "_visible_gpu_count", lambda: None)
+        monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")  # force parallel
+
+        async def fake_sequence(
+            base_payload, candidate, *, session_dir, parallel_backends=False,
+        ):
+            return {
+                "status": "ok",
+                "kernel_id": candidate["kernel_id"],
+                "source_file": candidate.get("source_file"),
+                "proposal": {"decision": "REVERT"},
+                "verification": {"micro_speedup": 1.0},
+            }
+
+        monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
+        candidates = [
+            {"kernel_id": f"k{i}", "source_file": f"/p/{i}.py",
+             "reusable_native_kernel": True}
+            for i in range(3)
+        ]
+        out = asyncio.run(krh._run_optimization_batch(
+            payload={"candidates_path": "/dummy", "max_parallel": 7},
+            candidates=candidates,
+            session_dir=tmp_path,
+        ))
+
+        assert out["parallel_backends"] is True
+        assert out["max_parallel"] == 7  # uncapped (visible GPU count unknown)
+
+
+# ---------------------------------------------------------------------------
+# _reconcile_kernel_id
 class TestReconcileKernelId:
     CANDS = [
         {"kernel_id": "k001", "name": "aten::mm"},
@@ -659,16 +769,9 @@ class TestReconcileKernelId:
         )
 
 
-# ---------------------------------------------------------------------------
-# _resolve_candidate_id / _all_kernel_candidates
-#
-# When hot_kernels is empty the batch dispatcher returns no candidates, so
-# _reconcile_kernel_id never runs. _resolve_candidate_id canonicalizes an
-# aliased id against the full hot ∪ skipped set (no fallback) so the
-# downstream reusable-native guard rejects the real k00x rather than the
-# raw hallucinated alias.
-# ---------------------------------------------------------------------------
-
+# _resolve_candidate_id / _all_kernel_candidates — canonicalizes an aliased id
+# against the full hot ∪ skipped set (no fallback) so the reusable-native guard
+# rejects the real k00x rather than the raw hallucinated alias.
 class TestResolveCandidateId:
     SKIPPED = [
         {"kernel_id": "k001", "name": "aten::mm",

@@ -1,20 +1,9 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """kernel_id mismatch handling at the kernel-agent boundary.
 
-The Orchestration LLM occasionally supplies a ``kernel_id`` that does not
-match any TraceLens candidate (e.g. it echoes an operator name like
-``aiter.silu_and_mul`` or a hallucinated ``kn001`` instead of the real
-``k001``). Previously ``find_candidate`` raised ``KeyError`` on the first
-lookup, crashing the entire kernel-optimization subprocess before GEAK was
-ever invoked.
-
-Contract:
-
-* ``find_candidate`` resolves by exact ``kernel_id`` and normalized
-  ``kernel_id`` match (case-insensitive, ``kn``/``rn`` prefix folded to
-  ``k``). It accepts a ``name`` only when that name uniquely identifies a
-  routable candidate.
-* When nothing matches it returns ``None`` instead of raising, so the caller
-  can skip the kernel gracefully rather than aborting the whole run.
+``find_candidate`` resolves by exact/normalized ``kernel_id`` (``kn``/``rn``
+folded to ``k``) or unique routable name, returning ``None`` (not raising).
 """
 
 from __future__ import annotations
@@ -69,15 +58,12 @@ def test_unique_routable_name_match():
 
 
 def test_operator_name_for_skipped_or_non_unique_candidates_returns_none():
-    # Real TraceLens failures often list several skipped ``aten::mm`` rows.
-    # The operator name is non-unique and non-routable, so it must not resolve
-    # to k001 and accidentally send a skipped candidate into optimization.
+    # Non-unique, non-routable operator name must not resolve to a skipped candidate.
     assert ko.find_candidate(SKIPPED_CANDIDATES, "aten::mm") is None
 
 
 def test_normalized_prefix_match():
-    # LLM hallucinated ``kn001`` / ``rn010``; fold the synthetic prefix back to
-    # the real ``k`` numbering.
+    # Fold hallucinated ``kn``/``rn`` prefix back to real ``k`` numbering.
     assert ko.find_candidate(CANDIDATES, "kn001")["kernel_id"] == "k001"
     assert ko.find_candidate(CANDIDATES, "rn010")["kernel_id"] == "k010"
 

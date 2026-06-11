@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Tests for the disk-backed DetectorStateStore."""
 
 from __future__ import annotations
@@ -29,7 +31,6 @@ def test_save_then_flush_roundtrips(tmp_path: Path) -> None:
     store.flush_atomic()
     assert store.file_path.is_file()
 
-    # Reload via a new store instance.
     again = DetectorStateStore(session_dir=tmp_path)
     assert again.load_slot("gpu_leak") == {"consecutive_hits": 2}
     assert again.load_slot("progress") == {

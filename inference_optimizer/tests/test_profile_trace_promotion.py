@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Profile trace promotion + last_profile_status tests."""
 
 from __future__ import annotations
@@ -35,11 +37,7 @@ def _silent_coordinator(session_dir) -> Coordinator:
 
 @pytest.mark.asyncio
 async def test_profile_executor_fails_when_no_trace_files(tmp_path, monkeypatch):
-    # ProfileExecutor's BaselineExecutor base falls back to
-    # ``_resolve_session_dir`` (defaults to ``/workspace/hyperloom``)
-    # and ``harvest_leaked_artifacts`` defaults to ``/workspace`` —
-    # neither is writable inside CI. Pin both to a tmp_path sandbox so
-    # the executor stays inside the fixture tree.
+    # Pin session dir + leak roots to tmp_path so the executor stays in the fixture tree.
     user_data = tmp_path / "user_data"
     user_data.mkdir()
     monkeypatch.setenv("USER_DATA_PATH", str(user_data))
@@ -65,12 +63,8 @@ async def test_profile_executor_fails_when_no_trace_files(tmp_path, monkeypatch)
         "BaselineExecutor.__call__",
         fake_call,
     )
-    # ``profile`` is no longer a registered action; the only production
-    # caller is RooflineExecutor's `_wrap_profile_ctx`, which inherits
-    # the parent roofline's workspace via ``ctx.extra['workspace']``.
-    # Mirror that here so ProfileExecutor's `_resolve_workspace` takes
-    # the extra-supplied path instead of trying to call ``runs_dir(sd,
-    # 'profile', ...)`` (which now rejects 'profile' as unknown).
+    # ``profile`` is no longer registered; mirror RooflineExecutor by passing the
+    # workspace via ``ctx.extra`` so ``_resolve_workspace`` uses it.
     task = Task(
         task_id="prof-empty",
         kind="profile",

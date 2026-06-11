@@ -1,20 +1,6 @@
-"""v0.8 §3.3 — Role realignment / phase-aware prompts tests.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Covers the additive prompt + Coordinator changes that ship the phase
-context to all 4 reactors:
-
-* Static system prompts (rules fragments + builders) carry phase
-  awareness sections.
-* Per-tick prompt assembly (``Coordinator._compose_prompt``) emits a
-  ``=== Phase ===`` block for every agent, ``=== Warm start ===``
-  for Orchestration when warm_start_recipe is non-empty, and
-  ``=== Phase budget telemetry ===`` + ``=== Specialist health ===``
-  for Robustness.
-* SharedState renderers: ``to_phase_status_summary`` /
-  ``to_phase_budget_telemetry`` / ``to_warm_start_summary``.
-* ``Coordinator._scan_stale_specialists`` returns an empty list when no
-  specialist tasks exist (M2 baseline; M5 wires the real tasks).
-"""
+"""v0.8 §3.3 — Role realignment / phase-aware prompts tests."""
 
 from __future__ import annotations
 
@@ -23,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from inference_optimizer.orchestrator.action_registry import ActionRegistry
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.system_prompts.critic_prompt_builder import (
     build_critic_prompt,
@@ -35,9 +21,7 @@ from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
 from inference_optimizer.paths import make_session_dir
 
 
-# ===========================================================================
 # fixtures
-# ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -49,9 +33,7 @@ def registry() -> ActionRegistry:
     return ActionRegistry().load()
 
 
-# ===========================================================================
 # Static system prompts carry phase semantics
-# ===========================================================================
 def test_orchestration_prompt_includes_phase_contract(registry):
     text = build_orchestration_prompt(
         action_registry=registry,
@@ -61,7 +43,6 @@ def test_orchestration_prompt_includes_phase_contract(registry):
         objective_value=10.0,
         max_minutes=120,
     )
-    # PHASE CONTRACT section + every phase name + R1 hint anchor.
     assert "PHASE CONTRACT" in text
     for phase in ("PRELUDE", "FRAMEWORK_PR", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"):
         assert phase in text, f"missing phase {phase} from orchestration prompt"
@@ -76,7 +57,6 @@ def test_orchestration_prompt_no_kernel_marks_kernel_skipped(registry):
         framework="sglang",
         max_minutes=120,
     )
-    # The KERNEL line in PHASE CONTRACT is annotated with skipped suffix.
     assert "(skipped in --no-kernel runs)" in text
 
 
@@ -88,15 +68,13 @@ def test_critic_prompt_includes_phase_review_contract(registry):
         max_minutes=120,
     )
     assert "PHASE REVIEW CONTRACT" in text
-    # v0.8 KB_gaps/Gap-11 — per-variant verdict_map for specialist
-    # / multi-variant explore packets. The prompt advertises both
-    # the canonical batch shape and the legacy single-verdict path.
-    assert "proposal_set" in text
-    assert "verdict_map" in text.lower()
+    # Explore grids run directly, so the Critic uses single-action verdicts (no verdict_map).
+    assert "verdict_map" not in text.lower()
+    assert "single-proposal" in text.lower()
 
 
 def test_role_md_files_carry_phase_awareness():
-    """Sanity-check the static rules fragments + Robustness markdown."""
+    """Static rules fragments + Robustness markdown carry phase awareness."""
     from inference_optimizer.paths import asset_system_prompts_dir
     root = asset_system_prompts_dir()
     for name in ("orchestration", "kernel", "critic", "robustness"):
@@ -107,15 +85,12 @@ def test_role_md_files_carry_phase_awareness():
             assert "Phase-specific rules" in body
         else:
             assert "Phase awareness" in body, f"{name}.md missing phase awareness"
-        # Every prompt must mention at least one phase name for grep ability.
         assert "PRELUDE" in body or "PHASE_PRELUDE" in body
         assert "EXPLORE" in body
         assert "KERNEL" in body
 
 
-# ===========================================================================
 # SharedState renderers
-# ===========================================================================
 def test_shared_state_phase_status_summary_renders_compact_block():
     s = SharedState(max_minutes=60)
     s.record_phase_transition(
@@ -132,10 +107,7 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     assert "elapsed_sec=120" in out
     # 60 min × 60s × 0.5 = 1800s cap; elapsed 120s → 1680s remaining.
     assert "remaining_sec=1680" in out
-    # v0.8 M3 + KB_gaps/Gap-10 — EXPLORE allowlist now only carries
-    # the merged ``explore`` action plus ``specialist`` and ``recover``.
-    # The legacy backends/params/validate_stack are closed at the
-    # PolicyGate boundary with ``rule='action_deprecated'``.
+    # Gap-10: EXPLORE allowlist carries explore + specialist + recover only.
     assert "explore" in out and "specialist" in out
 
 
@@ -169,9 +141,7 @@ def test_shared_state_phase_budget_telemetry_reports_per_phase_elapsed():
 
 
 def test_shared_state_phase_budget_telemetry_includes_framework_pr():
-    # Regression for the hardcoded 5-phase tuple that swallowed
-    # FRAMEWORK_PR. The renderer should iterate ``PHASE_NAMES`` so
-    # any phase that appears in ``phase_history`` shows up.
+    # Regression: the renderer must iterate PHASE_NAMES so FRAMEWORK_PR isn't swallowed.
     s = SharedState(max_minutes=60)
     s.record_phase_transition(
         to_phase="PRELUDE", reason="phase_entered", evidence={},
@@ -217,9 +187,7 @@ def test_shared_state_warm_start_summary_renders_recipe_and_pitfalls():
     assert "OOM on fp8" in out
 
 
-# ===========================================================================
 # Coordinator per-tick prompt assembly
-# ===========================================================================
 def _silent_intent() -> Intent:
     return Intent(
         type=IntentType.SEND_MESSAGE,
@@ -298,10 +266,8 @@ async def test_compose_prompt_robustness_renders_specialist_health(
     c = coordinator_with_mocks
     try:
         prompt = await c._compose_prompt("robustness")
-        # No specialist tasks → running=0, stale=0.
         assert "=== Specialist health ===" in prompt
         assert "running=0 stale=0" in prompt
-        # Stale threshold defaults to 600s (configurable via env).
         assert "stale_threshold_sec=600" in prompt
     finally:
         await c.stop()
@@ -313,11 +279,8 @@ async def test_compose_prompt_robustness_includes_budget_telemetry(
 ):
     c = coordinator_with_mocks
     try:
-        # Skip FRAMEWORK_PR so PRELUDE → EXPLORE remains the routing
-        # this telemetry test exercises.
+        # Skip FRAMEWORK_PR so this exercises PRELUDE → EXPLORE; force a transition for telemetry.
         c.shared_state.framework_phase_enabled = False
-        # Force a transition so phase_history has a second row + we get
-        # a phase budget telemetry block with PRELUDE elapsed.
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.save(session_dir)
         await c.tick(1)
@@ -341,9 +304,7 @@ async def test_scan_stale_specialists_returns_empty_when_no_specialists(
         await c.stop()
 
 
-# ===========================================================================
 # Phase budget telemetry math (independent of coordinator)
-# ===========================================================================
 def test_to_phase_budget_telemetry_handles_empty_history():
     s = SharedState()
     out = s.to_phase_budget_telemetry()

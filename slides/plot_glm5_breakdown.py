@@ -1,3 +1,12 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""Render the GLM-5 FP8 per-GPU throughput slide figure.
+
+Builds a bar chart comparing MI355X baseline, NVIDIA B200, and Hyperloom
+MI355X tokens/sec per GPU, then saves it as
+``docs/figs/glm5_optimization_breakdown.png`` for use in the slide deck. Uses
+the non-interactive ``Agg`` backend so it can run headless.
+"""
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt

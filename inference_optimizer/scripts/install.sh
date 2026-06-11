@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Inference Optimizer installer.
 #
 # Owns the inference_optimizer-side bare-image setup so SKILL.md does
@@ -8,12 +10,14 @@
 # Stack (in order):
 #   1. inference_optimizer + extras (pulls in claude_agent_sdk via
 #      pyproject `[test]` extra)
-#   2. Magpie (benchmark engine) into $HYPERLOOM_RUNTIME_DIR/Magpie
-#      (= $USER_DATA_PATH/runtime/Magpie by default)
+#   2. Magpie (benchmark engine) into the pod-local open-source repo tree,
+#      pinned to MAGPIE_REF
+#      (a commit SHA, mirrors the GEAK_REF pin in kernel-agent)
 #   2b. Atomic-write patch for Magpie._prepare_benchmark_scripts
-#       (bugs.md §C #1 root-cause fix; fail-loud)
-#   3. InferenceX checkout: clone latest from upstream (no SHA pin yet),
-#      sets INFERENCEX_PATH for runtime
+#       (bugs.md §C #1 root-cause fix; fail-soft — a no-op when MAGPIE_REF
+#       is pinned to an upstream-atomic commit)
+#   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
+#      (a commit SHA), sets INFERENCEX_PATH for runtime
 #   4. Delegates to kernel-agent/scripts/install.sh for ray, ray-head
 #      bring-up, Node/npm, TraceLens, GEAK, OOB and CLI auth-file setup.
 #      kernel-agent itself is the canonical owner of those — we just
@@ -76,16 +80,44 @@ load_dotenv_no_clobber() {
 # freshly-copied .env.template can be the single configuration entrypoint.
 # The loader is no-clobber: explicit shell exports always win.
 load_dotenv_no_clobber
+# Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
+# can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
+# or empty, which is exactly the case the :- default below would absorb.
+_user_data_was_set="${USER_DATA_PATH:+1}"
 USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
+if [ -z "${_user_data_was_set}" ]; then
+  echo "[install WARN] USER_DATA_PATH not set; defaulting to /workspace/hyperloom. Set USER_DATA_PATH to persist artifacts under your data root." >&2
+fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
+# Legacy variable kept for compatibility; open-source checkouts use _open_source_root.
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
+# Pod-local base for auto-cloned open-source deps, decoupled from USER_DATA_PATH
+# so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
+_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/kernel-agent}"
 FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${REPO_ROOT}/framework-agent}"
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
-MAGPIE_DIR="${MAGPIE_DIR:-${HYPERLOOM_RUNTIME_DIR}/Magpie}"
+# Pin Magpie to a *commit SHA* (not a branch name) so a fresh install is
+# deterministic and an upstream force-push / rebase cannot silently change
+# what every fresh clone gets. This default-branch HEAD drift is the root
+# cause of bugs.md §C #1 version skew: Magpie merged the atomic-copy refactor
+# (`_copy_benchmark_script_atomic` in Magpie/modes/benchmark/benchmarker.py)
+# between 06-06 and 06-07. Pre-refactor clones still had the legacy
+# `shutil.copy2` + `chmod` block the in-place patcher targets; post-refactor
+# clones do not ("legacy block not found"). We deliberately pin to a
+# post-refactor SHA: the upstream code is already atomic, so the in-place
+# patch (ensure_magpie_atomic_scripts_patch) becomes a no-op and is
+# fail-soft below. Operators can re-pin with MAGPIE_REF=<tag|branch|sha>
+# (mirrors GEAK_REF in kernel-agent/scripts/install.sh).
+MAGPIE_REF="${MAGPIE_REF:-b1d4dcdee7eaf7bcab4fac13ab751f61bffdc3f7}"
+MAGPIE_DIR="${MAGPIE_DIR:-${_open_source_root}/Magpie}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
-INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${HYPERLOOM_RUNTIME_DIR}/InferenceX}"
+# Pin InferenceX to a current default-branch HEAD *commit SHA* so the
+# per-install clone is reproducible (same rationale as MAGPIE_REF). Operators
+# can re-pin with INFERENCEX_REF=<tag|branch|sha>.
+INFERENCEX_REF="${INFERENCEX_REF:-2035a2117ad22403376359be0064dfa2c078c59b}"
+INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX}"
 
 DRY_RUN=0
 CHECK_ONLY=0
@@ -98,12 +130,15 @@ Usage: inference_optimizer/scripts/install.sh [options]
 
 Installs:
   - inference_optimizer Python package (with claude_agent_sdk via [test])
-  - Magpie (cloned to $HYPERLOOM_RUNTIME_DIR/Magpie by default)
+  - langfuse SDK, but ONLY when HYPERLOOM_LANGFUSE_ENABLE is on in the
+    environment / .env (opt-in live trace push; skipped otherwise)
+  - Magpie (cloned under the pod-local open-source repo tree by default)
   - Detects/exports INFERENCEX_PATH
   - Chains to kernel-agent/scripts/install.sh for Ray + ray-head start,
     Node/npm, TraceLens, GEAK, and OOB CLI auth.
   - Chains to framework-agent/scripts/install.sh for the `fa` CLI
-    used by the `framework_pr` bandit arm at optimize-time.
+    used by the Coordinator-owned FRAMEWORK_PR phase at optimize-time
+    (candidate discovery via `fa phase-discover`).
     framework-agent is fully standalone; the chain just makes the
     `fa` binary available on PATH inside the same sandbox without
     operators having to run a second installer.
@@ -117,7 +152,12 @@ Options:
 
 Env overrides:
   REPO_ROOT, KERNEL_AGENT_ROOT, FRAMEWORK_AGENT_ROOT, MAGPIE_REPO,
-  MAGPIE_DIR, INFERENCEX_REPO, INFERENCEX_DEFAULT_DIR, INFERENCEX_PATH,
+  MAGPIE_REF (commit SHA / tag / branch the Magpie clone is pinned to;
+    default is a commit that already copies benchmark scripts atomically),
+  MAGPIE_DIR, INFERENCEX_REPO,
+  INFERENCEX_REF (commit SHA / tag / branch the InferenceX clone is pinned
+    to; default is a current upstream HEAD SHA),
+  INFERENCEX_DEFAULT_DIR, INFERENCEX_PATH,
   PYTHON, TRACELENS_ROOT,
   TRACELENS_INTERNAL_ROOT (set to enable the optional internal extension;
     unset => open-source-only),
@@ -144,10 +184,79 @@ log() { echo "[inference-optimizer] $*"; }
 warn() { echo "[inference-optimizer WARN] $*" >&2; }
 die() { echo "[inference-optimizer ERROR] $*" >&2; exit 1; }
 
+# Truthy/falsy test for boolean-ish env vars. Numeric `-eq` comparisons choke on
+# string values (`[ false -eq 0 ]` errors and reads as true under set -e), so a
+# user writing MAGPIE_PATCH_STRICT=false would get the OPPOSITE of intent. Accept
+# the common spellings case-insensitively; returns success (0) when falsy.
+is_falsy() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    0|false|no|off|"") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 run() {
   log "$*"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
     "$@"
+  fi
+}
+
+# Clone a dependency pinned to $ref into $dir, mirroring the GEAK pin in
+# kernel-agent/scripts/install.sh. `git clone --branch` only accepts
+# tags/branches, not raw SHAs, so a 7-40 hex char ref triggers a shallow
+# fetch-checkout dance instead (GitHub serves shallow SHA fetches via
+# uploadpack.allowReachableSHA1InWant=true). DRY_RUN / CHECK_ONLY are honoured
+# through the shared `run` helper. On success the checkout has a valid HEAD at
+# $ref, so manifest.py's _git_revision_at() still resolves the pinned commit.
+# Returns non-zero (stopping at the first failed step) so callers can choose
+# fail-loud (Magpie) or fail-soft (InferenceX).
+git_fetch_pinned() {
+  local repo="$1" dir="$2" ref="$3" label="$4"
+  if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    log "fetching ${label} pinned to commit ${ref} (shallow fetch-checkout)"
+    run git init -q "$dir" || return 1
+    run git -C "$dir" remote add origin "$repo" || return 1
+    run git -C "$dir" fetch --depth 1 origin "$ref" || return 1
+    run git -C "$dir" checkout -q FETCH_HEAD || return 1
+  else
+    log "cloning ${label} pinned to ref ${ref} (--branch)"
+    run git clone --depth 1 --branch "$ref" "$repo" "$dir" || return 1
+  fi
+  return 0
+}
+
+# Serialize concurrent installs that share one open-source checkout root
+# (Magpie / InferenceX, plus GEAK / OOB / TraceLens via the chained
+# kernel-agent installer). With no lock, two installs race and corrupt each
+# other's half-cloned checkouts (observed: GEAK src/minisweagent/... missing,
+# repeated install failures). The lock lives in $_open_source_root (pod-local)
+# so it tracks exactly what it guards; the chained kernel-agent installer uses
+# the same $_open_source_root default, keeping parent/child on one lock path.
+# We hold an flock on $_open_source_root/.install.lock via fd 9 from the first
+# mirror-mutating step until this process exits (fd closes on exit), so it
+# guards every clone/build below and releases automatically at the end.
+# Skipped under --check-only / --dry-run (introspection only, no mutation).
+# When we chain to kernel-agent's installer we export
+# HYPERLOOM_INSTALL_LOCK_HELD=1 so that child does not deadlock re-acquiring
+# the same lock on a second open file description.
+acquire_install_lock() {
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  if [ "${HYPERLOOM_INSTALL_LOCK_HELD:-0}" = "1" ]; then
+    log "install lock already held by parent installer; not re-locking"
+    return 0
+  fi
+  mkdir -p "${_open_source_root}"
+  exec 9>"${_open_source_root}/.install.lock"
+  if command -v flock >/dev/null 2>&1; then
+    log "waiting for install lock: ${_open_source_root}/.install.lock"
+    flock 9
+    log "acquired install lock"
+    export HYPERLOOM_INSTALL_LOCK_HELD=1
+  else
+    warn "flock not available; concurrent installs may race on dependency checkouts"
   fi
 }
 
@@ -351,6 +460,7 @@ log "REPO_ROOT=${REPO_ROOT}"
 log "USER_DATA_PATH=${USER_DATA_PATH}"
 log "HYPERLOOM_RUNTIME_DIR=${HYPERLOOM_RUNTIME_DIR}"
 log "HYPERLOOM_ROOT=${HYPERLOOM_ROOT}"
+log "open_source_root=${_open_source_root}"
 log "KERNEL_AGENT_ROOT=${KERNEL_AGENT_ROOT}"
 log "KERNEL_AGENT_ENV=${KERNEL_AGENT_ENV}"
 log "MAGPIE_DIR=${MAGPIE_DIR}"
@@ -363,7 +473,7 @@ export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGEN
 # under MAGPIE_DIR; install.sh of kernel-agent writes geak-config /
 # kernel-agent.env.sh into HYPERLOOM_RUNTIME_DIR).
 if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-  mkdir -p "${HYPERLOOM_RUNTIME_DIR}"
+  mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"
 fi
 
 # pip --break-system-packages when PYTHON is the system interpreter
@@ -413,7 +523,7 @@ PY
 
 # --- 2. Magpie ---
 # The install state is the checkout under $MAGPIE_DIR (default:
-# $USER_DATA_PATH/runtime/Magpie), not whatever `import Magpie` resolves
+# the pod-local open-source repo tree), not whatever `import Magpie` resolves
 # from the driver Python. Editable installs from older sessions can stay
 # importable and otherwise mask a missing per-workspace checkout.
 ensure_magpie() {
@@ -430,13 +540,35 @@ ensure_magpie() {
     mkdir -p "$(dirname "$MAGPIE_DIR")"
   fi
   if [ ! -f "$MAGPIE_DIR/setup.py" ] && [ ! -f "$MAGPIE_DIR/pyproject.toml" ]; then
-    log "cloning Magpie from $MAGPIE_REPO"
-    run git clone --depth 1 "$MAGPIE_REPO" "$MAGPIE_DIR"
+    log "cloning Magpie from $MAGPIE_REPO pinned to ${MAGPIE_REF}"
+    git_fetch_pinned "$MAGPIE_REPO" "$MAGPIE_DIR" "$MAGPIE_REF" "Magpie"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$MAGPIE_DIR"
-    "$PYTHON" -c "import Magpie" >/dev/null
-    log "Magpie installed OK from ${MAGPIE_DIR}"
+    # Idempotent reinstall guard. Magpie is editable-installed into the
+    # pod-level /opt/venv, which concurrent sessions on the same Claw pod
+    # SHARE. An unconditional `pip install -e` briefly tears the egg-link
+    # down/up; a sibling session mid-`python -m Magpie` benchmark then hits
+    # the gap and dies with "No module named Magpie" (intermittent, can
+    # follow an earlier successful run). The install lock lives under
+    # $HYPERLOOM_RUNTIME_DIR and does NOT cover the shared /opt/venv, so it
+    # cannot serialize this. Mirror ensure_inferencex (preserve existing) +
+    # ensure_bench_serving_deps (import-probe before pip): skip the reinstall
+    # only when the checkout exists under $MAGPIE_DIR AND `import Magpie`
+    # already resolves into it. The path check (not just import success)
+    # preserves the original guard against a stale editable from an older
+    # session masking a missing per-workspace checkout.
+    local magpie_real resolved
+    magpie_real="$(realpath "$MAGPIE_DIR" 2>/dev/null || echo "$MAGPIE_DIR")"
+    resolved="$("$PYTHON" -c 'import Magpie, os; print(os.path.realpath(os.path.dirname(Magpie.__file__)))' 2>/dev/null || true)"
+    if { [ -f "$MAGPIE_DIR/setup.py" ] || [ -f "$MAGPIE_DIR/pyproject.toml" ]; } \
+       && [ -n "$resolved" ] \
+       && case "$resolved" in "$magpie_real" | "$magpie_real"/*) true ;; *) false ;; esac; then
+      log "Magpie already installed from ${MAGPIE_DIR}; skipping editable reinstall (idempotent; avoids racing a shared /opt/venv reinstall)"
+    else
+      "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$MAGPIE_DIR"
+      "$PYTHON" -c "import Magpie" >/dev/null
+      log "Magpie installed OK from ${MAGPIE_DIR}"
+    fi
   fi
 }
 
@@ -449,14 +581,19 @@ ensure_magpie() {
 # patcher itself is idempotent + flock-serialised + atomic-rename
 # (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
 #
-# Escalation: this is a known root-cause fix. A `False` return means
-# Magpie was refactored upstream and our pattern no longer matches; we
-# `die` so the operator notices instead of silently shipping a broken
-# install. Override the gate via PATCH_MAGPIE=0 for the (rare) case
-# where you've already landed an upstream PR locally.
+# Fail-soft (was fail-loud): a `False` return means the legacy
+# `shutil.copy2` block was not found. With MAGPIE_REF now pinned to an
+# upstream commit that already copies scripts atomically
+# (`_copy_benchmark_script_atomic`), that is the EXPECTED no-op state —
+# bugs.md §C #1 is already mitigated upstream, so we `warn` and continue
+# instead of aborting every install. (A sibling branch makes the patcher
+# itself upstream-aware; this warn is the defense-in-depth complement.) If
+# you re-pin MAGPIE_REF to a pre-refactor commit and the patch still cannot
+# apply, the script-tearing race is genuinely unpatched — review the
+# warning. Override the gate via PATCH_MAGPIE=0 to skip the step entirely.
 ensure_magpie_atomic_scripts_patch() {
-  if [ "${PATCH_MAGPIE:-1}" -eq 0 ]; then
-    log "PATCH_MAGPIE=0 — skipping Magpie atomic-write patch (caller asserts upstream already fixed)"
+  if is_falsy "${PATCH_MAGPIE:-1}"; then
+    log "PATCH_MAGPIE is falsy — skipping Magpie atomic-write patch (caller asserts upstream already fixed)"
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -464,15 +601,57 @@ ensure_magpie_atomic_scripts_patch() {
     return 0
   fi
   log "applying Hyperloom #C1 atomic-write patch to Magpie._prepare_benchmark_scripts"
-  MAGPIE_DIR="$MAGPIE_DIR" "$PYTHON" - <<'PY' || die "Magpie atomic-write patch failed; see warnings above. bugs.md §C #1 is NOT mitigated. Set PATCH_MAGPIE=0 to skip if you know what you are doing."
+  # Exit-code contract (read below): 0 ok · 2 remote-trust drift only ·
+  # 4 GENUINE atomic failure (race unmitigated) · 1 benign atomic no-op.
+  if MAGPIE_DIR="$MAGPIE_DIR" "$PYTHON" - <<'PY'
 import os, sys
 from inference_optimizer.orchestrator.action_executors._magpie_patcher import (
-    ensure_magpie_atomic_scripts_patch,
+    magpie_scripts_patch_status,
 )
-ok = ensure_magpie_atomic_scripts_patch(os.environ["MAGPIE_DIR"])
-sys.exit(0 if ok else 1)
+status = magpie_scripts_patch_status(os.environ["MAGPIE_DIR"])
+print(f"_magpie_patcher: atomic_reason={status.atomic_reason} "
+      f"atomic_ok={status.atomic_ok} remote_trust_ok={status.remote_trust_ok}",
+      file=sys.stderr)
+if status.ok:
+    sys.exit(0)
+# A GENUINE atomic failure (unrecognized shape / I/O error) means the
+# script-tearing race is actually unmitigated — distinct exit so a strict
+# install can fail-loud instead of swallowing it as an expected no-op.
+if status.atomic_genuine_failure:
+    sys.exit(4)
+if not status.atomic_ok:
+    sys.exit(1)
+if not status.remote_trust_ok:
+    sys.exit(2)
+# Defensive catch-all: a not-ok status with none of the bits above set should
+# never happen, but exit non-zero so we never fall through to exit 0.
+sys.exit(3)
 PY
-  log "Magpie #C1 patch OK"
+  then
+    log "Magpie #C1 patch OK"
+  else
+    rc=$?
+    if [ "$rc" -eq 4 ]; then
+      # GENUINE failure: the legacy block is gone AND upstream is not atomic
+      # (or a read/write error). bugs.md §C #1 (script-tearing race) is NOT
+      # mitigated — `profile`/`baseline` can hit `syntax error near unexpected
+      # token 'fi'`. Strict mode (default) aborts; a falsy MAGPIE_PATCH_STRICT
+      # (0/false/no/off) keeps the legacy fail-soft behaviour and only warns.
+      if is_falsy "${MAGPIE_PATCH_STRICT:-1}"; then
+        warn "Magpie atomic-write patch GENUINELY failed (race unmitigated); MAGPIE_PATCH_STRICT=${MAGPIE_PATCH_STRICT:-} (falsy), continuing anyway — review _magpie_patcher.py."
+      else
+        die "Magpie atomic-write patch GENUINELY failed: neither the legacy shutil.copy2 block nor an upstream atomic copy was found in benchmarker.py. bugs.md §C #1 (script-tearing race) is unmitigated. Re-pin MAGPIE_REF to a supported commit, review _magpie_patcher.py, or set MAGPIE_PATCH_STRICT=0 to downgrade to a warning (or PATCH_MAGPIE=0 to skip entirely)."
+      fi
+    elif [ "$rc" -eq 2 ]; then
+      warn "Magpie SGLang remote trust patch did not apply. If MAGPIE_TRUST_REMOTE_CODE=1 is required for custom-code models (for example Kimi/Qwen tokenizer paths), remote benchmark clients may still fail to pass trust; review _magpie_patcher.py or set PATCH_MAGPIE=0 only if this is intentional."
+    else
+      # Benign no-op (rc=1): MAGPIE_DIR unset / benchmarker.py missing. With
+      # MAGPIE_REF pinned to an upstream-atomic commit the patcher reports
+      # ``upstream_atomic`` (exit 0) instead, so this branch is just the
+      # missing-tree case — warn and continue. PATCH_MAGPIE=0 skips the step.
+      warn "Magpie atomic-write patch skipped (no benchmarker.py under MAGPIE_DIR). Fine for tests/dry-runs; otherwise check MAGPIE_DIR or set PATCH_MAGPIE=0."
+    fi
+  fi
 }
 
 # --- 3. InferenceX checkout: fresh clone from upstream ---
@@ -493,15 +672,17 @@ PY
 #   * INFERENCEX_PATH set and exists -> preserve verbatim. This is the
 #     dev / CI override (caller is explicitly opting out of fresh
 #     clones, e.g. iterating on a local edit).
-#   * Otherwise -> always `git clone --depth 1` from INFERENCEX_REPO
-#     into INFERENCEX_DEFAULT_DIR. If a clone already exists there from
-#     a previous install we leave it as-is (idempotent re-runs) — the
-#     per-install isolation guarantee is already met, and re-cloning
-#     would just churn benchmark scripts that the Magpie patch already
-#     keeps consistent on disk.
-#   * No SHA pin yet (deferred). We record whatever commit `git clone`
-#     resolves into the session manifest (see manifest.py) so failed
-#     runs can be reproduced.
+#   * Otherwise -> fetch INFERENCEX_REF from INFERENCEX_REPO into
+#     INFERENCEX_DEFAULT_DIR via the shared git_fetch_pinned() dance
+#     (SHA-aware shallow fetch-checkout, mirrors the GEAK pin). If a clone
+#     already exists there from a previous install we leave it as-is
+#     (idempotent re-runs) — the per-install isolation guarantee is already
+#     met, and re-cloning would just churn benchmark scripts that the Magpie
+#     patch already keeps consistent on disk.
+#   * Pinned to INFERENCEX_REF (a commit SHA by default) so a fresh install
+#     is reproducible. We still record the resolved commit into the session
+#     manifest (see manifest.py / _describe_dep) so runs stay traceable even
+#     when an operator overrides INFERENCEX_REF.
 ensure_inferencex() {
   if [ -n "${INFERENCEX_PATH:-}" ] && [ -d "$INFERENCEX_PATH" ]; then
     log "INFERENCEX_PATH = $INFERENCEX_PATH (preserved from env; skipping fresh clone)"
@@ -519,19 +700,19 @@ ensure_inferencex() {
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "would: git clone --depth 1 ${INFERENCEX_REPO} ${INFERENCEX_PATH}"
+    log "would fetch InferenceX pinned to INFERENCEX_REF=${INFERENCEX_REF} from ${INFERENCEX_REPO} -> ${INFERENCEX_PATH}"
     export INFERENCEX_PATH
     return 0
   fi
-  log "cloning fresh InferenceX from ${INFERENCEX_REPO} -> ${INFERENCEX_PATH}"
+  log "cloning fresh InferenceX pinned to ${INFERENCEX_REF} from ${INFERENCEX_REPO} -> ${INFERENCEX_PATH}"
   mkdir -p "$(dirname "$INFERENCEX_PATH")"
-  if ! git clone --depth 1 "$INFERENCEX_REPO" "$INFERENCEX_PATH"; then
+  if ! git_fetch_pinned "$INFERENCEX_REPO" "$INFERENCEX_PATH" "$INFERENCEX_REF" "InferenceX"; then
     warn "InferenceX clone failed. GSM8K eval will fail without it. Set"
     warn "INFERENCEX_PATH to a pre-cloned tree to skip this step."
     return 0
   fi
   export INFERENCEX_PATH
-  log "InferenceX cloned at ${INFERENCEX_PATH}"
+  log "InferenceX cloned at ${INFERENCEX_PATH} (pinned ${INFERENCEX_REF})"
 }
 
 # --- 4. InferenceX bench_serving runtime deps ---
@@ -594,6 +775,194 @@ ensure_bench_serving_deps() {
   log "bench_serving deps installed OK"
 }
 
+# --- 4c. Langfuse SDK (opt-in live trace push) ---
+# The local reports/trace/*.jsonl ledger never needs this. Only the opt-in
+# live-Langfuse sink (HYPERLOOM_LANGFUSE_ENABLE=1) imports the SDK, and when
+# absent the emitter degrades to a silent no-op — so a run can look "fine"
+# while pushing nothing. Operators kept hitting that gap: they flipped the
+# flag + set the keys but forgot the separate `pip install '...[trace]'`,
+# and only noticed when session_breakdown showed sdk_available=false.
+#
+# Fix: when (and ONLY when) the Langfuse master switch is on in the loaded
+# environment (.env is sourced above by load_dotenv_no_clobber, so the flag
+# is visible here), guarantee the SDK is importable — install it on demand,
+# mirroring ensure_bench_serving_deps (import-probe first, pip only on miss).
+# Switch off => skipped entirely, so environments that don't use Langfuse
+# stay lean. Fail-soft: a failed install warns (the emitter's own no-op
+# fallback still protects the run) rather than aborting the whole install.
+_langfuse_enabled() {
+  case "$(printf '%s' "${HYPERLOOM_LANGFUSE_ENABLE:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ensure_langfuse_when_enabled() {
+  if ! _langfuse_enabled; then
+    log "langfuse: HYPERLOOM_LANGFUSE_ENABLE not set; skipping SDK install (local jsonl ledger is unaffected)"
+    return 0
+  fi
+  if "$PYTHON" -c "import langfuse" >/dev/null 2>&1; then
+    log "langfuse: SDK already importable"
+    return 0
+  fi
+  log "langfuse: HYPERLOOM_LANGFUSE_ENABLE is on but SDK missing — installing langfuse"
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "langfuse: SDK missing (check-only; would install 'langfuse>=2.0')"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would install 'langfuse>=2.0'"
+    return 0
+  fi
+  if "$PYTHON" -m pip install --quiet --no-cache-dir "${PIP_EXTRA[@]}" "langfuse>=2.0" \
+      && "$PYTHON" -c "import langfuse" >/dev/null 2>&1; then
+    log "langfuse: SDK installed OK"
+  else
+    warn "langfuse: SDK install failed; live push will degrade to a no-op (local jsonl ledger still written). Preinstall 'langfuse' in the image or run: \"\$PYTHON\" -m pip install 'langfuse>=2.0'"
+  fi
+}
+
+# --- 4b. rocprof-compute (kernel roofline profiler) ---
+# kernel_optimization.py's before-GEAK roofline step shells out to
+# `rocprof-compute` (apt package rocprofiler-compute, ships under
+# /opt/rocm/bin). Without it every per-kernel roofline collection fails with
+# "rocprof-compute is not installed or not on PATH" and kernel_roofline.json
+# stays measurement-free. Detect first; install only when missing AND apt is
+# available. Fail-soft: a missing tool degrades roofline data, it does not
+# block optimization.
+# Command name + fallback path are overridable so tests can point them at
+# non-existent targets; production uses the canonical rocprof-compute / ROCm bin.
+ROCPROF_COMPUTE_BIN="${ROCPROF_COMPUTE_BIN:-rocprof-compute}"
+ROCPROF_COMPUTE_PATH="${HYPERLOOM_ROCPROF_COMPUTE_PATH:-${ROCPROF_COMPUTE_PATH:-/opt/rocm/bin/rocprof-compute}}"
+ROCPROF_APT_BIN="${ROCPROF_APT_BIN:-apt-get}"
+ROCPROF_REQUIREMENTS="${ROCPROF_REQUIREMENTS:-}"
+
+_rocprof_compute_present() {
+  command -v "$ROCPROF_COMPUTE_BIN" >/dev/null 2>&1 || [ -x "$ROCPROF_COMPUTE_PATH" ]
+}
+
+_rocprof_compute_runnable() {
+  local bin="$1"
+  "$bin" --version >/dev/null 2>&1
+}
+
+_rocprof_find_requirements() {
+  local bin="$1"
+  if [ -n "$ROCPROF_REQUIREMENTS" ] && [ -f "$ROCPROF_REQUIREMENTS" ]; then
+    echo "$ROCPROF_REQUIREMENTS"; return 0
+  fi
+  local hint
+  hint="$("$bin" --version 2>&1 | grep -oP '(?<=See: )\S+requirements\.txt' | head -1)" || true
+  if [ -n "$hint" ] && [ -f "$hint" ]; then
+    echo "$hint"; return 0
+  fi
+  local d
+  for d in /opt/rocm/libexec/rocprofiler-compute /opt/rocm-*/libexec/rocprofiler-compute; do
+    if [ -f "$d/requirements.txt" ]; then
+      echo "$d/requirements.txt"; return 0
+    fi
+  done
+  return 1
+}
+
+_rocprof_fix_python_deps() {
+  local bin="$1"
+  if _rocprof_compute_runnable "$bin"; then return 0; fi
+  log "rocprof-compute binary present but --version failed; checking Python deps"
+  local req
+  if ! req="$(_rocprof_find_requirements "$bin")"; then
+    warn "rocprof-compute --version failed and requirements.txt not found; roofline may be degraded"
+    return 1
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "rocprof-compute deps missing (check-only; would pip install -r $req)"
+    return 1
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would pip install rocprof-compute Python deps from $req"
+    return 1
+  fi
+  # vllm images ship apt-installed python3-blinker 1.4 (distutils
+  # egg-info, no RECORD) which pip cannot uninstall.
+  if "$PYTHON" -c "import vllm" >/dev/null 2>&1; then
+    log "vllm detected; pre-installing blinker to work around distutils conflict"
+    "$PYTHON" -m pip install --quiet --no-cache-dir --break-system-packages \
+      --ignore-installed "blinker>=1.9" >/dev/null 2>&1 || true
+  fi
+  log "installing rocprof-compute Python deps from $req"
+  if "$PYTHON" -m pip install --quiet --no-cache-dir --break-system-packages \
+       -r "$req" >/dev/null 2>&1 \
+     && _rocprof_compute_runnable "$bin"; then
+    log "rocprof-compute Python deps installed OK"
+    return 0
+  fi
+  warn "rocprof-compute Python dep install failed; roofline may be degraded"
+  return 1
+}
+
+_rocprof_fix_pandas3() {
+  # rocprof-compute 3.4.0 is incompatible with pandas 3.0+ (Arrow
+  # string backend changes dtype, breaking Agent_Id conversion).
+  if "$PYTHON" -c "import pandas; v=tuple(int(x) for x in pandas.__version__.split('.')[:2]); exit(0 if v>=(3,0) else 1)" 2>/dev/null; then
+    log "pandas 3.x detected; downgrading to 2.x for rocprof-compute compat"
+    if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+      log "would pip install 'pandas>=2.1,<3'"
+      return 0
+    fi
+    "$PYTHON" -m pip install --quiet --no-cache-dir --break-system-packages \
+      "pandas>=2.1,<3" >/dev/null 2>&1 \
+      && log "pandas downgraded to $("$PYTHON" -c 'import pandas; print(pandas.__version__)')" \
+      || warn "pandas downgrade failed; rocprof-compute roofline may produce empty results"
+  fi
+}
+
+ensure_rocprof_compute() {
+  if _rocprof_compute_present; then
+    # Persist the resolved absolute path so Ray workers (trimmed PATH) can find it.
+    local resolved
+    resolved="$(command -v "$ROCPROF_COMPUTE_BIN" 2>/dev/null)" || resolved=""
+    [ -z "$resolved" ] && [ -x "$ROCPROF_COMPUTE_PATH" ] && resolved="$ROCPROF_COMPUTE_PATH"
+    if [ -n "$resolved" ]; then
+      export HYPERLOOM_ROCPROF_COMPUTE_PATH="$resolved"
+      _rocprof_fix_python_deps "$resolved" || true
+      _rocprof_fix_pandas3
+      log "rocprof-compute present at ${resolved}"
+    else
+      _rocprof_fix_pandas3
+      log "rocprof-compute present"
+    fi
+    return 0
+  fi
+  if ! command -v "$ROCPROF_APT_BIN" >/dev/null 2>&1; then
+    warn "rocprof-compute missing and apt-get unavailable; kernel roofline data will be skipped"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "rocprof-compute missing (check-only; would apt-get install rocprofiler-compute)"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would install rocprofiler-compute via apt-get"
+    return 0
+  fi
+  log "installing rocprofiler-compute (provides rocprof-compute)"
+  export DEBIAN_FRONTEND=noninteractive
+  if "$ROCPROF_APT_BIN" update -qq >/dev/null 2>&1 \
+      && "$ROCPROF_APT_BIN" install -y --no-install-recommends rocprofiler-compute >/dev/null 2>&1 \
+      && _rocprof_compute_present; then
+    local resolved
+    resolved="$(command -v "$ROCPROF_COMPUTE_BIN" 2>/dev/null)" || resolved=""
+    [ -z "$resolved" ] && [ -x "$ROCPROF_COMPUTE_PATH" ] && resolved="$ROCPROF_COMPUTE_PATH"
+    [ -n "$resolved" ] && export HYPERLOOM_ROCPROF_COMPUTE_PATH="$resolved"
+    [ -n "$resolved" ] && _rocprof_fix_python_deps "$resolved" || true
+    _rocprof_fix_pandas3
+    log "rocprofiler-compute installed OK${resolved:+ at ${resolved}}"
+  else
+    warn "rocprofiler-compute install failed; kernel roofline data will be skipped (preinstall it in the image to fix)"
+  fi
+}
+
 # --- 5. Chain to kernel-agent ---
 chain_kernel_agent() {
   if [ "$SKIP_KERNEL_AGENT" -eq 1 ]; then
@@ -625,10 +994,10 @@ chain_kernel_agent() {
 
 # --- 5. Chain to framework-agent ---
 # Mirrors chain_kernel_agent but for the `fa` CLI used by the
-# `framework_pr` bandit arm. framework-agent's installer is fully
-# self-contained (zero shared state with kernel-agent), so we just
+# Coordinator-owned FRAMEWORK_PR phase. framework-agent's installer is
+# fully self-contained (zero shared state with kernel-agent), so we just
 # delegate. Failures here are non-fatal: the IO main path still
-# works without fa; only `framework_pr` arm ticks require it.
+# works without fa; only the FRAMEWORK_PR phase requires it.
 chain_framework_agent() {
   if [ "$SKIP_FRAMEWORK_AGENT" -eq 1 ]; then
     log "skipping framework-agent installer (--skip-framework-agent)"
@@ -653,10 +1022,15 @@ chain_framework_agent() {
 }
 
 ensure_inference_optimizer
+ensure_langfuse_when_enabled
+# Hold the install lock for the whole mirror-mutating region (Magpie /
+# InferenceX clones + the chained kernel-agent GEAK/OOB/TraceLens clones).
+acquire_install_lock
 ensure_magpie
 ensure_magpie_atomic_scripts_patch
 ensure_inferencex
 ensure_bench_serving_deps
+ensure_rocprof_compute
 chain_kernel_agent
 chain_framework_agent
 
@@ -707,8 +1081,8 @@ _probe_framework_source_roots
 # framework-agent (sibling skill — drives the standalone FRAMEWORK_PR
 # phase via ``fa phase-discover`` for batch enumeration. The
 # Coordinator's executor handles the apply/bench loop directly, so
-# ``phase-fetch`` / ``phase-emit-proposal`` ship for ad-hoc use but
-# are not on the inference_optimizer hot path). Owns its own python
+# only ``phase-discover`` is wired/kept on the inference_optimizer
+# path). Owns its own python
 # deps and venv layout; we only need to invoke its installer.
 #
 # Install is ON by default to match the runtime default

@@ -28,6 +28,9 @@ See [ENV_AND_AUTH.md](ENV_AND_AUTH.md) §1.
 | `GEAK_MODEL_NAME`      | no       | `claude-opus-4-7` | GEAK preprocessor / solver model id.                                                                                                                                                           |
 | `ANTHROPIC_API_KEY`    | no       | inherits `SAFE_API_KEY` (via auth-proxy) | Only set explicitly to override.                                                                                                                                |
 | `OPENAI_API_KEY`       | no       | inherits `SAFE_API_KEY` (via auth-proxy) | Only set explicitly to override.                                                                                                                                |
+| `LANGFUSE_HOST`        | no (required only when `HYPERLOOM_LANGFUSE_ENABLE=1`) | unset | Base URL of your Langfuse deployment (e.g. `https://langfuse.<your-domain>`). Used by both the live trace push and the offline `backfill_langfuse` CLI. |
+| `LANGFUSE_PUBLIC_KEY`  | no (required only when `HYPERLOOM_LANGFUSE_ENABLE=1`) | unset | Langfuse project public key (`pk-...`).                                                                                                                  |
+| `LANGFUSE_SECRET_KEY`  | no (required only when `HYPERLOOM_LANGFUSE_ENABLE=1`) | unset | Langfuse project secret key (`sk-...`).                                                                                                                  |
 
 ---
 
@@ -38,7 +41,7 @@ See [ENV_AND_AUTH.md](ENV_AND_AUTH.md) §1.
 | `REPO_ROOT`                               | yes (local mode)     | `$(pwd)` when invoked from the repo root                           | This Hyperloom checkout. Used to locate `.env`, skills, scripts.                                                                                                                     |
 | `OOB_SRC`                                 | yes for OOB backends | —                                                                  | Path to the `OOB/` subdirectory inside the Primus-Claw clone.                                                                                                                        |
 | `INFERENCEX_PATH`                         | yes for baseline / target analysis | —                                                    | Path to the SemiAnalysisAI/InferenceX repo.                                                                                                                                          |
-| `TRACELENS_ROOT`                          | yes for profile / kernel detection | `/wekafs/hyperloom/TraceLens-internal` when present  | Path to a checkout of `release/hyperloom_integration_v0.3` on TraceLens-internal.                                                                                                    |
+| `TRACELENS_ROOT`                          | no (installer auto-clones) | `$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `kernel-agent/scripts/install.sh` clones the public repo here when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
 | `USER_DATA_PATH`                          | no                   | `/workspace/hyperloom`                                             | Session directory root (logs, runs, mirrors, breakdown). Replaces the retired `INFERENCE_OPTIMIZER_SESSION_DIR` and `WORKSPACE_PATH`.                                                |
 | `HYPERLOOM_ROOT`                          | no                   | derived from `REPO_ROOT`                                           | Writable Hyperloom asset root used by the installer for GEAK / OOB / TraceLens mirrors. Defaults to `$REPO_ROOT`; override if `REPO_ROOT` is on a read-only mount.                  |
 | `MAGPIE_DIR`                              | no                   | discovered from sibling layouts                                    | Magpie source root for benchmark wrappers.                                                                                                                                            |
@@ -121,7 +124,7 @@ read them when invoked standalone.
 | `ROBUSTNESS_LLM_RCA_DISABLED`         | unset                  | Set to `1` to forcibly disable the LLM RCA engine even when credentials are present.                                                 |
 | `ROBUSTNESS_AGENT_ENABLE_HARD_ACTIONS`| unset                  | M4 milestone gate for scheduling-police hard actions (`prune_branch`, `force_dispatch`, ...). Default keeps them disabled.           |
 | `LLM_MODEL`                           | `claude-opus-4-7`      | RCA model name for robustness-agent.                                                                                                 |
-| `ROBUST_ANALYZER_URL`                 | scan known DNS         | Legacy provider URL, kept for the `--mode legacy` robustness loop.                                                                   |
+| `ROBUST_ANALYZER_URL`                 | scan known DNS         | Optional hybrid-provider endpoint used by robustness-agent local/server data-source discovery.                                      |
 
 ---
 
@@ -135,6 +138,64 @@ populate `session_breakdown.json` for downstream consumers
 |-------------------|--------------------------------------------------------------------------------------------|
 | `CLAW_SESSION_ID` | Hosted SaFE / Claw session id, written to `session.claw_session_id` in `session_breakdown.json`. Set by the PrimusClaw sandbox; unset for local runs. |
 | `SANDBOX_USER_ID` | Hosted SaFE / Claw user id, written to `session.sandbox_user_id`. Set by PrimusClaw; unset for local runs.                                            |
+| `HYPERLOOM_LANGFUSE_ENABLE` | Master switch (default **off**) for live Langfuse trace push. NOTE: when this flag is on in the environment / `.env`, `scripts/install.sh` auto-installs the optional `langfuse` SDK on demand (and skips it entirely when off), so no separate `pip install '...[trace]'` is required. When `1/true/yes/on` *and* the three `LANGFUSE_*` credentials are set, every in-process LLM call is mirrored into Langfuse while the run is live, and a session-end flush backfills the out-of-process children (geak / oob / robustness / specialist) and KEEP/REVERT decision Scores. The local `reports/trace/*.jsonl` ledger is always written regardless. Requires the optional `langfuse` dependency (`pip install 'hyperloom-inference_optimizer[trace]'`); a missing SDK degrades to a no-op. **Correlation:** the Langfuse trace id and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session id for standalone runs, so live push and the offline `backfill_langfuse` CLI collapse onto one trace per PrimusClaw session. **Span layout:** `trace → phase span (PRELUDE/EXPLORE/KERNEL/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/oob/…) → Generation`; each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision (trace-level fallback when no matching span exists). **Receipt:** every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting whether the push was enabled (or the `disabled_reason`), the redacted connection config (host + key-presence booleans, never the keys), the derived `trace_id`/`session_id`, and how many generations/scores/spans were actually sent — so an operator can confirm post-hoc whether a run reached Langfuse. |
+
+#### Langfuse / artifact-package — security & known limitations
+
+* **Sensitive data surface.** When live push is on, `conversations.jsonl`
+  (and Langfuse Generations) carry full prompt/response text. `redact_secrets`
+  scrubs common token shapes (Bearer, `sk-`/`pk-`, GitHub tokens, some
+  `KEY=value`) but is **not** a complete DLP filter — bare keys without a
+  recognizable prefix (e.g. raw AWS `AKIA…`) can slip through. The artifact
+  packager also copies `reports/trace/*.jsonl` and, with the loose mode on by
+  default (`HYPERLOOM_SESSION_PACKAGE_LOOSE`), drops them under `/workspace`
+  for the Claw sync. If a session may contain customer code / secrets, define
+  an explicit retention + access-control policy for both the Langfuse project
+  and the `/workspace` package destination, and consider disabling live push
+  or loose packaging for those runs.
+* **`live push` + `backfill_langfuse` overlap.** Both derive the same
+  `trace_id` from `claw_session_id`, so running the offline backfill *after* a
+  live run re-emits the out-of-process children onto the same trace and can
+  duplicate observations. Use one path per session, or treat backfill as a
+  recovery tool only when live push did not run.
+* **`flush_session` is idempotent.** A second flush only re-writes the receipt
+  (no re-emit), so a duplicated CLOSE step won't double-push.
+* **Package truncation.** The bundle caps at 5000 files / 256 MB. On a very
+  long session the cap can stop the bundle short; the `PACKAGE_MANIFEST` then
+  sets `truncated: true` and lists `dropped_files`, so consumers must not treat
+  a truncated package as complete.
+* **Generation duration is ~0.** Both live and backfill stamp a single
+  timestamp (`end == start`), so Langfuse shows no meaningful per-Generation
+  duration — counts/usage are accurate, latency is not captured.
+
+### `token_usage` section (in `session_breakdown.json`)
+
+Every breakdown carries a top-level `token_usage` section: a promoted,
+discoverable rollup of LLM token spend derived from the per-call ledger
+(`reports/trace/llm_calls.jsonl` + `ext/*.jsonl`). It is purely derived from
+`decision_trace.token_rollup`, so it always reconciles with that section. No
+env var controls it; it is always present (zeroed on pre-trace sessions).
+
+* `session_total` — whole-session total across every call, with two
+  convenience figures: `total_in_out` (prompt + completion only) and
+  `grand_total` (in + out + all cache-creation + cache-read tokens).
+* `by_component` — per-agent breakdown (orchestration / kernel / critic /
+  specialist / proposal_scorer / geak / oob / …), each with the same
+  convenience totals.
+* `by_phase` — per-phase breakdown (PRELUDE / FRAMEWORK_PR / EXPLORE / SWEEP / …).
+* `attribution` — `attributed_to_decisions` vs `unattributed` split plus
+  `attributed_calls_pct`. Only calls that carry a `task_id` / `dyn_id` joining
+  to a KEEP/REVERT or dynamic_action decision (e.g. specialist subprocess
+  turns) are attributed; orchestration / kernel / critic / proposal_scorer
+  turns are LLM-internal and land in `unattributed` (this is expected, not a
+  gap in the data).
+* `timeline` — each `action_timeline` row annotated with the tokens that join
+  to it on `task_id`. Rows whose action has no LLM spend show `tokens: null`
+  (rather than a zero bucket) to make the sparsity explicit.
+
+To get the single "total tokens for this run" number, read
+`token_usage.session_total.grand_total` (all-in) or `.total_in_out`
+(prompt+completion only).
 
 ---
 

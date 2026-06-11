@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 name: Auto-close stale issues awaiting author response
 
 # Runs hourly. Only acts on issues labeled 'awaiting-author-response':

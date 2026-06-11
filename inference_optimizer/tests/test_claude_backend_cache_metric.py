@@ -1,38 +1,17 @@
-"""Roofline-v2 N6: ClaudeBackend cache hit metric extraction.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Pins the contract N7 (verify + audit scripts) builds on top of:
-ClaudeBackend exposes `cache_creation_input_tokens` /
-`cache_read_input_tokens` / `input_tokens` / `output_tokens` from
-the underlying SDK's `ResultMessage.usage` on every `run()`
-invocation, in two places:
-
-* `backend.calls[-1]` (existing per-call audit log)
-* `BackendTurnResult.metadata` (returned to Coordinator)
-
-The metric is extracted exclusively from `ResultMessage.usage` —
-Anthropic Messages API response shape that Claude Code propagates
-on its terminal SDK messages. See task_manager.py in Primus-Claw/OOB
-(lines 152-153) for the same pattern in production.
-
-We do NOT inject `cache_control` ourselves (claude-agent-sdk 0.2.82
-doesn't expose that param), and we don't reorder prompt sections —
-automatic caching already operates on the `system_prompt + tools +
-messages` prefix per Anthropic docs. N6's contribution is purely
-**measuring** how effective that automatic caching is.
-"""
+"""Roofline-v2 N6: ClaudeBackend cache hit metric extraction."""
 
 from __future__ import annotations
 
 
 import pytest
 
-from inference_optimizer.orchestrator.intent_parser import IntentType
+from inference_optimizer.protocol.intent import IntentType
 from inference_optimizer.orchestrator.backends.claude import ClaudeBackend
 
 
-# ---------------------------------------------------------------------------
 # Fake SDK plumbing
-# ---------------------------------------------------------------------------
 class _FakeBlock:
     """Mimics claude_agent_sdk's ToolUseBlock with name + input."""
 
@@ -73,8 +52,7 @@ def _emit_intent_block() -> _FakeToolUseBlock:
 
 
 def _make_backend(messages: list[_FakeMessage]) -> ClaudeBackend:
-    """Construct ClaudeBackend with a fake SDK that plays back the given
-    message sequence."""
+    """Construct ClaudeBackend with a fake SDK that plays back the given messages."""
 
     async def fake_query(*, prompt, options):
         for m in messages:
@@ -93,14 +71,10 @@ def _make_backend(messages: list[_FakeMessage]) -> ClaudeBackend:
     return backend
 
 
-# ---------------------------------------------------------------------------
 # Happy path — usage propagates to calls + metadata
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_cache_metrics_extracted_from_result_message_usage():
-    """Happy path: ResultMessage carries `usage` dict including the 4
-    Anthropic token counters; they land on both `backend.calls[-1]`
-    and `BackendTurnResult.metadata`."""
+    """Happy path: the 4 token counters land on both `backend.calls[-1]` and `BackendTurnResult.metadata`."""
     messages = [
         _FakeMessage(content=[_emit_intent_block()]),
         _FakeMessage(
@@ -131,9 +105,7 @@ async def test_cache_metrics_extracted_from_result_message_usage():
 
 @pytest.mark.asyncio
 async def test_cache_read_only_means_cache_hit():
-    """When `cache_read > 0` and `cache_creation == 0`, the prompt
-    prefix was fully served from cache — this is the success
-    signal §10.3 looks for."""
+    """`cache_read > 0` and `cache_creation == 0` means the prefix was fully served from cache (the §10.3 success signal)."""
     messages = [
         _FakeMessage(content=[_emit_intent_block()]),
         _FakeMessage(
@@ -153,8 +125,7 @@ async def test_cache_read_only_means_cache_hit():
 
 @pytest.mark.asyncio
 async def test_cache_creation_only_means_first_miss():
-    """First request in a session: cache_creation > 0, cache_read = 0.
-    The next request with the same prefix should hit."""
+    """First request in a session: cache_creation > 0, cache_read = 0."""
     messages = [
         _FakeMessage(content=[_emit_intent_block()]),
         _FakeMessage(
@@ -172,16 +143,12 @@ async def test_cache_creation_only_means_first_miss():
     assert result.metadata["cache_read_input_tokens"] == 0
 
 
-# ---------------------------------------------------------------------------
 # Degraded paths — usage missing / non-dict / SDK silent on cache
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_no_usage_field_zero_metrics():
-    """SDK silent on usage (older Claude Code versions / unusual model
-    fallback paths) → metrics default to 0, no crash."""
+    """SDK silent on usage → metrics default to 0, no crash."""
     messages = [
         _FakeMessage(content=[_emit_intent_block()]),
-        # No usage attribute at all
     ]
     backend = _make_backend(messages)
     result = await backend.run(prompt="hello")
@@ -192,8 +159,7 @@ async def test_no_usage_field_zero_metrics():
 
 @pytest.mark.asyncio
 async def test_usage_partial_only_some_keys_present():
-    """SDK reports usage but only `input_tokens` (legacy gateway path).
-    Missing cache keys default to 0."""
+    """SDK reports usage with only `input_tokens`; missing cache keys default to 0."""
     messages = [
         _FakeMessage(content=[_emit_intent_block()]),
         _FakeMessage(usage={"input_tokens": 200}),
@@ -208,8 +174,7 @@ async def test_usage_partial_only_some_keys_present():
 
 @pytest.mark.asyncio
 async def test_usage_non_dict_treated_as_missing():
-    """`usage` field present but is e.g. a string (SDK schema drift) →
-    metrics default to 0, no crash."""
+    """`usage` present but non-dict (SDK schema drift) → metrics default to 0, no crash."""
     msg = _FakeMessage(content=[_emit_intent_block()])
     msg.usage = "garbage"  # type: ignore[assignment]
     backend = _make_backend([msg])
@@ -219,9 +184,7 @@ async def test_usage_non_dict_treated_as_missing():
 
 @pytest.mark.asyncio
 async def test_usage_non_numeric_value_coerced_to_zero():
-    """`cache_creation_input_tokens` present but non-numeric (e.g.
-    None / "n/a") → coerce to 0 (defensive against gateway proxies
-    that filter values)."""
+    """Non-numeric token values → coerce to 0 (defensive against gateway proxies)."""
     messages = [
         _FakeMessage(content=[_emit_intent_block()]),
         _FakeMessage(usage={
@@ -239,14 +202,10 @@ async def test_usage_non_numeric_value_coerced_to_zero():
     assert result.metadata["output_tokens"] == 50
 
 
-# ---------------------------------------------------------------------------
 # Multiple ResultMessages — last usage wins
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_last_usage_wins_when_multiple_result_messages():
-    """In multi-turn streaming, only the terminal ResultMessage carries
-    the cumulative session usage. Earlier ResultMessages (turn-level)
-    must NOT clobber the final one."""
+    """Only the terminal ResultMessage carries cumulative usage; earlier ones must NOT clobber it."""
     messages = [
         _FakeMessage(content=[_emit_intent_block()]),
         _FakeMessage(usage={"input_tokens": 50, "cache_read_input_tokens": 100}),
@@ -266,9 +225,7 @@ async def test_last_usage_wins_when_multiple_result_messages():
     assert result.metadata["output_tokens"] == 100
 
 
-# ---------------------------------------------------------------------------
 # safe_int helper
-# ---------------------------------------------------------------------------
 def test_safe_int_coerces_ints_strings_and_falsy():
     assert ClaudeBackend._safe_int(42) == 42
     assert ClaudeBackend._safe_int("100") == 100
@@ -279,9 +236,7 @@ def test_safe_int_coerces_ints_strings_and_falsy():
     assert ClaudeBackend._safe_int(False) == 0  # bool → int(False) == 0
 
 
-# ---------------------------------------------------------------------------
 # Pre-existing fields preserved
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_existing_metadata_fields_still_present():
     """N6 adds cache fields without removing tool_blocks / model."""
@@ -291,10 +246,8 @@ async def test_existing_metadata_fields_still_present():
     ]
     backend = _make_backend(messages)
     result = await backend.run(prompt="hello")
-    # Old fields
     assert "tool_blocks" in result.metadata
     assert "model" in result.metadata
-    # New fields
     assert "cache_creation_input_tokens" in result.metadata
     assert "cache_read_input_tokens" in result.metadata
 

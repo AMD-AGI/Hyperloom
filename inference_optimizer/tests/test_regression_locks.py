@@ -1,26 +1,12 @@
-"""P3 bug-fix regression tests.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Locks the three P3 fixes uncovered by the resume3 1h validation
-(see PR #130 description):
+"""P3 bug-fix regression tests (PR #130).
 
-* **Bug A** ``ReportExecutor`` failed with ``could not resolve session_dir``
-  because Coordinator never threaded the active session_dir into the
-  runner context. Fix: cli.py exports ``$USER_DATA_PATH`` and report.py
-  picks it up before falling back to the most-recent-session heuristic.
-
-* **Bug B** Codex Kernel LLM emitted a duplicate (hallucinated) RESPONSE
-  to the same REQUEST that the programmatic_handler had already answered.
-  Fix: Coordinator advances the target_agent cursor past ``request_msg.seq``
-  immediately after the handler responds, so the next reactor pass for
-  that agent doesn't see the request in its inbox.
-
-* **Bug C** Orchestration fabricated trace paths for ``trace_analyze``
-  REQUESTs because SharedState never exposed the trace path produced by
-  ``ProfileExecutor``. Fix: ``Coordinator._promote_to_shared_state`` writes
-  ``main_trace_path`` to ``shared_state.last_profile_trace`` on profile
-  succeeded; ``to_prompt_summary`` shows it;
-  ``orchestrator/system_prompts/orchestration.md`` (loaded by
-  ``cli._load_orchestration_prompt``) tells Orch to use it verbatim.
+Bug A: ReportExecutor session_dir resolution via $USER_DATA_PATH.
+Bug B: programmatic handler advances the target-agent cursor to suppress
+duplicate RESPONSEs.
+Bug C: profile success promotes ``main_trace_path`` to
+``shared_state.last_profile_trace``.
 """
 
 from __future__ import annotations
@@ -38,7 +24,7 @@ from inference_optimizer.orchestrator.backends import (
     ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.task_registry import Task
 from inference_optimizer.paths import make_session_dir
@@ -66,20 +52,16 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     return make_session_dir()
 
 
-# ===========================================================================
 # Bug A — ReportExecutor session_dir resolution
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_report_resolves_session_dir_from_env(tmp_path, monkeypatch):
-    """When CLI exports USER_DATA_PATH, ReportExecutor uses it without
-    needing task.params or ctx.extra to carry it."""
+    """ReportExecutor resolves session_dir from $USER_DATA_PATH."""
     sd = tmp_path / "real-session"
     sd.mkdir()
     state = SharedState(session_id=sd.name, model_name="qwen3-8b",
                         baseline_tput=800.0, cumulative_gain=2.5)
     state.save(sd)
-    # Initialise the coordinator.db with the schema (ensure_schema runs
-    # automatically when SqliteConnection opens).
+    # Initialise the coordinator.db schema.
     from inference_optimizer.storage.connection import SqliteConnection
     storage_dir = sd / "storage"
     storage_dir.mkdir()
@@ -126,17 +108,12 @@ async def test_report_prefers_ctx_extra_over_env(tmp_path, monkeypatch):
     assert summary["baseline_tput"] == 600.0
 
 
-# ===========================================================================
 # Bug B — programmatic_handler advances target cursor
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypatch):
-    """After Coordinator handles a 'trace_analyze' request inline, the
-    kernel agent's cursor should be past the request seq so its next
-    compose_prompt won't include the already-handled request."""
+    """After an inline 'trace_analyze' handler, the kernel cursor moves past the request."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        # Stub the real handler so we don't shell out to kernel-agent.
         from inference_optimizer.orchestrator import kernel_request_handlers
         async def fake_handler(payload, *, session_dir):
             return {"status": "ok", "selected_kernels": [{"rank": 1, "name": "x"}]}
@@ -145,11 +122,9 @@ async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypa
             "trace_analyze", fake_handler,
         )
 
-        # Cursor for kernel starts at 0
         cur_before = await c.cursors.load("kernel")
         assert cur_before.last_processed_seq == 0
 
-        # Dispatch a REQUEST from orchestration → kernel
         intent = Intent(
             type=IntentType.REQUEST,
             payload={"target_agent": "kernel", "kind": "trace_analyze",
@@ -157,20 +132,17 @@ async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypa
         )
         await c._handle_intent("orchestration", intent)
 
-        # The request was written + the response was written
         msgs = await c.bus.tail(n=10)
         topics = [m.topic for m in msgs]
         assert "request" in topics
         assert "response" in topics
 
-        # Kernel cursor is past the request — kernel won't see it next tick
         cur_after = await c.cursors.load("kernel")
         request_msg = next(m for m in msgs if m.topic == "request")
         assert cur_after.last_processed_seq >= request_msg.seq, (
             f"kernel cursor {cur_after.last_processed_seq} must be past "
             f"request seq {request_msg.seq} to suppress duplicate response"
         )
-        # Verify replay_for excludes the request from kernel's next inbox
         leftover = await c.bus.replay_for(
             "kernel", after_seq=cur_after.last_processed_seq,
         )
@@ -182,8 +154,7 @@ async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypa
 
 @pytest.mark.asyncio
 async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypatch, tmp_path):
-    """Successful trace_analyze writes a cache entry; the next identical
-    request short-circuits without invoking the handler."""
+    """Successful trace_analyze caches; an identical request short-circuits the handler."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from inference_optimizer.orchestrator import kernel_request_handlers
@@ -230,19 +201,15 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
         ))
         assert call_count["n"] == 2
 
-        # to_prompt_summary surfaces the cached state for Orchestration.
         assert "last_trace_analyze=" in c.shared_state.to_prompt_summary()
     finally:
         await c.stop()
 
 
-# ===========================================================================
 # Bug C — profile result promotes main_trace_path to SharedState
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_profile_promotion_records_args_and_clears_select_cache(session_dir):
-    """A new profile invalidates any prior trace_analyze cache and stamps
-    the server config that produced the trace into shared_state."""
+    """A new profile clears the trace_analyze cache and stamps the server config."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from inference_optimizer.orchestrator.task_registry import Task
@@ -285,7 +252,7 @@ async def test_profile_promotion_writes_last_profile_trace(session_dir):
 
         result = {
             "status": "succeeded",
-            "output_throughput": 805.0,  # +0.6%, below 1% so no current_best
+            "output_throughput": 805.0,  # +0.6%, below 1% threshold
             "trace_dir": "/tmp/ws/torch_trace",
             "main_trace_path": "/tmp/ws/torch_trace/main.trace.json.gz",
             "trace_files": ["/tmp/ws/torch_trace/main.trace.json.gz"],
@@ -295,10 +262,8 @@ async def test_profile_promotion_writes_last_profile_trace(session_dir):
 
         assert c.shared_state.last_profile_trace == \
             "/tmp/ws/torch_trace/main.trace.json.gz"
-        # below-threshold tput shouldn't move current_best
         assert (c.shared_state.current_best or {}).get("action") != "profile"
 
-        # On reload, the field survives.
         reloaded = SharedState.load_or_init(session_dir)
         assert reloaded.last_profile_trace == \
             "/tmp/ws/torch_trace/main.trace.json.gz"

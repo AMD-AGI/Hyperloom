@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Agent role definitions
 
 Each :class:`AgentRole` binds:
@@ -24,19 +26,8 @@ v0.6 roster — 4 persistent reactors, no mode gating::
     │              │          │ + always-on tick                        │
     └──────────────┴──────────┴─────────────────────────────────────────┘
 
-Removed in the legacy release:
-    * sage role (KB merged into Critic — §7.3 / ADR-35)
-    * robustness role (health monitoring + RCA + recovery — ADR-36)
-    * triage role (renamed to robustness — alignment with arch diagram)
-    * OBJECTION / VOTE intents (parliament removed entirely — ADR-38)
-
-Framework / Comm layer experts (DESIGN §7.7) are **not implemented** in
-v0.6; they're architecturally placeholders.
-
-References:
-    --7.4   Per-role responsibilities
-    -       Role × Intent capability matrix
-    -      PolicyGate consumes the flags below
+The roster is exactly these four roles. Framework PR work runs as the
+Coordinator-owned FRAMEWORK_PR phase, not an agent role.
 """
 
 from __future__ import annotations
@@ -47,7 +38,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from ..paths import asset_system_prompts_dir
-from .intent_parser import IntentType
+from ..protocol.intent import IntentType
 
 
 class BackendType(str, Enum):
@@ -57,9 +48,7 @@ class BackendType(str, Enum):
     CODEX = "codex"     # no-tools, validated_json_output only (KB Bash exception)
 
 
-# --------------------------------------------------------------------------
 # Built-in default model + API key env table
-# --------------------------------------------------------------------------
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-7"
 DEFAULT_CODEX_MODEL = "gpt-5.4"  # litellm support pending for 5.5
 
@@ -67,9 +56,7 @@ DEFAULT_CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY"
 DEFAULT_CODEX_API_KEY_ENV = "OPENAI_API_KEY"
 
 
-# --------------------------------------------------------------------------
 # Role permission catalogue (DESIGN §7.6)
-# --------------------------------------------------------------------------
 _BASE_INTENTS: frozenset[IntentType] = frozenset({
     IntentType.SEND_MESSAGE,
     IntentType.ASK_QUESTION,
@@ -79,21 +66,14 @@ _BASE_INTENTS: frozenset[IntentType] = frozenset({
 })
 
 
-# Orchestration — proposes / delegates / requests Kernel; the only role with
-# REQUEST authority (target_agent="kernel" enforced by PolicyGate).
-#
-# Roofline-v2 C3: Orchestration is also granted PRUNE_BRANCH so it can act on
-# the structured ``suggested_prunes`` advice produced by the ``roofline``
-# action (C4 / C5). The intent's per-source allowlist is widened in
-# :mod:`.policy` (``_ROBUSTNESS_ONLY_INTENT_SOURCES``); the other two
-# scheduling-police intents (FORCE_DISPATCH, ESCALATE_STRATEGY_CHANGE) stay
-# robustness-only.
+# Orchestration — only role with REQUEST authority; holds PRUNE_BRANCH (Roofline-v2 C3) + ESCALATE_STRATEGY_CHANGE. FORCE_DISPATCH stays robustness-only.
 _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
     IntentType.PROPOSE_ACTION,
     IntentType.DELEGATE,
     IntentType.UPDATE_STATE,
     IntentType.REQUEST,
     IntentType.PRUNE_BRANCH,
+    IntentType.ESCALATE_STRATEGY_CHANGE,
 })
 
 
@@ -104,15 +84,13 @@ _KERNEL_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
 })
 
 
-# Critic — review verdicts only (no propose_action / delegate / request).
-# Devil's advocate: send_message(topic="advice"), no parliament intents.
+# Critic — review verdicts only; devil's advocate via send_message(topic="advice").
 _CRITIC_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
     IntentType.REVIEW_VERDICT,
 })
 
 
-# Robustness — always-on health monitoring + RCA + recovery. Holds the entire
-# scheduling-police intent set + KILL_TASK exclusively.
+# Robustness — always-on health monitoring + RCA + recovery; holds the scheduling-police set + KILL_TASK exclusively.
 _ROBUSTNESS_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
     IntentType.UPDATE_STATE,  # crash_count / current_action only
     IntentType.DELEGATE,      # only handle actions: accuracy_gate / recover / server_lifecycle
@@ -123,9 +101,7 @@ _ROBUSTNESS_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
 })
 
 
-# --------------------------------------------------------------------------
 # AgentRole dataclass
-# --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class AgentRole:
     """Static role record. Backend instances are created elsewhere.
@@ -146,17 +122,36 @@ class AgentRole:
 
     @property
     def system_prompt_path(self) -> Path:
+        """Path to this role's system prompt markdown file.
+
+        Uses ``system_prompt_filename`` when set, else ``<name>.md`` under
+        the shared system-prompts asset directory.
+
+        Returns:
+            Path: Absolute path to the role's system prompt file.
+        """
         return asset_system_prompts_dir() / (self.system_prompt_filename or f"{self.name}.md")
 
     def load_system_prompt(self) -> str:
+        """Read and return this role's system prompt text.
+
+        Returns:
+            str: The UTF-8 decoded contents of :attr:`system_prompt_path`.
+        """
         return self.system_prompt_path.read_text(encoding="utf-8")
 
 
-# --------------------------------------------------------------------------
 # Default registry
-# --------------------------------------------------------------------------
 def default_role_registry() -> dict[str, AgentRole]:
-    """Return the canonical v0.6 4-agent registry (PascalCase capable)."""
+    """Return the canonical v0.6 4-agent registry (PascalCase capable).
+
+    Builds fresh :class:`AgentRole` records for orchestration, kernel,
+    critic, and robustness with their default backends, models, and
+    permission flags.
+
+    Returns:
+        dict[str, AgentRole]: Mapping of role name to its static record.
+    """
     return {
         "orchestration": AgentRole(
             name="orchestration",
@@ -203,7 +198,13 @@ def default_role_registry() -> dict[str, AgentRole]:
 
 @lru_cache(maxsize=1)
 def roles_for_run() -> tuple[str, ...]:
-    """Stable, deterministic ordering for reactor loop iteration."""
+    """Stable, deterministic ordering for reactor loop iteration.
+
+    Cached so every caller observes the same tuple instance.
+
+    Returns:
+        tuple[str, ...]: Role names in fixed reactor-iteration order.
+    """
     return ("orchestration", "kernel", "critic", "robustness")
 
 

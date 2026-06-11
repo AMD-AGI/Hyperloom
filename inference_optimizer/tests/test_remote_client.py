@@ -1,24 +1,6 @@
-"""Read-only tests for :class:`RemoteRecipeClient`.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The remote client is the read half of the recipe-snapshot KB
-dispatcher (writes go local-only via :class:`LocalRecipeStore`).
-This module covers only the HTTP transport + read-method surface:
-
-* health probe — 200 ok / 5xx / disabled-client short-circuit;
-* get_recipe — 200 / 404 (returns None) / ?version=N forwarding /
-  5xx (raises RemoteRecipeClientError);
-* get_history — empty-array contract on unknown id;
-* search — POST body shape, default order_by, limit forwarding;
-* list_recent / list_attempts / list_session_attempts — limit
-  forwarding + empty-list short-circuits;
-* session_summary — dict pass-through;
-* env-driven config overrides (CORTEX_KB_URL,
-  CORTEX_KB_HTTP_TIMEOUT_SEC, CORTEX_KB_RETRY_ATTEMPTS,
-  KB_SERVICE_TOKEN);
-* foreground vs background timeout/retry profile defaults.
-
-No write methods are tested — the client doesn't expose any.
-"""
+"""Read-only tests for :class:`RemoteRecipeClient` — HTTP transport + read-method surface (writes go local-only)."""
 
 from __future__ import annotations
 
@@ -63,8 +45,7 @@ def _cid(model: str = "m") -> str:
 
 @pytest.fixture
 def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Wipe the env vars the client consults so tests can opt into
-    each one explicitly without inheriting CI noise."""
+    """Wipe the env vars the client consults so tests opt into each one explicitly."""
     for key in (
         "CORTEX_KB_URL",
         "CORTEX_KB_HTTP_TIMEOUT_SEC",
@@ -84,9 +65,7 @@ def client(env_clean: None) -> RemoteRecipeClient:
     )
 
 
-# ===========================================================================
 # Health
-# ===========================================================================
 def test_health_returns_true_on_status_ok(client: RemoteRecipeClient) -> None:
     with respx.mock(base_url=KB_URL) as mock:
         mock.get(PATH_HEALTH).mock(
@@ -116,9 +95,7 @@ def test_health_returns_false_on_unexpected_body(client: RemoteRecipeClient) -> 
         assert client.health() is False
 
 
-# ===========================================================================
 # get_recipe
-# ===========================================================================
 def test_get_recipe_returns_dict_on_200(client: RemoteRecipeClient) -> None:
     cid = _cid()
     expected = {"canonical_id": cid, "version": 3, "metrics": {"x": 1.0}}
@@ -130,8 +107,7 @@ def test_get_recipe_returns_dict_on_200(client: RemoteRecipeClient) -> None:
 
 
 def test_get_recipe_returns_none_on_404(client: RemoteRecipeClient) -> None:
-    """A missing recipe is a normal state — the dispatcher uses the
-    None return as the "fall through to local" trigger."""
+    """A missing recipe is normal — None is the dispatcher's "fall through to local" trigger."""
     cid = _cid(model="absent")
     with respx.mock(base_url=KB_URL) as mock:
         mock.get(format_recipe_path(PATH_RECIPE_TPL, cid)).mock(
@@ -188,9 +164,7 @@ def test_get_recipe_rejects_empty_canonical_id(client: RemoteRecipeClient) -> No
         client.get_recipe(canonical_id="")
 
 
-# ===========================================================================
 # get_history
-# ===========================================================================
 def test_get_history_returns_archives(client: RemoteRecipeClient) -> None:
     cid = _cid()
     payload = {
@@ -224,9 +198,7 @@ def test_get_history_disabled_returns_empty(env_clean: None) -> None:
     assert c.get_history(canonical_id=_cid()) == []
 
 
-# ===========================================================================
 # list_recent / search
-# ===========================================================================
 def test_list_recent_forwards_limit(client: RemoteRecipeClient) -> None:
     with respx.mock(base_url=KB_URL) as mock:
         route = mock.get(PATH_RECIPES_LIST).mock(
@@ -271,7 +243,6 @@ def test_search_omits_optional_fields_when_unset(
         assert "label_match"    not in sent
         assert "metric_filters" not in sent
         assert "updated_since"  not in sent
-        # Required shape: order_by + limit always present.
         assert sent["order_by"] == "updated_at DESC"
         assert sent["limit"]    == 50
 
@@ -281,9 +252,7 @@ def test_search_returns_empty_list_when_disabled(env_clean: None) -> None:
     assert c.search() == []
 
 
-# ===========================================================================
 # Attempts
-# ===========================================================================
 def test_list_attempts_returns_attempts_array(
     client: RemoteRecipeClient,
 ) -> None:
@@ -341,9 +310,7 @@ def test_session_summary_returns_dict(client: RemoteRecipeClient) -> None:
     assert summary["total_attempts"] == 4
 
 
-# ===========================================================================
 # Configuration / env
-# ===========================================================================
 def test_kb_url_falls_back_to_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CORTEX_KB_URL", "http://env-url.example")
     c = RemoteRecipeClient()
@@ -351,10 +318,7 @@ def test_kb_url_falls_back_to_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_no_url_no_env_forces_local_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No explicit URL and no ``$CORTEX_KB_URL`` → the client forces
-    ``enabled=False`` (local-only). The old hard-coded central
-    kb-service default was retired, so there is nothing to fall back
-    to and the optimizer never silently connects to a remote KB."""
+    """No URL and no ``$CORTEX_KB_URL`` → client forces ``enabled=False`` (local-only, never a silent remote connect)."""
     monkeypatch.delenv("CORTEX_KB_URL", raising=False)
     c = RemoteRecipeClient()
     assert c.enabled is False
@@ -402,9 +366,7 @@ def test_token_added_to_header_when_set(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_no_write_methods_present() -> None:
-    """Defence-in-depth: the read-only contract is enforced at the
-    class-attribute level too, so a future refactor that accidentally
-    re-introduces ``put_recipe`` will fail this test."""
+    """Defence-in-depth: the read-only contract is enforced at the class-attribute level too."""
     c = RemoteRecipeClient(kb_url=KB_URL, enabled=False)
     for forbidden in (
         "put_recipe",

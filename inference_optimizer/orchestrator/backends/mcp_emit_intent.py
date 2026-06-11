@@ -1,22 +1,12 @@
-"""In-process MCP server exposing the ``emit_intent`` tool
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Wires :data:`EMIT_INTENT_TOOL_NAME` into the Claude SDK as a real tool
-(rather than a JSON-in-text convention). Each tool_use block from Claude's
-trajectory becomes one validated :class:`Intent` downstream.
+"""In-process MCP server exposing the ``emit_intent`` tool.
 
-Why in-process (not stdio/SSE):
-
-* **Zero extra processes** — Coordinator + reactors + sub-agents already
-  use plenty of pids; an in-process MCP server keeps the topology trim.
-* **Synchronous lookup** — handler validates + returns an MCP envelope;
-  intent capture is done by the trajectory parser (so the handler can
-  stay tiny).
-* **Test seam** — :func:`build_emit_intent_server` accepts factory
-  overrides so tests don't have to import ``claude_agent_sdk``.
-
-Tool-name rewriting: the SDK rewrites ``emit_intent`` to
-``mcp__inference_optimizer__emit_intent`` when forwarding to Claude.
-Use :data:`EMIT_INTENT_TOOL_QUALIFIED` to allow-list it.
+Wires :data:`EMIT_INTENT_TOOL_NAME` into the Claude SDK as a real tool; each
+tool_use block becomes one validated :class:`Intent`. In-process avoids extra
+processes; :func:`build_emit_intent_server` accepts factory overrides for
+tests. The SDK rewrites the name to :data:`EMIT_INTENT_TOOL_QUALIFIED` when
+forwarding to Claude.
 """
 
 from __future__ import annotations
@@ -25,7 +15,7 @@ import importlib
 import logging
 from typing import Any, Callable
 
-from ..intent_parser import (
+from ...protocol.intent import (
     IntentType,
     IntentValidationError,
     _PAYLOAD_REQUIRED,  # type: ignore[attr-defined]
@@ -78,7 +68,21 @@ EMIT_INTENT_TOOL_DESCRIPTION = (
 
 
 def validate_emit_intent_input(payload: dict[str, Any]) -> None:
-    """Eager single-intent validation (mirrors :func:`validate_envelope`)."""
+    """Eager single-intent validation (mirrors :func:`validate_envelope`).
+
+    Checks the tool-input shape (only ``intent_type`` and ``payload`` keys,
+    both present), that ``intent_type`` is a known :class:`IntentType`, and
+    that the inner payload carries every required field for that type.
+
+    Args:
+        payload (dict[str, Any]): The raw ``emit_intent`` tool input to
+            validate.
+
+    Raises:
+        IntentValidationError: If the input is not a dict, has unexpected or
+            missing top-level keys, names an unknown intent type, or omits a
+            required payload field.
+    """
     if not isinstance(payload, dict):
         raise IntentValidationError(
             f"emit_intent input must be an object, got {type(payload).__name__}"
@@ -113,7 +117,7 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> None:
 
 
 async def _emit_intent_handler(args: dict[str, Any]) -> dict[str, Any]:
-    """Default handler — validate then ack. Errors return is_error=True."""
+    """Default handler — validate then ack; errors return is_error=True."""
     try:
         validate_emit_intent_input(args)
     except IntentValidationError as exc:
@@ -126,6 +130,16 @@ async def _emit_intent_handler(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_sdk(sdk_module: Any | None) -> Any | None:
+    """Return the provided SDK module or import ``claude_agent_sdk``.
+
+    Args:
+        sdk_module (Any | None): An explicit SDK module override (used by
+            tests); when ``None`` the real ``claude_agent_sdk`` is imported.
+
+    Returns:
+        Any | None: The resolved SDK module, or ``None`` if the override is
+        absent and the SDK cannot be imported.
+    """
     if sdk_module is not None:
         return sdk_module
     try:
@@ -143,15 +157,10 @@ def build_emit_intent_server(
 ) -> Any | None:
     """Build the in-process MCP server config exposing ``emit_intent``.
 
-    Returns the SDK ``McpSdkServerConfig`` to plug into
+    Returns the SDK ``McpSdkServerConfig`` for
     :class:`ClaudeAgentOptions.mcp_servers`, or ``None`` if the SDK lacks
-    in-process MCP helpers.
-
-    Test seams:
-
-    * ``tool_factory`` — replacement for ``sdk.tool``
-    * ``server_factory`` — replacement for ``sdk.create_sdk_mcp_server``
-    * ``handler`` — replacement for the default validator-handler
+    in-process MCP helpers. ``tool_factory`` / ``server_factory`` /
+    ``handler`` are test seams.
     """
     sdk = _resolve_sdk(sdk_module)
     handler = handler or _emit_intent_handler

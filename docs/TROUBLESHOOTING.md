@@ -80,12 +80,51 @@ defaults to 0 on some images). GEAK and OOB submit tasks with
 ```bash
 RAY_NUM_GPUS="${RAY_NUM_GPUS:-$(python3 -c 'import torch; print(torch.cuda.device_count() or 1)')}"
 ray stop --force || true
+# issue #433: raise the soft open-files limit before `ray start` so the
+# raylet stays up (see "Ray raylet unstable / zombie" below).
+ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true
 ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
 ray status
 ```
 
 > **Note.** `inference_optimizer.cli` does **not** auto-start Ray.
 > Always start it before launching `inference_optimizer optimize`.
+
+---
+
+## Ray raylet unstable / zombie (fd-limit too low)
+
+**Symptom.** During GEAK dispatch the raylet aborts on startup
+(`SIGABRT`), or `ray stop` reports it could not be stopped and leaves
+it behind, e.g.:
+
+```
+WARN scripts.py:1287 -- Stopped only 0 out of 391 Ray processes within
+the grace period 16 seconds. Remaining processes [... name='raylet',
+status='zombie' ...]
+```
+
+**Cause.** At the container default `ulimit -n` (1024) the open-files
+limit is far too low for the raylet, which opens many fds (sockets,
+plasma store, per-worker pipes) — on a 384-CPU node with hundreds of
+workers it needs `nofile >= 65536` (issue #433).
+
+**Fix.** Launch the kernel-agent container with a high open-files limit
+(this is a **hard requirement** — only the container launch can lift the
+*hard* cap):
+
+```bash
+docker run --ulimit nofile=1048576 ...   # minimum: --ulimit nofile=65536
+```
+
+The runtime also runs an fd-limit preflight that raises this process's
+*soft* limit (up to the hard cap) before every `ray start`
+(`kernel-agent/scripts/install.sh` `ensure_fd_limit_for_ray` and
+`kernel-agent/tools/backends/ray_runtime.py` `ensure_fd_limit`), so a
+high hard cap is enough; you do not need to set the soft limit yourself.
+Override the target with `RAY_MIN_NOFILE` if needed. If the preflight
+warns that the **hard** cap is below the target, the container was not
+launched with `--ulimit nofile=...` — fix the launch command.
 
 ---
 
@@ -154,22 +193,26 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
 
 **Fix.**
 
-1. Re-run `install.sh` (it installs TraceLens-internal editable and
-   smokes the CLI):
+1. Re-run `install.sh` (it clones AMD-AGI/TraceLens to
+   `$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`, pins it to a fixed
+   SHA, runs `pip install -e`, and smokes the CLI):
    ```bash
    bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
    ```
 2. If `install.sh` succeeds but the CLI still isn't on PATH, install
-   manually:
+   manually. By default use the installer-managed clone; only point
+   `TRACELENS_ROOT` at a pre-existing checkout you maintain as an
+   explicit operator override — that skips both the clone and the SHA
+   pin:
    ```bash
-   export TRACELENS_ROOT="${TRACELENS_ROOT:-/wekafs/hyperloom/TraceLens-internal}"
+   export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime}/source-mirrors/TraceLens}"
    cd "$TRACELENS_ROOT"
    pip install -e .
    TraceLens_generate_perf_report_pytorch_inference --help
    ```
-3. Do **not** fall back to the open-source TraceLens clone. The
-   open-source repo does not contain the standalone skills required by
-   `tools/tracelens_analysis.py`.
+3. The optional internal extension is enabled only when
+   `TRACELENS_INTERNAL_ROOT` is set to your own existing checkout
+   (no default path; leave unset for the open-source-only report).
 
 ---
 
@@ -206,7 +249,7 @@ specifics.
 
 **Cause.** `USER_DATA_PATH` points at a different directory than the
 original session, or the session never reached the point of writing
-`manifest.json` (failed in setup).
+`manifest.json` (failed before the session manifest was written).
 
 **Fix.**
 
@@ -221,8 +264,8 @@ original session, or the session never reached the point of writing
    export USER_DATA_PATH=/path/to/your/session
    inference_optimizer optimize --resume
    ```
-3. If `manifest.json` truly never existed (session crashed at setup),
-   resume is not possible — restart with a fresh `--model …` launch.
+3. If `manifest.json` truly never existed, resume is not possible —
+   restart with a fresh `--model …` launch.
 
 ---
 

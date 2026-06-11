@@ -1,10 +1,6 @@
-"""Session identification + lifecycle renderer.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Surfaces just enough of the ``session`` section so the report header
-is self-contained: session_id, claw join keys, host, code revision,
-stop reason, elapsed time. Workload (model / framework / GPU / TP /
-ISL / OSL) lives in its own section.
-"""
+"""Session identification + lifecycle renderer (id, claw keys, host, revision, stop reason, elapsed)."""
 
 from __future__ import annotations
 
@@ -15,6 +11,18 @@ from ..base import Decision, RenderedSection, md_kv_list, register_renderer
 
 @register_renderer("session")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the session-identification + lifecycle section.
+
+    Surfaces session/claw ids, host, container image, code revision, stop
+    reason, elapsed time and tick count so the report header is
+    self-contained. Skipped when neither session id nor host is present.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered session section.
+    """
     s = breakdown.get("session") or {}
     facts: list[str] = []
     warnings: list[str] = []
@@ -66,10 +74,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         ("elapsed_minutes",  elapsed),
         ("tick_count",       tick),
         ("host",             host or None),
-        # Always include the image row so reviewers can see at a glance
-        # whether the run had its container image recorded; "(not
-        # configured)" makes the gap obvious instead of silently
-        # omitting the field.
+        # Always emit the image row so a missing image is visible.
         ("image",            image if (isinstance(image, str) and image.strip()) else "(not configured)"),
         ("code_revision",    code or None),
         ("created_at_utc",   s.get("created_at_utc")),

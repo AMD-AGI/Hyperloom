@@ -3,9 +3,9 @@
 ## Purpose
 
 Dispatch an LLM specialist sub-agent on the **research_lane** to investigate
-one canonical gap in depth. The specialist reads the Cortex KB sub-graph
-anchored by one or more knowledge-domain `tags`, the PR Monitor feed for
-the same tag set, and the framework source roots under `INFERENCEX_PATH`.
+one canonical gap in depth. The specialist reads advisory RecipeKB
+warm-start facts, source-backed research hints, the PR Monitor feed for the
+same tag set, and the framework source roots under `INFERENCEX_PATH`.
 It then emits exactly one `specialist_done` intent on exit (Inv-5.3 single
 exit protocol).
 
@@ -72,7 +72,7 @@ GPU specialists must not launch persistent serving servers or Magpie loops.
 | `gap_symptom`        | string   | no       | Human summary of the symptom (e.g. `decode kernel at 30% HBM peak`). |
 | `gap_layer`          | string   | no       | Layer label (`kernel` / `framework` / `communication` / …). |
 | `gap_evidence`       | object   | no       | Profile path + numeric metrics forwarded into the prompt. |
-| `max_turns`          | int      | no       | Hard cap on LLM turns (default 8, hard ceiling 16). |
+| `max_turns`          | int      | no       | Hard cap on LLM turns (default 12, hard ceiling 16). |
 | `needs_gpu`          | bool     | no       | Request the specialist GPU pool for a short GPU experiment / microbenchmark. Default false. |
 | `gpu_count`          | int      | no       | Number of GPUs to allocate when `needs_gpu=true` (default 1). |
 
@@ -89,7 +89,7 @@ delegate{
     gap_layer         = 'framework',
     gap_evidence      = { profile_trace = '<from SharedState.last_profile_trace>' },
     needs_gpu         = false,
-    max_turns         = 8,
+    max_turns         = 12,
   },
   idempotency_key = 'specialist-framework-<gap_id>-<round_idx>',
 }
@@ -103,7 +103,8 @@ Each specialist subprocess sees:
   - identity + autonomy scope
   - hardware context
   - the gap statement + evidence
-  - KB sub-graph traversal output (anchored at `domain.kb_anchor`)
+  - optional advisory KB context, warm-start lessons / pitfalls, and
+    source-backed research hints
   - PR feed for `domain.pr_repos`
   - framework source root hints
   - the worktree path

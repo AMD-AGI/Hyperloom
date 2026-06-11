@@ -1,20 +1,11 @@
-"""Roofline Comparison pipeline tests — `report.py` ↔ `roofline_snapshots`.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Covers the data path that produces ``final.json["roofline_comparison"]``
-and renders ``## Roofline Comparison`` in ``final.md`` after PR #321
-retired the legacy ``last_trace_analyze_baseline`` baseline-freeze
-field. The new contract is:
+"""Roofline Comparison pipeline tests — `report.py` ↔ `roofline_snapshots` (PR #321).
 
-* ``SharedState.roofline_snapshots`` accumulates one entry per
-  successful ``record_trace_analyze``; entries are append-only so the
-  first one survives every watermark-driven refresh of
-  ``last_trace_analyze``.
-* ``_build_summary_dict`` reads that history (not the removed
-  ``last_trace_analyze_baseline``) to populate the
-  ``roofline_comparison`` block on ``final.json``.
-* ``_format_roofline_comparison_section`` renders the matching
-  ``## Roofline Comparison`` section; its prose no longer references
-  the retired N31 "final-roofline before report" trigger.
+After PR #321 retired ``last_trace_analyze_baseline``, ``final.json``'s
+``roofline_comparison`` block is built from the append-only
+``SharedState.roofline_snapshots`` history, and the markdown section drops the
+retired N31 trigger wording.
 """
 
 from __future__ import annotations
@@ -30,9 +21,7 @@ from inference_optimizer.orchestrator.action_executors.report import (
 )
 
 
-# ---------------------------------------------------------------------------
 # Test fixtures
-# ---------------------------------------------------------------------------
 def _snapshot(
     *,
     snapshot_id: int,
@@ -55,7 +44,6 @@ def _snapshot(
         "analysis_md_path": analysis_md_path,
         "trace_input": trace_input,
         "ts": ts,
-        # 9fe4609 sidecar pointer to reports/kernel_roofline.json.
         "kernel_roofline_path": kernel_roofline_path,
         "compute_pct": compute_pct,
         "idle_pct": idle_pct,
@@ -79,12 +67,7 @@ def _mock_state(
     roofline_snapshots: list[dict[str, Any]] | None = None,
     last_trace_analyze: dict[str, Any] | None = None,
 ) -> SimpleNamespace:
-    """Minimal state for `_build_summary_dict`.
-
-    Deliberately omits `last_trace_analyze_baseline` so the test
-    reproduces the post-PR#321 production state (field removed from
-    SharedState).
-    """
+    """Minimal state for `_build_summary_dict`; omits the removed `last_trace_analyze_baseline` field."""
     return SimpleNamespace(
         session_id="test-session",
         model_name="test-model",
@@ -129,20 +112,16 @@ def analysis_md(tmp_path):
     return _make
 
 
-# ---------------------------------------------------------------------------
 # _build_summary_dict — wire-shape tests
-# ---------------------------------------------------------------------------
 def test_build_summary_zero_snapshots_omits_roofline_comparison():
-    """With no captured snapshots, `final.json` must not carry a
-    `roofline_comparison` key at all (vs. an empty stub)."""
+    """With no snapshots, `final.json` carries no `roofline_comparison` key."""
     state = _mock_state(roofline_snapshots=[], last_trace_analyze={})
     summary = _build_summary_dict(state, ev_counts={}, highlights=[])
     assert "roofline_comparison" not in summary
 
 
 def test_build_summary_single_snapshot_emits_single_snapshot_mode(analysis_md):
-    """One captured snapshot → mode='single_snapshot', baseline == latest,
-    both populated from `roofline_snapshots[0]`."""
+    """One snapshot → mode='single_snapshot', baseline == latest from `roofline_snapshots[0]`."""
     path = analysis_md("analysis_1.md")
     snap1 = _snapshot(
         snapshot_id=1, analysis_md_path=path, ts="2026-05-24T13:00:02+00:00",
@@ -170,8 +149,7 @@ def test_build_summary_single_snapshot_emits_single_snapshot_mode(analysis_md):
 
 
 def test_build_summary_two_snapshots_emits_before_after_with_delta(analysis_md):
-    """Two captured snapshots → mode='before_after', baseline=first,
-    latest=last, delta populated for the diffable fields."""
+    """Two snapshots → mode='before_after' with baseline=first, latest=last, and a populated delta."""
     p1 = analysis_md("analysis_1.md", "baseline snapshot")
     p2 = analysis_md("analysis_2.md", "post-optimization snapshot")
     snap1 = _snapshot(
@@ -206,23 +184,16 @@ def test_build_summary_two_snapshots_emits_before_after_with_delta(analysis_md):
     assert pytest.approx(delta.get("top_kernel_efficiency_pct"), abs=0.01) == 7.24
 
 
-# ---------------------------------------------------------------------------
 # _format_roofline_comparison_section — markdown prose tests
-# ---------------------------------------------------------------------------
 def test_format_section_zero_snapshots_says_none_captured():
-    """Rendering with no baseline/latest must surface the explicit
-    'no snapshot captured' marker (kept for back-compat)."""
+    """Rendering with no baseline/latest surfaces the explicit 'no snapshot captured' marker."""
     md = "\n".join(_format_roofline_comparison_section({}))
     assert "## Roofline Comparison" in md
     assert "No roofline snapshot was captured" in md
 
 
 def test_format_section_single_snapshot_no_n31_wording(tmp_path):
-    """With a single snapshot, the section must:
-    (a) NOT claim 'no snapshot was captured';
-    (b) NOT cite the retired N31 trigger contract;
-    (c) explain the new (PR #321) gain/watermark mechanism.
-    """
+    """A single-snapshot section drops the 'none captured' + N31 wording and explains the PR #321 watermark mechanism."""
     p = tmp_path / "analysis.md"
     p.write_text(
         "# TraceLens\n\n## Executive Summary\n\nbody\n",
@@ -242,8 +213,7 @@ def test_format_section_single_snapshot_no_n31_wording(tmp_path):
 
 
 def test_format_section_before_after_renders_both_blocks(tmp_path):
-    """Two-snapshot mode renders distinct baseline and post-optimization
-    blocks (with the corresponding snapshot ids)."""
+    """Two-snapshot mode renders distinct baseline and post-optimization blocks."""
     p1 = tmp_path / "a1.md"
     p1.write_text("# TL\n\n## Executive Summary\n\nbody1\n", encoding="utf-8")
     p2 = tmp_path / "a2.md"
@@ -270,20 +240,9 @@ def test_format_section_before_after_renders_both_blocks(tmp_path):
     assert "N31" not in md
 
 
-# ---------------------------------------------------------------------------
 # kernel_roofline_path sidecar (9fe4609 contract)
-# ---------------------------------------------------------------------------
 def test_build_summary_propagates_kernel_roofline_path(analysis_md):
-    """The per-kernel roofline sidecar path written by
-    ``tracelens_analysis.py`` (``reports/kernel_roofline.json``) must
-    survive into ``final.json`` so dashboards have a stable pointer to
-    the per-kernel arithmetic-intensity / efficiency table.
-
-    9fe4609 (``feat: add kernel roofline sidecar evidence``) put the
-    field on ``roofline_comparison.latest``; PR-321's history-driven
-    rewrite must keep that surface non-empty whenever the underlying
-    ``state.roofline_snapshots`` entry carries the path.
-    """
+    """The ``kernel_roofline_path`` sidecar pointer survives into ``final.json`` (9fe4609)."""
     path = analysis_md("analysis_1.md")
     snap = _snapshot(
         snapshot_id=1,
@@ -295,7 +254,6 @@ def test_build_summary_propagates_kernel_roofline_path(analysis_md):
     summary = _build_summary_dict(state, ev_counts={}, highlights=[])
     cmp = summary.get("roofline_comparison")
     assert cmp is not None
-    # single_snapshot mode → both sides carry the same sidecar pointer.
     assert (
         cmp["baseline"].get("kernel_roofline_path")
         == "/tmp/session/reports/kernel_roofline.json"
@@ -309,10 +267,7 @@ def test_build_summary_propagates_kernel_roofline_path(analysis_md):
 def test_build_roofline_snapshot_default_carries_empty_kernel_roofline_path(
     tmp_path,
 ):
-    """``roofline_snapshot.build_roofline_snapshot`` is the canonical
-    factory; even when callers only have an analysis.md (no
-    ``kernel_roofline_path`` to inject) the returned dict MUST still
-    expose the key so downstream readers don't ``KeyError``."""
+    """``build_roofline_snapshot`` always exposes ``kernel_roofline_path`` (empty when not injected)."""
     from inference_optimizer.orchestrator.roofline_snapshot import (
         build_roofline_snapshot,
     )
@@ -329,9 +284,7 @@ def test_build_roofline_snapshot_default_carries_empty_kernel_roofline_path(
     assert snap["kernel_roofline_path"] == ""
 
 
-# ---------------------------------------------------------------------------
 # Decode-roofline ceiling propagation (Step 2).
-# ---------------------------------------------------------------------------
 def _snapshot_with_ceiling(
     *,
     snapshot_id: int,
@@ -410,10 +363,7 @@ class TestBuildSnapshotCeilingFields:
 
 
 class TestComparisonDeltaIncludesWithinRoofline:
-    """``build_roofline_comparison_from_history.delta`` carries
-    within_roofline_pct AND gap_to_roofline_pct so dashboards can show
-    the "Before X% within roofline → After Y% within roofline"
-    improvement either way."""
+    """The comparison delta carries both within_roofline_pct and gap_to_roofline_pct."""
 
     def test_before_after_delta_gap_to_roofline_pct(self):
         from inference_optimizer.orchestrator.roofline_snapshot import (
@@ -439,7 +389,6 @@ class TestComparisonDeltaIncludesWithinRoofline:
         )
         cmp = build_roofline_comparison_from_history([snap_base, snap_latest])
         delta = (cmp or {}).get("delta") or {}
-        # Optimization closed the gap from 47.25% to 30.91% (-16.34 ppt).
         assert pytest.approx(delta.get("gap_to_roofline_pct"), abs=0.01) == -16.34
 
     def test_format_table_renders_gap_delta(self):
@@ -474,8 +423,6 @@ class TestComparisonDeltaIncludesWithinRoofline:
             },
         }
         text = "\n".join(format_roofline_metrics_table(cmp))
-        # Gap row now carries a Δ column (was — placeholder); regex-light
-        # check via the unique negative delta value.
         assert "Gap to roofline %" in text
         assert "-16.3" in text
 
@@ -505,8 +452,7 @@ class TestComparisonDeltaIncludesWithinRoofline:
 
 
 class TestSummaryDictCarriesCeilingThroughHistory:
-    """End-to-end: history snapshot → summary['roofline_comparison']
-    must carry the ceiling fields without summary-builder dropping them."""
+    """End-to-end: a history snapshot's ceiling fields survive into summary['roofline_comparison']."""
 
     def test_single_snapshot_propagates_ceiling_to_summary(self, analysis_md):
         path = analysis_md("a.md")
@@ -529,8 +475,7 @@ class TestSummaryDictCarriesCeilingThroughHistory:
 
 
 class TestFormatTableRendersCeiling:
-    """``format_roofline_metrics_table`` renders the ceiling once above
-    the Base/Opt table + 3 new rows for achieved / within / gap."""
+    """``format_roofline_metrics_table`` renders the ceiling once plus achieved/within/gap rows."""
 
     def test_single_snapshot_renders_ceiling_and_within_rows(self):
         from inference_optimizer.orchestrator.roofline_snapshot import (
@@ -611,17 +556,11 @@ class TestFormatTableRendersCeiling:
 
 
 class TestRecordTraceAnalyzeStampsCeiling:
-    """``SharedState.record_trace_analyze`` must call
-    ``compute_peak_from_state`` and ``current_best.tput`` to stamp
-    ceiling + achieved + within + gap onto every history snapshot."""
+    """``record_trace_analyze`` stamps ceiling + achieved + within + gap onto every history snapshot."""
 
     @staticmethod
     def _mock_breakdown(monkeypatch, *, mem=0.0, cmp=0.0, peak=0.0, kind="unknown"):
-        """Patch ``compute_roofline_breakdown_from_state`` (the new entry
-        point ``shared_state.record_trace_analyze`` calls after the
-        two-sided roofline formula change). Returning a stub
-        ``RooflineBreakdown`` lets the test pin (mem, cmp, peak, kind)
-        without standing up a synthetic HF model."""
+        """Patch ``compute_roofline_breakdown_from_state`` to return a stub ``RooflineBreakdown``."""
         from inference_optimizer.orchestrator import roofline_ceiling
         from inference_optimizer.orchestrator.roofline_ceiling import (
             RooflineBreakdown,
@@ -630,7 +569,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
         monkeypatch.setattr(
             roofline_ceiling,
             "compute_roofline_breakdown_from_state",
-            lambda _state: br,
+            lambda _state, **_kw: br,
         )
 
     def test_stamps_ceiling_and_achieved_into_history(
@@ -662,6 +601,53 @@ class TestRecordTraceAnalyzeStampsCeiling:
         assert snap["within_roofline_pct"] == 69.09
         assert snap["gap_to_roofline_pct"] == pytest.approx(30.91, abs=0.01)
 
+    def test_forced_baseline_arm_overrides_promoted_current_best(
+        self, tmp_path, monkeypatch
+    ):
+        """A delayed PRELUDE roofline (payload roofline_arm=baseline) records as
+        baseline even after warm-replay promoted a fp8 current_best — the ceiling
+        is computed for the baseline arm and achieved uses baseline_tput."""
+        from inference_optimizer.orchestrator import roofline_ceiling
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            RooflineBreakdown,
+        )
+        seen_arm: dict[str, object] = {}
+
+        def _capture(_state, **kw):
+            seen_arm["arm"] = kw.get("arm")
+            return RooflineBreakdown(1000.0, 5000.0, 1000.0, "memory")
+
+        monkeypatch.setattr(
+            roofline_ceiling,
+            "compute_roofline_breakdown_from_state",
+            _capture,
+        )
+        from inference_optimizer.orchestrator.shared_state import SharedState
+        md = tmp_path / "analysis.md"
+        md.write_text(
+            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
+        )
+        state = SharedState()
+        state.baseline_tput = 527.5
+        # warm-replay already promoted an optimized fp8 arm.
+        state.current_best = {
+            "action": "warm_replay",
+            "tput": 900.0,
+            "extra_server_args": "--quantization fp8",
+        }
+        state.record_trace_analyze(
+            {"trace_input": "/tmp/trace.json", "roofline_arm": "baseline"},
+            {
+                "hot_kernels": [],
+                "trace_report_path": str(md),
+                "candidates_path": "/tmp/kc.json",
+            },
+        )
+        # Ceiling resolved for the BASELINE arm, not the promoted current_best.
+        assert seen_arm["arm"] == "baseline"
+        snap = state.roofline_snapshots[0]
+        assert snap["achieved_tok_per_sec"] == 527.5
+
     def test_falls_back_to_baseline_tput_when_no_current_best(
         self, tmp_path, monkeypatch
     ):
@@ -688,9 +674,109 @@ class TestRecordTraceAnalyzeStampsCeiling:
         assert snap["achieved_tok_per_sec"] == 527.5
         assert snap["within_roofline_pct"] == 52.75
 
+    def test_baseline_arm_falls_back_to_last_baseline_tput(
+        self, tmp_path, monkeypatch
+    ):
+        """When baseline_tput is lost, a baseline-arm snapshot still stamps
+        achieved from last_baseline so within/gap pct are not empty."""
+        from inference_optimizer.orchestrator.shared_state import SharedState
+        self._mock_breakdown(
+            monkeypatch, mem=1000.0, cmp=5000.0, peak=1000.0, kind="memory",
+        )
+        md = tmp_path / "analysis.md"
+        md.write_text(
+            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
+        )
+        state = SharedState()
+        state.baseline_tput = 0.0
+        state.last_baseline = {"output_throughput": 480.0}
+        state.current_best = {}
+        state.record_trace_analyze(
+            {"trace_input": "/tmp/trace.json", "roofline_arm": "baseline"},
+            {
+                "hot_kernels": [],
+                "trace_report_path": str(md),
+                "candidates_path": "/tmp/kc.json",
+            },
+        )
+        snap = state.roofline_snapshots[0]
+        assert snap["achieved_tok_per_sec"] == 480.0
+        assert snap["within_roofline_pct"] == 48.0
+
+    def test_unknown_roofline_arm_falls_back_to_inference(
+        self, tmp_path, monkeypatch
+    ):
+        """An invalid roofline_arm is ignored and the recorder infers from
+        current_best.tput (here a promoted optimized arm)."""
+        from inference_optimizer.orchestrator.shared_state import SharedState
+        self._mock_breakdown(
+            monkeypatch, mem=1000.0, cmp=5000.0, peak=1000.0, kind="memory",
+        )
+        md = tmp_path / "analysis.md"
+        md.write_text(
+            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
+        )
+        state = SharedState()
+        state.baseline_tput = 527.5
+        state.current_best = {"tput": 900.0}
+        state.record_trace_analyze(
+            {"trace_input": "/tmp/trace.json", "roofline_arm": "bogus"},
+            {
+                "hot_kernels": [],
+                "trace_report_path": str(md),
+                "candidates_path": "/tmp/kc.json",
+            },
+        )
+        snap = state.roofline_snapshots[0]
+        assert snap["achieved_tok_per_sec"] == 900.0
+
+    def test_current_best_arm_keeps_arm_when_tput_missing(
+        self, tmp_path, monkeypatch
+    ):
+        """A current_best-tagged snapshot keeps its arm even when current_best
+        carries no live tput; the ceiling must not downgrade to baseline."""
+        from inference_optimizer.orchestrator import roofline_ceiling
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            RooflineBreakdown,
+        )
+        seen_arm: dict[str, object] = {}
+
+        def _capture(_state, **kw):
+            seen_arm["arm"] = kw.get("arm")
+            return RooflineBreakdown(1000.0, 5000.0, 1000.0, "memory")
+
+        monkeypatch.setattr(
+            roofline_ceiling,
+            "compute_roofline_breakdown_from_state",
+            _capture,
+        )
+        from inference_optimizer.orchestrator.shared_state import SharedState
+        md = tmp_path / "analysis.md"
+        md.write_text(
+            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
+        )
+        state = SharedState()
+        state.baseline_tput = 527.5
+        # No live tput, but a recorded output_throughput from the run.
+        state.current_best = {
+            "action": "params", "output_throughput": 690.0,
+        }
+        state.record_trace_analyze(
+            {"trace_input": "/tmp/trace.json", "roofline_arm": "current_best"},
+            {
+                "hot_kernels": [],
+                "trace_report_path": str(md),
+                "candidates_path": "/tmp/kc.json",
+            },
+        )
+        # Arm stays current_best (not downgraded), achieved from fallback.
+        assert seen_arm["arm"] == "current_best"
+        snap = state.roofline_snapshots[0]
+        assert snap["achieved_tok_per_sec"] == 690.0
+
     def test_zero_peak_keeps_within_gap_none(self, tmp_path, monkeypatch):
         from inference_optimizer.orchestrator.shared_state import SharedState
-        self._mock_breakdown(monkeypatch)  # default all-zero / unknown
+        self._mock_breakdown(monkeypatch)
         md = tmp_path / "analysis.md"
         md.write_text(
             "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
@@ -712,9 +798,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
 
 
 class TestBuildSnapshotTwoSidedRoofline:
-    """``build_roofline_snapshot`` carries T_mem / T_cmp / bound_kind
-    alongside the legacy ``theoretical_peak_tok_per_sec`` so dashboards
-    can show which side dominated (per the formula change)."""
+    """``build_roofline_snapshot`` carries T_mem / T_cmp / bound_kind alongside the legacy peak field."""
 
     def test_two_sided_fields_default_to_unknown_for_legacy_callers(self):
         from inference_optimizer.orchestrator.roofline_snapshot import (
@@ -725,11 +809,8 @@ class TestBuildSnapshotTwoSidedRoofline:
             analysis_md_path="",
             theoretical_peak_tok_per_sec=1000.0,
             achieved_tok_per_sec=500.0,
-            # mem/cmp/bound_kind omitted — legacy caller.
         )
-        # Legacy field still works.
         assert snap["theoretical_peak_tok_per_sec"] == 1000.0
-        # New fields default-degrade: mem/cmp None, kind "unknown".
         assert snap["roofline_mem_ceiling_tok_per_sec"] is None
         assert snap["roofline_cmp_ceiling_tok_per_sec"] is None
         assert snap["roofline_bound_kind"] == "unknown"
@@ -750,7 +831,7 @@ class TestBuildSnapshotTwoSidedRoofline:
         assert snap["roofline_mem_ceiling_tok_per_sec"] == 8000.0
         assert snap["roofline_cmp_ceiling_tok_per_sec"] == 40_000.0
         assert snap["roofline_bound_kind"] == "memory"
-        # Theoretical peak stays == min(mem, cmp).
+        # Caller-provided primary ceiling is persisted separately from sides.
         assert snap["theoretical_peak_tok_per_sec"] == 8000.0
 
     def test_zero_mem_cmp_serialize_as_none(self):
@@ -769,9 +850,7 @@ class TestBuildSnapshotTwoSidedRoofline:
 
 
 class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
-    """``SharedState.record_trace_analyze`` must propagate the four
-    breakdown fields (mem / cmp / peak / bound_kind) into the history
-    snapshot end-to-end."""
+    """``record_trace_analyze`` propagates the four breakdown fields into the history snapshot."""
 
     @staticmethod
     def _mock_breakdown(monkeypatch, *, mem, cmp, peak, kind):
@@ -783,7 +862,7 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         monkeypatch.setattr(
             roofline_ceiling,
             "compute_roofline_breakdown_from_state",
-            lambda _state: br,
+            lambda _state, **_kw: br,
         )
 
     def _record(self, tmp_path, state):
@@ -805,7 +884,6 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         self, tmp_path, monkeypatch,
     ):
         from inference_optimizer.orchestrator.shared_state import SharedState
-        # 095726Z-style: cmp >> mem, peak == mem, bound = memory.
         self._mock_breakdown(
             monkeypatch, mem=8065.0, cmp=375_612.0, peak=8065.0,
             kind="memory",
@@ -818,7 +896,6 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         assert snap["roofline_mem_ceiling_tok_per_sec"] == 8065.0
         assert snap["roofline_cmp_ceiling_tok_per_sec"] == 375_612.0
         assert snap["roofline_bound_kind"] == "memory"
-        # within% matches PR-9749520 anchor.
         assert snap["within_roofline_pct"] == pytest.approx(77.43, abs=0.05)
 
     def test_compute_bound_breakdown_propagates_to_snapshot(
@@ -833,7 +910,6 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         state.baseline_tput = 1500.0
         state.current_best = {}
         snap = self._record(tmp_path, state)
-        # Peak == cmp because cmp is the tighter side.
         assert snap["theoretical_peak_tok_per_sec"] == 2000.0
         assert snap["roofline_bound_kind"] == "compute"
 
@@ -853,3 +929,38 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         assert snap["roofline_cmp_ceiling_tok_per_sec"] is None
         assert snap["roofline_bound_kind"] == "unknown"
         assert snap["within_roofline_pct"] is None
+
+    def test_perfmodel_breakdown_persists_decode_sides_and_bound(
+        self, tmp_path, monkeypatch,
+    ):
+        from inference_optimizer.orchestrator import roofline_ceiling
+        from inference_optimizer.orchestrator.shared_state import SharedState
+
+        self._mock_breakdown(
+            monkeypatch, mem=8000.0, cmp=40_000.0, peak=7900.0,
+            kind="memory",
+        )
+        monkeypatch.setattr(roofline_ceiling, "load_model_meta", lambda *a, **kw: object())
+        monkeypatch.setattr(
+            roofline_ceiling,
+            "compute_roofline_from_perfmodel",
+            lambda **kw: SimpleNamespace(
+                decode_tok_per_s=7900.0,
+                prefill_tok_per_s=123.0,
+                decode_mem_tok_per_s=8000.0,
+                decode_cmp_tok_per_s=40_000.0,
+                bound_kind="memory",
+                hbm_bw_gbps=5300.0,
+                peak_achievable_tflops=708.0,
+                ops=[],
+            ),
+        )
+        state = SharedState()
+        state.baseline_tput = 1000.0
+        snap = self._record(tmp_path, state)
+        perf = snap["perfmodel_breakdown"]
+
+        assert perf["decode_tok_per_s"] == 7900.0
+        assert perf["decode_mem_tok_per_s"] == 8000.0
+        assert perf["decode_cmp_tok_per_s"] == 40_000.0
+        assert perf["bound_kind"] == "memory"

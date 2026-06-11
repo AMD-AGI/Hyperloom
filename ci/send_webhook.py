@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Send Hyperloom CI summary to Teams / Power Automate webhook.
 
-Power Automate accepts large JSON bodies (256 KB) but the downstream Teams
-card renderer fails when a single Adaptive Card contains too many Table rows.
-Keep cards small: 10 model rows per card, each rendered as a bordered
-Adaptive Card Table.
+The Teams card renderer fails when an Adaptive Card has too many Table rows, so keep cards
+small: 10 model rows per card, each a bordered Adaptive Card Table.
 """
 
 from __future__ import annotations
@@ -22,6 +22,15 @@ import requests
 
 
 def _fmt_num(v: Any) -> str:
+    """Format a numeric cell value for display.
+
+    Args:
+        v (Any): The value to format.
+
+    Returns:
+        str: ``"-"`` for None, a two-decimal string for floats, otherwise
+        ``str(v)``.
+    """
     if v is None:
         return "-"
     if isinstance(v, float):
@@ -30,6 +39,15 @@ def _fmt_num(v: Any) -> str:
 
 
 def _fmt_pct(v: Any) -> str:
+    """Format a value as a signed percentage string.
+
+    Args:
+        v (Any): The value to format.
+
+    Returns:
+        str: ``"-"`` for None, a signed two-decimal percentage when numeric,
+        otherwise ``str(v)``.
+    """
     if v is None:
         return "-"
     try:
@@ -39,10 +57,29 @@ def _fmt_pct(v: Any) -> str:
 
 
 def _short_model(model: str | None) -> str:
+    """Return the final path segment of a model id.
+
+    Args:
+        model (str | None): The full model id (may include an author prefix).
+
+    Returns:
+        str: The trailing segment, or ``"?"`` when ``model`` is None.
+    """
     return (model or "?").split("/")[-1]
 
 
 def _params(row: dict[str, Any]) -> str:
+    """Derive a human-readable parameter-count label for a model row.
+
+    Prefers the numeric ``params_b`` field; otherwise parses a ``<n>B`` token
+    out of the model name.
+
+    Args:
+        row (dict[str, Any]): A model summary row.
+
+    Returns:
+        str: A label such as ``"7.0B"`` or ``"-"`` when unknown.
+    """
     value = row.get("params_b")
     if isinstance(value, (int, float)):
         if value >= 100:
@@ -53,6 +90,15 @@ def _params(row: dict[str, Any]) -> str:
 
 
 def _gain_prefix(gain: Any) -> str:
+    """Return a leading marker reflecting the magnitude of a gain.
+
+    Args:
+        gain (Any): The gain percentage value.
+
+    Returns:
+        str: A prefix (e.g. ``"*** "``, ``"** "``, ``"* "``, ``"+ "``,
+        ``"0 "``), or an empty string for negative/unparseable values.
+    """
     if gain is None:
         return ""
     try:
@@ -73,6 +119,15 @@ def _gain_prefix(gain: Any) -> str:
 
 
 def _gain_color(gain: Any) -> str:
+    """Map a gain value to an Adaptive Card text color.
+
+    Args:
+        gain (Any): The gain percentage value.
+
+    Returns:
+        str: One of ``"Good"``, ``"Accent"``, ``"Warning"``, ``"Attention"``,
+        or ``"Default"`` for None/unparseable values.
+    """
     if gain is None:
         return "Default"
     try:
@@ -89,6 +144,16 @@ def _gain_color(gain: Any) -> str:
 
 
 def _text(text: Any, weight: str | None = None, color: str | None = None) -> dict[str, Any]:
+    """Build an Adaptive Card ``TextBlock`` element.
+
+    Args:
+        text (Any): The text content (coerced to ``str``).
+        weight (str | None): Optional font weight (e.g. ``"Bolder"``).
+        color (str | None): Optional text color.
+
+    Returns:
+        dict[str, Any]: The TextBlock element dict.
+    """
     block = {"type": "TextBlock", "text": str(text), "wrap": True, "size": "Small"}
     if weight:
         block["weight"] = weight
@@ -98,10 +163,29 @@ def _text(text: Any, weight: str | None = None, color: str | None = None) -> dic
 
 
 def _cell(text: Any, weight: str | None = None, color: str | None = None) -> dict[str, Any]:
+    """Build an Adaptive Card ``TableCell`` wrapping a single text block.
+
+    Args:
+        text (Any): The cell text content.
+        weight (str | None): Optional font weight for the text.
+        color (str | None): Optional text color.
+
+    Returns:
+        dict[str, Any]: The TableCell element dict.
+    """
     return {"type": "TableCell", "items": [_text(text, weight, color)]}
 
 
 def _sort_key(row: dict[str, Any]) -> tuple[int, float]:
+    """Compute a sort key ordering delivered rows first, then by gain desc.
+
+    Args:
+        row (dict[str, Any]): A model summary row.
+
+    Returns:
+        tuple[int, float]: ``(delivered_rank, -gain)`` where delivered rows
+        rank ahead of undelivered ones.
+    """
     delivered_rank = 0 if row.get("ci_success") else 1
     gain = row.get("gain_pct")
     if gain is None:
@@ -119,6 +203,22 @@ def _build_payload(
     total_parts: int,
     dashboard_url: str,
 ) -> dict[str, Any]:
+    """Build one Adaptive Card webhook payload for a chunk of model rows.
+
+    The summary header counts are computed across ``all_rows``; the table only
+    renders ``rows`` (the current chunk). A perf-leaderboard publish footer is
+    appended on the final card.
+
+    Args:
+        rows (list[dict[str, Any]]): Rows to render in this card's table.
+        all_rows (list[dict[str, Any]]): All rows, used for header aggregates.
+        part (int): 1-based index of this card.
+        total_parts (int): Total number of cards.
+        dashboard_url (str): Optional dashboard URL linked in the header.
+
+    Returns:
+        dict[str, Any]: The Teams/Power Automate message payload.
+    """
     n = len(all_rows)
     delivered = sum(1 for r in all_rows if r.get("ci_success"))
     safe_succeeded = sum(1 for r in all_rows if r.get("final_status") == "Succeeded")
@@ -198,11 +298,8 @@ def _build_payload(
         "rows": table_rows,
     })
 
-    # Footer: per-model perf-leaderboard publish count, on the LAST card only
-    # (avoid spam-repeating the same number across every chunk for big batches).
-    # Counts are computed by the workflow's "Count perf-leaderboard publish
-    # status" step (walks task-artifacts-merged/**/perf_publish_marker.txt)
-    # and injected via the PERF_PUBLISH_OK / PERF_PUBLISH_TOTAL env vars.
+    # Footer: perf-leaderboard publish count on the LAST card only (avoid repeating across chunks).
+    # Counts come from the workflow's count step via PERF_PUBLISH_OK / PERF_PUBLISH_TOTAL env vars.
     if part == total_parts:
         try:
             perf_ok    = int(os.environ.get("PERF_PUBLISH_OK")    or 0)
@@ -239,6 +336,15 @@ def _build_payload(
 
 
 def main() -> int:
+    """Load the CI summary and POST it to the webhook in small card chunks.
+
+    Skips sending (returning success) when no webhook URL is configured or the
+    summary has no rows. Rows are sorted, split into cards, and posted with a
+    short delay between cards.
+
+    Returns:
+        int: ``0`` on success or skip, ``1`` if any POST returns HTTP >= 300.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--summary", required=True, help="ci_summary.json")
     parser.add_argument("--url", default=os.environ.get("WEBHOOK_URL", ""))

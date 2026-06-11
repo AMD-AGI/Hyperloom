@@ -1,19 +1,6 @@
-"""PR-A7 (Arbor-into-Hyperloom): Critic gate over specialist patches.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Pins three contracts:
-
-1. ``SharedState.specialist_patch_verdicts`` stores per-task verdicts.
-2. PolicyGate's ``integrate_patch_requires_critic_verdict`` rule denies
-   an ``integrate_patch`` delegate when:
-   - ``specialist_task_id`` is missing.
-   - No critic verdict has been recorded yet (and ``bypass_critic``
-     is not set).
-   - The recorded verdict is ``reject`` / ``needs_review`` / ``redirect``.
-3. ``IntegratePatchExecutor`` short-circuits with
-   ``status='rejected_by_critic'`` when SharedState has a rejection
-   on file (defense in depth — the PolicyGate gate is the primary
-   check, but the executor also enforces it).
-"""
+"""PR-A7 (Arbor-into-Hyperloom): Critic gate over specialist patches."""
 
 from __future__ import annotations
 
@@ -27,7 +14,7 @@ from inference_optimizer.orchestrator.action_executors.integrate_patch import (
     IntegratePatchExecutor,
 )
 from inference_optimizer.orchestrator.agent_role import default_role_registry
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.policy import (
     INTEGRATE_PATCH_ACTION_NAME,
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
@@ -39,9 +26,7 @@ from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
 from inference_optimizer.orchestrator.task_registry import Task
 
 
-# ---------------------------------------------------------------------------
 # 1. SharedState ledger
-# ---------------------------------------------------------------------------
 def test_shared_state_record_and_read_verdict():
     s = SharedState()
     assert s.get_specialist_patch_verdict("t1") == ""
@@ -60,9 +45,7 @@ def test_shared_state_ignores_empty_task_id():
     assert s.specialist_patch_verdicts == {}
 
 
-# ---------------------------------------------------------------------------
 # 2. PolicyGate gate
-# ---------------------------------------------------------------------------
 def _make_gate(shared_state: SharedState | None = None) -> PolicyGate:
     return PolicyGate(
         role_registry=default_role_registry(),
@@ -121,9 +104,7 @@ def test_policy_allows_integrate_patch_on_approve():
     s.record_specialist_patch_verdict("t-spec-4", "approve")
     gate = _make_gate(s)
     intent = _make_intent({"specialist_task_id": "t-spec-4"})
-    # Phase check still requires EXPLORE; for an off-phase test we
-    # only verify the critic gate doesn't fire. Phase R1 will trigger
-    # if state isn't EXPLORE.
+    # Phase check still requires EXPLORE; verify only the critic gate.
     s.phase = "EXPLORE"
     gate.validate_intent("orchestration", intent)
 
@@ -138,8 +119,7 @@ def test_policy_allows_integrate_patch_on_advise():
 
 
 def test_policy_bypass_critic_overrides_gate():
-    """``params.bypass_critic=True`` skips the gate entirely (operator
-    audit trail responsibility)."""
+    """``params.bypass_critic=True`` skips the gate entirely."""
     s = SharedState()
     s.record_specialist_patch_verdict("t-spec-6", "reject")
     s.phase = "EXPLORE"
@@ -153,17 +133,14 @@ def test_policy_bypass_critic_overrides_gate():
 
 
 def test_policy_permissive_verdicts_constant_covers_expected_set():
-    """The permissive set must include approve + advise but exclude
-    reject / needs_review / redirect."""
+    """The permissive set includes approve + advise but excludes reject / needs_review / redirect."""
     assert "approve" in INTEGRATE_PATCH_PERMISSIVE_VERDICTS
     assert "advise" in INTEGRATE_PATCH_PERMISSIVE_VERDICTS
     for v in ("reject", "needs_review", "redirect"):
         assert v not in INTEGRATE_PATCH_PERMISSIVE_VERDICTS
 
 
-# ---------------------------------------------------------------------------
 # 3. Executor defense in depth
-# ---------------------------------------------------------------------------
 def _write_specialist_workspace_with_patch(
     session_dir: Path, task_id: str,
 ) -> Path:
@@ -184,9 +161,7 @@ def _write_specialist_workspace_with_patch(
 
 @pytest.mark.asyncio
 async def test_executor_short_circuits_on_recorded_reject(tmp_path: Path):
-    """When SharedState has a 'reject' verdict on file, the executor
-    refuses to bench. patches_applied stays empty and status is
-    ``rejected_by_critic``."""
+    """A recorded 'reject' verdict makes the executor refuse to bench."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     _write_specialist_workspace_with_patch(session_dir, "t-spec-x")
@@ -207,17 +182,10 @@ async def test_executor_short_circuits_on_recorded_reject(tmp_path: Path):
         requires_lanes=tuple(),
     )
     ctx = RunnerContext(task=task, lease=None, extra={"shared_state": state})
-    # framework_source_root doesn't exist → executor would normally
-    # apply_failed, but the critic short-circuit fires earlier on
-    # the patches_applied resolution path... actually wait. Re-read
-    # the executor: the critic check runs AFTER framework_root resolution
-    # but BEFORE apply_only stage 3. Let's create the framework dir
-    # so the executor reaches the critic check.
+    # Create the framework dir so the executor reaches the critic check.
     (tmp_path / "framework").mkdir()
     result = await executor(ctx)
-    # The check happens AFTER initial apply attempt; the dummy patch
-    # may fail to apply first. We accept either outcome as long as
-    # patches_applied is empty AND no bench was kicked off.
+    # Either outcome is fine as long as patches_applied is empty and no bench ran.
     assert result["status"] in ("rejected_by_critic", "apply_failed")
     assert result["patches_applied"] == []
     if result["status"] == "rejected_by_critic":
@@ -226,9 +194,7 @@ async def test_executor_short_circuits_on_recorded_reject(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_proceeds_when_verdict_is_approve(tmp_path: Path):
-    """No short-circuit when the recorded verdict is approve. We hit
-    apply_only=True so no bench is run, but the patches_applied step
-    fires."""
+    """No short-circuit when the recorded verdict is approve."""
     import os
     import subprocess
     session_dir = tmp_path / "session"
@@ -288,8 +254,7 @@ async def test_executor_proceeds_when_verdict_is_approve(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_bypass_critic_skips_short_circuit(tmp_path: Path):
-    """``params.bypass_critic=True`` overrides the executor-side
-    defense too, matching PolicyGate semantics."""
+    """``params.bypass_critic=True`` overrides the executor-side defense too."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     _write_specialist_workspace_with_patch(session_dir, "t-spec-z")
@@ -313,7 +278,5 @@ async def test_executor_bypass_critic_skips_short_circuit(tmp_path: Path):
     )
     ctx = RunnerContext(task=task, lease=None, extra={"shared_state": state})
     result = await executor(ctx)
-    # bypass_critic skipped the rejected_by_critic short-circuit; the
-    # bogus patch fails ``git apply`` instead — that's fine, status
-    # just must not be 'rejected_by_critic'.
+    # bypass_critic skipped the short-circuit; status just must not be 'rejected_by_critic'.
     assert result["status"] != "rejected_by_critic"

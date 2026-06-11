@@ -1,12 +1,6 @@
-"""Blocker #2 (cheap path) — ``_handle_propose_action`` must consult the
-auto-roofline gate before paying for the Critic round-trip.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Without this gate, an LLM-emitted ``propose_action{action='explore'}``
-with a grid (the only path that goes through propose, not delegate) would
-fan out to the Critic while the PRELUDE / watermark analysis task is
-still in flight — wasting a round-trip + risking dispatch against a stale
-``analysis.md`` snapshot.
-"""
+"""Regression (loosen P2_12): the ``wait_for_auto_roofline`` deny is gone — proposals proceed while an analysis task is in flight."""
 
 from __future__ import annotations
 
@@ -17,7 +11,7 @@ from typing import Any
 import pytest
 
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 
 
 @dataclass
@@ -47,32 +41,7 @@ class _BareState:
         return None
 
 
-@dataclass
-class _StubTask:
-    task_id: str
-    kind: str
-    state: str = "running"
-    params: dict[str, Any] = field(default_factory=dict)
-    idempotency_key: str = ""
-
-
-class _StubTaskRegistry:
-    def __init__(self) -> None:
-        self._tasks: dict[str, _StubTask] = {}
-
-    async def get(self, task_id: str) -> _StubTask:
-        from inference_optimizer.orchestrator.task_registry import TaskNotFound
-
-        t = self._tasks.get(task_id)
-        if t is None:
-            raise TaskNotFound(task_id)
-        return t
-
-
 class _RecordingBus:
-    """Captures every emitted Message so the test can assert on
-    ``observation`` envelopes (the policy-denial path emits one)."""
-
     def __init__(self) -> None:
         self.messages: list[Any] = []
 
@@ -86,39 +55,39 @@ def coord(tmp_path: Path) -> Coordinator:
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = _BareState()
-    c.tasks = _StubTaskRegistry()
     c.bus = _RecordingBus()
     c.cortex_kb = None
     from inference_optimizer.orchestrator.coordinator import CoordinatorState
 
     c.state = CoordinatorState()
-    # ``_handle_propose_action`` calls
-    # ``_sequence_denial_for_action`` after the roofline gate. We
-    # short-circuit that here so the test focuses on the gate itself —
-    # full sequence-gate coverage lives in test_policy_sequence_*.py.
     c._sequence_denial_for_action = lambda *_a, **_kw: None  # type: ignore[assignment]
     return c
 
 
+def test_roofline_pending_gate_hooks_removed():
+    """The deny helpers and gated-action set must be gone from the Coordinator surface."""
+    for attr in (
+        "_roofline_denial_for_action",
+        "_auto_roofline_pending_denial",
+        "_defer_approved_proposal_for_roofline",
+        "_drain_proposals_awaiting_roofline",
+        "_proposals_awaiting_roofline",
+    ):
+        assert not hasattr(Coordinator, attr), (
+            f"Coordinator.{attr} unexpectedly resurrected — the "
+            f"P2_12 deletion would silently re-introduce the "
+            f"wait_for_auto_roofline gate."
+        )
+    import inference_optimizer.orchestrator.coordinator as coord_mod
+    assert not hasattr(coord_mod, "_ROOFLINE_GATED_ACTIONS")
+
+
 @pytest.mark.asyncio
-async def test_propose_action_blocks_explore_while_roofline_pending(
+async def test_propose_action_passes_through_while_roofline_pending(
     coord: Coordinator,
 ):
-    """Explore-with-grid is the only path that re-routes through
-    ``_handle_propose_action``. With a roofline task pending, the gate
-    must drop the proposal *before* a ``proposal`` message hits the bus
-    (which is what the Critic agent reads)."""
-    from inference_optimizer.orchestrator.task_registry import Task
-
-    pending = Task(
-        task_id="rl-pending-id",
-        kind="roofline",
-        state="running",
-        params={},
-        idempotency_key="internal-analysis-watermark_crossed",
-    )
-    coord.tasks._tasks[pending.task_id] = pending  # type: ignore[assignment]
-    coord.shared_state.auto_roofline_pending_task_id = pending.task_id
+    """An ``explore`` proposal lands on the bus even with an in-flight auto-roofline task (no deferral, no denial)."""
+    coord.shared_state.auto_roofline_pending_task_id = "rl-pending-id"
 
     intent = Intent(
         type=IntentType.PROPOSE_ACTION,
@@ -130,55 +99,10 @@ async def test_propose_action_blocks_explore_while_roofline_pending(
     )
     await coord._handle_propose_action("orchestration", intent)
 
-    # No ``proposal`` envelope must have reached the bus (gate fired
-    # before bus.append_and_seq for the proposal). The only envelope
-    # in flight is the denial observation.
     topics = [getattr(m, "topic", None) for m in coord.bus.messages]
-    assert "proposal" not in topics, (
-        "propose_action gate failed — Critic would see a stale-roofline "
-        "explore proposal: %r" % topics
+    assert "proposal" in topics, (
+        "explore proposal must reach the bus while an analysis task is "
+        "in flight: %r" % topics
     )
-    assert "observation" in topics
-    # PendingProposal table must remain empty so no later verdict can
-    # re-animate the rejected proposal.
-    assert coord.state.pending_proposals == {}
-    # Denial counted in the streak ledger via record_policy_denial.
-    assert len(coord.shared_state.policy_denial_history) == 1
-    assert coord.shared_state.policy_denial_history[0]["rule"] == (
-        "wait_for_auto_roofline"
-    )
-
-
-@pytest.mark.asyncio
-async def test_propose_action_passes_through_non_gated_action(
-    coord: Coordinator,
-):
-    """Non-gated actions (``report``) must dispatch even while a
-    roofline task is in flight — the gate is per-action, not global."""
-    from inference_optimizer.orchestrator.task_registry import Task
-
-    pending = Task(
-        task_id="rl-pending-id",
-        kind="roofline",
-        state="running",
-        params={},
-        idempotency_key="internal-analysis-watermark_crossed",
-    )
-    coord.tasks._tasks[pending.task_id] = pending  # type: ignore[assignment]
-    coord.shared_state.auto_roofline_pending_task_id = pending.task_id
-
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={
-            "action_name": "report",
-            "predicted_gain_pct": 0.0,
-            "params": {},
-        },
-    )
-    await coord._handle_propose_action("orchestration", intent)
-
-    # Non-gated action proceeds: a ``proposal`` envelope is emitted and
-    # the PendingProposal entry is created.
-    topics = [getattr(m, "topic", None) for m in coord.bus.messages]
-    assert "proposal" in topics
     assert len(coord.state.pending_proposals) == 1
+    assert coord.shared_state.policy_denial_history == []

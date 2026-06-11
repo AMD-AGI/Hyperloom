@@ -1,22 +1,12 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Intent envelope contract.
 
-This module mirrors the wire shape defined by
-``inference_optimizer/orchestrator/intent_parser.py`` so that the
-robustness reactor can construct intents that the Coordinator's
-``PolicyGate`` accepts without change.
-
-Hosts drive the reactor through the subprocess CLI in
-:mod:`robustness_agent.runtime.cli`, which writes the resulting
-intents through :func:`build_envelope_dict` into ``emit.json`` —
-identical to how ``critic-agent`` ships its commit-review output.
-This file is *transport-agnostic*: same shape works for the Coordinator
-subprocess bridge today and for a long-running CLI writing JSONL rows
-to ``$SESSION_DIR/agents/robustness/outbox.jsonl`` in the future.
-
-The class layout intentionally avoids importing from inference_optimizer
-to keep this package independent. A contract test cross-checks the
-``IntentType`` / ``_PAYLOAD_REQUIRED`` table against the upstream module
-when both packages are importable.
+Mirrors the wire shape of ``inference_optimizer/protocol/intent.py`` so the
+reactor can build intents the Coordinator's ``PolicyGate`` accepts unchanged.
+Transport-agnostic; avoids importing inference_optimizer to stay independent.
+A contract test cross-checks ``IntentType`` / ``_PAYLOAD_REQUIRED`` against the
+upstream module when both packages are importable.
 """
 
 from __future__ import annotations
@@ -48,17 +38,12 @@ class IntentType(str, Enum):
     FORCE_DISPATCH = "force_dispatch"
     PRUNE_BRANCH = "prune_branch"
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
-    # specialist sub-agent exit protocol mirror.
-    # Robustness never emits this intent (PolicyGate restricts the
-    # source to specialist sub-agents), but the value belongs in the
-    # mirror so the upstream-contract test stays green and any tooling
-    # that round-trips envelopes does not lose the symbol.
+    # Robustness never emits this; kept in the mirror for the upstream-contract test.
     SPECIALIST_DONE = "specialist_done"
 
 
 # Per-intent required payload fields. Identical to upstream
-# ``policy._PAYLOAD_REQUIRED``; ``decision.policy_aware`` reuses the same
-# table to validate intents before they leave the reactor.
+# ``policy._PAYLOAD_REQUIRED``; ``decision.policy_aware`` reuses it to validate.
 PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
     IntentType.SEND_MESSAGE: ("topic",),
     IntentType.DELEGATE: ("action_name",),
@@ -70,13 +55,9 @@ PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
     IntentType.ALERT: ("severity", "summary"),
     IntentType.REQUEST: ("target_agent", "kind"),
     IntentType.RESPONSE: ("in_reply_to", "kind"),
-    # Upstream KB_gaps/Gap-11: the ``verdict``/``verdict_map``
-    # choice is mutually exclusive but at least one of them must be
-    # present. intent_parser only enforces the structural
-    # ``target_proposal_msg_id`` here; the verdict-payload mutual
-    # exclusion lives in ``policy._validate_review_verdict_payload``.
-    # Mirror the same shape so the upstream-sync contract test stays
-    # green.
+    # Only the structural ``target_proposal_msg_id`` is enforced here; the
+    # verdict/verdict_map mutual exclusion lives in
+    # ``policy._validate_review_verdict_payload``.
     IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
     IntentType.KILL_TASK: ("task_id", "reason"),
     IntentType.FORCE_DISPATCH: ("task_id", "reason"),
@@ -91,9 +72,8 @@ PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
 }
 
 
-# Intents that PolicyGate restricts to ``source == "robustness"``. The
-# reactor guards these locally to surface configuration / programming
-# bugs early; the gate still enforces them server-side.
+# Intents PolicyGate restricts to ``source == "robustness"``; guarded locally
+# to fail fast, still enforced server-side by the gate.
 ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset({
     IntentType.KILL_TASK,
     IntentType.FORCE_DISPATCH,
@@ -102,10 +82,8 @@ ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset({
 })
 
 
-# Intents the robustness role may emit. Mirrors ``_ROBUSTNESS_INTENTS``
-# in upstream agent_role.py. PROPOSE_ACTION / REQUEST / RESPONSE /
-# REVIEW_VERDICT / ASK_QUESTION continuations handled by other roles are
-# excluded so a programming mistake is caught at construction time.
+# Intents the robustness role may emit. Mirrors ``_ROBUSTNESS_INTENTS`` in
+# upstream agent_role.py; other roles' intents are excluded to fail fast.
 ROBUSTNESS_ALLOWED_INTENTS: frozenset[IntentType] = frozenset({
     IntentType.SEND_MESSAGE,
     IntentType.ASK_QUESTION,
@@ -121,8 +99,8 @@ ROBUSTNESS_ALLOWED_INTENTS: frozenset[IntentType] = frozenset({
 })
 
 
-# Severities accepted by ``alert`` and ``escalate_strategy_change`` per
-# DESIGN v0.6 13.2. ``high`` raises priority 0 broadcasts.
+# Severities accepted by ``alert`` and ``escalate_strategy_change``.
+# ``high`` raises priority 0 broadcasts.
 ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 
 
@@ -130,18 +108,9 @@ ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
 
 
-# Handle actions the robustness role is allowed to delegate. Upstream
-# documents the quartet in ``system_prompts/robustness.md``.
-#
-# ``report`` is an exception to the "handle action" pattern of the other
-# three: it is the deterministic session-finalize action owned by
-# Orchestration. Robustness is allowed to delegate it ONLY as a
-# last-resort wind-down lever, when the evidence shows the session is
-# locked out from making further progress on the remaining time budget
-# (deadline_imminent with zero validated gain, or recover_failed_finalize
-# after a GPU leak recovery returned needs_review and the leak re-fires).
-# Action-ladder ``_recommend`` is the single source-of-truth for those
-# guard conditions; ``build_delegate`` here only enforces the allowlist.
+# Handle actions robustness may delegate; ``report`` is the Orchestration-owned
+# session-finalize action, allowed only as a last-resort wind-down lever (guard
+# conditions live in action-ladder ``_recommend``; here we only enforce the allowlist).
 ROBUSTNESS_DELEGATE_ACTIONS: frozenset[str] = frozenset({
     "accuracy_gate",
     "recover",
@@ -182,10 +151,11 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "warm_start_pitfalls",
     "warm_start_lessons",
     "warm_start_ts",
-    # GAP 5 KB tag completeness.
+    "warm_start_context",
+    # KB tag completeness.
     "stack_fingerprint_meta",
     "baseline_workload_extra",
-    # GAP 1 warm-recipe replay.
+    # warm-recipe replay.
     "warm_replay_attempted",
     "warm_replay_outcome",
     "warm_history_injected",
@@ -195,6 +165,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "phase_started_unix",
     "phase_history",
     "phase_budget_pct",
+    # operator-facing lifecycle event log (#266); Coordinator-only writer.
+    "lifecycle",
     # specialist sub-agent ledger.
     "specialist_rounds",
     "specialist_domain_empty_streak",
@@ -212,21 +184,19 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "explore_search",
     # structured gaps ledger.
     "gaps",
-    # dynamic_action aggregate view + round counter
-    # (Coordinator-only writer; LLM cannot self-narrate dispatch
-    # outcomes via UPDATE_STATE).
-    "dynamic_actions",
-    "dynamic_action_round_count",
-    # FRAMEWORK_PR per-repo discovery budget (Coordinator-controlled
-    # search depth knob).
+    # Orchestration working-memory checkpoint (Coordinator-authored).
+    "orchestration_memory",
+    # FRAMEWORK_PR per-repo discovery budget (Coordinator-controlled).
     "framework_pr_max_candidates",
     # Advisory model-architecture profile (launcher / state.json owned).
     "model_arch",
-    # Architecture-identity tags lifted from config.json (recipe-snapshot
-    # KB tags). Fact-layer; locked to mirror upstream
-    # ``policy.CORE_STATE_FIELDS``.
+    # Architecture-identity tags from config.json; mirrors upstream.
     "model_architectures",
     "model_type",
+    # Multimodal text-fallback degraded-run markers (preflight-authored);
+    # locked so an LLM update_state can't forge/clear the degraded verdict.
+    "degraded_mode",
+    "model_warnings",
 })
 
 
@@ -251,7 +221,12 @@ class Intent:
     payload: dict[str, Any] = field(default_factory=dict)
 
     def to_envelope_item(self) -> dict[str, Any]:
-        """Return the dict shape used inside an ``intents`` envelope."""
+        """Return the dict shape used inside an ``intents`` envelope.
+
+        Returns:
+            dict[str, Any]: A ``{"intent_type": ..., "payload": ...}`` dict
+            with a copy of the payload.
+        """
         return {"intent_type": self.type.value, "payload": dict(self.payload)}
 
 
@@ -273,7 +248,14 @@ class BackendTurnResult:
 # ---------------------------------------------------------------------------
 
 def build_heartbeat(body_md: str = "ok (robustness-agent)") -> Intent:
-    """Default tick-end fallback when no symptom warrants an emit."""
+    """Default tick-end fallback when no symptom warrants an emit.
+
+    Args:
+        body_md (str): Markdown body for the heartbeat message.
+
+    Returns:
+        Intent: A ``send_message`` intent on the ``heartbeat`` topic.
+    """
     return Intent(
         type=IntentType.SEND_MESSAGE,
         payload={"topic": "heartbeat", "body_md": body_md},
@@ -291,6 +273,16 @@ def build_send_message(
 
     The Coordinator soft-degrades unknown topics to ``observation`` per
     DESIGN v0.6 13.2; callers should still use a known topic.
+
+    Args:
+        topic (str): Message topic.
+        body_md (str | None): Optional markdown body.
+        to (str | None): Optional target agent name.
+        extras (Mapping[str, Any] | None): Optional extra payload fields;
+            any ``topic`` key is ignored to protect the canonical topic.
+
+    Returns:
+        Intent: A ``send_message`` intent with the assembled payload.
     """
     payload: dict[str, Any] = {"topic": topic}
     if body_md is not None:
@@ -316,6 +308,17 @@ def build_alert(
     severity must be one of :data:`ALERT_SEVERITIES`. ``summary`` is the
     one-line message PolicyGate sees; ``detail`` carries structured
     evidence the Coordinator persists verbatim.
+
+    Args:
+        severity (str): Alert severity; must be in :data:`ALERT_SEVERITIES`.
+        summary (str): One-line, non-empty alert summary.
+        detail (Mapping[str, Any] | None): Optional structured evidence.
+
+    Returns:
+        Intent: An ``alert`` intent with the assembled payload.
+
+    Raises:
+        ValueError: If ``severity`` is invalid or ``summary`` is empty.
     """
     if severity not in ALERT_SEVERITIES:
         raise ValueError(
@@ -339,6 +342,18 @@ def build_escalate(
 
     Robustness-only. Non-destructive priority-0 broadcast hint per
     DESIGN v0.6 19.3.4.
+
+    Args:
+        reason (str): Non-empty reason for the escalation.
+        next_action_hint (str): Non-empty hint for the next action.
+        severity (str): Severity; must be in :data:`ALERT_SEVERITIES`.
+
+    Returns:
+        Intent: An ``escalate_strategy_change`` intent.
+
+    Raises:
+        ValueError: If ``reason``/``next_action_hint`` is empty or
+            ``severity`` is invalid.
     """
     if not reason:
         raise ValueError("escalate reason must be non-empty")
@@ -364,6 +379,16 @@ def build_kill_task(task_id: str, reason: str) -> Intent:
     Robustness-only. ``scope`` is hardcoded to ``"task"`` because the
     upstream PolicyGate v0.6 rejects any other value (server / process
     kills go through delegate(server_lifecycle) under IR-5).
+
+    Args:
+        task_id (str): Non-empty id of the task to kill.
+        reason (str): Non-empty reason for the kill.
+
+    Returns:
+        Intent: A ``kill_task`` intent scoped to ``"task"``.
+
+    Raises:
+        ValueError: If ``task_id`` or ``reason`` is empty.
     """
     if not task_id:
         raise ValueError("kill_task task_id must be non-empty")
@@ -376,7 +401,18 @@ def build_kill_task(task_id: str, reason: str) -> Intent:
 
 
 def build_force_dispatch(task_id: str, reason: str) -> Intent:
-    """Construct a ``force_dispatch`` intent. Robustness-only."""
+    """Construct a ``force_dispatch`` intent. Robustness-only.
+
+    Args:
+        task_id (str): Non-empty id of the task to force-dispatch.
+        reason (str): Non-empty reason for the force-dispatch.
+
+    Returns:
+        Intent: A ``force_dispatch`` intent.
+
+    Raises:
+        ValueError: If ``task_id`` or ``reason`` is empty.
+    """
     if not task_id:
         raise ValueError("force_dispatch task_id must be non-empty")
     if not reason:
@@ -388,7 +424,18 @@ def build_force_dispatch(task_id: str, reason: str) -> Intent:
 
 
 def build_prune_branch(family: str, reason: str) -> Intent:
-    """Construct a ``prune_branch`` intent. Robustness-only."""
+    """Construct a ``prune_branch`` intent. Robustness-only.
+
+    Args:
+        family (str): Non-empty action family to prune.
+        reason (str): Non-empty reason for the prune.
+
+    Returns:
+        Intent: A ``prune_branch`` intent.
+
+    Raises:
+        ValueError: If ``family`` or ``reason`` is empty.
+    """
     if not family:
         raise ValueError("prune_branch family must be non-empty")
     if not reason:
@@ -411,6 +458,18 @@ def build_delegate(
     :data:`ROBUSTNESS_DELEGATE_ACTIONS`. Other action names will be
     rejected by PolicyGate's ``KERNEL_OWNED_ACTIONS`` / role check; we
     fail fast locally to keep error context.
+
+    Args:
+        action_name (str): Action to delegate; must be in
+            :data:`ROBUSTNESS_DELEGATE_ACTIONS`.
+        params (Mapping[str, Any] | None): Optional action parameters.
+        idempotency_key (str | None): Optional idempotency key.
+
+    Returns:
+        Intent: A ``delegate`` intent with the assembled payload.
+
+    Raises:
+        ValueError: If ``action_name`` is not in the robustness allowlist.
     """
     if action_name not in ROBUSTNESS_DELEGATE_ACTIONS:
         raise ValueError(
@@ -430,6 +489,17 @@ def build_update_state(changes: Mapping[str, Any]) -> Intent:
 
     Restricted to fields in :data:`ROBUSTNESS_STATE_FIELDS`;
     fields in :data:`CORE_STATE_FIELDS` are rejected upstream.
+
+    Args:
+        changes (Mapping[str, Any]): Non-empty mapping of state fields to
+            new values; keys must be in :data:`ROBUSTNESS_STATE_FIELDS`.
+
+    Returns:
+        Intent: An ``update_state`` intent carrying the changes.
+
+    Raises:
+        ValueError: If ``changes`` is empty or names a field outside the
+            robustness allowlist.
     """
     if not changes:
         raise ValueError("update_state changes must be a non-empty mapping")
@@ -453,5 +523,11 @@ def build_envelope_dict(intents: list[Intent]) -> dict[str, Any]:
     CLI's ``tick`` command to populate ``emit.json.intent_envelope`` —
     identical to ``critic-agent``'s ``commit-review`` output, so the
     same ``validate_envelope`` host-side check accepts both.
+
+    Args:
+        intents (list[Intent]): Intents to serialise into the envelope.
+
+    Returns:
+        dict[str, Any]: An ``{"intents": [...]}`` envelope dict.
     """
     return {"intents": [i.to_envelope_item() for i in intents]}

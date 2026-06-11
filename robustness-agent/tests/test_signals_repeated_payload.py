@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the ``same_payload_loop`` signal (B1)."""
 
 from __future__ import annotations
@@ -222,12 +224,7 @@ def test_inbox_and_coordinator_events_combined():
 # hash as canonical envelopes.
 # ---------------------------------------------------------------------------
 def _integrate_event(*, task_id: str, args_value: str, legacy: bool) -> dict:
-    """Build an ``integrate`` family envelope. When ``legacy=True`` the
-    payload carries the legacy ``extra_sglang_args`` key; otherwise the
-    canonical ``extra_server_args`` key. Both rows are otherwise
-    identical so the projection should fingerprint them to the same
-    hash.
-    """
+    """Build an ``integrate`` envelope using legacy ``extra_sglang_args`` (legacy=True) or canonical ``extra_server_args``; otherwise identical so both fingerprint to the same hash."""
     key = "extra_sglang_args" if legacy else "extra_server_args"
     return {
         "topic": "delegated_result",
@@ -250,12 +247,7 @@ def _integrate_event(*, task_id: str, args_value: str, legacy: bool) -> dict:
 
 
 def test_legacy_extra_sglang_args_envelope_hashes_identically(recwarn):
-    """G3 regression: a legacy ``extra_sglang_args`` envelope must
-    fingerprint to the same hash as a canonical ``extra_server_args``
-    envelope so the same_payload_loop signal still fires across a
-    mixed-key burst (e.g. an in-flight rollout where some workers
-    still emit the legacy key).
-    """
+    """G3 regression: legacy and canonical key envelopes must fingerprint identically so same_payload_loop fires across a mixed-key burst."""
     events = [
         _integrate_event(task_id="t1", args_value="--tp 4", legacy=True),
         _integrate_event(task_id="t2", args_value="--tp 4", legacy=False),
@@ -270,9 +262,7 @@ def test_legacy_extra_sglang_args_envelope_hashes_identically(recwarn):
     assert sym.evidence["count"] == 3, (
         "legacy + canonical envelopes did not collapse to the same hash"
     )
-    # At least one DeprecationWarning fired (one per legacy envelope
-    # touched by ``_hash_for`` — exact count is implementation-detail
-    # but >= 1 must hold for the audit channel).
+    # At least one DeprecationWarning must fire for the audit channel.
     legacy_warnings = [
         w for w in recwarn.list
         if issubclass(w.category, DeprecationWarning)
@@ -282,10 +272,7 @@ def test_legacy_extra_sglang_args_envelope_hashes_identically(recwarn):
 
 
 def test_legacy_envelope_alone_still_fingerprints():
-    """If every envelope in a streak uses the legacy key, the signal
-    must still fire — the shim must normalise the key before the
-    projection, not just on mixed-key bursts.
-    """
+    """An all-legacy-key streak must still fire — the shim normalises before projection, not just on mixed-key bursts."""
     events = [
         _integrate_event(task_id="t1", args_value="--tp 4", legacy=True),
         _integrate_event(task_id="t2", args_value="--tp 4", legacy=True),

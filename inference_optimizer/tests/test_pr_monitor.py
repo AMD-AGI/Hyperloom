@@ -1,22 +1,6 @@
-"""v0.8 M4 — Knowledge plane + PR Monitor tests.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Covers KB_design §3.6 + §3.13 M4:
-
-* PR Monitor REST client (stdlib urllib): healthz / list_repos /
-  list_prs / pr_feed_warm with stubbed ``urlopen``. Disabled / network
-  failure paths return empty lists + warnings, never raise.
-* domain → repos yaml loader (``actions/_meta/_domain_repos.yaml``)
-  with wildcard handling.
-* KnowledgePlane facade: pr_feed_warm dispatch (disabled / unknown
-  domain / wildcard / per-repo failure folded into warnings), Cortex
-  write helpers no-op when disabled, mint_pr_node canonical_id
-  derivation.
-* SpecialistRunner tool-list gating: ``mcp__pr_monitor__*`` stripped
-  when KnowledgePlane reports PR Monitor disabled; default still
-  exposes the 12 PR Monitor MCP tool names.
-* breakdown ``kb_provenance.points_created`` extraction from the
-  audit log (pr_node + workload_node mixed).
-"""
+"""v0.8 M4 — Knowledge plane + PR Monitor tests (KB_design §3.6 + §3.13 M4)."""
 
 from __future__ import annotations
 
@@ -28,7 +12,6 @@ import pytest
 from inference_optimizer.orchestrator.knowledge_plane import (
     KnowledgePlane,
     load_domain_repos,
-    pr_node_canonical_id,
 )
 from inference_optimizer.orchestrator.pr_monitor import (
     DEFAULT_PR_MONITOR_URL,
@@ -43,12 +26,9 @@ from inference_optimizer.orchestrator.specialist_runner import (
     PR_MONITOR_MCP_TOOLS,
     SpecialistRunner,
 )
-from inference_optimizer.breakdown.collectors import collect_kb_provenance
 
 
-# ---------------------------------------------------------------------------
 # helpers
-# ---------------------------------------------------------------------------
 def _make_response(body: dict[str, Any] | list[Any], *, status: int = 200):
     """Return a context-manager that mimics ``urllib.request.urlopen``."""
     class _Resp:
@@ -61,9 +41,7 @@ def _make_response(body: dict[str, Any] | list[Any], *, status: int = 200):
     return _Resp()
 
 
-# ===========================================================================
 # 1. PR Monitor client — direct REST surface
-# ===========================================================================
 def test_pr_monitor_client_from_args_default_url():
     c = PRMonitorClient.from_args()
     assert c.base_url == DEFAULT_PR_MONITOR_URL.rstrip("/")
@@ -73,8 +51,7 @@ def test_pr_monitor_client_from_args_default_url():
 def test_pr_monitor_client_from_args_disabled():
     c = PRMonitorClient.from_args(enabled=False)
     assert c.enabled is False
-    # Disabled client raises through the low-level helper but the
-    # high-level wrappers swallow into empty results.
+    # The low-level helper raises; the high-level wrappers swallow into empty results.
     with pytest.raises(PRMonitorError):
         c._get_json("/healthz")
     assert c.healthz() is False
@@ -97,8 +74,7 @@ def test_pr_monitor_healthz_handles_network_error(monkeypatch):
 
 
 def test_pr_monitor_list_repos_parses_items(monkeypatch):
-    """Legacy mock shape: dict-wrapped ``{items: [{name: ...}]}``.
-    Kept supported for back-compat with old test fixtures."""
+    """Legacy mock shape ``{items: [{name: ...}]}`` is still supported for back-compat."""
     c = PRMonitorClient.from_args()
     payload = {"items": [
         {"name": "ROCm/aiter"},
@@ -113,10 +89,7 @@ def test_pr_monitor_list_repos_parses_items(monkeypatch):
 
 
 def test_pr_monitor_list_repos_parses_real_rest_shape(monkeypatch):
-    """Production PR Monitor returns a top-level JSON array whose
-    entries carry ``repo_name`` + ``is_active``. Reading ``name``
-    silently dropped every entry (pr_intel_specialist wildcard
-    expansion bug). Inactive repos must be skipped."""
+    """Production returns a JSON array of ``repo_name`` + ``is_active`` entries; reading ``name`` dropped every row (wildcard bug). Inactive repos are skipped."""
     c = PRMonitorClient.from_args()
     payload = [
         {
@@ -247,9 +220,7 @@ def test_matches_keywords_case_insensitive():
     assert not _matches_keywords(pr, ["allreduce"])
 
 
-# ===========================================================================
 # 2. domain → repos yaml loader
-# ===========================================================================
 def test_load_domain_repos_returns_six_domains():
     repos = load_domain_repos()
     assert set(repos.keys()) == {
@@ -290,9 +261,7 @@ def test_load_domain_repos_ignores_unknown_domain(tmp_path):
     assert "ghost_specialist" not in out
 
 
-# ===========================================================================
 # 3. KnowledgePlane facade
-# ===========================================================================
 @pytest.fixture
 def plane_with_disabled_pr() -> KnowledgePlane:
     return KnowledgePlane.from_clients(
@@ -370,84 +339,16 @@ def test_plane_pr_feed_warm_wildcard_expands_via_list_repos(monkeypatch):
     # pr_intel_specialist has empty keywords → everything passes.
 
 
-def test_plane_cortex_write_helpers_skip_when_disabled():
-    plane = KnowledgePlane.from_clients(cortex_kb=None, pr_monitor=None)
-    out = plane.cortex_propose_point(canonical_id="x", kind="pr_node")
-    assert out["status"] == "skip_disabled"
-    # ``cortex_hypothesize`` was retired with the T2/T3 protocol; no
-    # facade method exists to test the disabled path against anymore.
-
-
-# ===========================================================================
-# 4. pr_node_canonical_id + mint_pr_node
-# ===========================================================================
-def test_pr_node_canonical_id_with_number():
-    assert pr_node_canonical_id("ROCm/aiter", number=3067) == "pr.ROCm/aiter#3067"
-
-
-def test_pr_node_canonical_id_with_sha():
-    assert pr_node_canonical_id("x/y", sha="abc123") == "pr.x/y@abc123"
-
-
-def test_pr_node_canonical_id_defaults():
-    assert pr_node_canonical_id("") == "pr.unknown_repo.unknown"
-
-
-def test_mint_pr_node_disabled_returns_skip():
-    plane = KnowledgePlane.from_clients(cortex_kb=None, pr_monitor=None)
-    out = plane.mint_pr_node(repo="ROCm/aiter", number=3067)
-    assert out["status"] == "skip_disabled"
-
-
-def test_mint_pr_node_calls_cortex_with_correct_canonical():
-    # Stub a CortexKBClient that captures calls.
-    captured: dict[str, Any] = {}
-
-    class _StubCortex:
-        enabled = True
-        def propose_point(self_inner, **kwargs):
-            captured.update(kwargs)
-            return {"status": "ok", "point_id": "pt-1"}
-
-    plane = KnowledgePlane.from_clients(
-        cortex_kb=_StubCortex(),  # type: ignore[arg-type]
-        pr_monitor=None,
-    )
-    out = plane.mint_pr_node(
-        repo="ROCm/aiter", number=3067,
-        attrs={"specialist": "kernel_switch_specialist"},
-    )
-    assert out["status"] == "ok"
-    assert captured["canonical_id"] == "pr.ROCm/aiter#3067"
-    assert captured["kind"] == "pr_node"
-    assert captured["authority"] == "EXPERIENTIAL"
-    # The repo/number/url get folded into attrs.
-    assert captured["attrs"]["repo"] == "ROCm/aiter"
-    assert captured["attrs"]["number"] == 3067
-    assert "ROCm/aiter/pull/3067" in captured["attrs"]["url"]
-    # The synthesised url evidence is appended.
-    assert any(e.startswith("url:") for e in captured["evidence"])
-
-
-# ===========================================================================
 # 5. SpecialistRunner tool-list gating
-# ===========================================================================
 def test_default_specialist_tools_include_all_pr_monitor_mcp_tools():
     for t in PR_MONITOR_MCP_TOOLS:
         assert t in DEFAULT_SPECIALIST_TOOLS
-    # 12-tool surface per primus-cortex-pr-monitor-access.md §"可用 tools".
+    # 12-tool surface per primus-cortex-pr-monitor-access.md §"Available Tools".
     assert len(PR_MONITOR_MCP_TOOLS) == 12
 
 
 def test_default_specialist_tools_exclude_orphan_cortex_kb_readonly():
-    """Cortex KB has no MCP surface (REST only); KB read context is
-    pre-warmed into the specialist prompt by
-    ``Coordinator._warm_specialist_params``. Advertising
-    ``mcp__cortex_kb__{traverse,find_recipe,query}`` in the
-    ``--allowedTools`` list caused specialists to attempt orphan
-    tool calls and silently fall back to ``WebSearch``. The names
-    remain importable for PolicyGate (denial validation) but are NOT
-    in the default specialist whitelist."""
+    """Cortex KB has no MCP surface; advertising its read-only tool names caused orphan calls, so they're kept out of the default whitelist (importable for PolicyGate)."""
     for t in CORTEX_KB_READONLY_MCP_TOOLS:
         assert t not in DEFAULT_SPECIALIST_TOOLS
 
@@ -482,69 +383,14 @@ def test_specialist_runner_keeps_pr_monitor_when_plane_enabled():
 
 
 def test_specialist_runner_without_plane_keeps_default_tools():
-    """Back-compat: callers that don't pass a KnowledgePlane keep
-    every default tool (M5 behaviour preserved)."""
+    """Back-compat: callers without a KnowledgePlane keep every default tool."""
     runner = SpecialistRunner(backend_factory=lambda d: None)
     tools = runner._resolve_tools()
     for t in DEFAULT_SPECIALIST_TOOLS:
         assert t in tools
 
 
-# ===========================================================================
-# 6. breakdown kb_provenance points_created
-# ===========================================================================
-def test_kb_provenance_points_created_aggregates_pr_node(tmp_path):
-    """Audit log with multiple propose_point ops surfaces in points_created."""
-    session_dir = tmp_path / "session"
-    (session_dir / "runtime" / "cortex").mkdir(parents=True)
-    audit = session_dir / "runtime" / "cortex" / ".kb_audit.jsonl"
-    audit_rows = [
-        {"ts": "2026-05-19T01:00:00", "op": "propose_point",
-         "status": "ok", "canonical_id": "workload.qwen3.mi300x",
-         "kind": "workload_node", "authority": "EXPERIENTIAL",
-         "source": "agent_observation"},
-        {"ts": "2026-05-19T02:00:00", "op": "propose_point",
-         "status": "ok", "canonical_id": "pr.ROCm/aiter#3067",
-         "kind": "pr_node", "authority": "EXPERIENTIAL",
-         "source": "pr_monitor"},
-        {"ts": "2026-05-19T02:01:00", "op": "propose_point",
-         "status": "queued", "canonical_id": "pr.ROCm/aiter#3067",
-         "kind": "pr_node", "authority": "EXPERIENTIAL",
-         "source": "pr_monitor"},   # dedupes (same canonical+kind)
-        {"ts": "2026-05-19T03:00:00", "op": "cli", "status": "ok",
-         "args": ["session", "commit"]},  # non-propose row, skipped
-    ]
-    with audit.open("w", encoding="utf-8") as f:
-        for r in audit_rows:
-            f.write(json.dumps(r) + "\n")
-
-    state = {"cortex_session_id": "sid-1"}
-    manifest = {"stack_fingerprint": {}}
-    warnings: list[str] = []
-    out = collect_kb_provenance(session_dir, state, manifest, warnings)
-    canonical_ids = {p["canonical_id"] for p in out["points_created"]}
-    assert "workload.qwen3.mi300x" in canonical_ids
-    assert "pr.ROCm/aiter#3067" in canonical_ids
-    # Dedup → exactly 2 unique (canonical_id, kind) pairs.
-    assert len(out["points_created"]) == 2
-    assert out["points_by_kind"]["pr_node"] == 1
-    assert out["points_by_kind"]["workload_node"] == 1
-    assert warnings == []
-
-
-def test_kb_provenance_no_audit_log_returns_empty_points(tmp_path):
-    session_dir = tmp_path / "session"
-    state = {}
-    manifest = {}
-    warnings: list[str] = []
-    out = collect_kb_provenance(session_dir, state, manifest, warnings)
-    assert out["points_created"] == []
-    assert out["points_by_kind"] == {}
-
-
-# ===========================================================================
-# 7. KnowledgePlane cache reset
-# ===========================================================================
+# 6. KnowledgePlane cache reset
 def test_plane_reset_round_caches():
     pr = PRMonitorClient.from_args()
     pr._cache["x"] = []

@@ -1,12 +1,9 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Concrete ActionRunner implementations.
 
-Each runner is an ``async def fn(RunnerContext) -> dict`` that the
-SubAgentRunner dispatches when a queued task's ``kind`` matches its
-registered name.
-
-The merged :class:`ExploreExecutor` is the single grid-runner entry;
-it maintains the unified ``explore_search`` ledger on
-:class:`SharedState`.
+Each runner is an ``async def fn(RunnerContext) -> dict`` dispatched by
+SubAgentRunner when a queued task's ``kind`` matches its registered name.
 """
 
 from .baseline import (
@@ -14,7 +11,6 @@ from .baseline import (
     BaselineExecutor,
     baseline_executor,
 )
-from .dynamic_action import dynamic_action_executor
 from .explore import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     DEFAULT_STACK_STABLE_PCT,
@@ -51,7 +47,6 @@ __all__ = [
     "TargetAnalysisExecutor",
     "baseline_executor",
     "conc_sweep_executor",
-    "dynamic_action_executor",
     "explore_executor",
     "framework_pr_executor",
     "recover_executor",

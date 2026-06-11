@@ -1,15 +1,9 @@
-"""Data-provenance renderer.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Surfaces the ``data_provenance`` section of the breakdown — a
-per-section list of source-artifact probes that explains, in one
-table, why any particular section is empty (or partial). Older
-breakdowns built before ``data_provenance`` shipped silently skip the
-section so the renderer is backwards-compatible.
+"""Data-provenance renderer — per-section source-artifact probes explaining why a section is empty/partial.
 
-The table intentionally stays compact: section / status / populated /
-missing_required / sources summary (e.g. ``5 found / 7 probed``). The
-full per-probe detail lives in the JSON; operators who need it can
-inspect ``session_breakdown.json`` directly.
+Backwards-compatible: older breakdowns without ``data_provenance`` skip
+the section.
 """
 
 from __future__ import annotations
@@ -20,10 +14,7 @@ from ..base import RenderedSection, md_table, register_renderer
 
 
 def _sources_summary(sources: list[dict[str, Any]]) -> str:
-    """Render a ``<found>/<total> probed`` summary, with required hits
-    distinguished from optional ones so an operator can tell at a
-    glance whether the missing artifacts were required or optional.
-    """
+    """Render a ``<found>/<total> probed`` summary, distinguishing required hits from optional."""
     if not sources:
         return "—"
     total = len(sources)
@@ -35,6 +26,19 @@ def _sources_summary(sources: list[dict[str, Any]]) -> str:
 
 @register_renderer("data_provenance")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the data-provenance section as a per-section probe table.
+
+    Shows, for each tracked section, whether it was populated and which
+    required source artifacts were missing, so empty/partial sections are
+    explainable. Skipped on breakdowns built before provenance shipped.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered section, or a skipped placeholder when
+            no provenance entries exist.
+    """
     entries_raw = breakdown.get("data_provenance")
     entries: list[dict[str, Any]] = (
         entries_raw if isinstance(entries_raw, list) else []

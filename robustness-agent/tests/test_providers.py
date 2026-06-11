@@ -1,10 +1,6 @@
-"""Tests for metrics providers — factory, ring buffer, LocalProvider,
-RobustProvider, and helper plumbing.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-These cover the same surface a production HTTP client would, but without
-network IO. Subprocess + httpx integration points are patched so tests
-run without real ROCm or a Primus-Robust-Internal endpoint.
-"""
+"""Tests for metrics providers (factory, ring buffer, LocalProvider, RobustProvider): subprocess/httpx points are patched so tests run without real ROCm or a Primus-Robust-Internal endpoint."""
 
 from __future__ import annotations
 

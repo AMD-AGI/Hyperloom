@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for the robustness-server client + Source adapter."""
 
 from __future__ import annotations
@@ -759,9 +761,8 @@ async def test_source_workload_uid_drives_multi_node_pod_metric_fan_out():
 
     def handler(request: httpx.Request) -> httpx.Response:
         if "/sessions/sess-1/pods" in request.url.path:
-            # Session only knows about the head pod; the workers were
-            # registered by the cluster but never made it into the
-            # session view yet.
+            # Session only knows the head pod; workers exist only in the
+            # cluster hierarchy view.
             return httpx.Response(
                 200,
                 json=[{"pod": {"namespace": "ns1", "name": "head"}}],

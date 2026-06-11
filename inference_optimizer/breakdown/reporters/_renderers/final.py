@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Final / validated result renderer."""
 
 from __future__ import annotations
@@ -16,6 +18,19 @@ from ._invocation import render_invocation_block
 
 @register_renderer("final")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the final / validated-result section.
+
+    Surfaces final throughput, the delta and validated cumulative gain vs.
+    baseline, the action path and final server args, plus data-quality
+    warnings (stale validation, missing validated gain). Skipped when
+    neither final throughput nor a validated gain is present.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered final-result section.
+    """
     f = breakdown.get("final") or {}
     b = breakdown.get("baseline") or {}
     session = breakdown.get("session") or {}

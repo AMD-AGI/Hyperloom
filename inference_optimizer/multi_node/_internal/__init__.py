@@ -1,8 +1,3 @@
-"""Internal helpers for ``inference_optimizer.multi_node``.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Everything in here is implementation detail: ``log``, ``safe_client``,
-``ray_dashboard``, ``workload_spec``. The only public surface is the
-``inference_optimizer.multi_node`` CLI, invoked as
-``python3 -m inference_optimizer.multi_node <subcommand>`` from inside
-the sandbox.
-"""
+"""Internal helpers for ``inference_optimizer.multi_node`` (log/safe_client/ray_dashboard/workload_spec); the CLI is the only public surface."""

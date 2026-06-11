@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Slugify spec tests against the contract Appendix D.4 golden fixture."""
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ def test_golden_cases_all_pass():
 
 def test_slugify_rejects_non_ascii():
     with pytest.raises(SlugifyError, match="non_ascii"):
-        slugify("FA3 在 H100 上崩溃")
+        slugify("FA3 cräshes ön H100 — übër")
 
 
 def test_slugify_rejects_too_short_after_normalisation():
@@ -59,14 +61,14 @@ def test_slugify_safe_pure_ascii_passes_through():
 
 def test_slugify_safe_uses_translate_fn_for_non_ascii():
     out = slugify_safe(
-        "FA3 在 H100 上崩溃",
+        "FA3 cräshes ön H100 — übër",
         translate_fn=lambda t: "fa3 h100 crash",
     )
     assert out == "fa3-h100-crash"
 
 
 def test_slugify_safe_fallback_prefix_when_no_translator():
-    out = slugify_safe("FA3 在 H100 上崩溃")
+    out = slugify_safe("FA3 cräshes ön H100 — übër")
     assert out.startswith("auto-")
     assert len(out.split("-", 1)[1]) == 8
 
@@ -76,7 +78,7 @@ def test_slugify_safe_fallback_when_translator_raises():
         raise RuntimeError("translation service unavailable")
 
     out = slugify_safe(
-        "FA3 在 H100 上崩溃",
+        "FA3 cräshes ön H100 — übër",
         translate_fn=bad_translate,
         fallback_prefix="critic",
     )
@@ -84,8 +86,8 @@ def test_slugify_safe_fallback_when_translator_raises():
 
 
 def test_slugify_safe_idempotent_for_same_non_ascii_input():
-    a = slugify_safe("FA3 在 H100 上崩溃")
-    b = slugify_safe("FA3 在 H100 上崩溃")
+    a = slugify_safe("FA3 cräshes ön H100 — übër")
+    b = slugify_safe("FA3 cräshes ön H100 — übër")
     assert a == b
 
 

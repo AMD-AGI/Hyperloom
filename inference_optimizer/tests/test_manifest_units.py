@@ -1,9 +1,6 @@
-"""Unit tests for ``inference_optimizer.manifest`` helpers.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Existing tests round-trip the manifest writer at a high level; we
-target the auxiliary helpers (objective summary, dependency provenance,
-image detection fallbacks) so each branch has explicit coverage.
-"""
+"""Unit tests for ``inference_optimizer.manifest`` helpers (objective summary, dependency provenance, image detection)."""
 
 from __future__ import annotations
 
@@ -17,9 +14,7 @@ import pytest
 from inference_optimizer import manifest as mf
 
 
-# ---------------------------------------------------------------------------
 # small helpers
-# ---------------------------------------------------------------------------
 
 class TestObjectiveSummary:
     def test_gain_pct(self):
@@ -45,9 +40,7 @@ class TestObjectiveSummary:
         assert mf._objective_summary(ns) == {"kind": "time_only", "value": None}
 
 
-# ---------------------------------------------------------------------------
 # build_session_id
-# ---------------------------------------------------------------------------
 
 class TestBuildSessionId:
     def test_uses_model_name_when_provided(self):
@@ -61,9 +54,7 @@ class TestBuildSessionId:
         assert sid.startswith("session_")
 
 
-# ---------------------------------------------------------------------------
 # _describe_dep + _build_dependencies
-# ---------------------------------------------------------------------------
 
 class TestDescribeDep:
     def test_unset_env(self, monkeypatch):
@@ -87,9 +78,7 @@ class TestDescribeDep:
         assert out["remote"] == "https://x/y.git"
 
 
-# ---------------------------------------------------------------------------
 # _detect_image
-# ---------------------------------------------------------------------------
 
 class TestDetectImage:
     def test_returns_env_when_set(self, monkeypatch):
@@ -131,9 +120,7 @@ class TestDetectImage:
         assert mf._detect_image() is None
 
 
-# ---------------------------------------------------------------------------
 # build_manifest end-to-end
-# ---------------------------------------------------------------------------
 
 class TestBuildManifest:
     def test_default_no_args(self, tmp_path, monkeypatch):
@@ -186,3 +173,30 @@ class TestWriteAndLoad:
     def test_load_raises_when_missing(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             mf.load_manifest(tmp_path)
+
+
+class TestDependencyEscapeGuard:
+    """``_describe_dep`` must never raise, even when the dep path makes ``Path.resolve`` raise a symlink-loop RuntimeError."""
+
+    def test_describe_dep_survives_symlink_loop(self, tmp_path, monkeypatch):
+        udp = tmp_path / "udp"
+        udp.mkdir()
+        monkeypatch.setenv(mf._paths.ENV_USER_DATA_PATH, str(udp))
+        # Real a -> b -> a loop; resolve(strict=False) raises RuntimeError.
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.symlink_to(b)
+        b.symlink_to(a)
+        monkeypatch.setenv("HYPERLOOM_TEST_DEP_LOOP", str(a))
+
+        out = mf._describe_dep("HYPERLOOM_TEST_DEP_LOOP")  # must not raise
+
+        assert out == {"path": str(a), "commit": "", "remote": ""}
+
+    def test_path_is_relative_to_handles_symlink_loop(self, tmp_path):
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.symlink_to(b)
+        b.symlink_to(a)
+        # Unresolvable path must degrade to False, not raise.
+        assert mf._path_is_relative_to(a, tmp_path) is False

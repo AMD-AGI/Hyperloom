@@ -1,18 +1,10 @@
-"""Cover the P2.b fix — ``fa phase-discover`` retries before
-flipping ``framework_pr_phase_done``.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The retry logic spans two methods on Coordinator:
+"""Cover the P2.b fix — ``fa phase-discover`` retries before flipping ``framework_pr_phase_done``.
 
-  - ``_discover_next_framework_pr_batch`` — bumps
-    ``state.framework_pr_discover_failures`` on Exception, resets to 0
-    on success, returns False either way.
-  - ``_pump_framework_pr_phase`` — only marks the phase done after
-    ``DISCOVER_FAILURE_RETRY_LIMIT`` consecutive failures, OR on a
-    clean empty payload (failures counter == 0).
-
-We test both methods in isolation by binding them to a minimal stub
-that mirrors the Coordinator attributes they read; this keeps the
-test fast (no DB, no bus, no backends).
+Tests ``_discover_next_framework_pr_batch`` (bumps the failure counter, resets
+on success) and ``_pump_framework_pr_phase`` (flips done after the retry limit
+or a clean empty payload) by binding them to a minimal Coordinator stub.
 """
 
 from __future__ import annotations
@@ -53,15 +45,10 @@ class _StateStub:
 
 
 class _CoordinatorStub:
-    """Holds just enough attributes to bind the Coordinator's discover
-    methods to.
+    """Minimal stub to bind the Coordinator's discover methods to.
 
-    These focused retry tests pin discovery to a *single* repo so that
-    one ``_discover_next_framework_pr_batch`` call == one
-    ``phase_discover`` call (the per-batch failure-counter semantics the
-    suite asserts). The cross-repo fan-out is covered separately in
-    ``test_framework_pr_discover_directed.py``. The dedup / tried-refs
-    helpers are bound directly from Coordinator so behaviour stays real.
+    Pins discovery to a single repo so one discover call == one phase_discover
+    call (the per-batch failure-counter semantics under test).
     """
 
     def __init__(self, tmp_path: Path) -> None:
@@ -87,9 +74,7 @@ def test_discover_failure_bumps_counter_without_flipping_phase_done(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A single failure increments the counter but leaves
-    framework_pr_phase_done False. Phase_history gets a
-    ``framework_pr_discover_failed`` row."""
+    """A single failure increments the counter, leaves phase_done False, and logs a ``framework_pr_discover_failed`` row."""
 
     async def _raise(**_: Any) -> dict[str, Any]:
         raise RuntimeError("simulated timeout")
@@ -115,9 +100,7 @@ def test_discover_three_consecutive_failures_reach_retry_limit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """After ``DISCOVER_FAILURE_RETRY_LIMIT`` failures the counter
-    reflects the cap. The pump (separately exercised below) interprets
-    this as the green light to flip framework_pr_phase_done."""
+    """After ``DISCOVER_FAILURE_RETRY_LIMIT`` failures the counter reflects the cap; discover never flips phase_done."""
 
     async def _raise(**_: Any) -> dict[str, Any]:
         raise RuntimeError("simulated")
@@ -133,7 +116,6 @@ def test_discover_three_consecutive_failures_reach_retry_limit(
         stub.shared_state.framework_pr_discover_failures
         == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
     )
-    # Discover itself never marks the phase done; pump does.
     assert stub.shared_state.framework_pr_phase_done is False
 
 
@@ -141,8 +123,7 @@ def test_discover_success_resets_failure_counter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A success after N failures must reset the counter to 0 so the
-    next failure starts fresh."""
+    """A success after N failures resets the counter to 0."""
 
     call_count = SimpleNamespace(n=0)
 
@@ -160,12 +141,10 @@ def test_discover_success_resets_failure_counter(
     monkeypatch.setattr(_fa_client, "phase_discover", _flaky)
     stub = _CoordinatorStub(tmp_path)
 
-    # 2 failures
     assert asyncio.run(_call_discover(stub)) is False
     assert asyncio.run(_call_discover(stub)) is False
     assert stub.shared_state.framework_pr_discover_failures == 2
 
-    # success
     assert asyncio.run(_call_discover(stub)) is True
     assert stub.shared_state.framework_pr_discover_failures == 0
     assert len(stub.shared_state.framework_pr_batches) == 1
@@ -210,12 +189,9 @@ def test_discover_timeout_default_used_when_override_zero(
     assert _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC == 180.0
 
 
-# ---------------------------------------------------------------------------
 # P2.e — enqueue failure records progress row.
-# ---------------------------------------------------------------------------
 class _TasksStub:
-    """Mimics ``Coordinator.tasks.create_or_return_existing``. Raises on
-    the first call to simulate an enqueue failure."""
+    """Mimics ``Coordinator.tasks.create_or_return_existing``; raises to simulate an enqueue failure."""
 
     def __init__(self, *, fail: bool = True) -> None:
         self._fail = fail
@@ -233,9 +209,7 @@ async def _call_enqueue(stub: _CoordinatorStub, cand: dict[str, Any]) -> None:
 
 
 def test_enqueue_failure_appends_progress_row(tmp_path: Path):
-    """Regression for P2.e: a registry failure during
-    _enqueue_framework_pr_task must record an ``enqueue_failed``
-    progress row so the next pump tick skips this candidate."""
+    """Regression for P2.e: a registry failure records an ``enqueue_failed`` progress row so the next tick skips the candidate."""
     stub = _CoordinatorStub(tmp_path)
     stub.tasks = _TasksStub(fail=True)  # type: ignore[attr-defined]
     cand = {
@@ -255,9 +229,7 @@ def test_enqueue_failure_appends_progress_row(tmp_path: Path):
 
 
 def test_enqueue_failed_candidate_skipped_by_selector(tmp_path: Path):
-    """After an enqueue_failed row is appended, the next selector pass
-    must NOT return that candidate — proves the failure breaks the
-    forever-loop."""
+    """After an enqueue_failed row, the next selector pass must NOT return that candidate."""
     stub = _CoordinatorStub(tmp_path)
     stub.tasks = _TasksStub(fail=True)  # type: ignore[attr-defined]
     cand_bad = {"candidate_id": "pr-bad", "batch_id": "b1"}
@@ -269,18 +241,15 @@ def test_enqueue_failed_candidate_skipped_by_selector(tmp_path: Path):
         },
     ]
 
-    # First tick: enqueue cand_bad → fails → progress row appended.
     asyncio.run(_call_enqueue(stub, cand_bad))
 
-    # Next selector pass should skip cand_bad and return cand_good.
     nxt = Coordinator._select_next_framework_pr_candidate(stub)  # type: ignore[arg-type]
     assert nxt is not None
     assert nxt["candidate_id"] == "pr-good"
 
 
 def test_enqueue_success_does_not_append_progress_row(tmp_path: Path):
-    """Belt-and-braces: success path must NOT write an enqueue_failed
-    (or any other) progress row; that's the executor's job."""
+    """Belt-and-braces: the success path must NOT write any progress row."""
     stub = _CoordinatorStub(tmp_path)
     stub.tasks = _TasksStub(fail=False)  # type: ignore[attr-defined]
     cand = {"candidate_id": "pr-ok", "batch_id": "b1"}
@@ -290,13 +259,9 @@ def test_enqueue_success_does_not_append_progress_row(tmp_path: Path):
     assert stub.shared_state.framework_pr_phase_progress == []
 
 
-# ---------------------------------------------------------------------------
 # Gap 4 — phase_history summary row when the pump gives up on discover.
-# ---------------------------------------------------------------------------
 def test_record_framework_pr_phase_done_appends_history_row(tmp_path: Path):
-    """The helper called from _pump_framework_pr_phase appends a
-    summary row to phase_history so the give-up decision is visible
-    alongside the per-attempt ``framework_pr_discover_failed`` rows."""
+    """The helper appends a phase_history summary row so the give-up decision is visible."""
     stub = _CoordinatorStub(tmp_path)
     stub.shared_state.framework_pr_batches = [
         {"batch_id": "b1", "candidates": []},
@@ -324,9 +289,7 @@ def test_record_framework_pr_phase_done_appends_history_row(tmp_path: Path):
 def test_record_framework_pr_phase_done_records_empty_payload_reason(
     tmp_path: Path,
 ):
-    """The same helper records a different reason when the pump
-    flipped because discover returned a clean empty payload (no
-    failures, no candidates)."""
+    """The helper records ``discover_empty_payload`` when discover returned a clean empty payload."""
     stub = _CoordinatorStub(tmp_path)
 
     Coordinator._record_framework_pr_phase_done(  # type: ignore[arg-type]

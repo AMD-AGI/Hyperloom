@@ -1,15 +1,6 @@
-"""Cover the P1.b fix — Critic gate before FRAMEWORK_PR apply.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The gate lives in Coordinator._critic_review_framework_pr_candidate
-and is consulted from _pump_framework_pr_phase right before
-``_enqueue_framework_pr_task``. ``approve`` (or the degraded
-``abstain`` returned when no Critic is wired) falls through to enqueue;
-``reject`` short-circuits with a ``critic_denied`` progress row so the
-candidate is never applied.
-
-Tests bind the Coordinator method directly to a minimal stub so we
-exercise the gate without spinning up the full DB/bus/backends stack.
-"""
+"""P1.b — Critic gate before FRAMEWORK_PR apply: approve/abstain enqueue, reject writes ``critic_denied``."""
 
 from __future__ import annotations
 
@@ -23,7 +14,7 @@ from inference_optimizer.orchestrator.backends.critic_mock import (
     MockCriticBackend,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
-from inference_optimizer.orchestrator.intent_parser import Intent, IntentType
+from inference_optimizer.protocol.intent import Intent, IntentType
 
 
 class _StateStub:
@@ -40,13 +31,7 @@ class _StateStub:
 
 
 class _CoordinatorStub:
-    """Holds just enough state for the gate helper to run.
-
-    Class-level binding of ``_collect_framework_pr_priors`` so that
-    ``self._collect_framework_pr_priors()`` resolves to the real
-    Coordinator implementation when the gate is called with the stub
-    as ``self``.
-    """
+    """Holds just enough state for the gate helper to run (real ``_collect_framework_pr_priors`` bound)."""
 
     _CRITIC_PRIORS_DECISION_TAIL = Coordinator._CRITIC_PRIORS_DECISION_TAIL
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
@@ -68,13 +53,9 @@ def _call_gate(stub: _CoordinatorStub, candidate: dict[str, Any]) -> dict[str, s
     )
 
 
-# ---------------------------------------------------------------------------
 # Approve / reject / abstain mapping
-
-
 def test_gate_returns_approve_for_mock_critic(tmp_path: Path) -> None:
-    """MockCriticBackend auto-approves every proposal it sees, so the
-    gate maps that to ``approve`` and caches the decision."""
+    """MockCriticBackend auto-approves, so the gate maps to ``approve`` and caches the decision."""
     stub = _CoordinatorStub(tmp_path, MockCriticBackend())
     candidate = {
         "candidate_id":     "https://github.com/sgl-project/sglang/pull/9999",
@@ -111,8 +92,7 @@ class _RejectBackend:
         max_turns: int = 1,
     ) -> Any:
         self.calls.append(prompt)
-        # Extract msg_id from prompt so the verdict targets the right
-        # proposal (matches MockCriticBackend's wire format).
+        # Extract msg_id so the verdict targets the right proposal.
         import re
         m = re.search(r"msg_id=([a-f0-9]+)", prompt)
         msg_id = m.group(1) if m else "unknown"
@@ -142,12 +122,11 @@ def test_gate_returns_reject_with_rationale(tmp_path: Path) -> None:
 
 
 def test_gate_abstains_when_no_critic_backend(tmp_path: Path) -> None:
-    """Missing Critic must NOT block the phase — the caller treats
-    ``abstain`` like ``approve``. The cache still records the decision."""
+    """Missing Critic must NOT block the phase — the caller treats ``abstain`` like ``approve``."""
     stub = _CoordinatorStub(tmp_path, backend=None)
     result = _call_gate(stub, {"candidate_id": "pr-1", "batch_id": "b-1"})
     assert result["verdict"] == "abstain"
-    # No backend → no cache write (we short-circuit before the cache append).
+    # No backend → no cache write (short-circuit before the cache append).
     assert stub.shared_state.framework_pr_critic_decisions == []
 
 
@@ -203,18 +182,14 @@ class _NeedsReviewBackend:
 
 
 def test_gate_maps_needs_review_to_abstain(tmp_path: Path) -> None:
-    """Critic vocab outside {approve, reject} maps to ``abstain`` so the
-    phase keeps moving instead of stalling on a soft verdict."""
+    """Critic vocab outside {approve, reject} maps to ``abstain`` so the phase keeps moving."""
     stub = _CoordinatorStub(tmp_path, _NeedsReviewBackend())
     result = _call_gate(stub, {"candidate_id": "pr-7", "batch_id": "b-7"})
     assert result["verdict"] == "abstain"
     assert "insufficient context" in result["rationale"]
 
 
-# ---------------------------------------------------------------------------
 # Resume-safe cache lookup
-
-
 class _CountingBackend:
     """Records how many .run() calls it received."""
 
@@ -248,9 +223,7 @@ class _CountingBackend:
 
 
 def test_gate_uses_cached_decision_on_repeat_call(tmp_path: Path) -> None:
-    """Second call for the same candidate_id reads from
-    ``framework_pr_critic_decisions`` instead of re-invoking the
-    Critic — this is the resume path."""
+    """Resume path: a repeat call reads ``framework_pr_critic_decisions`` instead of re-invoking the Critic."""
     backend = _CountingBackend()
     stub = _CoordinatorStub(tmp_path, backend)
     cand = {"candidate_id": "pr-cached", "batch_id": "b-c"}
@@ -259,14 +232,10 @@ def test_gate_uses_cached_decision_on_repeat_call(tmp_path: Path) -> None:
     assert first["verdict"] == "approve"
     assert second["verdict"] == "approve"
     assert backend.run_count == 1, "second call should hit the cache"
-    # Only one decision row.
     assert len(stub.shared_state.framework_pr_critic_decisions) == 1
 
 
-# ---------------------------------------------------------------------------
 # Gap 3 — prompt enrichment (diff_url + session-local priors).
-
-
 class _PromptCapturingBackend:
     """Captures the prompt body so we can assert on its contents."""
 
@@ -312,9 +281,7 @@ def test_prompt_includes_diff_url_when_present(tmp_path: Path) -> None:
     assert "https://github.com/sgl-project/sglang/pull/1.diff" in backend.last_prompt
 
 
-# ---------------------------------------------------------------------------
 # atom-candidate rendering parity
-# ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "framework, diff_url",
     [
@@ -326,11 +293,7 @@ def test_prompt_includes_diff_url_when_present(tmp_path: Path) -> None:
 def test_critic_prompt_renders_candidate_diff_url_across_frameworks(
     tmp_path: Path, framework: str, diff_url: str,
 ) -> None:
-    """The Critic prompt must carry the candidate's ``diff_url``
-    verbatim regardless of framework. atom uses the
-    ``github.com/ROCm/ATOM/pull/N/files`` URL shape (variant of the
-    canonical PR-diff URL); the prompt rendering must not reject or
-    reshape it."""
+    """The Critic prompt carries the candidate's ``diff_url`` verbatim regardless of framework (incl. atom's /files shape)."""
     backend = _PromptCapturingBackend()
     stub = _CoordinatorStub(tmp_path, backend)
     cand = {
@@ -342,19 +305,13 @@ def test_critic_prompt_renders_candidate_diff_url_across_frameworks(
     }
     _call_gate(stub, cand)
     assert diff_url in backend.last_prompt
-    # Framework name carried into the prompt verbatim too.
     assert framework in backend.last_prompt
 
 
 def test_critic_prompt_no_framework_specific_rule_text_for_atom(
     tmp_path: Path,
 ) -> None:
-    """The Critic prompt body assembled for an atom candidate must not
-    contain rule text that's specific to sglang or vllm (e.g.
-    ``"sglang-specific"``, ``"vllm-specific"``). Concrete examples that
-    *mention* sglang or vllm are fine — the guard is on rule-flavour
-    substrings that would systematically bias the verdict against atom
-    by reference to the other frameworks' conventions."""
+    """The atom-candidate Critic prompt must not contain sglang/vllm-specific rule text."""
     backend = _PromptCapturingBackend()
     stub = _CoordinatorStub(tmp_path, backend)
     cand = {
@@ -377,12 +334,9 @@ def test_critic_prompt_no_framework_specific_rule_text_for_atom(
 
 
 def test_prompt_includes_session_local_priors(tmp_path: Path) -> None:
-    """Recent Critic decisions + apply/bench outcomes get folded
-    into the prompt so the Critic can spot patterns across the
-    current FRAMEWORK_PR session."""
+    """Recent Critic decisions + apply/bench outcomes fold into the prompt for pattern-spotting."""
     backend = _PromptCapturingBackend()
     stub = _CoordinatorStub(tmp_path, backend)
-    # Pre-populate the decision cache and the outcome ledger.
     stub.shared_state.framework_pr_critic_decisions.extend([
         {
             "candidate_id": "pr-prev-1",
@@ -413,22 +367,17 @@ def test_prompt_includes_session_local_priors(tmp_path: Path) -> None:
     ])
     cand = {"candidate_id": "pr-new", "batch_id": "b-2"}
     _call_gate(stub, cand)
-    # The decision cache rows should appear.
     assert "pr-prev-1" in backend.last_prompt
     assert "touches kernel build" in backend.last_prompt
-    # The outcome rows should appear.
     assert "reverted" in backend.last_prompt
     assert "kept" in backend.last_prompt
-    # Priors envelope key should be visible.
     assert "priors" in backend.last_prompt
 
 
 def test_priors_helper_trims_to_tail_length(tmp_path: Path) -> None:
-    """The helper bounds both decisions and outcomes to the
-    configured tail length so the prompt does not grow unbounded."""
+    """The helper bounds both decisions and outcomes to the tail length so the prompt stays bounded."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
     stub = _CoordinatorStub(tmp_path, backend=None)
-    # 12 decisions, 12 terminal outcomes — both should be capped at 5.
     for i in range(12):
         stub.shared_state.framework_pr_critic_decisions.append({
             "candidate_id": f"pr-{i}",
@@ -443,15 +392,12 @@ def test_priors_helper_trims_to_tail_length(tmp_path: Path) -> None:
     priors = Coordinator._collect_framework_pr_priors(stub)  # type: ignore[arg-type]
     assert len(priors["recent_decisions"]) == 5
     assert len(priors["recent_outcomes"]) == 5
-    # Tail = the most recent 5.
     assert priors["recent_decisions"][-1]["candidate_id"] == "pr-11"
     assert priors["recent_outcomes"][-1]["candidate_id"] == "pr-11"
 
 
 def test_priors_helper_skips_non_terminal_outcomes(tmp_path: Path) -> None:
-    """Only rows with terminal status (kept / reverted / no_patch /
-    enqueue_failed / critic_denied) feed the outcomes prior — an
-    in-flight ``running`` row should not show up."""
+    """Only terminal-status rows feed the outcomes prior; in-flight ``running`` rows don't show up."""
     from inference_optimizer.orchestrator.coordinator import Coordinator
     stub = _CoordinatorStub(tmp_path, backend=None)
     stub.shared_state.framework_pr_phase_progress.extend([

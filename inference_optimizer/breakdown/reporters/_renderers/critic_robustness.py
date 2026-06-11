@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Critic robustness renderer — captures pass-rate of LLM critic /
 self-consistency checks on candidate optimizations.
 """
@@ -13,6 +15,19 @@ _MAX_ROWS = 20
 
 @register_renderer("critic_robustness")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the critic-robustness section: critic/self-consistency checks.
+
+    Normalizes both legacy (prompt-only string) and structured entry
+    shapes, surfaces a pass/fail table when verdicts exist, and marks the
+    section skipped (with a warning) when entries carry no actionable
+    payload.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered critic-robustness section.
+    """
     cr = breakdown.get("critic_robustness") or []
     if not cr:
         return RenderedSection(
@@ -24,10 +39,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             skipped=True,
         )
 
-    # The collector historically wrote two shapes:
-    #   * V2: list[dict] with structured payload keys
-    #   * V1: list[str] (just the prompt body, no decision)
-    # Normalize both into dicts so the rest of this function is uniform.
+    # Normalize both historical shapes (V2 list[dict], V1 list[str]) into dicts.
     cr_norm: list[dict[str, Any]] = []
     for c in cr:
         if isinstance(c, dict):

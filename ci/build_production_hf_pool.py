@@ -1,25 +1,17 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Build the production rerun corpus directly from the HuggingFace catalog.
 
-The pool selection rule:
-  * pipeline_tag=text-generation
-  * inference_provider=all (HF "Inference Available" filter)
-  * num_parameters >= --min-params (HF server-side ``min:NB`` filter,
-    default 12 — matches the operator-supplied search URL)
-  * minus the InferenceX-roadmap / customer-noop blacklist defined in
-    ``ci/inferenceX_models.yaml::production_pool_exclusion_keywords``
+Pool selection: pipeline_tag=text-generation, inference_provider=all,
+num_parameters >= --min-params (default 12), minus the exclusion keywords in
+``ci/inferenceX_models.yaml::production_pool_exclusion_keywords``.
 
 The HF list endpoint caps a single sort at 500 rows, so we crawl every
-``sort`` × ``direction`` combination plus a per-author slice list, dedup
-by repo id, then sort by downloads descending. Roughly 1000+ unique
-candidates today; the legacy leaderboard-derived approach maxed out at
-~400 because it only counted models that already had a successful
-Hyperloom optimization task.
-
-The output JSON keeps the same ``hyperloom.production_corpus.v1``
-schema as the legacy ``build_production_leaderboard_pool.py`` (which
-this script replaces) so downstream consumers (generate_hf_matrix.py,
-the optimize-submit workflow) work without changes.
+``sort`` × ``direction`` plus a per-author slice list, dedup by repo id, then
+sort by downloads descending. Output keeps the ``hyperloom.production_corpus.v1``
+schema so downstream consumers (generate_hf_matrix.py, optimize-submit) are
+unchanged.
 """
 
 from __future__ import annotations
@@ -73,11 +65,8 @@ DEFAULT_AUTHOR_SLICES = [
 def _load_yaml_exclusions(path: Path) -> tuple[set[str], list[str]]:
     """Read ``ci/inferenceX_models.yaml`` and return ``(exact_ids, keywords)``.
 
-    See the original builder for the schema rationale; we only consume
-    two fields here:
-
-    * ``models[].hf_model``                              — exact lower-case match
-    * ``production_pool_exclusion_keywords``             — substring match
+    Consumes ``models[].hf_model`` (exact lower-case match) and
+    ``production_pool_exclusion_keywords`` (substring match).
     """
     if not path.exists():
         return set(), []
@@ -109,6 +98,15 @@ def _load_yaml_exclusions(path: Path) -> tuple[set[str], list[str]]:
 
 
 def _fetch_one(url: str) -> list[dict[str, Any]]:
+    """Fetch a single HF list URL, returning an empty list on any error.
+
+    Args:
+        url (str): Fully-formed HuggingFace models list endpoint URL.
+
+    Returns:
+        list[dict[str, Any]]: The decoded JSON rows, or an empty list if the
+        request fails or the response is not a list.
+    """
     try:
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=HF_TIMEOUT) as r:
@@ -122,7 +120,21 @@ def _crawl(
     *, min_params: float, base_extra: str = "",
     workers: int = HF_LIST_WORKERS,
 ) -> dict[str, dict[str, Any]]:
-    """Pull every (sort × direction) × (author slice) shard concurrently."""
+    """Pull every (sort × direction) × (author slice) shard concurrently.
+
+    Each shard is a separate HF list request; results are de-duplicated by
+    repo id across all shards.
+
+    Args:
+        min_params (float): Minimum parameter count (in billions) for the
+            server-side ``num_parameters`` filter.
+        base_extra (str): Optional extra query string appended to the base
+            filter.
+        workers (int): Number of concurrent fetch workers.
+
+    Returns:
+        dict[str, dict[str, Any]]: Mapping of repo id to its HF model row.
+    """
     base = (
         "pipeline_tag=text-generation"
         f"&num_parameters=min:{int(min_params)}B"
@@ -150,6 +162,14 @@ def _crawl(
     lock = threading.Lock()
 
     def _ingest(rows: list[dict[str, Any]]) -> int:
+        """Merge fetched rows into the shared ``seen`` map under a lock.
+
+        Args:
+            rows (list[dict[str, Any]]): Rows from one fetched shard.
+
+        Returns:
+            int: The number of newly added (previously unseen) rows.
+        """
         added = 0
         with lock:
             for m in rows:
@@ -174,12 +194,30 @@ def _crawl(
 
 
 def _params_total(m: dict[str, Any]) -> int:
+    """Return a model's total parameter count from its safetensors metadata.
+
+    Args:
+        m (dict[str, Any]): An HF model row.
+
+    Returns:
+        int: The total parameter count, or ``0`` if unavailable or non-positive.
+    """
     sf = m.get("safetensors") or {}
     total = sf.get("total")
     return int(total) if isinstance(total, (int, float)) and total > 0 else 0
 
 
 def _is_excluded(mid: str, exact_ids: set[str], keywords: list[str]) -> bool:
+    """Check whether a repo id is excluded by exact id or keyword match.
+
+    Args:
+        mid (str): The model repo id.
+        exact_ids (set[str]): Lower-cased repo ids to exclude exactly.
+        keywords (list[str]): Lower-cased substrings; any match excludes.
+
+    Returns:
+        bool: True if the model should be excluded from the pool.
+    """
     ml = mid.lower()
     if ml in exact_ids:
         return True
@@ -196,7 +234,25 @@ def build_candidates(
     exact_ids: set[str],
     exclusion_keywords: list[str],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Apply size/exclusion filters and produce the candidates list."""
+    """Apply size/exclusion filters and produce the candidates list.
+
+    Filters raw HF rows by minimum parameter count and exclusion rules, maps
+    survivors into the ``hyperloom.production_corpus.v1`` candidate schema,
+    sorts them, and applies an optional cap.
+
+    Args:
+        raw (dict[str, dict[str, Any]]): Mapping of repo id to HF model row.
+        min_params_b (float): Minimum parameter count in billions.
+        max_models (int): Cap on the number of candidates (0 = no cap).
+        sort_mode (str): ``"downloads"`` (desc) or ``"model"`` (alphabetical).
+        pool_id (str): Pool identifier stamped on each candidate.
+        exact_ids (set[str]): Repo ids to exclude exactly.
+        exclusion_keywords (list[str]): Substrings used to exclude repo ids.
+
+    Returns:
+        tuple[list[dict[str, Any]], dict[str, int]]: The candidate list and a
+        stats dict counting rows seen and exclusions applied.
+    """
     stats = {
         "hf_rows_seen": len(raw),
         "models_excluded_by_keyword": 0,
@@ -212,8 +268,7 @@ def build_candidates(
             continue
         params = _params_total(m)
         if threshold and params == 0:
-            # The HF min: filter should have removed these already, but
-            # be paranoid in case the server returned a stale row.
+            # Defensive: HF min: filter should have removed these already.
             stats["models_without_safetensors"] += 1
             continue
         if threshold and params < threshold:
@@ -232,9 +287,8 @@ def build_candidates(
             "trending_score": m.get("trendingScore"),
             "last_modified": m.get("lastModified"),
             "pipeline_tag": m.get("pipeline_tag") or "text-generation",
-            # Keep stub fields the legacy schema downstream consumers
-            # expect; leaderboard-derived metrics will be filled by the
-            # results service after the first optimization run.
+            # Stub fields the legacy schema expects; filled by the results
+            # service after the first optimization run.
             "data_quality": "hf_inference_listed",
             "framework": None,
             "precision": None,
@@ -267,6 +321,14 @@ def build_candidates(
 
 
 def main() -> int:
+    """Crawl the HF catalog, build the candidate pool, and write the JSON.
+
+    Parses CLI arguments, crawls HuggingFace, applies exclusion filters, and
+    writes the ``hyperloom.production_corpus.v1`` payload (unless ``--dry-run``).
+
+    Returns:
+        int: Process exit code (``0`` on success or dry-run).
+    """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--min-params", type=float, default=12.0,

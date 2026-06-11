@@ -1,36 +1,14 @@
 #!/usr/bin/env python3
-"""Multi-node sglang / vllm server launcher.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Runs INSIDE the RayJob head pod, submitted via Ray Dashboard REST by
-``inference_optimizer.multi_node restart-server`` when the workload has
-``nodes >= 2``. Single-node restarts use the bash ``launch_server.sh``
-path instead — the entry-point dispatch lives in cli.py.
+"""Multi-node sglang / vllm server launcher, run INSIDE the RayJob head pod.
 
-Algorithm:
-
-  1. ``ray.init()`` (no address; we are inside the cluster pod).
-  2. Poll ``ray.nodes()`` until ``nnodes`` alive nodes with GPU>0 are
-     visible (KubeRay can take a few seconds to register workers).
-  3. Pick the node hosting THIS process as rank 0 (it is the head pod
-     because the entry-point was submitted to the head's dashboard).
-     Sort remaining nodes deterministically by NodeManagerAddress and
-     assign ranks 1..N-1.
-  4. For each rank K, spawn a ``@ray.remote`` actor pinned to that
-     node via ``NodeAffinitySchedulingStrategy(node_id, soft=False)``.
-  5. Inside each actor: start the framework launcher via ``bash`` with
-     ``nohup`` and ``setsid`` (when available) so the server reparents
-     away from the short-lived Ray task worker — avoids zombie PIDs and
-     empty logs from an unreaped ``subprocess.Popen`` parent. The actor
-     writes the detached child's PID to ``<pid_dir>/rank_<K>.pid``.
-  6. (Optional) Wait for ``http://127.0.0.1:8888/health`` on rank 0
-     to come up before returning. Cold MoE may exceed the budget; the
-     caller can pass ``--no-wait-health`` to skip and probe externally
-     via the ClusterIP service.
-
-ADDENDUM-02 sanity: this file runs INSIDE the RayJob pod (sglang/vllm
-image), not in the Claw sandbox. ``import ray`` is the standard, in-pod
-way to talk to the local GCS — sandbox-side code (``cli.py`` etc.)
-still must NOT import ray.
+Waits for ``nnodes`` alive GPU nodes, makes the local (head) node rank 0
+and ranks the rest by NodeManagerAddress, then spawns one NodeAffinity-
+pinned actor per rank that launches the framework detached via
+bash+nohup+setsid (avoiding zombie PIDs / empty logs) and records
+``<pid_dir>/rank_<K>.pid``. Optionally waits on rank-0 ``/health``
+(``--no-wait-health`` to skip). Single-node restarts use the bash path.
 """
 
 from __future__ import annotations
@@ -49,62 +27,52 @@ from typing import Any
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-# Hard-coded inference port — matches SaFE Service.targetPort and the
-# ClusterIP Service brain wires up. Changing it requires a coordinated
-# brain + safe + cli edit, so we keep a single source of truth here.
-# In `colocated` PD mode this port is bound by sglang/vllm rank 0
-# directly; in `disaggregated` mode it is bound by the router which
-# proxies to the internal prefill/decode ports below.
+# Hard-coded inference port (single source of truth; matches SaFE
+# Service.targetPort). Bound by rank 0 in colocated mode, by the router in
+# disaggregated mode (which proxies to the internal prefill/decode ports).
 _INFERENCE_PORT = 8888
-# Internal ports for sglang/vllm server groups when PD is disaggregated.
-# Both are loopback-only on their respective head pods; the router on
-# the cluster head pod fronts them at _INFERENCE_PORT for the magpie
-# client, so the external service URL never changes between modes.
+# Loopback-only internal ports for disaggregated PD server groups (router
+# fronts them at _INFERENCE_PORT so the external URL is mode-independent).
 _PD_PREFILL_PORT = 30000
 _PD_DECODE_PORT = 30001
-# Default sglang collective port (resolution: $RAYJOB_DIST_INIT_PORT > 29500).
-# Changed from 5000 → 29500 because RayJob head pod uses hostNetwork=true
-# (amd-ray-job-template ConfigMap `dnsPolicy: ClusterFirstWithHostNet`),
-# so the port lives in the host namespace; torch.distributed TCPStore
-# leaves an orphan LISTEN socket on the host after a mid-init crash
-# (no SO_REUSEADDR), and the next RayJob scheduled on the same host
-# inherits EADDRINUSE → baseline_failed cascade. 29500 is the PyTorch
-# convention. Operators override via $RAYJOB_DIST_INIT_PORT.
-# PD disaggregated mode auto-derives decode port via
-# ``_pd_decode_dist_init_port`` (= prefill + 1) so the two rendezvous
-# endpoints never collide when both groups land on the same host
-# (single source of truth: whatever prefill resolves to).
+# Default collective port ($RAYJOB_DIST_INIT_PORT else 29500). 29500 (PyTorch
+# convention) avoids the EADDRINUSE cascade a stale TCPStore LISTEN socket
+# caused under the head pod's hostNetwork. Decode port = prefill + 1.
 _DEFAULT_DIST_INIT_PORT = 29500
 
 
 def _pd_decode_dist_init_port(prefill_dist_init_port: int) -> int:
-    """Derive PD-disaggregated decode rendezvous port from prefill port.
-
-    Returns ``prefill + 1`` so an operator override of
-    ``$RAYJOB_DIST_INIT_PORT`` automatically shifts both endpoints in
-    lock-step (no chance of decode silently colliding with prefill).
-    """
+    """Derive the decode rendezvous port as ``prefill + 1`` so an override shifts both endpoints in lock-step."""
     return prefill_dist_init_port + 1
-# sglang PD bootstrap server port (KV transfer rendezvous). Default
-# matches the sglang docs example. Override per-call via --pd-bootstrap-port.
+# sglang PD bootstrap (KV transfer rendezvous) port; override via --pd-bootstrap-port.
 _PD_DEFAULT_BOOTSTRAP_PORT = 8998
 # Max seconds to wait for ray.nodes() to surface every expected pod.
 _NODES_DISCOVERY_TIMEOUT_SEC = 120
-# /health probe budget on rank 0. Cold MoE startup can exceed this; pass
-# --no-wait-health to bypass and probe externally.
+# rank-0 /health probe budget (cold MoE can exceed it; --no-wait-health to bypass).
 _HEALTH_PROBE_TIMEOUT_SEC = int(os.environ.get('SGLANG_HEALTH_PROBE_TIMEOUT_SEC', '1800'))
 
 
 def _log(msg: str) -> None:
-    """Stderr line with timestamp; no logging module to avoid handler
-    surprises when this is exec'd as a Ray Dashboard entry-point."""
+    """Stderr line with timestamp (no logging module to avoid handler surprises as a dashboard entry-point)."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[launch_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _wait_for_nodes(target_n: int, timeout_s: int) -> list[dict]:
-    """Poll ray.nodes() until ``target_n`` alive GPU nodes are visible."""
+    """Poll ray.nodes() until ``target_n`` alive GPU nodes are visible.
+
+    Args:
+        target_n (int): Number of alive GPU nodes required.
+        timeout_s (int): Maximum seconds to wait before giving up.
+
+    Returns:
+        list[dict]: The alive GPU node rows from ``ray.nodes()``.
+
+    Raises:
+        RuntimeError: If fewer than ``target_n`` nodes are visible before
+            the timeout elapses.
+    """
     started = time.monotonic()
     while True:
         nodes = [
@@ -124,8 +92,7 @@ def _wait_for_nodes(target_n: int, timeout_s: int) -> list[dict]:
 
 
 def _pick_head_first(nodes: list[dict]) -> list[dict]:
-    """Reorder so the local node (which submitted this driver) is rank 0,
-    and the rest follow in deterministic NodeManagerAddress order."""
+    """Reorder so the local (driver) node is rank 0 and the rest follow in NodeManagerAddress order."""
     local_addr = ray.util.get_node_ip_address()
     local = [n for n in nodes if n.get("NodeManagerAddress") == local_addr]
     others = sorted(
@@ -133,8 +100,7 @@ def _pick_head_first(nodes: list[dict]) -> list[dict]:
         key=lambda n: n.get("NodeManagerAddress", ""),
     )
     if not local:
-        # Fallback: sort everything by address — driver is not on a GPU
-        # node (rare but possible if KubeRay submitter pod is GPU-less).
+        # Fallback: driver isn't on a GPU node; sort everything by address.
         _log(f"WARN local node {local_addr!r} not in alive GPU set; sorting all")
         return sorted(nodes, key=lambda n: n.get("NodeManagerAddress", ""))
     return local + others
@@ -155,35 +121,12 @@ def _build_sglang_cmd(
     pd_ib_device: str = "",
     pd_bootstrap_port: int = _PD_DEFAULT_BOOTSTRAP_PORT,
 ) -> list[str]:
-    """Compose the sglang multi-node launch command per upstream docs.
+    """Compose the sglang multi-node launch command.
 
-    Per https://sgl-project.github.io/references/multi_node_deployment/multi_node.html
-    only the head (rank 0) needs ``--host`` / ``--port`` (the HTTP server
-    only runs on rank 0). Worker ranks coordinate via the dist-init-addr
-    and never serve HTTP — passing ``--port`` to a worker would cause it
-    to bind a useless local socket. Match the upstream contract exactly.
-
-    ``--trust-remote-code`` is added by default to mirror Magpie's
-    single-node ``sglang_mi*x.sh`` launchers (which always set it).
-    Custom modeling.py models (DSr1, future MoEs) require it; harmless
-    for stock models. Callers can override via ``extra_args`` if needed
-    — duplicate flags resolve to the last occurrence in argparse.
-
-    ``ep`` (expert-parallel size, default 1) controls MoE expert
-    distribution. ``ep <= 1``: omit any EP flag (legacy behaviour;
-    experts shard along the TP dimension). ``ep > 1``: emit
-    ``--expert-parallel-size N`` so each rank holds only
-    ``n_experts / ep`` experts and the cluster does true expert
-    parallelism (DSr1 / DSv3 best-practice on multi-node).
-
-    NOTE: the older ``--enable-ep-moe --ep-size N`` flag pair was
-    REMOVED in current sglang main; the canonical knob is now just
-    ``--expert-parallel-size N`` (verified empirically against the
-    sglang in the active RayJob image — earlier flag spelling caused
-    ``launch_server.py: error: unrecognized arguments: --enable-ep-moe``
-    and a hard restart loop). If you also want to switch the a2a
-    backend, pass ``--moe-a2a-backend {deepep,mooncake,mori,...}``
-    via ``extra_args``.
+    Only rank 0 gets ``--host``/``--port`` (workers serve no HTTP).
+    ``--trust-remote-code`` is default-on (custom modeling.py models need
+    it). ``ep > 1`` emits ``--expert-parallel-size N`` for true expert
+    parallelism (the older ``--enable-ep-moe`` pair was removed upstream).
     """
     cmd = [
         "python3", "-m", "sglang.launch_server",
@@ -195,18 +138,13 @@ def _build_sglang_cmd(
         "--dist-init-addr", dist_init_addr,
     ]
     if node_rank == 0:
-        # In PD-disaggregated mode the rank-0 HTTP port is the internal
-        # prefill / decode port (proxied by the router); in colocated
-        # mode it is the public inference port.
+        # rank-0 HTTP port = internal prefill/decode port in PD mode, public port in colocated.
         cmd.extend(["--host", "0.0.0.0", "--port", str(pd_port)])
     if ep > 1:
         cmd.extend(["--expert-parallel-size", str(ep)])
     role = pd_role.strip().lower()
     if role in ("prefill", "decode"):
-        # PD disaggregated: tell sglang which side of the split this
-        # rank is, where the bootstrap rendezvous is, and which IB/RoCE
-        # device to use for KV transfer. mooncake auto-detects when
-        # ib_device is empty.
+        # PD disaggregated: split side + bootstrap port + KV-transfer IB device.
         cmd.extend(["--disaggregation-mode", role])
         cmd.extend(["--disaggregation-bootstrap-port", str(pd_bootstrap_port)])
         if pd_transfer_backend:
@@ -230,22 +168,10 @@ def _build_vllm_cmd(
     pd_kv_rank: int = 0,
     pd_kv_parallel_size: int = 1,
 ) -> list[str]:
-    """vLLM multi-node command for rank 0.
+    """vLLM multi-node command for rank 0 (workers are KubeRay-joined; vLLM auto-discovers them via the GCS).
 
-    Worker ranks have no command — KubeRay already started ``ray start
-    --address=<head>:6379`` in every worker pod's container, so the
-    cluster is fully connected by the time we launch ``vllm serve`` on
-    rank 0. vLLM auto-discovers the workers via the GCS and places its
-    actors with ``--distributed-executor-backend ray``.
-
-    ``--tensor-parallel-size`` = total GPUs across the cluster (caller
-    passes ``nnodes * gpus_per_node``).
-
-    ``ep`` (expert-parallel size, default 1) controls MoE expert
-    distribution. ``ep <= 1``: omit (vllm default = TP-shard experts).
-    ``ep > 1``: add ``--enable-expert-parallel`` (vllm 0.6+). vllm
-    does not accept an ep-size value separately; the runtime infers
-    ``ep_size = tp_size`` when the flag is set.
+    ``--tensor-parallel-size`` = total cluster GPUs; ``ep > 1`` adds
+    ``--enable-expert-parallel`` (vllm infers ep_size = tp_size).
     """
     cmd = [
         "vllm", "serve", model,
@@ -258,12 +184,7 @@ def _build_vllm_cmd(
         cmd.append("--enable-expert-parallel")
     role = pd_role.strip().lower()
     if role in ("prefill", "decode"):
-        # vllm PD: the kv-transfer-config JSON encodes connector type,
-        # the role (kv_producer = prefill, kv_consumer = decode), and
-        # this rank's slot in the kv_parallel cluster. Connector default
-        # is NixlConnector (recommended in vllm docs as of 2026 for
-        # async push/pull). Buffer device fixed at cuda; backends omitted
-        # so the connector picks UCX/UCC/NCCL based on the runtime.
+        # vllm PD: kv-transfer-config JSON with connector + role + kv slot (default NixlConnector, cuda buffer).
         kv_role = "kv_producer" if role == "prefill" else "kv_consumer"
         connector = pd_transfer_backend or "NixlConnector"
         kv_cfg = (
@@ -282,14 +203,7 @@ def _build_vllm_cmd(
 
 
 def _probe_mec_firmware_lt_177() -> bool:
-    """Return True iff rocm-smi reports MEC firmware version < 177.
-
-    Mirrors the gate Magpie's ``sglang_mi300x.sh`` uses to decide
-    whether ``HSA_NO_SCRATCH_RECLAIM=1`` is required for RCCL memory
-    reclaim correctness. Best-effort: any failure (rocm-smi missing,
-    parse error, non-MI300 GPU) returns ``False`` so we don't apply
-    the workaround when we can't confirm we need it.
-    """
+    """Return True iff rocm-smi reports MEC firmware < 177 (gate for the HSA_NO_SCRATCH_RECLAIM workaround); False on any failure."""
     try:
         proc = subprocess.run(
             ["rocm-smi", "--showfw"],
@@ -311,42 +225,22 @@ def _probe_mec_firmware_lt_177() -> bool:
 
 
 def _subprocess_env() -> dict[str, str]:
-    """Build the env passed to the framework launcher subprocess.
+    """Build the framework launcher subprocess env.
 
-    Force ``/opt/venv/bin`` to the front of ``PATH`` so the spawned
-    ``python3 -m sglang.launch_server`` / ``vllm serve`` resolves to
-    the framework's venv interpreter (which has sglang/vllm/ray
-    installed) regardless of what the actor process's PATH looks like.
-
-    Inheriting ``os.environ`` keeps the *_API_KEY / *_BASE_URL and any
-    SGLANG_* / VLLM_* tunings the bootstrap layer (or KubeRay) injected.
-
-    MI300X tuning trio (mirrors Magpie's ``sglang_mi300x.sh``):
-      * ``SGLANG_USE_AITER=1`` — aiter kernels (large tput uplift on
-        MI300X; default-off in stock sglang)
-      * ``SGLANG_AITER_MLA_PERSIST=1`` — persist MLA workspace across
-        decode calls (DSr1 / DSv3 workloads)
-      * ``HSA_NO_SCRATCH_RECLAIM=1`` — only when MEC firmware < 177
-        (older firmware leaks scratch on RCCL reclaim)
-
-    Without these, multi-node tput is not comparable to single-node;
-    `--no-clobber` semantics: don't overwrite if caller already set
-    them via inherited env (KubeRay env injection wins).
+    Puts ``/opt/venv/bin`` first on PATH (framework venv) and inherits
+    ``os.environ`` (keeps injected API keys / SGLANG_* / VLLM_* tunings).
+    Sets the MI300X tuning trio (SGLANG_USE_AITER / SGLANG_AITER_MLA_PERSIST,
+    and HSA_NO_SCRATCH_RECLAIM when MEC firmware < 177) without clobbering
+    caller-set values.
     """
     env = dict(os.environ)
-    # Ray sets *_VISIBLE_DEVICES='' on actors spawned with num_gpus=0; that
-    # empty string masks ALL physical GPUs for the detached framework child,
-    # which then dies with "No accelerator (CUDA, XPU, HPU, NPU, MUSA, MPS)
-    # is available." Strip the mask so the framework re-discovers all 8 GPUs
-    # on the pod (it manages its own per-rank pinning via TP/EP). Honour an
-    # explicit non-empty override (set deliberately by the caller).
+    # Strip Ray's empty *_VISIBLE_DEVICES mask (num_gpus=0 actors) so the
+    # detached framework child re-discovers all GPUs; honour non-empty overrides.
     for _vis in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES",
                  "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"):
         if _vis in env and env[_vis].strip() == "":
             env.pop(_vis, None)
-    # Prevent sglang crash with fused decode MLA on MI300X (aiter
-    # ForwardMetadata mismatch). Restored after an earlier edit dropped
-    # this line while adding the ROCR_VISIBLE_DEVICES cleanup above.
+    # Prevent the MI300X fused-decode-MLA crash (aiter ForwardMetadata mismatch).
     env["SGLANG_ROCM_FUSED_DECODE_MLA"] = "0"
     env.setdefault("SGLANG_USE_AITER", "1")
     env.setdefault("SGLANG_AITER_MLA_PERSIST", "1")
@@ -367,21 +261,13 @@ def _detach_framework_launch(
     sub_env: dict[str, str],
     node_rank: int,
 ) -> int:
-    """Start ``cmd`` detached from the Ray worker via bash+nohup.
-
-    A plain ``subprocess.Popen`` without ``wait()`` leaves the Ray worker
-    as parent of a dead child (zombie) and can leave ``rank_*.log`` empty
-    due to stdio block-buffering. This path reparents the server under
-    init, enables line-oriented logs with ``PYTHONUNBUFFERED=1``, and
-    fails fast with log tail if the child dies immediately.
-    """
+    """Start ``cmd`` detached from the Ray worker via bash+nohup+setsid (reparents under init, PYTHONUNBUFFERED logs, fails fast with log tail)."""
     sub_env = dict(sub_env)
     sub_env.setdefault("PYTHONUNBUFFERED", "1")
     log_q = shlex.quote(str(log_file))
     pid_q = shlex.quote(str(pid_file))
     inner = " ".join(shlex.quote(c) for c in cmd)
-    # ``setsid`` gives a fresh session so ``kill_multinode`` can SIGTERM
-    # the whole process group; fall back to plain ``nohup`` if missing.
+    # ``setsid`` gives a fresh session group for kill_multinode to SIGTERM (falls back to plain nohup).
     launches = (
         f"if command -v setsid >/dev/null 2>&1; then "
         f"nohup setsid {inner} >>{log_q} 2>&1 & "
@@ -454,22 +340,15 @@ def _spawn_remote(
     pd_kv_parallel_size: int = 1,
     pid_file_name: str = "",
 ) -> int:
-    """Spawn the framework launcher detached on the local actor's pod.
+    """Spawn the framework launcher detached on the local actor's pod, recording the PID; ``@ray.remote``-friendly.
 
-    Writes the real server PID to ``<pid_dir>/rank_<K>.pid``. Designed for
-    ``@ray.remote`` invocation — inputs are all picklable primitives.
-
-    ``torch_profiler_dir`` (multi-node only) — when non-empty, exported
-    as ``SGLANG_TORCH_PROFILER_DIR`` so the rank's sglang server emits
-    torch traces to a sandbox-readable shared path (typically wekafs).
-    Empty string preserves legacy per-pod /tmp behaviour.
+    ``torch_profiler_dir`` (if set) is exported as
+    ``SGLANG_TORCH_PROFILER_DIR`` for shared-path traces.
     """
     Path(pid_dir).mkdir(parents=True, exist_ok=True)
     Path(log_dir).mkdir(parents=True, exist_ok=True)
-    # PD-disaggregated mode launches two server groups on potentially
-    # overlapping rank numbers (prefill ranks 0..P-1, decode ranks
-    # 0..D-1 *within their own group*). Caller passes a role-tagged
-    # pid_file_name so they don't collide on disk.
+    # PD mode runs two groups with overlapping rank numbers; caller passes
+    # a role-tagged pid_file_name so they don't collide on disk.
     fname = pid_file_name or f"rank_{node_rank}.pid"
     log_fname = (
         f"{Path(fname).stem}.log" if pid_file_name else f"rank_{node_rank}.log"
@@ -478,24 +357,14 @@ def _spawn_remote(
     log_file = Path(log_dir) / log_fname
 
     sub_env = _subprocess_env()
-    # Resume-aware fallback: when the orchestrator (profile_executor) reuses
-    # an already-running sglang server (resume path in multi_node cli.py),
-    # this LAUNCH never re-runs, so any later round-scoped torch_profiler_dir
-    # has no chance of reaching sglang's env. Falling back to
-    # $HYPERLOOM_MN_PROFILE_TRACE_DIR (cli.py exports this as
-    # `/wekafs/.../<rayjob>/torch_trace`, a single base shared by every
-    # profile round) lets sglang write trace.json.gz to that shared dir
-    # on its FIRST launch, then profile_executor mtime-filters per-round.
+    # Resume-aware fallback to $HYPERLOOM_MN_PROFILE_TRACE_DIR so traces still
+    # reach a shared dir when a reused server skips this launch.
     tpd = (
         (torch_profiler_dir or "").strip()
         or os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     )
     if tpd:
-        # Pin sglang torch profiler output to a shared dir; mkdir is
-        # safe across racing ranks (exist_ok). Failure to mkdir is
-        # non-fatal: the server may still bring up; sglang itself will
-        # raise on the first profile request, which is the right place
-        # for a loud, attributable error.
+        # Pin profiler output to a shared dir; mkdir failure is non-fatal.
         try:
             Path(tpd).mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -518,23 +387,15 @@ def _spawn_remote(
             pd_bootstrap_port=pd_bootstrap_port,
         )
     elif fw == "vllm":
-        # vLLM multi-node: KubeRay already wired every worker pod into
-        # the GCS via its auto-generated ``ray start --address=<head>:6379``
-        # container command. Worker actors here do NOTHING — vLLM on rank
-        # 0 discovers the workers through the existing ray cluster and
-        # uses ``--distributed-executor-backend ray`` to place its
-        # workers. Trying to ``ray start`` again here would either fail
-        # ("ray is already running") or spawn a duplicate worker process
-        # that confuses GCS scheduling.
+        # vLLM multi-node: workers are already KubeRay-joined to the GCS, so
+        # worker actors do nothing; rank-0 vllm serve discovers them.
         if node_rank != 0:
             sys.stderr.write(
                 f"[rank {node_rank}] vllm worker: no-op (KubeRay already "
                 f"joined this node to the ray cluster; rank 0 vllm serve "
                 f"will discover us via GCS)\n"
             )
-            # Write a sentinel PID so kill_multinode finds *something*
-            # to clean up; PID 0 is never alive so kill_remote treats it
-            # as stale and just removes the file.
+            # Sentinel PID 0 so kill_multinode treats the file as stale.
             pid_file.write_text("0")
             return 0
         cmd = _build_vllm_cmd(
@@ -553,7 +414,16 @@ def _spawn_remote(
 
 
 def _rank0_pid_from_log(log_dir: str) -> int | None:
-    """Read rank 0 PID from /tmp/multi_node_pids/rank_0.pid (best-effort)."""
+    """Read rank 0 PID from /tmp/multi_node_pids/rank_0.pid (best-effort).
+
+    Args:
+        log_dir (str): The log directory; its parent is probed for the
+            ``multi_node_pids/rank_0.pid`` file before falling back to the
+            default ``/tmp`` location.
+
+    Returns:
+        int | None: The rank-0 PID, or ``None`` if it cannot be read.
+    """
     try:
         pid_path = pathlib.Path(log_dir).parent / "multi_node_pids" / "rank_0.pid"
         if not pid_path.is_file():
@@ -563,14 +433,8 @@ def _rank0_pid_from_log(log_dir: str) -> int | None:
         return None
 
 
-# Fatal patterns to scan rank_0.log for. Triggered even when the rank-0
-# wrapper PID is still alive (e.g. nohup lingers after the python sglang
-# child has traceback-exited). Without this scan, a real framework crash
-# such as `KeyError: 'glm_moe_dsa'` (sglang transformers version too old
-# for GLM-4.5/4.6 MoE-DSA) would silently consume the full 1800s /health
-# budget before the Ray Dashboard job flips to FAILED.
-# Patterns are anchored to line start to reduce false positives from
-# benign mentions inside JSON / tracebacks of unrelated frames.
+# Fatal patterns scanned in rank_0.log (catches crashes the lingering nohup
+# wrapper PID hides, which would otherwise burn the full 1800s /health budget).
 _FATAL_LOG_PATTERNS: tuple[str, ...] = (
     "Traceback (most recent call last):",
     "KeyError:",
@@ -593,20 +457,12 @@ _FATAL_LOG_PATTERNS: tuple[str, ...] = (
     "abort()",
     "Segmentation fault",
 )
-# How far back from end-of-file we scan. Large enough to catch a full
-# Python traceback (typically <8KB) but bounded to keep this cheap.
+# How far back from EOF we scan (covers a full traceback, bounded for cost).
 _FATAL_SCAN_TAIL_BYTES = 256 * 1024
 
 
 def _scan_rank0_log_for_fatal(log_dir: str) -> str | None:
-    """Scan rank_0.log tail for a fatal traceback / framework error.
-
-    Returns the matched line (stripped) on hit, ``None`` otherwise.
-    Used by ``_wait_health`` to bail out of the 1800s health wait the
-    moment sglang / vllm has clearly crashed, and by ``main()`` after a
-    health timeout to distinguish "still loading weights" from a silent
-    framework error masked by a lingering wrapper PID.
-    """
+    """Scan rank_0.log tail for a fatal traceback / framework error; returns the matched line or ``None``."""
     try:
         lf = Path(log_dir) / "rank_0.log"
         if not lf.is_file():
@@ -617,7 +473,7 @@ def _scan_rank0_log_for_fatal(log_dir: str) -> str | None:
         with lf.open("rb") as f:
             if size > _FATAL_SCAN_TAIL_BYTES:
                 f.seek(size - _FATAL_SCAN_TAIL_BYTES)
-                f.readline()  # discard partial line
+                f.readline()  # discard partial first line
             tail = f.read().decode("utf-8", errors="replace")
         for raw in tail.splitlines():
             line = raw.strip()
@@ -636,9 +492,7 @@ def _wait_health(
     rank0_pid: int | None = None,
     log_dir: str | None = None,
 ) -> bool:
-    """Poll http://127.0.0.1:8888/health on rank 0 (this pod). Returns
-    True on first 200, False on timeout / rank 0 process death / fatal
-    error detected in ``rank_0.log``."""
+    """Poll rank-0 ``/health``; True on first 200, False on timeout / rank-0 death / fatal ``rank_0.log`` error."""
     import urllib.request
     import urllib.error
     started = time.monotonic()
@@ -651,9 +505,7 @@ def _wait_health(
                     return True
         except (urllib.error.URLError, OSError):
             pass
-        # Bail early if rank 0 process died (server crash during cuda graph
-        # capture, OOM, MoE assertion, etc.). Without this we wait the full
-        # 1800s for /health on a corpse.
+        # Bail early if rank 0 died, else we wait the full 1800s on a corpse.
         if rank0_pid is not None and rank0_pid > 0:
             try:
                 os.kill(rank0_pid, 0)
@@ -663,11 +515,7 @@ def _wait_health(
                 return False
             except OSError:
                 pass  # permission etc; don't kill the wait
-        # Bail early on fatal traceback in rank_0.log. The wrapper PID
-        # (nohup) often outlives the actual python framework child, so
-        # os.kill above misses the crash. Scanning the log catches
-        # framework errors (e.g. KeyError on unsupported model_type)
-        # in seconds rather than burning the full 1800s budget.
+        # Bail on a fatal traceback the lingering wrapper PID hides from os.kill above.
         if log_dir:
             fatal_line = _scan_rank0_log_for_fatal(log_dir)
             if fatal_line:
@@ -679,7 +527,11 @@ def _wait_health(
 
 
 def _emit_rank0_log_tail(log_dir: Path) -> None:
-    """Append the tail of ``rank_0.log`` to stderr if the file exists."""
+    """Append the tail of ``rank_0.log`` to stderr if the file exists.
+
+    Args:
+        log_dir (Path): Directory containing ``rank_0.log``.
+    """
     lf = log_dir / "rank_0.log"
     try:
         sz = lf.stat().st_size if lf.is_file() else 0
@@ -694,12 +546,7 @@ def _emit_rank0_log_tail(log_dir: Path) -> None:
 
 
 def _log_rank0_post_spawn(log_dir: Path, rank0_pid: int | None) -> None:
-    """Emit diagnostics for rank 0 after a short settle (driver runs on head).
-
-    If the framework exits during weight load, ``/health`` never flips;
-    this log gives operators an immediate ``rank_0.log`` tail without
-    exec'ing into the pod first.
-    """
+    """Emit rank-0 diagnostics after a short settle (a ``rank_0.log`` tail for early weight-load exits)."""
     if rank0_pid is None or rank0_pid <= 0:
         return
     time.sleep(3)
@@ -712,6 +559,18 @@ def _log_rank0_post_spawn(log_dir: Path, rank0_pid: int | None) -> None:
 
 
 def main() -> int:
+    """Parse CLI arguments and launch the multi-node server group(s).
+
+    Connects to the in-pod Ray cluster, discovers and rank-orders nodes,
+    spawns one launcher actor per rank (colocated or PD-disaggregated),
+    emits a JSON summary to stdout, and optionally waits for rank-0
+    ``/health``.
+
+    Returns:
+        int: Process exit code; ``0`` on success (or slow-but-alive boot),
+        ``1`` on a spawn failure, ``2`` on invalid args or a confirmed
+        framework early-exit / fatal log error.
+    """
     p = argparse.ArgumentParser(
         prog="launch_multinode.py",
         description="Spawn one sglang/vllm rank per RayJob node via ray actors.",
@@ -742,13 +601,8 @@ def main() -> int:
                         "`--enable-ep-moe --ep-size N` or vllm "
                         "`--enable-expert-parallel`. Caller (orchestrator "
                         "helper) is responsible for ensuring ep <= tp.")
-    # PD disaggregation arguments. Default `colocated` keeps the legacy
-    # single-server-group behaviour (rank 0..N-1 form one TP=tp group).
-    # `disaggregated` splits nodes[0:pd_prefill_nodes] into a prefill
-    # group (TP=pd_prefill_tp) and nodes[pd_prefill_nodes:] into a
-    # decode group (TP=pd_decode_tp). Neither group binds the public
-    # 8888 port; the router (launched separately by launch_router.py)
-    # does that and proxies to the internal 30000/30001 ports.
+    # PD disaggregation args: `colocated` (default) is one TP group;
+    # `disaggregated` splits into prefill/decode groups fronted by the router.
     p.add_argument("--pd-mode", choices=("colocated", "disaggregated"),
                    default="colocated",
                    help="PD disaggregation mode (default colocated)")
@@ -797,7 +651,7 @@ def main() -> int:
         if ptp <= 0 or dtp <= 0:
             _log(f"PD invalid TP: pd_prefill_tp={ptp} pd_decode_tp={dtp}")
             return 2
-        # IB device default: pod's $NCCL_IB_HCA (injected by image).
+        # IB device default: pod's $NCCL_IB_HCA.
         ib_dev = args.pd_ib_device or os.environ.get("NCCL_IB_HCA", "")
         ib_dev = ib_dev.strip()
     else:
@@ -822,19 +676,13 @@ def main() -> int:
              f"addr={n.get('NodeManagerAddress', '?')} "
              f"gpu={n.get('Resources', {}).get('GPU', 0)}")
 
-    # Spawn one actor per rank. num_gpus=0 because the framework
-    # process itself reserves GPUs via its own mechanisms; pinning
-    # the actor takes 0 GPU resource so it doesn't conflict with the
-    # forked process's hold.
+    # Spawn one actor per rank (num_gpus=0; the framework reserves GPUs itself).
     SpawnActor = ray.remote(num_cpus=1, num_gpus=0)(_spawn_remote)
-    pids: dict[str, int] = {}     # key = pid_file_name (e.g. "rank_0.pid"
-                                   # or "prefill_0.pid"); value = real PID.
+    pids: dict[str, int] = {}     # pid_file_name -> real PID
     refs: list[tuple[str, Any]] = []  # noqa: F821  Any imported below
 
     if pd_mode == "disaggregated":
-        # Group A: prefill — nodes[0:pn] form an inner sglang/vllm group
-        # of nnodes=pn, TP=ptp; rank-0 (= physical head pod) binds the
-        # internal prefill HTTP port.
+        # Group A: prefill — nodes[0:pn], TP=ptp; rank-0 binds the internal prefill port.
         prefill_head_ip = nodes[0].get("NodeManagerAddress", head_ip)
         for grp_rank in range(pn):
             node = nodes[grp_rank]
@@ -862,10 +710,7 @@ def main() -> int:
             )
             refs.append((f"prefill_{grp_rank}", actor_ref))
 
-        # Group B: decode — nodes[pn:pn+dn]; uses prefill_port + 1 as
-        # its dist-init port so it never clashes with prefill rendezvous
-        # when both happen to share a node, regardless of whether the
-        # operator overrode the prefill port via $RAYJOB_DIST_INIT_PORT.
+        # Group B: decode — nodes[pn:pn+dn]; dist-init port = prefill + 1 to avoid rendezvous clashes.
         decode_head_ip = nodes[pn].get("NodeManagerAddress", head_ip)
         for grp_rank in range(dn):
             node = nodes[pn + grp_rank]
@@ -918,8 +763,7 @@ def main() -> int:
             _log(f"{tag}: spawned pid={pid}")
         except Exception as exc:  # noqa: BLE001
             _log(f"{tag}: spawn FAILED: {type(exc).__name__}: {exc}")
-            # Roll back already-spawned ranks so the cluster doesn't
-            # leak half-started servers between attempts.
+            # Roll back already-spawned ranks so no half-started servers leak.
             for tag2, p2 in pids.items():
                 _log(f"rolling back {tag2} pid={p2}")
                 try:
@@ -928,8 +772,7 @@ def main() -> int:
                     pass
             return 1
 
-    # Health-tail probe targets the first launched leader. In colocated
-    # mode that's `rank_0`; in PD it's `prefill_0` (the prefill head).
+    # Health-tail probe targets the leader: rank_0 (colocated) / prefill_0 (PD).
     leader_tag = "rank_0" if pd_mode == "colocated" else "prefill_0"
     _log_rank0_post_spawn(Path(args.log_dir), pids.get(leader_tag))
 
@@ -948,10 +791,8 @@ def main() -> int:
         "pd_mode": pd_mode,
     }
     if pd_mode == "disaggregated":
-        # The router (launched separately by launch_router.py) needs the
-        # internal prefill/decode endpoints and the bootstrap port. Emit
-        # them here so the multi_node CLI can read this JSON and submit
-        # the router entrypoint without re-discovering nodes.
+        # Emit the internal endpoints + bootstrap port so the CLI can submit
+        # the router without re-discovering nodes.
         summary["pd_prefill_nodes"] = pn
         summary["pd_decode_nodes"] = dn
         summary["pd_prefill_tp"] = ptp
@@ -975,9 +816,7 @@ def main() -> int:
         _log("--no-wait-health set; not probing /health")
         return 0
 
-    # In PD mode the public 8888 is bound by the router (separate
-    # entrypoint), not by any rank here. Skip the local /health probe;
-    # the caller polls externally once the router is up.
+    # In PD mode the router owns 8888; skip the local probe (caller polls externally).
     if pd_mode == "disaggregated":
         _log("pd_mode=disaggregated; /health probe skipped (router owns 8888)")
         return 0
@@ -989,28 +828,11 @@ def main() -> int:
     ):
         _log("rank 0 /health OK")
         return 0
-    # _wait_health returned False on either /health timeout OR early rank-0
-    # process death. Tail the log so operators see the framework's last
-    # words regardless of which path we took.
+    # Tail the log (timeout or early rank-0 death) for the framework's last words.
     _emit_rank0_log_tail(Path(args.log_dir))
-    # Distinguish the two failure modes so the upstream caller (hyperloom
-    # `_multi_node_server_lifecycle`) reacts correctly:
-    #   * rank-0 process died -> framework refused to start (argparse
-    #     error on an unknown flag, aiter kernel ABI assert, OOM during
-    #     cuda graph capture, RCCL init, ...). Caller's 1800s /health
-    #     wait would just stall on a corpse. Exit non-zero with a
-    #     MULTI_NODE_FAILURE_SNAPSHOT marker so the Ray Dashboard job
-    #     flips to FAILED and `cmd_restart_server` raises
-    #     `ServerRestartFailed` in O(seconds), letting the grid runner
-    #     skip the broken variant instead of burning 30 min.
-    #   * rank-0 process still alive -> server is still loading weights
-    #     (slow checkpoint, slow init). Preserve legacy return-0 + WARN
-    #     so the caller's external poll can catch up without us turning
-    #     a slow boot into a hard failure.
-    # Tri-state: True=alive, False=confirmed dead, None=cannot determine
-    # (pid file missing / unreadable). Only flip to FAILED on confirmed
-    # death; "unknown" stays on the legacy return-0 + WARN path so we
-    # never invent a failure when the signal is missing.
+    # Distinguish failure modes for the caller. Tri-state: True=alive,
+    # False=confirmed dead, None=unknown. Only confirmed death flips to
+    # FAILED (return 2); alive/unknown stay on the legacy return-0 + WARN path.
     _r0_alive: bool | None = None
     if _r0_pid is not None and _r0_pid > 0:
         try:
@@ -1042,15 +864,8 @@ def main() -> int:
              f"surfaces ServerRestartFailed immediately (was: silent "
              f"1800s /health stall).")
         return 2
-    # Even when the rank-0 wrapper PID is technically alive (typically
-    # `nohup`/`setsid` lingers after the framework child has exited), a
-    # fatal traceback in rank_0.log proves the framework already crashed.
-    # Catches e.g. `KeyError: 'glm_moe_dsa'` (sglang transformers too old
-    # for GLM-4.5/4.6 MoE-DSA), `CUDA out of memory`, RCCL init failures,
-    # ImportError on a missing wheel, etc. — every one of which would
-    # otherwise silently consume the full 1800s health-wait budget and
-    # then be reported as SUCCEEDED to the caller (the bug this patch
-    # closes; see /wekafs/.../sandbox-65ad7ec0629801-9k9ct incident).
+    # A fatal traceback in rank_0.log proves a crash even when the nohup
+    # wrapper PID lingers (else the 1800s wait silently reports SUCCEEDED).
     _fatal_line = _scan_rank0_log_for_fatal(args.log_dir)
     if _fatal_line:
         snap = {

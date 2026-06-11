@@ -1,9 +1,12 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Read-vs-write dispatcher for the recipe-snapshot KB.
 
 Routes calls between the local store and the central kb-service
 according to the design fixed in 2026-05-28:
 
-Writes — local-only:
+Writes — local-only::
+
     :meth:`put_recipe`, :meth:`append_attempt`,
     :meth:`delete_recipe` are forwarded verbatim to
     :class:`LocalRecipeStore`. The remote client never sees a
@@ -12,7 +15,8 @@ Writes — local-only:
     new rows land.
 
 Reads — remote-first via the SINGLE ``/recipes/search`` route, fall
-through to local on absence / failure:
+through to local on absence / failure::
+
     The remote half is reached ONLY through ``/recipes/search``.
     ``get_recipe`` decodes the 5-tuple from the canonical_id into
     ``label_match`` and issues ONE search — the server decides
@@ -41,7 +45,8 @@ through to local on absence / failure:
        local store. Callers therefore never have to unwrap remote
        errors.
 
-Reads — local-only mode:
+Reads — local-only mode::
+
     A dispatcher constructed with ``remote=None`` (e.g.
     ``--degraded-kb`` or no ``--cortex-kb-url``) skips step 1
     entirely; reads go directly to the local store. A
@@ -79,8 +84,19 @@ def _labels_from_canonical_id(canonical_id: str) -> dict[str, str]:
 
     The five cid segments are already slug-clean (produced by
     ``recipe_canonical_id``), so they map 1:1 to the label values the
-    server matches on. Raises :class:`InvalidCanonicalIdError` for a
-    malformed id — the caller falls back to a local read.
+    server matches on.
+
+    Args:
+        canonical_id (str): Canonical recipe identity to decode.
+
+    Returns:
+        dict[str, str]: The 5-key ``label_match`` dict (``model`` /
+            ``hardware`` / ``framework`` / ``framework_version`` /
+            ``precision``).
+
+    Raises:
+        InvalidCanonicalIdError: If ``canonical_id`` is malformed; the
+            caller falls back to a local read.
     """
     model, hardware, framework, framework_version, precision = (
         cid_to_path_components(canonical_id)
@@ -130,6 +146,14 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
     Tolerant of missing keys — the central server always returns the
     full v2 envelope, but a partially-populated row (e.g. an old
     archive that pre-dates the field) shouldn't crash the read.
+
+    Args:
+        v2_payload (dict[str, Any]): A v2-spec recipe dict from the
+            central kb-service.
+
+    Returns:
+        dict[str, Any]: The same row in arbor on-disk shape; an empty
+            dict if ``v2_payload`` is not a dict.
     """
     if not isinstance(v2_payload, dict):
         return {}
@@ -195,7 +219,85 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
         "evidence_refs": list(v2_payload.get("evidence_refs") or []),
         "provenance":    dict(v2_payload.get("provenance") or {}),
     }
+    # Carry through any extra top-level keys the envelope shipped that
+    # aren't part of the v2 wire structure (``body`` / ``labels`` /
+    # ``metrics`` / ``findings`` / ``failures`` / ``gaps``) and aren't
+    # already mapped above. This mirrors the local store's arbor shape
+    # (``Recipe.to_dict`` splats free-form ``extras`` — e.g. the workload
+    # knobs ``tp`` / ``ep`` / ``conc`` / ``framework_version`` /
+    # ``quant_scheme`` — at the top level), so the dispatcher's
+    # ``prefer`` rerank reads identical fields whether the row came from
+    # a remote or local. Reserved keys never get clobbered.
+    _wire_only = {"body", "labels", "metrics", "findings", "failures", "gaps"}
+    for key, val in v2_payload.items():
+        if key in _wire_only or key in arbor:
+            continue
+        arbor[key] = val
     return arbor
+
+
+# ---------------------------------------------------------------------------
+# Client-side rerank by ``prefer`` similarity
+# ---------------------------------------------------------------------------
+# The ``required`` filter (5-tuple ``label_match``) decides reusability;
+# ``prefer`` decides similarity. Neither the cortex kb-service nor the
+# gbrain page store rank by ``prefer`` server-side, so the dispatcher does
+# a stable client-side rerank over the already-arbor rows: higher
+# prefer-hit count first, ties broken by the backend's original order
+# (the sort is stable). Rows are NEVER dropped — prefer only reorders.
+#
+# Match rules per field:
+# * ``framework_version`` / ``quant_scheme`` / ``workload_mode`` — exact
+#   string equality (case-insensitive, stripped).
+# * numeric workload knobs (``tp`` / ``ep`` / ``pp`` / ``conc`` / ``isl``
+#   / ``osl`` / ``max_model_len``) — exact int/float equality.
+# A field absent on the row contributes 0 (no penalty, no credit).
+_PREFER_NUMERIC_KEYS: tuple[str, ...] = (
+    "tp", "ep", "pp", "conc", "isl", "osl", "max_model_len",
+)
+_PREFER_STRING_KEYS: tuple[str, ...] = (
+    "framework_version", "quant_scheme", "workload_mode",
+)
+
+
+def _prefer_score(row: dict[str, Any], prefer: dict[str, Any]) -> int:
+    """Count how many ``prefer`` fields the (flat arbor) row matches."""
+    if not isinstance(row, dict):
+        return 0
+    score = 0
+    for key in _PREFER_NUMERIC_KEYS:
+        want = prefer.get(key)
+        if want in (None, "", 0):
+            continue
+        have = row.get(key)
+        if have in (None, ""):
+            continue
+        try:
+            if float(have) == float(want):
+                score += 1
+        except (TypeError, ValueError):
+            continue
+    for key in _PREFER_STRING_KEYS:
+        want = str(prefer.get(key) or "").strip().lower()
+        if not want:
+            continue
+        have = str(row.get(key) or "").strip().lower()
+        if have and have == want:
+            score += 1
+    return score
+
+
+def _rerank_by_prefer(
+    rows: list[dict[str, Any]], prefer: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Stable rerank of flat arbor rows by ``prefer`` similarity.
+
+    No-op when ``prefer`` is empty. Never drops rows; only reorders so a
+    closer-workload recipe surfaces first.
+    """
+    if not prefer:
+        return rows
+    return sorted(rows, key=lambda r: _prefer_score(r, prefer), reverse=True)
 
 
 @dataclass
@@ -234,6 +336,9 @@ class RecipeKB:
         v1 ``CortexKBClient`` keep working against the v2 dispatcher
         (e.g. ``coordinator._ensure_cortex_t0_anchored``); a missing
         attribute there would silently skip the SDK-fallback T0 anchor.
+
+        Returns:
+            bool: Always ``True``.
         """
         return True
 
@@ -248,34 +353,41 @@ class RecipeKB:
         retries background) to detect "service unhealthy" within an
         SLO that matches what callers already expect from the prior
         client. Adding a separate ping doubles RTT for every read.
+
+        Returns:
+            bool: ``True`` iff a remote client exists and is enabled.
         """
         return self.remote is not None and bool(self.remote.enabled)
 
     def _normalize_remote_row(self, row: dict[str, Any]) -> dict[str, Any]:
         """Project a remote row into the consistent arbor shape callers see.
 
-        Two remote backends feed this dispatcher with DIFFERENT wire
-        shapes:
+        Every remote backend (cortex kb-service, gbrain, and any future
+        KB) returns the SAME unified nested KB-interface envelope
+        (``labels`` / ``body`` / ``metrics`` / ``findings`` / ``failures``
+        / ``gaps`` / ``lessons`` / ``pitfalls``). The dispatcher runs a
+        single :func:`_v2_to_arbor` translation regardless of which
+        backend served the row — backend-native storage shapes are the
+        adapter's private detail and never reach this point.
 
-        * the central kb-service speaks the nested v2 envelope
-          (``labels`` / ``body`` / ``findings`` / ``metrics``) → it needs
-          the :func:`_v2_to_arbor` projection;
-        * the gbrain client (:class:`GbrainRemoteRecipeClient`) already
-          pre-translates pages into the flat ``Recipe.to_dict()`` arbor
-          shape → re-projecting it would null out ``best_config`` /
-          ``best_throughput`` / ``what_worked``.
-
-        A remote advertises which shape it returns via the
-        ``returns_arbor_shape`` capability flag (default ``False`` =
-        v2). The :func:`_v2_to_arbor` projection keeps an independent
-        idempotency guard as a secondary safety net for a mis-flagged
-        remote.
+        :func:`_v2_to_arbor` keeps an idempotency guard so a row that is
+        already in flat arbor shape (e.g. a mis-built adapter) passes
+        through untouched rather than being silently emptied.
         """
-        if getattr(self.remote, "returns_arbor_shape", False):
-            return dict(row)
         return _v2_to_arbor(row)
 
     def _note_failure(self, method: str, exc: Exception) -> None:
+        """Report a remote read failure before local fall-through.
+
+        Invokes the ``on_remote_failure`` callback when one is
+        configured (logging if the callback itself raises); otherwise
+        logs a warning. Never raises.
+
+        Args:
+            method (str): Name of the dispatcher method that failed
+                against the remote.
+            exc (Exception): The remote failure being reported.
+        """
         if callable(self.on_remote_failure):
             try:
                 self.on_remote_failure(method, exc)
@@ -322,9 +434,39 @@ class RecipeKB:
     ) -> dict[str, Any]:
         """Write a recipe row LOCALLY ONLY in the arbor schema.
 
-        Returns ``{"canonical_id", "version", "created"}``. Never
-        touches the central kb-service. Field shape mirrors arbor's
-        ``Recipe`` (see :mod:`recipe_kb.schema`).
+        Never touches the central kb-service. Field shape mirrors
+        arbor's ``Recipe`` (see :mod:`recipe_kb.schema`); all
+        arguments are forwarded verbatim to
+        :meth:`LocalRecipeStore.put_recipe`.
+
+        Args:
+            canonical_id (str): Canonical recipe identity; must be
+                non-empty.
+            model (str): Model identity slot.
+            hardware (str): Hardware identity slot.
+            framework (str): Framework identity slot.
+            framework_version (str): Framework version identity slot.
+            precision (str): Precision identity slot.
+            best_config (dict[str, str] | None): Best-known config.
+            best_throughput (float): Best measured throughput.
+            what_worked (list[Any] | None): Findings that helped.
+            what_failed (list[Any] | None): Findings that failed.
+            remaining_gaps (list[Any] | None): Known remaining gaps.
+            prs_tested (list[Any] | None): PRs tested.
+            pitfalls (list[Any] | None): Known pitfalls.
+            lessons (list[Any] | None): Lessons learned.
+            last_profiled (str): Timestamp of last profiling run.
+            stack_fingerprint (dict[str, str] | None): Stack
+                fingerprint mapping.
+            sessions (list[Any] | None): Per-session records.
+            authority (str): Authority tier.
+            confidence (float): Confidence score in ``[0, 1]``.
+            evidence_refs (list[Any] | None): Supporting evidence refs.
+            provenance (dict[str, Any] | None): Audit provenance.
+            extras (dict[str, Any] | None): Free-form arbor keys.
+
+        Returns:
+            dict[str, Any]: ``{"canonical_id", "version", "created"}``.
         """
         return self.local.put_recipe(
             canonical_id=canonical_id,
@@ -364,7 +506,28 @@ class RecipeKB:
         rationale: str = "",
         attempt_at: str | None = None,
     ) -> dict[str, Any]:
-        """Append one attempt row LOCALLY ONLY."""
+        """Append one attempt row LOCALLY ONLY.
+
+        Forwards verbatim to :meth:`LocalRecipeStore.append_attempt`.
+
+        Args:
+            canonical_id (str): Parent recipe identity; must be
+                non-empty.
+            session_id (str): Owning session; must be non-empty.
+            diff (dict[str, Any] | None): Config diff applied.
+            predicted_delta (dict[str, Any] | None): Predicted metric
+                deltas.
+            measured_metrics (dict[str, Any] | None): Measured metrics.
+            fitness (float | None): Scalar fitness score, or ``None``.
+            outcome (str): Outcome label.
+            rationale (str): Free-form rationale.
+            attempt_at (str | None): Explicit ISO-8601 timestamp; auto
+                stamped when ``None``.
+
+        Returns:
+            dict[str, Any]: A dict with keys ``id``,
+                ``recipe_canonical_id`` and ``attempt_at``.
+        """
         return self.local.append_attempt(
             canonical_id=canonical_id,
             session_id=session_id,
@@ -378,7 +541,15 @@ class RecipeKB:
         )
 
     def delete_recipe(self, *, canonical_id: str) -> bool:
-        """Delete the live recipe row LOCALLY ONLY (history preserved)."""
+        """Delete the live recipe row LOCALLY ONLY (history preserved).
+
+        Args:
+            canonical_id (str): Canonical recipe identity; must be
+                non-empty.
+
+        Returns:
+            bool: ``True`` iff a live row was removed.
+        """
         return self.local.delete_recipe(canonical_id=canonical_id)
 
     # ==================================================================
@@ -389,15 +560,24 @@ class RecipeKB:
         *,
         canonical_id: str,
         version: int | None = None,
+        prefer: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Read a recipe row.
 
         Remote uses the SINGLE ``/recipes/search`` route: the 5-tuple
         decoded from ``canonical_id`` is passed as ``label_match`` and
         the central kb-service decides exact-vs-relative match +
-        ranking — the client issues ONE search and takes the top
-        (server-ranked) row. We deliberately do NOT hit
-        ``GET /recipes/{cid}``; search is the only remote route.
+        ranking. We deliberately do NOT hit ``GET /recipes/{cid}``;
+        search is the only remote route.
+
+        ``prefer`` (workload-similarity hints — ``tp`` / ``ep`` / ``pp``
+        / ``conc`` / ``isl`` / ``osl`` / ``max_model_len`` /
+        ``framework_version`` / ``quant_scheme`` / ``workload_mode``)
+        does NOT change the ``required`` (5-tuple) filter; it only
+        reranks the candidate rows so the closest-workload recipe is
+        returned first. When ``prefer`` is set we ask the remote for a
+        small candidate window instead of a single row, rerank
+        client-side, and take the top.
 
         Local is an arbor-style exact read of the on-disk
         ``recipe.json`` for this canonical_id. It serves:
@@ -406,16 +586,29 @@ class RecipeKB:
           returns live rows), and
         * the fall-through when remote is absent / empty / errors.
 
-        Returns ``None`` only when neither store has the row.
+        Args:
+            canonical_id (str): Canonical recipe identity.
+            version (int | None): Specific archived version (served
+                locally), or ``None`` for the live row.
+
+        Returns:
+            dict[str, Any] | None: The recipe row in arbor shape, or
+                ``None`` when neither store has the row.
         """
         if version is None and self._remote_active():
             try:
                 labels = _labels_from_canonical_id(canonical_id)
+                # With prefer hints we pull a candidate window so the
+                # client-side rerank has rows to reorder; otherwise the
+                # single top (server-ranked) row is enough.
+                candidate_limit = 25 if prefer else 1
                 rows = self.remote.search(  # type: ignore[union-attr]
-                    label_match=labels, limit=1,
+                    label_match=labels, limit=candidate_limit, prefer=prefer,
                 )
                 if rows:
-                    return self._normalize_remote_row(rows[0])
+                    normalized = [self._normalize_remote_row(r) for r in rows]
+                    ranked = _rerank_by_prefer(normalized, prefer)
+                    return ranked[0]
                 # remote miss — fall through to local.
             except RemoteRecipeClientError as exc:
                 self._note_failure("get_recipe", exc)
@@ -440,6 +633,14 @@ class RecipeKB:
         ``/history`` is not used. The local archive is authoritative
         for writes anyway, so the on-disk ``history/v{N}.json`` files
         are the source of truth here.
+
+        Args:
+            canonical_id (str): Canonical recipe identity.
+            limit (int): Maximum number of archived rows to return.
+
+        Returns:
+            list[dict[str, Any]]: Archived prior versions ascending by
+                version.
         """
         return self.local.get_history(
             canonical_id=canonical_id, limit=limit,
@@ -447,7 +648,15 @@ class RecipeKB:
 
     def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
         """Recent recipes — LOCAL only (remote = ``/recipes/search``
-        route only; bare ``GET /recipes`` is not used)."""
+        route only; bare ``GET /recipes`` is not used).
+
+        Args:
+            limit (int): Maximum number of recipes to return.
+
+        Returns:
+            list[dict[str, Any]]: Recent live recipes, ordered
+                ``updated_at DESC``.
+        """
         return self.local.list_recent(limit=limit)
 
     def search(
@@ -458,14 +667,16 @@ class RecipeKB:
         updated_since: str | None = None,
         order_by: str = "updated_at DESC",
         limit: int = 50,
+        prefer: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Filtered search, remote-first with local fall-through.
 
         Single-source-of-record per call (no merging across stores
         — see the class docstring for why). Resolution:
 
-        1. Remote returned a non-empty list → that list is
-           returned verbatim.
+        1. Remote returned a non-empty list → that list is reranked
+           by ``prefer`` (similarity hints; never drops rows) and
+           returned.
         2. Remote returned ``[]`` → fall through to local. A
            genuinely-empty central corpus matching this filter is
            rare; an empty result is more often "the central
@@ -473,6 +684,9 @@ class RecipeKB:
            callers nearly always benefit from seeing local matches
            in that case.
         3. Remote raised → log + fall through.
+
+        ``prefer`` only reorders; the ``required`` filter
+        (``label_match`` / ``metric_filters``) decides membership.
         """
         if self._remote_active():
             try:
@@ -482,6 +696,7 @@ class RecipeKB:
                     updated_since=updated_since,
                     order_by=order_by,
                     limit=limit,
+                    prefer=prefer,
                 )
                 # Empty remote search → fall through to local. A
                 # genuinely-empty search corpus on a working remote
@@ -489,16 +704,18 @@ class RecipeKB:
                 # network or a freshly-bootstrapped service that
                 # hasn't received our local writes yet.
                 if rows:
-                    return [self._normalize_remote_row(r) for r in rows]
+                    normalized = [self._normalize_remote_row(r) for r in rows]
+                    return _rerank_by_prefer(normalized, prefer)
             except RemoteRecipeClientError as exc:
                 self._note_failure("search", exc)
-        return self.local.search(
+        local_rows = self.local.search(
             label_match=label_match,
             metric_filters=metric_filters,
             updated_since=updated_since,
             order_by=order_by,
             limit=limit,
         )
+        return _rerank_by_prefer(local_rows, prefer)
 
     def list_attempts(
         self,
@@ -507,7 +724,15 @@ class RecipeKB:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Attempts for one recipe — LOCAL only (remote =
-        ``/recipes/search`` route only)."""
+        ``/recipes/search`` route only).
+
+        Args:
+            canonical_id (str): Parent recipe identity.
+            limit (int): Maximum number of attempts to return.
+
+        Returns:
+            list[dict[str, Any]]: Attempt rows newest-first.
+        """
         return self.local.list_attempts(
             canonical_id=canonical_id, limit=limit,
         )
@@ -519,7 +744,15 @@ class RecipeKB:
         limit: int = 500,
     ) -> list[dict[str, Any]]:
         """Session attempts — LOCAL only (remote = ``/recipes/search``
-        route only)."""
+        route only).
+
+        Args:
+            session_id (str): Session whose attempts to collect.
+            limit (int): Maximum number of attempts to return.
+
+        Returns:
+            list[dict[str, Any]]: Attempts for the session oldest-first.
+        """
         return self.local.list_session_attempts(
             session_id=session_id, limit=limit,
         )

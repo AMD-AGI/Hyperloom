@@ -1,19 +1,14 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Local fallback source.
 
-Wraps a small set of best-effort probes that work on any host: a SQLite
-read of the Coordinator session DB, a ``shutil.disk_usage`` sample,
-optional ``ps``/``rocm-smi``/``nvidia-smi`` invocations, a tail of a
-configured log file plus error-pattern extraction, and an HTTP probe
-of locally-running inference servers.  Any sub-probe that fails
-returns empty data without raising — :class:`LocalProbeSource` only
-raises :class:`SourceUnavailable` when *every* sub-probe yields
-nothing, so :class:`DegradeRouter` does not get stuck switching back
-and forth.
-
-The probes here intentionally only collect data the agent itself can
-see on the host. Cluster-wide GPU time-series, workload inference
-metrics, and node-level fault detection stay with primus-robust /
-robustness-server (see plan §6.1).
+Wraps best-effort host-local probes (Coordinator SQLite read, disk
+usage, ``ps``/``rocm-smi``/``nvidia-smi``, log tail + error-pattern
+extraction, HTTP server probe). A failing sub-probe returns empty data
+without raising; :class:`LocalProbeSource` raises
+:class:`SourceUnavailable` only when *every* sub-probe yields nothing,
+so :class:`DegradeRouter` does not flap. Cluster-wide metrics and
+node-level fault detection stay with robustness-server (plan §6.1).
 """
 
 from __future__ import annotations
@@ -38,17 +33,10 @@ from .base import SourceData, SourceUnavailable
 log = logging.getLogger(__name__)
 
 
-# Default process patterns we surface in ``local_processes``. The list
-# spans every owner that may legitimately hold AMD GPU VRAM during an
-# inference_optimizer session, so the gpu_memory_leaked signal can
-# distinguish "leaked VRAM (no live owner)" from "active server holding
-# VRAM". ``sglang.launch_server`` / ``EngineCore`` / ``Magpie`` were
-# added in 2026-05 alongside the GPU-leak detector. The second batch
-# (``vllm.v1.engine.core`` / ``vllm.engine.async_llm_engine`` /
-# ``ray::IDLE`` / ``raylet`` / ``hipcc`` / ``inferencex``) closes the
-# detection gap exposed by the 2026-05-18 GPU-leak post-mortem where
-# the vLLM v1 ``EngineCore-`` child processes still held VRAM under
-# names ``_DEFAULT_PROCESS_PATTERNS`` did not match.
+# Process patterns surfaced in ``local_processes``: every owner that may
+# legitimately hold AMD GPU VRAM, so gpu_memory_leaked can distinguish
+# leaked VRAM (no live owner) from an active server. Must cover vLLM v1
+# ``EngineCore-`` children that held VRAM in the 2026-05-18 leak post-mortem.
 _DEFAULT_PROCESS_PATTERNS: tuple[str, ...] = (
     # SGLang
     "sglang.srt",
@@ -65,33 +53,19 @@ _DEFAULT_PROCESS_PATTERNS: tuple[str, ...] = (
     # Ray + per-task workers (kernel_opt and GEAK schedule via Ray)
     "ray::IDLE",
     "raylet",
-    # aiter JIT compilation — when ``hipcc`` is stuck mid-build it
-    # holds GPU locks and CPU but produces no progress, masking as
-    # "live owner" for the gpu_memory_leaked detector unless we list it.
+    # hipcc stuck mid-build holds GPU locks; list it so it doesn't mask as a live owner.
     "hipcc",
     # Generic benchmark serving client (Magpie sub-process)
     "benchmark_serving",
 )
 
 
-# Default error patterns extracted from local logs. Conservative — only
-# unambiguous failure markers — to keep false-positive RCA prompts low.
-# The 2026-05-19 extension (D1) adds 11 inference-framework-specific
-# patterns drawn from the 2026-05 post-mortem: vLLM EngineCore exits,
-# server port reuse, MTP/MLA arch mismatches, hipcc compile fail,
-# accuracy gate fail, KFD resource exhaustion (≠ OOM), ROCblas/hipBLAS
-# errors, NCCL timeouts, model checkpoint load fail, and the critic-
-# agent runtime timeout (E5). Severity tier is decided by
+# Conservative log error markers; severity tier decided by
 # :data:`signals.local_health._HIGH_SEVERITY_PATTERNS`.
-#
-# **Order matters** — :func:`_extract_log_errors` short-circuits on the
-# first matching pattern per line, so MORE SPECIFIC patterns must come
-# BEFORE GENERIC ones. The D1 / E5 additions in 2026-05-19 are ordered
-# so framework-specific errors (Engine core / aiter compile / runtime
-# timeout) win over the generic ``RuntimeError`` / ``Killed`` fallback.
+# **Order matters** — :func:`_extract_log_errors` short-circuits on the first
+# match per line, so MORE SPECIFIC patterns MUST come BEFORE GENERIC ones.
 _DEFAULT_LOG_ERROR_PATTERNS: tuple[str, ...] = (
-    # D1/E5 specific patterns — listed first so the generic
-    # ``RuntimeError`` / ``Killed`` fallbacks below don't shadow them.
+    # D1/E5 specific patterns — first so generic ``RuntimeError`` / ``Killed`` don't shadow them.
     # E5 critic-agent runtime stuck.
     r"runtime\.cli .* timed out after \d+s",
     # D1 vLLM v1 EngineCore subprocess crashes.
@@ -141,34 +115,22 @@ class LocalProbeConfig:
     """Inputs the LocalProbe needs from the agent config."""
 
     session_dir: Path | None = None
-    # D2 — single server log path (legacy). For multi-variant grid
-    # runs, also set ``extra_server_log_globs`` so executor-side logs
-    # like ``runs/<action>/<task_id>/server.log`` are picked up. Empty
-    # default keeps backwards compat with hosts that only emit one log.
+    # Single server log path (legacy); ``extra_server_log_globs`` picks up
+    # per-variant grid-run logs. Empty default keeps single-log hosts working.
     server_log_path: Path | None = None
     extra_server_log_globs: tuple[str, ...] = (
         "runs/*/*/server.log",
         "runs/*/*/server_log",
         "runs/*/server.log",
-        # 2026-05 grid_runner layout — ``runs/<action>/<task_id>/<variant>/
-        # <benchmark_dir>/server.log``. Without these depth-3/4 patterns
-        # the F-pattern log scanner sees zero live server logs while a
-        # grid is running, because Magpie/SGLang's per-variant log lives
-        # two directories deeper than the legacy single-run layout.
+        # depth-3/4 grid_runner layout (per-variant logs live deeper than legacy single-run).
         "runs/*/*/*/server.log",
         "runs/*/*/*/*/server.log",
     )
-    # Max number of additional log files scanned per tick (sorted by
-    # mtime desc). 5 is enough to cover the most-recent grid variants
-    # while staying cheap.
+    # Max extra log files per tick (mtime desc); 5 covers recent grid variants cheaply.
     max_extra_server_logs: int = 5
     log_tail_lines: int = 200
-    # ``/dev/shm`` is required by SGLang / vLLM multi-process queues
-    # (``SHM_*``). The Hyperloom SKILL preflight requires ≥ 16 GiB free
-    # before the run starts, but the host can exhaust it mid-session
-    # (Magpie wrappers + Ray plasma both write here). We surface
-    # ``/dev/shm`` alongside ``/`` so ``signals/local_health`` can fire
-    # ``shm_pressure`` separately from ``disk_pressure``.
+    # Surface ``/dev/shm`` (SGLang/vLLM SHM_* queues, can exhaust mid-session)
+    # alongside ``/`` so signals fire ``shm_pressure`` separately from ``disk_pressure``.
     disk_mountpoints: tuple[str, ...] = ("/", "/dev/shm")
     process_patterns: tuple[str, ...] = _DEFAULT_PROCESS_PATTERNS
     coordinator_event_limit: int = 200
@@ -176,66 +138,53 @@ class LocalProbeConfig:
     log_error_window_lines: int = 500
     health_probe_targets: tuple[str, ...] = ()
     health_probe_timeout_s: float = 1.5
-    # A5 / A6 / A7 — knobs for the new sub-probes. ``ray_probe_enabled``
-    # short-circuits the Ray check when the operator knows there's no
-    # Ray head on this node (smoke tests). ``aiter_jit_dir`` defaults to
-    # the env-supplied dir; when missing we fall back to scanning known
-    # locations under the running aiter wheel. ``fd_probe_pid`` defaults
-    # to the current Coordinator process (``os.getpid()``).
+    # A5/A6/A7 sub-probe knobs. ``ray_probe_enabled`` skips the Ray check on
+    # head-less nodes; ``aiter_jit_dir`` falls back to the aiter wheel when unset;
+    # ``fd_probe_pid`` defaults to the current Coordinator process (os.getpid()).
     ray_probe_enabled: bool = True
     ray_probe_timeout_s: float = 5.0
     aiter_jit_dir: Path | None = None
     fd_probe_pid: int | None = None
     fd_probe_enabled: bool = True
-    # G — decision-audit probe knobs (2026-05-18). The probe scans
-    # ``runs/integrate/*/result.json``, ``results/ci_metrics*.json`` and
-    # ``kernel-agent/runs/*/optimization_attempts.jsonl`` once per tick
-    # and surfaces the contents under :attr:`SourceData.local_decision_audit`.
-    # Disable wholesale via ``decision_audit_enabled=False`` for hosts
-    # that ship their own auditing.
+    # G — decision-audit probe. Scans ``runs/integrate/*/result.json``,
+    # ``results/ci_metrics*.json``, ``kernel-agent/runs/*/optimization_attempts.jsonl``
+    # into :attr:`SourceData.local_decision_audit`.
     decision_audit_enabled: bool = True
-    # Max recent ``runs/integrate/*/result.json`` files inspected per
-    # tick (sorted by mtime desc). 20 is enough to catch a same-fingerprint
-    # KEEP loop within a single Coordinator tick window without blowing
-    # up file IO budget.
+    # Max recent integrate result.json per tick (mtime desc); 20 catches a
+    # same-fingerprint KEEP loop within a tick without blowing the IO budget.
     decision_audit_max_integrate: int = 20
     # Max tail entries pulled from ``optimization_attempts.jsonl``.
     decision_audit_max_oob_attempts: int = 50
-    # C — preflight probe knobs (2026-05-19). ``preflight_enabled`` reads
-    # ``manifest.json`` once per tick into :attr:`SourceData.local_manifest`
-    # and aggregates ``profiles/kernel_breakdown.json`` into
-    # :attr:`SourceData.local_kernel_breakdown`. Both files are tiny and
-    # change rarely; cost is one ``json.load`` per tick.
+    # C — preflight probe. Reads ``manifest.json`` into local_manifest and
+    # aggregates ``profiles/kernel_breakdown.json`` into local_kernel_breakdown.
     preflight_enabled: bool = True
-    # E — critic-health probe knobs (2026-05-19). ``critic_health_enabled``
-    # scans ``critic-workdir/*/judge_bundle.json`` for KB-unreachable
-    # markers and counts workdir entries (used by ``critic_prune_stuck``).
+    # E — critic-health probe. Scans ``critic-workdir/*/judge_bundle.json`` for
+    # KB-unreachable markers and counts workdir entries (``critic_prune_stuck``).
     critic_health_enabled: bool = True
-    # Max ``critic-workdir/<turn>/`` directories scanned for judge bundles
-    # per tick. Robustness only needs the recent ones to catch a
-    # consecutive-tick KB outage; the rest of the corpus stays cold.
+    # Max ``critic-workdir/<turn>/`` dirs scanned per tick; recent ones suffice
+    # to catch a consecutive-tick KB outage.
     max_critic_judge_bundles: int = 20
-    # I — state-integrity probe (2026-05-19). Scans state.json /
-    # coordinator.db-wal / leases / agent JSONLs / Coordinator PID file.
-    # Disable wholesale via ``state_integrity_enabled=False`` for hosts
-    # that audit these externally.
+    # I — state-integrity probe. Scans state.json / coordinator.db-wal / leases /
+    # agent JSONLs / Coordinator PID file.
     state_integrity_enabled: bool = True
-    # Optimiser-run dir under ``session_dir`` where ``run_*.pid`` lives.
-    # Defaults to ``$USER_DATA_PATH/optimizer_runs/`` per SKILL.md.
+    # Optimiser-run dir under ``session_dir`` holding ``run_*.pid``
+    # (defaults to ``$USER_DATA_PATH/optimizer_runs/`` per SKILL.md).
     optimizer_runs_dirname: str = "optimizer_runs"
-    # J — external-deps probe (2026-05-19). Reads $OPENAI_BASE_URL etc.
-    # from env; disable when running offline or when the host has its
-    # own gateway-health monitor.
+    # J — external-deps probe. Reads $OPENAI_BASE_URL etc. from env.
     external_deps_enabled: bool = True
-    # Per-mount stat-latency budget. Above this → ``wekafs_degraded``.
-    # 5s matches the SKILL.md WekaFS read-latency expectation.
+    # Per-mount stat-latency budget; above this → ``wekafs_degraded`` (5s per SKILL.md).
     external_mount_stat_timeout_s: float = 5.0
-    # When set, override the default gateway probe URL. Empty → derive
-    # from ``$OPENAI_BASE_URL`` via ``/models`` suffix.
+    # Override gateway probe URL; empty → derive from ``$OPENAI_BASE_URL`` + ``/models``.
     external_gateway_probe_url: str = ""
 
     @property
     def conductor_db_path(self) -> Path | None:
+        """Path to the Coordinator session DB under ``session_dir``.
+
+        Returns:
+            Path | None: ``<session_dir>/storage/conductor.db`` when a
+            session directory is configured, else ``None``.
+        """
         if self.session_dir is None:
             return None
         return self.session_dir / "storage" / "conductor.db"
@@ -243,6 +192,13 @@ class LocalProbeConfig:
 
 @dataclass
 class _ProbeOutcome:
+    """Result of a single sub-probe attempt.
+
+    Attributes:
+        success (bool): Whether the sub-probe produced usable data.
+        detail (str): Optional human-readable detail / failure reason.
+    """
+
     success: bool
     detail: str = ""
 
@@ -258,9 +214,34 @@ class LocalProbeSource:
     name = "local-probe"
 
     def __init__(self, config: LocalProbeConfig | None = None) -> None:
+        """Store the probe configuration.
+
+        Args:
+            config (LocalProbeConfig | None): Probe configuration; a
+                default :class:`LocalProbeConfig` is used when ``None``.
+        """
         self._config = config or LocalProbeConfig()
 
     async def fetch(self, ctx: Any) -> SourceData:
+        """Run every configured sub-probe and assemble a snapshot.
+
+        Each sub-probe is best-effort: failures yield empty data rather
+        than raising. CPU-bound probes run in a thread pool to keep the
+        tick responsive. :class:`SourceUnavailable` is only raised when
+        *all* sub-probes come back empty, so the DegradeRouter does not
+        thrash between sources.
+
+        Args:
+            ctx (Any): The per-tick reactor context (unused by the local
+                probe but part of the :class:`Source` contract).
+
+        Returns:
+            SourceData: A snapshot populated with whatever local signals
+            were collected.
+
+        Raises:
+            SourceUnavailable: When no sub-probe produced any data.
+        """
         cfg = self._config
         coordinator_events = await asyncio.to_thread(
             _read_coordinator_events,
@@ -399,6 +380,21 @@ def _read_coordinator_events(
     db_path: Path | None,
     limit: int,
 ) -> list[dict[str, Any]]:
+    """Read recent Coordinator events from the session SQLite DB.
+
+    Opens the DB read-only and tries both known schemas for the
+    ``events`` table, decoding any JSON ``payload`` column. Any error
+    (missing file, open failure, bad query) yields an empty list.
+
+    Args:
+        db_path (Path | None): Path to ``conductor.db``; ``None`` or a
+            missing file short-circuits to ``[]``.
+        limit (int): Maximum number of most-recent events to return.
+
+    Returns:
+        list[dict[str, Any]]: Event rows projected to
+        ``{id, agent, topic, payload, ts}``, newest first, or ``[]``.
+    """
     if db_path is None or not db_path.exists():
         return []
     try:
@@ -412,15 +408,14 @@ def _read_coordinator_events(
         return []
     try:
         conn.row_factory = sqlite3.Row
-        # The events table uses ``seq`` as monotonic id; some schemas
-        # alias it to ``id`` ??? probe both.
+        # ``events`` uses ``seq`` as monotonic id; some schemas alias it to ``id`` — probe both.
         rows = _try_select(
             conn,
             [
                 "SELECT seq AS id, from_agent AS agent, topic, payload, ts "
-                "FROM events ORDER BY seq DESC LIMIT ?",
+                + "FROM events ORDER BY seq DESC LIMIT ?",
                 "SELECT id, agent, topic, payload, timestamp AS ts "
-                "FROM events ORDER BY id DESC LIMIT ?",
+                + "FROM events ORDER BY id DESC LIMIT ?",
             ],
             (limit,),
         )
@@ -447,6 +442,18 @@ def _try_select(
     candidates: Iterable[str],
     params: tuple,
 ) -> list[sqlite3.Row]:
+    """Try each candidate SELECT until one succeeds.
+
+    Args:
+        conn (sqlite3.Connection): Open read-only connection.
+        candidates (Iterable[str]): SQL statements to try in order;
+            schema variants of the same query.
+        params (tuple): Bound parameters applied to each statement.
+
+    Returns:
+        list[sqlite3.Row]: Rows from the first statement that executes,
+        or ``[]`` when all candidates fail.
+    """
     last_err: sqlite3.Error | None = None
     for sql in candidates:
         try:
@@ -460,6 +467,19 @@ def _try_select(
 
 
 def _maybe_decode_json(value: Any) -> Any:
+    """Best-effort decode of a possibly-JSON event payload.
+
+    Bytes are UTF-8 decoded first; strings are parsed as JSON when
+    possible. Values that are neither, or that fail to parse, are
+    returned unchanged.
+
+    Args:
+        value (Any): The raw payload column value.
+
+    Returns:
+        Any: The decoded object, the original string when not JSON, or
+        ``None`` when bytes cannot be decoded.
+    """
     if isinstance(value, (bytes, bytearray)):
         try:
             value = value.decode("utf-8", errors="replace")
@@ -476,6 +496,18 @@ def _maybe_decode_json(value: Any) -> Any:
 
 
 def _sample_disk(mountpoints: tuple[str, ...]) -> dict[str, Any]:
+    """Sample disk usage for each mountpoint via ``shutil.disk_usage``.
+
+    Mountpoints that raise :class:`OSError` (missing / unmounted) are
+    skipped so the rest still report.
+
+    Args:
+        mountpoints (tuple[str, ...]): Filesystem paths to sample.
+
+    Returns:
+        dict[str, Any]: Map of mountpoint to
+        ``{total_gb, used_gb, free_gb, used_pct}`` rounded to 2 dp.
+    """
     out: dict[str, Any] = {}
     for mp in mountpoints:
         try:
@@ -495,6 +527,20 @@ def _sample_disk(mountpoints: tuple[str, ...]) -> dict[str, Any]:
 
 
 def _sample_processes(patterns: tuple[str, ...]) -> list[dict[str, Any]]:
+    """List local processes whose command matches any pattern.
+
+    Runs ``ps -eo pid=,rss=,cmd=`` and keeps lines whose command
+    contains one of ``patterns``. Returns ``[]`` when ``ps`` is absent,
+    times out, or exits non-zero.
+
+    Args:
+        patterns (tuple[str, ...]): Substrings matched against each
+            process command line; empty disables the probe.
+
+    Returns:
+        list[dict[str, Any]]: One ``{pid, rss_mb, cmd}`` entry per
+        matching process.
+    """
     if not patterns:
         return []
     try:
@@ -535,9 +581,14 @@ def _sample_processes(patterns: tuple[str, ...]) -> list[dict[str, Any]]:
 def _sample_gpu() -> dict[str, Any]:
     """Best-effort GPU snapshot using rocm-smi or nvidia-smi.
 
-    Returns an empty dict on any failure (binary missing, exits non-zero,
-    parse error). M2 will replace this with a robustness-server cluster
-    proxy call, so the M1 implementation is intentionally lightweight.
+    Tries rocm-smi first and falls back to nvidia-smi. M2 will replace
+    this with a robustness-server cluster proxy call, so the M1
+    implementation is intentionally lightweight.
+
+    Returns:
+        dict[str, Any]: The first non-empty snapshot (``{"gpus": [...],
+        "tool": ...}``), or ``{}`` on any failure (binary missing,
+        non-zero exit, parse error).
     """
     snap = _sample_rocm_smi()
     if snap:
@@ -546,6 +597,17 @@ def _sample_gpu() -> dict[str, Any]:
 
 
 def _sample_rocm_smi() -> dict[str, Any]:
+    """Sample AMD GPUs via ``rocm-smi --csv``.
+
+    Returns ``{}`` when ``rocm-smi`` is missing, times out, or exits
+    non-zero. When the CSV parses to no devices the raw text is kept
+    under ``raw_csv`` so RCA still has something to inspect.
+
+    Returns:
+        dict[str, Any]: ``{"gpus": [...], "tool": "rocm-smi"}`` on a
+        successful parse, ``{"raw_csv": ..., "tool": "rocm-smi"}`` on
+        parser drift, or ``{}`` on failure.
+    """
     if not shutil.which("rocm-smi"):
         return {}
     try:
@@ -571,17 +633,13 @@ def _sample_rocm_smi() -> dict[str, Any]:
         return {}
     gpus = _parse_rocm_smi_csv(proc.stdout)
     if not gpus:
-        # Keep the raw text in case of parser drift so RCA still has
-        # something to look at.
+        # Keep raw text on parser drift so RCA still has something to look at.
         return {"raw_csv": proc.stdout, "tool": "rocm-smi"}
     return {"gpus": gpus, "tool": "rocm-smi"}
 
 
-# Mapping rocm-smi column header -> SourceData GPU snapshot field. The
-# column names below are stable across ROCm 5.x / 6.x; new metrics map
-# to None and stay in ``raw`` for future inspection. The two
-# ``VRAM Total ... Memory (B)`` columns are bytes-valued and translated
-# to MiB by ``_parse_rocm_smi_csv`` via :data:`_ROCM_BYTE_TO_MB_FIELDS`.
+# rocm-smi column header -> SourceData GPU field (stable across ROCm 5.x/6.x).
+# The ``VRAM ... (B)`` columns are bytes, translated to MiB via _ROCM_BYTE_TO_MB_FIELDS.
 _ROCM_HEADER_MAP: dict[str, str] = {
     "GPU use (%)": "util_gpu_pct",
     "GPU memory use (%)": "util_mem_pct",
@@ -594,9 +652,7 @@ _ROCM_HEADER_MAP: dict[str, str] = {
     "VRAM Total Memory (B)": "vram_total_mb",
 }
 
-# Snapshot fields whose underlying rocm-smi CSV value is in bytes; the
-# parser divides by 1024**2 so the final units match nvidia-smi
-# (``vram_used_mb`` / ``vram_total_mb``).
+# Byte-valued rocm-smi fields; parser divides by 1024**2 to match nvidia-smi units.
 _ROCM_BYTE_TO_MB_FIELDS: frozenset[str] = frozenset({
     "vram_used_mb",
     "vram_total_mb",
@@ -610,6 +666,15 @@ def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
     block starts with a header row whose first column is ``device``
     and is followed by per-device rows (``cardN``).  We accumulate all
     metrics into a single dict per device keyed by ``gpu_id``.
+    ``util_mem_pct`` is derived from VRAM used/total when rocm-smi omits
+    the percentage column, so the GPU-leak detector still fires on AMD.
+
+    Args:
+        text (str): The raw rocm-smi CSV output.
+
+    Returns:
+        list[dict[str, Any]]: One snapshot dict per device that yielded
+        at least one parsed metric, ordered by ``gpu_id``.
     """
     by_id: dict[int, dict[str, Any]] = {}
     current_columns: list[str] | None = None
@@ -649,13 +714,10 @@ def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
     for k in sorted(by_id):
         snap = by_id[k]
         if len(snap) > 1:  # at least one parsed metric beyond ``gpu_id``
-            # Derive ``util_mem_pct`` from VRAM used/total when rocm-smi
-            # didn't emit the percentage column (it's optional on older
-            # rocm releases). Without this the GpuLeakDetector's primary
-            # trigger ``util_mem_pct ≥ 99%`` never fires on AMD hosts,
-            # leaving only the very strict ``free_mb ≤ 500MB`` path —
-            # 500 MB is 0.25% of an MI300X (192 GiB), so legitimate
-            # multi-GB leaks slipped past the detector in B2 testing.
+            # Derive ``util_mem_pct`` from VRAM used/total when rocm-smi omits the
+            # percentage column (optional on older releases); otherwise GpuLeakDetector's
+            # ``util_mem_pct >= 99%`` trigger never fires on AMD, and the strict
+            # ``free_mb <= 500MB`` fallback (0.25% of a 192GiB MI300X) misses multi-GB leaks.
             if "util_mem_pct" not in snap:
                 used = snap.get("vram_used_mb")
                 total = snap.get("vram_total_mb")
@@ -670,6 +732,15 @@ def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
 
 
 def _coerce_float_or_none(value: str) -> float | None:
+    """Parse a CSV cell to ``float``, or ``None`` when not numeric.
+
+    Args:
+        value (str): The raw cell text.
+
+    Returns:
+        float | None: The parsed float, or ``None`` when empty or
+        unparseable.
+    """
     if not value:
         return None
     try:
@@ -679,6 +750,16 @@ def _coerce_float_or_none(value: str) -> float | None:
 
 
 def _sample_nvidia_smi() -> dict[str, Any]:
+    """Sample NVIDIA GPUs via ``nvidia-smi --query-gpu``.
+
+    Returns ``{}`` when ``nvidia-smi`` is missing, times out, exits
+    non-zero, or no row parses.
+
+    Returns:
+        dict[str, Any]: ``{"gpus": [...], "tool": "nvidia-smi"}`` with
+        one row per device (``gpu_id``, utilisation, temperature, VRAM),
+        or ``{}`` on failure.
+    """
     if not shutil.which("nvidia-smi"):
         return {}
     try:
@@ -721,6 +802,21 @@ def _sample_nvidia_smi() -> dict[str, Any]:
 
 
 def _tail_log(path: Path | None, max_lines: int) -> list[str]:
+    """Return the last ``max_lines`` lines of a log file.
+
+    Reads the file backwards in 4 KiB blocks so large logs are not
+    fully loaded. Any read error yields an empty list.
+
+    Args:
+        path (Path | None): Log file to tail; ``None`` / missing yields
+            ``[]``.
+        max_lines (int): Maximum trailing lines to return; ``<= 0``
+            yields ``[]``.
+
+    Returns:
+        list[str]: Up to ``max_lines`` trailing lines, decoded as UTF-8
+        with replacement.
+    """
     if path is None or not path.exists() or max_lines <= 0:
         return []
     try:
@@ -760,6 +856,20 @@ def _tail_logs(
     Lines from extra logs are tagged ``[<filename>]`` so
     :data:`signals.local_health._log_error_symptoms` can attribute
     pattern hits to the right variant.
+
+    Args:
+        primary_path (Path | None): The legacy single server log path.
+        session_dir (Path | None): Session root the extra globs are
+            resolved against.
+        extra_globs (tuple[str, ...]): Glob patterns for extra per-run
+            server logs.
+        max_extra_logs (int): Max extra log files scanned per tick,
+            chosen by most-recent mtime.
+        max_lines (int): Max trailing lines taken from each source;
+            ``<= 0`` yields ``[]``.
+
+    Returns:
+        list[str]: Primary lines followed by tagged extra-log lines.
     """
     if max_lines <= 0:
         return []
@@ -770,8 +880,7 @@ def _tail_logs(
             candidates: list[Path] = []
             for pattern in extra_globs:
                 candidates.extend(session_dir.glob(pattern))
-            # Deduplicate (a path may match multiple globs) and order by
-            # mtime desc so the most-recently-touched variant lands first.
+            # Dedupe (a path may match multiple globs) and order by mtime desc.
             unique: dict[Path, float] = {}
             for path in candidates:
                 if not path.is_file():
@@ -793,9 +902,7 @@ def _tail_logs(
         except OSError as exc:
             log.debug("local_probe: extra log glob failed: %s", exc)
 
-    # Merge: primary first (so primary patterns surface first), then
-    # extras with a per-file tag. Final cap = max_lines * (1 + len(extras))
-    # so cumulative scan cost stays linear.
+    # Primary first (so its patterns surface first), then extras with a per-file tag.
     out: list[str] = list(primary)
     for path, lines in extras:
         tag = f"[{path.name}]"
@@ -810,9 +917,18 @@ def _extract_log_errors(
 ) -> list[dict[str, Any]]:
     """Scan the last ``window`` log lines for fatal error patterns.
 
-    Returns one entry per matching line with the pattern that matched
-    and the line text trimmed to 240 chars (avoid blowing up the
-    `Finding.evidence` payload).
+    Patterns are compiled case-insensitively; the first matching
+    pattern per line wins (so caller ordering decides specificity).
+
+    Args:
+        tail (list[str]): Recent log lines to scan.
+        patterns (tuple[str, ...]): Regex patterns tried per line, in
+            priority order.
+        window (int): Only the last ``window`` lines are scanned.
+
+    Returns:
+        list[dict[str, Any]]: One ``{pattern, line}`` entry per matching
+        line, with ``line`` trimmed to 240 chars.
     """
     if not tail or not patterns:
         return []
@@ -848,6 +964,17 @@ async def _probe_local_servers(
     deadlocks and stops accepting requests.  Connection refused /
     timeout each carry a distinct ``status`` so signals can act on
     them.
+
+    Args:
+        targets (tuple[str, ...]): URLs to probe; empty disables the
+            probe.
+        timeout_s (float): Per-request timeout in seconds (floored at
+            0.2s).
+
+    Returns:
+        list[dict[str, Any]]: One entry per target with ``url``,
+        ``reachable``, ``status`` and either ``status_code`` or
+        ``error``.
     """
     if not targets:
         return []
@@ -887,6 +1014,13 @@ def _parse_ray_pending_count(text: str) -> int:
     embedded inside node IDs (line ``1 node_<64-char-hex>``), which
     never satisfy both the colon/line-start anchor *and* the
     ``task|actor`` suffix.
+
+    Args:
+        text (str): The full ``ray status`` stdout.
+
+    Returns:
+        int: The summed pending task / actor count, or 0 when the text
+        is empty or has no matching demand lines.
     """
     if not text:
         return 0
@@ -901,6 +1035,10 @@ def _parse_ray_pending_count(text: str) -> int:
 
 def _probe_ray_head(timeout_s: float) -> dict[str, Any]:
     """Best-effort ``ray status`` probe for liveness + queued demand.
+
+    Args:
+        timeout_s (float): Subprocess timeout in seconds (floored at
+            0.5s).
 
     Returns:
         ``{}`` when ``ray`` is not on ``$PATH`` (silent on smoke-test pods).
@@ -941,11 +1079,9 @@ def _probe_ray_head(timeout_s: float) -> dict[str, Any]:
         }
     if proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
-        # A broken `ray status` CLI entrypoint (e.g. click/import error in
-        # ray's own scripts) is NOT evidence the head is down: the library
-        # imports fine, only the CLI shim crashes. Treat such self-crashes
-        # as inconclusive (silent) so we do not falsely emit ray_head_dead
-        # and prune the kernel_opt branch.
+        # A crashing `ray status` CLI shim (click/import error in ray's own scripts)
+        # is NOT evidence the head is down; treat as inconclusive so we don't falsely
+        # emit ray_head_dead and prune the kernel_opt branch.
         cli_self_crash = "Traceback (most recent call last)" in stderr and (
             "ray/scripts/scripts.py" in stderr
             or "add_command_alias" in stderr
@@ -986,8 +1122,14 @@ def _sample_fd_usage(pid: int | None) -> dict[str, Any]:
     entry is one FD) and the per-process limit through
     ``/proc/<pid>/limits``. Both files are zero-overhead reads.
 
-    Returns ``{}`` when ``/proc`` is unreadable (containers, sandboxes)
-    so the signal stays silent there.
+    Args:
+        pid (int | None): Target process id; defaults to the current
+            process when ``None``.
+
+    Returns:
+        dict[str, Any]: ``{pid, used, limit, used_pct}`` (``limit`` /
+        ``used_pct`` may be ``None`` when the hard limit is unknown), or
+        ``{}`` when ``/proc`` is unreadable (containers, sandboxes).
     """
     target_pid = pid if pid is not None else os.getpid()
     fd_dir = Path(f"/proc/{target_pid}/fd")
@@ -1033,13 +1175,18 @@ def _sample_aiter_jit(jit_dir: Path | None) -> dict[str, Any]:
     where the cache lives; we mirror its heuristics here so the
     detector stays accurate without forcing a cross-package import.
 
-    Returns ``{}`` when we cannot resolve a directory. Otherwise:
+    Args:
+        jit_dir (Path | None): Explicit JIT cache dir; when ``None`` the
+            dir is resolved from env / the aiter package location.
 
-    * ``so_count``         — total ``*.so`` files under ``jit_dir``
-                             (excludes ``build/`` staging).
-    * ``build_count``      — files under ``jit_dir/build/`` (in-flight
-                             compilation; usually 0 on a warm host).
-    * ``jit_dir``          — absolute path probed.
+    Returns:
+        dict[str, Any]: ``{}`` when no directory resolves. Otherwise:
+
+        * ``so_count``    — total ``*.so`` files under ``jit_dir``
+          (excludes ``build/`` staging).
+        * ``build_count`` — files under ``jit_dir/build/`` (in-flight
+          compilation; usually 0 on a warm host).
+        * ``jit_dir``     — absolute path probed.
     """
     resolved = _resolve_aiter_jit_dir(jit_dir)
     if resolved is None:
@@ -1066,6 +1213,14 @@ def _resolve_aiter_jit_dir(explicit: Path | None) -> Path | None:
     1. ``explicit`` (caller-supplied) → use if exists.
     2. ``$INFERENCE_OPTIMIZER_AITER_JIT_DIR`` env (matches upstream).
     3. ``importlib.util.find_spec("aiter")`` → ``<pkg>/jit``.
+
+    Args:
+        explicit (Path | None): Caller-supplied candidate dir, tried
+            first when it exists.
+
+    Returns:
+        Path | None: The resolved JIT cache directory, or ``None`` when
+        none of the candidates exist.
     """
     if explicit is not None and Path(explicit).is_dir():
         return Path(explicit)
@@ -1104,6 +1259,17 @@ def _sample_decision_audit(
     ``ci_metrics.json``) still gets G1-G3 audit on the integrate
     artefacts.
 
+    Args:
+        session_dir (Path | None): Session root; ``None`` yields ``{}``.
+        max_integrate (int): Max recent ``runs/integrate/*/result.json``
+            files to read.
+        max_oob_attempts (int): Max tail entries from
+            ``optimization_attempts.jsonl``.
+
+    Returns:
+        dict[str, Any]: ``{}`` when ``session_dir`` is ``None``,
+        otherwise a dict with the slices below.
+
     Returned shape::
 
         {
@@ -1133,7 +1299,17 @@ def _scan_integrate_results(
     session_dir: Path,
     max_files: int,
 ) -> list[dict[str, Any]]:
-    """Read the most recent ``runs/integrate/*/result.json`` files."""
+    """Read the most recent ``runs/integrate/*/result.json`` files.
+
+    Args:
+        session_dir (Path): Session root containing ``runs/integrate``.
+        max_files (int): Max files to read, newest by mtime first.
+
+    Returns:
+        list[dict[str, Any]]: Normalised integrate entries (see
+        :func:`_normalise_integrate_entry`), or ``[]`` when the
+        directory is absent or unreadable.
+    """
     integrate_root = session_dir / "runs" / "integrate"
     if not integrate_root.is_dir():
         return []
@@ -1165,6 +1341,21 @@ def _scan_integrate_results(
 def _normalise_integrate_entry(
     data: dict[str, Any], *, result_path: Path,
 ) -> dict[str, Any] | None:
+    """Project a raw integrate ``result.json`` dict into the audit shape.
+
+    Resolves the patch size from ``patch_path`` when present and coerces
+    throughput / gain fields to floats. Entries without a string
+    ``decision`` are dropped.
+
+    Args:
+        data (dict[str, Any]): Parsed ``result.json`` contents.
+        result_path (Path): Path the entry was read from; used for the
+            ``result_path`` and ``mtime`` fields.
+
+    Returns:
+        dict[str, Any] | None: The normalised entry, or ``None`` when
+        ``decision`` is missing / not a string.
+    """
     decision = data.get("decision")
     if not isinstance(decision, str):
         return None
@@ -1204,6 +1395,21 @@ def _scan_oob_attempts(
     session_dir: Path,
     max_entries: int,
 ) -> list[dict[str, Any]]:
+    """Read the tail of the newest ``optimization_attempts.jsonl``.
+
+    Scans ``kernel-agent/runs/*/optimization_attempts.jsonl`` newest
+    first and returns rows from the first file that yields any, capping
+    to the most recent ``max_entries``.
+
+    Args:
+        session_dir (Path): Session root containing ``kernel-agent``.
+        max_entries (int): Max tail entries to keep.
+
+    Returns:
+        list[dict[str, Any]]: Projected attempt rows (``kernel_id``,
+        ``backend``, ``report_text``, ``microbench_speedup``, ``ts``,
+        ``source_file``), or ``[]`` when none are found.
+    """
     root = session_dir / "kernel-agent" / "runs"
     if not root.is_dir():
         return []
@@ -1256,6 +1462,18 @@ _CI_METRICS_CANDIDATE_RELPATHS: tuple[str, ...] = (
 def _load_ci_metrics(
     session_dir: Path,
 ) -> tuple[Path | None, dict[str, Any]]:
+    """Load the first present ``ci_metrics`` JSON under the session.
+
+    Tries each candidate relpath in :data:`_CI_METRICS_CANDIDATE_RELPATHS`
+    order and returns the first that exists and parses to a dict.
+
+    Args:
+        session_dir (Path): Session root searched for the metrics files.
+
+    Returns:
+        tuple[Path | None, dict[str, Any]]: ``(path, data)`` for the
+        first match, or ``(None, {})`` when none is found.
+    """
     for relpath in _CI_METRICS_CANDIDATE_RELPATHS:
         candidate = session_dir / relpath
         if not candidate.is_file():
@@ -1272,6 +1490,14 @@ def _load_ci_metrics(
 
 
 def _json_loads_or_none(text: str) -> Any:
+    """Parse JSON text, returning ``None`` instead of raising on error.
+
+    Args:
+        text (str): The JSON text to parse.
+
+    Returns:
+        Any: The decoded object, or ``None`` when empty or invalid.
+    """
     if not text:
         return None
     import json
@@ -1283,6 +1509,18 @@ def _json_loads_or_none(text: str) -> Any:
 
 
 def _coerce_optional_float(value: Any) -> float | None:
+    """Coerce a value to ``float`` where sensible, else ``None``.
+
+    Booleans are explicitly rejected (so ``True`` is not read as 1.0);
+    ints / floats convert directly and numeric strings are parsed.
+
+    Args:
+        value (Any): The value to coerce.
+
+    Returns:
+        float | None: The float value, or ``None`` when it is a bool,
+        a non-numeric string, or any other type.
+    """
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -1303,8 +1541,16 @@ def _load_manifest_extras(session_dir: Path | None) -> dict[str, Any]:
     """Read ``manifest.json`` for the C-section preflight signals.
 
     Returns the raw dict so the signal layer can pick fields without
-    leaking knowledge of the manifest schema into the probe. Empty when
-    the file is absent (resume from a half-init session) or unreadable.
+    leaking knowledge of the manifest schema into the probe.
+
+    Args:
+        session_dir (Path | None): Session root containing
+            ``manifest.json``; ``None`` yields ``{}``.
+
+    Returns:
+        dict[str, Any]: The parsed manifest dict, or ``{}`` when the
+        file is absent (resume from a half-init session), unreadable, or
+        not a JSON object.
     """
     if session_dir is None:
         return {}
@@ -1322,9 +1568,8 @@ def _load_manifest_extras(session_dir: Path | None) -> dict[str, Any]:
     return data
 
 
-# Tier mapping kept as a private constant so the signal layer can
-# compute the Amdahl ceiling without importing the inference_optimizer
-# package.
+# Private tier mapping so the signal layer computes the Amdahl ceiling
+# without importing the inference_optimizer package.
 _AMDAHL_TIER_FAMILIES: dict[str, str] = {
     "T1_TRITON":      "triton",
     "T2_AITER_CK":    "vendor",
@@ -1338,10 +1583,18 @@ def _load_kernel_breakdown(session_dir: Path | None) -> dict[str, Any]:
     """Read ``profiles/kernel_breakdown.json`` and aggregate by tier.
 
     The full per-kernel list is huge; the C2 detector only needs the
-    aggregate so we pre-collapse to ``{tier_pcts: {triton, vendor, ...},
-    total_kernels, total_gpu_pct, mtime}``. Tiers fall back to the
-    canonical name when no mapping exists, keeping new tiers from
-    surfacing as silent drops.
+    aggregate so we pre-collapse it. Tiers fall back to the canonical
+    name when no mapping exists, keeping new tiers from surfacing as
+    silent drops.
+
+    Args:
+        session_dir (Path | None): Session root containing
+            ``profiles/kernel_breakdown.json``; ``None`` yields ``{}``.
+
+    Returns:
+        dict[str, Any]: ``{tier_pcts: {triton, vendor, ...},
+        total_kernels, total_gpu_pct, kernel_breakdown_path, mtime}``,
+        or ``{}`` when the file is absent / unreadable / not a list.
     """
     if session_dir is None:
         return {}
@@ -1392,8 +1645,16 @@ def _sample_critic_workdir(
 ) -> dict[str, Any]:
     """Scan ``critic-workdir/<turn>/judge_bundle.json`` for E1+E4 signals.
 
-    Returns ``{recent_judges: [...], workdir_count: int}``. Empty when
-    the critic-workdir tree doesn't exist (smoke run / critic disabled).
+    Args:
+        session_dir (Path | None): Session root containing
+            ``critic-workdir``; ``None`` yields ``{}``.
+        max_judges (int): Max recent turn directories scanned for judge
+            bundles.
+
+    Returns:
+        dict[str, Any]: ``{recent_judges: [...], workdir_count: int,
+        workdir_root: str}``, or ``{}`` when the critic-workdir tree
+        doesn't exist (smoke run / critic disabled).
     """
     if session_dir is None:
         return {}
@@ -1429,9 +1690,7 @@ def _sample_critic_workdir(
             mtime = judge_path.stat().st_mtime
         except (FileNotFoundError, PermissionError, OSError):
             mtime = 0.0
-        # Proposals count comes from ``judge_bundle.proposals``
-        # (decision_reviewer.PrepareReviewBundle); some bundles emit
-        # ``kb_priors_by_proposal`` dict instead, fall back gracefully.
+        # Count from ``proposals``; some bundles emit ``kb_priors_by_proposal`` instead.
         proposals = data.get("proposals")
         if isinstance(proposals, list):
             proposal_count = len(proposals)
@@ -1463,10 +1722,19 @@ def _sample_state_integrity(
 ) -> dict[str, Any]:
     """Aggregate the I1-I5 state-integrity slots into one payload.
 
-    Returns ``{}`` only when ``session_dir`` is missing. Individual
-    sub-slots that fail (missing file / unreadable DB / no PID file)
-    surface their own error markers so the signal layer can branch
-    on absence without mistaking it for healthy state.
+    Individual sub-slots that fail (missing file / unreadable DB / no
+    PID file) surface their own error markers so the signal layer can
+    branch on absence without mistaking it for healthy state.
+
+    Args:
+        session_dir (Path | None): Session root; ``None`` yields ``{}``.
+        optimizer_runs_dirname (str): Sub-directory under ``session_dir``
+            where ``run_*.pid`` files live.
+
+    Returns:
+        dict[str, Any]: ``{state_json, wal, leases, agents,
+        coordinator}`` aggregating the five state slots, or ``{}`` when
+        ``session_dir`` is missing.
     """
     if session_dir is None:
         return {}
@@ -1482,7 +1750,17 @@ def _sample_state_integrity(
 
 
 def _probe_state_json(session_dir: Path) -> dict[str, Any]:
-    """Return ``state.json`` health: validity / size / mtime / error."""
+    """Return ``state.json`` health: validity / size / mtime / error.
+
+    Args:
+        session_dir (Path): Session root containing ``state.json``.
+
+    Returns:
+        dict[str, Any]: ``{valid, path, ...}``; on success also carries
+        ``size_bytes``, ``mtime`` and ``stop_reason``, otherwise an
+        ``error`` marker (``missing`` / ``read_failed`` /
+        ``json_parse_failed``).
+    """
     path = session_dir / "state.json"
     if not path.is_file():
         return {"valid": False, "error": "missing", "path": str(path)}
@@ -1518,7 +1796,15 @@ def _probe_state_json(session_dir: Path) -> dict[str, Any]:
 
 
 def _probe_wal_size(session_dir: Path) -> dict[str, Any]:
-    """``storage/coordinator.db-wal`` size — WAL bloat signal source."""
+    """``storage/coordinator.db-wal`` size — WAL bloat signal source.
+
+    Args:
+        session_dir (Path): Session root containing ``storage/``.
+
+    Returns:
+        dict[str, Any]: ``{db_path, wal_path, wal_bytes, db_bytes}``;
+        byte counts are 0 when the corresponding file is absent.
+    """
     db_path = session_dir / "storage" / "coordinator.db"
     wal_path = session_dir / "storage" / "coordinator.db-wal"
     out: dict[str, Any] = {
@@ -1546,6 +1832,15 @@ def _probe_leases(session_dir: Path) -> list[dict[str, Any]]:
     Reads the ``leases`` table from ``storage/coordinator.db``. Each
     row's ``holder_pid`` is liveness-checked; ``alive=False`` means
     the lease is stale (holder process gone but lease still held).
+
+    Args:
+        session_dir (Path): Session root containing
+            ``storage/coordinator.db``.
+
+    Returns:
+        list[dict[str, Any]]: One ``{task_id, holder_pid, lane,
+        acquired_at, alive}`` per lease row, or ``[]`` when the DB is
+        absent / unreadable.
     """
     db_path = session_dir / "storage" / "coordinator.db"
     if not db_path.is_file():
@@ -1590,8 +1885,15 @@ def _probe_leases(session_dir: Path) -> list[dict[str, Any]]:
 
 
 def _is_pid_alive(pid: int) -> bool:
-    """``os.kill(pid, 0)`` — POSIX existence probe. Returns False on any
-    error (PID missing, permission denied, non-Linux)."""
+    """``os.kill(pid, 0)`` — POSIX existence probe.
+
+    Args:
+        pid (int): The process id to probe.
+
+    Returns:
+        bool: ``True`` when the process exists; ``False`` on any error
+        (PID missing, permission denied, non-Linux).
+    """
     try:
         os.kill(pid, 0)
         return True
@@ -1600,7 +1902,16 @@ def _is_pid_alive(pid: int) -> bool:
 
 
 def _probe_agent_files(session_dir: Path) -> dict[str, Any]:
-    """Per-agent inbox/outbox sizes for I4 bloat detection."""
+    """Per-agent inbox/outbox sizes for I4 bloat detection.
+
+    Args:
+        session_dir (Path): Session root containing the ``agents/`` tree.
+
+    Returns:
+        dict[str, Any]: ``{<role>: {inbox_bytes, outbox_bytes,
+        inbox_path, outbox_path}}`` for roles with non-zero mailboxes,
+        or ``{}`` when the tree is absent.
+    """
     agents_root = session_dir / "agents"
     if not agents_root.is_dir():
         return {}
@@ -1645,6 +1956,15 @@ def _probe_coordinator_pid(
     The PID file is dropped by the SKILL.md launcher template; absence
     is not itself an error (operator may have launched without ``setsid``).
     Mismatch is the I5 ``coordinator_zombie`` signal.
+
+    Args:
+        session_dir (Path): Session root containing the runs directory.
+        optimizer_runs_dirname (str): Sub-directory holding
+            ``run_*.pid`` files.
+
+    Returns:
+        dict[str, Any]: ``{recorded_pid, alive, pid_file}``; fields stay
+        ``None`` / ``""`` when no usable PID file is found.
     """
     runs_dir = session_dir / optimizer_runs_dirname
     out: dict[str, Any] = {
@@ -1688,7 +2008,20 @@ async def _probe_external_deps(
     mount_timeout_s: float,
     http_timeout_s: float,
 ) -> dict[str, Any]:
-    """Async wrapper that runs J1+J2+J3 probes once per tick."""
+    """Async wrapper that runs J1+J2+J3 probes once per tick.
+
+    Args:
+        gateway_probe_url_override (str): Explicit gateway probe URL;
+            when empty it is derived from ``$OPENAI_BASE_URL`` +
+            ``/models``.
+        mount_timeout_s (float): Per-mount stat-latency budget passed to
+            the mounts probe.
+        http_timeout_s (float): Timeout for the gateway HTTP probe.
+
+    Returns:
+        dict[str, Any]: ``{gateway, mounts, tracelens_cli}``, or ``{}``
+        when all three sub-probes are empty.
+    """
     gateway_url = gateway_probe_url_override
     if not gateway_url:
         base = os.environ.get("OPENAI_BASE_URL", "").strip()
@@ -1720,6 +2053,16 @@ async def _probe_gateway_health(
     A 401 here (with the same auth token that critic + kernel-agent
     use) means the upstream gateway has revoked / lost the key — J1
     surfaces this distinct from generic local-server unreachable.
+
+    Args:
+        url (str): The gateway ``/models`` URL to probe.
+        timeout_s (float): Request timeout in seconds (floored at 0.5s).
+
+    Returns:
+        dict[str, Any]: ``{url, reachable, status, ...}`` with either a
+        ``status_code`` (and classified ``status``: ``ok`` /
+        ``unauthorized`` / ``http_error`` / ``server_error``) or an
+        ``error`` marker on transport failure.
     """
     out: dict[str, Any] = {
         "url": url, "reachable": False, "status": "error",
@@ -1754,12 +2097,13 @@ async def _probe_gateway_health(
     return out
 
 
-# Default mount paths probed by J2. Each is read from the env at probe
-# time so an operator can move them without rebuilding the agent.
+# J2 mount paths, read from env at probe time. All default to "" (no fallback):
+# we only probe what the operator points at. TRACELENS_ROOT is now session-local
+# (install.sh clones into $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens), so it
+# is only flagged degraded when explicitly overridden to a shared mount.
 _EXTERNAL_MOUNT_ENVS: tuple[tuple[str, str], ...] = (
-    ("TRACELENS_ROOT", "/wekafs/hyperloom/TraceLens-internal"),
-    # Internal extension is optional: no default path, so an open-source-only
-    # setup (TRACELENS_INTERNAL_ROOT unset) is not flagged as a degraded mount.
+    ("TRACELENS_ROOT", ""),
+    # Optional internal extension; unset means open-source-only, not a degraded mount.
     ("TRACELENS_INTERNAL_ROOT", ""),
     ("INFERENCEX_PATH", ""),
     ("OOB_SRC", ""),
@@ -1769,7 +2113,20 @@ _EXTERNAL_MOUNT_ENVS: tuple[tuple[str, str], ...] = (
 def _probe_external_mounts(
     timeout_s: float,
 ) -> list[dict[str, Any]]:
-    """``os.stat`` each external mount, time it, flag slow / failing."""
+    """``os.stat`` each external mount, time it, flag slow / failing.
+
+    Mount paths are read from the env names in
+    :data:`_EXTERNAL_MOUNT_ENVS` (falling back to their defaults) at
+    probe time so an operator can relocate them without a rebuild.
+
+    Args:
+        timeout_s (float): Stat-latency budget in seconds; echoed back
+            as ``timeout_ms`` so the signal layer can flag slow mounts.
+
+    Returns:
+        list[dict[str, Any]]: One ``{env_name, path, ok, error,
+        latency_ms, timeout_ms}`` entry per configured mount.
+    """
     out: list[dict[str, Any]] = []
     for env_name, default_path in _EXTERNAL_MOUNT_ENVS:
         raw = os.environ.get(env_name, default_path) or ""
@@ -1800,9 +2157,8 @@ def _probe_external_mounts(
     return out
 
 
-# Both TraceLens CLI names ship from the public repo; the
-# ``_inference`` variant is the canonical one for vLLM/SGLang traces
-# per SKILL.md but the legacy name remains valid for older builds.
+# Both TraceLens CLI names; the ``_inference`` variant is canonical for
+# vLLM/SGLang traces per SKILL.md, the legacy name remains valid for older builds.
 _TRACELENS_CLI_NAMES: tuple[str, ...] = (
     "TraceLens_generate_perf_report_pytorch_inference",
     "TraceLens_generate_perf_report_pytorch",
@@ -1810,7 +2166,13 @@ _TRACELENS_CLI_NAMES: tuple[str, ...] = (
 
 
 def _probe_tracelens_cli() -> dict[str, Any]:
-    """Detect both TraceLens CLI names — boot-time presence check."""
+    """Detect both TraceLens CLI names — boot-time presence check.
+
+    Returns:
+        dict[str, Any]: ``{cli_names: [...], found: {name: bool},
+        any_present: bool}`` reflecting which CLI names resolve via
+        :func:`shutil.which`.
+    """
     found: dict[str, bool] = {}
     for name in _TRACELENS_CLI_NAMES:
         found[name] = shutil.which(name) is not None

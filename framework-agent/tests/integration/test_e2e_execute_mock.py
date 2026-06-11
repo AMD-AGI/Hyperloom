@@ -1,15 +1,6 @@
-"""Integration test: ``fa explore --execute`` against fake Primus + echo build/bench.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The fake bench command writes a constant ``benchmark.json`` so the
-winner gate fires deterministically. The accuracy command does the
-same with ``accuracy.json``. ``prepare_candidate_env=false`` skips git
-worktree + venv creation so this test runs in seconds and on any
-machine (no GPU / git remote / network needed).
-
-Also asserts the KB hook auto-appends to
-``${FRAMEWORK_AGENT_KB_DIR}/<domain>/empirical_kb.md`` when
-``kb_domain`` is set.
-"""
+"""Integration test: ``fa explore --execute`` against fake Primus + echo build/bench; asserts deterministic winner gate and KB auto-append when ``kb_domain`` is set."""
 
 from __future__ import annotations
 

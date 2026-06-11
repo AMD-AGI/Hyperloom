@@ -1,23 +1,6 @@
-"""Advisory ``model_arch`` profile: loader, serialization, renderer, and
-specialist warm-param injection.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Contracts pinned here (all advisory — ``model_arch`` drives NO
-deterministic gating; it is prompt-context only and subordinate to live
-TraceLens evidence):
-
-* ``cli._load_model_arch`` reads ``<workspace_root>/model_arch.json``,
-  soft-degrades to ``{}`` on missing / unreadable / invalid-JSON /
-  non-dict / missing-or-mismatched ``model_name`` (stale-file guard).
-* ``SharedState.model_arch`` round-trips through ``to_dict`` /
-  ``from_dict`` so a ``--resume`` rehydrates the persisted profile.
-* ``render_model_arch_compact`` drops empty fields, renders ``""`` for an
-  empty / non-dict profile, and trails the free-text ``notes``.
-* ``SharedState.to_prompt_summary`` injects the labeled advisory block
-  when a profile is set and omits it entirely otherwise.
-* ``Coordinator._warm_specialist_params`` populates ``arch_notes`` from
-  ``SharedState.model_arch`` (and skips it when empty) so non-arch
-  sessions render exactly as before.
-"""
+"""Advisory ``model_arch`` profile: loader, serialization, renderer, warm-param injection."""
 
 from __future__ import annotations
 
@@ -62,9 +45,7 @@ def _write(workspace: Path, payload: Any) -> Path:
     return p
 
 
-# ---------------------------------------------------------------------------
 # 1. _load_model_arch — happy path + soft-degrade matrix
-# ---------------------------------------------------------------------------
 def test_load_model_arch_valid(tmp_path: Path):
     _write(tmp_path, _VALID_ARCH)
     out = _load_model_arch(tmp_path, "DeepSeek-R1-0528")
@@ -72,8 +53,7 @@ def test_load_model_arch_valid(tmp_path: Path):
 
 
 def test_load_model_arch_matches_on_basename(tmp_path: Path):
-    """The launched ``--model`` may be a full path; the guard compares
-    basenames so a path / bare-name mismatch still matches."""
+    """The guard compares basenames so a path / bare-name mismatch still matches."""
     _write(tmp_path, {**_VALID_ARCH, "model_name": "DeepSeek-R1-0528"})
     out = _load_model_arch(tmp_path, "/weights/nfs/DeepSeek-R1-0528")
     assert out["attention"] == "MLA"
@@ -100,15 +80,12 @@ def test_load_model_arch_missing_model_name_returns_empty(tmp_path: Path):
 
 
 def test_load_model_arch_stale_mismatch_returns_empty(tmp_path: Path):
-    """A leftover file from a previous run (different model) must be
-    ignored — the convention path is shared across launches."""
+    """A leftover file from a different-model run must be ignored."""
     _write(tmp_path, {**_VALID_ARCH, "model_name": "Llama-3.1-8B"})
     assert _load_model_arch(tmp_path, "DeepSeek-R1-0528") == {}
 
 
-# ---------------------------------------------------------------------------
 # 2. SharedState serialization round-trip
-# ---------------------------------------------------------------------------
 def test_model_arch_round_trips_through_dict():
     state = SharedState(model_name="DeepSeek-R1-0528", model_arch=dict(_VALID_ARCH))
     revived = SharedState.from_dict(state.to_dict())
@@ -122,9 +99,7 @@ def test_model_arch_defaults_to_empty_dict():
     assert revived.model_arch == {}
 
 
-# ---------------------------------------------------------------------------
 # 3. render_model_arch_compact
-# ---------------------------------------------------------------------------
 def test_render_empty_inputs_return_blank():
     assert render_model_arch_compact({}) == ""
     assert render_model_arch_compact(None) == ""
@@ -135,11 +110,8 @@ def test_render_drops_empty_fields_and_trails_notes():
     line = render_model_arch_compact(_VALID_ARCH)
     assert "attention=MLA" in line
     assert "experts=256" in line
-    # swa_window is None -> dropped.
-    assert "swa_window" not in line
-    # source/model_name are not structured render fields -> not shown.
-    assert "model_name=" not in line
-    # notes trails at the end.
+    assert "swa_window" not in line  # None -> dropped
+    assert "model_name=" not in line  # not a structured render field
     assert line.strip().endswith(_VALID_ARCH["notes"])
     assert line.index("decoder=") < line.index("notes=")
 
@@ -149,9 +121,7 @@ def test_render_skips_blank_notes():
     assert line == "attention=MLA"
 
 
-# ---------------------------------------------------------------------------
 # 4. to_prompt_summary block
-# ---------------------------------------------------------------------------
 def test_prompt_summary_renders_block_when_set():
     state = SharedState(model_name="m", model_arch=dict(_VALID_ARCH))
     text = state.to_prompt_summary()
@@ -165,9 +135,7 @@ def test_prompt_summary_omits_block_when_empty():
     assert "model_arch" not in text
 
 
-# ---------------------------------------------------------------------------
 # 5. Coordinator._warm_specialist_params -> arch_notes
-# ---------------------------------------------------------------------------
 @dataclass
 class _ArchState:
     """Minimal SharedState double for the warm-param path."""

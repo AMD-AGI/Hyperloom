@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for prompt -> ReactorContext parser."""
 
 from __future__ import annotations
@@ -286,17 +288,12 @@ def test_optimization_stack_size_zero_when_none():
 
 
 # ---------------------------------------------------------------------------
-# explore_started — flips True iff at least one of the explore family
-# ``last_*`` lines is non-``(none)``. Used by the ``no_levers_found``
-# signal to defer until exploration has actually been attempted
-# (cold-start guard). The canonical keys are ``last_explore`` /
-# ``last_sweep``.
+# explore_started — flips True iff an explore-family ``last_*`` line is
+# non-``(none)``; the ``no_levers_found`` cold-start guard defers until then.
 # ---------------------------------------------------------------------------
 
 def test_explore_started_false_when_all_last_explore_keys_are_none():
-    """Coordinator default rendering: pre-explore/sweep the lines are
-    all ``(none)``. The flag must stay False so ``no_levers_found``
-    defers."""
+    """Pre-explore/sweep the lines are all ``(none)`` → flag stays False so ``no_levers_found`` defers."""
     prompt = _prompt(
         "session_id=s\n"
         "last_explore=(none)\n"
@@ -309,10 +306,7 @@ def test_explore_started_false_when_all_last_explore_keys_are_none():
 
 
 def test_explore_started_true_when_any_last_explore_key_is_set():
-    """First successful explore round renders e.g.
-    ``last_explore=status=succeeded decision=promoted ...``. That
-    flips ``explore_started`` to True even if last_sweep is still
-    ``(none)``."""
+    """A set ``last_explore`` flips ``explore_started`` to True even while last_sweep is still ``(none)``."""
     prompt = _prompt(
         "session_id=s\n"
         "last_explore=status=succeeded decision=promoted "
@@ -326,9 +320,7 @@ def test_explore_started_true_when_any_last_explore_key_is_set():
 
 
 def test_explore_started_true_for_each_individual_explore_family():
-    """Sanity: each explore family key flips the flag independently.
-    Iterate so a future schema rename in shared_state.py fails one
-    assertion rather than silently downgrading the gate."""
+    """Each explore-family key flips the flag independently, so a future shared_state.py rename fails an assertion rather than silently downgrading the gate."""
     for key in (
         "last_explore",
         "last_sweep",
@@ -345,9 +337,7 @@ def test_explore_started_true_for_each_individual_explore_family():
 
 
 def test_explore_started_default_false_when_keys_absent():
-    """Legacy / partial prompts (e.g. tests that omit the explore
-    family lines entirely) must default to False so the cold-start
-    guard stays conservative."""
+    """Partial prompts omitting the explore-family lines must default to False so the cold-start guard stays conservative."""
     prompt = _prompt(
         "session_id=s\ncrash_count=0\n",
         "=== Inbox for robustness ===\n(no new messages)\n",

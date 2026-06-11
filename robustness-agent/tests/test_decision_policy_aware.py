@@ -1,13 +1,6 @@
-"""Unit tests for :class:`robustness_agent.decision.PolicyAware`.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The validator mirrors upstream PolicyGate.  These tests pin the
-behaviour the reactor relies on:
-
-* every robustness-allowed intent built via the helpers passes.
-* missing / mistyped payload fields raise :class:`PolicyViolation` with
-  the rule label upstream PolicyGate uses.
-* validate_all collects every violation rather than short-circuiting.
-"""
+"""Unit tests for :class:`robustness_agent.decision.PolicyAware` (mirrors upstream PolicyGate rules)."""
 
 from __future__ import annotations
 
@@ -73,12 +66,7 @@ def test_delegate_passes(policy: PolicyAware):
 
 
 def test_delegate_recover_gpu_leak_payload_passes(policy: PolicyAware):
-    """``gpu_memory_leaked`` -> delegate(recover) payload regression.
-
-    The ActionLadder branch in :mod:`decision.action_ladder` builds this
-    exact shape; we pin the PolicyAware contract so future schema
-    changes are caught at build time rather than mid-tick.
-    """
+    """``gpu_memory_leaked`` -> delegate(recover) payload regression: pin the PolicyAware contract against schema drift."""
     intent = build_delegate(
         action_name="recover",
         params={

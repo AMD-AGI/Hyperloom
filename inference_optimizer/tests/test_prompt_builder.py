@@ -1,9 +1,6 @@
-"""Unit tests for ``orchestrator/system_prompts/prompt_builder.py``.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-These tests pin the public contract of :func:`build_orchestration_prompt`
-without going through the CLI helpers so a future CLI rearrangement
-doesn't silently break the prompt structure.
-"""
+"""Unit tests pinning :func:`build_orchestration_prompt`'s public contract."""
 
 from __future__ import annotations
 
@@ -36,15 +33,11 @@ def rules_path() -> Path:
     return asset_system_prompts_dir() / "orchestration.md"
 
 
-# ---------------------------------------------------------------------------
 # Default enabled-action sets
-# ---------------------------------------------------------------------------
 def test_default_enabled_actions_full_includes_kernel_actions():
     full = default_enabled_actions(no_kernel=False)
     assert set(KERNEL_OWNED_ACTIONS) <= set(full)
-    # v0.8 M3 + KB_gaps/Gap-10: ``validate_stack`` is deprecated; the
-    # merged ``explore`` action carries the per-KEEP stack rebench
-    # inline, so the enabled set advertises ``explore`` instead.
+    # Gap-10: validate_stack is deprecated; the merged ``explore`` action replaces it.
     assert "explore" in full
     assert "report" in full
     assert "baseline" in full
@@ -54,8 +47,7 @@ def test_default_enabled_actions_no_kernel_excludes_all_kernel_actions():
     bare = default_enabled_actions(no_kernel=True)
     assert set(KERNEL_OWNED_ACTIONS).isdisjoint(set(bare))
     assert "profile" not in bare  # profile only feeds kernel-opt
-    # v0.8 M3 + KB_gaps/Gap-10: ``explore`` replaces the v0.6
-    # backends/params/validate_stack grid-runner triple.
+    # Gap-10: ``explore`` replaces the v0.6 backends/params/validate_stack triple.
     assert "explore" in bare
     assert "baseline" in bare
 
@@ -70,36 +62,27 @@ def test_full_enabled_actions_match_registry_minus_pmc_optional(registry):
         assert registry.get(name) is not None
 
 
-def test_recover_is_enabled_and_has_real_executor(registry):
-    """``recover`` was re-enabled in 2026-05 alongside RecoverExecutor.
-
-    Pin all three legs of the contract so a future drift makes this
-    test fire instead of silently regressing to the old ``no_executor``
-    failure mode:
-
-    * registry metadata still loads (covered by parametrized check).
-    * ``recover`` appears in both enabled-action sets so the
-      Orchestration prompt offers it as a delegatable action.
-    * ``cli._REAL_EXECUTORS_FULL`` binds it to a real callable
-      (:data:`recover_executor`) rather than ``_noop_prep``.
-    """
+def test_recover_is_robustness_delegate_only_with_real_executor(registry):
+    """``recover`` is ROBUSTNESS_DELEGATE_ONLY: real executor + metadata, but off the Orchestration prompt surface."""
     from inference_optimizer.cli import _REAL_EXECUTORS_FULL
     from inference_optimizer.orchestrator.action_executors.recover import (
         RecoverExecutor,
         recover_executor,
     )
+    from inference_optimizer.protocol.action_surfaces import (
+        ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
+    )
 
-    assert "recover" in FULL_ENABLED_ACTIONS
-    assert "recover" in NO_KERNEL_ENABLED_ACTIONS
+    assert "recover" not in FULL_ENABLED_ACTIONS
+    assert "recover" not in NO_KERNEL_ENABLED_ACTIONS
+    assert "recover" in ROBUSTNESS_DELEGATE_ONLY_ACTIONS
     assert registry.get("recover") is not None
     assert "recover" in _REAL_EXECUTORS_FULL
     assert _REAL_EXECUTORS_FULL["recover"] is recover_executor
     assert isinstance(recover_executor, RecoverExecutor)
 
 
-# ---------------------------------------------------------------------------
 # Output structure
-# ---------------------------------------------------------------------------
 def _section_headers(prompt: str) -> list[str]:
     return [
         line.strip() for line in prompt.splitlines()
@@ -108,12 +91,7 @@ def _section_headers(prompt: str) -> list[str]:
 
 
 def test_full_prompt_has_seven_sections(registry, rules_path):
-    """v0.8 §3.3 — original v0.6 seven-section contract is now eight
-    sections because the PHASE CONTRACT (§3a) is wedged between
-    PIPELINE & TIME BUDGET and ACTIONS YOU MAY USE. The legacy 1-7
-    headers are preserved verbatim so downstream LLM prompts that key
-    on the original numbering keep working.
-    """
+    """v0.8 §3.3 — eight sections now (PHASE CONTRACT §3a added); legacy 1-7 headers preserved verbatim."""
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
@@ -130,18 +108,10 @@ def test_full_prompt_has_seven_sections(registry, rules_path):
         "## 3. PIPELINE & TIME BUDGET",
         "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "## 4. ACTIONS YOU MAY USE",
-        "## 5. DECISION FRAMEWORK (apply EVERY tick BEFORE emitting)",
-        # N20-A "BACKENDS GRID CATALOGUE" + "PARAMS GRID CATALOGUE"
-        # sections retired on this branch alongside the v0.6
-        # backends / params executors (KB_design §3.4 / Dead-A).
-        # The v0.8 ``explore`` action covers the same surface
-        # internally; no per-action grid catalogue is rendered.
+        "## 5. DECISION FRAMEWORK (heuristics + facts — the next action is your call)",
+        # Grid catalogue sections retired with the v0.6 backends/params executors.
         "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
-        # Supplementary EXPLORE channel
-        # declaration sits between the kernel-opt reference and the
-        # rules fragment so the LLM internalises the default
-        # decision flow before reading the §3 supplementary framing.
-        "## 6b. DYNAMIC ACTION (supplementary EXPLORE channel)",
+        # 6b. DYNAMIC ACTION removed when dynamic_action folded into ``specialist``.
         "## 7. RULES & OUTPUT PROTOCOL",
     ]
     actual_top = [h for h in headers if h.startswith("## ")]
@@ -167,8 +137,7 @@ def test_no_kernel_prompt_drops_section_six(registry, rules_path):
 
 
 def test_full_prompt_has_all_phase_subheaders(registry, rules_path):
-    """ACTIONS YOU MAY USE groups by pipeline_phase; each phase used by the
-    enabled set must appear as a ``###`` sub-header."""
+    """ACTIONS YOU MAY USE groups by pipeline_phase; each enabled phase appears as a ``###`` sub-header."""
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
@@ -185,8 +154,6 @@ def test_full_prompt_has_all_phase_subheaders(registry, rules_path):
         assert f"### {phase}" in sub_headers, (
             f"expected phase header '### {phase}' in catalogue, got {sub_headers}"
         )
-        # Each phase MUST have a header line in the time-budget mapping
-        # (defensive — the catalogue uses the same _PHASE_HEADERS contract).
         assert phase in _PHASE_HEADERS, (
             f"phase {phase!r} present in registry but missing from "
             f"_PHASE_HEADERS — update prompt_builder._PHASE_HEADERS"
@@ -194,14 +161,11 @@ def test_full_prompt_has_all_phase_subheaders(registry, rules_path):
 
 
 def test_phase_header_keys_subset_of_valid_phases():
-    """Defensive: builder phase headers must be a subset of registry's
-    VALID_PIPELINE_PHASES so we don't drift between schema and prompt."""
+    """Builder phase headers must be a subset of registry's VALID_PIPELINE_PHASES."""
     assert set(_PHASE_HEADERS.keys()) <= VALID_PIPELINE_PHASES
 
 
-# ---------------------------------------------------------------------------
 # Action-level content
-# ---------------------------------------------------------------------------
 def test_every_enabled_action_appears_with_description(registry, rules_path):
     text = build_orchestration_prompt(
         action_registry=registry,
@@ -215,9 +179,7 @@ def test_every_enabled_action_appears_with_description(registry, rules_path):
     for name in FULL_ENABLED_ACTIONS:
         meta = registry.get(name)
         assert meta is not None
-        # Bullet line for the action
         assert f"**{name}**" in text, f"action {name!r} missing from catalogue"
-        # And its description
         assert meta.description in text, (
             f"description for {name!r} missing or truncated"
         )
@@ -234,7 +196,6 @@ def test_kernel_owned_actions_marked_kernel_owned(registry, rules_path):
         rules_fragment_path=rules_path,
     )
     for name in KERNEL_OWNED_ACTIONS:
-        # Marker on the bullet line so the LLM picks the REQUEST transport
         marker = f"**{name}** (KERNEL-OWNED)"
         assert marker in text, (
             f"expected '(KERNEL-OWNED)' tag next to {name!r}"
@@ -251,18 +212,13 @@ def test_emit_hints_use_request_for_kernel_actions(registry, rules_path):
         max_minutes=120,
         rules_fragment_path=rules_path,
     )
-    # propose_action hint format for non-kernel.
-    # v0.8 M3 + KB_gaps/Gap-10: ``backends`` was deprecated; the
-    # canonical grid-runner is ``explore``.
+    # propose_action hint for non-kernel; Gap-10 made ``explore`` the canonical grid-runner.
     assert "propose_action{action_name='baseline'" in text
     assert "propose_action{action_name='explore'" in text
-    # REQUEST hint for kernel-owned
     assert "REQUEST{target_agent='kernel'" in text
 
 
-# ---------------------------------------------------------------------------
 # Determinism + fragment fallback
-# ---------------------------------------------------------------------------
 def test_build_is_deterministic(registry, rules_path):
     args = dict(
         action_registry=registry,
@@ -311,7 +267,7 @@ def test_explicit_kernel_enabled_override_wins(registry, rules_path):
     """Even with FULL set, if kernel_enabled=False is forced, no K-pipeline."""
     text = build_orchestration_prompt(
         action_registry=registry,
-        # Caller forgot to filter — builder must STILL respect explicit flag
+        # Caller forgot to filter — builder must STILL respect the explicit flag.
         enabled_actions=("baseline", "explore", "report"),
         framework="sglang",
         kernel_enabled=False,
@@ -323,16 +279,11 @@ def test_explicit_kernel_enabled_override_wins(registry, rules_path):
     assert "## 6. KERNEL-OPT REQUEST REFERENCE" not in text
 
 
-# ---------------------------------------------------------------------------
 # Mission / time budget content
-# ---------------------------------------------------------------------------
 def test_mission_section_emphasises_cumulative_gain_and_stack_rebench(
     registry, rules_path,
 ):
-    """v0.8 M3 + KB_gaps/Gap-10: the mission section emphasises the
-    cumulative gain story; the standalone ``validate_stack`` keyword
-    is gone (the rebench is inlined into ``explore``). We check for
-    the new keyword ``stack rebench`` instead."""
+    """Gap-10: the mission emphasises cumulative gain + ``stack rebench`` (validate_stack keyword gone)."""
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
@@ -366,24 +317,15 @@ def test_time_budget_section_lists_all_enabled_phases(registry, rules_path):
         )
     assert "Sum of typical phase ETAs" in pipeline_block
     assert "max_minutes=120" in pipeline_block
-    # The inlined stack rebench must be documented in the budget
-    # section so the LLM treats it as part of the schedule.
+    # The inlined stack rebench must be documented in the budget section.
     assert "stack rebench" in pipeline_block
 
 
-# ---------------------------------------------------------------------------
 # #144 last comment Layer 2: orchestrator must NOT pre-pin backends='claude'
-# ---------------------------------------------------------------------------
 def test_run_optimization_example_does_not_pin_backends_to_claude(
     registry, rules_path,
 ):
-    """The ``run_optimization`` example in the kernel-opt pipeline section
-    must NOT contain a literal ``backends: 'claude'`` (or any other backend
-    pin). When the example carried that literal, the LLM echoed it on
-    every kernel-opt request and ``kernel_optimization.choose_backends()``
-    short-circuited to Claude only — even on hip_cpp+benchmark kernels
-    that GEAK can rewrite (the exact regression closed in #144 last
-    comment Layer 2)."""
+    """#144 Layer 2: the ``run_optimization`` example must NOT pin ``backends: 'claude'`` (the LLM would echo it, forcing Claude-only)."""
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
@@ -393,12 +335,8 @@ def test_run_optimization_example_does_not_pin_backends_to_claude(
         max_minutes=120,
         rules_fragment_path=rules_path,
     )
-    # The example block lives inside the kernel-opt pipeline section.
     assert "## 6. KERNEL-OPT PIPELINE" in text or "KERNEL-OPT PIPELINE" in text
-    # Extract the K2 step block (where the run_optimization example lives).
-    # We don't want to test on the entire prompt because legitimate
-    # mentions of "claude" elsewhere (e.g. in the explanatory comment)
-    # are fine.
+    # Scope to the K2 step block so legitimate "claude" mentions elsewhere don't trip.
     assert "kind: 'run_optimization'" in text
     k2_section = text.split("kind: 'run_optimization'", 1)[1]
     example_block = k2_section.split("budget_minutes")[0]
@@ -413,9 +351,7 @@ def test_run_optimization_example_does_not_pin_backends_to_claude(
 
 
 def test_run_optimization_section_documents_auto_pick_rule(registry, rules_path):
-    """The kernel-opt pipeline section must document that backends are
-    auto-picked by the kernel-agent — so a future contributor doesn't
-    re-add the literal pin "for clarity" and regress #144."""
+    """The kernel-opt section must document that backends are auto-picked (guards against re-pinning, #144)."""
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
@@ -425,10 +361,7 @@ def test_run_optimization_section_documents_auto_pick_rule(registry, rules_path)
         max_minutes=120,
         rules_fragment_path=rules_path,
     )
-    # Look for the auto-pick guidance in the kernel_opt section.
-    # Main's prompt restructure (post-#207 merge) renamed "Step **K2**"
-    # to "### kernel_opt — payload for run_optimization" and the next
-    # subsection is "### integrate — payload"; split there.
+    # Auto-pick guidance lives in the kernel_opt section (between run_optimization and integrate).
     k2_section = text.split("kind: 'run_optimization'", 1)[1].split("### `integrate`")[0]
     assert "auto-pick" in k2_section.lower() or "auto-picks" in k2_section.lower(), (
         "kernel_opt step must document that backends are auto-picked"

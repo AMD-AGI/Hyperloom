@@ -1,14 +1,6 @@
-"""Tests for the subprocess transport CLI.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Exercises both the in-process ``_run_tick`` helper (fast) and the real
-``python -m robustness_agent.runtime.cli tick`` invocation (slow but
-catches packaging / argparse regressions).
-
-The host-side wrapper in ``inference_optimizer/orchestrator/backends/
-robustness_agent.py`` builds the same ``request.json`` and reads the
-same ``emit.json`` shape this file exercises, so the contract checked
-here is the contract the Coordinator depends on.
-"""
+"""Tests for the subprocess transport CLI: the in-process ``_run_tick`` helper and the real ``python -m robustness_agent.runtime.cli tick`` invocation. Pins the request.json/emit.json contract the Coordinator host-side wrapper depends on."""
 
 from __future__ import annotations
 
@@ -62,17 +54,9 @@ async def test_run_tick_emits_heartbeat_envelope(tmp_path: Path):
             "options": {
                 "session_dir": str(tmp_path),
                 "auto_probe_inference_server": False,
-                # Heartbeat path runs on inert CI hosts without a Ray
-                # head. Without this opt-out the LocalProbe A6 sub-probe
-                # fires ``ray_head_dead`` after the 5s timeout and the
-                # ladder appends alert + prune_branch +
-                # escalate_strategy_change intents that mask the
-                # expected ``send_message{heartbeat}`` envelope.
+                # Inert CI hosts have no Ray head: the A6 probe would fire ``ray_head_dead`` and mask the heartbeat envelope.
                 "ray_probe_enabled": False,
-                # CI containers lack the TraceLens CLI and WekaFS mounts
-                # the J external_deps probe expects. Disable the whole
-                # probe so it does not enqueue ``tracelens_cli_missing``
-                # / ``wekafs_degraded`` alerts alongside the heartbeat.
+                # CI lacks the TraceLens CLI / WekaFS mounts the J external_deps probe expects.
                 "external_deps_enabled": False,
             },
         }
@@ -90,6 +74,7 @@ async def test_run_tick_emits_heartbeat_envelope(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_run_tick_emits_alert_on_high_crash_count(tmp_path: Path):
+    """Strategic HIGH symptoms (crash_count_high) emit alert(high) only (escalate/prune auto-emit retired in loosen P3_19)."""
     from robustness_agent.runtime.cli import _coerce_request, _run_tick
 
     request = _coerce_request(
@@ -99,7 +84,7 @@ async def test_run_tick_emits_alert_on_high_crash_count(tmp_path: Path):
     intents = emit["intent_envelope"]["intents"]
     intent_types = {i["intent_type"] for i in intents}
     assert "alert" in intent_types
-    assert "escalate_strategy_change" in intent_types
+    assert "escalate_strategy_change" not in intent_types
 
 
 @pytest.mark.asyncio
@@ -183,14 +168,9 @@ def test_subprocess_tick_emits_heartbeat(tmp_path: Path):
         "options": {
             "session_dir": str(tmp_path / "sess"),
             "auto_probe_inference_server": False,
-            # Heartbeat path is exercised on CI/dev hosts with no Ray
-            # head running, where ``ray status`` hangs / times out and
-            # the LocalProbe ladder would otherwise fire alert + prune
-            # intents alongside the heartbeat. Disable the A6 probe so
-            # the envelope stays focused on the heartbeat contract.
+            # CI/dev hosts have no Ray head: ``ray status`` hangs and the A6 probe would fire alert/prune alongside the heartbeat.
             "ray_probe_enabled": False,
-            # Same rationale for the J external_deps probe — CI lacks
-            # the TraceLens CLI / WekaFS mounts it expects.
+            # CI lacks the TraceLens CLI / WekaFS mounts the J external_deps probe expects.
             "external_deps_enabled": False,
         },
     }
@@ -237,8 +217,7 @@ def test_subprocess_tick_help_smoke():
 @pytest.mark.asyncio
 async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
     """``request.options`` overrides land on the per-tick :class:`Config`."""
-    # Make Config.discover deterministic for this assertion: drop any
-    # workload uid env so the only non-default value comes from options.
+    # Drop workload-uid env so the only non-default Config value comes from options.
     for key in (
         "ROBUSTNESS_WORKLOAD_UID",
         "CLAW_WORKLOAD_UID",

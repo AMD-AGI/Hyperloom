@@ -1,28 +1,15 @@
-Use the inference-optimization skill from a fresh Hyperloom checkout for this model.
+Before optimizing, run this shell prelude exactly:
 
-  # Production: USER_DATA_PATH is the wekafs path Claw mounts for this run.
-  # The V2 session_dir + audit files live directly under it (already
-  # persistent — CI reads them straight from wekafs, no copy needed).
-  export USER_DATA_PATH
-  echo "[CI_PATH] USER_DATA_PATH=$USER_DATA_PATH (persistent session + artifact root)"
   export HYPERLOOM_SOURCE_REPO="${HYPERLOOM_SOURCE_REPO:-https://github.com/AMD-AGI/Hyperloom.git}"
   export HYPERLOOM_SOURCE_REF="${HYPERLOOM_SOURCE_REF:-main}"
-  # Clone OUTSIDE $USER_DATA_PATH so the ~100MB shallow checkout is not
-  # mirrored into the persistent tree on every run. The audit files written
-  # below (hyperloom_source_commit.txt + source_commits.json) still live
-  # under $USER_DATA_PATH so they remain with the session.
-  export HYPERLOOM_SOURCE_DIR="${HYPERLOOM_SOURCE_DIR:-/workspace/Hyperloom-main}"
-  mkdir -p "$USER_DATA_PATH"
+  export HYPERLOOM_SOURCE_DIR="${HYPERLOOM_SOURCE_DIR:-/tmp/Hyperloom-main}"
   mkdir -p "$(dirname "$HYPERLOOM_SOURCE_DIR")"
   rm -rf "$HYPERLOOM_SOURCE_DIR"
-  # 1) shallow clone main (always works regardless of HYPERLOOM_SOURCE_REF).
   if ! git clone --depth 1 --branch main "$HYPERLOOM_SOURCE_REPO" "$HYPERLOOM_SOURCE_DIR"; then
     echo "[FATAL] git clone of Hyperloom failed — refusing to fall back to /wekafs/HyperloomV2" >&2
     exit 1
   fi
   cd "$HYPERLOOM_SOURCE_DIR"
-  # 2) if CI pinned a specific commit, fetch + checkout it. Failure here is
-  #    also fatal — the alternative is silently running the wrong code.
   if [ "$HYPERLOOM_SOURCE_REF" != "main" ]; then
     if ! git fetch --depth 1 origin "$HYPERLOOM_SOURCE_REF"; then
       echo "[FATAL] git fetch of pinned ref $HYPERLOOM_SOURCE_REF failed" >&2
@@ -30,44 +17,10 @@ Use the inference-optimization skill from a fresh Hyperloom checkout for this mo
     fi
     git checkout --detach FETCH_HEAD
   fi
-  HYPERLOOM_SOURCE_COMMIT=$(git rev-parse HEAD)
-  printf '%s\n' "$HYPERLOOM_SOURCE_COMMIT" > "$USER_DATA_PATH/hyperloom_source_commit.txt"
-  python3 - <<'PY'
-import json, os, subprocess
-def git_out(args):
-    try:
-        return subprocess.check_output(args, text=True).strip()
-    except Exception:
-        return ""
-source_dir = os.environ.get("HYPERLOOM_SOURCE_DIR", "")
-# Write the audit file next to the session on wekafs (USER_DATA_PATH). Never
-# fall back to /workspace — if the platform did not set USER_DATA_PATH we skip
-# the write rather than scatter artifacts onto ephemeral sandbox disk.
-result_dir = os.environ.get("USER_DATA_PATH", "")
-# Strip the embedded token from the remote URL we record (the token is OK
-# inside the sandbox env but should never end up in a persisted artifact).
-def _sanitize(url: str) -> str:
-    import re
-    return re.sub(r"https://[^@]+@", "https://", url or "")
-payload = {
-    "hyperloom": {
-        "repo": _sanitize(os.environ.get("HYPERLOOM_SOURCE_REPO", "")),
-        "ref": os.environ.get("HYPERLOOM_SOURCE_REF", ""),
-        "path": source_dir,
-        "commit": git_out(["git", "-C", source_dir, "rev-parse", "HEAD"]) if source_dir else "",
-        "remote": _sanitize(git_out(["git", "-C", source_dir, "config", "--get", "remote.origin.url"])) if source_dir else "",
-    }
-}
-if result_dir:
-    os.makedirs(result_dir, exist_ok=True)
-    with open(os.path.join(result_dir, "source_commits.json"), "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-PY
-
-  export CORTEX_KB_URL=https://global.primus-safe.amd.com/knowledge-base
-  export NODE_TLS_REJECT_UNAUTHORIZED=0
 
 SAFETY:
 - NEVER `find /` or `find /wekafs` without `-maxdepth 4`. Prefer which/ls/$PATH lookups.
 - NEVER run `kill -9 $(ps aux | grep ...)` — this kills the sandbox executor itself.
 - Per-bash timeouts must be <= 120s; use short polling loops rather than one long blocking call.
+- Modification of USER_DATA_PATH environment variable is not allowed.
+- After the prelude, always `cd "$HYPERLOOM_SOURCE_DIR"` and use that checkout as the only Hyperloom source for install, skill docs, CLI execution, and new-session decisions; ignore historical sessions under USER_DATA_PATH before this task's first launch.

@@ -1,9 +1,6 @@
-"""Unit tests for ``action_executors._accuracy_gate``.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Covers the three public helpers (``is_high_accuracy_risk``,
-``parse_eval_results``, ``accuracy_passed``) including the error / missing-
-metric branches that integration tests don't trigger.
-"""
+"""Unit tests for ``action_executors._accuracy_gate``."""
 
 from __future__ import annotations
 
@@ -98,7 +95,6 @@ class TestParseEvalResults:
 
 class TestAccuracyPassed:
     def test_baseline_zero_skips_gate(self):
-        # ``baseline <= 0`` short-circuits to True.
         assert ag.accuracy_passed(0.0, 0.42) is True
         assert ag.accuracy_passed(-0.1, 0.0) is True
 
@@ -109,6 +105,5 @@ class TestAccuracyPassed:
         assert ag.accuracy_passed(0.80, 0.70) is False
 
     def test_custom_threshold(self):
-        # 0.11 drop threshold lets 0.70 pass cleanly.
         assert ag.accuracy_passed(0.80, 0.70, threshold=0.11) is True
         assert ag.accuracy_passed(0.80, 0.68, threshold=0.10) is False

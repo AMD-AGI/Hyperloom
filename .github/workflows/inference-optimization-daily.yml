@@ -1,0 +1,407 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+name: Inference Optimization Daily (fixed models)
+
+# Daily inference-optimization run over a SMALL FIXED model corpus
+# (ci/candidates/inferencex_daily_fixed.json — the InferenceX-comparison set
+# plus MiMo). One run per day; each model gets its own parallel job and an
+# optimizer budget of --max-hours=24.
+#
+# This workflow deliberately combines two existing pipelines:
+#   * inference-optimization-ci.yml  → the "fixed curated corpus" idea
+#     (a hand-maintained list of InferenceX-comparable models with FIXED
+#     per-model config instead of a rotating HuggingFace pool).
+#   * optimize-submit.yml            → the SaFE submit engine
+#     (ci/optimize_submit.py) AND the "pull latest code every run" behaviour:
+#     the sandbox git-clones Hyperloom @ ${GITHUB_SHA} via the CI SOURCE PIN
+#     prepended to ci/prompt_prefix.txt, so each daily run validates the
+#     freshest main commit (NOT the lagging /wekafs/HyperloomV2 snapshot).
+#
+# Independent of both files above — no shared state / cache.
+#
+# Per-model config (framework / precision / tp / conc) is FIXED in the
+# candidates JSON, carried into the matrix by generate_hf_matrix.py, and
+# forwarded to optimize_submit.py as --manual --framework --precision --tp
+# --concurrency so nothing is auto-detected at run time.
+
+on:
+  # Once per day at 00:00 Beijing time (Asia/Shanghai, UTC+8). GitHub Actions
+  # cron runs in UTC, so 16:00 UTC == 00:00 next-day Beijing. Every run pins the
+  # sandbox to that moment's latest main commit.
+  schedule:
+    - cron: '0 16 * * *'
+  workflow_dispatch:
+    inputs:
+      models:
+        description: 'Override: space/comma-separated HF repo IDs (empty = use the fixed candidates file).'
+        required: false
+        default: ''
+      candidates_file:
+        description: 'Fixed-pool JSON. Leave default unless testing another list.'
+        required: false
+        default: 'ci/candidates/inferencex_daily_fixed.json'
+      isl:
+        description: 'Input sequence length (fixed config).'
+        required: false
+        default: '1024'
+      osl:
+        description: 'Output sequence length (fixed config).'
+        required: false
+        default: '1024'
+      max_hours:
+        description: 'Per-model optimizer budget in hours.'
+        required: false
+        default: '24'
+      task_timeout_min:
+        description: 'Per-task wait timeout in minutes (must exceed max_hours*60).'
+        required: false
+        default: '1560'
+      gpu_type:
+        description: 'GPU type tag (empty = script default MI300X).'
+        required: false
+        default: ''
+      kernel_opt_backends:
+        description: 'Kernel optimization backends forwarded to SaFE.'
+        required: false
+        default: 'geak,claude,codex'
+      target_gpu:
+        description: 'Reference GPU for InferenceX comparison in the summary table.'
+        required: false
+        default: 'mi300x'
+        type: choice
+        options: [mi300x, b200, h100, mi355x, mi325x]
+      dry_run:
+        description: 'Dry run (auto-detect + print plan only, do not submit).'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  # ── Stage 1: build the fixed matrix ──────────────────────────────────────────
+  prepare:
+    name: Build fixed matrix
+    runs-on: hyperloom-mh826
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count:  ${{ steps.matrix.outputs.count }}
+    env:
+      HF_TOKEN:              ${{ secrets.HF_TOKEN }}
+      INPUT_MODELS:          ${{ github.event.inputs.models }}
+      # Always read the fixed candidates JSON (both schedule and dispatch) so
+      # the daily corpus is reproducible and editable in one place.
+      INPUT_CANDIDATES_FILE: ${{ github.event.inputs.candidates_file || 'ci/candidates/inferencex_daily_fixed.json' }}
+      # Whole pool, every run — no rotation, no slicing.
+      INPUT_BATCH_INDEX:     '0'
+      INPUT_BATCH_SIZE:      '0'
+      # This is a curated re-run corpus: never drop a model just because it is
+      # already on the leaderboard or running elsewhere.
+      INPUT_EXCLUDE_LEADERBOARD:      'false'
+      INPUT_EXCLUDE_ACTIVE_WORKFLOWS: 'false'
+      GITHUB_TOKEN:          ${{ github.token }}
+      GITHUB_RUN_NUMBER:     ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install requests
+        run: pip install --quiet requests
+      - name: Generate matrix
+        id: matrix
+        working-directory: ci
+        run: python3 generate_hf_matrix.py
+
+  # ── Stage 2: per-model optimization (parallel) ───────────────────────────────
+  optimize:
+    name: optimize-${{ matrix.key }}
+    needs: prepare
+    if: needs.prepare.outputs.count != '0'
+    runs-on: hyperloom-4hhzn
+    # 24h optimizer budget + cold-start + (potentially multi-hour) model
+    # download + register/wait/collect buffer.
+    timeout-minutes: 1680
+    strategy:
+      fail-fast: false
+      # The fixed corpus is small (~10 models); dispatch them all at once.
+      max-parallel: 16
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    env:
+      # This daily CI authenticates to SaFE with its OWN key (secret KEY_XF),
+      # kept separate from the shared CLAW_API_KEY used by other workflows.
+      # optimize_submit.py reads the CLAW_API_KEY env var, so we just point it
+      # at KEY_XF here (no script change needed).
+      CLAW_API_KEY:                     ${{ secrets.KEY_XF }}
+      SAFE_BASE_URL:                    ${{ secrets.SAFE_BASE_URL }}
+      HARBOR_PREFIX:                    ${{ secrets.HARBOR_PREFIX }}
+      HF_TOKEN:                         ${{ secrets.HF_TOKEN }}
+      SAFE_OPTIMIZE_REGISTER_WORKSPACE: ${{ secrets.SAFE_OPTIMIZE_REGISTER_WORKSPACE }}
+      SAFE_OPTIMIZE_SUBMIT_WORKSPACE:   ${{ secrets.SAFE_OPTIMIZE_SUBMIT_WORKSPACE }}
+      SAFE_OPTIMIZE_VOLUME:             ${{ secrets.SAFE_OPTIMIZE_VOLUME }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install dependencies
+        working-directory: ci
+        run: pip install --quiet requests PyYAML 'huggingface_hub>=0.24'
+
+      - name: Prewarm /wekafs/models for this repo
+        # Pre-pull the HF repo into /wekafs/models/<owner>-<repo>/ so SaFE
+        # register can use local_path mode (skips its slow K8s download job).
+        # continue-on-error: a missing mount / gated repo / not-yet-published
+        # repo just falls back to SaFE handling the download itself.
+        if: always()
+        continue-on-error: true
+        env:
+          HF_TOKEN:   ${{ secrets.HF_TOKEN }}
+          MODEL_REPO: ${{ matrix.model }}
+        run: |
+          set -euo pipefail
+          if [ ! -d /wekafs/models ] || [ ! -w /wekafs/models ]; then
+            echo "WARN: /wekafs/models not writable on this runner — skipping prewarm"
+            echo "      (SaFE register will handle the download on its own)"
+            exit 0
+          fi
+          python3 ci/prewarm_models.py \
+            --repos        "${MODEL_REPO}" \
+            --target-root  /wekafs/models \
+            --concurrency  1 \
+            --inner-workers 8 \
+            --log          "${{ github.workspace }}/prewarm.log"
+
+      - name: Submit + wait + collect (single model, fixed config)
+        working-directory: ci
+        env:
+          MODEL_REPO:             ${{ matrix.model }}
+          # Per-model FIXED config carried from the candidates JSON via the
+          # matrix. Empty string ⇒ let optimize_submit.py auto-detect.
+          MATRIX_FRAMEWORK:       ${{ matrix.framework }}
+          MATRIX_PRECISION:       ${{ matrix.precision }}
+          MATRIX_TP:              ${{ matrix.tp }}
+          MATRIX_CONC:            ${{ matrix.conc }}
+          # Multi-node knobs (carried from the candidates JSON). nodes>1 makes
+          # optimize_submit.py force --mode claw and inject the RayJob topology.
+          MATRIX_NODES:           ${{ matrix.nodes }}
+          MATRIX_RAYJOB_IMAGE:    ${{ matrix.rayjob_image }}
+          INPUT_ISL:              ${{ github.event.inputs.isl || '1024' }}
+          INPUT_OSL:              ${{ github.event.inputs.osl || '1024' }}
+          INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
+          INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends || 'geak,claude,codex' }}
+          # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
+          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: 'core42-top8'
+          INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min || '1560' }}
+          INPUT_MAX_HOURS:        ${{ github.event.inputs.max_hours || '24' }}
+          INPUT_DRY_RUN:          ${{ github.event.inputs.dry_run }}
+          MATRIX_POOL_ID:         ${{ matrix.pool_id }}
+          MATRIX_POOL_INDEX:      ${{ matrix.pool_index }}
+          OUTPUT_DIR:             ${{ github.workspace }}/submit-output
+          ARTIFACTS_DIR:          ${{ github.workspace }}/task-artifacts
+          # GitHub-issued, repo-scoped, run-lifetime token. Embedded into the
+          # HYPERLOOM_SOURCE_REPO clone URL so the sandbox can `git clone` the
+          # private Hyperloom repo. Renamed from GITHUB_TOKEN so it never
+          # clobbers actions/checkout's env.
+          HYPERLOOM_GIT_TOKEN:    ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ARGS=(--model "${MODEL_REPO}")
+
+          # ── Fixed per-model config (no auto-detect) ───────────────────────
+          # optimize_submit.py: --manual skips auto-detect and only requires
+          # --framework. precision/tp/concurrency are honored as explicit
+          # overrides. Only enable --manual when the matrix actually carries a
+          # framework (it always does for the fixed pool).
+          if [ -n "${MATRIX_FRAMEWORK:-}" ]; then
+            ARGS+=(--manual --framework "${MATRIX_FRAMEWORK}")
+          fi
+          if [ -n "${MATRIX_PRECISION:-}" ]; then
+            ARGS+=(--precision "${MATRIX_PRECISION}")
+          fi
+          if [ -n "${MATRIX_TP:-}" ]; then
+            ARGS+=(--tp "${MATRIX_TP}")
+          fi
+          if [ -n "${MATRIX_CONC:-}" ]; then
+            ARGS+=(--concurrency "${MATRIX_CONC}")
+          fi
+
+          # ── Multi-node (GLM-5 / GLM-5.1) ─────────────────────────────────
+          # candidates JSON carries nodes (+ rayjob_image) for models that do
+          # not fit on one 8-GPU node. nodes>1 ⇒ optimize_submit.py forces
+          # --mode claw (RayJob fan-out) and injects the topology block.
+          # Single-node models have no nodes field ⇒ MATRIX_NODES empty ⇒ 1.
+          MODEL_NODES="${MATRIX_NODES:-1}"
+          if [ -n "${MODEL_NODES}" ] && [ "${MODEL_NODES}" -gt 1 ] 2>/dev/null; then
+            echo "[multi-node] ${MODEL_REPO}: nodes=${MODEL_NODES} mode=claw"
+            ARGS+=(--nodes "${MODEL_NODES}" --mode claw)
+            if [ -n "${MATRIX_RAYJOB_IMAGE:-}" ]; then
+              ARGS+=(--rayjob-image "${MATRIX_RAYJOB_IMAGE}")
+            fi
+          else
+            ARGS+=(--mode local)
+          fi
+
+          ARGS+=(--isl "${INPUT_ISL:-1024}" --osl "${INPUT_OSL:-1024}")
+          if [ -n "${INPUT_GPU_TYPE:-}" ]; then
+            ARGS+=(--gpu-type "${INPUT_GPU_TYPE}")
+          fi
+          if [ -n "${INPUT_KERNEL_OPT_BACKENDS:-}" ]; then
+            ARGS+=(--kernel-opt-backends "${INPUT_KERNEL_OPT_BACKENDS}")
+          fi
+          ARGS+=(--max-hours "${INPUT_MAX_HOURS:-24}")
+
+          # ── Pull latest code every run (mirror optimize-submit.yml) ───────
+          # The hard contract: SaFE promptPrefix MUST be non-empty. The base
+          # prefix is ci/prompt_prefix.txt (single source of truth); on top of
+          # it we prepend a CI SOURCE PIN block that makes the sandbox clone
+          # Hyperloom @ this run's commit (GITHUB_SHA) instead of the deployed
+          # /wekafs/HyperloomV2 snapshot.
+          PROMPT_PREFIX_VALUE=""
+          if [ -f "prompt_prefix.txt" ]; then
+            PROMPT_PREFIX_VALUE="$(cat prompt_prefix.txt)"
+            echo "[prompt_prefix] loaded ci/prompt_prefix.txt ($(wc -c < prompt_prefix.txt) bytes)"
+          fi
+          if [ -z "$PROMPT_PREFIX_VALUE" ]; then
+            echo "::error::ci/prompt_prefix.txt missing/empty — refusing to submit with empty promptPrefix"
+            exit 1
+          fi
+          if [ -n "${GITHUB_SHA:-}" ]; then
+            if [ -z "${HYPERLOOM_GIT_TOKEN:-}" ]; then
+              echo "::error::HYPERLOOM_GIT_TOKEN not set; cannot pin sandbox checkout to the private repo"
+              exit 1
+            fi
+            REPO_URL_AUTH="https://x-access-token:${HYPERLOOM_GIT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            PROMPT_PREFIX_VALUE="CI SOURCE PIN:"$'\n'"  export HYPERLOOM_SOURCE_REF=\"${GITHUB_SHA}\""$'\n'"  export HYPERLOOM_SOURCE_REPO=\"${REPO_URL_AUTH}\""$'\n\n'"${PROMPT_PREFIX_VALUE}"
+            # Log only the SHA — never the URL (it carries the token).
+            echo "[prompt_prefix] pinned sandbox Hyperloom checkout to ${GITHUB_SHA}"
+          fi
+          ARGS+=(--prompt-prefix "$PROMPT_PREFIX_VALUE")
+
+          # Curated corpus → always collect every artifact for later analysis.
+          ARGS+=(--all-artifacts)
+          if [ "${INPUT_DRY_RUN:-false}" = "true" ]; then
+            ARGS+=(--dry-run)
+          fi
+          if [ -n "${MATRIX_POOL_ID:-}" ]; then
+            ARGS+=(--pool-id "${MATRIX_POOL_ID}")
+          fi
+          if [ -n "${MATRIX_POOL_INDEX:-}" ]; then
+            ARGS+=(--pool-index "${MATRIX_POOL_INDEX}")
+          fi
+          ARGS+=(--task-timeout-min "${INPUT_TASK_TIMEOUT_MIN:-1560}")
+          ARGS+=(--output-dir "${OUTPUT_DIR}")
+          ARGS+=(--artifacts-dir "${ARTIFACTS_DIR}")
+          ARGS+=(--submit-jitter-sec 600)
+          python3 optimize_submit.py "${ARGS[@]}"
+
+      - name: Render per-model manifest to job summary
+        if: always()
+        run: |
+          if [ -f "${{ github.workspace }}/submit-output/submission_manifest.md" ]; then
+            cat "${{ github.workspace }}/submit-output/submission_manifest.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No manifest produced for ${{ matrix.model }}._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload per-model manifest
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: submission-manifest-${{ matrix.key }}
+          path: submit-output/
+          retention-days: 45
+          if-no-files-found: warn
+
+      - name: Upload per-model task artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: task-artifacts-${{ matrix.key }}
+          path: task-artifacts/
+          retention-days: 45
+          if-no-files-found: ignore
+
+      - name: Upload prewarm log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: prewarm-log-${{ matrix.key }}
+          path: prewarm.log
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # ── Stage 3: aggregate summary + webhook ─────────────────────────────────────
+  summarize:
+    name: Build summary
+    # Both: optimize for ordering, prepare so needs.prepare.outputs.count is
+    # actually resolvable in the `if` below.
+    needs: [prepare, optimize]
+    if: always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true'
+    runs-on: hyperloom-4hhzn
+    timeout-minutes: 20
+    env:
+      WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: pip install --quiet requests pyyaml
+
+      - name: Download all submission manifests
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ github.workspace }}/manifests
+          pattern: submission-manifest-*
+          merge-multiple: false
+
+      - name: Download all task artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ github.workspace }}/task-artifacts-merged
+          pattern: task-artifacts-*
+          merge-multiple: true
+
+      - name: Build summary table
+        working-directory: ci
+        env:
+          INPUT_TARGET_GPU: ${{ github.event.inputs.target_gpu }}
+          INPUT_ISL:        ${{ github.event.inputs.isl || '1024' }}
+          INPUT_OSL:        ${{ github.event.inputs.osl || '1024' }}
+        run: |
+          python3 build_summary.py \
+            --artifacts-dir "${{ github.workspace }}/task-artifacts-merged" \
+            --manifests-dir "${{ github.workspace }}/manifests" \
+            --target-gpu    "${INPUT_TARGET_GPU:-mi300x}" \
+            --isl           "${INPUT_ISL:-1024}" \
+            --osl           "${INPUT_OSL:-1024}" \
+            --out-dir       "${{ github.workspace }}/summary-out"
+
+      - name: Render summary to job summary
+        if: always()
+        run: |
+          if [ -f "${{ github.workspace }}/summary-out/ci_summary.md" ]; then
+            cat "${{ github.workspace }}/summary-out/ci_summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No summary produced._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload final summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-summary
+          path: summary-out/
+          retention-days: 45
+          if-no-files-found: warn
+
+      - name: Send webhook (completion notification)
+        if: always() && env.WEBHOOK_URL != ''
+        env:
+          WEBHOOK_URL:   ${{ secrets.WEBHOOK_URL }}
+          DASHBOARD_URL: ${{ secrets.HYPERLOOM_DASHBOARD_URL }}
+        run: |
+          python3 ci/send_webhook.py \
+            --summary "${{ github.workspace }}/summary-out/ci_summary.json" \
+            --rows-per-card 10

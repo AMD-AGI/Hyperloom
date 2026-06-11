@@ -1,42 +1,18 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Multi-node-only: per-round sglang/vllm restart helper.
 
-Why this exists
----------------
-Single-node Magpie (`sglang_mi300x.sh PHASE=all`) restarts the inference
-server on EVERY benchmark invocation, baking that round's server-side
-flags (e.g. ``--quantization fp8 --enable-torch-compile``) and profiling
-env (``SGLANG_TORCH_PROFILER_DIR=...``) into the fresh server process.
-That keeps every test variant deterministic and isolated.
+Single-node Magpie restarts the server on every benchmark invocation, baking
+that round's flags + profiler env into a fresh process. Multi-node used to run
+the whole grid against one long-lived server, silently dropping later variants'
+flags. This helper closes the gap: every executor calls
+:func:`restart_server_for_round` before spawning Magpie, invoking
+``multi_node restart-server`` with the round's framework/model/tp + extra-args
+(and a per-round profiler trace dir).
 
-Multi-node mode used to skip this — Magpie was forced into PHASE=client
-so it never relaunched the server, and orchestrator executors ran their
-whole grid against ONE long-lived sglang instance booted by the initial
-``multi_node create-rayjob``. Server-side flags from later variants were
-silently dropped, and the torch profiler env was frozen at whatever
-``cli.py`` exported when the RayJob first came up.
-
-This helper closes that gap: every executor that is about to spawn a
-Magpie subprocess calls :func:`restart_server_for_round` first; the
-helper invokes ``inference_optimizer.multi_node restart-server`` with
-the round's framework/model/tp + ``--extra-args`` and (for profile
-rounds) a per-round ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` so the next
-sglang launch picks them up via the existing
-``launch_multinode.py --torch-profiler-dir`` plumb.
-
-Single-node short-circuit
--------------------------
-:func:`is_multi_node` returns ``False`` ⇒ this helper is a no-op. The
-single-node path keeps using Magpie's own server lifecycle; nothing in
-``baseline.py`` / ``profile.py`` / ``_grid_runner.py`` changes
-behaviourally for ``--nodes 1``.
-
-Failure semantics (Q4 = fail-fast)
-----------------------------------
-On any failure (missing model/tp in state, ``cmd_restart_server`` non-
-zero return, /health flip timeout) we raise :class:`ServerRestartFailed`.
-Callers should let this bubble — the round becomes a ``failed`` task
-and the coordinator surfaces a clear error rather than benchmarking
-against a stale or half-dead server.
+No-op in single-node mode (``is_multi_node()`` False). Fail-fast: any failure
+raises :class:`ServerRestartFailed`, which callers let bubble so the round is
+marked failed rather than benchmarking a stale/half-dead server.
 """
 
 from __future__ import annotations
@@ -53,38 +29,16 @@ from ._multi_node_env import _read_state, is_multi_node
 log = logging.getLogger(__name__)
 
 
-# Default poll timeout for the dashboard-side launch.
-# Cold-load of large MoE models (DeepSeek-R1 671B, Llama-405B) can take
-# 20-30 min through aiter JIT; warm restarts typically finish in 3-5 min.
-# 1800 s (30 min) leaves headroom on cold while still failing-fast on
-# truly stuck launches. Override per-call via ``health_timeout_s``.
+# Default /health poll timeout. Tightened from 1800s to 900s (~2x normal MoE
+# cold-start headroom) so an incompatible-config variant aborts ~2x faster;
+# override per-run via HYPERLOOM_MN_HEALTH_WAIT_S.
 DEFAULT_HEALTH_TIMEOUT_S = 900  # 15 min.
-# Tightened from 1800s after multi-node sessions observed variants
-# silent-aborting after exactly 30 min of sglang launch-poll RUNNING —
-# the variant's config was incompatible with the model's multi-node
-# cold-start path and the launcher driver never reached /health 200.
-# Typical multi-node MoE cold-start finishes in 5-7 min, so 900s is
-# ~2x normal headroom and still aborts ~2x faster than the old 1800s
-# ceiling. Override per-run via HYPERLOOM_MN_HEALTH_WAIT_S when a
-# slower workload genuinely needs more — the env override path in
-# restart_server_for_round is preserved.
 
-# Defaults Magpie's sglang_mi*x.sh always appends to the server cmd when
-# the variant did not explicitly override them. Keeping the SAME flag set
-# in multi-node mode is what makes tput/accuracy numbers comparable to
-# the single-node baseline; the *value* for `--mem-fraction-static` is
-# the one place we deliberately diverge:
-#
-#   * single-node `sglang_mi*x.sh:74` ships --mem-fraction-static=0.8
-#   * multi-node we lower to 0.75 because cross-node RDMA / RoCE
-#     buffers (mlx5 pinned memory, NCCL connection pool) eat noticeably
-#     more headroom than the single-node intra-pod NVLink/XGMI path.
-#     0.8 has been observed to OOM on DSr1 671B FP8 when the second
-#     node joins.
-#
-# Shape: (flag_name, full_token). ``_merge_sglang_defaults`` skips a
-# default if the user's extra_args already mentions ``flag_name``
-# (matching Magpie's own behaviour at ``sglang_mi300x.sh:74-79``).
+# Magpie's sglang_mi*x.sh DEFAULT_ARGS, re-applied in multi-node so tput numbers
+# stay comparable to single-node. We diverge on --mem-fraction-static (0.75 vs
+# single-node 0.8) because cross-node RDMA buffers eat headroom (0.8 OOMs on
+# DSr1 671B FP8 when the second node joins). ``_merge_sglang_defaults`` skips a
+# default when the user already set ``flag_name``.
 _SGLANG_DEFAULT_TOKENS: tuple[tuple[str, str], ...] = (
     ("--mem-fraction-static", "--mem-fraction-static=0.75"),
     ("--disable-radix-cache", "--disable-radix-cache"),
@@ -94,15 +48,8 @@ _SGLANG_DEFAULT_TOKENS: tuple[tuple[str, str], ...] = (
 def _merge_sglang_defaults(extra_args: str) -> str:
     """Append Magpie's DEFAULT_ARGS that the user did not already set.
 
-    Mirrors ``Magpie/scripts/benchmark/sglang_mi300x.sh:74-79`` so the
-    multi-node sglang server gets the same conservative tuning baseline
-    as single-node when the variant did not provide an explicit value.
-
-    For example, with ``extra_args=""`` returns
-    ``"--mem-fraction-static=0.8 --disable-radix-cache"``; with
-    ``extra_args="--mem-fraction-static=0.9"`` returns
-    ``"--mem-fraction-static=0.9 --disable-radix-cache"`` (caller's
-    explicit override wins, the default is dropped).
+    Mirrors ``sglang_mi300x.sh:74-79``; a caller's explicit value for a flag
+    wins and that default is dropped.
     """
     user = (extra_args or "").strip()
     parts = [user] if user else []
@@ -112,9 +59,8 @@ def _merge_sglang_defaults(extra_args: str) -> str:
         parts.append(default_token)
     return " ".join(p for p in parts if p)
 
-# Persist round-trip context here so callers (profile.py) can recover
-# the path the server was actually restarted with, even after this
-# helper restored the previous env. Read-only for callers.
+# Round-trip context so callers (profile.py) can recover the trace dir the
+# server was restarted with, even after this helper restored the env.
 _LAST_ROUND_TRACE_DIR: str = ""
 
 
@@ -123,7 +69,11 @@ class ServerRestartFailed(RuntimeError):
 
 
 def last_round_trace_dir() -> str:
-    """Return the trace dir the most recent restart was wired with (or '')."""
+    """Return the trace dir the most recent restart was wired with (or '').
+
+    Returns:
+        str: The most recent round's profiler trace dir, or ``""`` if none.
+    """
     return _LAST_ROUND_TRACE_DIR
 
 
@@ -140,15 +90,10 @@ def _resolve_pd_args(
 ) -> dict:
     """Resolve PD knobs with state.json + env fallback.
 
-    Returns a flat dict of resolved PD values; callers pass it to the
-    multi_node CLI argparse Namespace. Validates ``pd_mode`` and (when
-    disaggregated) the prefill/decode TP <= per-group capacity.
-
-    Resolution order per field:
-      1. Explicit kwarg (executor-supplied, usually from $PD_* env).
-      2. ``state["last_restart_pd_*"]`` from prior restart.
-      3. Process env (``$PD_MODE`` etc.).
-      4. Defaults (mode=colocated, prefill/decode TP=tp).
+    Returns a flat dict of resolved PD values for the multi_node CLI Namespace.
+    Resolution per field: explicit kwarg > ``state["last_restart_pd_*"]`` >
+    ``$PD_*`` env > defaults (mode=colocated, prefill/decode TP=tp). Validates
+    ``pd_mode`` and disaggregated prefill/decode TP.
     """
     state = _read_state()
     mode = (
@@ -166,12 +111,8 @@ def _resolve_pd_args(
     if mode == "colocated":
         return out
 
-    # PD disaggregation requires >=2 nodes. is_multi_node() already
-    # gated the helper entry, but defend in depth: if state.json got
-    # mangled (e.g. provisioning re-ran with --nodes 1 mid-session)
-    # we'd otherwise try to split a single pod into two roles. Catch
-    # the inconsistency here and surface it as a recoverable round
-    # failure rather than a confusing sglang launcher error.
+    # PD disaggregation requires >=2 nodes; defend against a mangled state.json
+    # so we surface a recoverable round failure, not a confusing launcher error.
     state_nodes = int(state.get("nodes") or 0)
     if state_nodes < 2:
         raise ServerRestartFailed(
@@ -181,6 +122,16 @@ def _resolve_pd_args(
         )
 
     def _intf(kw, sk, ek):
+        """Resolve an int field from kwarg > state key > env var.
+
+        Args:
+            kw: The explicit kwarg value (wins when not ``None``).
+            sk (str): The ``state.json`` key to read next.
+            ek (str): The environment variable name to read last.
+
+        Returns:
+            int: The first parseable integer found, or ``0`` when none.
+        """
         if kw is not None:
             return int(kw)
         v = state.get(sk)
@@ -249,16 +200,10 @@ def _resolve_round_args(
 ) -> tuple[str, str, int, int]:
     """Resolve (framework, model, tp, ep) for the restart, with state fallback.
 
-    Resolution order per field:
-      1. Explicit kwarg (executor-supplied, usually from task.params).
-      2. ``state["last_restart_*"]`` from prior successful restart.
-      3. Process env (``$FRAMEWORK`` / ``$MODEL_PATH`` / ``$TP`` / ``$EP``).
-      4. ep specifically: defaults to ``1`` (no EP) when nothing supplied,
-         keeping the legacy TP-shard-experts behaviour.
-
-    Raises :class:`ServerRestartFailed` if model/tp end up empty, if
-    framework is unsupported, or if ``ep > tp`` (sglang / vllm cannot
-    place more expert shards than ranks).
+    Resolution per field: explicit kwarg > ``state["last_restart_*"]`` >
+    ``$FRAMEWORK`` / ``$MODEL_PATH`` / ``$TP`` / ``$EP`` env > defaults (ep=1).
+    Raises :class:`ServerRestartFailed` if model/tp are empty, framework is
+    unsupported, or ``ep > tp``.
     """
     state = _read_state()
     fw = (framework or state.get("last_restart_framework")
@@ -320,34 +265,16 @@ async def restart_server_for_round(
 ) -> None:
     """Restart the multi-node inference server for the next Magpie round.
 
-    No-op (returns immediately) when ``is_multi_node()`` is False so the
-    single-node code path is preserved bit-for-bit.
+    No-op when ``is_multi_node()`` is False. For multi-node: resolves
+    framework/model/tp, mkdirs + exports ``torch_profiler_dir`` via
+    ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` (restored afterward), and invokes
+    ``cmd_restart_server`` in a thread.
 
-    For multi-node:
-      * Resolves framework/model/tp (kwargs > state.json > env).
-      * Mkdir ``torch_profiler_dir`` (when non-empty) and exports it via
-        ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` so the existing
-        ``multi_node/cli.py _build_multinode_launch_entrypoint`` picks
-        it up and forwards ``--torch-profiler-dir <dir>`` to every
-        sglang launcher rank.
-      * Invokes ``cmd_restart_server`` synchronously inside a thread
-        (the function does Ray Dashboard polling internally).
-      * Restores the previous env value of
-        ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` afterwards so a later round
-        without a profile dir doesn't accidentally inherit this round's
-        path.
+    ``force_full_restart``: scopes ``MULTI_NODE_RESTART_RESUME_RUNNING=0`` for
+    this invocation so a fresh kill+launch runs — required after kernel-agent
+    fans patched source so sglang re-imports the new modules.
 
-    ``force_full_restart``: when True, scopes
-    ``MULTI_NODE_RESTART_RESUME_RUNNING=0`` for this single invocation
-    so cmd_restart_server's resume fast-path is bypassed and a fresh
-    kill+launch always runs. Required by the kernel-agent integrate
-    path: after apply_kernel_patch fans new source files to every pod,
-    sglang must be fully restarted (not just /flush_cache resumed) to
-    re-import the patched modules. The previous env value is restored
-    in ``finally`` so non-kernel-opt callers keep their resume savings.
-
-    Raises :class:`ServerRestartFailed` on any failure; callers should
-    let it bubble so the round is marked failed.
+    Raises :class:`ServerRestartFailed` on any failure (callers let it bubble).
     """
     global _LAST_ROUND_TRACE_DIR
 
@@ -361,8 +288,7 @@ async def restart_server_for_round(
         tp_int=tp_int,
     )
 
-    # PD-disaggregated × EP cross-check: ep > min(prefill_tp, decode_tp)
-    # would put more expert shards than ranks on at least one side.
+    # PD-disaggregated × EP cross-check: ep must not exceed either group's TP.
     if pd["pd_mode"] == "disaggregated" and ep_int > 1:
         min_grp_tp = min(pd["pd_prefill_tp"], pd["pd_decode_tp"])
         if ep_int > min_grp_tp:
@@ -372,9 +298,7 @@ async def restart_server_for_round(
                 "lower --ep or raise the smaller per-group TP."
             )
 
-    # Apply Magpie's sglang DEFAULT_ARGS only for sglang; vllm has its
-    # own defaults baked into the server and Magpie doesn't append the
-    # same flags there.
+    # Apply Magpie's sglang DEFAULT_ARGS only for sglang (vllm has its own).
     if fw == "sglang":
         extra_server_args = _merge_sglang_defaults(extra_server_args)
 
@@ -389,32 +313,17 @@ async def restart_server_for_round(
         os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = torch_profiler_dir
         _LAST_ROUND_TRACE_DIR = torch_profiler_dir
     else:
-        # Round has no profiler — drop any stale env so the launcher
-        # doesn't reuse a previous round's path on this restart.
+        # No profiler this round — drop stale env so the launcher doesn't
+        # reuse a previous round's path.
         os.environ.pop("HYPERLOOM_MN_PROFILE_TRACE_DIR", None)
         _LAST_ROUND_TRACE_DIR = ""
 
-    # Multi-node TraceLens SGLang patch fan-out (fail-soft).
-    #
-    # Single-node ``ensure_sglang_patched_for_tracelens`` runs in the
-    # same Python process that imports SGLang; multi-node SGLang lives
-    # in head/worker pods so the controller cannot ``import sglang`` and
-    # the local patcher silently skips. Without these patches SGLang's
-    # torch.profiler emits step boundaries the TraceLens splitter does
-    # NOT recognise (``step[DECODE bs=N]`` instead of vLLM-style
-    # ``execute_*_context_*_generation_*``), so every profile round
-    # ends in ``trace_split_no_steady_state`` and the orchestration
-    # agent stalls. We invoke the multi-node fan-out (idempotent: each
-    # pod sentinel-greps before applying) BEFORE ``cmd_restart_server``
-    # so the restarted SGLang already has the patches in place.
-    #
-    # Fail-soft: if the patch fan-out fails (TraceLens missing, ssh
-    # error, version unsupported, ...) we log a warning and proceed with
-    # the restart anyway. The trace will be unannotated and tracelens
-    # analysis will surface the splitter warning, but every other phase
-    # (baseline / grid / validate_stack / kernel) keeps working — far
-    # better than blocking the entire restart on what is supposed to be
-    # an opt-in profiling enhancement.
+    # Multi-node TraceLens SGLang patch fan-out (fail-soft). The controller
+    # can't ``import sglang`` (it lives in the pods), so the local patcher
+    # skips; without these patches the trace splitter ends every profile round
+    # in ``trace_split_no_steady_state``. Fan out (idempotent per pod) before
+    # ``cmd_restart_server``; on failure log a warning and proceed (trace
+    # unannotated, but other phases keep working).
     try:
         from ._server_patcher import _tracelens_patch_enabled
     except Exception:  # noqa: BLE001
@@ -459,8 +368,7 @@ async def restart_server_for_round(
             )
 
     try:
-        # Local import: avoid pulling httpx into the import path of any
-        # caller that doesn't actually invoke the helper (single-node).
+        # Local import to keep httpx out of the single-node import path.
         from ...multi_node.cli import cmd_restart_server, _resolve_poll_timeout_s
 
         poll_timeout_s = int(
@@ -492,8 +400,7 @@ async def restart_server_for_round(
             print_logs=False,
             poll_interval=poll_interval_s,
             poll_timeout=poll_timeout_s,
-            # PD knobs forwarded to multi_node CLI; colocated mode passes
-            # only pd_mode and the rest stay at argparse defaults.
+            # PD knobs; colocated mode passes only pd_mode.
             pd_mode=pd.get("pd_mode", "colocated"),
             pd_prefill_nodes=pd.get("pd_prefill_nodes", 0),
             pd_decode_nodes=pd.get("pd_decode_nodes", 0),
@@ -522,12 +429,9 @@ async def restart_server_for_round(
             extra_server_args, torch_profiler_dir,
         )
 
-        # When kernel-agent just patched sglang source on every pod, the
-        # resume fast-path (MULTI_NODE_RESTART_RESUME_RUNNING) would
-        # leave the still-running sglang process holding the OLD module
-        # imports and the patch would have no effect. Scope an env
-        # override for THIS invocation only so cmd_restart_server's
-        # prev_match check fails and a fresh kill+launch runs.
+        # After kernel-agent patches sglang source, the resume fast-path would
+        # keep the old module imports; scope an override for this invocation so
+        # a fresh kill+launch runs.
         prev_resume = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING")
         if force_full_restart:
             os.environ["MULTI_NODE_RESTART_RESUME_RUNNING"] = "0"
@@ -550,13 +454,9 @@ async def restart_server_for_round(
                 f"(framework={fw} tp={tp_int} extra_args={extra_server_args!r})"
             )
 
-        # ADDENDUM: cmd_restart_server returns when the launcher driver
-        # finishes spawning actors (servers detached); on a cold MoE
-        # weight-load (DeepSeek-R1 671B) the server itself can need
-        # 20-30 min before /health flips. The downstream baseline
-        # benchmark fires immediately and 100%-fails if we don't wait
-        # here. Poll the service_url /health (head-pod IP) until it
-        # 200's or we hit health_timeout_s.
+        # cmd_restart_server returns when actors are spawned, but a cold MoE
+        # weight-load can need 20-30 min before /health flips; poll it here so
+        # the downstream baseline doesn't fire against a not-yet-ready server.
         try:
             await _wait_for_server_health_async(
                 timeout_s=health_wait_s,
@@ -571,8 +471,7 @@ async def restart_server_for_round(
                 f"post-launch /health wait raised: {exc!r}"
             ) from exc
     finally:
-        # Restore previous env so we don't leak this round's profiler
-        # path into the orchestrator process or subsequent helper calls.
+        # Restore env so this round's profiler path doesn't leak forward.
         if saved_trace_env is None:
             os.environ.pop("HYPERLOOM_MN_PROFILE_TRACE_DIR", None)
         else:
@@ -587,10 +486,8 @@ async def _wait_for_server_health_async(
 ) -> None:
     """Poll the multi_node service_url /health until 200 or timeout.
 
-    Reads ``service_url`` from ``state.json`` (the multi_node CLI's
-    persisted RayJob state). When the URL points at the in-cluster
-    ClusterIP DNS name and we also have a ``head_pod_ip`` we rewrite
-    to the head-pod IP so the sandbox can reach it directly.
+    Reads ``service_url`` from ``state.json``; rewrites a ClusterIP DNS URL to
+    ``head_pod_ip`` when available so the sandbox can reach it directly.
     """
     import time as _time
     import re as _re

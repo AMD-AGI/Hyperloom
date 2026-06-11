@@ -1,8 +1,6 @@
-"""Tests for :class:`runtime.in_memory_kb_client.InMemoryKBClient`.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-The contract (§7.3) lists 4 promises this mock must keep; one test per
-promise plus a couple of edge cases.
-"""
+"""Tests for :class:`runtime.in_memory_kb_client.InMemoryKBClient` (contract §7.3 promises)."""
 
 from __future__ import annotations
 

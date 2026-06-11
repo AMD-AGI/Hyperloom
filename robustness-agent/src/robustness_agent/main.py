@@ -1,15 +1,11 @@
-"""Entry point for the Robustness Agent daemon.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Two run modes:
+"""Entry point for the standalone Robustness Agent reactor.
 
-* ``--mode reactor`` (default, M1): runs the new symptom -> intent
-  pipeline in standalone form, polling sources every
-  ``standalone_tick_interval_s`` seconds and writing findings to disk.
-  This is mainly used for dev / smoke testing; production hosts (the
-  Coordinator) drive the reactor via :mod:`robustness_agent.runtime.cli`
-  in a subprocess instead.
-* ``--mode legacy``: keeps the previous RobustnessAgent loop available
-  for environments that still depend on direct conductor.db writes.
+The console script runs the symptom -> intent reactor standalone, polling
+sources every ``standalone_tick_interval_s`` and writing findings to disk.
+Production hosts drive the same reactor via
+:mod:`robustness_agent.runtime.cli` in a subprocess instead.
 """
 
 from __future__ import annotations
@@ -27,6 +23,11 @@ from .role.prompt_inputs import ReactorContext, SharedStateSnapshot
 
 
 def _setup_logging() -> None:
+    """Configure root logging for the daemon.
+
+    Sets up a basic stderr handler at INFO level with a timestamped
+    format shared by both run modes.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -36,13 +37,9 @@ def _setup_logging() -> None:
 
 
 async def _run_reactor_mode(config: Config) -> None:
-    """Standalone reactor loop for dev / debugging.
-
-    Polls the configured sources at ``standalone_tick_interval_s`` and
-    writes findings to disk. Coordinator integration drives the same
-    reactor through ``robustness_agent.runtime.cli tick`` in a
-    subprocess (mirroring critic-agent's transport).
-    """
+    """Standalone reactor loop for dev / debugging; polls sources at
+    ``standalone_tick_interval_s`` and writes findings to disk. (Production
+    drives the same reactor via ``runtime.cli tick`` in a subprocess.)"""
     log = logging.getLogger("robustness_agent")
     bundle = build_reactor_components(config)
 
@@ -50,6 +47,11 @@ async def _run_reactor_mode(config: Config) -> None:
     loop = asyncio.get_running_loop()
 
     def _shutdown(sig: signal.Signals) -> None:
+        """Signal handler that requests a graceful loop shutdown.
+
+        Args:
+            sig (signal.Signals): The received signal triggering shutdown.
+        """
         log.info("Received %s, shutting down", sig.name)
         stop.set()
 
@@ -87,48 +89,39 @@ async def _run_reactor_mode(config: Config) -> None:
         await bundle.aclose()
 
 
-async def _run_legacy_mode(config: Config) -> None:
-    """Original event-driven RobustnessAgent loop, kept for compatibility."""
-    from .agent import RobustnessAgent
-
-    log = logging.getLogger("robustness_agent")
-    agent = RobustnessAgent(config)
-    loop = asyncio.get_running_loop()
-
-    def _shutdown(sig: signal.Signals) -> None:
-        log.info("Received %s, shutting down", sig.name)
-        loop.create_task(agent.stop())
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _shutdown, sig)
-        except NotImplementedError:
-            pass
-
-    await agent.run_forever()
-
-
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse daemon command-line arguments.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse. Defaults to
+            ``None``, which uses ``sys.argv``.
+
+    Returns:
+        argparse.Namespace: Parsed arguments including the selected
+        ``mode``.
+    """
     parser = argparse.ArgumentParser(prog="robustness-agent")
-    parser.add_argument(
-        "--mode",
-        choices=("reactor", "legacy"),
-        default="reactor",
-        help="reactor: M1 standalone loop (default); legacy: previous agent.py loop",
-    )
     return parser.parse_args(argv)
 
 
 async def _async_main(argv: list[str] | None = None) -> None:
+    """Discover configuration and run the selected mode.
+
+    Args:
+        argv (list[str] | None): Argument vector forwarded to
+            :func:`_parse_args`. Defaults to ``None``.
+    """
     args = _parse_args(argv)
     config = await Config.discover()
-    if args.mode == "reactor":
-        await _run_reactor_mode(config)
-    else:
-        await _run_legacy_mode(config)
+    await _run_reactor_mode(config)
 
 
 def main() -> None:
+    """Synchronous process entry point for the daemon.
+
+    Configures logging and runs the async main loop, treating a
+    keyboard interrupt as a clean exit.
+    """
     _setup_logging()
     try:
         asyncio.run(_async_main())

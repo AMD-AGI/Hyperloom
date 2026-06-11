@@ -1,9 +1,6 @@
-"""Cover the --no-explore CLI flag + resume write-back semantics.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Mirrors test_cli_no_framework_resume.py. --no-explore is CLI-only (no
-env fallback) and, like --no-framework, may only be honoured on resume
-before the EXPLORE phase has been entered.
-"""
+"""Cover the --no-explore CLI flag + resume write-back semantics."""
 
 from __future__ import annotations
 
@@ -11,9 +8,7 @@ from __future__ import annotations
 from inference_optimizer import cli
 
 
-# ---------------------------------------------------------------------------
 # Parser default — CLI-only, defaults False, no env fallback.
-# ---------------------------------------------------------------------------
 def _parse_optimize(argv: list[str]) -> object:
     parser = cli._build_parser()
     return parser.parse_args(["optimize", "--model", "/tmp/m", *argv])
@@ -36,18 +31,14 @@ def test_no_explore_has_no_env_fallback(monkeypatch):
     assert getattr(args, "no_explore") is False
 
 
-# ---------------------------------------------------------------------------
 # explore_enabled flows into SharedState construction.
-# ---------------------------------------------------------------------------
 def test_shared_state_explore_enabled_defaults_true():
     from inference_optimizer.orchestrator.shared_state import SharedState
 
     assert SharedState(session_id="t").explore_enabled is True
 
 
-# ---------------------------------------------------------------------------
 # Resume write-back — mirror the inline cli.py branch logic.
-# ---------------------------------------------------------------------------
 class _ResumeStateStub:
     def __init__(self, *, explore_enabled: bool, phase: str) -> None:
         self.explore_enabled = explore_enabled
@@ -60,10 +51,7 @@ class _ArgsStub:
 
 
 def _apply_resume_writeback(state: _ResumeStateStub, args: _ArgsStub) -> str:
-    """Re-implement the resume-branch logic from cli.py for testing.
-
-    Kept byte-for-byte aligned with the inline handler so a divergence
-    is caught the next time the cli changes."""
+    """Re-implement the resume-branch logic from cli.py for testing."""
     msg = ""
     if not bool(getattr(state, "explore_enabled", True)):
         args.no_explore = True

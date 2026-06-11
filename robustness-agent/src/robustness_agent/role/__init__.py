@@ -1,14 +1,10 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Robustness reactor role layer.
 
-Hosts drive the reactor through the subprocess CLI in
-:mod:`robustness_agent.runtime.cli`, which converts ``request.json`` ->
-``ReactorContext`` (via :func:`from_coordinator_prompt`) and serialises
-emitted intents through :func:`build_envelope_dict`.
-
-Only the wire-format primitives (envelope + prompt_inputs) are
-re-exported at package level. The reactor itself lives in
-``role.reactor`` to keep this module import-light for hosts that just
-need the JSON-IO surface.
+Only the wire-format primitives (envelope + prompt_inputs) are re-exported here;
+the reactor lives in ``role.reactor`` to keep this module import-light for hosts
+that just need the JSON-IO surface.
 """
 
 from .envelope import (

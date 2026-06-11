@@ -1,21 +1,13 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Progress-stagnation detectors (B2 / B3).
 
-Two stateful rules live here:
-
-* ``gain_plateau`` — the validated gain has not moved by more than
-  ``epsilon_pct`` across the last ``window_ticks`` ticks despite
-  Orchestration still proposing actions. Search space is likely
-  exhausted; we suggest Orchestration switch to ``report``.
-
-* ``no_levers_found`` — after ``min_observation_minutes`` of elapsed
-  wall-clock time the ``optimization_stack`` is still empty AND
-  validated gain is still 0. This is the
-  ``remain_issue.md`` #8 ("1h+ session with no attribution trace")
-  failure mode: the run wasted time without finding anything worth
-  keeping, and the operator gets no diagnostic.
-
-Both detectors short-circuit when the session is in ``closing_phase``
-(already winding down) or already has a ``stop_reason`` set.
+Two stateful rules: ``gain_plateau`` (validated gain flat within
+``epsilon_pct`` across ``window_ticks`` while still proposing actions →
+suggest ``report``) and ``no_levers_found`` (after
+``min_observation_minutes`` the optimization_stack is empty and validated
+gain still 0). Both short-circuit in ``closing_phase`` or once a
+``stop_reason`` is set.
 """
 
 from __future__ import annotations
@@ -33,19 +25,11 @@ from .symptom import Symptom, SymptomSeverity
 class ProgressConfig:
     """Tunables for :class:`ProgressDetector`.
 
-    ``gain_window_ticks`` is the size of the rolling gain history; we
-    only fire ``gain_plateau`` once the buffer is full so an early-tick
-    flat-line doesn't trip the rule. ``gain_epsilon_pct`` is the
-    absolute %-point window inside which we still call the gain
-    "unchanged" (matches the upstream ``min_keep_gain_pct`` convention).
-    ``no_levers_min_minutes`` is the elapsed-time floor: below it we
-    refuse to call the session "empty" because cold-start alone could
-    push past 30-40 min on a 671B FP8 model. The default 45.0 covers
-    typical single-node scenarios; multi-node + large-model setups
-    consume more wall-clock time for sglang cold start (10-15 min) +
-    baseline + profile + turnaround alone, so they should override
-    this via host-side config (e.g. inference_optimizer's
-    ``_build_robustness_options`` passes 60.0 when ``args.nodes >= 2``).
+    ``gain_plateau`` only fires once the ``gain_window_ticks`` buffer is
+    full; ``gain_epsilon_pct`` is the unchanged-gain window.
+    ``no_levers_min_minutes`` (default 45) is the elapsed-time floor so
+    cold-start alone doesn't look "empty"; multi-node large-model runs
+    should override it higher (host passes 60.0 when ``nodes >= 2``).
     """
 
     gain_window_ticks: int = 6
@@ -58,10 +42,8 @@ class ProgressConfig:
 class ProgressDetector:
     """Stateful per-tick rule for ``gain_plateau`` + ``no_levers_found``.
 
-    The reactor constructs one detector instance and calls
-    :meth:`evaluate` each tick. We keep a per-tick rolling history of
-    ``cumulative_gain_validated`` so the rule is robust against missing
-    snapshots on a degraded tick (an empty history short-circuits).
+    Keeps a per-tick rolling history of ``cumulative_gain_validated``;
+    an empty history short-circuits on a degraded tick.
     """
 
     def __init__(
@@ -70,13 +52,18 @@ class ProgressDetector:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
+        """Initialise the detector and restore the persisted gain history.
+
+        Args:
+            config (ProgressConfig | None): Tunables; defaults to
+                :class:`ProgressConfig` when ``None``.
+            state_view (DetectorStateView | None): Disk-backed state view used to
+                load/persist the rolling gain history and last tick.
+        """
         self._config = config or ProgressConfig()
         self._state_view = state_view
-        # Disk-backed rolling history — B2 ``gain_plateau`` requires
-        # ``gain_window_ticks`` samples (default 6) and B3
-        # ``no_levers_found`` cross-references ``last_tick``. Without
-        # persistence neither rule can ever fire under M1 subprocess
-        # transport.
+        # Disk-backed rolling history; without it neither rule can fire
+        # under the subprocess-per-tick transport.
         loaded = state_view.load() if state_view is not None else {}
         raw_history = loaded.get("gain_history") or []
         if isinstance(raw_history, list):
@@ -95,6 +82,7 @@ class ProgressDetector:
             self._last_tick = -1
 
     def _persist(self) -> None:
+        """Write the gain history and last tick to the state view, if any."""
         if self._state_view is None:
             return
         self._state_view.save({
@@ -104,19 +92,39 @@ class ProgressDetector:
 
     @property
     def gain_history(self) -> list[float]:
-        """Visible for tests; production code should not rely on this."""
+        """Snapshot of the rolling validated-gain history.
+
+        Visible for tests; production code should not rely on this.
+
+        Returns:
+            list[float]: A copy of the recorded ``cumulative_gain_validated``
+                samples.
+        """
         return list(self._gain_history)
 
     def evaluate(
         self, ctx: ReactorContext, data: SourceData,
     ) -> list[Symptom]:
+        """Update the gain history and evaluate the B2/B3 stagnation rules.
+
+        Appends one gain sample per new Coordinator tick, then runs the
+        ``gain_plateau`` and ``no_levers_found`` checks. Short-circuits when the
+        run is already closing or has a stop reason.
+
+        Args:
+            ctx (ReactorContext): Reactor context providing the shared-state
+                snapshot.
+            data (SourceData): Collected source data (unused but kept for a
+                uniform rule signature).
+
+        Returns:
+            list[Symptom]: Any ``gain_plateau`` / ``no_levers_found`` symptoms
+                for this tick, possibly empty.
+        """
         snap = ctx.shared_state
         if snap.closing_phase or snap.stop_reason:
-            # Run is already winding down; we don't pile more signals on.
             return []
-        # Append once per Coordinator tick (the same tick can drive the
-        # robustness backend multiple times during testing but we still
-        # only want one history slot per tick).
+        # Append at most one history slot per Coordinator tick.
         if snap.tick > self._last_tick:
             self._gain_history.append(float(snap.cumulative_gain_validated or 0.0))
             self._last_tick = int(snap.tick)
@@ -134,41 +142,42 @@ class ProgressDetector:
         return out
 
     def _gain_plateau_symptom(self, snap: SharedStateSnapshot) -> Symptom | None:
+        """B2: build a ``gain_plateau`` symptom when validated gain has flatlined.
+
+        Args:
+            snap (SharedStateSnapshot): Current shared-state snapshot.
+
+        Returns:
+            Symptom | None: A ``gain_plateau`` symptom (HIGH when gain is still
+                zero, MEDIUM when a shippable gain exists), or ``None`` when the
+                window is not full, the stack is empty, or the gain is still
+                moving.
+        """
         cfg = self._config
         if len(self._gain_history) < cfg.gain_window_ticks:
             return None
-        # Plateau semantics require "explored but stalled". Before any
-        # candidate has been promoted onto the optimization_stack,
-        # cumulative_gain_validated is 0 by construction (baseline +
-        # profile alone fill the 6-tick window with zeros on multi-node
-        # cold start). Defer to ``no_levers_found`` which has the right
-        # elapsed/tick floors for the empty-stack case so the two
-        # B-family rules don't fire HIGH twice on the same condition.
+        # Plateau requires "explored but stalled"; an empty stack is the
+        # zero-by-construction case that ``no_levers_found`` owns instead.
         if snap.optimization_stack_size == 0:
             return None
         window = self._gain_history[-cfg.gain_window_ticks:]
         delta = max(window) - min(window)
         if delta > cfg.gain_epsilon_pct:
             return None
-        # Plateau is uninteresting if the run has already produced a
-        # validated gain that's large enough to ship — we want the
-        # ``no_levers_found`` rule to handle the empty-stack case
-        # separately.
         if window[-1] >= cfg.productive_gain_pct:
-            severity = SymptomSeverity.MEDIUM
             hint_tail = (
-                "search space is exhausted; consider proposing `report` "
-                "to lock in the validated gain"
+                "search space looks exhausted; consider proposing "
+                "`report` to lock in the validated gain"
             )
         else:
-            severity = SymptomSeverity.HIGH
             hint_tail = (
-                "validated_gain still 0 after a full window; propose "
-                "`report` and end the run"
+                "validated_gain still 0 after a full window; consider "
+                "`escalate_strategy_change(skip_to_close)` or `report` "
+                "to wind the run down"
             )
         return Symptom(
             name="gain_plateau",
-            severity=severity,
+            severity=SymptomSeverity.MEDIUM,
             summary=(
                 f"cumulative_gain_validated flat at "
                 f"{window[-1]:.2f}% across {cfg.gain_window_ticks} ticks "
@@ -183,33 +192,37 @@ class ProgressDetector:
             },
             subject={},
             source="local",
-            suggestion=f"escalate_strategy_change: {hint_tail}",
+            suggestion=hint_tail,
         )
 
     def _no_levers_symptom(self, snap: SharedStateSnapshot) -> Symptom | None:
+        """B3: build a ``no_levers_found`` symptom for an empty, gainless run.
+
+        Fires only after the explore phase has started and the configured
+        elapsed-minute and tick floors are met, while no kernel_opt work is in
+        flight.
+
+        Args:
+            snap (SharedStateSnapshot): Current shared-state snapshot.
+
+        Returns:
+            Symptom | None: A HIGH-severity ``no_levers_found`` symptom, or
+                ``None`` when any guard condition defers the fire.
+        """
         cfg = self._config
         if snap.optimization_stack_size > 0:
             return None
         if snap.cumulative_gain_validated >= cfg.productive_gain_pct:
-            # Validated gain exists even though stack count is 0 — odd
-            # but not our problem; let it be.
+            # Validated gain with stack count 0 — odd but not our problem.
             return None
-        # PR-B Fix 2 (M0): do not claim "no lever" while kernel_opt is
-        # in flight or its KEEP queue is waiting to integrate. Qwen3
-        # 20260522T093903Z burned a 4.13x KEEP because this signal only
-        # looked at optimization_stack_size + cumulative_gain.
+        # Don't claim "no lever" while kernel_opt is in flight or a KEEP
+        # is waiting to integrate (avoids burning a pending win).
         if snap.kernel_opt_attempts_count > 0:
             return None
         if snap.has_keep_pending_integrate:
             return None
-        # Multi-node defer (PR #239 followup 97318ee): sglang cold start
-        # (10-15 min) + baseline + profile + turnaround eats 35-50 min
-        # on large-model multi-node runs, during which stack_size==0 +
-        # cumulative_gain==0 are by-construction rather than diagnostic.
-        # Defer the symptom until any explore family has actually run
-        # (last_explore / last_sweep populated). Repro:
-        # primus-claw-20260522034541-xkk9f turn=7 fired HIGH 12 minutes
-        # before the explore phase actually started.
+        # Defer until an explore family has actually run; otherwise
+        # stack==0 + gain==0 are by-construction during cold start, not diagnostic.
         if not snap.explore_started:
             return None
         if snap.elapsed_minutes < cfg.no_levers_min_minutes:
@@ -218,7 +231,7 @@ class ProgressDetector:
             return None
         return Symptom(
             name="no_levers_found",
-            severity=SymptomSeverity.HIGH,
+            severity=SymptomSeverity.MEDIUM,
             summary=(
                 f"session has run {snap.elapsed_minutes:.0f}min over "
                 f"{snap.tick} ticks but optimization_stack is empty and "
@@ -237,8 +250,9 @@ class ProgressDetector:
             subject={},
             source="local",
             suggestion=(
-                "delegate(report) to finalize and surface the attempted "
-                "candidates; keep `decision_trace.json` for the operator"
+                "consider `escalate_strategy_change(skip_to_close)` or "
+                "`report` to surface the attempted candidates; "
+                "`decision_trace.json` already records what was tried"
             ),
         )
 
@@ -248,7 +262,16 @@ def evaluate_progress_signals(
     ctx: ReactorContext,
     data: SourceData,
 ) -> list[Symptom]:
-    """Module-level helper mirroring the other signal rule entry points."""
+    """Module-level helper mirroring the other signal rule entry points.
+
+    Args:
+        detector (ProgressDetector): The stateful detector owned by the caller.
+        ctx (ReactorContext): Reactor context for the current tick.
+        data (SourceData): Collected source data.
+
+    Returns:
+        list[Symptom]: The detector's symptoms for this tick, possibly empty.
+    """
     return detector.evaluate(ctx, data)
 
 

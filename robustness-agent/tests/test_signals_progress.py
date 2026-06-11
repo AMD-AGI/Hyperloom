@@ -1,3 +1,5 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Unit tests for ``gain_plateau`` and ``no_levers_found`` signals (B2 / B3)."""
 
 from __future__ import annotations
@@ -56,12 +58,7 @@ def test_short_history_silent_until_window_full():
 
 
 def test_plateau_with_productive_gain_fires_medium():
-    """Productive gain ≥ threshold → flat = "exhausted but shippable" → medium.
-
-    The non-zero ``cumulative_gain_validated`` implies at least one
-    candidate has been promoted, so ``optimization_stack_size`` must
-    be > 0 for the scenario to be physically realisable.
-    """
+    """Productive gain ≥ threshold → flat = "exhausted but shippable" → medium (stack must be > 0)."""
     det = ProgressDetector(ProgressConfig(
         gain_window_ticks=3, gain_epsilon_pct=0.5, productive_gain_pct=0.5,
     ))
@@ -75,13 +72,8 @@ def test_plateau_with_productive_gain_fires_medium():
     assert sym.severity is SymptomSeverity.MEDIUM
 
 
-def test_plateau_with_zero_gain_fires_high():
-    """After at least one promotion attempt has landed something on the
-    stack, a still-zero validated gain across the window is genuine
-    plateau territory and must fire HIGH so Orchestration can wind
-    down. ``optimization_stack_size > 0`` is what distinguishes this
-    from the cold-start case (see
-    :func:`test_plateau_suppressed_when_stack_empty`)."""
+def test_plateau_with_zero_gain_also_fires_medium():
+    """Loosen P3_19: ``gain_plateau`` is now uniformly MEDIUM advisory (previously HIGH on still-zero validated gain)."""
     det = ProgressDetector(ProgressConfig(
         gain_window_ticks=3, gain_epsilon_pct=0.5, productive_gain_pct=0.5,
     ))
@@ -92,21 +84,12 @@ def test_plateau_with_zero_gain_fires_high():
     out = det.evaluate(_ctx(tick=2, cumulative_gain_validated=0.0,
                             optimization_stack_size=1), SourceData())
     sym = next(s for s in out if s.name == "gain_plateau")
-    assert sym.severity is SymptomSeverity.HIGH
+    assert sym.severity is SymptomSeverity.MEDIUM
+    assert "skip_to_close" in (sym.suggestion or "") or "report" in (sym.suggestion or "")
 
 
 def test_plateau_suppressed_when_stack_empty():
-    """Cold-start regression guard: baseline + profile fill the 6-tick
-    history window with zeros before any candidate has been promoted.
-    We must NOT fire ``gain_plateau`` in that window because
-    ``no_levers_found`` already owns the empty-stack case (with the
-    proper elapsed_minutes + tick floors). Firing both produces two
-    HIGH escalations on the same condition, biasing Coordinator
-    toward ``delegate(report)`` before backends/params ever run.
-    Repro: sandbox primus-claw-20260522020448-z6rg6, tick=6,
-    optimization_stack=(none), gain_history=[0]*6 → falsely fired
-    ``gain_plateau HIGH`` + ``escalate_strategy_change HIGH``.
-    """
+    """Cold-start guard: empty stack must not fire ``gain_plateau`` (``no_levers_found`` owns that case); else two HIGH escalations bias toward early report. Repro: primus-claw-20260522020448-z6rg6 tick=6."""
     det = ProgressDetector(ProgressConfig(
         gain_window_ticks=3, gain_epsilon_pct=0.5, productive_gain_pct=0.5,
     ))
@@ -177,12 +160,8 @@ def test_no_levers_silent_before_min_ticks():
     assert all(s.name != "no_levers_found" for s in out)
 
 
-def test_no_levers_fires_high_when_quotas_met():
-    """Once exploration has started (any of last_explore/sweep
-    rendered as non-(none)) and the elapsed/tick floors
-    are met with stack still empty, fire HIGH so Coordinator can wind
-    down. ``explore_started=True`` is the new precondition added by
-    the 2026-05-22 PR (cold-start regression in xkk9f turn=7)."""
+def test_no_levers_fires_medium_when_quotas_met():
+    """Loosen P3_19: ``no_levers_found`` is MEDIUM advisory once floors met with empty stack; ``explore_started=True`` distinguishes genuine no-lever from cold-start delay."""
     det = ProgressDetector(ProgressConfig(
         no_levers_min_minutes=45.0, no_levers_min_ticks=8,
     ))
@@ -192,7 +171,7 @@ def test_no_levers_fires_high_when_quotas_met():
         SourceData(),
     )
     sym = next(s for s in out if s.name == "no_levers_found")
-    assert sym.severity is SymptomSeverity.HIGH
+    assert sym.severity is SymptomSeverity.MEDIUM
     assert sym.evidence["optimization_stack_size"] == 0
 
 
@@ -225,16 +204,7 @@ def test_no_levers_silent_when_validated_gain_present():
 # PR-B Fix 2: in-flight kernel-opt short-circuits no_levers_found
 # ---------------------------------------------------------------------------
 def test_no_levers_silent_when_kernel_opt_attempts_in_progress():
-    """While a batch kernel_opt is in flight (or completed but no integrate
-    yet), ``kernel_opt_attempts_count > 0`` even though
-    ``optimization_stack_size == 0``. The signal must short-circuit so
-    Orch does not race to ``report`` before the next integrate fires.
-
-    Repro of the Qwen3-30B-A3B-Base 20260522T093903Z regression: a
-    GEAK batch ran 90+ min with stack=0 + gain=0 the whole time;
-    pre-Fix-2 this signal would have emitted HIGH alert and pushed the
-    LLM toward early report.
-    """
+    """In-flight kernel_opt (``kernel_opt_attempts_count > 0``) with empty stack must short-circuit so Orch doesn't race to report. Repro: Qwen3-30B-A3B-Base 20260522T093903Z."""
     det = ProgressDetector(ProgressConfig(
         no_levers_min_minutes=45.0, no_levers_min_ticks=8,
     ))
@@ -251,9 +221,7 @@ def test_no_levers_silent_when_kernel_opt_attempts_in_progress():
 
 
 def test_no_levers_silent_when_keep_pending_integrate():
-    """When the multi-KEEP queue has work waiting, the Coordinator's
-    integrate gate is about to fire -- not a "no lever found" condition.
-    """
+    """A waiting multi-KEEP queue means integrate is about to fire -- not a "no lever found" condition."""
     det = ProgressDetector(ProgressConfig(
         no_levers_min_minutes=45.0, no_levers_min_ticks=8,
     ))
@@ -270,16 +238,7 @@ def test_no_levers_silent_when_keep_pending_integrate():
 
 
 def test_no_levers_silent_before_explore_started():
-    """Cold-start regression guard (PR #239 followup 97318ee):
-    baseline + profile + sglang launch + turnaround can run past the
-    45 min / 8 tick floors before any explore family is actually
-    attempted. In that window stack_size=0 and validated_gain=0 are
-    both by-construction (the explore phase has not started), so
-    ``no_levers_found`` must stay silent. Repro: sandbox
-    primus-claw-20260522034541-xkk9f turn=7 fired HIGH at elapsed
-    47.6min / tick=8 — 12 minutes BEFORE backends phase 1 actually
-    started (04:56:31). The escalate_strategy_change + delegate(report)
-    intents would have ended the run before the first variant ran."""
+    """Cold-start guard (PR #239 followup 97318ee): before explore starts, stack=0 + gain=0 are by-construction, so ``no_levers_found`` must stay silent. Repro: primus-claw-20260522034541-xkk9f turn=7."""
     det = ProgressDetector(ProgressConfig(
         no_levers_min_minutes=45.0, no_levers_min_ticks=8,
     ))
@@ -292,10 +251,7 @@ def test_no_levers_silent_before_explore_started():
 
 
 def test_no_levers_evidence_includes_in_flight_fields():
-    """When no_levers DOES fire (genuinely no kernel_opt run yet), the
-    emitted evidence dict should carry the in-flight bookkeeping so an
-    operator can inspect the decision after the fact.
-    """
+    """When no_levers fires, the evidence dict carries the in-flight bookkeeping for post-hoc inspection."""
     det = ProgressDetector(ProgressConfig(
         no_levers_min_minutes=45.0, no_levers_min_ticks=8,
     ))

@@ -1,16 +1,6 @@
-"""Tests for the config.json-derived KB architecture tags.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Covers two layers:
-
-1. ``cli._load_model_config_tags`` — the soft-degrade loader that lifts
-   ``architectures`` + ``model_type`` out of a model's ``config.json``.
-2. The T0 anchor write path — ``run_t0_anchor`` stamps those tags into the
-   recipe-snapshot ``extras`` so a fine-tuned model's row records the same
-   architecture identity as the base model it derives from.
-
-The amend (KEEP / REVERT / CLOSE) write path is covered in
-``test_coordinator_kb_writes.py``.
-"""
+"""Tests for the config.json-derived KB architecture tags (``_load_model_config_tags`` loader + T0 anchor stamping)."""
 
 from __future__ import annotations
 
@@ -40,9 +30,7 @@ def _write_config(model_dir: Path, payload: Any) -> Path:
     return cfg
 
 
-# ===========================================================================
 # 1. _load_model_config_tags — happy path + soft-degrade matrix
-# ===========================================================================
 def test_load_config_tags_valid(tmp_path: Path) -> None:
     _write_config(tmp_path / "m", {
         "architectures": ["LlamaForCausalLM"],
@@ -81,10 +69,8 @@ def test_load_config_tags_scalar_architectures_wrapped(tmp_path: Path) -> None:
 
 
 def test_load_config_tags_omits_empty_fields(tmp_path: Path) -> None:
-    # Only model_type present -> architectures key omitted entirely.
     _write_config(tmp_path / "m", {"model_type": "qwen3_moe"})
     assert _load_model_config_tags(str(tmp_path / "m")) == {"model_type": "qwen3_moe"}
-    # Only architectures present -> model_type key omitted.
     _write_config(tmp_path / "n", {"architectures": ["Qwen3MoeForCausalLM"]})
     assert _load_model_config_tags(str(tmp_path / "n")) == {
         "architectures": ["Qwen3MoeForCausalLM"],
@@ -101,9 +87,7 @@ def test_load_config_tags_drops_blank_entries(tmp_path: Path) -> None:
     assert out["model_type"] == "llama"
 
 
-# ===========================================================================
 # 2. T0 anchor stamps the tags into the recipe extras
-# ===========================================================================
 @dataclass
 class _FakeSharedState:
     cortex_session_id: str = ""

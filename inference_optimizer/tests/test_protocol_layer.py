@@ -1,16 +1,6 @@
-"""P0-1 protocol-layer tests.
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-Covers:
-
-* IntentEnvelope schema validation (validate_envelope) — including v0.6
-  additions REVIEW_VERDICT and removed-in-v0.6 OBJECTION/VOTE rejection
-* MessageBus append/tail/replay/lookup + topic allowlist + priority bound
-* ResourceLockManager: 4 KNOWN_LANES + LANE_CONFLICTS + acquire_many
-  atomicity + heartbeat + release + reap_expired
-* TaskRegistry: state machine transitions + idempotency_key dedup +
-  cancel_family bulk
-* CursorStore: empty default, advance forward, never moves backwards
-"""
+"""P0-1 protocol-layer tests (intent envelope, MessageBus, ResourceLockManager, TaskRegistry, CursorStore)."""
 
 from __future__ import annotations
 
@@ -19,7 +9,7 @@ import time
 import pytest
 
 from inference_optimizer.orchestrator.cursor_store import CursorStore
-from inference_optimizer.orchestrator.intent_parser import (
+from inference_optimizer.protocol.intent import (
     EMIT_INTENT_TOOL_SCHEMA,
     IntentType,
     IntentValidationError,
@@ -53,9 +43,7 @@ def db(tmp_path) -> SqliteConnection:
     sc.close()
 
 
-# ===========================================================================
 # intent_parser
-# ===========================================================================
 def test_intent_type_v06_includes_review_verdict():
     assert IntentType.REVIEW_VERDICT.value == "review_verdict"
 
@@ -119,9 +107,7 @@ def test_emit_intent_tool_schema_is_complete():
     assert "objection" not in enum_values
 
 
-# ===========================================================================
 # message_bus
-# ===========================================================================
 def test_topic_allowlist_v06_changes():
     """v0.6: review_verdict added; objection/vote/parliament removed."""
     assert "review_verdict" in TOPIC_ALLOWLIST
@@ -184,12 +170,9 @@ async def test_message_bus_replay_for_returns_ascending(db):
     assert [m.seq for m in msgs] == sorted(seqs)
 
 
-# ===========================================================================
 # resource_lock
-# ===========================================================================
 def test_known_lanes_v08_includes_research_lane():
-    """v0.8 M5 (KB_design §3.7) adds ``research_lane`` for LLM specialist
-    sub-agents. The four v0.6 serving lanes remain unchanged."""
+    """v0.8 M5 (KB_design §3.7) adds ``research_lane``; the four v0.6 serving lanes are unchanged."""
     assert set(KNOWN_LANES) == {
         "server_lifecycle",
         "workspace_mutation",
@@ -302,9 +285,7 @@ async def test_resource_lock_reap_expired_emits_event(db):
     assert len(expired_events) >= 1
 
 
-# ===========================================================================
 # task_registry
-# ===========================================================================
 def test_task_states_and_terminals():
     assert "queued" in TASK_STATES
     assert "succeeded" in TERMINAL_STATES
@@ -350,9 +331,7 @@ async def test_task_registry_cancel_family_bulk(db):
     assert bench_after.state == "queued"  # untouched
 
 
-# ===========================================================================
 # cursor_store
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_cursor_store_empty_default(db):
     cs = CursorStore(db)

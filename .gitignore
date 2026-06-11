@@ -32,13 +32,12 @@ optimization_logs/
 optimization_reports/
 optimized_versions/
 benchmarks/
-marathon-runs/
-marathon-sessions/
 kernel-agent/runs/
 inference_optimizer/runs/
 .optimization_strategies.md
 optimization_report.md
 bench.py
+ci/claw-integration.md
 
 # IDE / editor
 .idea/
@@ -77,3 +76,8 @@ pr.md
 CLAUDE.md
 boost_trap_files
 atom_boost_tutorials.md
+
+#clean-up files
+./code-cleansing-plan
+code_cleansing.MD
+future_plan.MD

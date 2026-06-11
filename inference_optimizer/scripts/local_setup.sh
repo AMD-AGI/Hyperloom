@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 # Local Mode bootstrap for a fresh Hyperloom checkout.
 
 set -euo pipefail
@@ -8,20 +10,27 @@ CHECK_ONLY=0
 
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${_script_dir}/../.." && pwd)}"
+# Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
+# can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
+# or empty, which is exactly the case the :- default below would absorb.
+_user_data_was_set="${USER_DATA_PATH:+1}"
 USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
-HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
-DEPS_ROOT_EXPLICIT=0
-if [ -n "${HYPERLOOM_DEPS_ROOT:-}" ]; then
-  DEPS_ROOT_EXPLICIT=1
-else
-  HYPERLOOM_DEPS_ROOT="${HYPERLOOM_RUNTIME_DIR}/source-mirrors"
+if [ -z "${_user_data_was_set}" ]; then
+  echo "[install WARN] USER_DATA_PATH not set; defaulting to /workspace/hyperloom. Set USER_DATA_PATH to persist artifacts under your data root." >&2
 fi
+HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
+# Pod-local base for auto-cloned open-source deps, decoupled from USER_DATA_PATH
+# so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
+HYPERLOOM_DEPS_ROOT="${HYPERLOOM_DEPS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}}"
+_open_source_root="${HYPERLOOM_DEPS_ROOT}"
 LOCAL_SETUP_ENV="${LOCAL_SETUP_ENV:-${HYPERLOOM_RUNTIME_DIR}/local-setup.env.sh}"
 
 PRIMUS_CLAW_REPO="${PRIMUS_CLAW_REPO:-https://github.com/AMD-AGI/Primus-Claw.git}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
+INFERENCEX_REF="${INFERENCEX_REF:-2035a2117ad22403376359be0064dfa2c078c59b}"
 TRACELENS_REPO="${TRACELENS_REPO:-https://github.com/AMD-AGI/TraceLens.git}"
-TRACELENS_REF="${TRACELENS_REF:-release/hyperloom_integration_v0.5.0}"
+# TraceLens v0.6.0 integration (#474): head of release/hyperloom_integration_v0.6.0.
+TRACELENS_REF="${TRACELENS_REF:-0ebaa7109992b98b8f747a0fc0973e0f3b65d5d9}"
 # Preferred container-local checkout for the public repo when operators install
 # TraceLens manually. The internal extension is private: Hyperloom keeps NO
 # repo URL, ref, or default path for it. It is used only when an operator
@@ -48,7 +57,7 @@ Options:
 Advanced env overrides:
   REPO_ROOT, USER_DATA_PATH, HYPERLOOM_DEPS_ROOT, LOCAL_SETUP_ENV,
   OOB_SRC, INFERENCEX_PATH, TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT,
-  PRIMUS_CLAW_REPO, INFERENCEX_REPO,
+  PRIMUS_CLAW_REPO, INFERENCEX_REPO, INFERENCEX_REF,
   TRACELENS_REPO, TRACELENS_REF,
   TRACELENS_INTERNAL_ROOT (path to an existing internal extension checkout;
     set to enable it, otherwise open-source-only)
@@ -63,16 +72,13 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || { echo "[local-setup] ERROR: --deps-root requires PATH" >&2; exit 2; }
       shift
       HYPERLOOM_DEPS_ROOT="${1:-}"
-      DEPS_ROOT_EXPLICIT=1
       ;;
     --session-dir)
       [ "$#" -ge 2 ] || { echo "[local-setup] ERROR: --session-dir requires PATH" >&2; exit 2; }
       shift
       USER_DATA_PATH="${1:-}"
       HYPERLOOM_RUNTIME_DIR="${USER_DATA_PATH}/runtime"
-      if [ "$DEPS_ROOT_EXPLICIT" -eq 0 ]; then
-        HYPERLOOM_DEPS_ROOT="${HYPERLOOM_RUNTIME_DIR}/source-mirrors"
-      fi
+      # Deps root stays pod-local and does NOT follow --session-dir.
       LOCAL_SETUP_ENV="${HYPERLOOM_RUNTIME_DIR}/local-setup.env.sh"
       ;;
     -h|--help) usage; exit 0 ;;
@@ -80,6 +86,9 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+# Re-sync after arg parsing: --deps-root may have changed HYPERLOOM_DEPS_ROOT.
+_open_source_root="${HYPERLOOM_DEPS_ROOT}"
 
 log() { echo "[local-setup] $*"; }
 warn() { echo "[local-setup WARN] $*" >&2; }
@@ -219,7 +228,7 @@ resolve_tracelens() {
   if _resolve_existing_checkout TRACELENS_ROOT "$TRACELENS_DEFAULT_ROOT"; then
     :
   else
-    TRACELENS_ROOT="${HYPERLOOM_DEPS_ROOT}/TraceLens"
+    TRACELENS_ROOT="${_open_source_root}/TraceLens"
     clone_or_update "TraceLens" "$TRACELENS_REPO" "$TRACELENS_ROOT" "$TRACELENS_REF"
     export TRACELENS_ROOT
     log "TRACELENS_ROOT: ${TRACELENS_ROOT}"
@@ -260,7 +269,7 @@ resolve_oob_src() {
     return 0
   fi
 
-  local root="${HYPERLOOM_DEPS_ROOT}/Primus-Claw"
+  local root="${_open_source_root}/Primus-Claw"
   clone_or_update "Primus-Claw" "$PRIMUS_CLAW_REPO" "$root" ""
   OOB_SRC="${root}/OOB"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
@@ -277,8 +286,8 @@ resolve_inferencex() {
     return 0
   fi
 
-  INFERENCEX_PATH="${HYPERLOOM_DEPS_ROOT}/InferenceX"
-  clone_or_update "InferenceX" "$INFERENCEX_REPO" "$INFERENCEX_PATH" ""
+  INFERENCEX_PATH="${_open_source_root}/InferenceX"
+  clone_or_update "InferenceX" "$INFERENCEX_REPO" "$INFERENCEX_PATH" "$INFERENCEX_REF"
   export INFERENCEX_PATH
   log "INFERENCEX_PATH: ${INFERENCEX_PATH}"
 }
@@ -331,7 +340,6 @@ Optimize inference for this workload:
 - CONC: 64
 - ISL: 1024
 - OSL: 1024
-- Precision: bf16
 - Goal: improve throughput by at least 10%
 - Budget: 24 hours
 
