@@ -189,6 +189,17 @@ class SweepExecutor:
         default_num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
         variant_timeout_sec: int = 2400,
     ):
+        """Initialize the sweep executor with default sweep parameters.
+
+        Args:
+            default_config_path: Benchmark config path; ``None`` resolves
+                from ``$FRAMEWORK`` at call time.
+            session_dir: Default session directory for outputs.
+            default_conc_values: Default concurrency values to sweep.
+            default_isl_osl_configs: Default input/output length configs.
+            default_num_prompts_factor: Multiplier for prompt count.
+            variant_timeout_sec: Per-variant timeout in seconds.
+        """
         # None = resolve at call time from $FRAMEWORK; explicit fixture wins.
         self.default_config_path = (
             Path(default_config_path) if default_config_path else None
