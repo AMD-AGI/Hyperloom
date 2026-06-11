@@ -1996,7 +1996,7 @@ class TestArmPinnedPrecision:
 class TestReadBaselineServerArgs:
     """Public ``read_baseline_server_args`` reads the baseline yaml's flags."""
 
-    def test_reads_extra_sglang_args_from_yaml(self, tmp_path):
+    def test_reads_server_args_from_yaml(self, tmp_path):
         import yaml as _yaml  # type: ignore[reportMissingModuleSource]
         from inference_optimizer.orchestrator.roofline_ceiling import (
             read_baseline_server_args,
