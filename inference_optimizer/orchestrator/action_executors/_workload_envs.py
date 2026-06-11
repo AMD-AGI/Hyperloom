@@ -436,12 +436,48 @@ def materialize_config_with_envs(
         from ._grid_runner import merge_server_args
         _mimo_fw_env = server_args_env_name(bench.get("framework"))
         _mimo_existing = str(envs.get(_mimo_fw_env, "")).strip()
+        _mimo_is_vllm = "vllm" in str(bench.get("framework") or "").lower()
+        # sglang accepts the lowercase backend name `triton`; vLLM's
+        # AttentionBackendEnum (config/attention.py validate_backend_before ->
+        # value.upper()) only knows TRITON_ATTN — plain `triton`/`TRITON` is
+        # rejected as "Unknown attention backend" and the server never boots
+        # -> baseline_failed. Pick the framework-correct spelling.
+        _mimo_attn_backend = "TRITON_ATTN" if _mimo_is_vllm else "triton"
         if "attention-backend" not in _mimo_existing:
             envs[_mimo_fw_env] = (
-                merge_server_args(_mimo_existing, "--attention-backend triton")
+                merge_server_args(
+                    _mimo_existing, f"--attention-backend {_mimo_attn_backend}"
+                )
                 if _mimo_existing
-                else "--attention-backend triton"
+                else f"--attention-backend {_mimo_attn_backend}"
             )
+        # vLLM registers this checkpoint's implementation under the arch name
+        # MiMoV2FlashForCausalLM (model_executor/models/mimo_v2_flash.py), but
+        # the read-only HF config declares architectures=["MiMoV2ForCausalLM"],
+        # which the pod-local vLLM build does not recognize -> ModelConfig
+        # ValidationError "architectures ['MiMoV2ForCausalLM'] are not supported"
+        # at server boot -> baseline_failed (server never comes up). Remap the
+        # arch name via --hf-overrides so every `vllm serve` accepts the
+        # checkpoint untouched. vLLM-only: the sglang/RayJob path uses the dated
+        # image that registers the arch natively. The JSON is kept space-free so
+        # it survives Magpie's unquoted `vllm serve ... $EXTRA_VLLM_ARGS` splice
+        # (a single shell word). Merge (never overwrite) and skip when the
+        # caller already pinned an --hf-overrides so explore variants can
+        # re-test alternative overrides.
+        if "vllm" in str(bench.get("framework") or "").lower():
+            _mimo_hf_existing = str(envs.get(_mimo_fw_env, "")).strip()
+            if (
+                "hf-overrides" not in _mimo_hf_existing
+                and "hf_overrides" not in _mimo_hf_existing
+            ):
+                _mimo_arch_override = (
+                    '--hf-overrides {"architectures":["MiMoV2FlashForCausalLM"]}'
+                )
+                envs[_mimo_fw_env] = (
+                    merge_server_args(_mimo_hf_existing, _mimo_arch_override)
+                    if _mimo_hf_existing
+                    else _mimo_arch_override
+                )
     # sglang server-arg guards, applied at the FINAL framework env (after the
     # server_args + extra_envs merges above) so any operator-pinned flag (via
     # extra_server_args, extra_envs, or the YAML) is honored and never doubled.
