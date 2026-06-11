@@ -1281,6 +1281,102 @@ class DecisionTrace(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
+# Token usage — promoted, discoverable top-level rollup of LLM token spend.
+# ---------------------------------------------------------------------------
+class TokenUsageBucket(TypedDict, total=False):
+    """A token bucket plus two convenience totals for at-a-glance reading.
+
+    Same counters as :class:`TokenBucket` (``total_cache`` appears in the
+    per-action view where creation/read are pre-summed; the rollup view keeps
+    them split). Adds:
+
+    Attributes:
+        total_in_out (int): ``total_in + total_out`` — the non-cache prompt +
+            completion tokens (what most "how many tokens" questions mean).
+        grand_total (int): ``total_in + total_out`` + all cache tokens
+            (creation + read) — the all-in figure.
+    """
+    total_in: int
+    total_out: int
+    total_cache_creation: int
+    total_cache_read: int
+    total_cache: int
+    calls: int
+    total_in_out: int
+    grand_total: int
+
+
+class TokenUsageAttribution(TypedDict, total=False):
+    """How much of the session token spend ties back to a decision.
+
+    Attributes:
+        attributed_to_decisions (TokenUsageBucket): Tokens whose call carried a
+            ``task_id`` / ``dyn_id`` that joined to a KEEP/REVERT or
+            dynamic_action decision (e.g. specialist subprocess turns).
+        unattributed (TokenUsageBucket): Tokens from calls with no decision key
+            (orchestration / kernel / critic / proposal_scorer turns — these
+            are LLM-internal, not bound to a single tracked change).
+        attributed_calls_pct (float): Percentage of calls that were attributed.
+    """
+    attributed_to_decisions: TokenUsageBucket
+    unattributed: TokenUsageBucket
+    attributed_calls_pct: float
+
+
+class TokenUsageTimelineEntry(TypedDict, total=False):
+    """One ``action_timeline`` row annotated with the tokens tied to it.
+
+    Tokens join on ``task_id``; rows whose action carries no LLM token spend
+    (most config-exploration actions) get ``tokens: null`` rather than a zero
+    bucket, to make the (intentional) sparsity visible.
+
+    Attributes:
+        task_id (str | None): The action's task id (join key into the ledger).
+        action (str): The action / change label (mirrors action_timeline).
+        phase (str): Phase the action ran in.
+        decision (str): KEEP / REVERT / ... outcome.
+        ts (str): ISO timestamp of the action.
+        tokens (TokenUsageBucket | None): Tokens attributed to this task_id, or
+            None when no LLM call tied to it.
+    """
+    task_id: str | None
+    action: str
+    phase: str
+    decision: str
+    ts: str
+    tokens: TokenUsageBucket | None
+
+
+class TokenUsage(TypedDict, total=False):
+    """Top-level, discoverable LLM-token-spend summary for the session.
+
+    A promoted view over ``decision_trace.token_rollup`` (the full per-call
+    ledger ``reports/trace/llm_calls.jsonl`` + ``ext/*.jsonl``) plus a
+    timeline correlation. Purely derived — no new disk read — so it always
+    reconciles with ``decision_trace``.
+
+    Attributes:
+        session_total (TokenUsageBucket): Whole-session total across every call.
+        by_component (dict[str, TokenUsageBucket]): Per-agent breakdown
+            (orchestration / kernel / critic / specialist / proposal_scorer / ...).
+        by_phase (dict[str, TokenUsageBucket]): Per-phase breakdown
+            (PRELUDE / FRAMEWORK_PR / EXPLORE / SWEEP / ...).
+        attribution (TokenUsageAttribution): Decision-attributed vs unattributed.
+        timeline (list[TokenUsageTimelineEntry]): ``action_timeline`` rows with
+            their token spend joined on ``task_id``.
+        source (str): The ledger files the totals derive from.
+        correlation (str): How ``timeline`` joins to ``action_timeline``.
+    """
+    session_total: TokenUsageBucket
+    by_component: dict[str, TokenUsageBucket]
+    by_phase: dict[str, TokenUsageBucket]
+    attribution: TokenUsageAttribution
+    timeline: list[TokenUsageTimelineEntry]
+    source: str
+    correlation: str
+
+
+# ---------------------------------------------------------------------------
 # Langfuse push receipt — was the trace mirrored live to Langfuse?
 # ---------------------------------------------------------------------------
 class LangfuseConfig(TypedDict, total=False):
@@ -1453,6 +1549,11 @@ class SessionBreakdown(TypedDict, total=False):
     # ignores it. Empty dict on sessions that ran before the trace
     # subsystem landed (no reports/trace/ files).
     decision_trace: DecisionTrace
+    # Promoted, discoverable token-spend rollup (full total + by component /
+    # phase + decision attribution + action_timeline correlation). Derived
+    # from decision_trace.token_rollup, so always reconciles with it. Additive
+    # optional section; v1 readers ignore it.
+    token_usage: TokenUsage
     # Live-Langfuse push receipt: enabled?/redacted config/how much was sent.
     # Additive optional section; the local trace jsonl is always written
     # regardless. ``enabled`` is False (with a ``disabled_reason``) on the
@@ -1517,6 +1618,10 @@ __all__ = [
     "Telemetry",
     "TokenBucket",
     "TokenRollup",
+    "TokenUsage",
+    "TokenUsageAttribution",
+    "TokenUsageBucket",
+    "TokenUsageTimelineEntry",
     "Workload",
     "WorkloadObjective",
 ]

@@ -216,6 +216,17 @@ def build(
                                         ),
                                         warnings,
                                         default={})
+    # Promoted, discoverable token-spend rollup. Pure/derived from
+    # decision_trace's already-computed token_rollup (no second ledger read)
+    # plus an action_timeline correlation on task_id. Surfaces the full
+    # session total + by component/phase + decision attribution at top level
+    # so callers don't have to dig into decision_trace.token_rollup.
+    token_usage        = _safe_collect("token_usage",
+                                        lambda: collectors.collect_token_usage(
+                                            decision_trace, phase_timeline, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
     # Live-Langfuse push receipt (opt-in second sink): enabled? / redacted
     # config / counts. Prefers the post-flush ``langfuse_receipt.json``;
     # falls back to a live emitter read. The local trace jsonl is always
@@ -282,6 +293,10 @@ def build(
         # / session_total summary. New optional section — v1 readers ignore
         # it. Empty on pre-trace sessions.
         "decision_trace":      decision_trace,
+        # Promoted token-spend summary (full total + by component/phase +
+        # decision attribution + action_timeline correlation). Derived from
+        # decision_trace.token_rollup; additive, v1 readers ignore it.
+        "token_usage":         token_usage,
         # Live-Langfuse push receipt; ``enabled`` False (with a
         # ``disabled_reason``) on the default path. Local jsonl ledger is
         # always written regardless.

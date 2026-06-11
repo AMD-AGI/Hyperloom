@@ -4809,6 +4809,118 @@ def _decision_key(task_id: str, dyn_id: str) -> str | None:
     return None
 
 
+def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, int]:
+    """Copy a token bucket and add ``total_in_out`` + ``grand_total``.
+
+    Handles both bucket shapes: the rollup view (split
+    ``total_cache_creation`` / ``total_cache_read``) and the per-decision view
+    (pre-summed ``total_cache``). ``total_in_out`` is prompt+completion only;
+    ``grand_total`` folds in every cache token too.
+    """
+    b = dict(bucket or {})
+    ti = int(b.get("total_in", 0) or 0)
+    to = int(b.get("total_out", 0) or 0)
+    cache = (
+        int(b.get("total_cache", 0) or 0)
+        + int(b.get("total_cache_creation", 0) or 0)
+        + int(b.get("total_cache_read", 0) or 0)
+    )
+    b["total_in_out"] = ti + to
+    b["grand_total"] = ti + to + cache
+    return b
+
+
+def collect_token_usage(
+    decision_trace: dict[str, Any],
+    action_timeline: list[dict[str, Any]],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Promote the token rollup to a discoverable top-level ``token_usage``.
+
+    Pure / derived: reuses the rollup already computed by
+    :func:`collect_decision_trace` (no second ledger read), so the totals here
+    always reconcile with ``decision_trace``. Adds:
+
+    * ``session_total`` / ``by_component`` / ``by_phase`` — every call, with
+      ``total_in_out`` + ``grand_total`` convenience figures.
+    * ``attribution`` — decision-attributed vs unattributed split (most
+      orchestration / kernel / critic / proposal_scorer turns carry no
+      decision key, so they land in ``unattributed``).
+    * ``timeline`` — each ``action_timeline`` row annotated with the tokens
+      that join to it on ``task_id`` (``None`` when an action has no LLM spend).
+
+    Empty-but-valid (zeroed ``session_total``) when ``decision_trace`` is empty
+    (e.g. a pre-trace session), so downstream readers never KeyError.
+    """
+    dt = decision_trace if isinstance(decision_trace, dict) else {}
+    rollup = dt.get("token_rollup") or {}
+    session_total = rollup.get("session_total") or _empty_token_bucket()
+    by_component = rollup.get("by_component") or {}
+    by_phase = rollup.get("by_phase") or {}
+    unattributed = dt.get("unattributed_tokens") or _empty_token_bucket()
+
+    # attributed = session_total - unattributed, field by field.
+    attributed = _empty_token_bucket()
+    for k in attributed:
+        attributed[k] = (
+            int(session_total.get(k, 0) or 0) - int(unattributed.get(k, 0) or 0)
+        )
+    total_calls = int(session_total.get("calls", 0) or 0)
+    attr_calls = int(attributed.get("calls", 0) or 0)
+    attributed_calls_pct = (
+        round(100.0 * attr_calls / total_calls, 2) if total_calls else 0.0
+    )
+
+    # Per-task token map from the per-decision view (only decision-bearing
+    # task_ids carry tokens — i.e. the attributed subset).
+    tokens_by_task: dict[str, dict[str, Any]] = {}
+    for entry in dt.get("decision_trace") or []:
+        if not isinstance(entry, dict):
+            continue
+        dec = entry.get("decision") or {}
+        tid = str(dec.get("task_id") or dec.get("dyn_id") or "").strip()
+        tok = entry.get("tokens") or {}
+        if tid and int(tok.get("calls", 0) or 0) > 0:
+            tokens_by_task[tid] = tok
+
+    # Annotate the visible action timeline with tokens joined on task_id.
+    timeline: list[dict[str, Any]] = []
+    for act in action_timeline or []:
+        if not isinstance(act, dict):
+            continue
+        tid = str(act.get("task_id") or "").strip()
+        tok = tokens_by_task.get(tid) if tid else None
+        timeline.append({
+            "task_id": tid or None,
+            "action": str(act.get("action") or act.get("change") or ""),
+            "phase": str(act.get("phase") or ""),
+            "decision": str(act.get("decision") or ""),
+            "ts": str(act.get("ts") or ""),
+            "tokens": _token_convenience(tok) if tok else None,
+        })
+
+    return {
+        "session_total": _token_convenience(session_total),
+        "by_component": {
+            c: _token_convenience(b) for c, b in by_component.items()
+        },
+        "by_phase": {p: _token_convenience(b) for p, b in by_phase.items()},
+        "attribution": {
+            "attributed_to_decisions": _token_convenience(attributed),
+            "unattributed": _token_convenience(unattributed),
+            "attributed_calls_pct": attributed_calls_pct,
+        },
+        "timeline": timeline,
+        "source": "reports/trace/llm_calls.jsonl (+ reports/trace/ext/*.jsonl)",
+        "correlation": (
+            "timeline[].task_id joins action_timeline[].task_id; components "
+            "without a per-decision task_id (orchestration / kernel / critic / "
+            "proposal_scorer) are counted in session_total/by_component/by_phase "
+            "but appear as tokens=null in timeline (see attribution.unattributed)."
+        ),
+    }
+
+
 def collect_langfuse(
     session_dir: Path,
     manifest: dict[str, Any],
@@ -5085,5 +5197,6 @@ __all__ = [
     "collect_specialist_runs",
     "collect_sweep",
     "collect_telemetry",
+    "collect_token_usage",
     "collect_workload",
 ]

@@ -138,7 +138,36 @@ populate `session_breakdown.json` for downstream consumers
 |-------------------|--------------------------------------------------------------------------------------------|
 | `CLAW_SESSION_ID` | Hosted SaFE / Claw session id, written to `session.claw_session_id` in `session_breakdown.json`. Set by the PrimusClaw sandbox; unset for local runs. |
 | `SANDBOX_USER_ID` | Hosted SaFE / Claw user id, written to `session.sandbox_user_id`. Set by PrimusClaw; unset for local runs.                                            |
-| `HYPERLOOM_LANGFUSE_ENABLE` | Master switch (default **off**) for live Langfuse trace push. When `1/true/yes/on` *and* the three `LANGFUSE_*` credentials are set, every in-process LLM call is mirrored into Langfuse while the run is live, and a session-end flush backfills the out-of-process children (geak / oob / robustness / specialist) and KEEP/REVERT decision Scores. The local `reports/trace/*.jsonl` ledger is always written regardless. Requires the optional `langfuse` dependency (`pip install 'hyperloom-inference_optimizer[trace]'`); a missing SDK degrades to a no-op. **Correlation:** the Langfuse trace id and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session id for standalone runs, so live push and the offline `backfill_langfuse` CLI collapse onto one trace per PrimusClaw session. **Span layout:** `trace → phase span (PRELUDE/EXPLORE/KERNEL/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/oob/…) → Generation`; each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision (trace-level fallback when no matching span exists). **Receipt:** every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting whether the push was enabled (or the `disabled_reason`), the redacted connection config (host + key-presence booleans, never the keys), the derived `trace_id`/`session_id`, and how many generations/scores/spans were actually sent — so an operator can confirm post-hoc whether a run reached Langfuse. |
+| `HYPERLOOM_LANGFUSE_ENABLE` | Master switch (default **off**) for live Langfuse trace push. NOTE: when this flag is on in the environment / `.env`, `scripts/install.sh` auto-installs the optional `langfuse` SDK on demand (and skips it entirely when off), so no separate `pip install '...[trace]'` is required. When `1/true/yes/on` *and* the three `LANGFUSE_*` credentials are set, every in-process LLM call is mirrored into Langfuse while the run is live, and a session-end flush backfills the out-of-process children (geak / oob / robustness / specialist) and KEEP/REVERT decision Scores. The local `reports/trace/*.jsonl` ledger is always written regardless. Requires the optional `langfuse` dependency (`pip install 'hyperloom-inference_optimizer[trace]'`); a missing SDK degrades to a no-op. **Correlation:** the Langfuse trace id and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session id for standalone runs, so live push and the offline `backfill_langfuse` CLI collapse onto one trace per PrimusClaw session. **Span layout:** `trace → phase span (PRELUDE/EXPLORE/KERNEL/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/oob/…) → Generation`; each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision (trace-level fallback when no matching span exists). **Receipt:** every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting whether the push was enabled (or the `disabled_reason`), the redacted connection config (host + key-presence booleans, never the keys), the derived `trace_id`/`session_id`, and how many generations/scores/spans were actually sent — so an operator can confirm post-hoc whether a run reached Langfuse. |
+
+### `token_usage` section (in `session_breakdown.json`)
+
+Every breakdown carries a top-level `token_usage` section: a promoted,
+discoverable rollup of LLM token spend derived from the per-call ledger
+(`reports/trace/llm_calls.jsonl` + `ext/*.jsonl`). It is purely derived from
+`decision_trace.token_rollup`, so it always reconciles with that section. No
+env var controls it; it is always present (zeroed on pre-trace sessions).
+
+* `session_total` — whole-session total across every call, with two
+  convenience figures: `total_in_out` (prompt + completion only) and
+  `grand_total` (in + out + all cache-creation + cache-read tokens).
+* `by_component` — per-agent breakdown (orchestration / kernel / critic /
+  specialist / proposal_scorer / geak / oob / …), each with the same
+  convenience totals.
+* `by_phase` — per-phase breakdown (PRELUDE / FRAMEWORK_PR / EXPLORE / SWEEP / …).
+* `attribution` — `attributed_to_decisions` vs `unattributed` split plus
+  `attributed_calls_pct`. Only calls that carry a `task_id` / `dyn_id` joining
+  to a KEEP/REVERT or dynamic_action decision (e.g. specialist subprocess
+  turns) are attributed; orchestration / kernel / critic / proposal_scorer
+  turns are LLM-internal and land in `unattributed` (this is expected, not a
+  gap in the data).
+* `timeline` — each `action_timeline` row annotated with the tokens that join
+  to it on `task_id`. Rows whose action has no LLM spend show `tokens: null`
+  (rather than a zero bucket) to make the sparsity explicit.
+
+To get the single "total tokens for this run" number, read
+`token_usage.session_total.grand_total` (all-in) or `.total_in_out`
+(prompt+completion only).
 
 ---
 
