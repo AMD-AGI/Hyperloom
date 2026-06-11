@@ -1541,7 +1541,7 @@ def _backend_order(payload: dict) -> list[str]:
        ``KERNEL_OPT_BACKEND_ORDER``.
     4. The built-in GEAK-first default ladder.
 
-    All backend names are normalised to lowercase before filtering, so
+    All backend names are normalized to lowercase before filtering, so
     values like ``"GEAK"`` or ``"Claude"`` are treated the same as their
     lowercase equivalents.  Unknown backends are silently dropped, and
     ``cursor`` is removed from the auto-derived ladder when
