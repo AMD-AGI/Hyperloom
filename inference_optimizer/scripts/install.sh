@@ -10,8 +10,8 @@
 # Stack (in order):
 #   1. inference_optimizer + extras (pulls in claude_agent_sdk via
 #      pyproject `[test]` extra)
-#   2. Magpie (benchmark engine) into $HYPERLOOM_RUNTIME_DIR/Magpie
-#      (= $USER_DATA_PATH/runtime/Magpie by default), pinned to MAGPIE_REF
+#   2. Magpie (benchmark engine) into the pod-local open-source repo tree,
+#      pinned to MAGPIE_REF
 #      (a commit SHA, mirrors the GEAK_REF pin in kernel-agent)
 #   2b. Atomic-write patch for Magpie._prepare_benchmark_scripts
 #       (bugs.md §C #1 root-cause fix; fail-soft — a no-op when MAGPIE_REF
@@ -90,7 +90,11 @@ if [ -z "${_user_data_was_set}" ]; then
 fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
+# Legacy variable kept for compatibility; open-source checkouts use _open_source_root.
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
+# Pod-local base for auto-cloned open-source deps, decoupled from USER_DATA_PATH
+# so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
+_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"
 KERNEL_AGENT_ROOT="${KERNEL_AGENT_ROOT:-${REPO_ROOT}/kernel-agent}"
 FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${REPO_ROOT}/framework-agent}"
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
@@ -107,13 +111,13 @@ MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # fail-soft below. Operators can re-pin with MAGPIE_REF=<tag|branch|sha>
 # (mirrors GEAK_REF in kernel-agent/scripts/install.sh).
 MAGPIE_REF="${MAGPIE_REF:-b1d4dcdee7eaf7bcab4fac13ab751f61bffdc3f7}"
-MAGPIE_DIR="${MAGPIE_DIR:-${HYPERLOOM_RUNTIME_DIR}/Magpie}"
+MAGPIE_DIR="${MAGPIE_DIR:-${_open_source_root}/Magpie}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
 # Pin InferenceX to a current default-branch HEAD *commit SHA* so the
 # per-install clone is reproducible (same rationale as MAGPIE_REF). Operators
 # can re-pin with INFERENCEX_REF=<tag|branch|sha>.
 INFERENCEX_REF="${INFERENCEX_REF:-2035a2117ad22403376359be0064dfa2c078c59b}"
-INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${HYPERLOOM_RUNTIME_DIR}/InferenceX}"
+INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX}"
 
 DRY_RUN=0
 CHECK_ONLY=0
@@ -126,7 +130,7 @@ Usage: inference_optimizer/scripts/install.sh [options]
 
 Installs:
   - inference_optimizer Python package (with claude_agent_sdk via [test])
-  - Magpie (cloned to $HYPERLOOM_RUNTIME_DIR/Magpie by default)
+  - Magpie (cloned under the pod-local open-source repo tree by default)
   - Detects/exports INFERENCEX_PATH
   - Chains to kernel-agent/scripts/install.sh for Ray + ray-head start,
     Node/npm, TraceLens, GEAK, and OOB CLI auth.
@@ -209,15 +213,16 @@ git_fetch_pinned() {
   return 0
 }
 
-# Serialize concurrent installs that share one $USER_DATA_PATH. Installs
-# pointed at the same data root also share
-# $HYPERLOOM_RUNTIME_DIR/source-mirrors (Magpie / InferenceX, plus
-# GEAK / OOB / TraceLens via the chained kernel-agent installer). With no
-# lock, two installs race and corrupt each other's half-cloned checkouts
-# (observed: GEAK src/minisweagent/... missing, repeated install failures).
-# We hold an flock on $HYPERLOOM_RUNTIME_DIR/.install.lock via fd 9 from the
-# first mirror-mutating step until this process exits (fd closes on exit),
-# so it guards every clone/build below and releases automatically at the end.
+# Serialize concurrent installs that share one open-source checkout root
+# (Magpie / InferenceX, plus GEAK / OOB / TraceLens via the chained
+# kernel-agent installer). With no lock, two installs race and corrupt each
+# other's half-cloned checkouts (observed: GEAK src/minisweagent/... missing,
+# repeated install failures). The lock lives in $_open_source_root (pod-local)
+# so it tracks exactly what it guards; the chained kernel-agent installer uses
+# the same $_open_source_root default, keeping parent/child on one lock path.
+# We hold an flock on $_open_source_root/.install.lock via fd 9 from the first
+# mirror-mutating step until this process exits (fd closes on exit), so it
+# guards every clone/build below and releases automatically at the end.
 # Skipped under --check-only / --dry-run (introspection only, no mutation).
 # When we chain to kernel-agent's installer we export
 # HYPERLOOM_INSTALL_LOCK_HELD=1 so that child does not deadlock re-acquiring
@@ -230,15 +235,15 @@ acquire_install_lock() {
     log "install lock already held by parent installer; not re-locking"
     return 0
   fi
-  mkdir -p "${HYPERLOOM_RUNTIME_DIR}"
-  exec 9>"${HYPERLOOM_RUNTIME_DIR}/.install.lock"
+  mkdir -p "${_open_source_root}"
+  exec 9>"${_open_source_root}/.install.lock"
   if command -v flock >/dev/null 2>&1; then
-    log "waiting for install lock: ${HYPERLOOM_RUNTIME_DIR}/.install.lock"
+    log "waiting for install lock: ${_open_source_root}/.install.lock"
     flock 9
     log "acquired install lock"
     export HYPERLOOM_INSTALL_LOCK_HELD=1
   else
-    warn "flock not available; concurrent installs may race on source-mirrors"
+    warn "flock not available; concurrent installs may race on dependency checkouts"
   fi
 }
 
@@ -442,6 +447,7 @@ log "REPO_ROOT=${REPO_ROOT}"
 log "USER_DATA_PATH=${USER_DATA_PATH}"
 log "HYPERLOOM_RUNTIME_DIR=${HYPERLOOM_RUNTIME_DIR}"
 log "HYPERLOOM_ROOT=${HYPERLOOM_ROOT}"
+log "open_source_root=${_open_source_root}"
 log "KERNEL_AGENT_ROOT=${KERNEL_AGENT_ROOT}"
 log "KERNEL_AGENT_ENV=${KERNEL_AGENT_ENV}"
 log "MAGPIE_DIR=${MAGPIE_DIR}"
@@ -454,7 +460,7 @@ export HYPERLOOM_KERNEL_AGENT_ROOT="${HYPERLOOM_KERNEL_AGENT_ROOT:-${KERNEL_AGEN
 # under MAGPIE_DIR; install.sh of kernel-agent writes geak-config /
 # kernel-agent.env.sh into HYPERLOOM_RUNTIME_DIR).
 if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-  mkdir -p "${HYPERLOOM_RUNTIME_DIR}"
+  mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"
 fi
 
 # pip --break-system-packages when PYTHON is the system interpreter
@@ -504,7 +510,7 @@ PY
 
 # --- 2. Magpie ---
 # The install state is the checkout under $MAGPIE_DIR (default:
-# $USER_DATA_PATH/runtime/Magpie), not whatever `import Magpie` resolves
+# the pod-local open-source repo tree), not whatever `import Magpie` resolves
 # from the driver Python. Editable installs from older sessions can stay
 # importable and otherwise mask a missing per-workspace checkout.
 ensure_magpie() {

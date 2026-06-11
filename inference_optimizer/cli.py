@@ -2608,18 +2608,18 @@ def _preflight(
     if not inferencex_path:
         from .paths import (
             magpie_dir as _magpie_default,
-            runtime_dir as _runtime_default,
+            open_source_root as _open_source_default,
         )
-        runtime_root = _runtime_default(_session_dir_resolve())
+        open_source_root = _open_source_default()
         magpie_root = (
             Path(os.environ["MAGPIE_DIR"])
             if os.environ.get("MAGPIE_DIR")
             else _magpie_default(_session_dir_resolve())
         )
-        # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone runtime checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
+        # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone pod-local checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
         for candidate in (
             magpie_root / "InferenceX",
-            runtime_root / "InferenceX",
+            open_source_root / "InferenceX",
         ):
             if _inferencex_checkout_ok(candidate):
                 if os.access(candidate, os.W_OK):
@@ -2635,8 +2635,8 @@ def _preflight(
     # than falling back to a read-only host mount. baseline cannot run
     # without InferenceX, so a clone failure is a hard error.
     if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
-        from .paths import runtime_dir as _runtime_default
-        dest = _runtime_default(_session_dir_resolve()) / "InferenceX"
+        from .paths import open_source_root as _open_source_default
+        dest = _open_source_default() / "InferenceX"
         print(f"Preflight: InferenceX not found; cloning into {dest} ...")
         inferencex_path = _clone_inferencex(dest)
         if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):

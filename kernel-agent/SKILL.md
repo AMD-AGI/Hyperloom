@@ -17,9 +17,9 @@ tree (created by Coordinator) holds cross-task GEAK/OOB work artefacts
 keyed by `kernel_id`. Default `USER_DATA_PATH` is `/workspace/hyperloom`.
 Do not write outside `$USER_DATA_PATH` except for reading user-provided
 trace/source paths, the TraceLens public source at
-`$TRACELENS_ROOT` (default `$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`,
-i.e. `$USER_DATA_PATH/runtime/source-mirrors/TraceLens`; `install.sh`
-clones `AMD-AGI/TraceLens` there and pins it to a fixed SHA. A
+`$TRACELENS_ROOT` (default
+`${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens`;
+`install.sh` clones `AMD-AGI/TraceLens` there and pins it to a fixed SHA. A
 pre-existing checkout you maintain is only used as an explicit operator
 override — export `TRACELENS_ROOT=<path>` to opt in, which makes the
 installer skip both the clone and the SHA pin), and —
@@ -67,9 +67,10 @@ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
 - Node.js 20 + npm when they are missing (required for the `claude` /
   `codex` npm CLIs)
 - TraceLens public editable install from `$TRACELENS_ROOT`
-  (default `$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`; when unset,
-  `install.sh` clones `AMD-AGI/TraceLens` there and pins it to a fixed
-  SHA. Export `TRACELENS_ROOT=<path>` to point at a pre-existing
+  (default
+  `${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens`;
+  when unset, `install.sh` clones `AMD-AGI/TraceLens` there and pins it to a
+  fixed SHA. Export `TRACELENS_ROOT=<path>` to point at a pre-existing
   checkout you maintain — this is an explicit operator override and
   skips both the clone and the SHA pin), plus the
   optional internal extension from `$TRACELENS_INTERNAL_ROOT` only when
@@ -87,7 +88,7 @@ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
   preset. Other yaml budget knobs are not env-overridable on purpose —
   edit `$GEAK_CONFIG` directly if you need to tune them per pod.
 - GEAK MCP tools — installed as four pip packages from
-  `${HYPERLOOM_ROOT}/geak/mcp_tools/`. The bundled `minisweagent` imports
+  `${GEAK_ROOT}/mcp_tools/`. The bundled `minisweagent` imports
   these at preprocess + run time; missing any of them fails the GEAK
   attempt fast (observed on Qwen3-32B 2026-05-15: `profiler_mcp` not
   installed → 4-minute aborts with zero-byte baselines).
@@ -340,9 +341,9 @@ OPTIONAL internal extension (internal users only): if you have access to it,
 install your own checkout (`pip install -e .`) and set `$TRACELENS_INTERNAL_ROOT`
 to its path. Hyperloom keeps no internal URL/path and never clones it.
 
-Default base repo (`TRACELENS_ROOT`): `$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`
-(i.e. `$USER_DATA_PATH/runtime/source-mirrors/TraceLens`). When unset,
-`install.sh` clones `AMD-AGI/TraceLens` there and pins it to the fixed
+Default base repo (`TRACELENS_ROOT`):
+`${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens`.
+When unset, `install.sh` clones `AMD-AGI/TraceLens` there and pins it to the fixed
 SHA recorded in the installer. A pre-existing checkout you maintain is
 **only** used as an explicit operator override — export
 `TRACELENS_ROOT=<path>` to opt in, which skips both the clone and the
@@ -361,10 +362,9 @@ If `tracelens_analysis` fails with "CLI not found", re-run `install.sh` or
 repeat the manual install above.
 
 When `$TRACELENS_ROOT` or `$TRACELENS_INTERNAL_ROOT` is on a read-only mount,
-`ensure_tracelens` automatically mirrors the checkout to
-`${HYPERLOOM_ROOT}/TraceLens` or `${HYPERLOOM_ROOT}/TraceLens-internal`
-respectively (parallel to `${HYPERLOOM_ROOT}/geak` /
-`${HYPERLOOM_ROOT}/OOB/oob_cli`) via `cp -r`, runs `pip install -e` against
+`ensure_tracelens` uses `$TRACELENS_ROOT` for the public checkout and mirrors
+the internal checkout to `$TRACELENS_MIRROR_DIR` when needed (parallel to
+`${GEAK_ROOT}` / `${OOB_CLI_ROOT}`) via `cp -r`, runs `pip install -e` against
 the writable mirror, and `write_env_file` re-exports the resolved root so
 subsequent CLI subprocesses inherit the mirror. Treat these mirrors as
 installer-owned state; do not clone, clean, or edit them by hand.
@@ -373,11 +373,11 @@ If `install.sh` did not finish or the CLI is unexpectedly missing, run a
 manual editable install + smoke test before analysis:
 
 ```bash
-# Default: use the installer-managed clone under $HYPERLOOM_RUNTIME_DIR.
+# Default: use the installer-managed pod-local open-source checkout.
 # Operator override: export TRACELENS_ROOT (e.g.
 # /path/to/your/TraceLens) before running install.sh to skip the clone
 # and the SHA pin.
-export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime}/source-mirrors/TraceLens}"
+export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens}"
 cd "$TRACELENS_ROOT" && pip install -e .
 # OPTIONAL internal extension — only if TRACELENS_INTERNAL_ROOT is set:
 [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && cd "$TRACELENS_INTERNAL_ROOT" && pip install -e .

@@ -219,9 +219,21 @@ class KernelAgentToolTests(unittest.TestCase):
         skill_text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         ray_runtime_text = RAY_RUNTIME.read_text(encoding="utf-8")
 
-        self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors/TraceLens}"', install_text)
+        # Open-source deps default to a pod-local base, decoupled from USER_DATA_PATH,
+        # with HYPERLOOM_OPEN_SOURCE_ROOT as an optional override.
+        self.assertIn(
+            '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"',
+            install_text,
+        )
+        self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"', install_text)
         # Internal extension is opt-in: no default path.
         self.assertIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"', install_text)
+        # GEAK has a dedicated root so moving it to pod-local storage does not
+        # implicitly move TraceLens/OOB via HYPERLOOM_ROOT.
+        self.assertIn('GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"', install_text)
+        self.assertIn('OOB_CLI_ROOT="${OOB_CLI_ROOT:-${_open_source_root}/OOB/oob_cli}"', install_text)
+        # Override is read but never written into a generated env file.
+        self.assertNotIn("export HYPERLOOM_OPEN_SOURCE_ROOT", install_text)
         # Assert the override pattern, not the exact pin, so ref bumps don't break this.
         self.assertIn('GEAK_REF="${GEAK_REF:-', install_text)
         self.assertIn("ensure_rocm_torch_for_geak()", install_text)
@@ -230,7 +242,7 @@ class KernelAgentToolTests(unittest.TestCase):
         # Prefix match on `_PIP_FLAGS` allows future flag additions.
         self.assertIn('_PIP_FLAGS="-q --no-cache-dir', install_text)
         self.assertIn(
-            'python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${HYPERLOOM_ROOT}/geak"',
+            'python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${GEAK_ROOT}"',
             install_text,
         )
         # GEAK v3.2.0 ships 4 MCP tool folders (metrix-mcp removed; transitive via profiler-mcp).
@@ -249,7 +261,7 @@ class KernelAgentToolTests(unittest.TestCase):
         )
         self.assertIn(
             'python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \\\n'
-            '        "${HYPERLOOM_ROOT}/geak/mcp_tools/${_geak_mcp}"',
+            '        "${GEAK_ROOT}/mcp_tools/${_geak_mcp}"',
             install_text,
         )
         # Auto-detect block: cuda stays the preferred default, env var still overrides.
@@ -283,19 +295,19 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertNotIn('TRACELENS_ROOT="${TRACELENS_ROOT:-/hyperloom/TraceLens}"', install_text)
         self.assertNotIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/hyperloom/TraceLens-internal}"', install_text)
         self.assertNotIn("Executor asks", skill_text)
-        # Public TraceLens is cloned into the runtime tree by default; TRACELENS_ROOT overrides.
+        # Public TraceLens is cloned into the pod-local repo tree by default; TRACELENS_ROOT overrides.
         self.assertIn(
             'TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"',
             install_text,
         )
         self.assertIn('TRACELENS_REF="0ebaa7109992b98b8f747a0fc0973e0f3b65d5d9"', install_text)
-        self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors/TraceLens}"', install_text)
+        self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"', install_text)
         self.assertIn('git clone --depth 1 "$TRACELENS_REPO" "$TRACELENS_ROOT"', install_text)
         self.assertIn('git -C "$TRACELENS_ROOT" fetch --depth 1 origin "$TRACELENS_REF"', install_text)
         self.assertNotIn('TRACELENS_PUBLIC_MIRROR_DIR="${TRACELENS_PUBLIC_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"', install_text)
         # Read-only internal root may trigger a writable mirror (optional extension).
         self.assertIn(
-            'TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens-internal}"',
+            'TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-internal}"',
             install_text,
         )
         self.assertIn('export TRACELENS_INTERNAL_ROOT', install_text)

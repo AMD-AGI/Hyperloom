@@ -200,14 +200,31 @@ def test_find_latest_per_session_dir_ignores_non_ts_dirs(
 
 
 def test_runtime_dir_is_workspace_shared(tmp_path, monkeypatch):
-    """N17: runtime/ + Magpie/ + source-mirrors/ live under workspace_root, not the per-session subdir."""
+    """N17: runtime/ lives under workspace_root, not the per-session subdir."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir(model_name="DeepSeek-R1-0528")
     assert paths.runtime_dir(sd) == tmp_path / "runtime"
-    assert paths.magpie_dir(sd) == tmp_path / "runtime" / "Magpie"
-    assert paths.source_mirrors_dir(sd) == tmp_path / "runtime" / "source-mirrors"
     # Also true when caller passes the historical no-arg form (back-compat)
     assert paths.runtime_dir() == tmp_path / "runtime"
+
+
+def test_magpie_dir_is_pod_local_and_decoupled_from_user_data(tmp_path, monkeypatch):
+    # Magpie resolves under the pod-local open-source root (mirrors install.sh),
+    # NOT under $USER_DATA_PATH/runtime, so script + runtime agree on one checkout.
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "shared"))
+    monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "podlocal"))
+    expected = tmp_path / "podlocal" / "hyperloom" / "open-source-repos"
+    assert paths.open_source_root() == expected
+    assert paths.magpie_dir() == expected / "Magpie"
+    assert str(tmp_path / "shared") not in str(paths.magpie_dir())
+
+
+def test_open_source_root_honours_explicit_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "custom"))
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "ignored"))
+    assert paths.open_source_root() == tmp_path / "custom"
+    assert paths.magpie_dir() == tmp_path / "custom" / "Magpie"
 
 
 # manifest
