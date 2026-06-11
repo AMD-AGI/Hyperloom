@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import os
 import re
 import shlex
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -309,6 +311,97 @@ def _iter_message_text(message: Any) -> Iterable[str]:
         yield result_text
 
 
+def _json_safe(value: Any) -> Any:
+    """Best-effort coercion of an SDK field into a JSON-serializable value.
+
+    Tool inputs / results are usually plain dicts already, but the SDK may
+    hand back nested objects; falling back to ``str`` keeps the transcript
+    write infallible so a serialization edge case never aborts a TraceLens
+    run (#266)."""
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        if isinstance(value, dict):
+            return {str(k): _json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_json_safe(v) for v in value]
+        return str(value)
+
+
+def _serialize_sdk_block(block: Any) -> dict[str, Any]:
+    """Serialize one message content block into a JSON-safe record.
+
+    Blocks are tagged by class name (``TextBlock`` / ``ToolUseBlock`` /
+    ``ToolResultBlock`` / ``ThinkingBlock`` / ...) and probed for the
+    union of fields those types expose, rather than importing the SDK's
+    concrete block classes. This mirrors
+    ``ClaudeBackend._iter_blocks`` so the runner stays decoupled from
+    claude-agent-sdk internals."""
+    if isinstance(block, dict):
+        record = _json_safe(block)
+        if isinstance(record, dict):
+            record.setdefault("block", record.get("type", "dict"))
+            return record
+        return {"block": "dict", "value": record}
+    cls_name = type(block).__name__
+    record: dict[str, Any] = {"block": cls_name}
+    text = getattr(block, "text", None)
+    if isinstance(text, str):
+        record["text"] = text
+    thinking = getattr(block, "thinking", None)
+    if isinstance(thinking, str):
+        record["thinking"] = thinking
+    name = getattr(block, "name", None)
+    if isinstance(name, str):
+        record["name"] = name
+    block_id = getattr(block, "id", None)
+    if isinstance(block_id, str):
+        record["id"] = block_id
+    tool_input = getattr(block, "input", None)
+    if tool_input is not None:
+        record["input"] = _json_safe(tool_input)
+    tool_use_id = getattr(block, "tool_use_id", None)
+    if isinstance(tool_use_id, str):
+        record["tool_use_id"] = tool_use_id
+    # ``TextBlock`` has no ``content``; only tool-result-style blocks do.
+    content = getattr(block, "content", None)
+    if content is not None and cls_name != "TextBlock":
+        record["content"] = _json_safe(content)
+    is_error = getattr(block, "is_error", None)
+    if isinstance(is_error, bool):
+        record["is_error"] = is_error
+    if set(record.keys()) == {"block"}:
+        # Unknown block with no recognized fields: keep a bounded repr so
+        # the transcript still records that something streamed.
+        record["repr"] = str(block)[:2000]
+    return record
+
+
+def _serialize_sdk_message(message: Any, *, seq: int) -> dict[str, Any]:
+    """Serialize one SDK stream message into a JSON-safe transcript record.
+
+    The record carries the message class name (``AssistantMessage`` /
+    ``ResultMessage`` / ...), its content blocks, and — when present on a
+    terminal ``ResultMessage`` — the consolidated ``result`` text and the
+    Anthropic ``usage`` dict (token accounting)."""
+    record: dict[str, Any] = {
+        "seq": seq,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "type": type(message).__name__,
+    }
+    blocks = getattr(message, "content", None)
+    if blocks:
+        record["content"] = [_serialize_sdk_block(b) for b in list(blocks)]
+    result_text = getattr(message, "result", None)
+    if isinstance(result_text, str) and result_text:
+        record["result"] = result_text
+    usage = getattr(message, "usage", None)
+    if isinstance(usage, dict) and usage:
+        record["usage"] = _json_safe(usage)
+    return record
+
+
 async def run_tracelens_skill(
     *,
     skill_path: Path,
@@ -405,8 +498,37 @@ async def run_tracelens_skill(
     sdk_error = ""
     if log:
         log(f"TraceLens SDK runner: prefix cache={prefix_path}")
+
+    # #266: persist a stream-JSON transcript of the agent's turns (text +
+    # tool_use/tool_result blocks) so operators can inspect the lifecycle
+    # and the artifacts it produced during execution. Capture is
+    # best-effort: a serialization or IO error on the logging side must
+    # never abort an otherwise-successful TraceLens run, so every write is
+    # guarded and the transcript handle open is tolerant of IO failure.
+    transcript_path = output_dir / "agent_transcript.jsonl"
+    transcript_written = False
+    transcript_seq = 0
+    try:
+        transcript_fh: Any = transcript_path.open("w", encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001
+        transcript_fh = None
+        if log:
+            log(f"[claude-sdk] WARNING: cannot open transcript "
+                f"{transcript_path}: {exc}")
     try:
         async for message in sdk_query_factory(prompt=prompt, options=options):
+            if transcript_fh is not None:
+                try:
+                    record = _serialize_sdk_message(message, seq=transcript_seq)
+                    transcript_fh.write(
+                        json.dumps(record, ensure_ascii=False) + "\n"
+                    )
+                    transcript_fh.flush()
+                    transcript_seq += 1
+                    transcript_written = True
+                except Exception:  # noqa: BLE001
+                    # Transcript is diagnostic-only; swallow and keep going.
+                    pass
             for text in _iter_message_text(message):
                 chunks.append(text)
                 if log:
@@ -416,6 +538,16 @@ async def run_tracelens_skill(
         sdk_error = f"{type(exc).__name__}: {exc}"
         if log:
             log(f"[claude-sdk] WARNING: {sdk_error}")
+    finally:
+        if transcript_fh is not None:
+            try:
+                transcript_fh.close()
+            except OSError as exc:
+                # Closing the diagnostic transcript must never abort an
+                # otherwise-successful run; surface it as a warning instead.
+                if log:
+                    log(f"[claude-sdk] WARNING: cannot close transcript "
+                        f"{transcript_path}: {exc}")
 
     # Final report is ``analysis.md`` (contract since #148; the v0.2 standalone_analysis.md
     # fallback was dropped in #203 for masking orchestrator failures with stale data).
@@ -431,6 +563,23 @@ async def run_tracelens_skill(
         "tracelens_agent_report": str(report_path),
         "tracelens_cmd_prefix": str(prefix_path),
     }
+    # #266: surface the stream-JSON transcript so it flows into the
+    # kernel-agent status sidecar (``artifacts.update(skill_result
+    # .artifact_paths)`` in tracelens_analysis.py) and a launcher/operator
+    # can tail it during execution. Only advertise it when at least one
+    # turn was actually recorded.
+    if transcript_written:
+        artifact_paths["tracelens_agent_transcript"] = str(transcript_path)
+    else:
+        # No turn was recorded (empty stream, or every serialization failed):
+        # remove the zero-byte file we truncated open at start so we don't
+        # leave a misleading empty agent_transcript.jsonl on disk.
+        try:
+            transcript_path.unlink(missing_ok=True)
+        except OSError as exc:
+            if log:
+                log(f"[claude-sdk] WARNING: cannot remove empty transcript "
+                    f"{transcript_path}: {exc}")
     if sdk_error:
         artifact_paths["tracelens_agent_sdk_error"] = sdk_error
 

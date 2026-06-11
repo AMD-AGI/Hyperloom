@@ -955,8 +955,43 @@ for k in ("stop_reason", "baseline_tput", "cumulative_gain", "current_best",
     print(f"{k}: {s.get(k)}")
 print("explore_last_round:", s.get("explore_search", {}).get("last_round"))
 print("phase:", s.get("phase"))
+
+# #266 lifecycle: a structured, append-only log of every phase/step
+# boundary. Each entry says which step ran (human label + real phase),
+# whether it STARTed / ENDed / errored, how long it took, and WHERE its
+# artifacts landed on disk. Surface these lines in chat verbatim so the
+# operator can tell — without reading the run log — that a phase ran, where
+# its outputs went, and which artifact feeds the next phase.
+#
+# Reading tip: step-level events pair up. A START with no matching END for
+# the same step means that step is still running (or died without
+# finishing); an ERROR means the handler raised. Two rows intentionally do
+# NOT pair: (a) phase-boundary rows use status ENTER (step == the phase
+# name) and are point-in-time "entered <phase>" markers — the next phase's
+# ENTER implies the previous one finished, so they never get an END; and
+# (b) a lone END with no START is a step that produced a response without
+# running its handler (detail=cache_hit when served from the trace_analyze
+# cache, detail=rejected when an integrate hit an already-exhausted patch).
+# Follow the printed artifact paths to inspect intermediates during
+# execution (e.g. the TraceLens run dir that contains analysis.md /
+# kernel_candidates.json / agent_transcript.jsonl).
+events = s.get("lifecycle") or []
+print(f"\n--- lifecycle (last 12 of {len(events)}) ---")
+for e in events[-12:]:
+    dur = f" {e['duration_s']}s" if e.get("duration_s") is not None else ""
+    detail = f" [{e['detail']}]" if e.get("detail") else ""
+    arts = " ".join(f"{k}={v}" for k, v in (e.get("artifacts") or {}).items())
+    line = (f"#{e.get('seq')} {e.get('label')} [{e.get('phase')}] "
+            f"{e.get('status')}{dur}{detail}")
+    if arts:
+        line += f" -> {arts}"
+    print(line)
 PY
 ```
+
+The `label` column uses the simplified pipeline names from #266 (TraceLens /
+GEAK / Integrate / Validate / Report); the `[phase]` column carries the exact
+coordinator phase (`PRELUDE` … `CLOSE`) so both naming dimensions are visible.
 
 Recent action counts from SQLite (last 500 events grouped by category):
 
