@@ -1524,6 +1524,19 @@ def _seed_shared_state(
     *,
     session_id: str,
 ) -> SharedState:
+    """Construct and persist the initial :class:`SharedState` for a run.
+
+    Seeds the state from parsed CLI args, clamping the research-lane
+    capacity to a safe range to protect quota and the PR-Monitor.
+
+    Args:
+        session_dir: Directory for the new session.
+        args: Parsed CLI arguments.
+        session_id: Identifier assigned to the session.
+
+    Returns:
+        The seeded :class:`SharedState` instance.
+    """
     # research_lane capacity is locked for the session; clamp to [0, ceiling] (2×GPU) to protect quota/PR-Monitor.
     from inference_optimizer.orchestrator.policy import (
         research_lane_ceiling,
@@ -3442,6 +3455,17 @@ def _export_workload_envs_for_optimize(
 
 
 async def _run_optimize(args: argparse.Namespace) -> int:
+    """Run the ``optimize`` subcommand end to end.
+
+    Resolves topology arguments (nodes, TP/EP, GPUs per node), runs
+    preflight, and drives the optimization session to completion.
+
+    Args:
+        args: Parsed CLI arguments for the ``optimize`` subcommand.
+
+    Returns:
+        Process exit code (``0`` on success).
+    """
     # Surface --nodes (CLI flag wins) before _preflight runs.
     nodes_resolved = max(1, int(args.nodes))
     tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
@@ -4324,6 +4348,11 @@ def _default_research_lane_capacity() -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the top-level CLI argument parser and subcommands.
+
+    Returns:
+        The configured :class:`argparse.ArgumentParser`.
+    """
     from inference_optimizer.orchestrator.specialist_domains import (
         DEFAULT_SPECIALIST_MAX_TURNS as _DEFAULT_SPECIALIST_MAX_TURNS,
     )
