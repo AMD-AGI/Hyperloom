@@ -405,6 +405,19 @@ compatibility output is gone with them). Downstream consumers read the
 canonical upstream path returned in `analysis_report_path` from
 `trace_analyze_handler`.
 
+### Candidate Export Contract
+
+Production hot-kernel candidates come from the TraceLens v0.3 `analysis.md`
+report only. Hyperloom parses the report tables into `kernel_candidates.json`;
+the generated `summary.json` is an audit sidecar and is not a candidate source.
+
+If the Executive Summary's idle gate fires, keep `hot_kernels=[]` and route to
+parameter/backends optimization; do not override the gate with duration data.
+If the idle gate does **not** fire and `analysis.md` contains measured GPU time
+but every parsed impact score is zero, treat impact attribution as missing and
+rank those `analysis.md` candidates by `duration_us` as a conservative fallback.
+Emit a `trace_health_warnings[]` entry when this fallback is used.
+
 ## Backend Selection
 
 User-specified backends win, subject to feasibility checks. If user does not

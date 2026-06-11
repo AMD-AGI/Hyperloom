@@ -123,6 +123,62 @@ def _build_high_idle_warning(
     }
 
 
+def rank_analysis_candidates_for_dispatch(
+    candidates: list[dict[str, Any]],
+    *,
+    top_k: int,
+    report_path: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Rank TraceLens ``analysis.md`` candidates for dispatch.
+
+    Normal path preserves TraceLens' report order (P-item priority, then
+    efficiency inside each P-item). Issue #434 covers the degraded path where
+    TraceLens emitted concrete measured rows (``duration_us`` > 0) but every
+    impact score is zero, usually because impact attribution collapsed under
+    cuda-graph / capture limitations. In that case, keep ``analysis.md`` as the
+    only candidate source but fall back to measured GPU time so Hyperloom does
+    not return an empty or arbitrary candidate list.
+    """
+    if not candidates:
+        return [], None
+
+    def _num(value: Any) -> float:
+        try:
+            return float(value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    has_measured_gpu_time = any(_num(c.get("duration_us")) > 0.0 for c in candidates)
+    all_impact_zero = all(
+        _num(c.get("impact_score")) <= 0.0
+        and _num(c.get("impact_score_low")) <= 0.0
+        and _num(c.get("impact_score_high")) <= 0.0
+        for c in candidates
+    )
+    if not has_measured_gpu_time or not all_impact_zero:
+        return candidates[:top_k], None
+
+    ranked = sorted(
+        candidates,
+        key=lambda c: _num(c.get("duration_us")),
+        reverse=True,
+    )[:top_k]
+    warning = {
+        "code": "analysis_md_zero_impact_duration_fallback",
+        "severity": "warning",
+        "source": str(report_path),
+        "candidate_count": len(candidates),
+        "selected_count": len(ranked),
+        "message": (
+            "TraceLens analysis.md contained measured GPU kernel time, but "
+            "all impact scores were zero. Hyperloom kept analysis.md as the "
+            "candidate source and ranked candidates by duration_us as a "
+            "conservative fallback."
+        ),
+    }
+    return ranked, warning
+
+
 def _build_trace_split_warning(
     *, trace_input: Path, split_dir: Path, split_rc: int,
     mixed_count: int, decode_count: int, prefilldecode_count: int,
@@ -3215,10 +3271,39 @@ def main() -> int:
                                 "below gate, continuing with kernel "
                                 "candidate extraction",
                             )
-                        report_cands = parse_analysis_md(
+                        report_cands_initial = parse_analysis_md(
                             skill_result.report_path, args.top_k,
                         )
+                        report_cands = report_cands_initial
                         if report_cands:
+                            # Issue #434: when TraceLens impact attribution
+                            # collapses to zero for every row but analysis.md
+                            # still reports measured GPU time, do not read the
+                            # summary.json sidecar. Keep analysis.md as the
+                            # source of truth and rank a wider parsed pool by
+                            # duration_us so the original top_k parse does not
+                            # discard the heaviest rows before fallback.
+                            fallback_pool = parse_analysis_md(
+                                skill_result.report_path,
+                                max(args.top_k, 1000),
+                            )
+                            report_cands, fallback_warning = (
+                                rank_analysis_candidates_for_dispatch(
+                                    fallback_pool,
+                                    top_k=args.top_k,
+                                    report_path=skill_result.report_path,
+                                )
+                            )
+                            if fallback_warning is not None:
+                                trace_health_warnings.append(fallback_warning)
+                                append_log(
+                                    log_path,
+                                    "TraceLens analysis.md impact scores were "
+                                    "all zero despite measured GPU time; "
+                                    "ranking candidates by duration_us "
+                                    f"(selected {len(report_cands)} of "
+                                    f"{len(fallback_pool)}).",
+                                )
                             raw_agent_candidates = report_cands
                             report_source = "analysis.md"
                         else:

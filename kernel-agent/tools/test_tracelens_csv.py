@@ -1354,6 +1354,61 @@ def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
     )
 
 
+def test_duration_fallback_orders_all_zero_impact_candidates_by_gpu_time():
+    """Issue #434: when TraceLens emits candidates but all impact scores are
+    zero, Hyperloom should keep analysis.md as the source of truth but fall
+    back to measured GPU time rather than preserving an arbitrary P-item order."""
+    candidates = [
+        {
+            "name": "small_gemm",
+            "duration_us": 100.0,
+            "impact_score": 0.0,
+            "impact_score_low": 0.0,
+            "impact_score_high": 0.0,
+        },
+        {
+            "name": "large_gemm",
+            "duration_us": 900.0,
+            "impact_score": 0.0,
+            "impact_score_low": 0.0,
+            "impact_score_high": 0.0,
+        },
+        {
+            "name": "medium_gemm",
+            "duration_us": 500.0,
+            "impact_score": 0.0,
+            "impact_score_low": 0.0,
+            "impact_score_high": 0.0,
+        },
+    ]
+
+    ranked, warning = tla.rank_analysis_candidates_for_dispatch(
+        candidates, top_k=2, report_path=Path("/tmp/analysis.md"),
+    )
+
+    assert [c["name"] for c in ranked] == ["large_gemm", "medium_gemm"]
+    assert warning is not None
+    assert warning["code"] == "analysis_md_zero_impact_duration_fallback"
+    assert warning["candidate_count"] == 3
+    assert warning["selected_count"] == 2
+
+
+def test_duration_fallback_keeps_existing_order_when_any_impact_is_positive():
+    """A positive impact score means TraceLens did provide an impact ranking;
+    do not override it with a pure duration sort."""
+    candidates = [
+        {"name": "short_high_impact", "duration_us": 100.0, "impact_score": 2.0},
+        {"name": "long_zero_impact", "duration_us": 900.0, "impact_score": 0.0},
+    ]
+
+    ranked, warning = tla.rank_analysis_candidates_for_dispatch(
+        candidates, top_k=10, report_path=Path("/tmp/analysis.md"),
+    )
+
+    assert [c["name"] for c in ranked] == ["short_high_impact", "long_zero_impact"]
+    assert warning is None
+
+
 # normalize_upstream_category — TraceLens orchestrator_prepare.py enum (#155 #4)
 @pytest.mark.parametrize("raw,expected", [
     ("gemm", "GEMM"),
