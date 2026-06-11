@@ -82,6 +82,15 @@ class QuantSkillRunResult:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _read_counter(workspace: Path) -> int:
+    """Read the persisted requantize-attempt counter.
+
+    Args:
+        workspace: Run workspace holding the counter file.
+
+    Returns:
+        The current counter value, or ``0`` when the file is absent or
+        unreadable.
+    """
     f = workspace / _COUNTER_FILE
     if not f.is_file():
         return 0
@@ -92,6 +101,14 @@ def _read_counter(workspace: Path) -> int:
 
 
 def _bump_counter(workspace: Path) -> int:
+    """Increment and persist the requantize-attempt counter.
+
+    Args:
+        workspace: Run workspace holding the counter file.
+
+    Returns:
+        The new counter value after incrementing.
+    """
     n = _read_counter(workspace) + 1
     (workspace / _COUNTER_FILE).write_text(str(n), encoding="utf-8")
     return n
@@ -102,6 +119,15 @@ def _bump_counter(workspace: Path) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _resolve_interactive(interactive: bool | None) -> bool:
+    """Resolve the effective interactive mode.
+
+    Args:
+        interactive: Explicit mode, or ``None`` to auto-detect from the tty.
+
+    Returns:
+        The explicit value when provided, otherwise ``True`` only when both
+        stdin and stderr are attached to a tty.
+    """
     if interactive is not None:
         return interactive
     # Auto: only enable if stdin is a tty AND stderr is a tty (we use stderr
@@ -114,6 +140,15 @@ def _resolve_interactive(interactive: bool | None) -> bool:
 
 
 def _ask_operator(message: str) -> bool:
+    """Prompt the operator on stderr for a yes/no decision.
+
+    Args:
+        message: Question to display.
+
+    Returns:
+        ``True`` if the operator answers ``y``/``yes``; ``False`` otherwise,
+        including on EOF or interrupt.
+    """
     print(message, file=sys.stderr, flush=True)
     try:
         line = sys.stdin.readline()
@@ -364,6 +399,15 @@ def _build_failed_bootstrap_result(
 # Convenience sync wrapper for the CLI smoke path. The library entry remains
 # async to compose cleanly with the orchestrator's asyncio loop.
 def quantize_via_prompt_sync(prompt: str, **kwargs: Any) -> QuantSkillRunResult:
+    """Synchronous wrapper around :func:`quantize_via_prompt`.
+
+    Args:
+        prompt: Natural-language quantization request.
+        **kwargs: Keyword arguments forwarded to :func:`quantize_via_prompt`.
+
+    Returns:
+        The :class:`QuantSkillRunResult` produced by the async entry point.
+    """
     return asyncio.run(quantize_via_prompt(prompt, **kwargs))
 
 

@@ -119,6 +119,12 @@ _MAX_TOTAL_BYTES = 256 * 1024 * 1024  # 256 MB
 
 
 def _dest_root() -> Path:
+    """Resolve the destination root for session packages.
+
+    Returns:
+        The path from ``ENV_PACKAGE_DEST_ROOT`` when set, otherwise the
+        default destination root.
+    """
     override = (os.environ.get(ENV_PACKAGE_DEST_ROOT) or "").strip()
     return Path(override) if override else DEFAULT_DEST_ROOT
 
@@ -235,6 +241,19 @@ def _build_manifest(
     truncated: bool = False,
     dropped_files: list[str] | None = None,
 ) -> dict:
+    """Build the manifest dict describing a session package.
+
+    Args:
+        session_dir: Source session directory.
+        session_id: Identifier of the session.
+        included: ``(relative_path, size_bytes)`` pairs that were bundled.
+        missing_globs: Selection globs that matched no files.
+        truncated: Whether a size/count cap stopped the bundle short.
+        dropped_files: Files omitted due to truncation.
+
+    Returns:
+        A JSON-serializable manifest mapping.
+    """
     total = sum(sz for _, sz in included)
     return {
         "schema_version": PACKAGE_SCHEMA_VERSION,
@@ -254,6 +273,14 @@ def _build_manifest(
 
 
 def _manifest_text(manifest: dict) -> str:
+    """Render a manifest dict as a human-readable text summary.
+
+    Args:
+        manifest: Manifest mapping produced by :func:`_build_manifest`.
+
+    Returns:
+        A multi-line plain-text description of the package contents.
+    """
     lines = [
         "Hyperloom session artifact package",
         f"  session_id   : {manifest.get('session_id') or '?'}",

@@ -166,6 +166,17 @@ class RooflineExecutor:
         self.shared_state = shared_state
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Run the roofline action for the given context.
+
+        Performs a profile sub-step and feeds the resulting trace into
+        TraceLens analysis to produce a roofline characterization.
+
+        Args:
+            ctx: Runner context carrying the task and session metadata.
+
+        Returns:
+            A result dict describing the roofline outcome and artifacts.
+        """
         # atom: the profile sub-step produces *.pt.trace.json.gz that
         # TraceLens consumes unchanged, so this falls through to the
         # sglang/vllm path. Lazy imports keep shell-out/yaml off module load.
