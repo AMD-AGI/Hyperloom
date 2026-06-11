@@ -499,6 +499,192 @@ class KernelLifecycle(TypedDict, total=False):
     rejected: list[RejectedKernel]
 
 
+# §9b Kernel journey — kernel-major unified lifecycle view
+class KernelToolMetadata(TypedDict, total=False):
+    """Provenance for an external kernel tool (tracelens / geak / oob / kernel_agent).
+
+    Attributes:
+        tool (str): Tool/backend name (``tracelens`` / ``geak`` / ``claude`` / ...).
+        root_dir (str): Resolved tool root directory ("" when not resolvable).
+        commit (str): Short git commit of ``root_dir`` ("" when not a repo).
+        version (str): Tool-reported version string ("" when the tool did not
+            surface one).
+    """
+    tool: str
+    root_dir: str
+    commit: str
+    version: str
+
+
+class DiscoveredHotKernel(TypedDict, total=False):
+    """One hot kernel surfaced by a discovery run (projected onto the journey)."""
+    kernel_id: str
+    name: str
+    gpu_pct: float | None
+    time_ms: float | None
+    bound_type: str
+    arithmetic_intensity: float | None
+    reusable_native_kernel: bool
+    source_file: str | None
+    recommended_backends: list[str]
+    selected_for_optimization: bool
+
+
+class KernelDiscoveryRun(TypedDict, total=False):
+    """One hot-kernel discovery invocation (stage 1).
+
+    Attributes:
+        source (str): Discovery source (``tracelens`` / ``roofline`` / ...).
+        status (str): Run status (``success`` / ``failed``).
+        ts (str): ISO UTC timestamp of the run.
+        tool (KernelToolMetadata): Provenance of the discovery tool.
+        scan (dict[str, Any]): Scan inputs/outputs (``splitter_mode`` /
+            ``trace_dir`` / ``candidates_path`` / ``trace_report_path``).
+        hot_kernel_count (int): Number of hot kernels surfaced.
+        hot_kernels (list[DiscoveredHotKernel]): The surfaced hot kernels.
+        error (str | None): Failure text, or None on success.
+    """
+    source: str
+    status: str
+    ts: str
+    tool: KernelToolMetadata
+    scan: dict[str, Any]
+    hot_kernel_count: int
+    hot_kernels: list[DiscoveredHotKernel]
+    error: str | None
+
+
+class KernelDispatch(TypedDict, total=False):
+    """The dispatch decision for one kernel (stage 2).
+
+    Attributes:
+        kernel_id (str): Kernel identifier.
+        dispatched (bool): Whether any backend was dispatched.
+        backends (list[str]): Backends dispatched to.
+        skip_reason (str): Gate reason when not dispatched.
+        orchestration_commit (str): Orchestrator commit at dispatch time.
+        task_group (str | None): Task-group/correlation id, or None.
+        ts (str): ISO UTC timestamp of the decision.
+    """
+    kernel_id: str
+    dispatched: bool
+    backends: list[str]
+    skip_reason: str
+    orchestration_commit: str
+    task_group: str | None
+    ts: str
+
+
+class KernelBackendAttempt(TypedDict, total=False):
+    """One backend attempt for one kernel (stage 3).
+
+    Attributes:
+        kernel_id (str): Kernel identifier.
+        attempt_id (str): Attempt identifier (dedupe key across retries).
+        run_id (str): Kernel-agent run id the attempt belonged to.
+        backend (str): Backend that ran (``geak`` / ``claude`` / ``codex``).
+        model (str | None): Model used by the backend, or None.
+        ts (str): ISO UTC timestamp of the attempt.
+        status (str): Attempt status.
+        decision (str): KEEP / PARTIAL / REVERT / FAILED.
+        micro_speedup (float | None): Micro-benchmark speedup, or None.
+        compile_passed (bool | None): Whether compilation passed, or None.
+        correctness_passed (bool | None): Whether correctness passed, or None.
+        optimized_files (list[str]): Optimized artifact paths.
+        error (str | None): Failure text, or None.
+        duration_sec (float | None): Wall-clock seconds the attempt ran, or None.
+        tool (KernelToolMetadata): Provenance of the backend tool.
+    """
+    kernel_id: str
+    attempt_id: str
+    run_id: str
+    backend: str
+    model: str | None
+    ts: str
+    status: str
+    decision: str
+    micro_speedup: float | None
+    compile_passed: bool | None
+    correctness_passed: bool | None
+    optimized_files: list[str]
+    error: str | None
+    duration_sec: float | None
+    tool: KernelToolMetadata
+
+
+class KernelE2E(TypedDict, total=False):
+    """The end-to-end integrate outcome for one kernel (stage 4).
+
+    Attributes:
+        kernel_id (str): Kernel identifier.
+        integrated (bool): Whether the optimization was integrated into the stack.
+        e2e_gain_pct (float | None): Validated end-to-end gain percent (negative
+            => regressed and reverted), or None.
+        validated (bool | None): Whether the integrate was validated, or None.
+        decision (str): KEEP / REVERT / REJECTED.
+        patch_path (str | None): Adopted patch path, or None.
+        target_file (str | None): File the patch applies to, or None.
+        extra_server_args (str): Server-arg fragment introduced by the adoption.
+        ts (str): ISO UTC timestamp of the integrate decision.
+    """
+    kernel_id: str
+    integrated: bool
+    e2e_gain_pct: float | None
+    validated: bool | None
+    decision: str
+    patch_path: str | None
+    target_file: str | None
+    extra_server_args: str
+    ts: str
+
+
+class KernelJourneyEntry(TypedDict, total=False):
+    """One kernel's full lifecycle, joined across the four stages.
+
+    Attributes:
+        kernel_id (str): Kernel identifier.
+        name (str): Kernel name (from discovery).
+        gpu_pct (float | None): Share of total GPU time (from discovery), or None.
+        bound_type (str): Bottleneck class (from discovery).
+        source_file (str | None): Source file (from discovery), or None.
+        discovery (DiscoveredHotKernel): Stage-1 discovery snapshot.
+        dispatch (KernelDispatch): Stage-2 dispatch decision.
+        backend_attempts (list[KernelBackendAttempt]): Stage-3 backend attempts.
+        e2e (KernelE2E): Stage-4 end-to-end integrate outcome.
+        outcome (str): Coarse rollup (``adopted`` / ``reverted`` / ``attempted``
+            / ``dispatched`` / ``skipped`` / ``discovered``).
+    """
+    kernel_id: str
+    name: str
+    gpu_pct: float | None
+    bound_type: str
+    source_file: str | None
+    discovery: DiscoveredHotKernel
+    dispatch: KernelDispatch
+    backend_attempts: list[KernelBackendAttempt]
+    e2e: KernelE2E
+    outcome: str
+
+
+class KernelJourney(TypedDict, total=False):
+    """Kernel-major unified lifecycle view.
+
+    Consolidates what was previously scattered across ``kernel_roofline``,
+    ``geak_invocations`` / ``oob_invocations``, ``kernel_lifecycle`` and the
+    attribution sections into a single per-kernel record threading discovery ->
+    dispatch -> backend attempts -> end-to-end integrate. Composed at assembly
+    from four recorder substreams; empty/absent on sessions that predate them.
+
+    Attributes:
+        discovery_runs (list[KernelDiscoveryRun]): Every discovery invocation,
+            with tool provenance and the hot kernels each surfaced.
+        kernels (list[KernelJourneyEntry]): Per-kernel lifecycle, sorted by
+            ``gpu_pct`` descending.
+    """
+    discovery_runs: list[KernelDiscoveryRun]
+    kernels: list[KernelJourneyEntry]
+
+
 # §10 Param search
 class ParamSearchEntry(TypedDict, total=False):
     """One candidate variant from ``explore_search.{tested,accepted,rejected}``.
@@ -1559,6 +1745,11 @@ class SessionBreakdown(TypedDict, total=False):
     # regardless. ``enabled`` is False (with a ``disabled_reason``) on the
     # default path where HYPERLOOM_LANGFUSE_ENABLE is off.
     langfuse: LangfusePush
+    # Kernel-major unified lifecycle view (discovery -> dispatch -> backend
+    # attempts -> e2e). Additive optional section composed from recorder
+    # substreams; empty {} on sessions that predate it, so v1/v2 readers that
+    # don't know it simply ignore it.
+    kernel_journey: KernelJourney
 
     warnings: list[str]
     source_files: SourceFiles
@@ -1581,6 +1772,14 @@ __all__ = [
     "DecisionTrace",
     "DecisionTraceEntry",
     "DetectedKernel",
+    "DiscoveredHotKernel",
+    "KernelBackendAttempt",
+    "KernelDiscoveryRun",
+    "KernelDispatch",
+    "KernelE2E",
+    "KernelJourney",
+    "KernelJourneyEntry",
+    "KernelToolMetadata",
     "LangfuseConfig",
     "LangfusePush",
     "LangfusePushCounts",

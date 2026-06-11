@@ -256,6 +256,12 @@ def build(
                                         ),
                                         warnings,
                                         default={})
+    # Kernel-major lifecycle view (discovery -> dispatch -> backend attempts ->
+    # e2e), composed by the recorder assembler from its four item substreams.
+    # Pure recorder section (no collector fallback): empty {} on sessions that
+    # predate the substreams, so v1/v2 readers that don't know it just ignore
+    # it and historical breakdowns stay byte-for-byte identical.
+    kernel_journey     = _pick("kernel_journey", {})
 
     source_files = collectors.collect_source_files(
         sd,
@@ -320,6 +326,10 @@ def build(
         # ``disabled_reason``) on the default path. Local jsonl ledger is
         # always written regardless.
         "langfuse":            langfuse,
+        # Kernel-major lifecycle view (discovery -> dispatch -> backend
+        # attempts -> e2e), composed from the recorder substreams. Additive,
+        # optional; empty {} on sessions that predate the substreams.
+        "kernel_journey":      kernel_journey,
 
         "warnings":            warnings,
         "source_files":        source_files,

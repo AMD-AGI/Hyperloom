@@ -27,6 +27,10 @@ from . import instrument
 from .assembler import assemble_parts, has_parts, parts_dir
 from .instrument import (
     record_critic_iteration,
+    record_kernel_backend_result,
+    record_kernel_discovery,
+    record_kernel_dispatch,
+    record_kernel_e2e,
     record_kernel_invocations,
     record_phase_event,
     record_robustness_signal,
@@ -53,6 +57,10 @@ __all__ = [
     "instrument",
     "parts_dir",
     "record_critic_iteration",
+    "record_kernel_backend_result",
+    "record_kernel_discovery",
+    "record_kernel_dispatch",
+    "record_kernel_e2e",
     "record_kernel_invocations",
     "record_phase_event",
     "record_robustness_signal",
