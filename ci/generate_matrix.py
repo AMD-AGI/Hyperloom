@@ -11,7 +11,14 @@ import yaml
 
 
 def _entry_key(m: dict) -> str:
-    """Effective matrix/filter key: explicit `key` field overrides `inferenceX_key`."""
+    """Return the effective matrix/filter key for a model entry.
+
+    Args:
+        m: A model config entry.
+
+    Returns:
+        The explicit ``key`` field when set, otherwise ``inferenceX_key``.
+    """
     return m.get("key") or m["inferenceX_key"]
 
 
