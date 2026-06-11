@@ -115,35 +115,6 @@ def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
     return out
 
 
-# F3-4 — saturation per direction (soft advisory feed)
-#: Direction → Executive Summary label aliases; missing labels degrade to ``0.0``.
-_SATURATION_LABEL_MAP: dict[str, tuple[str, ...]] = {
-    "compute": ("Compute %", "Compute Bound %", "Compute Bound"),
-    "memory": ("Memory %", "Memory Bound %", "Memory Bound"),
-    "host_overhead": ("Idle %", "Host Overhead %", "GPU Idle %"),
-    "comm": ("Exposed Communication %", "Communication %", "Comm %"),
-}
-
-#: Saturation threshold (%) above which the advisory surfaces a direction (single source for renderer + tests).
-SATURATION_ADVISORY_THRESHOLD_PCT: float = 80.0
-
-
-def derive_saturation_per_direction(analysis_md_text: str) -> dict[str, float]:
-    """Return ``{direction: saturation_pct}`` for the four canonical directions (F3-4 Roofline-v2; missing/unparseable degrades to ``0.0``)."""
-    out: dict[str, float] = {k: 0.0 for k in _SATURATION_LABEL_MAP}
-    if not analysis_md_text:
-        return out
-    rows = _parse_executive_table(analysis_md_text)
-    for direction, aliases in _SATURATION_LABEL_MAP.items():
-        for alias in aliases:
-            raw = rows.get(alias)
-            pct = _parse_pct(raw)
-            if pct is not None:
-                out[direction] = float(pct)
-                break
-    return out
-
-
 def _tracelens_dir_for_analysis_md(analysis_md_path: Path) -> Path:
     """Return the TraceLens output directory containing an ``analysis.md``.
 
@@ -370,74 +341,6 @@ def build_roofline_comparison_from_history(
             "comm_pct": _num_delta(
                 latest.get("comm_pct"), baseline.get("comm_pct"),
             ),
-            "top_kernel_efficiency_pct": _num_delta(lat_eff, base_eff),
-            "within_roofline_pct": _num_delta(
-                latest.get("within_roofline_pct"),
-                baseline.get("within_roofline_pct"),
-            ),
-            # Dashboard's main "X% within roofline" delta (negative = closer to ceiling).
-            "gap_to_roofline_pct": _num_delta(
-                latest.get("gap_to_roofline_pct"),
-                baseline.get("gap_to_roofline_pct"),
-            ),
-        }
-    return out
-
-
-def build_roofline_comparison(
-    baseline_meta: dict[str, Any],
-    latest_meta: dict[str, Any],
-) -> dict[str, Any] | None:
-    """Build ``roofline_comparison`` block for ``final.json``.
-
-    Args:
-        baseline_meta (dict[str, Any]): Baseline snapshot metadata (must carry
-            ``analysis_md_path`` / ``ts`` / ``snapshot_id``).
-        latest_meta (dict[str, Any]): Latest snapshot metadata.
-
-    Returns:
-        dict[str, Any] | None: The comparison block, or ``None`` when neither
-            side has an ``analysis_md_path``.
-    """
-    base_path = str(baseline_meta.get("analysis_md_path") or "")
-    latest_path = str(latest_meta.get("analysis_md_path") or "")
-    if not base_path and not latest_path:
-        return None
-
-    baseline = build_roofline_snapshot(
-        snapshot_id=_snapshot_id_from_meta(baseline_meta),
-        ts=str(baseline_meta.get("ts") or ""),
-        analysis_md_path=base_path,
-    )
-    latest = build_roofline_snapshot(
-        snapshot_id=_snapshot_id_from_meta(latest_meta),
-        ts=str(latest_meta.get("ts") or ""),
-        analysis_md_path=latest_path or base_path,
-    )
-
-    same_snapshot = (
-        base_path == latest_path
-        or (
-            isinstance(baseline.get("snapshot_id"), int)
-            and isinstance(latest.get("snapshot_id"), int)
-            and baseline["snapshot_id"] == latest["snapshot_id"]
-        )
-    )
-    mode = "single_snapshot" if same_snapshot else "before_after"
-
-    out: dict[str, Any] = {
-        "mode": mode,
-        "baseline": baseline,
-        "latest": latest,
-    }
-
-    if mode == "before_after":
-        base_eff = (baseline.get("top_kernel") or {}).get("efficiency_pct")
-        lat_eff = (latest.get("top_kernel") or {}).get("efficiency_pct")
-        out["delta"] = {
-            "compute_pct": _num_delta(latest.get("compute_pct"), baseline.get("compute_pct")),
-            "idle_pct": _num_delta(latest.get("idle_pct"), baseline.get("idle_pct")),
-            "comm_pct": _num_delta(latest.get("comm_pct"), baseline.get("comm_pct")),
             "top_kernel_efficiency_pct": _num_delta(lat_eff, base_eff),
             "within_roofline_pct": _num_delta(
                 latest.get("within_roofline_pct"),
