@@ -479,7 +479,7 @@ class KernelAgentToolTests(unittest.TestCase):
                 "--test-harness-path", str(harness),
                 "--e2e-gain-pct", "1.5",
                 "--accuracy-passed", "true",
-                # Need >= 1.50x microbench to clear KEEP threshold.
+                # Well above the 1.05x KEEP threshold (issue #442).
                 "--micro-speedup", "1.6",
                 "--dry-run",
             ], workspace=workspace)

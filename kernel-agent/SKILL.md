@@ -111,7 +111,7 @@ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
 - GEAK cross-session memory env; by default Hyperloom stores GEAK's SQLite
   memory DB at `/wekafs/hyperloom/geak-memory/memory.db`, enables
   `GEAK_SAVE_TO_KNOWLEDGE_BASE=1`, and aligns
-  `GEAK_MEMORY_MIN_SPEEDUP=1.20` with the KEEP gate.
+  `GEAK_MEMORY_MIN_SPEEDUP=1.05` with the KEEP gate.
 - OOB CLI + claude/codex npm CLIs + `@cursor/sdk` global install +
   `~/.claude/config.json` (`customApiUrl` pointed at the upstream
   Anthropic URL derived from `$OPENAI_BASE_URL` with a trailing `/v1`
@@ -465,12 +465,12 @@ than a silent skip.
 
 ## Optimization Goals & Time Budget
 
-- **Target speedup**: `>= 1.20x` on the dominant inference shape(s). Below this
+- **Target speedup**: `>= 1.05x` on the dominant inference shape(s). Below this
   threshold an attempt is `NEEDS_REVIEW` (marginal / shape-specific / risky),
   not `KEEP`. (Prompt still tells agents to aim for `>= 1.50x` to incentivise
-  ambitious optimization, but the KEEP gate is 1.20x because real inference
-  wins are often shape-specific 1.18-1.32x — see r19 GEMM 1.32x, r39 GEAK
-  rms_norm 1.18x.)
+  ambitious optimization, but the KEEP gate is 1.05x (issue #442) because real
+  inference wins are often shape-specific 1.18-1.32x — see r19 GEMM 1.32x, r39
+  GEAK rms_norm 1.18x — and even smaller wins are worth keeping.)
 - **Default budget**:
   - claude / codex / cursor: **60 minutes** per attempt (`--backend-budget-min 60`)
   - GEAK: tracks `$GEAK_RUN_MODE` (set by `install.sh`, exported via
@@ -570,7 +570,7 @@ Return one of `KEEP`, `PARTIAL`, `NEEDS_REVIEW`, or `REVERT`.
 `KEEP` requires ALL evidence:
 - compile/import pass
 - correctness pass
-- microbench speedup `>= 1.20x` (the gate threshold) with `micro_speedup_source`
+- microbench speedup `>= 1.05x` (the gate threshold) with `micro_speedup_source`
   in `{"report_scan", "cli_override"}` (i.e. a real measurement, not a default)
 - E2E does not regress
 - accuracy gate passed or accuracy risk is explicitly zero
@@ -582,7 +582,7 @@ budget boundary, sandbox couldn't rebuild the .so for A/B, GEAK sub-agent
 out-of-time. A human reviewer can read the report and salvage.
 
 `NEEDS_REVIEW` is returned when the attempt completed and produced a measured
-speedup in `(1.0x, 1.20x)` — improvement exists but doesn't meet the gate,
+speedup in `(1.0x, 1.05x)` — improvement exists but doesn't meet the gate,
 needs human judgement on shape coverage / risk.
 
 `REVERT` is returned for `compile fail`, `microbench did not improve`
