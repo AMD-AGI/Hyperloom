@@ -3249,7 +3249,7 @@ def main() -> int:
     parser.add_argument("--session-id", default="")
     parser.add_argument("--model-name", default="")
     parser.add_argument("--framework", default="")
-    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--target-platform", default="MI355X")
     parser.add_argument("--analysis-mode", default="default")
     parser.add_argument("--runtime-env", default="local")

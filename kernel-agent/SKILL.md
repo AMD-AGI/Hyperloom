@@ -200,7 +200,7 @@ python "$REPO_ROOT/kernel-agent/tools/tracelens_analysis.py" \
   --session-id "$SESSION_ID" \
   --model-name "$MODEL_NAME" \
   --framework "$FRAMEWORK" \
-  --top-k "${TOP_K:-10}"
+  --top-k "${TOP_K:-3}"
 ```
 
 `--workspace-path` defaults to `${USER_DATA_PATH:-/workspace/hyperloom}` so
