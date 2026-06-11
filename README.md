@@ -92,7 +92,7 @@ docker run -d \
   --group-add video \
   -v /path/to/workspace:/workspace \
   -v /path/to/models:/models \
-  harbor.core42.example-internal-host.invalid/proxy/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix \
+  primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix \
   tail -f /dev/null
 ```
 
