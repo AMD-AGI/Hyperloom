@@ -65,7 +65,18 @@ def resolve_threshold(
     *,
     acceptable_eval_gap: float | None,
 ) -> tuple[float, str]:
-    """Return ``(threshold, source)`` per §3.1 priority chain."""
+    """Resolve the eval-gap threshold per the §3.1 priority chain.
+
+    Args:
+        workspace: Workspace directory that may hold a threshold override
+            file.
+        acceptable_eval_gap: Explicit threshold argument; takes precedence
+            when provided.
+
+    Returns:
+        A ``(threshold, source)`` tuple where ``source`` is ``"arg"``,
+        ``"file"``, or ``"default"``.
+    """
 
     if acceptable_eval_gap is not None:
         return float(acceptable_eval_gap), "arg"
