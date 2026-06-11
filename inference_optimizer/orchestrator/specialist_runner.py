@@ -836,6 +836,22 @@ class SpecialistRunner:
             turn=1,
             metadata=sub_result.usage,
         )
+        # Full-trace B1 conversation: pair the parent-held prompt (the CLI
+        # never echoes it into the stream-json log) with the assistant reply
+        # the dispatcher recovered from process.log, so the production
+        # specialist turn lands in conversations.jsonl alongside the
+        # in-process path. No-op when no reply text was recovered.
+        if sub_result.response:
+            self._record_specialist_conversation(
+                task_id=ctx.task.task_id,
+                turn=1,
+                metadata={
+                    "prompt": (
+                        prep.system_prompt + "\n---\n" + prep.user_prompt
+                    ),
+                    "response": sub_result.response,
+                },
+            )
         self._write_heartbeat(
             workspace, turn=1, max_turns=prep.max_turns, status="finished",
         )
