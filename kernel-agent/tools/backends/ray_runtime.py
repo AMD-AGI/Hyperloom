@@ -37,6 +37,12 @@ def _fd_limit_warn(msg: str) -> None:
 
 
 def _min_nofile_target() -> int:
+    """Return the target soft RLIMIT_NOFILE value.
+
+    Returns:
+        The positive integer from ``RAY_MIN_NOFILE`` when set, otherwise
+        ``DEFAULT_MIN_NOFILE``.
+    """
     raw = os.environ.get("RAY_MIN_NOFILE", "").strip()
     if raw.isdigit() and int(raw) > 0:
         return int(raw)
@@ -313,6 +319,7 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
     runtime_env = safe_runtime_env()
 
     def _init() -> None:
+        """Call ``ray.init`` with stdout suppressed and standard options."""
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             ray.init(

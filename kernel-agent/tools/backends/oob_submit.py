@@ -227,6 +227,26 @@ def run_via_ray(agent: str, prompt_file: Path, output_dir: Path, source_file: st
     def _task(agent: str, prompt_file_str: str, output_dir_str: str,
               source_file: str, max_turns: int, timeout_s: int,
               extra_files: list[str], system_prompt: str) -> dict:
+        """Run one out-of-box (OOB) agent attempt inside a Ray worker.
+
+        Self-contained because Ray workers do not inherit the driver's
+        ``sys.path``; GPU visibility and compile caches are set up here.
+
+        Args:
+            agent: Agent identifier to run.
+            prompt_file_str: Path to the prompt file.
+            output_dir_str: Output directory for this attempt.
+            source_file: Path to the kernel source file.
+            max_turns: Maximum agent turns.
+            timeout_s: Per-attempt timeout in seconds.
+            extra_files: Additional files to make available to the agent.
+            system_prompt: System prompt text for the run.
+
+        Returns:
+            A result dict with ``returncode``, ``stdout``/``stdout_tail``,
+            ``stderr_tail``, ``gpu_ids``, ``elapsed_s``, and ``cmd`` (return
+            code ``127`` when the ``oob`` CLI is missing on the worker).
+        """
         # Self-contained: workers don't share the driver sys.path.
         import os as _os, shutil as _shutil, subprocess as _sp, time as _t
         if not _shutil.which("oob"):
