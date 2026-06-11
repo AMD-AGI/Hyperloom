@@ -1205,7 +1205,7 @@ def _grep_for_keyword(keyword: str, root: Path) -> list[Path]:
     return paths
 
 
-def _rank_paths(paths: list[Path]) -> list[Path]:
+def _rank_paths(paths: list[Path], keyword: str = "") -> list[Path]:
     """Sort candidate source paths by likely relevance.
 
     Prefers real source repos over installed wheels and over optimized /
@@ -1213,22 +1213,15 @@ def _rank_paths(paths: list[Path]) -> list[Path]:
 
     Args:
         paths (list[Path]): Candidate source paths to rank.
+        keyword (str): The search keyword; files whose stem contains it rank higher.
 
     Returns:
         list[Path]: ``paths`` sorted best-first.
     """
-    def score(path: Path) -> tuple[int, int, int]:
-        """Compute the sort score for a single candidate path.
+    kw_lower = keyword.lower()
 
-        Args:
-            path (Path): Candidate source path.
-
-        Returns:
-            tuple[int, int, int]: ``(kind_score, ext_score, depth_penalty)``;
-                lower tuples sort earlier (more relevant).
-        """
+    def score(path: Path) -> tuple[int, int, int, int]:
         s = str(path)
-        # Prefer real source repos over installed wheels and over optimized variants.
         depth_penalty = s.count("/")
         kind_score = 0
         if "/csrc/" in s:
@@ -1238,7 +1231,14 @@ def _rank_paths(paths: list[Path]) -> list[Path]:
         if "/site-packages/" in s:
             kind_score += 2
         ext_score = {".cuh": 0, ".cu": 0, ".hip": 0, ".cpp": 1, ".h": 2, ".hpp": 2, ".py": 3}.get(path.suffix, 4)
-        return (kind_score, ext_score, depth_penalty)
+        # Prefer files whose stem directly matches the keyword over incidental mentions.
+        name_match = 0 if (kw_lower and kw_lower in path.stem.lower()) else 1
+        # Penalize include headers and pybind wrappers (less likely to be the kernel impl).
+        if "/include/" in s:
+            kind_score += 1
+        if "/pybind/" in s:
+            kind_score += 2
+        return (name_match, kind_score, ext_score, depth_penalty)
 
     return sorted(paths, key=score)
 
@@ -1262,7 +1262,7 @@ def locate_source_via_grep(name: str) -> str:
         for root in KNOWN_SEARCH_ROOTS:
             hits.extend(_grep_for_keyword(keyword, Path(root)))
         if hits:
-            ranked = _rank_paths(hits)
+            ranked = _rank_paths(hits, keyword=keyword)
             return str(ranked[0])
     return ""
 
@@ -1482,6 +1482,11 @@ _AITER_COMPILE_OPS_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("moe_align_block_size", ("csrc/kernels/moe_align_block_size_kernels.cu",)),
     # moe_fused_gate — gating + top-k in fused form.
     ("moe_fused_gate", ("csrc/kernels/moe_fused_gate.cu",)),
+    # rmsnorm — fused add + rmsnorm + quantization kernel (dense / MoE shared).
+    ("rmsnorm", (
+        "csrc/kernels/rmsnorm_quant_kernels.cu",
+        "csrc/py_itfs_ck/rmsnorm_ck_kernels.cu",
+    )),
 )
 
 # Fallback aiter editable-checkout root when find_repo_root can't resolve from a wheel-install wrapper (no csrc/).
@@ -2032,16 +2037,15 @@ def _category_analysis_command(
     return cmd
 
 
-def _raise_on_empty_failed_deterministic_pipeline(
+def _raise_on_failed_deterministic_pipeline(
     det_rc: int,
-    raw_candidates: list[dict[str, Any]],
 ) -> None:
-    """Fail deterministic route when the TraceLens toolchain failed and yielded no usable candidates."""
-    if det_rc == 0 or raw_candidates:
+    """Fail deterministic route on any TraceLens deterministic toolchain error."""
+    if det_rc == 0:
         return
     raise RuntimeError(
-        "Deterministic TraceLens pipeline failed before producing hot-kernel "
-        f"candidates (rc={det_rc}); refusing to return empty hot_kernels[]. "
+        "Deterministic TraceLens pipeline failed "
+        f"(rc={det_rc}); refusing to return partial hot_kernels[]. "
         "Inspect the tracelens/ artifacts and logs."
     )
 
@@ -2129,7 +2133,8 @@ def _run_deterministic_tracelens_steps(
     priority_cmd = [
         sys.executable, "-c",
         f"from TraceLens.Agent.Analysis.utils.report_utils import "
-        f"generate_priority_data; generate_priority_data('{output_dir}')",
+        f"generate_priority_data; "
+        f"generate_priority_data({str(output_dir)!r})",
     ]
     rc = run_command(priority_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s)
     if rc != 0:
@@ -2192,6 +2197,18 @@ def _resolve_source_file_from_kernel_path(kernel_path: str) -> str:
     resolved = _resolve_launcher_to_abs_source(kernel_path)
     if resolved is not None:
         return resolved[0]
+    # Fallback: TraceLens launcher paths for aiter ops are relative to the
+    # aiter package dir (e.g. "ops/rmsnorm.py" → /sgl-workspace/aiter/aiter/ops/rmsnorm.py).
+    # Try known framework package roots when the head segment isn't a top-level package.
+    if raw_path and not os.path.isabs(raw_path):
+        _PACKAGE_INNER_ROOTS = (
+            "/sgl-workspace/aiter/aiter",
+            "/sgl-workspace/sglang/python/sglang",
+        )
+        for pkg_root in _PACKAGE_INNER_ROOTS:
+            candidate = os.path.join(pkg_root, raw_path)
+            if os.path.isfile(candidate):
+                return candidate
     return ""
 
 
@@ -3738,18 +3755,7 @@ def main() -> int:
                     raw_det_candidates = deterministic_extract_hot_kernels(
                         tracelens_dir, args.top_k,
                     )
-                    _raise_on_empty_failed_deterministic_pipeline(
-                        det_rc,
-                        raw_det_candidates,
-                    )
-                    if det_rc != 0:
-                        append_log(
-                            log_path,
-                            f"deterministic pipeline returned rc={det_rc}, "
-                            f"but {len(raw_det_candidates)} candidates were "
-                            "already available; continuing with partial "
-                            "structured results",
-                        )
+                    _raise_on_failed_deterministic_pipeline(det_rc)
                     if raw_det_candidates:
                         total_dur = sum(
                             float(c.get("duration_us") or 0)
