@@ -1106,6 +1106,7 @@ class Coordinator:
         )
         if str(state.phase or "").upper() == "EXPLORE":
             await self._maybe_enqueue_explore_research_scout()
+        await self._maybe_enqueue_trajectory_reviewer()
         if next_phase is None:
             return
         target, reason, evidence = next_phase
@@ -3427,6 +3428,74 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: EXPLORE re-dispatch failed")
 
+    async def _maybe_enqueue_trajectory_reviewer(self) -> None:
+        """On a plateau, dispatch a Coordinator-owned readonly specialist seeded
+        with the deterministic trajectory digest to propose fresh directions.
+
+        Gated by ``INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW`` (default off);
+        idempotent per macro-cycle. The specialist targets the dominant
+        bottleneck's domain so its proposals flow through the standard
+        specialist → explore pipeline. Fail-soft.
+        """
+        if os.getenv(
+            "INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW", "0",
+        ).strip().lower() not in ("1", "true", "on", "yes"):
+            return
+        state = self.shared_state
+        try:
+            plateau_active = bool(self._plateau_advisory_block())
+        except Exception:  # noqa: BLE001 — defensive
+            plateau_active = False
+        if not plateau_active:
+            return
+        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        try:
+            from . import trajectory_reviewer as _trajectory_reviewer
+            digest = _trajectory_reviewer.build_trajectory_digest(
+                self.session_dir, state,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            digest = ""
+        direction, _pct = self._dominant_roofline_direction()
+        from .roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
+        hint = BOTTLENECK_DOMAIN_HINTS.get(direction)
+        domain = hint[0] if hint else "serving_specialist"
+        params: dict[str, Any] = {
+            "domain": domain,
+            "gap_canonical_id": f"gap.trajectory_review.cycle{cycle}",
+            "gap_symptom": (
+                "The search has plateaued. Review the optimization trajectory "
+                "below and propose fresh, non-redundant directions (avoid the "
+                "exhausted ones).\n" + (digest or "(no digest)")
+            ),
+            "gap_layer": "research",
+            "max_turns": 8,
+            "source": "coordinator_internal",
+            "reason": "plateau_trajectory_review",
+            "readonly": True,
+        }
+        if digest:
+            params["gap_evidence"] = {"trajectory_review": digest}
+        await self._warm_specialist_params(params)
+        try:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind="specialist",
+                params=params,
+                idempotency_key=f"internal-trajectory-review-cycle{cycle}",
+                requires_lanes=["research_lane"],
+                allowed_tools=["Read", "Grep", "Glob"],
+                side_effects=["writes_results"],
+                lease_ttl_sec=1800,
+            )
+        except Exception:  # noqa: BLE001 — TaskRegistry edge cases
+            log.exception("trajectory-review: enqueue failed (cycle=%d)", cycle)
+            return
+        if not was_existing:
+            log.info(
+                "trajectory-review dispatched: task_id=%s cycle=%d domain=%s",
+                task.task_id, cycle, domain,
+            )
+
     def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
         """Persist scout output (hints, competitor target, gap seeds, dedup); all steps fail-soft."""
         from . import research_hints as _research_hints
@@ -4212,6 +4281,22 @@ class Coordinator:
             if plateau_block:
                 sections.append("=== Plateau advisory ===")
                 sections.append(plateau_block)
+
+            # On a plateau, review the whole lineage and surface candidate
+            # directions (exhausted directions to avoid + under-exploited
+            # bottleneck to push). Advisory; never gates phase advance.
+            if plateau_block:
+                try:
+                    from . import trajectory_reviewer as _trajectory_reviewer
+                    trajectory_block = _trajectory_reviewer.build_trajectory_digest(
+                        self.session_dir, self.shared_state,
+                    )
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception("Coordinator: trajectory review failed")
+                    trajectory_block = ""
+                if trajectory_block:
+                    sections.append("=== Trajectory review (advisory) ===")
+                    sections.append(trajectory_block)
 
             # R3: cyclic bottleneck-redirect advisory (next-cycle re-targeting).
             try:
@@ -5911,44 +5996,14 @@ class Coordinator:
         )
         return "\n".join(lines)
 
-    #: Map a dominant roofline direction → (specialist domain key, kb tag) so
-    #: the R3 redirect advisory can name a concrete dispatch target. Advisory
-    #: only — Orchestration still chooses the actual domain.
-    _BOTTLENECK_DOMAIN_HINTS: dict[str, tuple[str, str]] = {
-        "comm": ("comm_specialist", "communication"),
-        "host_overhead": ("system_specialist", "systems"),
-        "idle": ("system_specialist", "systems"),
-        "compute": ("kernel_switch_specialist", "kernel"),
-        "memory": ("serving_specialist", "framework"),
-    }
-
     def _dominant_roofline_direction(self) -> tuple[str, float]:
-        """Return ``(direction, pct)`` for the most-saturated roofline direction.
-
-        Reads the latest roofline snapshot's compute/idle/comm percentages plus
-        the bound kind; returns ``("", 0.0)`` when no snapshot is available.
-        """
+        """Return ``(direction, pct)`` for the most-saturated roofline direction
+        in the latest snapshot; ``("", 0.0)`` when no snapshot is available."""
+        from .roofline_snapshot import dominant_direction
         snaps = getattr(self.shared_state, "roofline_snapshots", None) or []
         if not snaps or not isinstance(snaps[-1], dict):
             return "", 0.0
-        latest = snaps[-1]
-        candidates: dict[str, float] = {}
-        for direction, key in (
-            ("compute", "compute_pct"),
-            ("idle", "idle_pct"),
-            ("comm", "comm_pct"),
-        ):
-            val = latest.get(key)
-            if isinstance(val, (int, float)):
-                candidates[direction] = float(val)
-        # Fold the memory/compute bound kind in as a tie-breaker signal.
-        bound_kind = str(latest.get("roofline_bound_kind") or "").strip().lower()
-        if bound_kind == "memory":
-            candidates["memory"] = max(candidates.get("compute", 0.0), 0.0) + 0.01
-        if not candidates:
-            return "", 0.0
-        best = max(candidates.items(), key=lambda kv: kv[1])
-        return best[0], best[1]
+        return dominant_direction(snaps[-1])
 
     def _bottleneck_redirect_advisory_block(self) -> str:
         """Render the R3 cyclic bottleneck-redirect advisory (EXPLORE only).
@@ -5977,7 +6032,8 @@ class Coordinator:
         if cur_top:
             lines.append(f"  current_top_bottleneck={cur_top}")
         if direction:
-            hint = self._BOTTLENECK_DOMAIN_HINTS.get(direction)
+            from .roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
+            hint = BOTTLENECK_DOMAIN_HINTS.get(direction)
             if hint:
                 lines.append(
                     f"  dominant_direction={direction} ({pct:.1f}%) → "

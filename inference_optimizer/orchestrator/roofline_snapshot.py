@@ -489,3 +489,123 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
     )
     lines.append("")
     return lines
+
+
+#: Dominant roofline direction → (specialist domain, kb tag). Shared by the
+#: profiler digest and the coordinator's bottleneck-redirect advisory so both
+#: name the same dispatch target for a saturated direction.
+BOTTLENECK_DOMAIN_HINTS: dict[str, tuple[str, str]] = {
+    "comm": ("comm_specialist", "communication"),
+    "host_overhead": ("system_specialist", "systems"),
+    "idle": ("system_specialist", "systems"),
+    "compute": ("kernel_switch_specialist", "kernel"),
+    "memory": ("serving_specialist", "framework"),
+}
+
+
+def dominant_direction(snapshot: dict[str, Any] | None) -> tuple[str, float]:
+    """Return ``(direction, pct)`` for the most-saturated direction in one snapshot.
+
+    Reads compute/idle/comm percentages and folds a ``memory`` bound kind in as
+    a tie-breaker; returns ``("", 0.0)`` when no usable numbers are present.
+    """
+    if not isinstance(snapshot, dict):
+        return "", 0.0
+    candidates: dict[str, float] = {}
+    for direction, key in (
+        ("compute", "compute_pct"),
+        ("idle", "idle_pct"),
+        ("comm", "comm_pct"),
+    ):
+        val = snapshot.get(key)
+        if isinstance(val, (int, float)):
+            candidates[direction] = float(val)
+    bound_kind = str(snapshot.get("roofline_bound_kind") or "").strip().lower()
+    if bound_kind == "memory":
+        candidates["memory"] = max(candidates.get("compute", 0.0), 0.0) + 0.01
+    if not candidates:
+        return "", 0.0
+    best = max(candidates.items(), key=lambda kv: kv[1])
+    return best[0], best[1]
+
+
+def build_profiler_digest(
+    snapshots: list[dict[str, Any]] | None,
+    trace_analyze: dict[str, Any] | None,
+    *,
+    top_n: int = 3,
+) -> str:
+    """Render a compact, bottleneck-focused profiler block for prompt injection.
+
+    Surfaces the latest saturation mix, its per-direction delta against the
+    previous snapshot, the hottest kernels, a suggested specialist lever for the
+    dominant direction, and the reusable native kernel ids. Returns ``""`` when
+    no profiler data is available; never raises.
+    """
+    try:
+        snaps = [s for s in (snapshots or []) if isinstance(s, dict)]
+        ta = trace_analyze if isinstance(trace_analyze, dict) else {}
+        if not snaps and not ta:
+            return ""
+        latest = snaps[-1] if snaps else {}
+
+        def _pct(v: Any) -> str:
+            return f"{float(v):.1f}%" if isinstance(v, (int, float)) else "—"
+
+        bound_kind = str(latest.get("roofline_bound_kind") or "").strip() or "unknown"
+        lines: list[str] = [
+            f"bound_kind={bound_kind}  "
+            f"compute={_pct(latest.get('compute_pct'))}  "
+            f"idle={_pct(latest.get('idle_pct'))}  "
+            f"comm={_pct(latest.get('comm_pct'))}"
+        ]
+
+        if len(snaps) >= 2:
+            prev = snaps[-2]
+            parts: list[str] = []
+            for label, key in (
+                ("compute", "compute_pct"),
+                ("idle", "idle_pct"),
+                ("comm", "comm_pct"),
+            ):
+                d = _num_delta(latest.get(key), prev.get(key))
+                if d is not None:
+                    parts.append(f"{label} {_fmt_delta(d)}pp")
+            if parts:
+                lines.append("delta_vs_prev: " + "  ".join(parts))
+
+        rows: list[str] = []
+        hot = ta.get("hot_kernels_top15") or []
+        if isinstance(hot, list):
+            for entry in hot[:top_n]:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("name") or entry.get("kernel_id") or "?")
+                seg = f"  {name}  {_pct(entry.get('gpu_pct'))} gpu"
+                eff = entry.get("efficiency_percent")
+                if isinstance(eff, (int, float)):
+                    seg += f"  (eff {float(eff):.1f}%)"
+                rows.append(seg)
+        if not rows and latest.get("top_bottleneck"):
+            rows.append(f"  {latest.get('top_bottleneck')}")
+        if rows:
+            lines.append("top_bottlenecks:")
+            lines.extend(rows)
+
+        direction, _pct_val = dominant_direction(latest)
+        lever = BOTTLENECK_DOMAIN_HINTS.get(direction)
+        if lever:
+            lines.append(
+                f"suggested_lever (dominant={direction}): {lever[0]}"
+            )
+
+        reusable = ta.get("reusable_native_kernel_ids") or []
+        if isinstance(reusable, list) and reusable:
+            lines.append(
+                "reusable_native_kernel_ids="
+                f"{[str(r) for r in reusable[:12]]}"
+            )
+
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001 — prompt enrichment must never crash
+        return ""

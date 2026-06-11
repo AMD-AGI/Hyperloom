@@ -2943,6 +2943,7 @@ class SharedState:
             f"last_profile_args='{self.last_profile_args}'",
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
             f"last_trace_analyze={self._format_last_trace_analyze()}",
+            f"profiler_digest={self._format_profiler_digest()}",
             # Full TraceLens analysis.md so the LLM grounds propose_action in the actual report.
             f"analysis_md={self._format_analysis_md_full()}",
             # Streak counter is a readable fact (KEEP/REVERT counts allowed); plateau judges also consume it on legacy resume.
@@ -3234,12 +3235,33 @@ class SharedState:
             gain_str = f"{float(gain):.2f}"
         except (TypeError, ValueError):
             gain_str = "?"
+        # When inline injection is disabled, surface the structured digest above
+        # (profiler_digest=) and point at the show_analysis_md tool for the full
+        # report — saves context on long runs. Default keeps the verbatim md.
+        if os.getenv(
+            "INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", "1",
+        ).strip().lower() in ("0", "false", "off", "no"):
+            return (
+                f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
+                "full report not inlined; see profiler_digest above or call the "
+                "show_analysis_md context tool for the verbatim analysis.md.)"
+            )
         return (
             f"\n=== TraceLens Analysis (snapshot #{snap}, "
             f"gain at snapshot = {gain_str}%) ===\n"
             f"{md_text}\n"
             f"=== End TraceLens Analysis ===\n"
         )
+
+    def _format_profiler_digest(self) -> str:
+        """Compact bottleneck-focused profiler block (saturation mix + cross-snapshot delta + hot kernels + lever); ``(none)`` until a snapshot lands."""
+        from .roofline_snapshot import build_profiler_digest
+        digest = build_profiler_digest(
+            self.roofline_snapshots, self.last_trace_analyze,
+        )
+        if not digest:
+            return "(none)"
+        return f"\n{digest}\n"
 
     def _format_last_trace_analyze(self) -> str:
         return self._format_trace_analyze_blob(self.last_trace_analyze)
