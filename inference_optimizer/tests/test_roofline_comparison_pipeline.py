@@ -601,6 +601,53 @@ class TestRecordTraceAnalyzeStampsCeiling:
         assert snap["within_roofline_pct"] == 69.09
         assert snap["gap_to_roofline_pct"] == pytest.approx(30.91, abs=0.01)
 
+    def test_forced_baseline_arm_overrides_promoted_current_best(
+        self, tmp_path, monkeypatch
+    ):
+        """A delayed PRELUDE roofline (payload roofline_arm=baseline) records as
+        baseline even after warm-replay promoted a fp8 current_best — the ceiling
+        is computed for the baseline arm and achieved uses baseline_tput."""
+        from inference_optimizer.orchestrator import roofline_ceiling
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            RooflineBreakdown,
+        )
+        seen_arm: dict[str, object] = {}
+
+        def _capture(_state, **kw):
+            seen_arm["arm"] = kw.get("arm")
+            return RooflineBreakdown(1000.0, 5000.0, 1000.0, "memory")
+
+        monkeypatch.setattr(
+            roofline_ceiling,
+            "compute_roofline_breakdown_from_state",
+            _capture,
+        )
+        from inference_optimizer.orchestrator.shared_state import SharedState
+        md = tmp_path / "analysis.md"
+        md.write_text(
+            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
+        )
+        state = SharedState()
+        state.baseline_tput = 527.5
+        # warm-replay already promoted an optimized fp8 arm.
+        state.current_best = {
+            "action": "warm_replay",
+            "tput": 900.0,
+            "extra_server_args": "--quantization fp8",
+        }
+        state.record_trace_analyze(
+            {"trace_input": "/tmp/trace.json", "roofline_arm": "baseline"},
+            {
+                "hot_kernels": [],
+                "trace_report_path": str(md),
+                "candidates_path": "/tmp/kc.json",
+            },
+        )
+        # Ceiling resolved for the BASELINE arm, not the promoted current_best.
+        assert seen_arm["arm"] == "baseline"
+        snap = state.roofline_snapshots[0]
+        assert snap["achieved_tok_per_sec"] == 527.5
+
     def test_falls_back_to_baseline_tput_when_no_current_best(
         self, tmp_path, monkeypatch
     ):

@@ -2025,15 +2025,28 @@ class SharedState:
             # precision is anchored to the SAME arm as achieved: a baseline
             # snapshot keeps its dtype on baseline even after current_best is
             # promoted (else a later fp8 best would retro-inflate the ceiling).
+            # An explicit ``roofline_arm`` on the payload wins — a delayed
+            # PRELUDE roofline must record as baseline even though current_best
+            # has already been promoted by warm-replay. Absent it, fall back to
+            # inferring the arm from current_best.tput.
+            forced_arm = str((payload or {}).get("roofline_arm") or "").strip()
             achieved_tput = 0.0
-            snapshot_arm = "baseline"
             cb = self.current_best if isinstance(self.current_best, dict) else {}
             cb_tput = cb.get("tput")
-            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
-                achieved_tput = float(cb_tput)
+            if forced_arm == "baseline":
+                snapshot_arm = "baseline"
+                if isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
+                    achieved_tput = float(self.baseline_tput)
+            elif forced_arm == "current_best" and isinstance(cb_tput, (int, float)) and cb_tput > 0:
                 snapshot_arm = "current_best"
-            elif isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
-                achieved_tput = float(self.baseline_tput)
+                achieved_tput = float(cb_tput)
+            elif isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                snapshot_arm = "current_best"
+                achieved_tput = float(cb_tput)
+            else:
+                snapshot_arm = "baseline"
+                if isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
+                    achieved_tput = float(self.baseline_tput)
             # Primary decode ceiling plus memory/compute sides; PerfModel bottom-up formula, legacy is fallback only.
             breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
             try:

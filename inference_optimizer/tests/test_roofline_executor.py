@@ -805,6 +805,68 @@ def _ta_ok(*, report_md: Path) -> dict:
     }
 
 
+def _run_roofline_captured_payload(tmp_path, *, reason: str) -> dict:
+    """Run RooflineExecutor with stubbed profile/trace_analyze; return the
+    payload passed to record_trace_analyze."""
+    import asyncio
+
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\nbody\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    async def fake_profile(ctx):
+        return _profile_ok()
+
+    async def fake_ta(payload, *, session_dir):
+        return _ta_ok(report_md=md)
+
+    state = _state()
+    orig_record = state.record_trace_analyze
+
+    def record_spy(payload, result):
+        captured["payload"] = dict(payload)
+        return orig_record(payload, result)
+
+    state.record_trace_analyze = record_spy  # type: ignore[assignment]
+
+    task = Task(
+        task_id=f"t-{reason}-1", kind="roofline", state="running",
+        params={"base_extra_args": "", "reason": reason},
+        idempotency_key=f"roofline:{reason}-1",
+        requires_lanes=["profile_lane"],
+    )
+    ctx = RunnerContext(
+        task=task, lease=None, extra={"session_dir": str(tmp_path)},
+    )
+
+    executor = RooflineExecutor(shared_state=state)
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.profile.profile_executor",
+        new=fake_profile,
+    ), patch(
+        "inference_optimizer.orchestrator.kernel_request_handlers.trace_analyze_handler",
+        new=fake_ta,
+    ):
+        result = asyncio.run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    return captured["payload"]  # type: ignore[return-value]
+
+
+def test_prelude_roofline_records_baseline_arm(tmp_path):
+    """A prelude_initial roofline tags trace_analyze payload roofline_arm=baseline."""
+    payload = _run_roofline_captured_payload(tmp_path, reason="prelude_initial")
+    assert payload.get("roofline_arm") == "baseline"
+
+
+def test_watermark_roofline_omits_forced_arm(tmp_path):
+    """A non-prelude roofline leaves arm inference to the recorder (no forced tag)."""
+    payload = _run_roofline_captured_payload(
+        tmp_path, reason="explore_keep_watermark",
+    )
+    assert "roofline_arm" not in payload
+
+
 def test_extract_picks_first_non_empty_mode():
     res = _ta_empty_chunk_failure(non_empty=["prefilldecode"])
     out = _extract_steady_state_retry_mode(res)
