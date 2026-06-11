@@ -72,7 +72,15 @@ _PARAM_BILLIONS_RE: re.Pattern[str] = re.compile(
 
 
 def extract_params_billions(model_name: str) -> float | None:
-    """Best-effort parse of ``-<N>B`` from a model name (first match; ``None`` if absent)."""
+    """Best-effort parse of ``-<N>B`` parameter count from a model name.
+
+    Args:
+        model_name: The model name to parse.
+
+    Returns:
+        The parameter count in billions (first match), or ``None`` when
+        absent or unparseable.
+    """
     if not model_name:
         return None
     match = _PARAM_BILLIONS_RE.search(model_name)
@@ -103,8 +111,14 @@ def compute_headroom_gib(
 ) -> HeadroomBreakdown | None:
     """Project per-GPU HBM headroom from manifest metadata.
 
-    Returns ``None`` when a required field (model size, precision, gpu_type, ``tp``) is
-    unresolved; the C1 detector treats ``None`` as "skip — not enough data to judge".
+    Args:
+        manifest: Run manifest with model / workload / GPU metadata.
+        activation_buf_gib: Reserved activation buffer per GPU, in GiB.
+
+    Returns:
+        A :class:`HeadroomBreakdown`, or ``None`` when a required field
+        (model size, precision, gpu_type, ``tp``) is unresolved — the C1
+        detector treats ``None`` as "skip — not enough data to judge".
     """
     if not isinstance(manifest, dict) or not manifest:
         return None
@@ -162,7 +176,17 @@ def amdahl_e2e_ceiling(
     optimizable_pct: float,
     single_kernel_speedup: float,
 ) -> float:
-    """Amdahl's law best-case E2E speedup ratio (1.0 = none); caller converts via ``(ratio - 1.0) * 100``."""
+    """Compute Amdahl's-law best-case end-to-end speedup ratio.
+
+    The caller converts to a percentage via ``(ratio - 1.0) * 100``.
+
+    Args:
+        optimizable_pct: Percent of runtime that is optimizable (0-100).
+        single_kernel_speedup: Speedup factor for the optimizable portion.
+
+    Returns:
+        The best-case E2E speedup ratio (``1.0`` means no speedup).
+    """
     p = max(0.0, min(1.0, optimizable_pct / 100.0))
     s = max(1.0, float(single_kernel_speedup))
     serial = 1.0 - p
@@ -343,7 +367,16 @@ def _manifest_fingerprint(manifest: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def _recommend_tp(breakdown: HeadroomBreakdown) -> int:
-    """Smallest power-of-two TP clearing ``required_gib`` (operator hint; assumes weights dominate KV)."""
+    """Recommend the smallest power-of-two TP that clears the HBM budget.
+
+    Operator hint only; assumes weights dominate KV and ignores KV scaling.
+
+    Args:
+        breakdown: The per-GPU headroom breakdown.
+
+    Returns:
+        A suggested tensor-parallel degree (power of two).
+    """
     if breakdown.hbm_gib <= 0 or breakdown.weights_gib <= 0:
         return 8
     # Weights shrink ~linearly with TP; ignore KV scaling for the hint.
