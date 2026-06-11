@@ -1930,3 +1930,223 @@ class TestRuntimeDtypeResolution:
         meta = load_model_meta(state.model_path)
         rt = resolve_runtime_dtype(state, meta)
         assert rt.quantization == "none"
+
+
+class TestArmPinnedPrecision:
+    """``arm`` pins ceiling precision: baseline keeps baseline dtype even after a fp8 current_best is promoted."""
+
+    def _bf16_baseline_with_fp8_best(self, tmp_path):
+        _write_synthetic_model(
+            tmp_path / "m",
+            total_size=140_000_000_000,
+            num_layers=80, num_kv_heads=8,
+            hidden_size=8192, num_attention_heads=64,
+            torch_dtype="bfloat16",
+        )
+        # Baseline yaml carries NO quantization (bf16 weights).
+        yaml_path = tmp_path / "bl.yaml"
+        yaml_path.write_text(
+            "benchmark:\n  envs:\n    CONC: 32\n",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(
+            model_path=str(tmp_path / "m"),
+            gpu_type="mi300x",
+            tp=1,
+            precision="bf16",
+            conc=32,
+            isl=2048,
+            osl=512,
+            last_baseline={"extras": {"materialized_config": str(yaml_path)}},
+            # Promoted optimized arm quantizes weights to fp8.
+            current_best={
+                "tput": 2000.0,
+                "extra_server_args": "--quantization fp8",
+            },
+        )
+
+    def test_baseline_arm_ignores_current_best_fp8(self, tmp_path):
+        state = self._bf16_baseline_with_fp8_best(tmp_path)
+        meta = load_model_meta(state.model_path)
+        rt = resolve_runtime_dtype(state, meta, arm="baseline")
+        # Baseline yaml had no --quantization -> weights stay bf16 (2 bytes).
+        assert rt.weight_dtype_bytes == 2.0
+        assert rt.quantization == "none"
+
+    def test_current_best_arm_picks_up_fp8(self, tmp_path):
+        state = self._bf16_baseline_with_fp8_best(tmp_path)
+        meta = load_model_meta(state.model_path)
+        rt = resolve_runtime_dtype(state, meta, arm="current_best")
+        assert rt.weight_dtype_bytes == 1.0
+        assert rt.quantization == "fp8"
+
+    def test_baseline_arm_ceiling_below_fp8_arm(self, tmp_path):
+        state = self._bf16_baseline_with_fp8_best(tmp_path)
+        baseline_peak = compute_roofline_breakdown_from_state(
+            state, arm="baseline",
+        ).peak_tok_per_sec
+        best_peak = compute_roofline_breakdown_from_state(
+            state, arm="current_best",
+        ).peak_tok_per_sec
+        # fp8 halves weight IO, so the best-arm ceiling must be higher.
+        assert baseline_peak > 0
+        assert best_peak > baseline_peak
+
+
+class TestReadBaselineServerArgs:
+    """Public ``read_baseline_server_args`` reads the baseline yaml's flags."""
+
+    def test_reads_server_args_from_yaml(self, tmp_path):
+        import yaml as _yaml  # type: ignore[reportMissingModuleSource]
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            read_baseline_server_args,
+        )
+        yaml_path = tmp_path / "bl.yaml"
+        yaml_path.write_text(
+            _yaml.safe_dump({
+                "benchmark": {
+                    "envs": {
+                        "EXTRA_SGLANG_ARGS": "--attention-backend AITER",
+                    },
+                },
+            }),
+            encoding="utf-8",
+        )
+        state = SimpleNamespace(
+            last_baseline={"extras": {"materialized_config": str(yaml_path)}},
+        )
+        assert read_baseline_server_args(state) == "--attention-backend AITER"
+
+    def test_returns_empty_when_yaml_missing(self):
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            read_baseline_server_args,
+        )
+        state = SimpleNamespace(
+            last_baseline={"extras": {"materialized_config": "/no/such.yaml"}},
+        )
+        assert read_baseline_server_args(state) == ""
+
+
+class TestPreludeRooflineWarmReplayIntegration:
+    """End-to-end-ish: a delayed PRELUDE roofline running AFTER warm-replay has
+    promoted an fp8 current_best must still record snapshot[0] as the baseline
+    arm — real RooflineExecutor + real SharedState + real ceiling math, only
+    profile/trace_analyze are faked. This reproduces the original bug scenario.
+    """
+
+    def _bf16_baseline_yaml(self, tmp_path) -> str:
+        import yaml as _yaml  # type: ignore[reportMissingModuleSource]
+        yaml_path = tmp_path / "baseline.yaml"
+        yaml_path.write_text(
+            _yaml.safe_dump({
+                "benchmark": {
+                    "framework": "sglang",
+                    "precision": "bf16",
+                    "runner_type": "mi300x",
+                    "model": str(tmp_path / "m"),
+                    "envs": {"TP": 1, "CONC": 32, "ISL": 2048, "OSL": 512},
+                },
+            }),
+            encoding="utf-8",
+        )
+        return str(yaml_path)
+
+    def _run_prelude_after_fp8_promotion(self, tmp_path):
+        import asyncio
+        from unittest.mock import patch
+
+        from inference_optimizer.orchestrator.action_executors.roofline import (
+            RooflineExecutor,
+        )
+        from inference_optimizer.orchestrator.shared_state import SharedState
+        from inference_optimizer.orchestrator.sub_agent_runner import (
+            RunnerContext,
+        )
+        from inference_optimizer.orchestrator.task_registry import Task
+
+        _write_synthetic_model(
+            tmp_path / "m",
+            total_size=140_000_000_000,
+            num_layers=80, num_kv_heads=8,
+            hidden_size=8192, num_attention_heads=64,
+            torch_dtype="bfloat16",
+        )
+        yaml_path = self._bf16_baseline_yaml(tmp_path)
+        md = tmp_path / "analysis.md"
+        md.write_text("# Executive Summary\nbody\n", encoding="utf-8")
+
+        # Real SharedState: baseline landed (bf16), then warm-replay promoted
+        # an optimized fp8 current_best BEFORE the deferred prelude runs.
+        state = SharedState()
+        state.baseline_tput = 527.5
+        state.gpu_type = "mi300x"
+        state.last_baseline = {
+            "extras": {"materialized_config": yaml_path},
+            "output_throughput": 527.5,
+        }
+        state.current_best = {
+            "action": "warm_replay",
+            "tput": 900.0,
+            "extra_server_args": "--quantization fp8",
+        }
+
+        async def fake_profile(ctx):
+            return {
+                "status": "succeeded",
+                "main_trace_path": str(tmp_path / "trace.json.gz"),
+                "workspace": str(tmp_path),
+                "output_throughput": 527.5,
+            }
+
+        async def fake_ta(payload, *, session_dir):
+            return {
+                "status": "ok",
+                "candidates_path": str(tmp_path / "kc.json"),
+                "trace_report_path": str(md),
+                "hot_kernels": [],
+                "trace_health_warnings": [],
+            }
+
+        task = Task(
+            task_id="t-prelude-1", kind="roofline", state="running",
+            params={"base_extra_args": "", "reason": "prelude_initial"},
+            idempotency_key="roofline:prelude-1",
+            requires_lanes=["profile_lane"],
+        )
+        ctx = RunnerContext(
+            task=task, lease=None, extra={"session_dir": str(tmp_path)},
+        )
+        executor = RooflineExecutor(shared_state=state)
+        with patch(
+            "inference_optimizer.orchestrator.action_executors."
+            "profile.profile_executor",
+            new=fake_profile,
+        ), patch(
+            "inference_optimizer.orchestrator.kernel_request_handlers."
+            "trace_analyze_handler",
+            new=fake_ta,
+        ):
+            result = asyncio.run(executor(ctx))
+        assert result["status"] == "succeeded"
+        return state
+
+    def test_delayed_prelude_records_baseline_not_fp8_current_best(
+        self, tmp_path,
+    ):
+        state = self._run_prelude_after_fp8_promotion(tmp_path)
+        assert len(state.roofline_snapshots) == 1
+        snap = state.roofline_snapshots[0]
+        # achieved is the baseline arm's tput, NOT the promoted current_best.
+        assert snap["achieved_tok_per_sec"] == 527.5
+
+    def test_delayed_prelude_ceiling_stays_baseline_dtype(self, tmp_path):
+        state = self._run_prelude_after_fp8_promotion(tmp_path)
+        snap = state.roofline_snapshots[0]
+        baseline_peak = snap["theoretical_peak_tok_per_sec"]
+        # The fp8 current_best ceiling would be strictly higher (half weight
+        # IO); the recorded baseline ceiling must NOT be inflated to it.
+        fp8_peak = compute_roofline_breakdown_from_state(
+            state, arm="current_best",
+        ).peak_tok_per_sec
+        assert baseline_peak is not None and baseline_peak > 0
+        assert fp8_peak > baseline_peak
