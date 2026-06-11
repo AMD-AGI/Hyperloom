@@ -21,7 +21,15 @@ _MAX_NAME_LEN = 70
 
 
 def _short_name(name: str) -> str:
-    """Shorten a kernel name keeping head + tail (CK/ROCBLAS variants differ at the tail)."""
+    """Shorten a kernel name keeping head + tail (CK/ROCBLAS variants differ at the tail).
+
+    Args:
+        name: Full kernel name to shorten.
+
+    Returns:
+        The name unchanged when short enough, otherwise a head + tail
+        elision joined by ``"..."``.
+    """
     if not name:
         return ""
     if len(name) <= _MAX_NAME_LEN:

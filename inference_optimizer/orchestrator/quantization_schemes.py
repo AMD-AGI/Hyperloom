@@ -49,6 +49,12 @@ def supported_schemes(gpu_type: str | None) -> list[str]:
 
     MI355X gets the full set; every other (DCGPU) target drops the
     ``mxfp4`` / ``mxfp4_fp8`` MI355X-only schemes.
+
+    Args:
+        gpu_type: The target GPU type, or ``None``/empty for non-MI355X.
+
+    Returns:
+        The list of schemes selectable on the given GPU type.
     """
     if (gpu_type or "").strip().lower() == "mi355x":
         return list(SUPPORTED_SCHEMES)
@@ -64,6 +70,15 @@ def validate_scheme(scheme: str | None, gpu_type: str | None) -> None:
     (the real GPU is resolved later via the rocm-smi probe) the hardware
     constraint is not enforced here — the constraint check needs a concrete
     target to act on.
+
+    Args:
+        scheme: The requested quantization scheme, or the ``none`` sentinel.
+        gpu_type: The target GPU type used to enforce hardware constraints.
+
+    Raises:
+        ValueError: If ``scheme`` is not a known supported scheme.
+        SchemeNotSupportedError: If an MI355X-only scheme is requested on a
+            known non-MI355X target.
     """
     if not scheme or scheme == NO_QUANTIZATION:
         return
@@ -106,7 +121,14 @@ class QuantizationConfig:
 
 
 def _join_clauses(items: Sequence[str]) -> str:
-    """Join clauses as ``a``, ``a and b``, or ``a, b and c``."""
+    """Join clauses as ``a``, ``a and b``, or ``a, b and c``.
+
+    Args:
+        items: The clause strings to join.
+
+    Returns:
+        The natural-language conjunction, or ``""`` when ``items`` is empty.
+    """
     items = list(items)
     if not items:
         return ""
@@ -202,6 +224,15 @@ def build_quantization_prompt(
     (no hard-coded defaults). ``model_path`` / ``skill_path`` / ``gpu_type``
     populate the intro line; the inference_optimizer prelude leaves them unset
     because its adapter folds the source model + export dir into the prompt.
+
+    Args:
+        cfg: The structured quantization config to render.
+        model_path: Optional source model path for the intro line.
+        gpu_type: Optional target GPU type for the intro line.
+        skill_path: Optional skill path referenced in the intro line.
+
+    Returns:
+        The composed natural-language quantization prompt.
     """
     paragraphs: list[str] = []
 
@@ -232,6 +263,16 @@ def resolve_scheme_prompt(scheme: str | None) -> str | None:
     Quark's intake + plan skill supplies those. Per-layer overrides and the
     other §4 knobs travel through :func:`build_quantization_prompt` with a fully
     populated :class:`QuantizationConfig` (the structured UI path).
+
+    Args:
+        scheme: The global scheme enum, or the ``none`` sentinel.
+
+    Returns:
+        The rendered ``--quantize`` prompt, or ``None`` when ``scheme`` is
+        falsy or ``"none"``.
+
+    Raises:
+        ValueError: If ``scheme`` is a non-empty unknown scheme.
     """
     if not scheme or scheme == NO_QUANTIZATION:
         return None

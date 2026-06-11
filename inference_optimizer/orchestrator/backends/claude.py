@@ -84,6 +84,14 @@ def _import_sdk() -> tuple[Any, Any, Any]:
     """Return ``(query, ClaudeAgentOptions, sdk_module)`` or raise.
 
     Only ``claude_agent_sdk`` is supported (``claude_code_sdk`` deprecated).
+
+    Returns:
+        A tuple of the SDK ``query`` callable, the ``ClaudeAgentOptions``
+        class, and the imported SDK module.
+
+    Raises:
+        BackendError: If ``claude_agent_sdk`` is not installed or is missing
+            the required ``query`` / ``ClaudeAgentOptions`` attributes.
     """
     try:
         sdk = importlib.import_module("claude_agent_sdk")
@@ -383,6 +391,10 @@ class ClaudeBackend:
 
         ``None`` detaches it. Best-effort: a build failure is recorded as a
         soft warning and leaves the backend usable without the pull tools.
+
+        Args:
+            provider: The context provider to back the pull tools, or ``None``
+                to detach the context-tools server.
         """
         if provider is None:
             self._context_server_config = None
@@ -416,7 +428,12 @@ class ClaudeBackend:
 
     @property
     def conversation_session_id(self) -> str | None:
-        """Current SDK session token (conversational mode), or None."""
+        """Current SDK session token (conversational mode), or None.
+
+        Returns:
+            The captured SDK session id in conversational mode, otherwise
+            ``None``.
+        """
         return self._session_id if self.conversational else None
 
     def _build_options(
@@ -485,6 +502,16 @@ class ClaudeBackend:
 
         Older SDK builds lack ``resume``; fall back to a stateless turn
         (with a one-time warning) rather than crashing the reactor.
+
+        Args:
+            kwargs: Keyword arguments to pass to the SDK options constructor.
+
+        Returns:
+            A constructed SDK options instance.
+
+        Raises:
+            TypeError: If the constructor rejects a keyword other than
+                ``resume``.
         """
         try:
             return self.sdk_options_cls(**kwargs)
@@ -518,6 +545,15 @@ class ClaudeBackend:
 
         `usage` (cache_creation/read_input_tokens) measures prompt-cache
         effectiveness against the SECTION-A/B stable-prefix design (§5.1, §8.8).
+
+        Args:
+            prompt: The composed prompt to stream to the SDK.
+            options: The SDK options object configuring this turn.
+
+        Returns:
+            A tuple ``(intents, raw_text, tool_block_count, usage, session_id)``
+            where ``usage`` is the latest cumulative usage dict and
+            ``session_id`` is the SDK session token (or ``None``).
         """
         intents: list[Intent] = []
         text_chunks: list[str] = []

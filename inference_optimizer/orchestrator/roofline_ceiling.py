@@ -98,6 +98,13 @@ def _parse_server_arg(args: str, flag: str) -> str:
     Tolerant of both ``--quantization fp8`` and ``--quantization=fp8``.
     When the flag appears multiple times, the last value wins so an
     optimized overlay can override the baseline args.
+
+    Args:
+        args: The server-args string to scan.
+        flag: The flag whose value to extract (e.g. ``--quantization``).
+
+    Returns:
+        The last value following the flag, or ``""`` when absent.
     """
     if not args:
         return ""
@@ -137,7 +144,14 @@ class RuntimeWorkload:
 
 
 def _read_baseline_yaml_benchmark(state: Any) -> dict[str, Any]:
-    """Read ``benchmark`` from the materialized baseline yaml."""
+    """Read ``benchmark`` from the materialized baseline yaml.
+
+    Args:
+        state: Shared run state carrying ``last_baseline`` provenance.
+
+    Returns:
+        The ``benchmark`` mapping, or ``{}`` when unreadable.
+    """
     last_bl = getattr(state, "last_baseline", None) or {}
     if not isinstance(last_bl, dict):
         return {}
@@ -214,6 +228,12 @@ def _read_baseline_yaml_server_args(state: Any) -> str:
     yaml), so a baseline-only run with ``--quantization fp8`` in the yaml
     would otherwise be invisible to dtype resolution. Returns ``""`` when
     the file / fields are unreadable.
+
+    Args:
+        state: Shared run state carrying ``last_baseline`` provenance.
+
+    Returns:
+        The assembled baseline server args, or ``""`` when unreadable.
     """
     return _server_args_from_envs(
         _benchmark_envs(_read_baseline_yaml_benchmark(state))
@@ -221,7 +241,14 @@ def _read_baseline_yaml_server_args(state: Any) -> str:
 
 
 def _server_args_env_override(entry: Any) -> str:
-    """Return framework server args pinned via ``extra_envs``."""
+    """Return framework server args pinned via ``extra_envs``.
+
+    Args:
+        entry: A state entry that may carry an ``extra_envs`` mapping.
+
+    Returns:
+        The server args assembled from ``extra_envs``, or ``""``.
+    """
     if not isinstance(entry, dict):
         return ""
     envs = entry.get("extra_envs") or {}
@@ -231,7 +258,14 @@ def _server_args_env_override(entry: Any) -> str:
 
 
 def _server_args_payload(entry: Any) -> str:
-    """Return framework-neutral overlay server args from an entry."""
+    """Return framework-neutral overlay server args from an entry.
+
+    Args:
+        entry: A state entry that may carry overlay server-arg keys.
+
+    Returns:
+        The first non-empty overlay server-args string, or ``""``.
+    """
     if not isinstance(entry, dict):
         return ""
     for key in ("candidate_extra_server_args", "extra_server_args", "extra_args"):
@@ -242,7 +276,14 @@ def _server_args_payload(entry: Any) -> str:
 
 
 def _server_args_from(entry: Any) -> str:
-    """Extract the final server-args string from one state entry."""
+    """Extract the final server-args string from one state entry.
+
+    Args:
+        entry: A state entry to read server args from.
+
+    Returns:
+        The env-override args if present, else the overlay payload args.
+    """
     return _server_args_env_override(entry) or _server_args_payload(entry)
 
 
@@ -250,9 +291,16 @@ def _achieved_arm_source(state: Any) -> str:
     """Which arm the roofline ``achieved`` throughput comes from.
 
     Mirrors the snapshot writer (``current_best.tput > 0`` ⇒ optimized,
-    else baseline) so the ceiling's dtype is resolved from the SAME run
+    else baseline) so the ceiling's dtype is resolved     from the SAME run
     its measured throughput came from. Returns ``"current_best"`` or
     ``"baseline"``.
+
+    Args:
+        state: Shared run state carrying ``current_best``.
+
+    Returns:
+        ``"current_best"`` when the optimized arm has positive throughput,
+        otherwise ``"baseline"``.
     """
     cb = getattr(state, "current_best", None)
     if isinstance(cb, dict):
@@ -271,6 +319,14 @@ def _collect_runtime_server_args(state: Any, *, arm: str | None = None) -> str:
     measured throughput comes from the optimized arm. ``arm`` pins the
     source explicitly ("baseline" never overlays current_best), so a
     baseline snapshot's ceiling precision stays anchored to baseline.
+
+    Args:
+        state: Shared run state to read baseline / current_best args from.
+        arm: Pins the source arm; ``None`` infers it via
+            ``_achieved_arm_source``.
+
+    Returns:
+        The server-args string for the selected arm.
     """
     base_args = (
         _read_baseline_yaml_server_args(state)
@@ -288,7 +344,15 @@ def _collect_runtime_server_args(state: Any, *, arm: str | None = None) -> str:
 
 
 def _runtime_gpu_type(state: Any, benchmark: dict[str, Any]) -> str:
-    """Resolve real hardware for roofline; runner_type is only script routing."""
+    """Resolve real hardware for roofline; runner_type is only script routing.
+
+    Args:
+        state: Shared run state carrying ``gpu_type``.
+        benchmark: Benchmark record (fallback ``runner_type``).
+
+    Returns:
+        The resolved GPU type string, or ``""`` when unknown.
+    """
     return str(
         getattr(state, "gpu_type", "")
         or os.environ.get("TARGET_GPU_TYPE", "")
@@ -306,6 +370,13 @@ def resolve_runtime_workload(
     yaml. ``arm`` only pins which arm's server args feed precision
     resolution; ``"baseline"`` keeps the ceiling's dtype anchored to
     baseline even after current_best is promoted.
+
+    Args:
+        state: Shared run state to resolve workload fields from.
+        arm: Pins which arm's server args feed precision resolution.
+
+    Returns:
+        The resolved ``RuntimeWorkload``.
     """
     benchmark = _read_baseline_yaml_benchmark(state)
     envs = _benchmark_envs(benchmark)
@@ -385,6 +456,14 @@ def resolve_runtime_dtype(
     float32 checkpoints to fp16, never keep 4B at runtime, and never go
     sub-bf16 without an explicit quantization signal. Activation dtype
     follows ``--dtype`` when present, else bf16, also floored at 2B.
+
+    Args:
+        state: Shared run state to read the runtime server args from.
+        meta: Model metadata (its on-disk weight dtype is a fallback signal).
+        arm: Pins which arm's server args feed precision resolution.
+
+    Returns:
+        The resolved ``RuntimeDtype`` provenance.
     """
     runtime = resolve_runtime_workload(state, arm=arm)
     args = runtime.server_args
@@ -439,7 +518,14 @@ def resolve_runtime_dtype(
 
 
 def _compute_tag_for_bytes(weight_bytes: float) -> str:
-    """Map weight bytes-per-element to a HW_SPECS compute precision key."""
+    """Map weight bytes-per-element to a HW_SPECS compute precision key.
+
+    Args:
+        weight_bytes: Weight bytes-per-element.
+
+    Returns:
+        The matching precision key (``fp4`` / ``fp8`` / ``bf16`` / ``fp32``).
+    """
     if weight_bytes <= 0.5:
         return "fp4"
     if weight_bytes <= 1.0:
@@ -457,6 +543,14 @@ def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
     per-token weight IO must scale by ``runtime_bpe / checkpoint_bpe``.
     No-op (scale == 1.0) when the checkpoint already matches runtime
     (pre-quantized MoE fp8), so it is safe to call unconditionally.
+
+    Args:
+        meta: Model metadata whose weight byte fields are rescaled.
+        rt: Resolved runtime dtype carrying the runtime weight bytes.
+
+    Returns:
+        A new ``ModelMeta`` rescaled to the runtime weight dtype (or ``meta``
+        unchanged for non-dataclass test doubles).
     """
     import dataclasses as _dc
 
@@ -478,7 +572,15 @@ def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
 
 
 def _resolve_peak_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
-    """``(gpu, precision)`` → vendor dense peak TFLOPS; 0.0 on miss (safe-degrade signal → T_cmp unavailable, fall back to T_mem)."""
+    """``(gpu, precision)`` → vendor dense peak TFLOPS; 0.0 on miss (safe-degrade signal → T_cmp unavailable, fall back to T_mem).
+
+    Args:
+        gpu_type: GPU type key (matched case-insensitively).
+        precision_tag: Precision key to look up.
+
+    Returns:
+        The vendor dense peak TFLOPS, or ``0.0`` on miss.
+    """
     spec = HW_SPECS.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
@@ -514,7 +616,14 @@ class ModelMeta:
 
 
 def _read_total_size(model_path: Path) -> int | None:
-    """Read ``metadata.total_size`` (bytes) from the safetensors index (byte-exact)."""
+    """Read ``metadata.total_size`` (bytes) from the safetensors index (byte-exact).
+
+    Args:
+        model_path: Local HF model directory.
+
+    Returns:
+        The total weight size in bytes, or ``None`` when unavailable.
+    """
     idx = model_path / "model.safetensors.index.json"
     if idx.is_file():
         try:
@@ -531,7 +640,15 @@ def _read_total_size(model_path: Path) -> int | None:
 
 
 def _sum_weight_file_sizes(model_path: Path, pattern: str) -> int | None:
-    """Fallback weight size from local weight shards matching ``pattern``."""
+    """Fallback weight size from local weight shards matching ``pattern``.
+
+    Args:
+        model_path: Local HF model directory.
+        pattern: Glob pattern for weight shards (e.g. ``*.safetensors``).
+
+    Returns:
+        The summed shard size in bytes, or ``None`` when zero/unreadable.
+    """
     try:
         total = sum(
             p.stat().st_size
@@ -563,7 +680,14 @@ def _read_hf_config(model_path: Path) -> dict[str, Any] | None:
 
 
 def _derive_kv_heads(cfg: dict[str, Any]) -> int:
-    """GQA-aware: ``num_key_value_heads`` if present, else ``num_attention_heads``."""
+    """GQA-aware: ``num_key_value_heads`` if present, else ``num_attention_heads``.
+
+    Args:
+        cfg: Parsed HF ``config.json``.
+
+    Returns:
+        The number of KV heads, or ``0`` when neither field is present.
+    """
     kv = cfg.get("num_key_value_heads")
     if kv is None:
         kv = cfg.get("num_attention_heads")
@@ -571,7 +695,14 @@ def _derive_kv_heads(cfg: dict[str, Any]) -> int:
 
 
 def _derive_head_dim(cfg: dict[str, Any]) -> int:
-    """``head_dim`` directly, or ``hidden_size / num_attention_heads``."""
+    """``head_dim`` directly, or ``hidden_size / num_attention_heads``.
+
+    Args:
+        cfg: Parsed HF ``config.json``.
+
+    Returns:
+        The per-head dimension, or ``0`` when it cannot be derived.
+    """
     head_dim = cfg.get("head_dim")
     if head_dim:
         return int(head_dim)
@@ -588,7 +719,16 @@ def _compute_active_weight_bytes(
     weight_bytes: int,
     dtype_bytes: float,
 ) -> int:
-    """MoE-aware estimate of weight bytes fetched per token (geometry-based, avoids the ~10× over-count from the safetensors total; safe-degrades to ``weight_bytes``)."""
+    """MoE-aware estimate of weight bytes fetched per token (geometry-based, avoids the ~10× over-count from the safetensors total; safe-degrades to ``weight_bytes``).
+
+    Args:
+        cfg: Parsed HF ``config.json``.
+        weight_bytes: Total weight bytes (the safe-degrade fallback).
+        dtype_bytes: Weight bytes-per-element.
+
+    Returns:
+        The estimated per-token active weight bytes.
+    """
     active, _total_expert, _ne, _ept = _compute_expert_decomposition(
         cfg, weight_bytes=weight_bytes, dtype_bytes=dtype_bytes,
     )
@@ -601,7 +741,17 @@ def _compute_expert_decomposition(
     weight_bytes: int,
     dtype_bytes: float,
 ) -> tuple[int, int, int, int]:
-    """MoE decomposition for the batch-aware roofline; returns ``(active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok)``. Safe-degrades to ``(weight_bytes, 0, 0, 0)``. Handles num_experts / n_routed_experts / num_local_experts aliases."""
+    """MoE decomposition for the batch-aware roofline; returns ``(active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok)``. Safe-degrades to ``(weight_bytes, 0, 0, 0)``. Handles num_experts / n_routed_experts / num_local_experts aliases.
+
+    Args:
+        cfg: Parsed HF ``config.json``.
+        weight_bytes: Total weight bytes (the safe-degrade fallback).
+        dtype_bytes: Weight bytes-per-element.
+
+    Returns:
+        A tuple of ``(active_weight_bytes, total_expert_bytes, num_experts,
+        experts_per_tok)``, degrading to ``(weight_bytes, 0, 0, 0)``.
+    """
     num_experts = int(
         cfg.get("num_experts")
         or cfg.get("n_routed_experts")  # DeepSeek V3 alias
@@ -643,7 +793,16 @@ def load_model_meta(
     *,
     precision_hint: str = "",
 ) -> ModelMeta | None:
-    """Read ``weight_bytes`` + KV-cache shape from a local HF model dir (``None`` when unreadable). Weight-dtype priority: quantization_config.quant_method > torch_dtype > dtype > precision_hint."""
+    """Read ``weight_bytes`` + KV-cache shape from a local HF model dir (``None`` when unreadable). Weight-dtype priority: quantization_config.quant_method > torch_dtype > dtype > precision_hint.
+
+    Args:
+        model_path: Local HF model directory.
+        precision_hint: Fallback precision tag when config lacks a dtype.
+
+    Returns:
+        The populated ``ModelMeta``, or ``None`` when the dir/config/weights
+        are unreadable.
+    """
     if not model_path:
         return None
     p = Path(model_path).expanduser()
@@ -700,7 +859,17 @@ def compute_kv_bytes_per_token(
     head_dim: int,
     kv_dtype_bytes: float,
 ) -> int:
-    """KV cache footprint per generated token, summed over all layers (the ``2`` covers K + V)."""
+    """KV cache footprint per generated token, summed over all layers (the ``2`` covers K + V).
+
+    Args:
+        num_layers: Number of transformer layers.
+        num_kv_heads: Number of KV heads.
+        head_dim: Per-head dimension.
+        kv_dtype_bytes: Bytes per KV element.
+
+    Returns:
+        The KV-cache bytes per generated token.
+    """
     return int(2 * num_layers * num_kv_heads * head_dim * kv_dtype_bytes)
 
 
@@ -721,7 +890,28 @@ def compute_theoretical_peak_output_tok_per_sec(
     experts_per_tok: int = 0,
     expert_weight_bytes: int = 0,
 ) -> float:
-    """Decode-only memory-bound ceiling for ``output_throughput`` (returns 0.0, never raises, on unknown gpu_type / degenerate divisor). ``active_weight_bytes`` shrinks per-token IO for MoE."""
+    """Decode-only memory-bound ceiling for ``output_throughput`` (returns 0.0, never raises, on unknown gpu_type / degenerate divisor). ``active_weight_bytes`` shrinks per-token IO for MoE.
+
+    Args:
+        gpu_type: GPU type key for the HBM bandwidth lookup.
+        num_gpus: Number of GPUs (tensor-parallel degree).
+        weight_bytes: Total weight bytes.
+        num_layers: Number of transformer layers.
+        num_kv_heads: Number of KV heads.
+        head_dim: Per-head dimension.
+        kv_dtype_bytes: Bytes per KV element.
+        isl: Input sequence length.
+        osl: Output sequence length.
+        concurrency: Decode batch size (floored at 1).
+        active_weight_bytes: Per-token active weight bytes for MoE (0 = dense).
+        num_experts: Total experts (0 = dense).
+        experts_per_tok: Experts activated per token.
+        expert_weight_bytes: Total expert weight bytes.
+
+    Returns:
+        The memory-bound decode throughput ceiling, or ``0.0`` on unknown
+        GPU type or a degenerate divisor.
+    """
     spec = HW_SPECS.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
@@ -776,6 +966,18 @@ def compute_compute_bound_ceiling_tok_per_sec(
         T_cmp = (F_peak * G * dtype_bytes) / (2 * active_weight_bytes_B1)
 
     Divisor uses ``active_weight_bytes`` at B=1 (NOT batch-saturated). Returns 0.0 on missing input (degrade to T_mem).
+
+    Args:
+        gpu_type: GPU type key for the peak TFLOPS lookup.
+        num_gpus: Number of GPUs (tensor-parallel degree).
+        precision_tag: Precision key for the peak TFLOPS lookup.
+        active_weight_bytes: Per-token active weight bytes at B=1.
+        weight_bytes: Total weight bytes (fallback when active is missing).
+        weight_dtype_bytes: Weight bytes-per-element.
+
+    Returns:
+        The compute-bound decode throughput ceiling, or ``0.0`` on missing
+        input.
     """
     peak_tflops = _resolve_peak_tflops(gpu_type, precision_tag)
     if peak_tflops <= 0 or weight_dtype_bytes <= 0:
@@ -796,7 +998,14 @@ def compute_compute_bound_ceiling_tok_per_sec(
 
 
 def _read_baseline_yaml_conc(state: Any) -> int:
-    """Read ``benchmark.envs.CONC`` from the materialized baseline yaml (ground-truth concurrency; ``0`` when unreadable)."""
+    """Read ``benchmark.envs.CONC`` from the materialized baseline yaml (ground-truth concurrency; ``0`` when unreadable).
+
+    Args:
+        state: Shared run state carrying ``last_baseline`` provenance.
+
+    Returns:
+        The baseline concurrency, or ``0`` when unreadable.
+    """
     return _env_int(
         _benchmark_envs(_read_baseline_yaml_benchmark(state)),
         "CONC",
@@ -804,7 +1013,14 @@ def _read_baseline_yaml_conc(state: Any) -> int:
 
 
 def _resolve_effective_concurrency(state: Any) -> int:
-    """Resolve the concurrency the actual benchmark ran with (returns int >= 1; on-disk baseline yaml CONC wins, since ``state.conc`` can stay stale and under-count the ceiling 8x)."""
+    """Resolve the concurrency the actual benchmark ran with (returns int >= 1; on-disk baseline yaml CONC wins, since ``state.conc`` can stay stale and under-count the ceiling 8x).
+
+    Args:
+        state: Shared run state (baseline yaml CONC preferred over ``conc``).
+
+    Returns:
+        The effective concurrency, always ``>= 1``.
+    """
     yaml_conc = _read_baseline_yaml_conc(state)
     if yaml_conc > 0:
         return yaml_conc
@@ -841,7 +1057,16 @@ def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
 def compute_roofline_breakdown_from_state(
     state: Any, *, arm: str | None = None,
 ) -> RooflineBreakdown:
-    """Primary decode ceiling + T_mem/T_cmp side projections. Prefers the bottom-up PerfModel (``compute_roofline_from_perfmodel``) when model config is complete, else the legacy top-down aggregate. Never raises; returns ``_EMPTY_BREAKDOWN`` on missing fields. ``arm`` pins precision to a specific arm ("baseline" anchors the ceiling dtype to baseline)."""
+    """Primary decode ceiling + T_mem/T_cmp side projections. Prefers the bottom-up PerfModel (``compute_roofline_from_perfmodel``) when model config is complete, else the legacy top-down aggregate. Never raises; returns ``_EMPTY_BREAKDOWN`` on missing fields. ``arm`` pins precision to a specific arm ("baseline" anchors the ceiling dtype to baseline).
+
+    Args:
+        state: Shared run state to resolve the workload and dtype from.
+        arm: Pins precision to a specific arm; ``None`` infers it.
+
+    Returns:
+        The decode ``RooflineBreakdown`` (``_EMPTY_BREAKDOWN`` on missing
+        fields).
+    """
     runtime = resolve_runtime_workload(state, arm=arm)
     meta = load_model_meta(
         runtime.model_path,
@@ -922,7 +1147,15 @@ def compute_roofline_breakdown_from_state(
 
 
 def compute_peak_from_state(state: Any, *, arm: str | None = None) -> float:
-    """Convenience scalar wrapper for ``T_peak`` only (kept for backward compat; prefer ``compute_roofline_breakdown_from_state``). ``arm`` pins precision to a specific arm."""
+    """Convenience scalar wrapper for ``T_peak`` only (kept for backward compat; prefer ``compute_roofline_breakdown_from_state``). ``arm`` pins precision to a specific arm.
+
+    Args:
+        state: Shared run state to compute the ceiling from.
+        arm: Pins precision to a specific arm; ``None`` infers it.
+
+    Returns:
+        The peak decode throughput (``peak_tok_per_sec``).
+    """
     return compute_roofline_breakdown_from_state(state, arm=arm).peak_tok_per_sec
 
 
@@ -932,6 +1165,12 @@ def read_baseline_server_args(state: Any) -> str:
     Stable entry point for callers (e.g. Coordinator profile injection) that
     must read baseline's own flags without depending on the private
     ``_read_baseline_yaml_server_args`` helper.
+
+    Args:
+        state: Shared run state carrying ``last_baseline`` provenance.
+
+    Returns:
+        The baseline arm's runtime server args, or ``""`` when unreadable.
     """
     return _read_baseline_yaml_server_args(state)
 
@@ -983,7 +1222,15 @@ HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
 
 
 def _resolve_achievable_tflops(gpu_type: str | None, precision_tag: str | None) -> float:
-    """Max-achievable TFLOPS from ``HW_SPECS_ACHIEVABLE``; 0.0 on miss."""
+    """Max-achievable TFLOPS from ``HW_SPECS_ACHIEVABLE``; 0.0 on miss.
+
+    Args:
+        gpu_type: GPU type key (matched case-insensitively).
+        precision_tag: Precision key to look up.
+
+    Returns:
+        The max-achievable TFLOPS, or ``0.0`` on miss.
+    """
     spec = HW_SPECS_ACHIEVABLE.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
@@ -1004,6 +1251,15 @@ def _fused_moe_flops(M: int, K: int, N: int, topk: int) -> float:
       gate+up : 2 * M * K * N * topk * 2
       down    : 2 * M * K * N * topk
       aggregation: M * K * (2 * topk - 1)
+
+    Args:
+        M: Number of tokens (batch * seq).
+        K: Hidden size.
+        N: Per-expert FFN intermediate size.
+        topk: Experts activated per token.
+
+    Returns:
+        Total FLOPs for the gated SwiGLU MoE forward.
     """
     return 2.0 * M * K * N * topk * 2 + 2.0 * M * K * N * topk + M * K * (2 * topk - 1)
 
@@ -1024,6 +1280,18 @@ def _fused_moe_bytes(
     act_bpe defaults to weight_bpe when not provided. For FP8/FP4-weight
     models pass act_bpe=2.0 (bf16 activations) to match TraceLens semantics
     where input_bpe != weight_bpe.
+
+    Args:
+        M: Number of tokens (batch * seq).
+        K: Hidden size.
+        N: Per-expert FFN intermediate size.
+        num_experts: Total experts.
+        topk: Experts activated per token.
+        weight_bpe: Weight bytes-per-element.
+        act_bpe: Activation bytes-per-element; defaults to ``weight_bpe``.
+
+    Returns:
+        Total HBM bytes for the gated SwiGLU MoE forward.
     """
     if act_bpe is None:
         act_bpe = weight_bpe
@@ -1077,6 +1345,14 @@ def _gemm_flops(M: int, N: int, K: int) -> float:
     Mirrors TraceLens.PerfModel.perf_model.GEMM.flops_func (no bias path
     needed here since LLM linear layers are weight-only without bias in
     the roofline model).
+
+    Args:
+        M: Rows of the output (tokens).
+        N: Output features.
+        K: Inner/contraction dimension.
+
+    Returns:
+        Total FLOPs for the matrix multiply.
     """
     return 2.0 * M * N * K
 
@@ -1090,6 +1366,16 @@ def _gemm_bytes(
     (input activation), bpe_mat2=weight_bpe (weight), bpe_output=act_bpe (output).
     act_bpe defaults to weight_bpe; for FP8/FP4-weight models pass act_bpe=2.0
     (bf16 activations) to correctly separate activation from weight bytes.
+
+    Args:
+        M: Rows of the output (tokens).
+        N: Output features.
+        K: Inner/contraction dimension.
+        weight_bpe: Weight bytes-per-element.
+        act_bpe: Activation bytes-per-element; defaults to ``weight_bpe``.
+
+    Returns:
+        Total HBM bytes for the matrix multiply.
     """
     a = act_bpe if act_bpe is not None else weight_bpe
     return M * K * a + K * N * weight_bpe + M * N * a
@@ -1106,6 +1392,19 @@ def _sdpa_flops(
       PV    : B * H_Q * 2 * N_Q * d_h_v * N_KV
     Softmax FLOPs omitted (dominated by matmuls).
     Causal masking halves the work when N_Q == N_KV (prefill only).
+
+    Args:
+        B: Batch size.
+        N_Q: Query sequence length.
+        H_Q: Number of query heads.
+        N_KV: Key/value sequence length.
+        H_KV: Number of KV heads.
+        d_h_qk: Per-head dimension for Q/K.
+        d_h_v: Per-head dimension for V.
+        causal: Whether causal masking applies.
+
+    Returns:
+        Total FLOPs for scaled dot-product attention.
     """
     flops_qk = B * H_Q * (2.0 * N_Q * N_KV * d_h_qk)
     flops_pv = B * H_Q * (2.0 * N_Q * d_h_v * N_KV)
@@ -1124,6 +1423,20 @@ def _sdpa_bytes(
     Mirrors TraceLens.PerfModel.perf_model.SDPA.bytes_func.
     causal is accepted for API symmetry but does not change the I/O volume
     (KV is always fully read even under causal masking at the HBM level).
+
+    Args:
+        B: Batch size.
+        N_Q: Query sequence length.
+        H_Q: Number of query heads.
+        N_KV: Key/value sequence length.
+        H_KV: Number of KV heads.
+        d_h_qk: Per-head dimension for Q/K.
+        d_h_v: Per-head dimension for V.
+        causal: Accepted for API symmetry; does not change I/O volume.
+        bpe: Bytes per element for the tensors.
+
+    Returns:
+        Total HBM bytes for scaled dot-product attention.
     """
     elems = (
         B * N_Q * H_Q * d_h_qk    # Q read
@@ -1160,6 +1473,19 @@ def compute_roofline_from_perfmodel(
     The GEMM / SDPA formulas are inlined here (no TraceLens import) and
     maintained independently.  They match TraceLens PerfModel exactly
     (verified by the PoC in roofline_perfmodel_poc.py: deviation < 1.6%).
+
+    Args:
+        meta: Model metadata; complete config required (else ``None``).
+        gpu_type: GPU type key for the achievable-spec lookup.
+        concurrency: Decode batch size.
+        isl: Input sequence length.
+        osl: Output sequence length.
+        num_gpus: Number of GPUs (tensor-parallel degree).
+        precision_tag: Precision key for the achievable TFLOPS lookup.
+
+    Returns:
+        The per-op ``PerfModelBreakdown``, or ``None`` when model metadata is
+        incomplete or the GPU is unsupported.
     """
     if meta is None:
         return None
@@ -1354,6 +1680,14 @@ def compute_roofline_breakdown_from_state_v2(
     the GPU or model config is unsupported).  Its ``decode_tok_per_s`` equals
     ``breakdown.peak_tok_per_sec`` for supported configs. ``arm`` pins precision
     to a specific arm ("baseline" anchors the ceiling dtype to baseline).
+
+    Args:
+        state: Shared run state to compute the breakdowns from.
+        arm: Pins precision to a specific arm; ``None`` infers it.
+
+    Returns:
+        A tuple of ``(RooflineBreakdown, PerfModelBreakdown | None)``; the
+        second element is ``None`` when the GPU/model config is unsupported.
     """
     legacy = compute_roofline_breakdown_from_state(state, arm=arm)
     runtime = resolve_runtime_workload(state, arm=arm)

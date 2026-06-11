@@ -141,7 +141,15 @@ def _load_json(path: Path) -> dict[str, Any]:
 # Plan building (pure -- no SDK, dry-run friendly)
 # ---------------------------------------------------------------------------
 def build_plan(session_dir: Path) -> dict[str, Any]:
-    """Parse the trace files into a Langfuse-shaped plan dict (pure)."""
+    """Parse the trace files into a Langfuse-shaped plan dict (pure).
+
+    Args:
+        session_dir: The session directory holding trace and manifest files.
+
+    Returns:
+        A Langfuse-shaped plan dict with trace seed, session id, and phase
+        hierarchy.
+    """
     tdir = session_dir / TRACE_SUBDIR
     llm = _load_jsonl(tdir / LLM_CALLS)
     conv = _load_jsonl(tdir / CONVERSATIONS)

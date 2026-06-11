@@ -59,6 +59,13 @@ def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, A
     Only non-empty values are included; the dispatcher skips absent
     fields. ``quant_scheme`` / ``workload_mode`` ride on the per-baseline
     ``baseline_workload_extra`` map when present.
+
+    Args:
+        shared_state: The live SharedState carrying workload knobs.
+        framework_version: The resolved framework version, included when set.
+
+    Returns:
+        The ``prefer`` similarity-hint dict (non-empty fields only).
     """
     prefer: dict[str, Any] = {}
     for attr in _PREFER_NUMERIC_ATTRS:
@@ -84,6 +91,12 @@ def _remote_is_gbrain(kb: Any) -> bool:
     adapter; otherwise the source is the cortex kb-service (or local-only
     fallback, which we still label ``cortex-kb`` since that is the
     configured remote contract).
+
+    Args:
+        kb: The recipe-KB dispatcher whose active remote is inspected.
+
+    Returns:
+        ``True`` when the active remote is the gbrain adapter.
     """
     remote = getattr(kb, "remote", None)
     return type(remote).__name__ == "GbrainRemoteRecipeClient"
@@ -96,6 +109,13 @@ def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
     tags but no champion / experiential lists) is NOT actionable: treating
     it as a confident hit would let warm-replay apply an empty config and
     starve the specialist prompt of real priors.
+
+    Args:
+        row: A warm recipe row to inspect.
+
+    Returns:
+        ``True`` when the row carries a usable config, positive throughput, or
+        any experiential list worth replaying.
     """
     if not isinstance(row, Mapping):
         return False
@@ -133,6 +153,19 @@ def _build_warm_start_context(
     ready-to-replay champion plus the experiential lists, so consumers
     (warm-replay / specialist prompt / ledger) never parse the raw
     recipe shape.
+
+    Args:
+        status: The warm-start status (``hit`` / ``seed_only`` / ``miss`` /
+            ``error``).
+        tier: The match tier (e.g. ``exact`` / ``relative`` / ``seed_only``).
+        confidence: The match confidence score.
+        canonical_id: The recipe's canonical id.
+        source: The serving source label (e.g. ``gbrain`` / ``cortex-kb``).
+        recipe: The matched recipe row, or ``None``.
+
+    Returns:
+        The model-facing WarmStartContext dict; replay/prior fields are only
+        populated for a ``hit``.
     """
     ctx: dict[str, Any] = {
         "status": status,
@@ -195,6 +228,28 @@ def run_t0_anchor(
 
     Mutates ``shared_state`` in place (warm_start_* fields) and persists when
     ``save_state=True``. ``session_dir`` is required. Returns a :class:`T0Result`.
+
+    Args:
+        kb: The recipe-KB dispatcher used for the read-modify-write anchor.
+        shared_state: The live SharedState, mutated in place with warm-start
+            results.
+        workload: The model/workload identifier.
+        hw: The hardware/GPU identifier.
+        image_digest: Optional container image digest stamped as a trace tag.
+        stack_fingerprint: Optional stack-version fingerprint mapping.
+        extra_attrs: Optional extra identity/trace attributes (model_class,
+            framework, session ids).
+        resume: When ``True``, re-anchor even if already anchored.
+        fail_fast: Reserved flag for fail-fast behavior.
+        on_status: Optional status-line callback; defaults to INFO logging.
+        session_dir: The session directory (required).
+        save_state: When ``True``, persist the mutated SharedState.
+
+    Returns:
+        A :class:`T0Result` describing the anchor outcome.
+
+    Raises:
+        ValueError: If ``session_dir`` is ``None``.
     """
     emit = on_status or _default_status_emitter
     if session_dir is None:
