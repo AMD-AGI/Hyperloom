@@ -18,6 +18,8 @@ import logging
 import os
 import signal
 import subprocess
+import sys
+import threading
 import time
 
 log = logging.getLogger(__name__)
@@ -188,6 +190,69 @@ _SERVER_DEAD_MARKERS: tuple[str, ...] = (
 # ``INFERENCE_OPTIMIZER_SERVER_DEAD_GRACE_SEC``.
 _SERVER_DEAD_GRACE_SEC_DEFAULT: float = 120.0
 
+
+class _StreamCapture:
+    """Capture child output while mirroring each line to the parent stream."""
+
+    def __init__(self, proc: subprocess.Popen, *, text: bool) -> None:
+        self._text = text
+        self._stdout_chunks: list[str | bytes] = []
+        self._stderr_chunks: list[str | bytes] = []
+        self._threads: list[threading.Thread] = []
+        if proc.stdout is not None:
+            self._threads.append(threading.Thread(
+                target=self._pump,
+                args=(proc.stdout, self._stdout_chunks, sys.stdout),
+                daemon=True,
+            ))
+        if proc.stderr is not None:
+            self._threads.append(threading.Thread(
+                target=self._pump,
+                args=(proc.stderr, self._stderr_chunks, sys.stderr),
+                daemon=True,
+            ))
+
+    def start(self) -> None:
+        for thread in self._threads:
+            thread.start()
+
+    def finish(self, timeout: float = 2.0) -> tuple[str | bytes, str | bytes]:
+        for thread in self._threads:
+            thread.join(timeout=timeout)
+        empty: str | bytes = "" if self._text else b""
+        return (
+            self._join(self._stdout_chunks) if self._stdout_chunks else empty,
+            self._join(self._stderr_chunks) if self._stderr_chunks else empty,
+        )
+
+    def _join(self, chunks: list[str | bytes]) -> str | bytes:
+        return "".join(chunks) if self._text else b"".join(chunks)  # type: ignore[arg-type,return-value]
+
+    def _pump(self, pipe, chunks: list[str | bytes], mirror) -> None:
+        try:
+            while True:
+                chunk = pipe.readline()
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                self._mirror(chunk, mirror)
+        finally:
+            try:
+                pipe.close()
+            except Exception:  # noqa: BLE001 - best-effort close
+                pass
+
+    def _mirror(self, chunk: str | bytes, mirror) -> None:
+        try:
+            if isinstance(chunk, bytes):
+                stream = getattr(mirror, "buffer", mirror)
+                stream.write(chunk)
+            else:
+                mirror.write(chunk)
+            mirror.flush()
+        except Exception:  # noqa: BLE001 - logging must not break subprocess
+            pass
+
 # Bytes read from the tail of ``server.log`` per scan (markers always land near
 # the end of the bootstrap traceback).
 _SERVER_LOG_TAIL_BYTES: int = 65536
@@ -257,6 +322,7 @@ def run_with_session_kill(
         except (TypeError, ValueError):
             server_dead_grace_sec = _SERVER_DEAD_GRACE_SEC_DEFAULT
     proc: subprocess.Popen | None = None
+    capture: _StreamCapture | None = None
     try:
         proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
             cmd,
@@ -267,6 +333,8 @@ def run_with_session_kill(
             cwd=cwd,
             **new_session_kwargs(),
         )
+        capture = _StreamCapture(proc, text=text)
+        capture.start()
         try:
             stdout, stderr = _communicate_with_soft_deadline(
                 proc,
@@ -274,22 +342,21 @@ def run_with_session_kill(
                 soft_deadline_sec=soft_deadline_sec,
                 server_log_path=server_log_path,
                 server_dead_grace_sec=server_dead_grace_sec,
+                capture=capture,
             )
         except subprocess.TimeoutExpired:
             # Reap before re-raising so the caller doesn't see a running tree.
             kill_my_spawned_server(proc)
-            try:
-                # Drain the pipes so the exception carries partial output.
-                stdout, stderr = proc.communicate(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                pass
+            if capture is not None:
+                capture.finish(timeout=2.0)
             raise
         except _ServerDeadDetected as exc:
             kill_my_spawned_server(proc)
-            try:
-                stdout, stderr = proc.communicate(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                stdout, stderr = "", ""
+            stdout, stderr = (
+                capture.finish(timeout=2.0)
+                if capture is not None
+                else ("" if text else b"", "" if text else b"")
+            )
             log.warning(
                 "_subprocess_kill: server-liveness watchdog reaped tree — "
                 "engine/worker init died but parent hung (marker=%r, "
@@ -305,10 +372,11 @@ def run_with_session_kill(
             )
         except _SoftDeadlineExceeded as exc:
             kill_my_spawned_server(proc)
-            try:
-                stdout, stderr = proc.communicate(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                stdout, stderr = "", ""
+            stdout, stderr = (
+                capture.finish(timeout=2.0)
+                if capture is not None
+                else ("" if text else b"", "" if text else b"")
+            )
             log.info(
                 "_subprocess_kill: soft_deadline_sec=%.1fs exceeded "
                 "(elapsed=%.1fs); reaped tree with sentinel returncode=%d.",
@@ -376,6 +444,7 @@ def _communicate_with_soft_deadline(
     soft_deadline_sec: float | None,
     server_log_path: str | None = None,
     server_dead_grace_sec: float | None = None,
+    capture: _StreamCapture | None = None,
 ) -> tuple[str | bytes, str | bytes]:
     """``proc.communicate`` shim enforcing the soft deadline + server watchdog.
 
@@ -398,8 +467,11 @@ def _communicate_with_soft_deadline(
     soft_active = (
         soft_deadline_sec is not None and float(soft_deadline_sec) > 0.0
     )
-    if not soft_active and not watchdog_active:
+    if capture is None and not soft_active and not watchdog_active:
         return proc.communicate(timeout=hard_timeout)
+    if capture is not None and not soft_active and not watchdog_active:
+        proc.wait(timeout=hard_timeout)
+        return capture.finish()
 
     deadline_sec = float(soft_deadline_sec) if soft_active else None
     grace_sec = float(server_dead_grace_sec) if watchdog_active else None
@@ -433,12 +505,14 @@ def _communicate_with_soft_deadline(
         if hard_timeout is not None:
             hard_remaining = float(hard_timeout) - elapsed
             if hard_remaining <= 0.0:
-                # Let proc.communicate's own TimeoutExpired path fire.
-                return proc.communicate(timeout=0.0)
+                raise subprocess.TimeoutExpired(proc.args, hard_timeout)
             slice_sec = min(slice_sec, hard_remaining)
         slice_sec = max(slice_sec, 0.0)
         try:
-            return proc.communicate(timeout=slice_sec)
+            if capture is None:
+                return proc.communicate(timeout=slice_sec)
+            proc.wait(timeout=slice_sec)
+            return capture.finish()
         except subprocess.TimeoutExpired:
             # Not yet done; loop to re-evaluate all gates.
             continue
