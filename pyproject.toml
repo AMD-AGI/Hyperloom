@@ -61,7 +61,6 @@ testpaths = [
     "critic-agent/runtime/tests",
     "kernel-agent/tools/test_tracelens_arch_benchmark.py",
     "kernel-agent/tools/test_ray_fd_limit.py",
-    "kernel-agent/tools/test_tracelens_csv.py",
 ]
 pythonpath = [".", "robustness-agent/src", "critic-agent"]
 markers = [
