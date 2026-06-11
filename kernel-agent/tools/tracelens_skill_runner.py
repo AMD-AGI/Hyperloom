@@ -319,8 +319,15 @@ def _iter_message_text(message: Any) -> Iterable[str]:
 
 
 def _cap_str(value: str, limit: int = _TRANSCRIPT_FIELD_MAX_CHARS) -> str:
-    """Truncate a transcript string to ``limit`` chars with a clip marker so a
-    reader can tell the field was bounded (#266)."""
+    """Truncate a transcript string, appending a clip marker when bounded.
+
+    Args:
+        value: The string to truncate.
+        limit: Maximum length before truncation.
+
+    Returns:
+        The original string, or a truncated copy with a clip marker (#266).
+    """
     if len(value) <= limit:
         return value
     return value[:limit] + f"... [truncated {len(value) - limit} chars]"
@@ -334,7 +341,15 @@ def _json_safe(value: Any, *, cap: bool = True) -> Any:
     write infallible so a serialization edge case never aborts a TraceLens
     run (#266). When ``cap`` is set every string (at any nesting depth) is
     bounded to ``_TRANSCRIPT_FIELD_MAX_CHARS`` so a megabyte tool_result cannot
-    bloat the transcript."""
+    bloat the transcript.
+
+    Args:
+        value: The value to coerce.
+        cap: When ``True``, bound every nested string to the field max.
+
+    Returns:
+        A JSON-serializable representation of ``value``.
+    """
     if isinstance(value, str):
         return _cap_str(value) if cap else value
     if isinstance(value, dict):
@@ -356,7 +371,14 @@ def _serialize_sdk_block(block: Any) -> dict[str, Any]:
     union of fields those types expose, rather than importing the SDK's
     concrete block classes. This mirrors
     ``ClaudeBackend._iter_blocks`` so the runner stays decoupled from
-    claude-agent-sdk internals."""
+    claude-agent-sdk internals.
+
+    Args:
+        block: An SDK content block (or a plain dict).
+
+    Returns:
+        A JSON-safe record describing the block.
+    """
     if isinstance(block, dict):
         record = _json_safe(block)
         if isinstance(record, dict):
@@ -403,7 +425,15 @@ def _serialize_sdk_message(message: Any, *, seq: int) -> dict[str, Any]:
     The record carries the message class name (``AssistantMessage`` /
     ``ResultMessage`` / ...), its content blocks, and — when present on a
     terminal ``ResultMessage`` — the consolidated ``result`` text and the
-    Anthropic ``usage`` dict (token accounting)."""
+    Anthropic ``usage`` dict (token accounting).
+
+    Args:
+        message: An SDK stream message.
+        seq: The message sequence number within the stream.
+
+    Returns:
+        A JSON-safe transcript record for the message.
+    """
     record: dict[str, Any] = {
         "seq": seq,
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -694,7 +724,18 @@ def _parse_marker_attrs(blob: str) -> dict[str, str]:
 def _extract_between(
     text: str, start_marker: str, end_markers: tuple[str, ...],
 ) -> str:
-    """Return the substring between ``start_marker`` and the earliest ``end_markers`` (tail if none; empty if start absent)."""
+    """Extract the substring between a start marker and the earliest end marker.
+
+    Args:
+        text: The text to search.
+        start_marker: Marker that begins the region.
+        end_markers: Candidate markers that end the region; the earliest match
+            wins.
+
+    Returns:
+        The trimmed substring, the tail when no end marker is found, or an
+        empty string when the start marker is absent.
+    """
     start = text.find(start_marker)
     if start == -1:
         return ""
@@ -706,7 +747,15 @@ def _extract_between(
 
 
 def _extract_pitem_prose(body: str) -> dict[str, Any]:
-    """Extract Identification / Reasoning / Resolution / Impact-estimate fields from a P-item body (all default empty/0.0)."""
+    """Extract prose and impact fields from a P-item body.
+
+    Args:
+        body: The Markdown body of a single P-item.
+
+    Returns:
+        A dict with ``identification``, ``reasoning_for_slowdown``,
+        ``resolution``, and impact estimates (defaulting to empty / 0.0).
+    """
     identification = _extract_between(
         body, _IDENTIFICATION_LABEL,
         (_DATA_LABEL, _REASONING_LABEL, _RESOLUTION_LABEL, _IMPACT_LABEL),
@@ -729,7 +778,15 @@ def _extract_pitem_prose(body: str) -> dict[str, Any]:
 
 
 def _extract_pitem_categories(text: str) -> list[dict[str, Any]]:
-    """Return per-P-item metadata (``category``/``low``/``mid``/``high``), in priority order, from p_item markers."""
+    """Extract per-P-item category and impact metadata in priority order.
+
+    Args:
+        text: The full report text containing ``p_item`` markers.
+
+    Returns:
+        A list of dicts with ``category`` and ``impact_score*`` fields, one
+        per P-item marker.
+    """
 
     items: list[dict[str, Any]] = []
     for match in _PITEM_MARKER_RE.finditer(text):
@@ -775,7 +832,17 @@ def _split_data_blocks(text: str) -> list[tuple[int, str, str]]:
 
 
 def _extract_data_table(body: str) -> list[list[str]]:
-    """Pull the 9-column markdown table that follows ``**Data:**`` (raw header + data cells; ends at blank line or next ``**Field:**``)."""
+    """Pull the 9-column markdown table that follows a ``**Data:**`` marker.
+
+    The table includes the raw header and data cells and ends at a blank line
+    or the next ``**Field:**`` marker.
+
+    Args:
+        body: The P-item body text to scan.
+
+    Returns:
+        The table rows as lists of cell strings.
+    """
 
     marker = body.find("**Data:**")
     if marker < 0:
@@ -921,7 +988,17 @@ _IDLE_PCT_TABLE_RE = re.compile(
 
 
 def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
-    """Extract ``Idle %`` from the Executive Summary table in ``analysis.md`` (§1/§2 idle-gate); ``None`` on missing/unparseable so callers skip the gate gracefully."""
+    """Extract ``Idle %`` from an ``analysis.md`` Executive Summary table.
+
+    Used by the §1/§2 idle gate.
+
+    Args:
+        md_path: Path to the ``analysis.md`` report.
+
+    Returns:
+        The idle percentage, or ``None`` when missing/unparseable so callers
+        skip the gate gracefully.
+    """
     try:
         text = md_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -939,7 +1016,14 @@ def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
 
 
 def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
-    """Per-row sort key for the ``Lower Efficiency`` budget filter (§2); rows with no efficiency (0.0) sort last."""
+    """Compute the per-row sort key for the ``Lower Efficiency`` filter (§2).
+
+    Args:
+        candidate: A candidate row carrying ``efficiency_percent``.
+
+    Returns:
+        The efficiency value, or ``inf`` so rows with no efficiency sort last.
+    """
     eff = candidate.get("efficiency_percent")
     try:
         value = float(eff)
@@ -951,7 +1035,19 @@ def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
 
 
 def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
-    """Parse the TraceLens ``analysis.md`` final report into hot-kernels in §2 priority order (P-item, then lower efficiency within); empty/missing → []."""
+    """Parse a TraceLens ``analysis.md`` report into hot-kernel rows.
+
+    Rows are returned in §2 priority order (P-item, then lower efficiency
+    within each item).
+
+    Args:
+        md_path: Path to the ``analysis.md`` report.
+        top_k: Maximum number of hot-kernel rows to return.
+
+    Returns:
+        The hot-kernel rows, or an empty list when the report is missing or
+        unparseable.
+    """
 
     if not md_path.exists():
         return []
@@ -1039,7 +1135,17 @@ _LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset({
 
 
 def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]:
-    """Parse a TraceLens kernel-path to ``(path, line, function_name)`` (accepts ``<path>(<line>): <func>``/``<path>#L<line>``/bare; placeholders → ``("", None, None)``)."""
+    """Parse a TraceLens kernel-path into its components.
+
+    Accepts ``<path>(<line>): <func>``, ``<path>#L<line>``, or a bare path.
+
+    Args:
+        kernel_path: The kernel-path string to parse.
+
+    Returns:
+        A ``(path, line, function_name)`` tuple; placeholders and empty input
+        return ``("", None, None)``.
+    """
     if not kernel_path:
         return "", None, None
     text = kernel_path.strip()
@@ -1083,7 +1189,13 @@ _FRAMEWORK_SOURCE_ROOTS_ENV = "HYPERLOOM_FRAMEWORK_SOURCE_ROOTS"
 
 
 def _env_framework_source_roots() -> dict[str, tuple[str, ...]]:
-    """Parse ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` (comma-separated ``pkg=/abs/parent``) into ``{pkg: (root,...)}``; unparseable entries skipped."""
+    """Parse ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` into a package-root map.
+
+    The variable is a comma-separated list of ``pkg=/abs/parent`` entries.
+
+    Returns:
+        A ``{pkg: (root, ...)}`` mapping; unparseable entries are skipped.
+    """
     raw = os.environ.get(_FRAMEWORK_SOURCE_ROOTS_ENV, "").strip()
     if not raw:
         return {}
@@ -1101,7 +1213,14 @@ def _env_framework_source_roots() -> dict[str, tuple[str, ...]]:
 
 
 def _package_root_parent(pkg: str) -> str | None:
-    """Return the directory containing ``pkg/`` on the live ``sys.path`` via find_spec; ``None`` if not importable."""
+    """Find the directory containing a package on the live ``sys.path``.
+
+    Args:
+        pkg: The importable package name.
+
+    Returns:
+        The directory containing ``pkg/``, or ``None`` when not importable.
+    """
     try:
         spec = importlib.util.find_spec(pkg)
     except (ImportError, ValueError):
@@ -1121,7 +1240,16 @@ def _package_root_parent(pkg: str) -> str | None:
 def _resolve_launcher_to_abs_source(
     kernel_path: str,
 ) -> tuple[str, int | None, str | None] | None:
-    """Resolve a TraceLens launcher-path to an absolute file; ``(abs_file, line, function_name)`` only when the file exists, else ``None`` (conservative miss → caller's grep locator)."""
+    """Resolve a TraceLens launcher-path to an absolute source file.
+
+    Args:
+        kernel_path: The TraceLens launcher-path to resolve.
+
+    Returns:
+        An ``(abs_file, line, function_name)`` tuple only when the file
+        exists, else ``None`` (a conservative miss defers to the caller's grep
+        locator).
+    """
     raw_path, line, func = _parse_launcher_path(kernel_path)
     if not raw_path:
         return None
@@ -1157,7 +1285,16 @@ def _resolve_launcher_to_abs_source(
 
 
 def _function_line_from_ast(path: Path, function_name: str) -> int | None:
-    """Return the lineno of the first (Async)FunctionDef in ``path`` named ``function_name``; ``None`` if unreadable/unparseable/absent."""
+    """Find the line number of a named function definition via AST.
+
+    Args:
+        path: The source file to parse.
+        function_name: The function name to locate.
+
+    Returns:
+        The first matching ``def``/``async def`` line, or ``None`` when the
+        file is unreadable, unparseable, or the function is absent.
+    """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError, UnicodeDecodeError):
@@ -1173,7 +1310,19 @@ def _resolve_source_target(
     *,
     source_root: Path | None,
 ) -> dict[str, Any] | None:
-    """Resolve a candidate's launcher path to a ``(source_path, definition_line, function_name)`` triple; ``None`` when unparseable. AST line overrides the reported call-site line when resolvable."""
+    """Resolve a candidate's launcher path to a source-target triple.
+
+    The AST-derived definition line overrides the reported call-site line when
+    resolvable.
+
+    Args:
+        candidate: The candidate dict carrying launcher/source paths.
+        source_root: Optional root to resolve relative paths against.
+
+    Returns:
+        A ``(source_path, definition_line, function_name)`` dict, or ``None``
+        when the path is unparseable.
+    """
     # Prefer verbatim tracelens_launcher_path so AST resolution survives _finalize_candidates'
     # source_file overwrite; fall back to source_file / kernel_path for non-TraceLens candidates.
     kernel_path = str(
@@ -1220,6 +1369,12 @@ def _is_native_source(path: str) -> bool:
     keying a task_group on that line splits one device kernel across
     groups. Callers therefore drop the line/function key components for
     these files.
+
+    Args:
+        path: The source file path to classify.
+
+    Returns:
+        ``True`` for C/C++/HIP/CUDA source files.
     """
     return str(path).lower().endswith(_NATIVE_SOURCE_SUFFIXES)
 
@@ -1231,7 +1386,14 @@ def _normalize_operation_key(operation: str) -> str:
     SAME kernel profiled at different dtypes/shapes — e.g.
     ``rmsnorm_kernel<bf16>`` vs ``rmsnorm_kernel<fp16>`` — groups together,
     while DISTINCT kernels (different base names) stay separate (the Q1
-    invariant). Returns the original string when stripping leaves nothing.
+    invariant).
+
+    Args:
+        operation: The TraceLens operation name.
+
+    Returns:
+        The canonicalized operation name, or the original string when
+        stripping leaves nothing.
     """
     s = str(operation).strip()
     if "<" not in s:
@@ -1255,7 +1417,24 @@ def aggregate_by_source_function(
     *,
     source_root: Path | str | None = None,
 ) -> list[dict[str, Any]]:
-    """Group TraceLens candidates into per-kernel ``task_group`` dicts, sorted by aggregate time (desc). Native (.cu/.hip/.cpp) key on ``(source_path, function)`` only (collapse #420 over-split instantiations); Python key on ``(operation, path, line, function)`` since one caller frame can launch distinct kernels (Q1). Each group carries task_group_id/source_path/definition_line/function_name/kernel_ids/primary_kernel_id/rows/aggregate_*. Unparseable candidates left out for legacy per-kernel dispatch."""
+    """Group TraceLens candidates into per-kernel ``task_group`` dicts.
+
+    Groups are sorted by aggregate time (descending). Native (.cu/.hip/.cpp)
+    candidates key on ``(source_path, function)`` only (collapsing #420
+    over-split instantiations); Python candidates key on
+    ``(operation, path, line, function)`` since one caller frame can launch
+    distinct kernels (Q1). Each group carries ``task_group_id``,
+    ``source_path``, ``definition_line``, ``function_name``, ``kernel_ids``,
+    ``primary_kernel_id``, ``rows``, and ``aggregate_*`` fields.
+
+    Args:
+        candidates: The TraceLens candidate rows to group.
+        source_root: Optional root to resolve relative source paths against.
+
+    Returns:
+        The task-group dicts. Unparseable candidates are left out for legacy
+        per-kernel dispatch.
+    """
     if not candidates:
         return []
     root: Path | None = None
