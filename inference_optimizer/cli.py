@@ -762,6 +762,9 @@ _UNSUPPORTED_MODEL_TYPES = frozenset({
 })
 
 _UNSUPPORTED_ARCHITECTURES = frozenset({
+    # RWKV6/Qwen2 hybrid linear-attention arch: not in sglang's supported list
+    # (only plain RwkvForCausalLM is), fails ModelConfig validation at boot.
+    "RWKV6Qwen2ForCausalLM",
     "Gemma3ForConditionalGeneration",
     "InternVLChatModel",
     "Phi3VForCausalLM",
@@ -789,10 +792,33 @@ _UNSUPPORTED_CONFIG_KEYS = (
     "mm_projector_type",
 )
 
+_TEXT_DECODER_CONFIG_KEYS = (
+    "text_config",
+    "language_config",
+    "llm_config",
+)
 
-_TEXT_COMPAT_MULTIMODAL_EXCEPTIONS = frozenset({
-    ("kimi_k25", "KimiK25ForConditionalGeneration"),
-    ("qwen3_5_moe", "Qwen3_5MoeForConditionalGeneration"),
+
+# Three-way model verdicts returned by ``_detect_unsupported_model``:
+#   text           — plain decoder-only causal LM; ``_detect`` returns None.
+#   text_coercible — config carries a multimodal signal (vision_config key or a
+#                    *ConditionalGeneration arch whose model_type is text-MoE)
+#                    but a usable text decoder exists. Not fail-fast: the run
+#                    proceeds on the text path with a loud degraded-mode warning
+#                    (gated by --allow-mm-text-fallback, default on).
+#   vision_only    — positively-identified VLM with no meaningful text-only path
+#                    (Llava / PaliGemma / Qwen-VL / Phi3V / …) or an
+#                    unclassifiable config. Always fail-fast.
+_VERDICT_TEXT_COERCIBLE = "text_coercible"
+_VERDICT_VISION_ONLY = "vision_only"
+
+# model_type values that ship a vision_config for the VLM checkpoint but whose
+# text MoE path is benchmark-compatible. Used to route a vision-config hit to
+# text_coercible instead of fail-fast. Matched on model_type so a whole family
+# is covered without re-listing every per-checkpoint arch name.
+_TEXT_COERCIBLE_MODEL_TYPES = frozenset({
+    "kimi_k25",
+    "qwen3_5_moe",
 })
 
 
@@ -805,59 +831,121 @@ def _arch_is_supported_text_generation(arch: str) -> bool:
     return any(marker in a for marker in _SUPPORTED_ARCH_MARKERS)
 
 
-def _is_text_compatible_multimodal_exception(
-    model_type_l: str,
-    architectures: list[str],
-) -> bool:
-    """Allow known multimodal configs whose text path is benchmark-compatible.
+def _config_declares_text_decoder(config: dict, architectures: list[str], model_type_l: str) -> bool:
+    """True when config positively identifies a usable text decoder.
 
-    Kimi-K2.6 and Qwen3.6 MoE ship with ``vision_config`` even when used as
-    text-only checkpoints. Their serving stacks can exercise the text-generation
-    path for our benchmark; the generic multimodal gate was too broad and
-    rejected them before baseline could start. Keep this list exact so ordinary
-    VLMs remain fail-fast.
+    For multimodal wrapper configs the top-level architecture often names the
+    wrapper (``*ForConditionalGeneration``), while the benchmarkable decoder is
+    described under ``text_config`` / ``language_config``. Treat those nested
+    text blocks as capability evidence instead of requiring a per-family
+    allowlist entry.
     """
-    return any(
-        (model_type_l, arch) in _TEXT_COMPAT_MULTIMODAL_EXCEPTIONS
-        for arch in architectures
-    )
+    if model_type_l in _TEXT_COERCIBLE_MODEL_TYPES:
+        return True
+    if any(_arch_is_supported_text_generation(a) for a in architectures):
+        return True
+
+    for key in _TEXT_DECODER_CONFIG_KEYS:
+        nested = config.get(key)
+        if not isinstance(nested, dict):
+            continue
+        nested_architectures = _config_architectures(nested)
+        if any(_arch_is_supported_text_generation(a) for a in nested_architectures):
+            return True
+
+        nested_model_type = str(nested.get("model_type") or "").strip().lower()
+        if (
+            nested_model_type in _SUPPORTED_MODEL_TYPES
+            or nested_model_type in _TEXT_COERCIBLE_MODEL_TYPES
+        ):
+            return True
+
+        # Some multimodal configs (including newer family wrappers) expose a
+        # text_config with decoder dimensions but do not use a model_type that
+        # this package has seen yet. Because the evidence is scoped to an
+        # explicitly named text block, this does not widen fallback for a
+        # top-level mislabeled VLM.
+        has_vocab = isinstance(nested.get("vocab_size"), int) and nested["vocab_size"] > 0
+        has_decoder_shape = any(
+            isinstance(nested.get(field), int) and nested[field] > 0
+            for field in ("hidden_size", "num_hidden_layers", "intermediate_size")
+        )
+        if has_vocab and has_decoder_shape:
+            return True
+
+    return False
 
 
 def _detect_unsupported_model(model_path: str) -> dict | None:
-    """Best-effort classify a model as unsupported (non-text-generation): multimodal/vision rejected, else whitelist.
+    """Best-effort classify a model's text-serving viability.
 
-    Returns ``{"architecture", "model_type", "signal"}`` when unsupported, else ``None`` (also for an
-    unreadable config.json — we don't hard-block on a config we cannot read).
+    Returns ``None`` for a plain text-generation model (and for an unreadable
+    config.json — we don't hard-block on a config we cannot read). Otherwise
+    returns ``{"architecture", "model_type", "signal", "verdict"}`` where
+    ``verdict`` is one of:
+
+    * ``"vision_only"`` — positively-identified VLM with no usable text path, or
+      an unclassifiable config. Caller fail-fasts.
+    * ``"text_coercible"`` — multimodal signal present but a text decoder exists
+      (e.g. Kimi-K2.6 / Qwen3.6 MoE, or a generic ``ForCausalLM`` arch that
+      merely carries a ``vision_config``). Caller proceeds on the text path with
+      a degraded-mode warning unless ``--allow-mm-text-fallback`` is off.
     """
     config = _load_model_config_dict(model_path)
     if config is None:
         return None
     architectures = _config_architectures(config)
+    # Wrapper models may nest the real arch under text_config; merge so the
+    # unsupported-arch blocklist still matches (e.g. RWKV6Qwen2ForCausalLM).
+    nested = config.get("text_config")
+    if isinstance(nested, dict):
+        for a in _config_architectures(nested):
+            if a not in architectures:
+                architectures.append(a)
     model_type = str(config.get("model_type") or "").strip()
     model_type_l = model_type.lower()
 
-    if _is_text_compatible_multimodal_exception(model_type_l, architectures):
-        return None
-
+    # Hard denylist wins first: explicit VLM arch / model_type is vision_only
+    # even if it also carries a ForCausalLM marker (e.g. Phi3VForCausalLM).
     for arch in architectures:
         if arch in _UNSUPPORTED_ARCHITECTURES:
             return {
                 "architecture": arch,
                 "model_type": model_type,
                 "signal": f"unsupported architecture '{arch}'",
+                "verdict": _VERDICT_VISION_ONLY,
             }
     if model_type_l in _UNSUPPORTED_MODEL_TYPES:
         return {
             "architecture": architectures[0] if architectures else "",
             "model_type": model_type,
             "signal": f"unsupported model_type '{model_type}'",
+            "verdict": _VERDICT_VISION_ONLY,
         }
+
+    # A multimodal config key (vision_config, image_token_id, …) is only a
+    # degrade signal, not a hard block: if a text decoder exists we coerce to
+    # the text path with a warning instead of fail-fasting. Routing to
+    # text_coercible requires a *positive* text-decoder signal — either an
+    # explicitly coercible model_type family, a confirmed text-generation
+    # architecture class, or a nested text decoder config. We deliberately do
+    # NOT fall back to top-level ``_SUPPORTED_MODEL_TYPES`` here: that allowlist
+    # is a last-resort match for a bare model_type with no architectures, and a
+    # mislabeled VLM config (e.g. a real vision model carrying model_type="llama"
+    # but no decoder evidence) must fail-fast rather than silently degrade to a
+    # text run.
+    _has_text_decoder = _config_declares_text_decoder(config, architectures, model_type_l)
     for key in _UNSUPPORTED_CONFIG_KEYS:
         if key in config:
+            verdict = (
+                _VERDICT_TEXT_COERCIBLE if _has_text_decoder
+                else _VERDICT_VISION_ONLY
+            )
             return {
                 "architecture": architectures[0] if architectures else "",
                 "model_type": model_type,
-                "signal": f"unsupported multimodal config key '{key}'",
+                "signal": f"multimodal config key '{key}'",
+                "verdict": verdict,
             }
 
     if any(_arch_is_supported_text_generation(a) for a in architectures):
@@ -875,6 +963,7 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
                 f"supported text-generation pattern "
                 f"({', '.join(_SUPPORTED_ARCH_MARKERS)})"
             ),
+            "verdict": _VERDICT_VISION_ONLY,
         }
 
     if model_type:
@@ -885,12 +974,14 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
                 f"model_type '{model_type}' is not in the supported "
                 f"text-generation allowlist"
             ),
+            "verdict": _VERDICT_VISION_ONLY,
         }
 
     return {
         "architecture": "",
         "model_type": "",
         "signal": "config.json has neither architectures nor model_type",
+        "verdict": _VERDICT_VISION_ONLY,
     }
 
 
@@ -1101,6 +1192,61 @@ _AMD_UNSUPPORTED_ARCHITECTURES = frozenset({"deepseekv32forcausallm"})
 # causing AttributeError deep in engine init.
 _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 
+# Quantization formats with no ROCm/AMD runtime path. NVIDIA ModelOpt FP8/NVFP4
+# use vendor-specific scale packing (no sglang ROCm loader); bitsandbytes ships
+# CUDA-only kernels; NVFP4/FP4 need Blackwell hardware. AMD-native fp8 (Quark /
+# compressed-tensors), gptq, awq are NOT listed so they keep running.
+_AMD_UNSUPPORTED_QUANT_ALGOS = frozenset({"nvfp4", "fp4"})
+_AMD_UNSUPPORTED_QUANT_METHODS = frozenset({"bitsandbytes", "bnb"})
+
+
+def _detect_amd_unsupported_quant(model_path: str) -> str | None:
+    """Return a reason when the model ships a quant format unsupported on ROCm.
+
+    Reads both ``config.json:quantization_config`` (standard HF) and the
+    separate ``hf_quant_config.json`` (NVIDIA ModelOpt). Returns None when the
+    format is ROCm-runnable or absent.
+    """
+    if not model_path:
+        return None
+    cfg = _load_model_config_dict(model_path) or {}
+    qc = cfg.get("quantization_config")
+    if isinstance(qc, dict):
+        method = str(qc.get("quant_method") or "").strip().lower()
+        if method in _AMD_UNSUPPORTED_QUANT_METHODS:
+            return (
+                f"quantization_config.quant_method '{method}' ships CUDA-only "
+                f"kernels with no ROCm equivalent; it crashes in engine init "
+                f"on AMD."
+            )
+    # NVIDIA ModelOpt writes a separate hf_quant_config.json, not config.json.
+    hq_path = Path(model_path) / "hf_quant_config.json"
+    if hq_path.is_file():
+        try:
+            hq = json.loads(hq_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            hq = None
+        if isinstance(hq, dict):
+            producer = str(
+                (hq.get("producer") or {}).get("name") or "",
+            ).strip().lower()
+            algo = str(
+                (hq.get("quantization") or {}).get("quant_algo") or "",
+            ).strip().lower()
+            if producer == "modelopt" and algo:
+                return (
+                    f"NVIDIA ModelOpt '{algo.upper()}' quantization "
+                    f"(hf_quant_config.json) uses vendor-specific scale packing "
+                    f"with no sglang ROCm loader (e.g. 'modelopt_fp8 ... not "
+                    f"supported in ROCm'); use an AMD-native (Quark) checkpoint."
+                )
+            if algo in _AMD_UNSUPPORTED_QUANT_ALGOS:
+                return (
+                    f"'{algo.upper()}' quantization needs NVIDIA Blackwell "
+                    f"hardware; no AMD/ROCm runtime path exists."
+                )
+    return None
+
 
 def _detect_incompatible_model_config(
     model_path: str, gpu_type: str | None = None,
@@ -1137,6 +1283,9 @@ def _detect_incompatible_model_config(
     # Reject DSA-like architectures only on AMD/ROCm.
     # The same model can still run on vendor-supported NVIDIA engines.
     if _resolve_amd_gpu_type(gpu_type):
+        quant_reason = _detect_amd_unsupported_quant(model_path)
+        if quant_reason is not None:
+            return quant_reason
         model_type = str(data.get("model_type") or "").strip().lower()
         arches = {a.lower() for a in _config_architectures(data)}
         if (
@@ -1263,10 +1412,18 @@ def _preflight_model_config_compat(
 def _preflight_unsupported_model_arch(
     args: argparse.Namespace, session_dir: Path,
 ) -> bool:
-    """Fail fast on positively-identified unsupported multimodal/vision models before expensive bring-up.
+    """Gate multimodal/vision models before expensive bring-up.
 
-    Best-effort (an unreadable config.json is not a hard block). Persists a stop reason and returns True
-    (caller should exit) when unsupported; False when supported or unclassifiable.
+    Best-effort (an unreadable config.json is not a hard block). Three outcomes:
+
+    * plain text model → returns False (run proceeds normally).
+    * ``text_coercible`` (multimodal signal but a text decoder exists) →
+      when ``--allow-mm-text-fallback`` is on (default), records a degraded-mode
+      warning on SharedState, emits a loud stderr/log warning, and returns False
+      so the run proceeds on the text path. When the flag is off, falls through
+      to fail-fast.
+    * ``vision_only`` (true VLM / unclassifiable) → persists
+      ``stop_reason=unsupported_model_arch`` and returns True (caller exits).
     """
     model = str(getattr(args, "model", "") or "")
     hit = _detect_unsupported_model(model)
@@ -1276,6 +1433,41 @@ def _preflight_unsupported_model_arch(
     name = Path(model).name or model
     arch = hit.get("architecture") or "<unknown>"
     mt = hit.get("model_type") or "<unknown>"
+    verdict = str(hit.get("verdict") or _VERDICT_VISION_ONLY)
+    allow_fallback = bool(getattr(args, "allow_mm_text_fallback", True))
+
+    if verdict == _VERDICT_TEXT_COERCIBLE and allow_fallback:
+        warning = (
+            f"DEGRADED MODE: model '{name}' carries a multimodal signal "
+            f"({hit.get('signal', 'multimodal config')}; architecture '{arch}', "
+            f"model_type '{mt}') but exposes a text-generation path. Hyperloom "
+            f"is running it on the TEXT path only — any image/audio inputs are "
+            f"ignored, so benchmark numbers reflect the text decoder alone. "
+            f"Pass --no-allow-mm-text-fallback to fail-fast instead."
+        )
+        print(f"WARNING: {warning}", file=sys.stderr)
+        log.warning(warning)
+        try:
+            from .orchestrator.shared_state import SharedState
+
+            state = SharedState.load_or_init(session_dir)
+            state.degraded_mode = True
+            state.model_warnings = list(state.model_warnings or []) + [{
+                "kind": "multimodal_text_fallback",
+                "model_name": name,
+                "architecture": arch,
+                "model_type": mt,
+                "signal": str(hit.get("signal") or ""),
+                "detail": warning,
+            }]
+            state.save(session_dir)
+        except Exception as exc:  # noqa: BLE001 — never block the run on advisory write
+            print(
+                f"WARNING: failed to persist degraded-mode marker: {exc!r}",
+                file=sys.stderr,
+            )
+        return False
+
     reason = (
         f"Unsupported model '{name}': architecture '{arch}' (model_type "
         f"'{mt}') is not a supported text-generation model. Hyperloom only "
@@ -2608,18 +2800,18 @@ def _preflight(
     if not inferencex_path:
         from .paths import (
             magpie_dir as _magpie_default,
-            runtime_dir as _runtime_default,
+            open_source_root as _open_source_default,
         )
-        runtime_root = _runtime_default(_session_dir_resolve())
+        open_source_root = _open_source_default()
         magpie_root = (
             Path(os.environ["MAGPIE_DIR"])
             if os.environ.get("MAGPIE_DIR")
             else _magpie_default(_session_dir_resolve())
         )
-        # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone runtime checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
+        # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone pod-local checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
         for candidate in (
             magpie_root / "InferenceX",
-            runtime_root / "InferenceX",
+            open_source_root / "InferenceX",
         ):
             if _inferencex_checkout_ok(candidate):
                 if os.access(candidate, os.W_OK):
@@ -2635,8 +2827,8 @@ def _preflight(
     # than falling back to a read-only host mount. baseline cannot run
     # without InferenceX, so a clone failure is a hard error.
     if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
-        from .paths import runtime_dir as _runtime_default
-        dest = _runtime_default(_session_dir_resolve()) / "InferenceX"
+        from .paths import open_source_root as _open_source_default
+        dest = _open_source_default() / "InferenceX"
         print(f"Preflight: InferenceX not found; cloning into {dest} ...")
         inferencex_path = _clone_inferencex(dest)
         if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
@@ -4397,6 +4589,19 @@ def _build_parser() -> argparse.ArgumentParser:
                       default=os.environ.get("CLAUDE_MODEL", "claude-opus-4-7"))
     opt.add_argument("--codex-model", type=str,
                       default=os.environ.get("CODEX_MODEL", "gpt-5.4"))
+    opt.add_argument(
+        "--allow-mm-text-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When a model carries a multimodal signal (e.g. vision_config) "
+             "but exposes a text-generation path, run it on the TEXT path with "
+             "a degraded-mode warning instead of fail-fasting. Image/audio "
+             "inputs are ignored, so numbers reflect the text decoder alone. "
+             "True VLMs with no text path (Llava / PaliGemma / Qwen-VL / "
+             "Phi3V) still fail-fast regardless of this flag. Pass "
+             "--no-allow-mm-text-fallback to fail-fast on text-coercible "
+             "models too. Default: enabled.",
+    )
     opt.add_argument("--no-kernel", action="store_true", default=False,
                       help="Disable the Kernel agent entirely. The run will "
                            "only do baseline + params + backends + sweep (pure "
@@ -5270,6 +5475,17 @@ def main(argv: list[str] | None = None) -> int:
         int: The process exit code (``optimize`` result, or ``2`` for no/unknown
         command).
     """
+    # Force line-buffering so output piped through `tee` (or any
+    # non-TTY sink) flushes every line immediately instead of
+    # block-buffering ~8 KB.  Without this the top-level log appears
+    # frozen for the entire duration of a Magpie subprocess (~30-60 min)
+    # because no new print() calls happen while communicate() blocks.
+    # See #468.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+
     parser = _build_parser()
     args = parser.parse_args(argv)
     level = logging.WARNING - 10 * min(args.verbose, 2)

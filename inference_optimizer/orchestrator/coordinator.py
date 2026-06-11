@@ -213,6 +213,11 @@ _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
     "workspace", "workspace_path", "out_dir", "output_dir", "run_dir",
     "report_path", "json_path", "md_path", "tracelens_agent_transcript",
     "tracelens_agent_report",
+    # TraceLens analysis outputs surfaced by trace_analyze_handler — the
+    # analysis.md report, its alias, the per-run audit summary, the roofline
+    # sidecar and the CLI log — so operators can reach them from lifecycle END.
+    "trace_report_path", "analysis_report_path", "tracelens_summary_path",
+    "kernel_roofline_path", "cli_log_path",
 )
 
 
@@ -363,6 +368,13 @@ class Coordinator:
 
         # Persistent session state (state.json) — load existing for resume.
         self.shared_state = SharedState.load_or_init(self.session_dir)
+        # #266 lifecycle save debounce: terminal events (END/ERROR) flush
+        # immediately so operators see produced artifacts promptly; bursty
+        # non-terminal markers (START/ENTER) coalesce within a short window to
+        # avoid amplifying state.json writes on long / multi-kernel sessions
+        # over NFS. ``_lifecycle_last_save`` is a monotonic timestamp.
+        self._lifecycle_last_save: float = 0.0
+        self._lifecycle_save_min_interval_s: float = 2.0
         # Thread live SharedState into the runner (constructed earlier) so
         # executors get it via ctx.extra; durable backstop for per-dispatch
         # ``base_tput`` injection.
@@ -2667,11 +2679,12 @@ class Coordinator:
             "source": "coordinator_internal",
             "reason": str(reason),
         }
-        cb = state.current_best or {}
-        if isinstance(cb, dict):
-            cb_args = str(cb.get("extra_server_args") or "")
-            if cb_args:
-                params["base_extra_args"] = cb_args
+        if reason != "prelude_initial":
+            cb = state.current_best or {}
+            if isinstance(cb, dict):
+                cb_args = str(cb.get("extra_server_args") or "")
+                if cb_args:
+                    params["base_extra_args"] = cb_args
         last_bl = state.last_baseline or {}
         if isinstance(last_bl, dict):
             bs = str(last_bl.get("benchmark_script") or "").strip()
@@ -6213,7 +6226,20 @@ class Coordinator:
                 detail=detail,
                 duration_s=duration_s,
             )
-            self.shared_state.save(self.session_dir)
+            # Terminal events (END/ERROR) carry the produced artifact paths an
+            # operator is waiting on — always flush them. Non-terminal markers
+            # (START / phase ENTER) are debounced: skip the write if we flushed
+            # within the last ``_lifecycle_save_min_interval_s`` seconds, since
+            # the next terminal event (or a later marker past the window) will
+            # persist the coalesced tail anyway.
+            terminal = status in ("END", "ERROR")
+            now = time.monotonic()
+            if terminal or (
+                now - self._lifecycle_last_save
+                >= self._lifecycle_save_min_interval_s
+            ):
+                self.shared_state.save(self.session_dir)
+                self._lifecycle_last_save = now
         except Exception:  # noqa: BLE001 — defensive
             log.debug(
                 "Coordinator: lifecycle emit failed (step=%s status=%s)",

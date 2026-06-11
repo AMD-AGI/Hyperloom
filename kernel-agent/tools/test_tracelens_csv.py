@@ -306,6 +306,117 @@ def test_load_op_category_map_missing_returns_empty(tmp_path):
     assert tla.load_op_category_map(tmp_path / "perf_report_csvs") == {}
 
 
+# ── #727 companion: fused-MoE trace-anchored shape capture ────────────────────
+
+# The two operand-tuple rows TraceLens writes for the fused-MoE expert kernel in
+# ``ops_unique_args.csv`` (gate/up GEMM then down GEMM), as captured for the
+# Qwen3-30B-A3B MoE decode workload (conc 64, ISL/OSL 1024).
+_FUSED_MOE_OPS_UNIQUE_ARGS = (
+    "name,op category,Input Dims,Input type\n"
+    'sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427,MoE_fused,'
+    '"((15360, 2048), (128, 1536, 2048), (), (122880, 1536), (), (), (), '
+    '(15360, 8), (15360, 8), (131007,), (2047,), (1,), ())",'
+    "\"('c10::BFloat16', 'c10::BFloat16', '', 'c10::BFloat16', '', '', '', "
+    "'float', 'int', 'int', 'int', 'int', '')\"\n"
+    'sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427,MoE_fused,'
+    '"((122880, 768), (128, 2048, 768), (), (15360, 8, 2048), (), (), (), '
+    '(15360, 8), (15360, 8), (131007,), (2047,), (1,), ())",'
+    "\"('c10::BFloat16', 'c10::BFloat16', '', 'c10::BFloat16', '', '', '', "
+    "'float', 'int', 'int', 'int', 'int', '')\"\n"
+)
+
+
+def _write_fused_moe_ops_unique_args(tmp_path):
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "ops_unique_args.csv").write_text(
+        _FUSED_MOE_OPS_UNIQUE_ARGS, encoding="utf-8"
+    )
+    return csv_dir
+
+
+def test_resolve_fused_moe_shapes_matches_manual_harness(tmp_path):
+    """Operand dims recovered from ops_unique_args.csv match the manual GEAK harness shapes."""
+    csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
+    shapes = tla.resolve_fused_moe_shapes_from_csv(csv_dir)
+    # gate/up GEMM: A(num_tokens,H) x w1(E,2I,H) -> C(T,2I)
+    assert "(15360,2048) bf16" in shapes      # A
+    assert "(128,1536,2048) bf16" in shapes   # w1 (2*I=1536)
+    assert "(122880,1536) bf16" in shapes     # C (T=num_tokens*topk)
+    # down GEMM: A(T,I) x w2(E,H,I) -> C(num_tokens,topk,H)
+    assert "(122880,768) bf16" in shapes      # A (I=768)
+    assert "(128,2048,768) bf16" in shapes    # w2
+    assert "(15360,8,2048) bf16" in shapes    # C
+    # 1-tuples keep the trailing comma; ints map to i32, floats to f32.
+    assert "(131007,) i32" in shapes
+    assert "(15360,8) f32" in shapes
+    # No empty/scalar operand leaks through.
+    assert all(s and s != "()" for s in shapes)
+
+
+def test_resolve_fused_moe_shapes_missing_csv_returns_empty(tmp_path):
+    """Absent sidecar / no fused-MoE rows => [] so the candidate's empty shapes stay untouched."""
+    assert tla.resolve_fused_moe_shapes_from_csv(tmp_path / "nope") == []
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "ops_unique_args.csv").write_text(
+        "name,op category,Input Dims,Input type\n"
+        'aten::mm,GEMM,"((15360, 2048),)","(\'c10::BFloat16\',)"\n',
+        encoding="utf-8",
+    )
+    assert tla.resolve_fused_moe_shapes_from_csv(csv_dir) == []
+
+
+def test_finalize_grafts_fused_moe_shapes_onto_empty_candidate(tmp_path):
+    """The empty-shaped fused-MoE candidate is back-filled with trace-anchored shapes + provenance."""
+    csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
+    candidates = [{
+        "name": "invoke_fused_moe_kernel",
+        "duration_us": 302429.0,
+        "call_count": 96,
+        "source_file": (
+            "/sgl-workspace/sglang/python/sglang/srt/layers/moe/"
+            "moe_runner/triton_utils/fused_moe.py"
+        ),
+        "source_type": "python",
+        "shapes": [],
+        "tracelens_category": "moe_fused",
+    }]
+    out = tla._finalize_candidates(
+        candidates, total_dur=302429.0, perf_report_csv_dir=csv_dir,
+    )
+    assert out[0]["shapes"], "fused-MoE candidate must carry non-empty shapes"
+    assert "(15360,2048) bf16" in out[0]["shapes"]
+    assert out[0]["shape_provenance"] == "torch_trace"
+
+
+def test_finalize_does_not_touch_non_moe_or_already_shaped(tmp_path):
+    """Resolver is scoped: non-MoE ops and MoE candidates that already have shapes are left as-is."""
+    csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
+    candidates = [
+        {  # non-MoE op: must NOT be back-filled from the fused-MoE sidecar
+            "name": "aten::mm",
+            "duration_us": 100.0,
+            "shapes": [],
+            "source_file": "",
+            "source_type": "unknown",
+        },
+        {  # MoE op that already carries shapes: keep them verbatim
+            "name": "invoke_fused_moe_kernel",
+            "duration_us": 200.0,
+            "shapes": ["(99,99) bf16"],
+            "source_file": "",
+            "source_type": "python",
+            "tracelens_category": "moe_fused",
+        },
+    ]
+    out = tla._finalize_candidates(
+        candidates, total_dur=300.0, perf_report_csv_dir=csv_dir,
+    )
+    assert out[0]["shapes"] == []
+    assert out[1]["shapes"] == ["(99,99) bf16"]
+
+
 def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
     """Backward compatibility: no csv => the name heuristic still tags aiter::ck_moe_* as MoE (csv path is additive)."""
     candidates = [{
@@ -977,6 +1088,35 @@ def test_266_transcript_failure_never_aborts_run(tmp_path):
 
     # Run still succeeds: report resolved, no crash from transcript path.
     assert res.report_path.exists()
+
+
+def test_266_transcript_caps_oversized_fields():
+    """#266: a megabyte tool_result / text block must be truncated so the
+    diagnostic transcript cannot grow unbounded. The cap applies to direct
+    string fields and to strings nested inside tool inputs/results."""
+    cap = tlr._TRANSCRIPT_FIELD_MAX_CHARS
+
+    # _cap_str leaves short strings alone, clips long ones with a marker.
+    assert tlr._cap_str("short") == "short"
+    big = "x" * (cap + 5000)
+    capped = tlr._cap_str(big)
+    assert len(capped) < len(big)
+    assert capped.startswith("x" * cap)
+    assert "truncated" in capped
+
+    # _json_safe caps strings at any nesting depth (tool_result content).
+    nested = tlr._json_safe({"out": ["y" * (cap + 100)]})
+    assert len(nested["out"][0]) <= cap + 64
+
+    class _ToolResultBlock:
+        def __init__(self, content):
+            self.content = content
+            self.tool_use_id = "tu_1"
+            self.is_error = False
+
+    rec = tlr._serialize_sdk_block(_ToolResultBlock("z" * (cap + 9000)))
+    assert "truncated" in rec["content"]
+    assert len(rec["content"]) < cap + 9000
 
 
 # ===========================================================================

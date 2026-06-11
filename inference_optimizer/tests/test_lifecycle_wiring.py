@@ -85,6 +85,21 @@ def test_lifecycle_paths_extracts_present_path_keys():
     }
 
 
+def test_lifecycle_paths_surfaces_tracelens_report_keys():
+    # trace_analyze_handler returns these analysis outputs; the lifecycle
+    # allowlist must surface them so operators reach analysis.md + sidecars.
+    payload = {
+        "trace_report_path": "/tmp/run/analysis.md",
+        "analysis_report_path": "/tmp/run/analysis.md",
+        "tracelens_summary_path": "/tmp/run/tracelens/summary.json",
+        "kernel_roofline_path": "/tmp/run/kernel_roofline.json",
+        "cli_log_path": "/tmp/run/cli.log",
+        "candidates_path": "/tmp/run/kernel_candidates.json",
+    }
+    out = _lifecycle_paths(payload)
+    assert out == payload
+
+
 def test_lifecycle_paths_handles_non_dict():
     assert _lifecycle_paths(None) == {}
     assert _lifecycle_paths("nope") == {}
@@ -114,6 +129,42 @@ async def test_emit_lifecycle_records_and_persists(session_dir):
         reloaded = SharedState.load_or_init(session_dir)
         assert reloaded.lifecycle[-1]["step"] == "report"
         assert reloaded.lifecycle[-1]["artifacts"]["json_path"] == "/x/final.json"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_emit_lifecycle_debounces_nonterminal_but_flushes_terminal(
+    session_dir,
+):
+    # Bursty START markers within the debounce window coalesce to a single
+    # state.json write; the next terminal END must flush the whole tail so an
+    # operator never loses a produced-artifact event to debouncing.
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        from unittest.mock import patch as _patch
+        c._lifecycle_save_min_interval_s = 60.0  # wide window: no time flushes
+        c._lifecycle_last_save = 0.0
+        with _patch.object(
+            type(c.shared_state), "save", autospec=True,
+        ) as mock_save:
+            # First START flushes (last_save==0, window elapsed under monotonic).
+            c._emit_lifecycle(step="trace_analyze", status="START")
+            saves_after_first = mock_save.call_count
+            # Subsequent STARTs inside the window are debounced (no new write).
+            c._emit_lifecycle(step="trace_analyze", status="START")
+            c._emit_lifecycle(step="kernel_optimization", status="START")
+            assert mock_save.call_count == saves_after_first
+            # A terminal END always flushes regardless of the window.
+            c._emit_lifecycle(
+                step="trace_analyze", status="END",
+                artifacts={"trace_report_path": "/x/analysis.md"},
+            )
+            assert mock_save.call_count == saves_after_first + 1
+        # All four events are recorded in memory even when writes coalesced.
+        steps = [(e["step"], e["status"]) for e in c.shared_state.lifecycle]
+        assert ("trace_analyze", "END") in steps
+        assert steps.count(("trace_analyze", "START")) == 2
     finally:
         await c.stop()
 
@@ -163,6 +214,47 @@ async def test_handle_request_emits_start_and_end(session_dir, monkeypatch, tmp_
         assert "duration_s" in end and end["duration_s"] >= 0.0
         # Monotonic ordering preserved.
         assert end["seq"] > start["seq"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_request_end_surfaces_tracelens_report_paths(
+    session_dir, monkeypatch, tmp_path,
+):
+    # The lifecycle END for a trace_analyze step must carry every TraceLens
+    # report path the handler returns — not just candidates_path — so the
+    # operator can reach analysis.md and the roofline/summary sidecars.
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        from inference_optimizer.orchestrator import kernel_request_handlers
+        report_fields = {
+            "candidates_path": str(tmp_path / "kernel_candidates.json"),
+            "trace_report_path": str(tmp_path / "analysis.md"),
+            "analysis_report_path": str(tmp_path / "analysis.md"),
+            "tracelens_summary_path": str(tmp_path / "summary.json"),
+            "kernel_roofline_path": str(tmp_path / "kernel_roofline.json"),
+            "cli_log_path": str(tmp_path / "cli.log"),
+        }
+
+        async def fake_handler(payload, *, session_dir):
+            return {"status": "ok", "hot_kernels": [], **report_fields}
+        monkeypatch.setitem(
+            kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
+            "trace_analyze", fake_handler,
+        )
+
+        intent = Intent(
+            type=IntentType.REQUEST,
+            payload={"target_agent": "kernel", "kind": "trace_analyze",
+                     "params": {"trace_input": "/tmp/trace-B.json.gz"}},
+        )
+        await c._handle_intent("orchestration", intent)
+
+        end = [e for e in c.shared_state.lifecycle
+               if e["step"] == "trace_analyze" and e["status"] == "END"][-1]
+        for key, val in report_fields.items():
+            assert end["artifacts"][key] == val, f"missing {key} in END artifacts"
     finally:
         await c.stop()
 
@@ -235,13 +327,18 @@ async def test_roofline_executor_emits_lifecycle_end(tmp_path):
 
     assert result["status"] == "succeeded"
     rf_events = [e for e in state.lifecycle if e["step"] == "roofline"]
-    assert len(rf_events) == 1
-    ev = rf_events[0]
+    # Paired START + END so the operator sees the run begin, not just finish.
+    assert [e["status"] for e in rf_events] == ["START", "END"], rf_events
+    start, ev = rf_events
+    assert start["label"] == "TraceLens"
+    assert "duration_s" not in start
     assert ev["status"] == "END"
     assert ev["label"] == "TraceLens"
     assert ev["artifacts"]["trace_input"] == "/tmp/trace.gz"
     assert ev["artifacts"]["analysis_md_path"] == str(md)
     assert "duration_s" in ev
+    # END strictly follows START.
+    assert ev["seq"] > start["seq"]
 
 
 # ===========================================================================
