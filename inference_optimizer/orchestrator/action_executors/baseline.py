@@ -759,6 +759,13 @@ class BaselineExecutor:
 
     @staticmethod
     def _double_run_enabled() -> bool:
+        """Whether baseline double-run is enabled.
+
+        Controlled by ``INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN``.
+
+        Returns:
+            ``True`` unless the env var is set to a falsey value.
+        """
         return os.environ.get(
             "INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1",
         ).strip().lower() not in ("0", "false", "no", "")
