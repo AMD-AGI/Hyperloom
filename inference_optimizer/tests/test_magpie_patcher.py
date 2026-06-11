@@ -14,13 +14,21 @@ from pathlib import Path
 import pytest
 
 from inference_optimizer.orchestrator.action_executors._magpie_patcher import (
+    _ATOMIC_REASON_ALREADY_PATCHED,
+    _ATOMIC_REASON_APPLIED,
+    _ATOMIC_REASON_MISSING,
+    _ATOMIC_REASON_UNRECOGNIZED_SHAPE,
+    _ATOMIC_REASON_UPSTREAM_ATOMIC,
     _LEGACY_BLOCK,
     _PATCH_SENTINEL,
     _PATCHED_BLOCK,
+    _REMOTE_TRUST_SENTINEL,
     _UPSTREAM_ATOMIC_HELPER,
+    _apply_patch_atomic_reason,
     _extract_prepare_region,
     _upstream_is_already_atomic,
     ensure_magpie_atomic_scripts_patch,
+    magpie_scripts_patch_status,
 )
 
 
@@ -119,6 +127,20 @@ class _FakeBenchmarker:
 """
 
 
+_UPSTREAM_SGLANG_MI300X_SH = """\
+#!/usr/bin/env bash
+if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
+  if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
+    # Remote server: call Python benchmark_serving.py directly.
+    SERVER_MONITOR_ARGS=()
+    magpie_run_benchmark_serving_remote_direct || exit $?
+  else
+    run_benchmark_serving --model "$MODEL" || exit $?
+  fi
+fi
+"""
+
+
 # Genuine layout drift: unrecognisable prepare body + atomic ops only in an
 # unrelated method. Region scoping must keep this out of "already atomic".
 _GARBAGE_WITH_UNRELATED_ATOMIC_PY = """\
@@ -160,6 +182,15 @@ def _write_magpie_tree(root: Path, benchmarker_src: str) -> Path:
     bench_py = bench_dir / "benchmarker.py"
     bench_py.write_text(benchmarker_src, encoding="utf-8")
     return bench_py
+
+
+def _write_sglang_script(root: Path, src: str = _UPSTREAM_SGLANG_MI300X_SH) -> Path:
+    script_dir = root / "Magpie" / "scripts" / "benchmark"
+    script_dir.mkdir(parents=True, exist_ok=True)
+    script = script_dir / "sglang_mi300x.sh"
+    script.write_text(src, encoding="utf-8")
+    script.chmod(0o755)
+    return script
 
 
 # Basic shape / sanity
@@ -206,6 +237,56 @@ def test_patch_is_idempotent(fake_magpie: Path):
     assert after_second.count(_PATCH_SENTINEL) == 1
 
 
+def test_sglang_remote_client_trust_patch_is_env_gated(fake_magpie: Path):
+    script = _write_sglang_script(fake_magpie)
+
+    assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
+    text = script.read_text(encoding="utf-8")
+
+    assert _REMOTE_TRUST_SENTINEL in text
+    assert '[[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" ]]' in text
+    assert "magpie_run_benchmark_serving_remote_direct trust" in text
+    assert "magpie_run_benchmark_serving_remote_direct || exit $?" in text
+
+    assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
+    assert script.read_text(encoding="utf-8") == text
+
+
+def test_remote_trust_drift_is_reported_separately(
+    tmp_path: Path,
+    caplog,
+):
+    """Atomic copy can be fixed while the SGLang trust patch drifts.
+
+    The status API must expose those as separate bits so install.sh can warn
+    about remote trust specifically instead of blaming the atomic-copy patch.
+    """
+    _write_magpie_tree(tmp_path, _UPSTREAM_ATOMIC_BENCHMARKER_PY)
+    script = _write_sglang_script(
+        tmp_path,
+        _UPSTREAM_SGLANG_MI300X_SH.replace(
+            "magpie_run_benchmark_serving_remote_direct || exit $?",
+            "magpie_run_benchmark_serving_remote_direct \"$@\" || exit $?",
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        status = magpie_scripts_patch_status(tmp_path)
+
+    assert status.atomic_ok is True
+    assert status.remote_trust_ok is False
+    assert status.ok is False
+    assert _REMOTE_TRUST_SENTINEL not in script.read_text(encoding="utf-8")
+    assert any(
+        "remote trust patch did not apply" in r.getMessage()
+        for r in caplog.records
+    )
+
+    # The bool compat wrapper reflects the atomic-copy race only (its name /
+    # docstring), so an optional remote-trust drift must NOT flip it to False.
+    assert ensure_magpie_atomic_scripts_patch(tmp_path) is True
+
+
 def test_patch_preserves_file_mode(fake_magpie: Path):
     bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
     bench_py.chmod(0o644)
@@ -231,6 +312,60 @@ def test_fail_soft_when_legacy_block_missing(tmp_path: Path):
     (bench_dir / "benchmarker.py").write_text(drifted, encoding="utf-8")
     assert ensure_magpie_atomic_scripts_patch(tmp_path) is False
     assert (bench_dir / "benchmarker.py").read_text(encoding="utf-8") == drifted
+
+
+# Reason classification — distinguish a GENUINE failure (race unmitigated)
+# from a benign no-op, so install.sh can fail-loud only on the former.
+def test_reason_applied_on_legacy_block(fake_magpie: Path):
+    bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
+    assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_APPLIED
+
+
+def test_reason_already_patched(fake_magpie: Path):
+    bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
+    assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_APPLIED
+    # Second pass sees the sentinel.
+    assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_ALREADY_PATCHED
+
+
+def test_reason_upstream_atomic_is_benign(tmp_path: Path):
+    bench_py = _write_magpie_tree(tmp_path, _UPSTREAM_ATOMIC_BENCHMARKER_PY)
+    assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_UPSTREAM_ATOMIC
+
+
+def test_reason_unrecognized_shape_is_genuine_failure(tmp_path: Path):
+    """Neither legacy block nor atomic upstream → genuine failure: the status
+    must flag atomic_genuine_failure so a strict install fails loud."""
+    drifted = (
+        "class _FakeBenchmarker:\n"
+        "    def _prepare_benchmark_scripts(self):\n"
+        "        pass\n"
+    )
+    bench_py = _write_magpie_tree(tmp_path, drifted)
+    assert (
+        _apply_patch_atomic_reason(bench_py)
+        == _ATOMIC_REASON_UNRECOGNIZED_SHAPE
+    )
+    status = magpie_scripts_patch_status(tmp_path)
+    assert status.atomic_ok is False
+    assert status.atomic_reason == _ATOMIC_REASON_UNRECOGNIZED_SHAPE
+    assert status.atomic_genuine_failure is True
+
+
+def test_missing_tree_is_benign_not_genuine_failure(tmp_path: Path):
+    """No benchmarker.py → atomic_ok False but NOT a genuine failure (the race
+    just cannot be assessed), so a strict install must not abort on it."""
+    status = magpie_scripts_patch_status(tmp_path / "nope")
+    assert status.atomic_ok is False
+    assert status.atomic_reason == _ATOMIC_REASON_MISSING
+    assert status.atomic_genuine_failure is False
+
+
+def test_upstream_atomic_status_is_not_genuine_failure(tmp_path: Path):
+    _write_magpie_tree(tmp_path, _UPSTREAM_ATOMIC_BENCHMARKER_PY)
+    status = magpie_scripts_patch_status(tmp_path)
+    assert status.atomic_ok is True
+    assert status.atomic_genuine_failure is False
 
 
 def test_already_patched_returns_true_without_rewriting(fake_magpie: Path):

@@ -44,6 +44,12 @@ _PHASE_HEADERS: dict[str, str] = {
 
 
 def _section_mission() -> list[str]:
+    """Build the MISSION section lines.
+
+    Returns:
+        list[str]: Markdown lines describing the Orchestration agent's
+        cumulative-gain objective and per-tick decision question.
+    """
     return [
         "## 1. MISSION",
         "",
@@ -73,6 +79,23 @@ def _section_session_context(
     max_minutes: int,
     framework_source_roots: tuple[str, ...] | None = None,
 ) -> list[str]:
+    """Build the SESSION CONTEXT section lines.
+
+    Args:
+        framework (str): The framework name shown verbatim.
+        kernel_enabled (bool): Whether kernel-owned actions are enabled.
+        objective_kind (str): The objective kind (e.g. ``time_only``,
+            ``gain_pct``).
+        objective_value (float | str | None): Optional objective target value
+            rendered alongside the kind.
+        max_minutes (int): Wall-clock budget for the run, in minutes.
+        framework_source_roots (tuple[str, ...] | None): Optional framework
+            source roots; a PolicyGate-default note is shown when empty.
+
+    Returns:
+        list[str]: Markdown lines describing static session context and phase
+        awareness.
+    """
     obj = f"{objective_kind}"
     if objective_value not in (None, ""):
         obj = f"{objective_kind}={objective_value}"
@@ -182,6 +205,17 @@ def _filter_actions(
     registry: ActionRegistry,
     enabled: Iterable[str],
 ) -> list[ActionMetadata]:
+    """Resolve enabled action names to their registry metadata.
+
+    Args:
+        registry (ActionRegistry): The loaded action registry to look up.
+        enabled (Iterable[str]): Enabled action names; unknown names are
+            silently skipped (the caller has already validated them).
+
+    Returns:
+        list[ActionMetadata]: Metadata for each resolvable enabled action, in
+        the input order.
+    """
     enabled_set: list[str] = list(enabled)
     out: list[ActionMetadata] = []
     for name in enabled_set:
@@ -219,6 +253,17 @@ def _section_pipeline_and_budget(
     *,
     max_minutes: int,
 ) -> list[str]:
+    """Build the PIPELINE & TIME BUDGET section lines.
+
+    Args:
+        actions (list[ActionMetadata]): The enabled actions, summarised by
+            phase ETA.
+        max_minutes (int): Wall-clock budget for the run, compared against the
+            summed phase ETAs.
+
+    Returns:
+        list[str]: Markdown lines describing per-phase ETAs and budget guidance.
+    """
     lines: list[str] = [
         "## 3. PIPELINE & TIME BUDGET",
         "",
@@ -252,6 +297,15 @@ def _section_pipeline_and_budget(
 
 
 def _format_gain_pair(meta: ActionMetadata) -> str:
+    """Format an action's expected-gain range as a short string.
+
+    Args:
+        meta (ActionMetadata): The action whose ``expected_gain_pct`` range to
+            format.
+
+    Returns:
+        str: ``"0%"`` when the range is zero, otherwise ``"lo-hi%"``.
+    """
     lo, hi = meta.expected_gain_pct
     if lo == 0.0 and hi == 0.0:
         return "0%"
@@ -259,6 +313,18 @@ def _format_gain_pair(meta: ActionMetadata) -> str:
 
 
 def _format_emit_hint(meta: ActionMetadata) -> str:
+    """Build the per-action ``EMIT:`` hint showing the correct transport.
+
+    Kernel-owned actions render a ``REQUEST{...}`` template; ``specialist`` /
+    ``integrate_patch`` / ``dynamic_action`` render their closed ``delegate``
+    payload contracts; everything else renders a ``propose_action`` template.
+
+    Args:
+        meta (ActionMetadata): The action to build an emit hint for.
+
+    Returns:
+        str: The emit-hint string for the catalogue entry.
+    """
     if meta.name in KERNEL_OWNED_ACTIONS:
         if meta.name == "kernel_opt":
             kind_hint = "run_optimization"
@@ -336,6 +402,17 @@ def _format_grid_injection_hint(name: str) -> str | None:
 
 
 def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
+    """Build the ACTIONS YOU MAY USE catalogue section, grouped by phase.
+
+    Each entry lists cost, gain, risks, family, the emit hint, and any
+    grid-injection hint.
+
+    Args:
+        actions (list[ActionMetadata]): The actions enabled for this run.
+
+    Returns:
+        list[str]: Markdown lines for the action catalogue.
+    """
     lines: list[str] = [
         "## 4. ACTIONS YOU MAY USE",
         "",
@@ -374,6 +451,18 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
 
 
 def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
+    """Build the DECISION FRAMEWORK section lines.
+
+    Covers the per-tick selection order, failure-recovery rules (F1–F4), and
+    idea-generation guidance.
+
+    Args:
+        kernel_enabled (bool): Whether kernel-owned actions are enabled for this
+            run.
+
+    Returns:
+        list[str]: Markdown lines for the decision framework.
+    """
     lines = [
         "## 5. DECISION FRAMEWORK (heuristics + facts — the next action is your call)",
         "",
@@ -480,9 +569,10 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "  made this session — do not re-propose a baseline whose params",
         "  fingerprint matches a recent failure; it will fail the same way.",
         "  Bump at least one of: `params.benchmark_script`",
-        "  (a sanitized `*.sh` file name — Magpie's `dsr1_fp8_mi300x.sh` hardcodes",
-        "  `--result-dir /workspace/`, but `sglang_mi300x.sh` respects",
-        "  `$RESULT_DIR`), `params.result_dir`, `params.extra_server_args`, or",
+        "  (a sanitized `*.sh` file name that MUST match THIS run's framework —",
+        "  e.g. for a vllm run pin `vllm_mi300x.sh`, never `sglang_*`; a",
+        "  cross-framework script boots the wrong engine and is rejected),",
+        "  `params.result_dir`, `params.extra_server_args`, or",
         "  `params.extra_envs`.",
         "* **RULE F2 — `error_class='no_report'` + no `rescued_from_leaked_path:*`",
         "  warning ⇒ leak salvage missed.** The script wrote results outside the",
@@ -509,12 +599,13 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "",
         "Example (baseline failed twice with `error_class='no_report'`):",
         "",
+        "    # Prefer RESULT_DIR rescue first; only override benchmark_script",
+        "    # when you have verified a same-framework script-specific bug.",
         "    propose_action{action_name='baseline',",
-        "        params={benchmark_script: 'sglang_mi300x.sh',",
-        "                result_dir: '<session_dir>/runs/baseline/<task>/leak'},",
+        "        params={result_dir: '<session_dir>/runs/baseline/<task>/leak'},",
         "        predicted_gain_pct: 0,",
-        "        notes: 'recover from no_report streak — sglang_mi300x.sh honors",
-        "                $RESULT_DIR; the default model script hardcodes /workspace/'}",
+        "        notes: 'recover from no_report streak by redirecting RESULT_DIR",
+        "                to the observed leak location'}",
         "",
         "### IDEA GENERATION (apply after EVERY explore round)",
         "",
@@ -630,6 +721,15 @@ kernels — they're tied to one compile cache and not reusable."""
 
 
 def _read_rules_fragment(path: Path | None) -> str:
+    """Read the ``orchestration.md`` rules fragment, tolerating absence.
+
+    Args:
+        path (Path | None): Path to the rules fragment, or ``None`` to skip.
+
+    Returns:
+        str: The stripped fragment text, or an empty string when the path is
+        ``None`` or unreadable.
+    """
     if path is None:
         return ""
     try:
@@ -639,6 +739,15 @@ def _read_rules_fragment(path: Path | None) -> str:
 
 
 def _section_rules(rules_md: str) -> list[str]:
+    """Build the RULES & OUTPUT PROTOCOL section wrapping the rules fragment.
+
+    Args:
+        rules_md (str): The raw rules-fragment markdown; a placeholder is used
+            when empty.
+
+    Returns:
+        list[str]: Markdown lines for the RULES & OUTPUT PROTOCOL section.
+    """
     body = rules_md.strip() or (
         "(orchestration.md rules fragment not found — Coordinator will still"
         " enforce PolicyGate hard rules at runtime.)"
@@ -706,7 +815,16 @@ def build_orchestration_prompt(
 
 
 def default_enabled_actions(*, no_kernel: bool) -> tuple[str, ...]:
-    """Return the canonical enabled-action set used by the CLI."""
+    """Return the canonical enabled-action set used by the CLI.
+
+    Args:
+        no_kernel (bool): When ``True``, return the no-kernel action set;
+            otherwise the full set.
+
+    Returns:
+        tuple[str, ...]: :data:`NO_KERNEL_ENABLED_ACTIONS` when ``no_kernel`` is
+        set, else :data:`FULL_ENABLED_ACTIONS`.
+    """
     return NO_KERNEL_ENABLED_ACTIONS if no_kernel else FULL_ENABLED_ACTIONS
 
 

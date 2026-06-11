@@ -29,6 +29,8 @@ from ...protocol.intent import (
     validate_envelope,
 )
 from ...session_paths import manifest_path
+from ..trace.conversation_trace import ConversationRecord, append_conversation
+from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from .base import BackendError, BackendTurnResult
 
 
@@ -168,7 +170,16 @@ def _assistant_message_with_tool_calls(msg: Any) -> dict[str, Any]:
 
 
 def _default_runtime_caller(call: RuntimeCall) -> None:
-    """Real implementation — runs ``python -m runtime.cli <phase> ...``."""
+    """Real implementation — runs ``python -m runtime.cli <phase> ...``.
+
+    Args:
+        call (RuntimeCall): The invocation descriptor with phase, request /
+            review / output paths, working directory, and subprocess env.
+
+    Raises:
+        BackendError: If a ``commit-review`` call is missing its review path,
+            the subprocess times out, cannot start, or exits non-zero.
+    """
     cmd = [
         sys.executable, "-m", "runtime.cli", call.phase,
         "--request", str(call.request_path),
@@ -323,6 +334,18 @@ class CriticAgentBackend:
     calls: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Validate config, wire transports, and resolve static context.
+
+        Normalises paths, verifies ``runtime/cli.py`` exists and adds the root
+        to ``sys.path``, validates ``kb_mode``, selects the real or test runtime
+        caller, constructs the Codex/OpenAI client (or its factory), resolves
+        the per-session static context (explicit or from ``manifest.json``), and
+        initialises optional web tools.
+
+        Raises:
+            BackendError: If ``runtime/cli.py`` is missing, ``kb_mode`` is
+                invalid, the OpenAI SDK is unavailable, or no API key is set.
+        """
         self.critic_agent_root = Path(self.critic_agent_root)
         self.session_dir = Path(self.session_dir)
         if not (self.critic_agent_root / "runtime" / "cli.py").is_file():
@@ -483,7 +506,31 @@ class CriticAgentBackend:
         tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
-        """One Critic turn — run the prepare → reason → commit pipeline."""
+        """One Critic turn — run the prepare → reason → commit pipeline.
+
+        Writes the ``coordinator_inbox`` request, runs ``prepare-review`` to get
+        a judge bundle, enriches its ``review_constraints`` (action policy and
+        cross-domain rules), drives Codex reasoning when proposals exist, runs
+        ``commit-review`` to produce the intent envelope, validates it, and
+        records per-turn telemetry.
+
+        Args:
+            prompt (str): The Coordinator-rendered inbox prompt for this turn.
+            system_prompt (str | None): Optional system prompt forwarded into
+                the Codex reasoning call.
+            tools (list[str] | None): Unused; the Critic exposes no tool palette
+                to the Coordinator.
+            max_turns (int): Unused; the Critic is single-turn.
+
+        Returns:
+            BackendTurnResult: The validated review intents plus model, KB, and
+            session metadata.
+
+        Raises:
+            BackendError: If the judge bundle or emit file cannot be read, or
+                ``emit.json`` is missing a dict ``intent_envelope``.
+            NoIntentEmitted: If the committed envelope fails intent validation.
+        """
         del tools, max_turns  # Critic is single-turn / no tool palette.
 
         turn_idx = self._turn_idx
@@ -649,6 +696,15 @@ class CriticAgentBackend:
 
     # Helpers
     def _allocate_workdir(self, turn_idx: int) -> Path:
+        """Create and return a per-turn workdir, pruning stale ones first.
+
+        Args:
+            turn_idx (int): Zero-based index of the current turn, used as the
+                zero-padded subdirectory name.
+
+        Returns:
+            Path: The created ``<session>/critic-workdir/<turn>/`` directory.
+        """
         root = self.session_dir / "critic-workdir"
         root.mkdir(parents=True, exist_ok=True)
         self._prune_old_workdirs(root, keep=CRITIC_AGENT_WORKDIR_KEEP_COUNT)
@@ -658,7 +714,15 @@ class CriticAgentBackend:
 
     @staticmethod
     def _prune_old_workdirs(root: Path, *, keep: int) -> None:
-        """Remove all but the ``keep`` most recent ``<turn>/`` subdirs."""
+        """Remove all but the ``keep`` most recent ``<turn>/`` subdirs.
+
+        Best-effort: listing and removal errors are swallowed so a janitor
+        hiccup never fails the turn.
+
+        Args:
+            root (Path): The ``critic-workdir`` parent directory to prune.
+            keep (int): Number of most recent turn subdirectories to retain.
+        """
         try:
             entries = sorted(
                 (p for p in root.iterdir() if p.is_dir()),
@@ -734,6 +798,19 @@ class CriticAgentBackend:
         return ctx
 
     def _build_runtime_env(self) -> dict[str, str]:
+        """Build the subprocess environment for ``runtime.cli`` invocations.
+
+        Co-locates session memory and the KB dead-letter dir under the session,
+        sets the KB client mode and the robustness session-dir hint, and in
+        ``live`` KB mode merges ``kb_env`` and requires ``KB_BASE_URL``.
+
+        Returns:
+            dict[str, str]: A copy of the current environment with the
+            critic-agent runtime variables applied.
+
+        Raises:
+            BackendError: If ``kb_mode == "live"`` but ``KB_BASE_URL`` is unset.
+        """
         env = dict(os.environ)
         # Co-locate session memory inside the Coordinator session.
         memory_dir = self.session_dir / "critic-session-memory"
@@ -767,7 +844,22 @@ class CriticAgentBackend:
         judge_bundle: dict[str, Any],
         system_prompt: str | None,
     ) -> tuple[dict[str, Any], str, str | None]:
-        """Drive Codex once with the judge bundle; return (review, raw, finish)."""
+        """Drive Codex with the judge bundle and parse a review object.
+
+        Builds the skill-preamble + judge-bundle + output-format user prompt,
+        runs the (optionally tool-using) reasoning loop, and extracts the review
+        JSON, falling back to an empty verdict list when nothing parses.
+
+        Args:
+            judge_bundle (dict[str, Any]): The prepared judge bundle to reason
+                over.
+            system_prompt (str | None): Optional system prompt sent as the
+                leading system message.
+
+        Returns:
+            tuple[dict[str, Any], str, str | None]: The parsed review dict, the
+            raw model text, and the final finish reason.
+        """
         preamble = self._load_skill_preamble()
         bundle_text = json.dumps(
             {
@@ -799,6 +891,18 @@ class CriticAgentBackend:
 
         text, finish = await self._run_reasoning_loop(messages)
 
+        # Full-trace conversation: the reasoning loop already folded token
+        # spend onto llm_calls.jsonl; mirror the full prompt + reply onto
+        # conversations.jsonl so the critic turn is replayable alongside the
+        # orchestration / specialist turns. The system + user prompt is the
+        # full request the critic saw; ``text`` is its externally-visible
+        # reply. Best-effort and never raised into the review path.
+        self._record_critic_conversation(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response=text,
+        )
+
         review = _extract_review_json(text)
         if review is None:
             # Empty list → commit-review emits a heartbeat; don't raise.
@@ -821,6 +925,10 @@ class CriticAgentBackend:
         """
         tools = self._web_tool_schemas
         max_turns = self._web_tool_max_turns if tools else 0
+        # Full-trace A5: accumulate token usage across every Codex call in
+        # this reasoning loop (initial + tool-use rounds + forced final).
+        # OpenAI has no prompt-cache split, so only in/out counters move.
+        usage_acc = {"input_tokens": 0, "output_tokens": 0}
 
         for turn in range(max_turns + 1):
             kwargs: dict[str, Any] = {
@@ -839,12 +947,14 @@ class CriticAgentBackend:
                     f"Codex API call failed (critic-agent reasoning): {exc!r}",
                 ) from exc
 
+            self._accumulate_usage(usage_acc, getattr(resp, "usage", None))
             choice = resp.choices[0]
             msg = choice.message
             finish = getattr(choice, "finish_reason", None)
             tool_calls = getattr(msg, "tool_calls", None) or []
 
             if not tool_calls:
+                self._trace_critic_llm_call(usage_acc)
                 return msg.content or "", finish
 
             log.info(
@@ -872,11 +982,107 @@ class CriticAgentBackend:
             raise BackendError(
                 f"Codex API call failed (critic-agent reasoning final turn): {exc!r}",
             ) from exc
+        self._accumulate_usage(usage_acc, getattr(resp, "usage", None))
+        self._trace_critic_llm_call(usage_acc)
         final = resp.choices[0]
         return final.message.content or "", getattr(final, "finish_reason", None)
 
+    @staticmethod
+    def _accumulate_usage(
+        acc: dict[str, int], usage: Any,
+    ) -> None:
+        """Fold one OpenAI ``resp.usage`` into the running token accumulator.
+
+        OpenAI reports ``prompt_tokens`` / ``completion_tokens``; map them
+        onto the canonical in/out counters. Missing / bad values contribute
+        0 so a single malformed response never corrupts the running sum.
+        """
+        if usage is None:
+            return
+        try:
+            acc["input_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            acc["output_tokens"] += int(
+                getattr(usage, "completion_tokens", 0) or 0
+            )
+        except (TypeError, ValueError):
+            pass
+
+    def _trace_critic_llm_call(self, usage_acc: dict[str, int]) -> None:
+        """Append one ``llm_calls.jsonl`` row for a critic reasoning loop.
+
+        Records the accumulated Codex token spend under
+        ``component=critic``. tick/phase are unknown to the critic backend
+        (it runs as its own reactor) — the collector backfills from the ts
+        window. Best-effort: never raises into the review path.
+        """
+        try:
+            record = LLMCallRecord(
+                session_id=self.session_dir.name,
+                component="critic",
+                role="critic",
+                model=self.codex_model,
+                input_tokens=usage_acc.get("input_tokens"),
+                output_tokens=usage_acc.get("output_tokens"),
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break review
+            log.debug(
+                "full-trace: critic llm_call append failed", exc_info=True,
+            )
+
+    def _record_critic_conversation(
+        self,
+        *,
+        system_prompt: str | None,
+        user_prompt: str,
+        response: str,
+    ) -> None:
+        """Append one ``conversations.jsonl`` row for a critic reasoning loop.
+
+        Persists the full (redacted) prompt + reply under
+        ``component=critic``. The prompt is the system message (when present)
+        joined to the judge-bundle user message — the complete request the
+        critic reasoned over. tick/phase are unknown to the critic backend
+        (it runs as its own reactor); the collector backfills from the ts
+        window. Best-effort: never raises into the review path. No-op when
+        both prompt and reply are empty.
+        """
+        try:
+            prompt = (
+                f"{system_prompt}\n---\n{user_prompt}"
+                if system_prompt
+                else user_prompt
+            )
+            if not prompt and not response:
+                return
+            record = ConversationRecord(
+                session_id=self.session_dir.name,
+                component="critic",
+                role="critic",
+                model=self.codex_model,
+                prompt=prompt or "",
+                response=response or "",
+            )
+            append_conversation(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break review
+            log.debug(
+                "full-trace: critic conversation append failed", exc_info=True,
+            )
+
     async def _execute_tool_call(self, tool_call: Any) -> str:
-        """Dispatch one OpenAI tool_call to the configured web client."""
+        """Dispatch one OpenAI tool_call to the configured web client.
+
+        Args:
+            tool_call (Any): The OpenAI tool-call object carrying the function
+                name and JSON-encoded arguments.
+
+        Returns:
+            str: The tool's result text, or an ``Error: ...`` string when the
+            arguments are malformed or the tool is unknown/disabled.
+        """
         fn = getattr(tool_call, "function", None)
         name = getattr(fn, "name", "") if fn else ""
         raw_args = getattr(fn, "arguments", "") if fn else ""
@@ -898,6 +1104,16 @@ class CriticAgentBackend:
         return f"Error: unknown or disabled tool {name!r}"
 
     def _load_skill_preamble(self) -> str:
+        """Load and cache the critic-agent skill/action markdown preamble.
+
+        Reads ``SKILL.md`` and ``actions/review_coordinator_inbox.md`` from the
+        critic-agent root, concatenating whatever is readable. Missing files are
+        skipped (the prompt just gets thinner). The result is memoised.
+
+        Returns:
+            str: The combined preamble text, or an empty string when no source
+            files could be read.
+        """
         if self._skill_preamble is not None:
             return self._skill_preamble
         parts: list[str] = []

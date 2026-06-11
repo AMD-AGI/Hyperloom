@@ -106,6 +106,19 @@ def _strip_log_prefix(line: str) -> str:
 
 
 def _starts_with_python_prefix(text: str) -> bool:
+    """Report whether ``text`` begins with a known launch-command prefix.
+
+    A prefix in :data:`_PYTHON_CMD_PREFIXES` counts only when it is a whole
+    token — i.e. immediately followed by end-of-string, whitespace, ``-`` or
+    ``.`` — so ``pythonic`` does not match ``python``.
+
+    Args:
+        text (str): Candidate command line (already stripped of any log
+            prefix by the caller).
+
+    Returns:
+        bool: ``True`` when ``text`` starts with a recognized command token.
+    """
     head = text.lstrip()
     for prefix in _PYTHON_CMD_PREFIXES:
         if head.startswith(prefix):
@@ -314,6 +327,17 @@ def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
     manifests (no ``image`` field) still surface a value when one of
     the envs is set. Mirrors :func:`manifest._detect_image` but kept as
     a separate function to avoid an import cycle.
+
+    Resolution order: manifest ``image`` field → ``HYPERLOOM_IMAGE`` /
+    ``CONTAINER_IMAGE`` / ``IMAGE`` env vars → known image marker files →
+    a ``unknown@<short-cgroup-id>`` derived from ``/proc/1/cgroup``.
+
+    Args:
+        manifest (dict[str, Any]): The parsed ``manifest.json`` dict.
+
+    Returns:
+        str | None: The resolved container image reference, or ``None`` when
+        no source yields a value.
     """
     manifest_image = manifest.get("image") if isinstance(manifest, dict) else None
     if isinstance(manifest_image, str) and manifest_image.strip():
@@ -351,6 +375,17 @@ def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
 
 # Shared helpers
 def _load_json_safe(path: Path | None, warnings: list[str]) -> Any | None:
+    """Parse a JSON file, recording any failure instead of raising.
+
+    Args:
+        path (Path | None): File to read, or ``None``.
+        warnings (list[str]): Shared warnings list; a parse/read failure is
+            appended here (mutated in place).
+
+    Returns:
+        Any | None: The decoded JSON value, or ``None`` if ``path`` is
+        ``None``, the file does not exist, or decoding failed.
+    """
     if path is None:
         return None
     try:
@@ -363,6 +398,19 @@ def _load_json_safe(path: Path | None, warnings: list[str]) -> Any | None:
 
 
 def _load_jsonl_safe(path: Path | None, warnings: list[str]) -> list[dict[str, Any]]:
+    """Parse a JSON-Lines file into a list of dict rows, never raising.
+
+    Blank lines are skipped. Malformed lines and read failures are recorded
+    in ``warnings`` and otherwise ignored; only dict-valued rows are kept.
+
+    Args:
+        path (Path | None): The ``.jsonl`` file to read, or ``None``.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        list[dict[str, Any]]: One dict per well-formed object line. Empty when
+        ``path`` is ``None`` / missing or no line parsed to a dict.
+    """
     if path is None or not path.exists():
         return []
     out: list[dict[str, Any]] = []
@@ -384,6 +432,20 @@ def _load_jsonl_safe(path: Path | None, warnings: list[str]) -> list[dict[str, A
 
 
 def _to_float(value: Any) -> float | None:
+    """Coerce an arbitrary value to ``float`` without raising.
+
+    Booleans are rejected (returned as ``None``) so ``True``/``False`` never
+    silently become ``1.0``/``0.0``. Strings are stripped, the sentinel
+    ``"SKIPPED"`` and empty strings map to ``None``, and thousands separators
+    (``,``) are removed before parsing.
+
+    Args:
+        value (Any): The value to convert.
+
+    Returns:
+        float | None: The parsed float, or ``None`` when the value is missing,
+        a bool, or not numeric.
+    """
     if value is None:
         return None
     if isinstance(value, bool):
@@ -400,15 +462,40 @@ def _to_float(value: Any) -> float | None:
 
 
 def _to_int(value: Any) -> int | None:
+    """Coerce a value to ``int`` via :func:`_to_float`, never raising.
+
+    Args:
+        value (Any): The value to convert.
+
+    Returns:
+        int | None: The truncated integer, or ``None`` when ``value`` is not
+        numeric (same rules as :func:`_to_float`).
+    """
     number = _to_float(value)
     return int(number) if number is not None else None
 
 
 def _utc_now_iso() -> str:
+    """Return the current UTC time as a second-precision ISO-8601 string.
+
+    Returns:
+        str: e.g. ``"2026-06-02T18:29:00+00:00"``.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _rel(path: Path | None, session_dir: Path) -> str | None:
+    """Express ``path`` relative to ``session_dir`` as a POSIX string.
+
+    Args:
+        path (Path | None): The path to relativize, or ``None``.
+        session_dir (Path): The session root the result is relative to.
+
+    Returns:
+        str | None: The POSIX-style relative path, or ``None`` when ``path``
+        is ``None``. Falls back to ``str(path)`` when ``path`` is not under
+        ``session_dir``.
+    """
     if path is None:
         return None
     try:
@@ -432,6 +519,14 @@ def _benchmark_report_metrics(
     result_section = report.get("result") if isinstance(report.get("result"), dict) else None
 
     def _from_lat(metric: str) -> Any:
+        """Read ``latency.<metric>.mean_ms`` from the V2 latency section.
+
+        Args:
+            metric (str): Latency metric name (e.g. ``"ttft"``, ``"tpot"``).
+
+        Returns:
+            Any: The metric's ``mean_ms`` value, or ``None`` when absent.
+        """
         if isinstance(lat_section, dict):
             sub = lat_section.get(metric)
             if isinstance(sub, dict):
@@ -530,6 +625,18 @@ def _resolve_under_session(
 
 
 def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
+    """Walk a nested dict by successive keys without raising.
+
+    Args:
+        d (Any): The (possibly nested) mapping to traverse.
+        *keys (str): Keys to follow in order.
+        default (Any): Value returned when traversal hits a missing key, a
+            non-dict node, or a ``None`` leaf. Defaults to ``None``.
+
+    Returns:
+        Any: The resolved value, or ``default`` if any step fails or the
+        final value is ``None``.
+    """
     cur = d
     for k in keys:
         if not isinstance(cur, dict):
@@ -576,7 +683,24 @@ def collect_session(
     manifest: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Top-level session identification + lifecycle."""
+    """Collect the §1 session-identification + lifecycle section.
+
+    Merges identifiers and timing from ``state`` and ``manifest`` (state
+    taking precedence on overlapping fields), computes ``elapsed_minutes``
+    from the start timestamp, resolves the container image, and stamps
+    ``ended_at_utc`` only once a ``stop_reason`` is present. When no image can
+    be detected a warning is appended.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json`` (SharedState-shaped).
+        manifest (dict[str, Any]): Parsed ``manifest.json``.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        dict[str, Any]: The session section (ids, timestamps, stop reason,
+        elapsed minutes, host, image, code revision, pid, tick count, etc.).
+    """
     start_ts = str(state.get("start_ts") or manifest.get("created_at_utc") or "")
     stop_reason = str(state.get("stop_reason") or "").strip()
     close_stop_reason, close_ts = _close_phase_stop_reason(state)
@@ -621,6 +745,23 @@ def collect_workload(
     manifest: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
+    """Collect the §2 workload-description section.
+
+    Merges framework / model / GPU / parallelism fields from ``state`` and
+    ``manifest`` (state preferred) plus the workload knobs (``conc`` / ``isl``
+    / ``osl`` / ``max_model_len`` / ``precision``) nested under
+    ``manifest.workload``, and the optimization objective.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+        manifest (dict[str, Any]): Parsed ``manifest.json``.
+        warnings (list[str]): Shared warnings list (unused here but kept for a
+            uniform collector signature).
+
+    Returns:
+        dict[str, Any]: The workload section with coerced numeric knobs and a
+        defaulted ``objective`` mapping.
+    """
     wl = manifest.get("workload") or {}
     return {
         "framework":         str(state.get("framework") or manifest.get("framework") or ""),
@@ -645,6 +786,26 @@ def collect_baseline(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
+    """Collect the §3 baseline-measurement section.
+
+    Resolves the baseline workspace (re-rooting container-style paths under
+    ``session_dir``), reads ttft / e2el from its ``benchmark_report.json``,
+    and — when state didn't resolve — falls back to a disk walk of
+    ``runs/baseline/``. Reconstructs an attempts history from disk when
+    ``state.baseline_attempts`` is empty, and extracts the launch invocation
+    (framework args + envs) from the matching server.log / config yaml. Each
+    fallback or extraction miss is recorded in ``warnings``.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        dict[str, Any]: The baseline section including throughput, accuracy,
+        ttft / e2el (with a ``ttft_e2el_source`` provenance label), the
+        attempts history, failure streak, and the launch ``invocation``.
+    """
     last_b = state.get("last_baseline") or {}
     workspace_str = last_b.get("workspace") or ""
     # Re-root container-style paths under the on-disk session_dir (see ``_resolve_under_session``).
@@ -794,6 +955,16 @@ def _reconstruct_baseline_attempts(
     Used when ``state.baseline_attempts`` is empty but the on-disk
     runs/baseline/ tree shows that baseline ran (one or many times).
     Reads only what we can be certain of; everything else stays empty.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place when a
+            report fails to parse).
+
+    Returns:
+        list[dict[str, Any]]: One reconstructed attempt row per discovered
+        report (each marked ``status="reconstructed"``), ordered by mtime.
+        Empty when no ``runs/baseline/`` tree exists.
     """
     root = session_dir / "runs" / "baseline"
     if not root.exists():
@@ -859,6 +1030,25 @@ def collect_final(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
+    """Collect the §4 final (validated) configuration section.
+
+    Reads ``current_best`` plus the validated cumulative-gain bookkeeping,
+    builds the ordered ``action_path`` from ``optimization_stack``, and — when
+    ``current_best`` lacks ttft / e2el — reconstructs them from disk (latest
+    ``validate_stack`` report first, then the top stack entry's report),
+    recording the provenance in ``ttft_e2el_source`` and a ``warnings`` note.
+    Also assembles the replayable launch ``invocation``.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        dict[str, Any]: The final section (throughput, validated/per-round
+        cumulative gain, stack-length bookkeeping, action path, ttft / e2el,
+        invocation, and closing-phase markers).
+    """
     cb = state.get("current_best") or {}
     stack = state.get("optimization_stack") or []
     stack_len = len(stack) if isinstance(stack, list) else 0
@@ -1349,6 +1539,15 @@ def collect_capability_summary(
 
     # GEAK / OOB from on-disk invocations, reconciled against the integrate verdict.
     def _from_invocations(invs: list[dict[str, Any]]) -> dict[str, Any]:
+        """Reduce one lane's invocations to a capability row.
+
+        Args:
+            invs (list[dict[str, Any]]): A lane's invocation records.
+
+        Returns:
+            dict[str, Any]: ``{"status", "attempts", "keeps"}`` where
+            ``keeps`` counts ``decision == "KEEP"`` entries.
+        """
         attempts = len(invs)
         adopted = 0
         reverted = 0
@@ -1612,6 +1811,18 @@ def _parse_invocation_attempt(
     ``results/<kid>.json`` and ``verification/<kid>.json`` describe the
     kernel's BEST attempt, not every attempt. Stamping happens in
     :func:`_stamp_kernel_level_decisions` after all attempts are parsed.
+
+    Args:
+        attempt (dict[str, Any]): One row from ``optimization_attempts.jsonl``.
+        run_dir (Path): The kernel-agent run directory the attempt belongs to.
+        session_dir (Path): Absolute session root (used to relativize paths).
+        warnings (list[str]): Shared warnings list (kept for signature
+            symmetry; not mutated here).
+
+    Returns:
+        dict[str, Any]: An Invocation dict for this single attempt, with
+        kernel-level decision / verification fields left unset for later
+        stamping.
     """
     kid = str(attempt.get("kernel_id") or "")
     backend = str(attempt.get("backend") or "").lower()
@@ -1713,6 +1924,15 @@ def _stamp_kernel_level_decisions(
             continue  # nothing to stamp
 
         def _attempt_key(a: dict[str, Any]) -> tuple[float, str]:
+            """Sort key selecting the best attempt for a kernel.
+
+            Args:
+                a (dict[str, Any]): One attempt invocation.
+
+            Returns:
+                tuple[float, str]: ``(micro_speedup, ts)`` with a missing
+                speedup treated as ``-inf`` so it sorts last.
+            """
             spd = a.get("micro_speedup")
             return (
                 float(spd) if isinstance(spd, (int, float)) else float("-inf"),
@@ -1851,7 +2071,16 @@ def collect_kernel_invocations(
 
 # §9 Kernel lifecycle
 def _scan_profile_reports(session_dir: Path) -> list[tuple[Path, Path]]:
-    """Return list of ``(task_dir, benchmark_report.json)`` under runs/profile/."""
+    """List ``(task_dir, benchmark_report.json)`` pairs under runs/profile/.
+
+    Args:
+        session_dir (Path): Absolute session root.
+
+    Returns:
+        list[tuple[Path, Path]]: One ``(task_dir, report_path)`` pair per
+        profile task that has a benchmark report. Empty when no
+        ``runs/profile/`` tree exists.
+    """
     out: list[tuple[Path, Path]] = []
     root = session_dir / "runs" / "profile"
     if not root.exists():
@@ -2150,6 +2379,19 @@ def _collect_detected_kernels(
 
 
 def _collect_recommended_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Shape the orchestrator's recommended hot-kernels list.
+
+    Reads ``state.last_trace_analyze.hot_kernels_top15`` and projects each
+    entry to the report's recommended-kernel shape.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        list[dict[str, Any]]: One row per recommended kernel (id / name /
+        gpu_pct / recommended backends + actions / bottleneck). Empty when no
+        trace-analyze recommendations exist.
+    """
     sk = state.get("last_trace_analyze") or {}
     if not isinstance(sk, dict):
         return []
@@ -2174,7 +2416,22 @@ def _collect_optimized_kernels(
     oob: list[dict[str, Any]],
     state: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Fold per-attempt invocations into per-kernel summaries."""
+    """Fold per-attempt invocations into per-kernel optimization summaries.
+
+    Aggregates both lanes' attempts per kernel (counts, best micro-speedup,
+    best artifact, decision history) and cross-references
+    ``state.kernel_opt_attempts`` to recover decisions whose on-disk
+    verification was rotated away.
+
+    Args:
+        geak (list[dict[str, Any]]): GEAK-lane invocations.
+        oob (list[dict[str, Any]]): OOB-lane invocations.
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        list[dict[str, Any]]: Per-kernel optimization summaries sorted by
+        ``kernel_id``.
+    """
     by_kid: dict[str, dict[str, Any]] = {}
     for invs in (geak, oob):
         for inv in invs:
@@ -2230,7 +2487,19 @@ def _collect_optimized_kernels(
 
 
 def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """KEEP-promoted kernel entries (from state.kernel_integrate_attempts + optimization_stack)."""
+    """Collect KEEP-promoted (adopted) kernel patch entries.
+
+    Reads ``state.kernel_integrate_attempts`` and keeps only entries whose
+    ``last_decision`` is ``"KEEP"``.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        list[dict[str, Any]]: One row per adopted kernel patch (kernel id,
+        patch / target paths, extra server args, validated e2e gain, status,
+        adoption timestamp, attempt count). Empty when none were adopted.
+    """
     out: list[dict[str, Any]] = []
     integ = state.get("kernel_integrate_attempts") or {}
     if isinstance(integ, dict):
@@ -2254,6 +2523,19 @@ def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _collect_rejected_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Collect rejected / retired kernel patch entries.
+
+    Reads ``state.rejected_kernel_patches`` and additionally surfaces any
+    ``state.rejected_kernel_ids`` that never made it into the patch list
+    (marked with ``reason="retired"``).
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+
+    Returns:
+        list[dict[str, Any]]: One row per rejected kernel (id, reason, patch /
+        target paths, attempt count, best gain, timestamp).
+    """
     out: list[dict[str, Any]] = []
     rejected = state.get("rejected_kernel_patches") or []
     if isinstance(rejected, list):
@@ -2294,6 +2576,22 @@ def collect_kernel_lifecycle(
     oob: list[dict[str, Any]],
     warnings: list[str],
 ) -> dict[str, Any]:
+    """Collect the §9 kernel-lifecycle section.
+
+    Bundles the five per-kernel views — detected, recommended, optimized,
+    adopted, and rejected — into one section.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        geak (list[dict[str, Any]]): GEAK-lane invocations.
+        oob (list[dict[str, Any]]): OOB-lane invocations.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        dict[str, Any]: ``{"detected", "recommended", "optimized", "adopted",
+        "rejected"}`` lists.
+    """
     return {
         "detected":    _collect_detected_kernels(session_dir, state, geak, oob, warnings),
         "recommended": _collect_recommended_kernels(state),
@@ -2309,6 +2607,22 @@ def _shape_ledger(
     *,
     top_n: int = 20,
 ) -> dict[str, Any]:
+    """Normalize a search ledger (params / backends / explore) for the report.
+
+    Shapes the ``accepted`` / ``rejected`` / ``tested`` entries to a stable
+    field set and derives a ``top_by_gain`` ranking from the tested entries.
+
+    Args:
+        ledger (dict[str, Any] | None): A raw search ledger from state, or
+            ``None``.
+        top_n (int): Maximum number of entries in ``top_by_gain``. Defaults to
+            20.
+
+    Returns:
+        dict[str, Any]: ``{"schema_version", "tested_count", "accepted",
+        "rejected", "top_by_gain"}``. An empty shell is returned when
+        ``ledger`` is not a dict.
+    """
     if not isinstance(ledger, dict):
         return {
             "schema_version": 0, "tested_count": 0,
@@ -2316,6 +2630,15 @@ def _shape_ledger(
         }
 
     def _shape_entry(e: Any) -> dict[str, Any]:
+        """Coerce one ledger entry to the stable field set.
+
+        Args:
+            e (Any): A raw ledger entry.
+
+        Returns:
+            dict[str, Any]: The shaped entry, or ``{}`` when ``e`` is not a
+            dict.
+        """
         if not isinstance(e, dict):
             return {}
         return {
@@ -2468,7 +2791,15 @@ _VARIANT_NAME_RE = re.compile(r"variant_(\d+)_conc(\d+)_isl(\d+)_osl(\d+)", re.I
 
 
 def _scan_sweep_variants(session_dir: Path) -> list[Path]:
-    """Return list of variant directories under runs/sweep/<task>/variant_*/."""
+    """List variant directories under runs/sweep/<task>/variant_*/.
+
+    Args:
+        session_dir (Path): Absolute session root.
+
+    Returns:
+        list[Path]: Every ``variant_*`` directory across all sweep tasks,
+        sorted. Empty when no ``runs/sweep/`` tree exists.
+    """
     root = session_dir / "runs" / "sweep"
     if not root.exists():
         return []
@@ -2487,6 +2818,22 @@ def _shape_sweep_point(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
+    """Shape one sweep variant directory into a sweep-point row.
+
+    Parses the ``conc`` / ``isl`` / ``osl`` from the variant directory name,
+    reads its benchmark report for throughput / latency metrics, and derives a
+    status (``ok`` / ``failed`` / ``skipped``).
+
+    Args:
+        variant_dir (Path): A ``variant_*`` directory.
+        session_dir (Path): Absolute session root (used to relativize paths).
+        warnings (list[str]): Shared warnings list (mutated in place when a
+            report fails to parse).
+
+    Returns:
+        dict[str, Any]: A sweep-point row with the parsed workload knobs,
+        metrics, status, and relative report path.
+    """
     name = variant_dir.name
     m = _VARIANT_NAME_RE.search(name)
     conc: int | None = None
@@ -2528,6 +2875,20 @@ def collect_sweep(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
+    """Collect the §11 sweep section.
+
+    Merges the in-state ``last_sweep`` summary (grid size, best-overall,
+    per-conc bests, pareto front) with the variant points discovered on disk.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        dict[str, Any]: The sweep section (grid size, best_overall,
+        best_for_each_conc, pareto_front, all_variants, config_path).
+    """
     ls = state.get("last_sweep") or {}
     if not isinstance(ls, dict):
         ls = {}
@@ -2551,6 +2912,20 @@ def collect_critic_robustness(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
+    """Collect the §12 critic / robustness section.
+
+    Walks ``critic-workdir/<iter>/`` for review + emit JSON (verdict, topic,
+    truncated summary, artifact paths) and ``robustness-workdir/<iter>/`` for
+    signal + action JSON, then summarizes critic verdicts.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        dict[str, Any]: ``{"critic_iterations", "robustness_signals",
+        "kb_writes_summary"}``.
+    """
     critic_iters: list[dict[str, Any]] = []
     critic_root = session_dir / "critic-workdir"
     if critic_root.exists():
@@ -2622,6 +2997,15 @@ def _critic_kb_writes_summary(
 
 # §13 Telemetry
 def _scan_all_benchmark_reports(session_dir: Path) -> Iterable[Path]:
+    """Find every ``benchmark_*/benchmark_report.json`` under ``runs/``.
+
+    Args:
+        session_dir (Path): Absolute session root.
+
+    Returns:
+        Iterable[Path]: All benchmark reports, sorted. Empty when no ``runs/``
+        tree exists.
+    """
     runs = session_dir / "runs"
     if not runs.exists():
         return ()
@@ -2629,6 +3013,14 @@ def _scan_all_benchmark_reports(session_dir: Path) -> Iterable[Path]:
 
 
 def _scan_torch_traces(session_dir: Path) -> list[Path]:
+    """Find all ``torch_trace*`` directories under ``runs/``.
+
+    Args:
+        session_dir (Path): Absolute session root.
+
+    Returns:
+        list[Path]: Matching trace directories, sorted. Empty when none exist.
+    """
     runs = session_dir / "runs"
     if not runs.exists():
         return []
@@ -2636,6 +3028,15 @@ def _scan_torch_traces(session_dir: Path) -> list[Path]:
 
 
 def _scan_system_profiles(session_dir: Path) -> list[Path]:
+    """Find all ``system_profile*`` directories under ``runs/``.
+
+    Args:
+        session_dir (Path): Absolute session root.
+
+    Returns:
+        list[Path]: Matching profile directories, sorted. Empty when none
+        exist.
+    """
     runs = session_dir / "runs"
     if not runs.exists():
         return []
@@ -2643,6 +3044,14 @@ def _scan_system_profiles(session_dir: Path) -> list[Path]:
 
 
 def _scan_server_logs(session_dir: Path) -> list[Path]:
+    """Find all ``server*.log`` files under ``runs/``.
+
+    Args:
+        session_dir (Path): Absolute session root.
+
+    Returns:
+        list[Path]: Matching server log files, sorted. Empty when none exist.
+    """
     runs = session_dir / "runs"
     if not runs.exists():
         return []
@@ -2653,6 +3062,20 @@ def _aggregate_gpu_monitor(
     reports: list[Path],
     warnings: list[str],
 ) -> dict[str, Any]:
+    """Aggregate GPU-monitor samples across benchmark reports.
+
+    Collects every ``gpu_monitor`` sample from the given reports and computes
+    average / max power, temperature, and average clock.
+
+    Args:
+        reports (list[Path]): Benchmark report paths to scan.
+        warnings (list[str]): Shared warnings list (mutated in place when a
+            report fails to parse).
+
+    Returns:
+        dict[str, Any]: Aggregate stats (sample count plus avg/max power,
+        avg/max temp, avg clock). ``{}`` when no samples were found.
+    """
     samples: list[dict[str, Any]] = []
     for r in reports:
         d = _load_json_safe(r, warnings)
@@ -2669,11 +3092,27 @@ def _aggregate_gpu_monitor(
         return {}
 
     def _avg(key: str) -> float:
+        """Mean of a numeric field across the collected samples.
+
+        Args:
+            key (str): Sample field name.
+
+        Returns:
+            float: The rounded mean of present values, or ``0.0`` when none.
+        """
         vals = [_to_float(s.get(key)) for s in samples]
         vals = [v for v in vals if v is not None]
         return round(sum(vals) / len(vals), 2) if vals else 0.0
 
     def _max(key: str) -> float:
+        """Maximum of a numeric field across the collected samples.
+
+        Args:
+            key (str): Sample field name.
+
+        Returns:
+            float: The rounded max of present values, or ``0.0`` when none.
+        """
         vals = [_to_float(s.get(key)) for s in samples]
         vals = [v for v in vals if v is not None]
         return round(max(vals), 2) if vals else 0.0
@@ -2781,6 +3220,21 @@ def collect_telemetry(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
+    """Collect the §13 telemetry section.
+
+    Gathers references to the baseline / profile benchmark reports, torch
+    traces, system profiles, and server logs on disk, aggregates GPU-monitor
+    stats across all reports, and attaches the per-lane occupancy summary.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        dict[str, Any]: Telemetry section with artifact path lists, the GPU
+        monitor aggregate, and the lane timeline.
+    """
     baseline_report: Path | None = None
     last_b = state.get("last_baseline") or {}
     if isinstance(last_b, dict) and last_b.get("workspace"):
@@ -2838,7 +3292,16 @@ def _normalize_specialist_key(provenance: str) -> str:
 
 
 def _action_family(action: str) -> str:
-    """Map an action label to a family for source_breakdown bucketing."""
+    """Map an action label to a family for source_breakdown bucketing.
+
+    Args:
+        action (str): A stack-entry / gain-ledger action label.
+
+    Returns:
+        str: One of ``kernel`` / ``backends`` / ``params`` / ``validate`` /
+        ``sweep`` / ``explore`` / ``framework_pr`` / ``gemm_tuning``, or
+        ``"other"`` when unrecognized.
+    """
     s = (action or "").lower()
     if s.startswith("kernel_opt") or s == "integrate":
         return "kernel"
@@ -3106,6 +3569,15 @@ def _collect_phase_breakdown(
     timeline.sort(key=lambda r: r[0])
 
     def _phase_for(ts_unix: float) -> str:
+        """Resolve which phase owned a given timestamp.
+
+        Args:
+            ts_unix (float): Unix timestamp of a gain-ledger entry.
+
+        Returns:
+            str: The latest phase whose boundary is ``<= ts_unix``, or ``""``
+            when the timeline is empty.
+        """
         if not timeline:
             return ""
         current = ""
@@ -3433,7 +3905,15 @@ def collect_roofline_progress(
 
 
 def _normalize_roofline_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
-    """Coerce one ``state.roofline_snapshots[]`` entry to the schema."""
+    """Coerce one ``state.roofline_snapshots[]`` entry to the schema.
+
+    Args:
+        snap (dict[str, Any]): A raw roofline snapshot from state.
+
+    Returns:
+        dict[str, Any]: The snapshot with stable types and a normalized
+        ``top_kernel`` sub-dict.
+    """
     top_kernel_raw = snap.get("top_kernel") or {}
     top_kernel: dict[str, Any] = {}
     if isinstance(top_kernel_raw, dict):
@@ -3507,7 +3987,14 @@ def collect_kernel_roofline(
 
 
 def _normalize_kernel_roofline_entry(raw: dict[str, Any]) -> dict[str, Any]:
-    """Coerce one kernel entry to the schema shape with stable types."""
+    """Coerce one kernel roofline entry to the schema shape with stable types.
+
+    Args:
+        raw (dict[str, Any]): A raw kernel entry from ``kernel_roofline.json``.
+
+    Returns:
+        dict[str, Any]: The entry with all fields coerced to stable types.
+    """
     return {
         "kernel_id":             str(raw.get("kernel_id") or ""),
         "name":                  str(raw.get("name") or ""),
@@ -3695,6 +4182,23 @@ def collect_source_files(
     profile_reports: list[str],
     sweep_reports: list[str],
 ) -> dict[str, Any]:
+    """Build the ``source_files`` map of key on-disk artifacts.
+
+    Always surfaces the manifest / state / baseline references and the
+    critic / robustness workdirs (when present), and conditionally adds the
+    profile / sweep / kernel-attempt list categories when non-empty (empty
+    list-valued categories are omitted so the renderer doesn't show
+    ``count=0`` rows).
+
+    Args:
+        session_dir (Path): Absolute session root.
+        baseline_path (str | None): Relative path to the baseline report.
+        profile_reports (list[str]): Relative profile report paths.
+        sweep_reports (list[str]): Relative sweep report paths.
+
+    Returns:
+        dict[str, Any]: The source-files map.
+    """
     kernel_attempts = [
         _rel(run_dir / "optimization_attempts.jsonl", session_dir) or str(run_dir / "optimization_attempts.jsonl")
         for run_dir in _kernel_agent_run_dirs(session_dir)
@@ -3891,6 +4395,14 @@ def collect_kb_provenance(
                 )
 
     def _count_lines(p: Path) -> int:
+        """Count non-blank lines in a file, recording read errors.
+
+        Args:
+            p (Path): File to scan.
+
+        Returns:
+            int: Number of non-blank lines, or ``0`` when missing / unreadable.
+        """
         try:
             if not p.exists():
                 return 0
@@ -3901,6 +4413,16 @@ def collect_kb_provenance(
             return 0
 
     def _read_last_n_audit(p: Path, n: int = 50) -> list[dict[str, Any]]:
+        """Read the last ``n`` JSON rows of an audit log, never raising.
+
+        Args:
+            p (Path): The ``.jsonl`` audit log.
+            n (int): Maximum number of trailing rows to return. Defaults to 50.
+
+        Returns:
+            list[dict[str, Any]]: Up to the last ``n`` parsed rows, or ``[]``
+            when the file is missing / unreadable.
+        """
         try:
             if not p.exists():
                 return []
@@ -4140,6 +4662,16 @@ def collect_specialist_runs(
 def _normalize_specialist_domain_breakdown(
     raw: Any,
 ) -> dict[str, dict[str, int]]:
+    """Coerce a round's per-domain breakdown to a stable int-counted shape.
+
+    Args:
+        raw (Any): The raw ``domain_breakdown`` value from a specialist round.
+
+    Returns:
+        dict[str, dict[str, int]]: Per-domain counts (dispatched /
+        proposals_total / proposals_kept / proposals_rejected). ``{}`` when
+        ``raw`` is not a dict.
+    """
     if not isinstance(raw, dict):
         return {}
     norm: dict[str, dict[str, int]] = {}
@@ -4171,11 +4703,543 @@ def _domain_for_task(round_entry: dict[str, Any], task_id: str) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Full-trace: unified token + decision timeline (FULL_TRACE_DESIGN §6)
+# ---------------------------------------------------------------------------
+# Token-counter keys, shared with orchestrator.trace.llm_trace. Re-declared
+# here (not imported) so the breakdown package stays free of orchestrator
+# deps — collectors must run offline against a session_dir tarball.
+_TOKEN_IN_KEY = "input_tokens"
+_TOKEN_OUT_KEY = "output_tokens"
+_TOKEN_CACHE_CREATE_KEY = "cache_creation_input_tokens"
+_TOKEN_CACHE_READ_KEY = "cache_read_input_tokens"
+_TOKEN_KEYS_ALL: tuple[str, ...] = (
+    _TOKEN_IN_KEY, _TOKEN_OUT_KEY,
+    _TOKEN_CACHE_CREATE_KEY, _TOKEN_CACHE_READ_KEY,
+)
+
+
+def _coerce_token(value: Any) -> int:
+    """Coerce a token counter to int, treating ``None`` / bad as 0.
+
+    The rollup sums tokens, so a missing counter contributes 0 here (the
+    ``None``-vs-0 distinction matters only on the raw per-call rows, which
+    we preserve verbatim in ``decision_trace.jsonl``).
+    """
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _empty_token_bucket() -> dict[str, int]:
+    return {
+        "total_in": 0,
+        "total_out": 0,
+        "total_cache_creation": 0,
+        "total_cache_read": 0,
+        "calls": 0,
+    }
+
+
+def _fold_call_into_bucket(bucket: dict[str, int], call: dict[str, Any]) -> None:
+    bucket["total_in"] += _coerce_token(call.get(_TOKEN_IN_KEY))
+    bucket["total_out"] += _coerce_token(call.get(_TOKEN_OUT_KEY))
+    bucket["total_cache_creation"] += _coerce_token(
+        call.get(_TOKEN_CACHE_CREATE_KEY)
+    )
+    bucket["total_cache_read"] += _coerce_token(call.get(_TOKEN_CACHE_READ_KEY))
+    bucket["calls"] += 1
+
+
+def _load_llm_calls(
+    session_dir: Path, warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Read every LLM-call row: the in-process ledger + all ext shards.
+
+    Merges ``reports/trace/llm_calls.jsonl`` with every
+    ``reports/trace/ext/*.jsonl`` shard written by out-of-process children.
+    Best-effort: missing files / dirs yield ``[]``; malformed lines are
+    skipped by :func:`_load_jsonl_safe`.
+    """
+    trace_root = session_dir / "reports" / "trace"
+    rows: list[dict[str, Any]] = list(
+        _load_jsonl_safe(trace_root / "llm_calls.jsonl", warnings)
+    )
+    ext_dir = trace_root / "ext"
+    if ext_dir.is_dir():
+        try:
+            shards = sorted(ext_dir.glob("*.jsonl"))
+        except OSError as exc:
+            warnings.append(f"decision_trace: failed to scan {ext_dir}: {exc!r}")
+            shards = []
+        for shard in shards:
+            rows.extend(_load_jsonl_safe(shard, warnings))
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _load_dispatch_history_all(
+    session_dir: Path, warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Read every dynamic_action ``dispatch_history.jsonl`` row.
+
+    Walks ``agents/orchestration/dynamic_actions/<dyn_id>/`` and stamps
+    each row with its owning ``dyn_id`` so the join can key on it. Returns
+    ``[]`` when the dynamic_actions tree is absent (no dynamic actions ran).
+    """
+    root = session_dir / "agents" / "orchestration" / "dynamic_actions"
+    if not root.is_dir():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        dyn_dirs = sorted(p for p in root.iterdir() if p.is_dir())
+    except OSError as exc:
+        warnings.append(f"decision_trace: failed to scan {root}: {exc!r}")
+        return []
+    for dyn_dir in dyn_dirs:
+        rows = _load_jsonl_safe(dyn_dir / "dispatch_history.jsonl", warnings)
+        for row in rows:
+            if isinstance(row, dict):
+                row = dict(row)
+                row.setdefault("dyn_id", dyn_dir.name)
+                out.append(row)
+    return out
+
+
+def _build_phase_windows(
+    state: dict[str, Any],
+) -> list[tuple[float, str]]:
+    """Build a sorted ``[(entered_unix, phase), ...]`` timeline.
+
+    Derived from ``state.phase_history`` rows that carry a ``to_phase``
+    (real transitions). Used to backfill a call's / decision's phase from
+    its ``ts`` when the producer didn't stamp one (out-of-process children,
+    sub-agent runners). Empty when phase_history is missing.
+    """
+    history = state.get("phase_history") or []
+    if not isinstance(history, list):
+        return []
+    windows: list[tuple[float, str]] = []
+    for row in history:
+        if not isinstance(row, dict):
+            continue
+        to_phase = str(row.get("to_phase") or "").strip()
+        if not to_phase:
+            continue
+        ts_unix = row.get("ts_unix")
+        if ts_unix is None:
+            ts_unix = _parse_iso_unix(row.get("ts"))
+        if ts_unix is None:
+            continue
+        windows.append((float(ts_unix), to_phase))
+    windows.sort(key=lambda w: w[0])
+    return windows
+
+
+def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
+    """Return the phase active at ``ts`` per ``windows`` (latest <= ts)."""
+    unix = _parse_iso_unix(ts)
+    if unix is None or not windows:
+        return ""
+    phase = ""
+    for entered, name in windows:
+        if entered <= unix:
+            phase = name
+        else:
+            break
+    return phase
+
+
+def _decision_key(task_id: str, dyn_id: str) -> str | None:
+    """Canonical join key for a decision / call: ``dyn_id`` wins over
+    ``task_id`` (a dynamic_action dispatch owns both). ``None`` when
+    neither is present (the call can only be ts-window bucketed)."""
+    d = (dyn_id or "").strip()
+    if d:
+        return f"dyn:{d}"
+    t = (task_id or "").strip()
+    if t:
+        return f"task:{t}"
+    return None
+
+
+def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, int]:
+    """Copy a token bucket and add ``total_in_out`` + ``grand_total``.
+
+    Handles both bucket shapes: the rollup view (split
+    ``total_cache_creation`` / ``total_cache_read``) and the per-decision view
+    (pre-summed ``total_cache``). ``total_in_out`` is prompt+completion only;
+    ``grand_total`` folds in every cache token too.
+    """
+    b = dict(bucket or {})
+    ti = int(b.get("total_in", 0) or 0)
+    to = int(b.get("total_out", 0) or 0)
+    cache = (
+        int(b.get("total_cache", 0) or 0)
+        + int(b.get("total_cache_creation", 0) or 0)
+        + int(b.get("total_cache_read", 0) or 0)
+    )
+    b["total_in_out"] = ti + to
+    b["grand_total"] = ti + to + cache
+    return b
+
+
+def collect_token_usage(
+    decision_trace: dict[str, Any],
+    action_timeline: list[dict[str, Any]],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Promote the token rollup to a discoverable top-level ``token_usage``.
+
+    Pure / derived: reuses the rollup already computed by
+    :func:`collect_decision_trace` (no second ledger read), so the totals here
+    always reconcile with ``decision_trace``. Adds:
+
+    * ``session_total`` / ``by_component`` / ``by_phase`` — every call, with
+      ``total_in_out`` + ``grand_total`` convenience figures.
+    * ``attribution`` — decision-attributed vs unattributed split (most
+      orchestration / kernel / critic / proposal_scorer turns carry no
+      decision key, so they land in ``unattributed``).
+    * ``timeline`` — each ``action_timeline`` row annotated with the tokens
+      that join to it on ``task_id`` (``None`` when an action has no LLM spend).
+
+    Empty-but-valid (zeroed ``session_total``) when ``decision_trace`` is empty
+    (e.g. a pre-trace session), so downstream readers never KeyError.
+    """
+    dt = decision_trace if isinstance(decision_trace, dict) else {}
+    rollup = dt.get("token_rollup") or {}
+    session_total = rollup.get("session_total") or _empty_token_bucket()
+    by_component = rollup.get("by_component") or {}
+    by_phase = rollup.get("by_phase") or {}
+    unattributed = dt.get("unattributed_tokens") or _empty_token_bucket()
+
+    # attributed = session_total - unattributed, field by field.
+    attributed = _empty_token_bucket()
+    for k in attributed:
+        attributed[k] = (
+            int(session_total.get(k, 0) or 0) - int(unattributed.get(k, 0) or 0)
+        )
+    total_calls = int(session_total.get("calls", 0) or 0)
+    attr_calls = int(attributed.get("calls", 0) or 0)
+    attributed_calls_pct = (
+        round(100.0 * attr_calls / total_calls, 2) if total_calls else 0.0
+    )
+
+    # Per-task token map from the per-decision view (only decision-bearing
+    # task_ids carry tokens — i.e. the attributed subset).
+    tokens_by_task: dict[str, dict[str, Any]] = {}
+    for entry in dt.get("decision_trace") or []:
+        if not isinstance(entry, dict):
+            continue
+        dec = entry.get("decision") or {}
+        tid = str(dec.get("task_id") or dec.get("dyn_id") or "").strip()
+        tok = entry.get("tokens") or {}
+        if tid and int(tok.get("calls", 0) or 0) > 0:
+            tokens_by_task[tid] = tok
+
+    # Annotate the visible action timeline with tokens joined on task_id.
+    timeline: list[dict[str, Any]] = []
+    for act in action_timeline or []:
+        if not isinstance(act, dict):
+            continue
+        tid = str(act.get("task_id") or "").strip()
+        tok = tokens_by_task.get(tid) if tid else None
+        timeline.append({
+            "task_id": tid or None,
+            "action": str(act.get("action") or act.get("change") or ""),
+            "phase": str(act.get("phase") or ""),
+            "decision": str(act.get("decision") or ""),
+            "ts": str(act.get("ts") or ""),
+            "tokens": _token_convenience(tok) if tok else None,
+        })
+
+    return {
+        "session_total": _token_convenience(session_total),
+        "by_component": {
+            c: _token_convenience(b) for c, b in by_component.items()
+        },
+        "by_phase": {p: _token_convenience(b) for p, b in by_phase.items()},
+        "attribution": {
+            "attributed_to_decisions": _token_convenience(attributed),
+            "unattributed": _token_convenience(unattributed),
+            "attributed_calls_pct": attributed_calls_pct,
+        },
+        "timeline": timeline,
+        "source": "reports/trace/llm_calls.jsonl (+ reports/trace/ext/*.jsonl)",
+        "correlation": (
+            "timeline[].task_id joins action_timeline[].task_id; components "
+            "without a per-decision task_id (orchestration / kernel / critic / "
+            "proposal_scorer) are counted in session_total/by_component/by_phase "
+            "but appear as tokens=null in timeline (see attribution.unattributed)."
+        ),
+    }
+
+
+def collect_langfuse(
+    session_dir: Path,
+    manifest: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Assemble the ``langfuse`` section: was the trace pushed live, and how much.
+
+    Two-tier source (the breakdown is normally written *before* the
+    session-end ``flush_session``, so the on-disk receipt may not exist yet):
+
+    1. ``reports/trace/langfuse_receipt.json`` if present -- the post-flush
+       receipt with final counts (``receipt_source="receipt_file"``).
+    2. Otherwise a live read of the per-session emitter singleton -- reports
+       the gating + redacted config + in-process running counts
+       (``receipt_source="live_emitter"``, ``counts_final=False``).
+
+    Either way credentials are redacted to host + presence booleans. Never
+    raises: any failure degrades to a minimal ``config_only`` view so the
+    breakdown still records whether the feature was even on.
+    """
+    from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
+
+    # Tier 1: the persisted post-flush receipt (final counts).
+    try:
+        receipt = lfe.read_receipt(session_dir)
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"langfuse: read_receipt failed: {type(exc).__name__}: {exc}")
+        receipt = None
+    if receipt is not None:
+        receipt["receipt_source"] = "receipt_file"
+        return receipt
+
+    # Tier 2: live read of the emitter singleton (pre-flush / in-process).
+    try:
+        section = lfe.get_emitter(session_dir).receipt()
+        section["receipt_source"] = "live_emitter"
+        return section
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"langfuse: live receipt failed: {type(exc).__name__}: {exc}")
+
+    # Tier 3 fallback: config-only view straight from env + manifest, so the
+    # breakdown still records whether the feature was configured at all.
+    from inference_optimizer.orchestrator.trace import trace_env as tenv
+
+    creds = tenv.langfuse_credentials()
+    return {
+        "enabled": False,
+        "disabled_reason": "unknown",
+        "config": {
+            "enable_flag": tenv.langfuse_live_enabled(),
+            "host": creds.get(tenv.ENV_LANGFUSE_HOST),
+            "public_key_set": tenv.ENV_LANGFUSE_PUBLIC_KEY in creds,
+            "secret_key_set": tenv.ENV_LANGFUSE_SECRET_KEY in creds,
+            "sdk_available": None,
+        },
+        "trace_id": None,
+        "session_id": str(manifest.get("claw_session_id") or manifest.get("session_id") or ""),
+        "correlated_on": (
+            "claw_session_id"
+            if str(manifest.get("claw_session_id") or "").strip()
+            else "internal_session_id"
+        ),
+        "counts": {},
+        "counts_final": False,
+        "receipt_source": "config_only",
+    }
+
+
+def collect_decision_trace(
+    session_dir: Path,
+    state: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Join the token ledger to the decision streams into one timeline.
+
+    Implements FULL_TRACE_DESIGN §6: read the per-call token rows
+    (``reports/trace/llm_calls.jsonl`` + ``ext/*.jsonl``), read the
+    decision rows (``optimization_journal.json`` KEEP/REVERT entries +
+    every dynamic_action ``dispatch_history.jsonl``), then attach each
+    decision's LLM calls by the shared ``task_id`` / ``dyn_id`` key, with a
+    ``ts``-window phase fallback for calls that carry neither.
+
+    Side effect (best-effort): writes the joined timeline to
+    ``reports/trace/decision_trace.jsonl``. A write failure is swallowed —
+    the in-breakdown section is the authoritative product and must not be
+    lost to a disk error.
+
+    Returns ``{"decision_trace": [...], "token_rollup": {...},
+    "unattributed_tokens": {...}}``. All-empty (zeroed rollup) when no
+    trace files exist, so a session that ran before the trace subsystem
+    landed degrades cleanly.
+    """
+    calls = _load_llm_calls(session_dir, warnings)
+    phase_windows = _build_phase_windows(state)
+
+    # ── Index calls by decision key; orphans (no key) go to a ts list ──
+    calls_by_key: dict[str, list[dict[str, Any]]] = {}
+    orphan_calls: list[dict[str, Any]] = []
+    for call in calls:
+        key = _decision_key(
+            str(call.get("task_id") or ""), str(call.get("dyn_id") or ""),
+        )
+        if key is None:
+            orphan_calls.append(call)
+        else:
+            calls_by_key.setdefault(key, []).append(call)
+
+    # ── Gather decisions from the journal + dispatch_history ──
+    decisions: list[dict[str, Any]] = []
+    for e in _load_optimization_journal(session_dir, warnings):
+        if not isinstance(e, dict):
+            continue
+        task_id = str(e.get("task_id") or "")
+        key = _decision_key(task_id, "")
+        ts = _iso_z(e.get("ts"))
+        phase = str(e.get("phase") or "").strip() or _phase_at(ts, phase_windows)
+        decisions.append({
+            "kind": "keep_revert",
+            "key": key,
+            "phase": phase,
+            "tick": e.get("tick"),
+            "ts": ts,
+            "decision": {
+                "component": "orchestration",
+                "change": str(e.get("change") or ""),
+                "outcome": str(e.get("outcome") or ""),
+                "gain_pct": _to_float(e.get("gain_pct")),
+                "task_id": task_id,
+            },
+        })
+    for row in _load_dispatch_history_all(session_dir, warnings):
+        dyn_id = str(row.get("dyn_id") or "")
+        key = _decision_key(str(row.get("task_id") or ""), dyn_id)
+        ts = _iso_z(row.get("ts"))
+        phase = _phase_at(ts, phase_windows)
+        decisions.append({
+            "kind": "dynamic_action",
+            "key": key,
+            "phase": phase,
+            "tick": row.get("tick"),
+            "ts": ts,
+            "decision": {
+                "component": "dynamic_action",
+                "event": str(row.get("event") or ""),
+                "dyn_id": dyn_id,
+                "verdict": row.get("verdict"),
+                "outcome": str(row.get("integrate_status") or row.get("terminal_state") or ""),
+                "gain_pct": _to_float(row.get("delta_pct")),
+            },
+        })
+
+    # ── Attach calls to decisions; build the joined trace ──
+    # A given key's calls attach to exactly ONE decision — the first by ts
+    # (e.g. a dynamic_action's DISPATCHED event anchors all its sub-agent
+    # turns). Later same-key events (CRITIC_VERDICT / INTEGRATE_RESULT) get
+    # empty token buckets so the per-decision sums don't double-count.
+    consumed_keys: set[str] = set()
+    decision_trace: list[dict[str, Any]] = []
+    for dec in sorted(decisions, key=lambda d: (d.get("ts") or "")):
+        key = dec.get("key")
+        if key and key in calls_by_key and key not in consumed_keys:
+            attached = calls_by_key[key]
+            consumed_keys.add(key)
+        else:
+            attached = []
+        by_component: dict[str, dict[str, int]] = {}
+        agg = _empty_token_bucket()
+        for call in attached:
+            comp = str(call.get("component") or "unknown")
+            comp_bucket = by_component.setdefault(comp, _empty_token_bucket())
+            _fold_call_into_bucket(comp_bucket, call)
+            _fold_call_into_bucket(agg, call)
+        decision_trace.append({
+            "phase": dec.get("phase") or "",
+            "tick": dec.get("tick"),
+            "ts": dec.get("ts") or "",
+            "decision": dec.get("decision") or {},
+            "tokens": {
+                "by_component": by_component,
+                "total_in": agg["total_in"],
+                "total_out": agg["total_out"],
+                "total_cache": agg["total_cache_creation"] + agg["total_cache_read"],
+                "calls": agg["calls"],
+            },
+        })
+
+    # ── Unjoined calls: keyed calls with no matching decision + orphans ──
+    # These still count toward the session total + phase/component rollup so
+    # the books balance, but they don't anchor to a decision row.
+    unattributed = _empty_token_bucket()
+    for key, key_calls in calls_by_key.items():
+        if key in consumed_keys:
+            continue
+        for call in key_calls:
+            _fold_call_into_bucket(unattributed, call)
+    for call in orphan_calls:
+        _fold_call_into_bucket(unattributed, call)
+
+    # ── Rollups: by_phase + by_component + session_total (ALL calls) ──
+    by_phase: dict[str, dict[str, int]] = {}
+    by_component_roll: dict[str, dict[str, int]] = {}
+    session_total = _empty_token_bucket()
+    for call in calls:
+        comp = str(call.get("component") or "unknown")
+        # Phase: prefer the call's own phase, else ts-window backfill.
+        phase = str(call.get("phase") or "").strip() or _phase_at(
+            call.get("ts"), phase_windows
+        ) or "unattributed"
+        _fold_call_into_bucket(
+            by_phase.setdefault(phase, _empty_token_bucket()), call
+        )
+        _fold_call_into_bucket(
+            by_component_roll.setdefault(comp, _empty_token_bucket()), call
+        )
+        _fold_call_into_bucket(session_total, call)
+
+    token_rollup = {
+        "by_phase": by_phase,
+        "by_component": by_component_roll,
+        "session_total": session_total,
+    }
+
+    # ── Best-effort side write of the joined timeline (design §6.4) ──
+    _write_decision_trace_jsonl(session_dir, decision_trace, warnings)
+
+    return {
+        "decision_trace": decision_trace,
+        "token_rollup": token_rollup,
+        "unattributed_tokens": unattributed,
+    }
+
+
+def _write_decision_trace_jsonl(
+    session_dir: Path,
+    decision_trace: list[dict[str, Any]],
+    warnings: list[str],
+) -> None:
+    """Append-free atomic-ish write of ``reports/trace/decision_trace.jsonl``.
+
+    Rewrites the whole file (one JSON object per decision) on each export;
+    the collector is the single producer, so a full rewrite is simpler than
+    append + dedup and stays consistent with the latest join. Best-effort:
+    OSError is recorded in ``warnings`` and swallowed.
+    """
+    target = session_dir / "reports" / "trace" / "decision_trace.jsonl"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lines = [json.dumps(row, sort_keys=True) for row in decision_trace]
+        target.write_text(
+            ("\n".join(lines) + "\n") if lines else "", encoding="utf-8",
+        )
+    except OSError as exc:
+        warnings.append(
+            f"decision_trace: failed to write {target}: {exc!r}"
+        )
+
+
 __all__ = [
     "collect_attribution",
     "collect_baseline",
     "collect_capability_summary",
     "collect_critic_robustness",
+    "collect_decision_trace",
     "collect_final",
     "collect_explore_search",
     "collect_kb_provenance",
@@ -4189,5 +5253,6 @@ __all__ = [
     "collect_specialist_runs",
     "collect_sweep",
     "collect_telemetry",
+    "collect_token_usage",
     "collect_workload",
 ]

@@ -10,7 +10,9 @@ capture directories, and has a dry-run path that works without TraceLens install
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
+import csv
 import functools
 import gzip
 import json
@@ -19,12 +21,30 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
 import uuid
 from datetime import datetime, timezone
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+try:
+    from inference_optimizer.orchestrator.framework_paths import (
+        resolve_patch_target_roots as _resolve_patch_target_roots,
+    )
+except ImportError:
+    _resolve_patch_target_roots = None
+
+try:
+    from apply_kernel_patch import known_target_roots as _known_target_roots
+except ImportError:
+    _known_target_roots = None
+
+try:
+    import aiter.jit.core as _aiter_jit_core  # type: ignore[import-untyped]
+except Exception:
+    _aiter_jit_core = None
+
+from tracelens_arch_benchmark import normalize_platform, populate_gpu_arch_json
 from tracelens_skill_runner import (
     aggregate_by_source_function,
     discover_capture_folder,
@@ -40,6 +60,9 @@ from _paths import workspace_root
 
 HIGH_IDLE_PCT_THRESHOLD_DEFAULT = 80.0
 HIGH_IDLE_PCT_THRESHOLD_ENV = "HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD"
+
+ARCH_BENCHMARK_TIMEOUT_ENV = "TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC"
+ARCH_BENCHMARK_TIMEOUT_FLOOR_S = 600
 
 
 def _resolve_idle_pct_threshold() -> float:
@@ -59,6 +82,23 @@ def _resolve_idle_pct_threshold() -> float:
     if value < 0.0:
         return HIGH_IDLE_PCT_THRESHOLD_DEFAULT
     return value
+
+
+def _resolve_arch_benchmark_timeout_s() -> int:
+    """Return the GPU arch microbenchmark timeout in seconds (floor 600s).
+
+    Configured via ``TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC``. Empty, non-numeric,
+    or out-of-range values fall back to the 600s floor rather than crashing the
+    pipeline with a ``ValueError`` before the microbenchmark runs.
+    """
+    raw = os.environ.get(ARCH_BENCHMARK_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return ARCH_BENCHMARK_TIMEOUT_FLOOR_S
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return ARCH_BENCHMARK_TIMEOUT_FLOOR_S
+    return max(ARCH_BENCHMARK_TIMEOUT_FLOOR_S, value)
 
 
 def _build_high_idle_warning(
@@ -89,6 +129,23 @@ def _build_trace_split_warning(
     *, trace_input: Path, split_dir: Path, split_rc: int,
     mixed_count: int, decode_count: int, prefilldecode_count: int,
 ) -> dict[str, Any]:
+    """Build the ``trace_split_no_steady_state`` trace-health warning.
+
+    Emitted when the TraceLens splitter produces no steady-state chunks,
+    so analyzing the raw trace would risk misleading high-idle results.
+
+    Args:
+        trace_input (Path): The raw trace that was handed to the splitter.
+        split_dir (Path): Directory the splitter wrote its outputs into.
+        split_rc (int): Return code from the splitter subprocess.
+        mixed_count (int): Number of ``mixed`` steady-state chunks produced.
+        decode_count (int): Number of ``decode_only`` chunks produced.
+        prefilldecode_count (int): Number of ``prefilldecode`` chunks produced.
+
+    Returns:
+        dict[str, Any]: A structured warning entry with code
+            ``trace_split_no_steady_state`` and the supporting counts/message.
+    """
     return {
         "code": "trace_split_no_steady_state",
         "severity": "warning",
@@ -122,8 +179,6 @@ def _check_selected_chunk_has_gpu_events(
     warning the caller appends and raises on. A data-validity gate, not a reorder — falling
     back to another mode is the operator's call (never a silent swap).
     """
-    import csv
-
     details_path = split_dir / "execution_details.csv"
     if not details_path.is_file():
         # No CSV (older TraceLens): let the chunk through (T3 idle gate still applies).
@@ -150,6 +205,14 @@ def _check_selected_chunk_has_gpu_events(
         return None
 
     def _f(name: str) -> float:
+        """Read a numeric field from the selected splitter CSV row.
+
+        Args:
+            name (str): Column name to read from ``selected_row``.
+
+        Returns:
+            float: The parsed value, or ``0.0`` when missing/unparseable.
+        """
         try:
             return float(selected_row.get(name) or "0") or 0.0
         except (TypeError, ValueError):
@@ -220,6 +283,15 @@ _CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10  # 10 ppt
 
 
 def _resolve_min_busy_ratio() -> float:
+    """Return the minimum chunk busy-ratio threshold for the N36 quality gate.
+
+    Reads ``INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO`` and falls back
+    to :data:`_DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO` when unset, out of the
+    ``[0.0, 1.0]`` range, or unparseable.
+
+    Returns:
+        float: The busy-ratio threshold in the inclusive range ``[0.0, 1.0]``.
+    """
     raw = os.environ.get(
         "INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO", "",
     ).strip()
@@ -252,18 +324,25 @@ def _check_selected_chunk_has_gpu_events_quality(
     materially better, or the CSV/row is absent. Otherwise a ``steady_state_chunk_low_quality``
     warning (same shape as N25 for the N26 retry path). See the module-level N36 comment.
     """
-    import csv as _csv
-
     details_path = split_dir / "execution_details.csv"
     if not details_path.is_file():
         return None
     try:
         with details_path.open("r", encoding="utf-8") as fh:
-            rows = list(_csv.DictReader(fh))
-    except (OSError, _csv.Error):
+            rows = list(csv.DictReader(fh))
+    except (OSError, csv.Error):
         return None
 
     def _row_for(chunk_path: "Path") -> "dict[str, str] | None":
+        """Find the splitter CSV row whose ``output_path`` is the chunk.
+
+        Args:
+            chunk_path (Path): Chunk file to match against ``output_path``.
+
+        Returns:
+            dict[str, str] | None: The matching CSV row, or ``None`` when no
+                row resolves to the same path.
+        """
         resolved = str(chunk_path.resolve())
         for row in rows:
             out_path = row.get("output_path", "")
@@ -277,9 +356,26 @@ def _check_selected_chunk_has_gpu_events_quality(
         return None
 
     def _stats(row: "dict[str, str] | None") -> "tuple[int, float, float]":
+        """Extract ``(num_gpu_events, gpu_busy_duration, gpu_duration)``.
+
+        Args:
+            row (dict[str, str] | None): A splitter CSV row, or ``None``.
+
+        Returns:
+            tuple[int, float, float]: The event count, busy duration (us),
+                and total duration (us); all zero when ``row`` is ``None``.
+        """
         if row is None:
             return 0, 0.0, 0.0
         def _f(k: str) -> float:
+            """Read a numeric field from the CSV row.
+
+            Args:
+                k (str): Column name to read.
+
+            Returns:
+                float: The parsed value, or ``0.0`` when missing/unparseable.
+            """
             try:
                 return float(row.get(k) or "0") or 0.0
             except (TypeError, ValueError):
@@ -377,10 +473,24 @@ DEFAULT_TRACELENS_INTERNAL_ROOT = ""
 
 
 def utc_now() -> str:
+    """Return the current UTC time as an ISO-8601 string.
+
+    Returns:
+        str: The current UTC timestamp in ISO-8601 format.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    """Atomically write ``data`` as pretty-printed JSON to ``path``.
+
+    Writes to a temporary file in the same directory then replaces the
+    target so readers never observe a partially-written file.
+
+    Args:
+        path (Path): Destination JSON file; parent dirs are created.
+        data (dict[str, Any]): JSON-serializable payload to write.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
         json.dump(data, tmp, indent=2, sort_keys=True)
@@ -390,12 +500,29 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def append_log(log_path: Path, message: str) -> None:
+    """Append a single line to a log file, creating parent dirs as needed.
+
+    Args:
+        log_path (Path): Log file to append to.
+        message (str): Text to append; trailing whitespace is stripped and a
+            newline is added.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(message.rstrip() + "\n")
 
 
 def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
+    """Return the last ``limit`` lines of a log file.
+
+    Args:
+        log_path (Path): Log file to read.
+        limit (int): Maximum number of trailing lines to return.
+
+    Returns:
+        list[str]: The trailing lines, or an empty list when the file does
+            not exist.
+    """
     if not log_path.exists():
         return []
     lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -413,6 +540,22 @@ def update_status(
     started_at: str,
     error: str | None = None,
 ) -> None:
+    """Atomically write a tracelens_analysis run-status JSON file.
+
+    Captures the current run state, recent log tail, and (on terminal
+    states) the wall-clock duration so downstream collectors can build a
+    timeline event.
+
+    Args:
+        status_path (Path): Destination status JSON file.
+        state (str): Current run state (e.g. ``running``, ``succeeded``).
+        current_step (str): Human-readable label of the active step.
+        log_path (Path): Log file whose size/tail are recorded.
+        artifact_paths (dict[str, str]): Map of artifact names to paths.
+        run_id (str): Unique identifier for this run.
+        started_at (str): ISO-8601 start time used to compute duration.
+        error (str | None): Error message recorded when the run failed.
+    """
     updated_at = utc_now()
     payload: dict[str, Any] = {
         "tool": "tracelens_analysis",
@@ -448,6 +591,14 @@ def update_status(
 
 
 def open_json(path: Path) -> dict[str, Any]:
+    """Load a JSON file, transparently handling ``.gz`` compression.
+
+    Args:
+        path (Path): JSON or gzipped-JSON file to read.
+
+    Returns:
+        dict[str, Any]: The parsed JSON payload.
+    """
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rt", encoding="utf-8", errors="replace") as fh:
         return json.load(fh)
@@ -487,6 +638,23 @@ def _trace_input_sort_key(path: Path) -> tuple[int, str]:
 
 
 def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
+    """Resolve a trace input path into a list of trace files.
+
+    Accepts either a single trace file or a capture directory; directories
+    are searched recursively for known trace extensions, deduplicated, and
+    ordered via :func:`_trace_input_sort_key`.
+
+    Args:
+        trace_input (Path): A trace file or a capture directory.
+
+    Returns:
+        tuple[str, list[Path]]: ``("file", [path])`` for a single file or
+            ``("capture_dir", paths)`` for a directory.
+
+    Raises:
+        FileNotFoundError: When the path does not exist or no trace files are
+            found under a supplied directory.
+    """
     if trace_input.is_file():
         return "file", [trace_input]
     if not trace_input.is_dir():
@@ -520,6 +688,18 @@ def is_kernel_event(event: dict[str, Any]) -> bool:
 
 
 def extract_shape(event: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract a shape annotation from a trace event when present.
+
+    Checks both ``event['args']`` and the event top level for the first of
+    several known shape keys.
+
+    Args:
+        event (dict[str, Any]): A single trace event.
+
+    Returns:
+        dict[str, Any] | None: A single-key dict ``{shape_key: value}`` for
+            the first shape field found, or ``None`` when none is present.
+    """
     args = event.get("args") if isinstance(event.get("args"), dict) else {}
     for key in ("shape", "shapes", "input_shape", "trace_shapes"):
         if key in args:
@@ -530,6 +710,17 @@ def extract_shape(event: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def extract_source_file(event: dict[str, Any]) -> str:
+    """Extract a source-file path from a trace event when present.
+
+    Checks both ``event['args']`` and the event top level for the first of
+    several known path keys.
+
+    Args:
+        event (dict[str, Any]): A single trace event.
+
+    Returns:
+        str: The first non-empty source path found, or ``""`` when none.
+    """
     args = event.get("args") if isinstance(event.get("args"), dict) else {}
     for key in ("source_file", "file", "filename", "path"):
         value = args.get(key) or event.get(key)
@@ -568,6 +759,19 @@ _FLYDSL_PSEUDO_OP_NAME_MARKERS = (
 
 
 def source_type_for(name: str, source_file: str) -> str:
+    """Classify a kernel's source type from its name and source path.
+
+    Recognizes FlyDSL pseudo-ops, runtime-generated kernels, HIP/C++,
+    Triton, FlyDSL, plain Python, and vendor-binary backends.
+
+    Args:
+        name (str): Kernel symbol/name.
+        source_file (str): Resolved source-file path (may be empty).
+
+    Returns:
+        str: One of ``flydsl``, ``runtime_generated``, ``hip_cpp``,
+            ``triton``, ``python``, ``vendor_binary``, or ``unknown``.
+    """
     lower_name = name.lower()
     lower_file = source_file.lower()
     # PR #668: synthetic ``pseudo_op::*flydsl_*`` carry no source_file; match the name prefix directly.
@@ -606,15 +810,14 @@ _COMPILE_GENERATED_NAME_MARKERS = (
 def _framework_patch_roots() -> tuple[str, ...]:
     """Framework install roots (from framework_paths.resolve_patch_target_roots); also emits a lower-case variant of each (``/app/ATOM/atom/`` -> ``/app/atom/atom/``) for case-insensitive matching."""
     try:
-        from inference_optimizer.orchestrator.framework_paths import (
-            resolve_patch_target_roots,
-        )
-
-        roots = resolve_patch_target_roots()
+        if _resolve_patch_target_roots is None:
+            raise ImportError
+        roots = _resolve_patch_target_roots()
     except ImportError:
-        from apply_kernel_patch import known_target_roots
-
-        roots = known_target_roots()
+        if _known_target_roots is None:
+            roots = []
+        else:
+            roots = _known_target_roots()
     out: list[str] = []
     seen: set[str] = set()
     for root in roots:
@@ -627,12 +830,12 @@ def _framework_patch_roots() -> tuple[str, ...]:
 
 @functools.lru_cache(maxsize=1)
 def _aiter_csrc_root() -> str:
-    """aiter's device-source root (``.../aiter_meta/csrc/``) from the installed package; empty if aiter is unimportable."""
-    try:
-        import aiter.jit.core as _jc  # type: ignore
-    except Exception:
+    """aiter's own device-source root (e.g. ``.../aiter_meta/csrc/``),
+    resolved from the installed package. Empty when aiter is not importable.
+    Cached once per process."""
+    if _aiter_jit_core is None:
         return ""
-    raw = (getattr(_jc, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
+    raw = (getattr(_aiter_jit_core, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
     return (raw.rstrip("/") + "/") if raw else ""
 
 
@@ -650,7 +853,12 @@ def _flydsl_reusable_roots() -> tuple[str, ...]:
 
 
 def _reusable_roots() -> tuple[str, ...]:
-    """Discovered framework roots + aiter csrc + FlyDSL checkout (dynamic)."""
+    """Combine all reusable-source roots used by the patchability gate.
+
+    Returns:
+        tuple[str, ...]: Discovered framework roots plus the aiter csrc root
+            and FlyDSL checkout roots, deduplicated.
+    """
     roots = _framework_patch_roots()
     csrc = _aiter_csrc_root()
     if csrc and csrc not in roots:
@@ -790,6 +998,12 @@ def is_reusable_native_kernel(candidate: dict[str, Any]) -> bool:
 
     Thin wrapper over :func:`classify_patchability` kept for backward
     compatibility with downstream consumers that only need the bool.
+
+    Args:
+        candidate (dict[str, Any]): A hot-kernel candidate row.
+
+    Returns:
+        bool: ``True`` when the candidate is routable to a kernel-opt backend.
     """
     return classify_patchability(candidate)[0]
 
@@ -843,6 +1057,14 @@ SOURCE_EXTENSIONS = (".cuh", ".cu", ".hip", ".cpp", ".h", ".hpp", ".py")
 
 
 def _strip_template_args(symbol: str) -> str:
+    """Remove C++ template argument blocks (``<...>``) from a symbol.
+
+    Args:
+        symbol (str): A possibly templated C++ symbol name.
+
+    Returns:
+        str: The symbol with all balanced ``<...>`` sections removed.
+    """
     out: list[str] = []
     depth = 0
     for ch in symbol:
@@ -871,11 +1093,19 @@ def _candidate_keywords(name: str) -> list[str]:
 
     Prefers descriptive identifiers (e.g. cross_device_reduce_2stage, gemm_a16w16)
     over namespace/type tokens (aiter, vllm, RankData) that match too widely.
+
+    Args:
+        name (str): Kernel symbol/name (possibly Itanium-mangled).
+
+    Returns:
+        list[str]: Up to three descriptive search keywords, most-specific
+            first; empty when nothing usable can be extracted.
     """
     cleaned = name.strip()
     if cleaned.startswith("_Z"):
-        # Itanium ABI <len><name>: slice manually so consecutive segments parse separately.
-        import re
+        # Itanium ABI uses <len><name>; walk through and slice manually so
+        # consecutive segments (e.g. 5aiter26cross_device_reduce_2stage...) are
+        # parsed as separate identifiers.
         tokens = []
         pos = 0
         while pos < len(cleaned):
@@ -926,6 +1156,18 @@ _GREP_CACHE: dict[tuple[str, str], list[Path]] = {}
 
 
 def _grep_for_keyword(keyword: str, root: Path) -> list[Path]:
+    """Recursively grep ``root`` for source files containing ``keyword``.
+
+    Results are cached per ``(keyword, root)`` and restricted to known
+    source extensions. Failures (missing grep, timeout) yield ``[]``.
+
+    Args:
+        keyword (str): Literal string to search for.
+        root (Path): Directory to search recursively.
+
+    Returns:
+        list[Path]: Existing source files that match, possibly empty.
+    """
     if not root.exists():
         return []
     cache_key = (keyword, str(root))
@@ -959,7 +1201,27 @@ def _grep_for_keyword(keyword: str, root: Path) -> list[Path]:
 
 
 def _rank_paths(paths: list[Path]) -> list[Path]:
+    """Sort candidate source paths by likely relevance.
+
+    Prefers real source repos over installed wheels and over optimized /
+    build variants, then by file extension and path depth.
+
+    Args:
+        paths (list[Path]): Candidate source paths to rank.
+
+    Returns:
+        list[Path]: ``paths`` sorted best-first.
+    """
     def score(path: Path) -> tuple[int, int, int]:
+        """Compute the sort score for a single candidate path.
+
+        Args:
+            path (Path): Candidate source path.
+
+        Returns:
+            tuple[int, int, int]: ``(kind_score, ext_score, depth_penalty)``;
+                lower tuples sort earlier (more relevant).
+        """
         s = str(path)
         # Prefer real source repos over installed wheels and over optimized variants.
         depth_penalty = s.count("/")
@@ -976,21 +1238,100 @@ def _rank_paths(paths: list[Path]) -> list[Path]:
     return sorted(paths, key=score)
 
 
+def _compound_subwindow_keywords(name: str) -> list[str]:
+    """Trailing snake_case sub-windows of a compound/profiler-wrapped symbol.
+
+    A profiler-wrapped op name like
+    ``sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427``
+    never appears verbatim in source: the recorded identifier is
+    ``<file_stem>_<func>_<line>``. :func:`_candidate_keywords` returns only the
+    full compound token, which greps to nothing. This yields progressively
+    shorter trailing windows (longest first, most specific) so the embedded
+    function symbol (e.g. ``invoke_fused_moe_kernel``) still resolves. The
+    namespace/profiler prefix and a trailing numeric id are stripped first.
+    """
+    cleaned = _strip_template_args(name.strip())
+    if "::" in cleaned:
+        cleaned = cleaned.split("::")[-1]
+    cleaned = re.sub(r"_\d+$", "", cleaned)  # drop a trailing launcher line number
+    segs = [s for s in cleaned.split("_") if s]
+    if len(segs) < 3:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    # Windows anchored at the end, dropping leading segments one at a time, down
+    # to the last two segments. Longest (most specific) first.
+    for start in range(0, len(segs) - 1):
+        window = "_".join(segs[start:])
+        if len(window) >= 6 and not window.isdigit() and window not in seen:
+            seen.add(window)
+            out.append(window)
+    return out[:6]
+
+
+def _file_defines_symbol(path: Path, keyword: str) -> bool:
+    """True when ``path`` *defines* ``keyword`` (vs merely mentioning it).
+
+    Distinguishes a kernel's definition site (``def invoke_fused_moe_kernel``,
+    a Triton ``@triton.jit`` function, or a C/HIP ``__global__``) from a file
+    that only calls/wraps it (e.g. sglang's ``kernel_shape_profiler.py`` dispatch
+    shim). Best-effort: returns False on read errors.
+    """
+    kw = re.escape(keyword)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    patterns = (
+        r"\bdef\s+" + kw + r"\b",            # Python (incl. @triton.jit) def
+        r"\b" + kw + r"\s*=",                # kernel bound to a module-level name
+        r"__global__[^\n;{]*\b" + kw + r"\b",  # CUDA/HIP global kernel
+    )
+    return any(re.search(p, text) for p in patterns)
+
+
+def _prefer_symbol_definition(keyword: str, hits: list[Path]) -> list[Path]:
+    """Rank definition sites of ``keyword`` ahead of mere mentions."""
+    definers = [h for h in hits if _file_defines_symbol(h, keyword)]
+    return _rank_paths(definers) if definers else _rank_paths(hits)
+
+
 def locate_source_via_grep(name: str) -> str:
     """Locate a kernel source file by grepping known repos.
 
     Returns "" when no confident match exists. Never fabricates a path.
+
+    Args:
+        name (str): Kernel symbol/name to locate.
+
+    Returns:
+        str: The best-ranked matching source path, or ``""`` when none.
     """
-    keywords = _candidate_keywords(name)
-    if not keywords:
-        return ""
-    for keyword in keywords:
+    tried: set[str] = set()
+    # Primary pass: established keyword extraction + ranking (unchanged).
+    for keyword in _candidate_keywords(name):
+        if not keyword or keyword in tried:
+            continue
+        tried.add(keyword)
         hits: list[Path] = []
         for root in KNOWN_SEARCH_ROOTS:
             hits.extend(_grep_for_keyword(keyword, Path(root)))
         if hits:
-            ranked = _rank_paths(hits)
-            return str(ranked[0])
+            return str(_rank_paths(hits)[0])
+    # Fallback pass: trailing sub-windows of a compound/profiler-wrapped symbol
+    # (e.g. sglang_profiler::..._invoke_fused_moe_kernel_427) whose full
+    # identifier never appears verbatim in source — needed so recovered
+    # ops_summary.csv candidates (#515 fallback) resolve to their kernel source.
+    # Prefer the file that *defines* the embedded function over dispatch shims.
+    for keyword in _compound_subwindow_keywords(name):
+        if not keyword or keyword in tried:
+            continue
+        tried.add(keyword)
+        hits = []
+        for root in KNOWN_SEARCH_ROOTS:
+            hits.extend(_grep_for_keyword(keyword, Path(root)))
+        if hits:
+            return str(_prefer_symbol_definition(keyword, hits)[0])
     return ""
 
 
@@ -998,6 +1339,13 @@ def find_repo_root(source_file: str) -> str:
     """Walk upward from source_file until we find a .git/ dir; return the dir.
 
     Returns "" when no git repo root is found.
+
+    Args:
+        source_file (str): Path to a file inside a (possibly) git repo.
+
+    Returns:
+        str: The directory containing the nearest ``.git`` ancestor, or
+            ``""`` when none is found.
     """
     if not source_file:
         return ""
@@ -1040,6 +1388,18 @@ _KNOWN_HARNESS_HINTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
 
 
 def _known_harness_files(name: str, source_file: str) -> list[Path]:
+    """Return curated benchmark/test harnesses matching a kernel.
+
+    Looks up :data:`_KNOWN_HARNESS_HINTS` by marker substrings found in the
+    kernel name / source path and returns the hinted harnesses that exist.
+
+    Args:
+        name (str): Kernel symbol/name.
+        source_file (str): Resolved source-file path (may be empty).
+
+    Returns:
+        list[Path]: Existing curated harness files, possibly empty.
+    """
     blob = f"{name} {source_file}".lower()
     out: list[Path] = []
     for markers, paths in _KNOWN_HARNESS_HINTS:
@@ -1108,6 +1468,14 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
     # Demote multi-GPU / distributed tests to the end: backends running on a
     # single Ray worker can't satisfy them, and they tend to make agents bail.
     def _is_multigpu(path_str: str) -> bool:
+        """Return whether a harness path looks multi-GPU / distributed.
+
+        Args:
+            path_str (str): Candidate harness file path.
+
+        Returns:
+            bool: ``True`` when the path contains a multi-GPU/distributed tag.
+        """
         low = path_str.lower()
         return any(tag in low for tag in ("multigpu", "multi_gpu", "multinode", "/dist/", "_dist_"))
     unique.sort(key=_is_multigpu)
@@ -1117,6 +1485,17 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
 _PYBIND_PARENT_DIRS = ("csrc/pybind", "csrc/python", "python_bindings")
 # A pybind11 registration shim (<2KB, just PYBIND11_MODULE) has no device code; detect so callers promote it to the real .cu/.cuh.
 def _is_pybind_shim(source_file: str) -> bool:
+    """Detect a tiny pybind11 registration TU (no rewritable device code).
+
+    A shim is a small (<2 KB) ``.cu``/``.cpp``/``.cc`` file under a pybind
+    directory that only contains ``PYBIND11_MODULE`` glue.
+
+    Args:
+        source_file (str): Candidate source-file path.
+
+    Returns:
+        bool: ``True`` when the file is a pybind11 registration shim.
+    """
     if not source_file:
         return False
     p = Path(source_file)
@@ -1267,6 +1646,18 @@ def upgrade_pybind_shim_source(source_file: str, kernel_name: str,
 
 
 def _coerce_count(value: Any) -> int | None:
+    """Coerce a loosely-typed call-count value into a positive int.
+
+    Handles ``None``/empty, numpy-repr strings (``np.float64(...)``), and
+    float-like strings.
+
+    Args:
+        value (Any): The raw count value to coerce.
+
+    Returns:
+        int | None: A positive integer, or ``None`` when absent, unparseable,
+            or non-positive.
+    """
     if value in (None, ""):
         return None
     text = str(value).strip()
@@ -1280,6 +1671,16 @@ def _coerce_count(value: Any) -> int | None:
 
 
 def _merge_shape_call(target: list[Any], shape: Any, call_num: int) -> None:
+    """Merge a shape/call-count pair into an accumulator list in place.
+
+    If an entry with the same shape already exists, its ``call_num`` is
+    incremented; otherwise a new entry is appended.
+
+    Args:
+        target (list[Any]): Accumulator list of ``{"shape", "call_num"}`` dicts.
+        shape (Any): The shape value to merge.
+        call_num (int): Call count to add for this shape.
+    """
     for entry in target:
         if isinstance(entry, dict) and entry.get("shape") == shape:
             entry["call_num"] = int(entry.get("call_num") or 0) + call_num
@@ -1288,6 +1689,16 @@ def _merge_shape_call(target: list[Any], shape: Any, call_num: int) -> None:
 
 
 def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any]]:
+    """Normalize a shapes payload into merged ``{shape, call_num}`` entries.
+
+    Args:
+        shapes (Any): A list of shape values or ``{"shape", "call_num"}`` dicts.
+        call_num (Any): Default call count applied when an entry lacks one.
+
+    Returns:
+        list[dict[str, Any]]: Deduplicated shape entries with summed call
+            counts; empty when ``shapes`` is not a list.
+    """
     if not isinstance(shapes, list):
         return []
     count = _coerce_count(call_num) or 1
@@ -1344,7 +1755,16 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
 
 
 def is_multigpu_kernel(name: str, source_file: str) -> bool:
-    """Heuristic: kernel is a multi-GPU collective if name/source hints it."""
+    """Heuristic: kernel is a multi-GPU collective if name/source hints it.
+
+    Args:
+        name (str): Kernel symbol/name.
+        source_file (str): Resolved source-file path (may be empty).
+
+    Returns:
+        bool: ``True`` when the name/source contains a collective /
+            distributed marker.
+    """
     blob = f"{name} {source_file}".lower()
     return any(tag in blob for tag in (
         "all_reduce", "allreduce", "all_gather", "allgather",
@@ -1355,6 +1775,19 @@ def is_multigpu_kernel(name: str, source_file: str) -> bool:
 
 
 def analyze_trace_files(trace_files: list[Path], top_k: int) -> list[dict[str, Any]]:
+    """Aggregate GPU kernels across raw trace files into top-K candidates.
+
+    Sums per-kernel duration and call counts across all events, takes the
+    top ``top_k`` by duration, then runs :func:`_finalize_candidates`. This
+    is the dry-run / test-only raw-trace path (production uses analysis.md).
+
+    Args:
+        trace_files (list[Path]): Trace files (optionally gzipped) to scan.
+        top_k (int): Number of hottest kernels to keep.
+
+    Returns:
+        list[dict[str, Any]]: Finalized hot-kernel candidate dicts.
+    """
     aggregates: dict[str, dict[str, Any]] = {}
     total_dur = 0.0
 
@@ -1411,17 +1844,462 @@ def load_op_category_map(
     csv_path = Path(perf_report_csv_dir) / "unified_perf_summary.csv"
     if not csv_path.is_file():
         return {}
-    import csv as _csv
     out: dict[str, str] = {}
     try:
         with csv_path.open(newline="", encoding="utf-8") as f:
-            for row in _csv.DictReader(f):
+            for row in csv.DictReader(f):
                 name = str(row.get("name") or "").strip()
                 cat = str(row.get("op category") or "").strip()
                 if name and cat and name not in out:
                     out[name] = cat
-    except (OSError, _csv.Error):
+    except (OSError, csv.Error):
         return {}
+    return out
+
+
+# ── #727 companion: trace-anchored shape capture for the fused-MoE expert kernel ──
+#
+# The Triton fused-MoE expert kernel surfaces in the torch trace as a pybind
+# built-in (``sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427``)
+# whose top-level kernel event carries NO resolvable ``Input Dims`` — so the
+# moe_fused category metric (and the LLM-rendered analysis.md ``Args`` column)
+# emit the candidate with ``shapes: []``. Hyperloom's dispatch gate
+# (``_validate_kernel_shape_and_paths`` → ``empty_kernel_shape``) then rejects the
+# whole geak→claude→codex ladder before any harness is built.
+#
+# TraceLens DOES still capture the operands for this kernel: the per-shape rows in
+# ``perf_report_csvs/ops_unique_args.csv`` carry the wrapped invocation's
+# ``Input Dims`` / ``Input type`` (the gate/up and down grouped-GEMM operands).
+# This recovers those operand shapes from that deterministic sidecar so the
+# emitted candidate carries non-empty, trace-anchored ``shapes`` with
+# ``shape_provenance="torch_trace"``. Scoped to the fused-MoE invoke kernel so
+# other ops are untouched.
+_FUSED_MOE_KERNEL_MARKER = "invoke_fused_moe_kernel"
+
+# torch ``Input type`` token → compact dtype suffix used by TraceLens shape
+# strings (e.g. ``(15360,2048) bf16``). Unmapped/empty types emit a bare shape.
+_TRACE_DTYPE_SUFFIX = {
+    "c10::bfloat16": "bf16",
+    "bfloat16": "bf16",
+    "c10::half": "f16",
+    "half": "f16",
+    "float16": "f16",
+    "float": "f32",
+    "float32": "f32",
+    "double": "f64",
+    "float64": "f64",
+    "int": "i32",
+    "int32": "i32",
+    "long": "i64",
+    "int64": "i64",
+    "short": "i16",
+    "int16": "i16",
+    "char": "i8",
+    "int8": "i8",
+    "uint8": "u8",
+    "bool": "bool",
+}
+
+
+def _format_trace_shape(dims: Any, dtype: Any) -> str | None:
+    """Render one operand as ``(d0,d1,...) <dtype>`` (matching TraceLens shape strings); ``None`` for scalar/empty operands."""
+    if not isinstance(dims, (list, tuple)) or not dims:
+        return None
+    try:
+        body = ",".join(str(int(d)) for d in dims)
+    except (TypeError, ValueError):
+        return None
+    shape = f"({body},)" if len(dims) == 1 else f"({body})"
+    suffix = _TRACE_DTYPE_SUFFIX.get(str(dtype or "").strip().lower())
+    return f"{shape} {suffix}" if suffix else shape
+
+
+def resolve_fused_moe_shapes_from_csv(
+    perf_report_csv_dir: Path | str | None,
+) -> list[str]:
+    """Recover the fused-MoE expert kernel operand shapes from ``ops_unique_args.csv``.
+
+    Reads each per-shape row whose op name embeds ``invoke_fused_moe_kernel`` and
+    parses its ``Input Dims`` / ``Input type`` tuple-of-tuples into TraceLens-style
+    shape strings (e.g. ``(15360,2048) bf16``), deduped across rows in first-seen
+    order. Returns ``[]`` when the sidecar is absent or carries no fused-MoE rows
+    (so callers leave the candidate's empty ``shapes`` untouched).
+    """
+    if not perf_report_csv_dir:
+        return []
+    csv_path = Path(perf_report_csv_dir) / "ops_unique_args.csv"
+    if not csv_path.is_file():
+        return []
+    shapes: list[str] = []
+    seen: set[str] = set()
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                name = str(row.get("name") or "").strip().lower()
+                if _FUSED_MOE_KERNEL_MARKER not in name:
+                    continue
+                try:
+                    dims = ast.literal_eval(str(row.get("Input Dims") or "").strip() or "()")
+                    dtypes = ast.literal_eval(str(row.get("Input type") or "").strip() or "()")
+                except (ValueError, SyntaxError):
+                    continue
+                if not isinstance(dims, (list, tuple)):
+                    continue
+                if not isinstance(dtypes, (list, tuple)):
+                    dtypes = ()
+                for i, operand in enumerate(dims):
+                    dtype = dtypes[i] if i < len(dtypes) else ""
+                    s = _format_trace_shape(operand, dtype)
+                    if s and s not in seen:
+                        seen.add(s)
+                        shapes.append(s)
+    except (OSError, csv.Error):
+        return []
+    return shapes
+
+
+def _is_fused_moe_candidate(item: dict[str, Any]) -> bool:
+    """True for the Triton fused-MoE expert-kernel candidate (by op name or moe_fused category)."""
+    name = str(item.get("name") or "").lower()
+    if _FUSED_MOE_KERNEL_MARKER in name:
+        return True
+    cat = str(item.get("tracelens_category") or "").strip().lower()
+    return cat == "moe_fused" and "moe" in name
+
+
+# ── #514: high-GPU-time "other"-bucket candidate recovery (defense-in-depth) ──
+#
+# Hyperloom builds candidates EXCLUSIVELY from analysis.md reasoning-candidate
+# (P-item) blocks (parse_analysis_md), and the driver refuses any
+# priority_data/category_data/CSV fallback ("analysis.md is the single source
+# of truth"). TraceLens never emits a reasoning-candidate block for a kernel it
+# files under the un-roofline'd "other" category, so a dominant editable kernel
+# (e.g. the Triton fused-MoE GEMM at ~67% GPU time) lands in neither
+# hot_kernels nor skipped_kernels and GEAK never sees it.
+#
+# This is the Hyperloom-side defense-in-depth net: it recovers a HIGH-GPU-time
+# "other"-bucket op that is MISSING from the analysis.md candidates from the
+# per-op ranking TraceLens already writes (ops_summary.csv /
+# unified_perf_summary.csv / priority_data.json), so the op flows through the
+# normal _finalize_candidates -> classify_patchability path and is routed to
+# GEAK iff it is a reusable native kernel. analysis.md stays PRIMARY; this only
+# fires for high-time ops with no reasoning-candidate block. The TraceLens-side
+# categorization gap is fixed separately upstream.
+
+_OTHER_BUCKET_MIN_GPU_PCT_ENV = "HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT"
+_DEFAULT_OTHER_BUCKET_MIN_GPU_PCT = 10.0
+
+# Raw/normalized category labels that mean "TraceLens did not roofline this op"
+# (no P-item block). Compared case-insensitively against both the raw category
+# and normalize_upstream_category() output.
+_OTHER_LIKE_CATEGORIES = frozenset({
+    "", "other", "others", "misc", "miscellaneous", "uncategorized",
+    "uncategorised", "unknown", "n/a", "na", "none", "null",
+})
+
+# Per-op ranking sidecars in preference order, relative to the skill output dir.
+_OPS_RANKING_CSV_RELPATHS = (
+    "ops_summary.csv",
+    "perf_report_csvs/ops_summary.csv",
+    "perf_report_csvs/unified_perf_summary.csv",
+    "unified_perf_summary.csv",
+)
+_OPS_RANKING_JSON_RELPATHS = (
+    "priority_data.json",
+    "perf_report_csvs/priority_data.json",
+)
+
+_RANK_NAME_KEYS = ("name", "operation", "op", "kernel", "kernel_name", "op_name")
+_RANK_CATEGORY_KEYS = (
+    # ``categories`` is the real ops_summary.csv column (stored as a list-repr
+    # string like ``['MoE_fused']``; see _clean_category_label).
+    "op category", "op_category", "category", "categories", "tracelens_category",
+)
+# GPU-time column/field names → multiplier to microseconds (most specific first).
+# ``total_direct_kernel_time_ms`` is the real ops_summary.csv per-op GPU-time
+# column (its ``_sum`` sibling holds the same value in microseconds, handled by
+# _RANK_TIME_US_KEYS below).
+_RANK_TIME_MS_KEYS = (
+    "gpu time total (ms)", "total gpu time (ms)", "gpu time (ms)",
+    "self gpu time (ms)", "total_direct_kernel_time_ms",
+    "total_direct_kernel_time_ms_sum", "gpu_time_ms", "gpu_time_total_ms",
+    "duration (ms)", "dur (ms)", "time (ms)", "time_ms", "duration_ms",
+)
+_RANK_TIME_US_KEYS = (
+    "gpu time (us)", "self gpu time (us)", "total_direct_kernel_time_sum",
+    "total_direct_kernel_time_us", "gpu_time_us", "gpu_time_total_us",
+    "duration_us", "dur (us)", "time (us)", "time_us", "dur",
+)
+_RANK_PCT_KEYS = (
+    # ``percentage (%)`` is the real ops_summary.csv % column.
+    "% gpu time", "gpu time %", "gpu %", "gpu_pct", "gpu_time_pct",
+    "% of compute time", "% of compute", "%e2e", "% e2e",
+    "percentage (%)", "percentage", "percent", "pct",
+)
+
+
+def _coerce_float(value: Any) -> float | None:
+    """Parse a CSV/JSON cell to float (strips ``%`` / commas); ``None`` if not numeric."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip().rstrip("%").replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _lower_keyed(row: dict) -> dict[str, Any]:
+    return {str(k).strip().lower(): v for k, v in row.items()}
+
+
+def _first_present(low: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for k in keys:
+        v = low.get(k)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return ""
+
+
+def _clean_category_label(raw: str) -> str:
+    """Normalize a category cell to a bare label.
+
+    The real ``ops_summary.csv`` stores the category as a Python list-repr
+    string, e.g. ``['MoE_fused']`` or ``['GEMM', 'Reduce']`` — return the first
+    element (``MoE_fused`` / ``GEMM``). Plain labels pass through unchanged.
+    """
+    s = str(raw or "").strip()
+    if s.startswith("[") and s.endswith("]"):
+        try:
+            val = ast.literal_eval(s)
+            if isinstance(val, (list, tuple)) and val:
+                return str(val[0]).strip()
+            if isinstance(val, (list, tuple)):
+                return ""
+        except (ValueError, SyntaxError):
+            s = s.strip("[]")
+    return s.strip().strip("'\"").strip()
+
+
+def _record_gpu_us(low: dict[str, Any]) -> float | None:
+    """Best-effort GPU time in microseconds from a per-op ranking record."""
+    for k in _RANK_TIME_MS_KEYS:
+        if k in low:
+            val = _coerce_float(low[k])
+            if val is not None:
+                return val * 1000.0
+    for k in _RANK_TIME_US_KEYS:
+        if k in low:
+            val = _coerce_float(low[k])
+            if val is not None:
+                return val
+    return None
+
+
+def _record_gpu_pct(low: dict[str, Any]) -> float | None:
+    for k in _RANK_PCT_KEYS:
+        if k in low:
+            val = _coerce_float(low[k])
+            if val is not None:
+                return val
+    return None
+
+
+def _ranking_record(raw: dict) -> dict[str, Any] | None:
+    low = _lower_keyed(raw)
+    name = _first_present(low, _RANK_NAME_KEYS)
+    if not name:
+        return None
+    return {
+        "name": name,
+        "category": _clean_category_label(_first_present(low, _RANK_CATEGORY_KEYS)),
+        "gpu_us": _record_gpu_us(low),
+        "gpu_pct": _record_gpu_pct(low),
+    }
+
+
+def _load_ops_ranking_csv(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        with path.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                rec = _ranking_record(row)
+                if rec is not None:
+                    out.append(rec)
+    except (OSError, csv.Error):
+        return []
+    return out
+
+
+def _iter_json_ranking_records(data: Any) -> list[dict]:
+    if isinstance(data, list):
+        return [r for r in data if isinstance(r, dict)]
+    if isinstance(data, dict):
+        for key in (
+            "findings", "operations", "ops", "priorities", "candidates",
+            "kernels", "items", "rows",
+        ):
+            v = data.get(key)
+            if isinstance(v, list):
+                return [r for r in v if isinstance(r, dict)]
+    return []
+
+
+def _load_ops_ranking_json(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    out: list[dict[str, Any]] = []
+    for rec_raw in _iter_json_ranking_records(data):
+        rec = _ranking_record(rec_raw)
+        if rec is not None:
+            out.append(rec)
+    return out
+
+
+def load_ops_ranking(
+    skill_output_dir: Path | str | None,
+) -> list[dict[str, Any]]:
+    """Load a per-op GPU-time ranking from TraceLens sidecars (schema-tolerant).
+
+    Returns ``[{name, category, gpu_us, gpu_pct}]`` from the first sidecar that
+    yields rows (ops_summary.csv / unified_perf_summary.csv /
+    priority_data.json, under the output dir or its ``perf_report_csvs/``);
+    ``[]`` when none is present/parseable. Used only by the ``other``-bucket
+    recovery fallback — the contracted candidate source remains analysis.md.
+    """
+    if not skill_output_dir:
+        return []
+    root = Path(skill_output_dir)
+    for rel in _OPS_RANKING_CSV_RELPATHS:
+        rows = _load_ops_ranking_csv(root / rel)
+        if rows:
+            return rows
+    for rel in _OPS_RANKING_JSON_RELPATHS:
+        rows = _load_ops_ranking_json(root / rel)
+        if rows:
+            return rows
+    return []
+
+
+def _resolve_other_bucket_min_gpu_pct() -> float:
+    raw = os.environ.get(_OTHER_BUCKET_MIN_GPU_PCT_ENV, "").strip()
+    if raw:
+        val = _coerce_float(raw)
+        if val is not None and val >= 0:
+            return val
+    return _DEFAULT_OTHER_BUCKET_MIN_GPU_PCT
+
+
+def _is_other_like_category(category: str) -> bool:
+    raw_l = str(category or "").strip().lower()
+    if raw_l in _OTHER_LIKE_CATEGORIES:
+        return True
+    return str(
+        normalize_upstream_category(category or "")
+    ).strip().lower() in _OTHER_LIKE_CATEGORIES
+
+
+def recover_other_bucket_candidates(
+    skill_output_dir: Path | str | None,
+    existing_candidates: list[dict[str, Any]],
+    *,
+    top_k: int = 10,
+    min_gpu_pct: float | None = None,
+    log: Callable[[str], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Recover HIGH-GPU-time ops missing from analysis.md (any category).
+
+    Defense-in-depth fallback for the candidate-extraction gap: surfaces ops
+    that have no analysis.md reasoning-candidate block (so ``parse_analysis_md``
+    dropped them) as raw candidates, ranked by per-op sidecar GPU time, so each
+    flows through ``_finalize_candidates`` -> ``classify_patchability``.
+
+    Originally scoped to the un-roofline'd ``other`` bucket; broadened so **any**
+    high-GPU-time op missing from ``existing_candidates`` is eligible. This is
+    required for categories like ``MoE_fused`` whose dominant fused-MoE kernel is
+    correctly categorized but whose roofline is null (so TraceLens emits no
+    reasoning-candidate block and the kernel is otherwise dropped). The
+    patchability gate downstream still rejects vendor / native ops, so widening
+    the recovery net does not route non-patchable kernels to GEAK.
+
+    Fires for ops that are (a) absent from ``existing_candidates`` by name and
+    (b) at or above ``min_gpu_pct`` of total GPU time (env
+    ``HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT``, default 10%). Returns ``[]`` when no
+    sidecar is available or nothing qualifies, so analysis.md stays the primary
+    source.
+    """
+    ranking = load_ops_ranking(skill_output_dir)
+    if not ranking:
+        return []
+    if min_gpu_pct is None:
+        min_gpu_pct = _resolve_other_bucket_min_gpu_pct()
+
+    have = {
+        str(c.get("name") or "").strip().lower()
+        for c in existing_candidates
+        if isinstance(c, dict)
+    }
+    total_us = sum(
+        r["gpu_us"] for r in ranking if r.get("gpu_us") is not None
+    ) or 0.0
+
+    def _pct(rec: dict[str, Any]) -> float | None:
+        if rec.get("gpu_pct") is not None:
+            return float(rec["gpu_pct"])
+        if total_us > 0 and rec.get("gpu_us") is not None:
+            return rec["gpu_us"] / total_us * 100.0
+        return None
+
+    qualifying: list[tuple[float, dict[str, Any]]] = []
+    for rec in ranking:
+        name_l = str(rec.get("name") or "").strip().lower()
+        if not name_l or name_l in have:
+            continue
+        # Gate broadened from "other-like category only" to "any high-GPU-time op
+        # missing from existing candidates" so MoE_fused (and any other modeled-
+        # but-unsurfaced category) is eligible.
+        pct = _pct(rec)
+        if pct is None or pct < min_gpu_pct:
+            continue
+        qualifying.append((pct, rec))
+
+    if not qualifying:
+        return []
+    qualifying.sort(key=lambda t: t[0], reverse=True)
+
+    out: list[dict[str, Any]] = []
+    for pct, rec in qualifying[: max(1, top_k)]:
+        gpu_us = rec.get("gpu_us")
+        out.append({
+            "name": rec["name"],
+            "duration_us": float(gpu_us) if gpu_us is not None else 0.0,
+            "call_count": 0,
+            "source_file": "",
+            "source_type": "unknown",
+            "shapes": [],
+            "tracelens_category": rec.get("category") or "other",
+            "gpu_pct": round(pct, 3),
+            "candidate_source": "other_bucket_fallback",
+        })
+        if log is not None:
+            log(
+                f"candidate recovery fallback (#514/#515): recovered "
+                f"high-GPU-time op {rec['name']!r} (~{pct:.1f}% GPU time, "
+                f"category={rec.get('category') or 'other'!r}) that has no "
+                f"analysis.md reasoning-candidate block; routing through "
+                f"classify_patchability so a reusable native kernel still "
+                f"reaches GEAK"
+            )
     return out
 
 
@@ -1439,11 +2317,22 @@ def _finalize_candidates(
     )
     sum_dur = total_dur if total_dur is not None else sum(it.get("duration_us", 0.0) for it in top)
     sum_dur = sum_dur or 1.0
+    # #727 companion: the fused-MoE expert kernel's top-level trace event carries
+    # no Input Dims, so its candidate would emit empty ``shapes`` and trip the
+    # dispatch gate. Recover its operand shapes once from the ops_unique_args
+    # sidecar and graft them onto any fused-MoE candidate that lacks shapes.
+    _fused_moe_shapes: list[str] | None = None
     for idx, item in enumerate(top, 1):
         item.pop("_extracted_source_checked", None)
         item.setdefault("source_file", "")
         item.setdefault("source_type", "unknown")
         item.setdefault("shapes", [])
+        if not item.get("shapes") and _is_fused_moe_candidate(item):
+            if _fused_moe_shapes is None:
+                _fused_moe_shapes = resolve_fused_moe_shapes_from_csv(perf_report_csv_dir)
+            if _fused_moe_shapes:
+                item["shapes"] = list(_fused_moe_shapes)
+                item["shape_provenance"] = "torch_trace"
         # Mark trace-extracted shapes so the dispatch-time validator can tell their provenance.
         if item.get("shapes"):
             item.setdefault("shape_provenance", "torch_trace")
@@ -1533,6 +2422,15 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
 
 
 def build_notes(candidate: dict[str, Any]) -> str:
+    """Build a short human-readable optimization note for a candidate.
+
+    Args:
+        candidate (dict[str, Any]): A finalized hot-kernel candidate row.
+
+    Returns:
+        str: A note describing whether/why the candidate is routable
+            (resolved source vs. an explanation of why it was skipped).
+    """
     if not candidate.get("source_file"):
         return "source file not resolved; backend dispatch will be skipped"
     if candidate.get("runtime_generated_kernel", is_runtime_generated_kernel(
@@ -1547,11 +2445,19 @@ def build_notes(candidate: dict[str, Any]) -> str:
     return f"resolved source: {candidate['source_file']}"
 
 
-def run_command(cmd: list[str], *, cwd: Path | None, log_path: Path, timeout_s: int) -> int:
+def run_command(
+    cmd: list[str],
+    *,
+    cwd: Path | None,
+    log_path: Path,
+    timeout_s: int,
+    env: dict[str, str] | None = None,
+) -> int:
     append_log(log_path, f"$ {' '.join(cmd)}")
     proc = subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -1563,7 +2469,15 @@ def run_command(cmd: list[str], *, cwd: Path | None, log_path: Path, timeout_s: 
 
 
 def roofline_match_key(name: str) -> str:
-    """Normalize trace and rocprof names enough to join roofline data."""
+    """Normalize trace and rocprof names enough to join roofline data.
+
+    Args:
+        name (str): A kernel name from a trace or rocprof report.
+
+    Returns:
+        str: A canonical match key (e.g. ``hipblaslt_gemm``, ``attention``),
+            falling back to the first 80 lower-cased chars.
+    """
     lower = (name or "").lower()
     if "cijk_" in lower:
         return "hipblaslt_gemm"
@@ -1591,6 +2505,16 @@ def roofline_match_key(name: str) -> str:
 
 
 def load_roofline_results(path: str | None) -> dict[str, dict[str, Any]]:
+    """Load roofline results JSON keyed by normalized kernel match key.
+
+    Args:
+        path (str | None): Path to a roofline results JSON file (a list of
+            rows or a dict with a ``results`` list); may be empty/``None``.
+
+    Returns:
+        dict[str, dict[str, Any]]: Map of :func:`roofline_match_key` to row;
+            empty when the path is missing or unparseable.
+    """
     if not path:
         return {}
     p = Path(path).expanduser()
@@ -1614,6 +2538,17 @@ def merge_roofline_into_candidates(
     candidates: list[dict[str, Any]],
     roofline_by_name: dict[str, dict[str, Any]],
 ) -> None:
+    """Merge roofline metrics into candidate rows in place.
+
+    For each candidate, looks up roofline data by normalized name and copies
+    bottleneck / utilization / suggestion fields; candidates without a match
+    get conservative ``None``/default placeholders.
+
+    Args:
+        candidates (list[dict[str, Any]]): Hot-kernel candidate rows to enrich.
+        roofline_by_name (dict[str, dict[str, Any]]): Roofline rows keyed by
+            :func:`roofline_match_key`.
+    """
     for item in candidates:
         if not isinstance(item, dict):
             continue
@@ -1635,6 +2570,14 @@ def merge_roofline_into_candidates(
 
 
 def _first_non_empty(*values: Any) -> Any:
+    """Return the first argument that is neither ``None`` nor empty string.
+
+    Args:
+        *values (Any): Candidate values in priority order.
+
+    Returns:
+        Any: The first value that is not ``None`` or ``""``, else ``None``.
+    """
     for value in values:
         if value is not None and value != "":
             return value
@@ -1642,7 +2585,15 @@ def _first_non_empty(*values: Any) -> Any:
 
 
 def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
-    """Project one hot-kernel candidate into the kernel-roofline view."""
+    """Project one hot-kernel candidate into the kernel-roofline view.
+
+    Args:
+        candidate (dict[str, Any]): A finalized hot-kernel candidate row.
+
+    Returns:
+        dict[str, Any]: A flattened roofline row with identity, cost, and
+            (possibly ``None``) utilization/bottleneck fields.
+    """
     arithmetic_intensity = _first_non_empty(
         candidate.get("arithmetic_intensity"),
         candidate.get("flops_per_byte"),
@@ -1731,6 +2682,18 @@ def kernel_roofline_path_for_run(run_dir: Path) -> Path:
 
 
 def _candidate_model_config_paths(model_name: str) -> list[Path]:
+    """Enumerate candidate ``config.json`` paths for a model name/path.
+
+    Considers the value as a direct JSON path, a directory containing
+    ``config.json``, and locations under ``$HYPERLOOM_MODELS_ROOT``.
+
+    Args:
+        model_name (str): A model name or filesystem path.
+
+    Returns:
+        list[Path]: Deduplicated candidate config paths in priority order;
+            empty when ``model_name`` is blank.
+    """
     text = str(model_name or "").strip()
     if not text:
         return []
@@ -1753,7 +2716,16 @@ def _candidate_model_config_paths(model_name: str) -> list[Path]:
 
 
 def load_model_kernel_params(model_name: str) -> dict[str, Any]:
-    """Read HF config.json and return attention parameters relevant to GEAK."""
+    """Read HF config.json and return attention parameters relevant to GEAK.
+
+    Args:
+        model_name (str): A model name or path used to locate ``config.json``.
+
+    Returns:
+        dict[str, Any]: Attention/MLA params (e.g. ``HEAD_SIZE``,
+            ``NUM_ATTENTION_HEADS``) plus ``MODEL_CONFIG_PATH``; empty when no
+            readable config is found.
+    """
     for config_path in _candidate_model_config_paths(model_name):
         if not config_path.is_file():
             continue
@@ -1852,7 +2824,17 @@ def _flydsl_kernel_params(
 def enrich_candidates_with_runtime_metadata(
     candidates: list[dict[str, Any]], args: argparse.Namespace,
 ) -> None:
-    """Attach stable runtime metadata fields before GEAK prompt generation."""
+    """Attach stable runtime metadata fields before GEAK prompt generation.
+
+    Mutates each candidate in place, filling framework, shapes/dtypes,
+    model and FlyDSL kernel params, and runtime flags so the downstream
+    prompt builder sees a consistent schema.
+
+    Args:
+        candidates (list[dict[str, Any]]): Hot-kernel candidate rows to enrich.
+        args (argparse.Namespace): Parsed CLI args carrying framework, model
+            name, target platform, and runtime flags.
+    """
     framework = str(getattr(args, "framework", "") or "").strip()
     model_params = load_model_kernel_params(str(getattr(args, "model_name", "") or ""))
     target_platform = str(getattr(args, "target_platform", "") or "")
@@ -2173,6 +3155,16 @@ def _default_workspace_path() -> str:
 
 
 def main() -> int:
+    """CLI entry point for the TraceLens analysis tool.
+
+    Parses arguments, optionally splits the trace into a steady-state chunk,
+    runs the TraceLens SDK orchestrator, extracts hot-kernel candidates,
+    merges roofline data, and writes the run's report sidecars and status.
+
+    Returns:
+        int: ``0`` on success, ``1`` when the run failed (the error is also
+            written to status and printed as JSON).
+    """
     parser = argparse.ArgumentParser(description="Kernel Agent TraceLens analysis tool")
     parser.add_argument("--trace-input", required=True)
     parser.add_argument("--session-id", default="")
@@ -2335,6 +3327,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    args.target_platform = normalize_platform(args.target_platform)
+
     session_id = args.session_id or uuid.uuid4().hex[:12]
     run_id = f"tl-{uuid.uuid4().hex[:8]}"
     started_at = utc_now()
@@ -2430,7 +3424,49 @@ def main() -> int:
             tracelens_dir = run_dir / "tracelens"
             tracelens_dir.mkdir(parents=True, exist_ok=True)
 
-            # #127: split the full-window trace into steady-state chunks via TraceLens's splitter.
+            # ---- #390: backfill MAF for the open-source TraceLens path ----
+            # Public TraceLens carries no MAF values, so on MI355+ roofline
+            # (and the whole kernel-optimization loop) fails. The benchmark is
+            # gated on whether the TraceLens-internal extension is enabled:
+            # when it is, the extension backfills MAF itself and we skip the
+            # microbenchmark; when it is not (open-source path) we measure the
+            # missing arch/MAF spec on an idle GPU before report generation.
+            update_status(
+                status_path,
+                state="running",
+                current_step="populate_gpu_arch_json",
+                log_path=log_path,
+                artifact_paths=artifacts,
+                run_id=run_id,
+                started_at=started_at,
+            )
+            arch_benchmark_timeout_s = _resolve_arch_benchmark_timeout_s()
+            gpu_arch_path = populate_gpu_arch_json(
+                tracelens_root=tl_root,
+                platform=args.target_platform,
+                internal_extension_enabled=tl_internal_root is not None,
+                log=lambda msg: append_log(log_path, msg),
+                run_command=lambda cmd, *, cwd, timeout_s, env=None: run_command(
+                    cmd,
+                    cwd=cwd,
+                    log_path=log_path,
+                    timeout_s=timeout_s,
+                    env=env,
+                ),
+                timeout_s=arch_benchmark_timeout_s,
+            )
+            if gpu_arch_path is not None:
+                artifacts["tracelens_gpu_arch_json"] = str(gpu_arch_path)
+
+            # ---- #127: split inference trace into steady-state chunks ----
+            # The filtered trace from vLLM/SGLang spans the full benchmark
+            # window (warmup + tear-down + steady-state mixed together).
+            # TraceLens's perf report expects a single steady-state chunk.
+            # Use TraceLens's own splitter to produce
+            # mixed_steady_state_*_trace.json.gz, then feed the first chunk
+            # to TraceLens_generate_perf_report_pytorch_inference. Fail-soft:
+            # if the splitter is unavailable or produces no output, fall back
+            # to the original filtered trace (legacy behaviour).
             cli_trace_path = trace_files[0]
             trace_split_blocked = False
             if not args.skip_split:
@@ -2478,6 +3514,16 @@ def main() -> int:
                 # The three chunks are parallel views, not a fallback ladder; the consumer picks ONE
                 # via --steady-state-mode (default 'mixed') and we hard-fail when the selected chunk is missing/empty.
                 def _collect(prefix: str) -> list[Path]:
+                    """Collect splitter chunk files for a steady-state prefix.
+
+                    Args:
+                        prefix (str): Chunk prefix (``mixed``, ``decode_only``,
+                            or ``prefilldecode``).
+
+                    Returns:
+                        list[Path]: Sorted chunk files matching the prefix
+                            across known trace extensions.
+                    """
                     out: list[Path] = []
                     for ext in ("trace.json.gz", "json.gz", "trace.json", "json"):
                         out.extend(sorted(split_dir.rglob(f"{prefix}_steady_state_*.{ext}")))
@@ -2704,9 +3750,27 @@ def main() -> int:
                         report_cands = parse_analysis_md(
                             skill_result.report_path, args.top_k,
                         )
+                        # #514 defense-in-depth: recover any HIGH-GPU-time
+                        # "other"-bucket op that TraceLens filed without a
+                        # reasoning-candidate block (so parse_analysis_md
+                        # dropped it) from the per-op ranking sidecar, so the
+                        # dominant editable kernel still reaches GEAK. No-op
+                        # when the sidecars are absent or nothing qualifies;
+                        # analysis.md stays the primary source.
+                        fallback_cands = recover_other_bucket_candidates(
+                            skill_result.output_dir,
+                            report_cands,
+                            top_k=args.top_k,
+                            log=lambda msg: append_log(log_path, msg),
+                        )
+                        if fallback_cands:
+                            report_cands = report_cands + fallback_cands
                         if report_cands:
                             raw_agent_candidates = report_cands
-                            report_source = "analysis.md"
+                            report_source = (
+                                "analysis.md+other_bucket_fallback"
+                                if fallback_cands else "analysis.md"
+                            )
                         else:
                             agent_candidates = []
                             allow_empty_candidates = True
@@ -2715,8 +3779,9 @@ def main() -> int:
                                 "TraceLens analysis.md had no Detailed "
                                 "Analysis compute candidate blocks "
                                 "(v0.3 contract: analysis.md is the single "
-                                "source of truth)."
-                                " Producing empty hot_kernels[] — "
+                                "source of truth) and the other-bucket "
+                                "fallback found no high-GPU-time op to "
+                                "recover. Producing empty hot_kernels[] — "
                                 "downstream Coordinator will route to "
                                 "params/backends.",
                             )

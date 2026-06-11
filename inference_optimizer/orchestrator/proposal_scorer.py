@@ -22,9 +22,12 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from .backends.base import parse_call_timeout_env
+from .trace.conversation_trace import ConversationRecord, append_conversation
+from .trace.llm_trace import LLMCallRecord, append_llm_call
 
 log = logging.getLogger(__name__)
 
@@ -149,6 +152,12 @@ class ProposalScorer:
     # Test seam — set to bypass real OpenAI client construction.
     client_factory: Callable[[], Any] | None = None
 
+    # Full-trace A6: when set, each model-scoring call appends its token
+    # usage to ``<session_dir>/reports/trace/llm_calls.jsonl`` under
+    # ``component=proposal_scorer``. ``None`` (the default, and the case
+    # in unit tests) disables trace writes entirely.
+    session_dir: Path | None = None
+
     _client: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -245,13 +254,86 @@ class ProposalScorer:
             raise RuntimeError(
                 f"timed out after {self.call_timeout_s:.0f}s"
             ) from exc
+        # Full-trace A6: record this model's token spend before parsing.
+        # Best-effort + a no-op when ``session_dir`` is unset (tests).
+        self._trace_scorer_llm_call(model, getattr(resp, "usage", None))
         text = (resp.choices[0].message.content or "")
+        # Full-trace: persist the full (redacted) prompt + reply so the
+        # scorer's conversation lines up with its token row.
+        self._record_scorer_conversation(model, full_prompt, text)
         parsed = _extract_scores_json(text)
         if parsed is None:
             raise RuntimeError(
                 f"no parseable scores JSON (reply_chars={len(text)})"
             )
         return _normalise_model_scores(parsed, proposal_names=proposal_names)
+
+    def _trace_scorer_llm_call(self, model: str, usage: Any) -> None:
+        """Append one ``llm_calls.jsonl`` row for a proposal-scoring call.
+
+        No-op when ``session_dir`` is unset. OpenAI usage carries
+        ``prompt_tokens`` / ``completion_tokens`` (no cache split). tick /
+        phase are unknown here (the scorer runs off the dispatch path) — the
+        collector backfills phase from the ts window. Best-effort: never
+        raises into the scoring path.
+        """
+        if self.session_dir is None:
+            return
+        try:
+            input_tokens = None
+            output_tokens = None
+            if usage is not None:
+                pt = getattr(usage, "prompt_tokens", None)
+                ct = getattr(usage, "completion_tokens", None)
+                input_tokens = int(pt) if pt is not None else None
+                output_tokens = int(ct) if ct is not None else None
+            record = LLMCallRecord(
+                session_id=self.session_dir.name,
+                component="proposal_scorer",
+                role="proposal_scorer",  # must match the conversation row's
+                model=str(model),        # role for Langfuse token<->text pairing
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break scoring
+            log.debug(
+                "full-trace: proposal_scorer llm_call append failed for "
+                "model=%s", model, exc_info=True,
+            )
+
+    def _record_scorer_conversation(
+        self, model: str, prompt: str, response: str,
+    ) -> None:
+        """Append one ``conversations.jsonl`` row for a proposal-scoring call.
+
+        Persists the full (redacted) scoring prompt + model reply under
+        ``component=proposal_scorer``, mirroring the per-call token row from
+        :meth:`_trace_scorer_llm_call`. No-op when ``session_dir`` is unset
+        (tests) or when both prompt and reply are empty. tick/phase are
+        unknown here (the scorer runs off the dispatch path); the collector
+        backfills phase from the ts window. Best-effort: never raises into
+        the scoring path.
+        """
+        if self.session_dir is None:
+            return
+        if not prompt and not response:
+            return
+        try:
+            record = ConversationRecord(
+                session_id=self.session_dir.name,
+                component="proposal_scorer",
+                role="proposal_scorer",
+                model=str(model),
+                prompt=prompt or "",
+                response=response or "",
+            )
+            append_conversation(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break scoring
+            log.debug(
+                "full-trace: proposal_scorer conversation append failed for "
+                "model=%s", model, exc_info=True,
+            )
 
     async def score(
         self, *, gap: dict[str, Any], proposals: list[dict[str, Any]],

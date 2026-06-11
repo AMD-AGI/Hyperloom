@@ -25,11 +25,13 @@ from __future__ import annotations
 import gzip
 import logging
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from ...compat.payload_aliases import read_extra_server_args
 from ...paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
     ensure_benchmark_lib_patched,
@@ -55,6 +57,39 @@ _TRACE_CONFIRM_BYTES = 64_000_000
 # Min fraction of ``cpu_op`` events carrying ``Input Dims`` for a healthy
 # ``capture_traces/`` file (Deval ref 99.97%; gated low to avoid false-positives).
 _INPUT_DIMS_FRACTION_FLOOR = 0.90
+
+_PROFILE_UNSAFE_BOOL_FLAGS = frozenset({
+    "--enable-torch-compile",
+})
+_PROFILE_UNSAFE_VALUE_FLAGS = frozenset({
+    "--torch-compile-max-bs",
+})
+
+
+def _sanitize_profile_server_args(args: str) -> str:
+    """Drop server flags known to conflict with profiler/shape discovery."""
+    raw = str(args or "").strip()
+    if not raw:
+        return ""
+    try:
+        tokens = shlex.split(raw)
+    except ValueError:
+        tokens = raw.split()
+    out: list[str] = []
+    skip_next = False
+    for token in tokens:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in _PROFILE_UNSAFE_BOOL_FLAGS:
+            continue
+        if token in _PROFILE_UNSAFE_VALUE_FLAGS:
+            skip_next = True
+            continue
+        if any(token.startswith(f"{flag}=") for flag in _PROFILE_UNSAFE_VALUE_FLAGS):
+            continue
+        out.append(token)
+    return shlex.join(out)
 
 
 def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) -> bool:
@@ -340,7 +375,14 @@ def _preferred_main_trace_path(trace_dir: Path, trace_files: list[Path]) -> Path
 
 
 def _candidate_trace_dirs(workspace: Path) -> list[Path]:
-    """Trace directories to probe for a Magpie profile workspace."""
+    """Trace directories to probe for a Magpie profile workspace.
+
+    Args:
+        workspace (Path): The Magpie profile workspace directory.
+
+    Returns:
+        list[Path]: Candidate trace directories, in probe order.
+    """
     return [
         workspace / "torch_trace",
         workspace / "capture_traces",
@@ -349,7 +391,14 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
 
 
 def _safe_mtime(p: Path) -> float:
-    """Return st_mtime, or 0 on stat() failure (e.g. NFS stale handle)."""
+    """Return st_mtime, or 0 on stat() failure (e.g. NFS stale handle).
+
+    Args:
+        p (Path): Path to stat.
+
+    Returns:
+        float: The modification time, or ``0.0`` if ``stat()`` fails.
+    """
     try:
         return p.stat().st_mtime
     except OSError:
@@ -387,6 +436,19 @@ class ProfileExecutor(BaselineExecutor):
         default_timeout_sec: int = PROFILE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
     ):
+        """Initialize the profile executor with profile-specific defaults.
+
+        Args:
+            magpie_python (str | None): Python interpreter for the Magpie
+                shell-out; ``None`` uses the base resolver.
+            default_config_path (Path | str | None): Override config path;
+                ``None`` defers to :meth:`_resolve_default_config`.
+            session_dir (Path | str | None): Session output directory.
+            default_timeout_sec (int): Wall-clock cap for the profile run.
+                Defaults to :data:`PROFILE_DEFAULT_TIMEOUT_SEC`.
+            cwd (Path | str): Working directory for the subprocess.
+                Defaults to ``"/tmp"``.
+        """
         super().__init__(
             magpie_python=magpie_python,
             default_config_path=default_config_path,
@@ -396,7 +458,11 @@ class ProfileExecutor(BaselineExecutor):
         )
 
     def _resolve_default_config(self) -> Path:
-        """Override BaselineExecutor's resolver to pick the profile yaml."""
+        """Override BaselineExecutor's resolver to pick the profile yaml.
+
+        Returns:
+            Path: The framework-specific profile YAML config path.
+        """
         return _default_profile_config()
 
     def _resolve_mn_round_trace_root(self, ctx) -> str:
@@ -480,6 +546,15 @@ class ProfileExecutor(BaselineExecutor):
         serving_path = ix_root / "utils" / "bench_serving" / "benchmark_serving.py"
 
         def _contains(path: Path, needle: str) -> bool:
+            """Check whether ``needle`` appears in ``path``'s text.
+
+            Args:
+                path (Path): File to read.
+                needle (str): Substring to search for.
+
+            Returns:
+                bool: ``True`` if found; ``False`` on miss or read error.
+            """
             try:
                 return needle in path.read_text(encoding="utf-8")
             except OSError:
@@ -511,17 +586,20 @@ class ProfileExecutor(BaselineExecutor):
         # falls through to the sglang/vllm path. (atom's TraceLens-flag guard
         # lives in _workload_envs.py.)
         params = ctx.task.params or {}
-        # Merge current_best.extra_sglang_args (stamped into base_extra_args
-        # by the Coordinator) into extra_sglang_args so the profile reflects
-        # the optimized workload — else the watermark snapshot's trace_analyze
-        # KPI is identical to PRELUDE's and hides the gain.
-        base_args = str(params.get("base_extra_args") or "").strip()
-        if base_args:
-            from ._grid_runner import merge_server_args
-            params["extra_sglang_args"] = merge_server_args(
-                base_args,
-                str(params.get("extra_sglang_args") or "").strip(),
-            )
+        # Merge current_best.extra_server_args (stamped into base_extra_args
+        # by the Coordinator) with caller args so profile reflects stable
+        # workload tweaks without carrying compile flags that break profiling.
+        base_args = _sanitize_profile_server_args(
+            str(params.get("base_extra_args") or "").strip(),
+        )
+        caller_args = _sanitize_profile_server_args(read_extra_server_args(params))
+        from ._grid_runner import merge_server_args
+        merged_args = merge_server_args(base_args, caller_args)
+        if merged_args:
+            params["extra_server_args"] = merged_args
+        else:
+            params.pop("extra_server_args", None)
+        params.pop("extra_sglang_args", None)
         extra = getattr(ctx, "extra", None) or {}
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")

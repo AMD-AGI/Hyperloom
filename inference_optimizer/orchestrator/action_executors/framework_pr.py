@@ -4,7 +4,7 @@
 
 Counterpart to :class:`IntegratePatchExecutor`. The Coordinator pump
 enumerates PR candidates via ``fa phase-discover``, gates each through
-the Critic, and dispatches this executor per approved candidate to:
+the Critic, and dispatches this executor per approved candidate to::
 
   1. Fetch the unified diff (explicit ``params.patches`` or
      ``curl candidate.diff_url``; apply happens in the live source root).
@@ -18,7 +18,8 @@ the Critic, and dispatches this executor per approved candidate to:
 Coordinator-internal: ``framework_pr`` is absent from
 ``PHASE_LLM_PROPOSABLE_ACTIONS`` so PolicyGate R1 denies LLM proposals.
 
-Inputs (``ctx.task.params``):
+Inputs (``ctx.task.params``)::
+
     candidate (dict, required) — PR metadata row:
         ``{repo, pr_number, ref, title, diff_url, pr_url?, framework?}``
     framework (str, optional) — ``"sglang"`` / ``"vllm"``. Falls back to
@@ -39,7 +40,8 @@ Inputs (``ctx.task.params``):
         defaults to first existing entry of ``resolve_source_file_allowlist()``.
     apply_only (bool, optional) — skip the bench step (test / smoke).
 
-Outputs (dict returned to the bus as ``delegated_result.result``):
+Outputs (dict returned to the bus as ``delegated_result.result``)::
+
     status: "kept" | "reverted" | "apply_failed" | "no_patch" |
             "fetch_failed" | "applied_no_bench" | "failed"
     output_throughput: float | None
@@ -72,7 +74,11 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
-from ._workload_envs import default_baseline_config, materialize_config_with_envs
+from ._workload_envs import (
+    FrameworkScriptMismatchError,
+    default_baseline_config,
+    materialize_config_with_envs,
+)
 from .integrate_patch import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     DEFAULT_VARIANT_TIMEOUT_SEC,
@@ -214,7 +220,16 @@ def _run_git(
     args: list[str], *, timeout: float = 120.0,
 ) -> tuple[bool, str, str]:
     """Run ``git <args>`` capturing output. Returns ``(ok, stdout, stderr)``.
-    Never raises (spawn / timeout failures map to ``(False, "", reason)``)."""
+    Never raises (spawn / timeout failures map to ``(False, "", reason)``).
+
+    Args:
+        args (list[str]): The git arguments (without the leading ``git``).
+        timeout (float): The subprocess timeout in seconds.
+
+    Returns:
+        tuple[bool, str, str]: ``(ok, stdout, stderr)`` where ``ok`` reflects a
+            zero return code.
+    """
     try:
         cp = subprocess.run(
             ["git", *args],
@@ -389,6 +404,20 @@ class FrameworkPrExecutor:
         keep_threshold_pct: float = DEFAULT_KEEP_THRESHOLD_PCT,
         diff_fetch_timeout_sec: float = DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
     ):
+        """Initialize the executor with session + bench defaults.
+
+        Args:
+            session_dir (Path | str | None): The session directory used to
+                root per-task workspaces; resolved from the environment when
+                ``None``.
+            default_config_path (Path | str | None): Default baseline config
+                path used when ``params.config_path`` is absent.
+            variant_timeout_sec (int): Default per-variant bench timeout.
+            keep_threshold_pct (float): Default throughput delta (percent)
+                required to KEEP a candidate.
+            diff_fetch_timeout_sec (float): Default timeout for fetching /
+                materializing the candidate diff.
+        """
         self.session_dir = (
             Path(session_dir) if session_dir else _resolve_session_dir()
         )
@@ -400,6 +429,24 @@ class FrameworkPrExecutor:
         self.diff_fetch_timeout_sec = float(diff_fetch_timeout_sec)
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Fetch, apply, bench and KEEP/REVERT one approved PR candidate.
+
+        Resolves the patch source (explicit paths, checkout-head worktree
+        diff, or curled ``diff_url``), snapshots the live tree HEAD, applies
+        the diff, optionally benches it via :meth:`_bench_candidate`, and
+        commits (KEEP) or ``git reset --hard`` reverts based on the throughput
+        delta and accuracy gate.
+
+        Args:
+            ctx: The runner context carrying ``task.params`` (the ``candidate``
+                row and bench knobs) and ``extra`` (workspace / shared_state).
+
+        Returns:
+            dict[str, Any]: A result dict whose ``status`` is one of ``kept``,
+                ``reverted``, ``apply_failed``, ``no_patch``, ``fetch_failed``,
+                ``applied_no_bench`` or ``failed``, plus throughput / accuracy
+                / patch bookkeeping fields.
+        """
         params = dict(ctx.task.params or {})
         extra = getattr(ctx, "extra", None) or {}
         candidate = params.get("candidate") or {}
@@ -648,6 +695,21 @@ class FrameworkPrExecutor:
                 output_root=output_root,
                 slug=slug,
             )
+        except FrameworkScriptMismatchError as exc:
+            reverted = self._revert_patches(
+                framework_root, applied, pre_apply_sha=pre_apply_sha,
+            )
+            return {
+                "status": "reverted",
+                "error_class": "framework_script_mismatch",
+                "error": str(exc),
+                "candidate": candidate,
+                "batch_id": batch_id,
+                "patches_applied": [],
+                "patches_reverted": [str(p) for p in reverted],
+                "reason": str(exc),
+                "workspace": str(output_root),
+            }
         except Exception as exc:  # noqa: BLE001
             reverted = self._revert_patches(
                 framework_root, applied, pre_apply_sha=pre_apply_sha,

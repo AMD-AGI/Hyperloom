@@ -52,7 +52,6 @@ import logging
 import os
 import random
 import re
-import shlex
 import shutil
 import sys
 import time
@@ -172,23 +171,9 @@ def _load_default_prompt_prefix() -> str:
     return ""
 
 
-def _with_image_env_prompt_prefix(prompt_prefix: str | None, image: str | None) -> str | None:
-    """Append per-task image exports so V2 writes manifest.image at startup."""
-    image = (image or "").strip()
-    if not image:
-        return prompt_prefix
-    block = "\n".join([
-        "CI SANDBOX IMAGE (export before launching `inference_optimizer optimize`):",
-        f"  export HYPERLOOM_IMAGE={shlex.quote(image)}",
-        "  export CONTAINER_IMAGE=\"${CONTAINER_IMAGE:-$HYPERLOOM_IMAGE}\"",
-        "  export KERNEL_OPT_IMAGE=\"${KERNEL_OPT_IMAGE:-$HYPERLOOM_IMAGE}\"",
-    ])
-    prefix = (prompt_prefix or "").rstrip()
-    return f"{prefix}\n\n{block}\n" if prefix else f"{block}\n"
-
-
-# RDMA bnxt_re tar staged on WekaFS — same path ci-config.yaml multi-node
-# entries use; module constant keeps orchestrator and this SaFE path in sync.
+# RDMA bnxt_re tar package staged on WekaFS — same path the validated
+# ci-config.yaml multi-node entries hand the agent. Kept as a module constant
+# so the orchestrator (Claw-direct) and this SaFE path stay in sync.
 _MULTINODE_BNXT_TAR = "/wekafs/primus/data/libbnxt/libbnxt_re-234.0.154.0.tar.gz"
 
 
@@ -218,7 +203,21 @@ def _multinode_prompt_suffix(nodes: int, rayjob_image: str) -> str:
 
 
 def parse_kernel_backends(raw: str | None) -> list[str]:
-    """Normalize user-facing kernel backend names for SaFE's API payload."""
+    """Normalize user-facing kernel backend names for SaFE's API payload.
+
+    Splits on commas/semicolons, lowercases, and maps each alias to its
+    canonical SaFE name, de-duplicating while preserving order.
+
+    Args:
+        raw (str | None): Comma/semicolon-separated backend names, or None.
+
+    Returns:
+        list[str]: Canonical backend names, or the default list when ``raw`` is
+            empty or yields nothing.
+
+    Raises:
+        ValueError: If a token is not a recognised backend alias.
+    """
 
     if not raw:
         return list(DEFAULT_KERNEL_BACKENDS)
@@ -280,6 +279,11 @@ def is_generative_arch(arch: str) -> bool:
 
 
 def _proxy() -> str:
+    """Return the container registry proxy prefix.
+
+    Returns:
+        str: ``$HARBOR_PREFIX`` when set, otherwise the default proxy prefix.
+    """
     return os.environ.get("HARBOR_PREFIX", DEFAULT_PROXY)
 
 
@@ -303,6 +307,12 @@ class HuggingFaceClient:
     BASE = "https://huggingface.co"
 
     def __init__(self, token: str = "", timeout: int = 15):
+        """Initialise the HF client session.
+
+        Args:
+            token (str): Optional HuggingFace token for gated-model access.
+            timeout (int): Per-request timeout in seconds.
+        """
         self.timeout = timeout
         self._sess = requests.Session()
         self._sess.headers["User-Agent"] = "hyperloom-optimize-submit/1.0"
@@ -310,14 +320,41 @@ class HuggingFaceClient:
             self._sess.headers["Authorization"] = f"Bearer {token}"
 
     def _get(self, path: str) -> dict | list:
+        """GET a HuggingFace API path and return the parsed JSON body.
+
+        Args:
+            path (str): Path appended to the HF base URL.
+
+        Returns:
+            dict | list: The decoded JSON response.
+
+        Raises:
+            requests.HTTPError: If the response status indicates an error.
+        """
         resp = self._sess.get(f"{self.BASE}{path}", timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
 
     def model_info(self, repo_id: str) -> dict:
+        """Fetch a repo's model metadata from the HF API.
+
+        Args:
+            repo_id (str): HuggingFace repo id (e.g. ``Qwen/Qwen3-8B``).
+
+        Returns:
+            dict: The model-info JSON (pipeline_tag, safetensors, tags, etc.).
+        """
         return self._get(f"/api/models/{repo_id}")  # type: ignore[return-value]
 
     def model_config(self, repo_id: str) -> dict:
+        """Fetch a repo's ``config.json`` from the HF resolve endpoint.
+
+        Args:
+            repo_id (str): HuggingFace repo id.
+
+        Returns:
+            dict: The parsed ``config.json`` contents.
+        """
         return self._get(f"/{repo_id}/resolve/main/config.json")  # type: ignore[return-value]
 
     def top_models(self, limit: int, min_params_b: float = 0.0) -> list[str]:
@@ -378,6 +415,17 @@ class HuggingFaceClient:
 
 @dataclass
 class DetectedConfig:
+    """Auto-detected launch configuration for a model.
+
+    Attributes:
+        arch (str): HF ``architectures[0]`` class name.
+        framework (str): Chosen serving framework (``sglang`` / ``vllm``).
+        precision (str): Detected precision tag (e.g. ``FP8`` / ``INT4``).
+        tp (int): Tensor-parallel size.
+        concurrency (int): Benchmark concurrency.
+        image (str): Container image to run.
+        params_b (float): Parameter count in billions.
+    """
     arch: str
     framework: str
     precision: str
@@ -406,6 +454,18 @@ def _quant_type(config: dict) -> str:
 
 
 def detect_framework(config: dict) -> str:
+    """Choose the serving framework for a model from its config.
+
+    vLLM is selected for architectures that require it or for quantization
+    types it handles better; SGLang is used for known-good architectures;
+    otherwise vLLM is the broader-support fallback.
+
+    Args:
+        config (dict): A HF ``config.json`` dict.
+
+    Returns:
+        str: ``"vllm"`` or ``"sglang"``.
+    """
     arch = (config.get("architectures") or [""])[0]
     qt = _quant_type(config)
     if arch in VLLM_REQUIRED_ARCHS:
@@ -419,6 +479,15 @@ def detect_framework(config: dict) -> str:
 
 
 def detect_precision(config: dict) -> str:
+    """Detect the serving precision from a model's quantization tag.
+
+    Args:
+        config (dict): A HF ``config.json`` dict.
+
+    Returns:
+        str: One of ``FP8`` / ``FP4`` / ``INT4``, defaulting to ``FP8`` for
+            unquantized models on MI300X.
+    """
     qt = _quant_type(config)
     if "fp8" in qt:   return "FP8"
     if "mxfp4" in qt: return "FP4"
@@ -430,6 +499,18 @@ def detect_precision(config: dict) -> str:
 
 
 def detect_param_count(hf_info: dict, config: dict) -> float:
+    """Estimate a model's parameter count in billions.
+
+    Prefers the exact ``safetensors.total`` count from HF metadata; otherwise
+    approximates from hidden size, layer count, and vocab size.
+
+    Args:
+        hf_info (dict): The HF model-info JSON.
+        config (dict): The HF ``config.json`` dict.
+
+    Returns:
+        float: Parameter count in billions, or 0.0 when it cannot be estimated.
+    """
     total = (hf_info.get("safetensors") or {}).get("total", 0)
     if total:
         return total / 1e9
@@ -479,13 +560,44 @@ def detect_tp(params_b: float, precision: str = "BF16",
 
 
 def detect_concurrency(tp: int, framework: str) -> int:
+    """Pick a benchmark concurrency from tensor-parallel size and framework.
+
+    Args:
+        tp (int): Tensor-parallel size.
+        framework (str): Serving framework (``vllm`` / ``sglang``).
+
+    Returns:
+        int: The chosen concurrency level.
+    """
     if framework == "vllm":
         return 64 if tp <= 4 else 16
     return 64 if tp == 1 else 32 if tp <= 4 else 64
 
 
-def detect_image(framework: str) -> str:
-    return _default_vllm_image() if framework == "vllm" else _default_sglang_image()
+def _sglang_image_for(repo_id: str = "") -> str:
+    """Pick the sglang image, honoring per-model baseline-arch needs.
+
+    Default is the profilerfix image. MiMo-V2.x is the exception: the undated
+    v0.5.11 profilerfix base does NOT register ``MiMoV2ForCausalLM`` (the
+    server dies at model-loader registration, three baseline attempts in a
+    row -> ``baseline_failed``), so it needs the image that carries the dated
+    20260508 sglang arch. That image is profilerfix's two patched ROCm libs
+    (libamdhip64/libroctracer, issue #352) layered onto the dated 20260508
+    build, so rocprofiler kernel capture under HipGraphLaunch still works.
+    Must be paired with ``--attention-backend triton`` (injected in
+    ``_workload_envs.materialize_config_with_envs``) to dodge the aiter
+    attention CUDA-graph-capture SIGABRT. Matched on the repo basename so it
+    fires for the HF repo id (the /wekafs/<org>-<repo> local path is derived
+    downstream from this same id).
+    """
+    basename = (repo_id or "").split("/")[-1].lower()
+    if "mimo-v2" in basename:
+        return "primussafe/sglang:v0.5.11-rocm720-mi30x-mimo-profilerfix"
+    return _default_sglang_image()
+
+
+def detect_image(framework: str, repo_id: str = "") -> str:
+    return _default_vllm_image() if framework == "vllm" else _sglang_image_for(repo_id)
 
 
 def auto_detect(hf: HuggingFaceClient, repo_id: str,
@@ -521,7 +633,7 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str,
     max_context_tokens = detect_max_context_tokens(config)
     tp = detect_tp(params_b, precision, gpu_type)
     conc = detect_concurrency(tp, framework)
-    image = detect_image(framework)
+    image = detect_image(framework, repo_id)
 
     cfg = DetectedConfig(
         arch=arch, framework=framework, precision=precision,
@@ -554,6 +666,20 @@ class SafeOptimizeClient:
         timeout: int = 30,
         submit_workspaces_pool: list[str] | None = None,
     ):
+        """Initialise the SaFE client and its authenticated HTTP session.
+
+        Args:
+            base_url (str): SaFE base URL (trailing slash trimmed).
+            token (str): Bearer token for the Authorization header.
+            register_workspace (str): Workspace where models are registered and
+                downloaded (must allow RW writes to ``volume``).
+            submit_workspace (str): Workspace where optimization tasks run (must
+                allow the Sandbox scope).
+            volume (str): Wekafs volume mounted RW in ``register_workspace``.
+            timeout (int): Per-request timeout in seconds.
+            submit_workspaces_pool (list[str] | None): Optional round-robin pool
+                of submit workspaces; when set, each submit cycles through it.
+        """
         self.base_url = base_url.rstrip("/")
         # Where the model registers + downloads (needs RW to the volume).
         self.register_workspace = register_workspace
@@ -576,9 +702,11 @@ class SafeOptimizeClient:
         self._sess.verify = os.environ.get(
             "SSL_CERT_FILE", os.environ.get("REQUESTS_CA_BUNDLE", True))
 
-    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+    def _request(self, method: str, path: str, body: dict | None = None,
+                 timeout: float | None = None) -> dict:
         url = f"{self.base_url}/{path.lstrip('/')}"
-        resp = self._sess.request(method, url, json=body, timeout=self.timeout)
+        resp = self._sess.request(method, url, json=body,
+                                  timeout=timeout or self.timeout)
         if resp.status_code >= 400:
             raise RuntimeError(
                 f"{method} {path} -> HTTP {resp.status_code}: {resp.text[:300]}")
@@ -654,6 +782,17 @@ class SafeOptimizeClient:
     def wait_ready(
         self, model_id: str, timeout_min: int = 480, poll_s: int = 30,
     ) -> bool:
+        """Poll a SaFE model until it reaches the Ready phase.
+
+        Args:
+            model_id (str): SaFE model id to poll.
+            timeout_min (int): Maximum minutes to wait before giving up.
+            poll_s (int): Seconds between polls.
+
+        Returns:
+            bool: True once the model is Ready; False if it reaches Failed or
+                the timeout elapses.
+        """
         log.info("waiting for model %s to be Ready (timeout=%dm)", model_id, timeout_min)
         deadline = time.time() + timeout_min * 60
         last_phase = ""
@@ -752,14 +891,23 @@ class SafeOptimizeClient:
         attempts = 8
         for attempt in range(1, attempts + 1):
             try:
-                return self._request("POST", "api/v1/optimization/tasks", body)
-            except RuntimeError as e:
+                # The submit POST can be slow when the core42 apiserver is
+                # under load from many parallel daily jobs. Give it a generous
+                # read timeout so a busy-but-alive backend doesn't trip the
+                # default 30s and get misreported as a hard submit failure.
+                return self._request(
+                    "POST", "api/v1/optimization/tasks", body, timeout=120)
+            except Exception as e:
                 msg = str(e)
+                low = msg.lower()
                 transient = (
                     "HTTP 500" in msg
                     or "HTTP 502" in msg
                     or "HTTP 503" in msg
                     or "HTTP 504" in msg
+                    or "timed out" in low      # requests ReadTimeout/ConnectTimeout
+                    or "timeout" in low
+                    or "connection" in low     # ConnectionError / HTTPSConnectionPool
                 )
                 if not transient or attempt >= attempts:
                     raise
@@ -782,6 +930,14 @@ class SafeOptimizeClient:
     TERMINAL_TASK_STATUSES = {"Succeeded", "Failed", "Interrupted"}
 
     def get_task(self, task_id: str) -> dict:
+        """Fetch the current state of an optimization task.
+
+        Args:
+            task_id (str): SaFE optimization task id.
+
+        Returns:
+            dict: The task record JSON.
+        """
         return self._request("GET", f"api/v1/optimization/tasks/{task_id}")
 
     def wait_task_done(
@@ -1002,6 +1158,18 @@ class SafeOptimizeClient:
     def download_artifact_to(
         self, task_id: str, path_or_item: "str | dict", local_path: str,
     ) -> int:
+        """Download an artifact and write it to a local file.
+
+        Creates parent directories as needed.
+
+        Args:
+            task_id (str): SaFE optimization task id.
+            path_or_item (str | dict): Artifact path string or item dict.
+            local_path (str): Destination file path.
+
+        Returns:
+            int: Number of bytes written.
+        """
         data = self.download_artifact(task_id, path_or_item)
         os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
         with open(local_path, "wb") as f:
@@ -1013,6 +1181,38 @@ class SafeOptimizeClient:
 
 @dataclass
 class SubmissionRecord:
+    """Per-model record tracking submission, completion, and CI delivery.
+
+    Accumulates state across the submit → wait → collect pipeline and is
+    serialised into the submission manifest.
+
+    Attributes:
+        model (str): HuggingFace repo id for this entry.
+        status (str): Local submit stage (submitted/dry-run/skipped/failed).
+        task_id (str | None): SaFE optimization task id once submitted.
+        claw_session_id (str | None): Claw session UUID SaFE created.
+        display_name (str | None): Task display name.
+        model_path (str | None): Resolved model path reported by SaFE.
+        safe_user_id (str | None): SaFE user id owning the task.
+        safe_started_at (str | None): SaFE task start timestamp.
+        safe_finished_at (str | None): SaFE task finish timestamp.
+        detected (dict | None): Auto-detected config as a dict.
+        overrides (dict): User/CLI overrides applied.
+        pool (dict): Production-pool audit metadata.
+        error (str | None): Error message when submit failed/skipped.
+        category (str | None): Coarse model shape (moe/dense/"").
+        sandbox_duration_seconds (float | None): SaFE wallclock duration.
+        final_status (str | None): SaFE terminal status.
+        final_phase (int | None): Current phase at the terminal moment.
+        final_message (str | None): SaFE task message.
+        ci_status (str | None): CI delivery status (separate from SaFE status).
+        ci_success (bool): Whether usable artifacts were delivered.
+        delivery_reason (str | None): Explanation for the CI delivery status.
+        artifacts_dir (str | None): Local directory artifacts landed in.
+        artifact_count (int): Number of collected artifacts.
+        artifact_files (list[str]): Collected artifact file paths.
+        artifact_sources (list[dict]): Provenance entries per artifact.
+    """
     model: str
     status: str = "pending"            # local stage: submitted/dry-run/skipped/failed
     task_id: str | None = None
@@ -1070,6 +1270,39 @@ def process_model(
     results_path: str | None = None,
     pool_metadata: dict | None = None,
 ) -> SubmissionRecord:
+    """Run the full submit flow for one model: detect, register, submit.
+
+    Auto-detects (or uses manual overrides for) the launch config, ensures the
+    model is registered and Ready in SaFE (preferring prewarmed local_path
+    mode), then submits the optimization task. Short-circuits for dry-run and
+    for skip/failure conditions.
+
+    Args:
+        repo_id (str): HuggingFace repo id.
+        hf (HuggingFaceClient): Client for HF metadata lookups.
+        safe (SafeOptimizeClient): Client for SaFE register/submit calls.
+        overrides (dict): Field overrides (framework/precision/tp/...).
+        isl (int): Input sequence length.
+        osl (int): Output sequence length.
+        dry_run (bool): When True, plan only without registering/submitting.
+        hf_token (str): HuggingFace token for gated downloads.
+        manual_mode (bool): Skip auto-detect; requires ``framework`` override.
+        mode (str): Execution mode passed to SaFE (``local`` / ``claw``).
+        gpu_type (str | None): GPU type override for the prompt.
+        inferencex_path (str | None): InferenceX checkout path override.
+        oob_path (str | None): OOB checkout path override.
+        tracelens_root (str | None): TraceLens checkout path override.
+        prompt_prefix (str | None): Prompt prefix forwarded to SaFE.
+        prompt_suffix (str | None): Prompt suffix forwarded to SaFE.
+        kernel_backends (list[str] | None): Kernel optimization backends.
+        max_hours (float | None): Max optimization wall-clock hours.
+        target_gain (float | None): Target gain percentage.
+        results_path (str | None): Results path passed to the prompt builder.
+        pool_metadata (dict | None): Production-pool audit metadata.
+
+    Returns:
+        SubmissionRecord: The record describing the outcome of this model.
+    """
     rec = SubmissionRecord(
         model=repo_id,
         overrides={k: v for k, v in overrides.items() if v is not None},
@@ -1106,7 +1339,7 @@ def process_model(
     precision = overrides.get("precision") or (detected.precision if detected else "FP8")
     tp        = overrides.get("tp")        or (detected.tp if detected else 1)
     conc      = overrides.get("concurrency") or (detected.concurrency if detected else 64)
-    image     = overrides.get("image") or (detected.image if detected else detect_image(framework))
+    image     = overrides.get("image") or (detected.image if detected else detect_image(framework, repo_id))
 
     log.info("[%s] => mode=%s framework=%s precision=%s tp=%d conc=%d image=%s",
              repo_id, mode, framework, precision, tp, conc, image)
@@ -1192,7 +1425,7 @@ def process_model(
             return rec
 
     try:
-        task_prompt_prefix = _with_image_env_prompt_prefix(prompt_prefix, image)
+        task_prompt_prefix = prompt_prefix
         result = safe.submit_task(
             model_id, display_name, framework, precision, tp, conc, isl, osl, image,
             mode=mode, gpu_type=gpu_type, inferencex_path=inferencex_path,
@@ -1234,6 +1467,16 @@ DEFAULT_ARTIFACT_PATTERNS = (
 
 
 def _is_wanted_artifact(path: str, all_artifacts: bool) -> bool:
+    """Decide whether an artifact path should be downloaded.
+
+    Args:
+        path (str): The remote artifact path.
+        all_artifacts (bool): When True, accept every artifact.
+
+    Returns:
+        bool: True when ``all_artifacts`` is set or the path matches a default
+            artifact pattern.
+    """
     if all_artifacts:
         return True
     p = path.lower()
@@ -1257,6 +1500,16 @@ def _record_artifact_source(
     source_path: str | None = None,
     session_dir: str | None = None,
 ) -> None:
+    """Append a provenance entry describing where an artifact came from.
+
+    Args:
+        rec (SubmissionRecord): Record whose ``artifact_sources`` is appended.
+        local_path (Path): Local path the artifact was written to.
+        source_type (str): Origin label (e.g. ``safe_artifact_api``, ``nfs_*``).
+        remote_path (str | None): Remote artifact path, when applicable.
+        source_path (str | None): Source filesystem path, when applicable.
+        session_dir (str | None): Originating session directory, when known.
+    """
     entry = {
         "source_type": source_type,
         "local_path": str(local_path).replace("\\", "/"),
@@ -1272,6 +1525,14 @@ def _record_artifact_source(
 
 
 def _write_artifact_sources(task_dir: Path, rec: SubmissionRecord) -> None:
+    """Write the per-task ``artifact_sources.json`` provenance file.
+
+    No-op when the record has no recorded artifact sources.
+
+    Args:
+        task_dir (Path): Per-task directory the file is written into.
+        rec (SubmissionRecord): Record carrying the artifact source entries.
+    """
     if not rec.artifact_sources:
         return
     payload = {
@@ -1298,11 +1559,32 @@ _KEY_RESULT_SUFFIXES: tuple[str, ...] = (
 
 
 def _norm_token(s: str) -> str:
+    """Aggressively normalise a string for fuzzy equality comparison.
+
+    Lowercases and strips dashes, underscores, dots, slashes, and spaces.
+
+    Args:
+        s (str): String to normalise.
+
+    Returns:
+        str: The normalised token.
+    """
     return (s or "").lower().replace("-", "").replace("_", "") \
         .replace(".", "").replace("/", "").replace(" ", "")
 
 
 def _slug_token(s: str) -> str:
+    """Convert a string to a lowercase dash-separated slug.
+
+    Collapses any run of non-alphanumeric characters to a single dash and
+    trims leading/trailing dashes.
+
+    Args:
+        s (str): String to slugify.
+
+    Returns:
+        str: The slugified token.
+    """
     out = []
     prev_dash = False
     for ch in (s or "").lower():
@@ -1316,7 +1598,15 @@ def _slug_token(s: str) -> str:
 
 
 def _metrics_have_positive_throughput(path: str) -> bool:
-    """True when ``ci_metrics.json`` carries real, non-zero throughput."""
+    """Report whether a ci_metrics.json file has real, non-zero throughput.
+
+    Args:
+        path (str): Path to a ``ci_metrics.json`` file.
+
+    Returns:
+        bool: True when both baseline and optimized throughput parse to values
+            greater than zero; False on any read/parse error.
+    """
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
@@ -1331,6 +1621,17 @@ def _metrics_have_positive_throughput(path: str) -> bool:
 
 
 def _json_has_any_number(value) -> bool:
+    """Recursively test whether a JSON value contains any real number.
+
+    Booleans are not counted as numbers; lists are scanned up to the first 100
+    elements.
+
+    Args:
+        value: Any JSON-decoded value.
+
+    Returns:
+        bool: True when an int/float (non-bool) is found anywhere within.
+    """
     if isinstance(value, bool):
         return False
     if isinstance(value, (int, float)):
@@ -1366,7 +1667,15 @@ def _breakdown_has_basic_data(path: Path) -> bool:
 
 
 def _mark_record_delivery(rec: SubmissionRecord) -> None:
-    """Set CI-level delivery status from collected artifacts."""
+    """Set CI-level delivery status from collected artifacts.
+
+    Scans the record's artifact files/dir for a publishable
+    ``session_breakdown`` JSON and updates ``ci_success``, ``ci_status``, and
+    ``delivery_reason`` accordingly.
+
+    Args:
+        rec (SubmissionRecord): The submission record to mutate in place.
+    """
     candidates: list[Path] = []
     for raw in rec.artifact_files:
         p = Path(raw)
@@ -1404,7 +1713,15 @@ def _mark_record_delivery(rec: SubmissionRecord) -> None:
 
 
 def _timestamp_hint_variants(value: str) -> set[str]:
-    """Return path-matchable variants for skill session timestamps."""
+    """Return path-matchable variants for skill session timestamps.
+
+    Args:
+        value (str): A session timestamp string (e.g. ``"20260512T010203Z"``).
+
+    Returns:
+        set[str]: Case- and separator-normalized variants for substring
+            matching against paths; empty if ``value`` is blank.
+    """
     raw = value.strip()
     if not raw:
         return set()
@@ -1416,6 +1733,15 @@ def _timestamp_hint_variants(value: str) -> set[str]:
 
 
 def _session_hints_from_artifact_items(items: list[dict]) -> set[str]:
+    """Collect session-timestamp hints from artifact item metadata.
+
+    Args:
+        items (list[dict]): Artifact item dicts with ``path``/``downloadPath``/
+            ``name`` fields.
+
+    Returns:
+        set[str]: Timestamp hint variants discovered across the items.
+    """
     hints: set[str] = set()
     for item in items or []:
         if not isinstance(item, dict):
@@ -1430,6 +1756,15 @@ def _session_hints_from_artifact_items(items: list[dict]) -> set[str]:
 
 
 def _path_has_session_hint(path: str, hints: set[str]) -> bool:
+    """Report whether a path contains any of the session timestamp hints.
+
+    Args:
+        path (str): The path to test.
+        hints (set[str]): Timestamp hint variants to look for.
+
+    Returns:
+        bool: True if any hint appears in the normalized path.
+    """
     if not hints:
         return False
     norm_path = _norm_token(path)
@@ -1437,6 +1772,15 @@ def _path_has_session_hint(path: str, hints: set[str]) -> bool:
 
 
 def _parse_safe_timestamp(value: str | None) -> datetime | None:
+    """Parse a SaFE ISO-8601 timestamp into a UTC datetime.
+
+    Args:
+        value (str | None): An ISO-8601 string (``Z`` suffix accepted).
+
+    Returns:
+        datetime | None: A timezone-aware UTC datetime, or ``None`` if blank
+            or unparseable.
+    """
     raw = (value or "").strip()
     if not raw:
         return None
@@ -1450,6 +1794,14 @@ def _parse_safe_timestamp(value: str | None) -> datetime | None:
 
 
 def _parse_session_timestamp(value: str) -> datetime | None:
+    """Parse a compact ``YYYYMMDDTHHMMSSZ`` session timestamp.
+
+    Args:
+        value (str): The compact session timestamp string.
+
+    Returns:
+        datetime | None: A UTC datetime, or ``None`` if blank or unparseable.
+    """
     raw = value.strip()
     if not raw:
         return None
@@ -1460,11 +1812,29 @@ def _parse_session_timestamp(value: str) -> datetime | None:
 
 
 def _session_timestamp_from_path(path: str) -> str:
+    """Extract the last ``YYYYMMDDTHHMMSSZ`` timestamp found in a path.
+
+    Args:
+        path (str): The path to scan.
+
+    Returns:
+        str: The matched timestamp (upper-cased), or ``""`` if none found.
+    """
     matches = re.findall(r"\b\d{8}T\d{6}Z\b", path, flags=re.IGNORECASE)
     return matches[-1].upper() if matches else ""
 
 
 def _timestamp_in_task_window(timestamp: str, rec: SubmissionRecord, margin_hours: int = 2) -> bool:
+    """Check whether a session timestamp falls within the task's run window.
+
+    Args:
+        timestamp (str): A compact session timestamp string.
+        rec (SubmissionRecord): The record providing SaFE start/finish times.
+        margin_hours (int): Slack added on each side of the window.
+
+    Returns:
+        bool: True if the timestamp lies within the (padded) task window.
+    """
     ts = _parse_session_timestamp(timestamp)
     start = _parse_safe_timestamp(rec.safe_started_at)
     end = _parse_safe_timestamp(rec.safe_finished_at)
@@ -1476,7 +1846,228 @@ def _timestamp_in_task_window(timestamp: str, rec: SubmissionRecord, margin_hour
 
 
 def _record_has_task_window(rec: SubmissionRecord) -> bool:
+    """Report whether a record has a usable SaFE start timestamp.
+
+    Args:
+        rec (SubmissionRecord): The submission record to inspect.
+
+    Returns:
+        bool: True if ``safe_started_at`` parses into a timestamp.
+    """
     return _parse_safe_timestamp(rec.safe_started_at) is not None
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float environment setting with a safe fallback."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning("%s=%r is not a float; using %.1f", name, raw, default)
+        return default
+
+
+def _read_session_state(session_dir: str | Path) -> dict:
+    """Best-effort read of a session's state.json."""
+    path = Path(session_dir) / "state.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _session_has_terminal_marker(session_dir: str | Path) -> bool:
+    """True when a session has reached a state where CI should collect now."""
+    root = Path(session_dir)
+    if (root / "session_breakdown.json").is_file():
+        return True
+    if (root / "complete").is_file():
+        return True
+    state = _read_session_state(root)
+    if state.get("close_sequence_done") is True:
+        return True
+    return False
+
+
+def _session_activity_mtime(session_dir: str | Path) -> float:
+    """Return a bounded best-effort activity timestamp for a session.
+
+    ``state.json`` can be quiet while long Magpie subprocesses append logs or
+    traces, so include the runtime subtrees CI relies on. The file cap avoids
+    expensive walks for very large sessions.
+    """
+    root = Path(session_dir)
+    mtimes: list[float] = []
+    for rel in (
+        "state.json",
+        "session_breakdown.json",
+        "complete",
+        "reports/final.md",
+        "reports/final.json",
+    ):
+        p = root / rel
+        try:
+            if p.exists():
+                mtimes.append(p.stat().st_mtime)
+        except OSError:
+            continue
+
+    seen = 0
+    for sub in ("optimizer_runs", "runs", "reports"):
+        base = root / sub
+        if not base.exists():
+            continue
+        for walk_root, _dirs, files in os.walk(base):
+            for name in files:
+                seen += 1
+                if seen > 5000:
+                    return max(mtimes) if mtimes else 0.0
+                if not name.endswith((".log", ".json", ".txt", ".md", ".csv", ".gz")):
+                    continue
+                try:
+                    mtimes.append((Path(walk_root) / name).stat().st_mtime)
+                except OSError:
+                    continue
+    return max(mtimes) if mtimes else 0.0
+
+
+def _find_nfs_state_session_dir(
+    rec: SubmissionRecord,
+    current_session_hints: set[str] | None = None,
+) -> str | None:
+    """Locate the current NFS session using state.json, not breakdown files."""
+    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    users_root = Path(nfs_root) / "users"
+    if not rec.safe_user_id or not users_root.is_dir():
+        return None
+    uid_path = users_root / rec.safe_user_id
+    if not uid_path.is_dir():
+        return None
+
+    hints = set(current_session_hints or set())
+    candidates: list[tuple[int, float, str]] = []
+    for model_dir_name in _candidate_model_dir_names(rec):
+        model_dir = uid_path / model_dir_name
+        if not model_dir.is_dir():
+            continue
+        try:
+            ts_entries = sorted(os.listdir(model_dir), reverse=True)
+        except OSError:
+            continue
+        for ts_entry in ts_entries:
+            session_dir = model_dir / ts_entry
+            if not session_dir.is_dir():
+                continue
+            state_path = session_dir / "state.json"
+            if not state_path.is_file():
+                continue
+            if hints:
+                if not _path_has_session_hint(str(session_dir), hints):
+                    continue
+                score = 40
+            else:
+                ts = _session_timestamp_from_path(ts_entry)
+                if not _timestamp_in_task_window(ts, rec):
+                    continue
+                score = 30
+            state = _read_session_state(session_dir)
+            workload = state.get("workload") if isinstance(state.get("workload"), dict) else {}
+            model_field = str(
+                state.get("model")
+                or state.get("model_name")
+                or workload.get("model_name")
+                or ""
+            )
+            if model_field and not _record_model_field_matches(rec, model_field):
+                continue
+            if model_field:
+                score += 100
+            try:
+                mtime = state_path.stat().st_mtime
+            except OSError:
+                continue
+            candidates.append((score, mtime, str(session_dir)))
+
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][2]
+
+
+def _wait_for_nfs_session_delivery(
+    rec: SubmissionRecord,
+    current_session_hints: set[str] | None = None,
+    poll_s: int = 60,
+    grace_min: float | None = None,
+    idle_min: float | None = None,
+) -> str | None:
+    """After SaFE early terminal, wait while the NFS session is still active."""
+    grace_min = _env_float("SAFE_OPTIMIZE_NFS_LIVE_GRACE_MIN", 180.0) \
+        if grace_min is None else grace_min
+    idle_min = _env_float("SAFE_OPTIMIZE_NFS_IDLE_GRACE_MIN", 20.0) \
+        if idle_min is None else idle_min
+    if grace_min <= 0 or idle_min <= 0:
+        return None
+
+    session_dir = _find_nfs_state_session_dir(rec, current_session_hints)
+    if not session_dir:
+        return None
+
+    now = time.time()
+    activity = _session_activity_mtime(session_dir)
+    if not activity:
+        return session_dir
+    if now - activity > idle_min * 60 and not _session_has_terminal_marker(session_dir):
+        log.info(
+            "[task %s] NFS session %s found but inactive for %.1fmin; "
+            "collecting without grace wait",
+            rec.task_id, session_dir, (now - activity) / 60,
+        )
+        return session_dir
+
+    deadline = now + grace_min * 60
+    idle_deadline = activity + idle_min * 60
+    log.warning(
+        "[task %s] SaFE status=%s but NFS session still appears active: %s; "
+        "waiting up to %.1fmin (idle %.1fmin) for delivery contract files",
+        rec.task_id, rec.final_status, session_dir, grace_min, idle_min,
+    )
+    while time.time() < deadline:
+        if _session_has_terminal_marker(session_dir):
+            log.info(
+                "[task %s] NFS session reached terminal/delivery marker: %s",
+                rec.task_id, session_dir,
+            )
+            return session_dir
+        latest = _session_activity_mtime(session_dir)
+        if latest > activity:
+            activity = latest
+            idle_deadline = latest + idle_min * 60
+            log.info(
+                "[task %s] NFS session still active (last activity %s)",
+                rec.task_id,
+                datetime.fromtimestamp(latest, tz=timezone.utc).isoformat(),
+            )
+        if time.time() > idle_deadline:
+            log.warning(
+                "[task %s] NFS session idle for %.1fmin without delivery "
+                "marker; proceeding to collect",
+                rec.task_id, idle_min,
+            )
+            return session_dir
+        time.sleep(max(1, min(poll_s, 60)))
+
+    log.warning(
+        "[task %s] NFS live-session grace wait expired after %.1fmin; "
+        "proceeding to collect",
+        rec.task_id, grace_min,
+    )
+    return session_dir
 
 
 def _category_from_arch(arch: str | None) -> str:
@@ -1824,6 +2415,15 @@ def _record_model_field_matches(rec: SubmissionRecord, model_field: str) -> bool
 
 
 def _candidate_model_dir_names(rec: SubmissionRecord) -> list[str]:
+    """Derive plausible per-model directory basenames for a record.
+
+    Args:
+        rec (SubmissionRecord): The record supplying model path / id / display
+            name candidates.
+
+    Returns:
+        list[str]: De-duplicated basename candidates, in priority order.
+    """
     names: list[str] = []
     for value in (
         rec.model_path or "",
@@ -1838,7 +2438,25 @@ def _candidate_model_dir_names(rec: SubmissionRecord) -> list[str]:
 
 
 def _json_positive_perf(data: dict) -> bool:
+    """Report whether a breakdown JSON has positive baseline AND optimized perf.
+
+    Args:
+        data (dict): A parsed session-breakdown/metrics JSON object.
+
+    Returns:
+        bool: True only if at least one positive baseline throughput and one
+            positive optimized throughput are present.
+    """
     def positive(value: object) -> bool:
+        """Return True for a positive, non-bool numeric value.
+
+        Args:
+            value (object): Candidate value to test.
+
+        Returns:
+            bool: True if ``value`` is an ``int``/``float`` (not ``bool``)
+                greater than zero.
+        """
         return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
 
     baseline = data.get("baseline") if isinstance(data.get("baseline"), dict) else {}
@@ -1864,6 +2482,14 @@ def _json_positive_perf(data: dict) -> bool:
 
 
 def _json_model_field(data: dict) -> str:
+    """Extract the model id from a breakdown/metrics JSON, trying known keys.
+
+    Args:
+        data (dict): A parsed session-breakdown/metrics JSON object.
+
+    Returns:
+        str: The first non-empty model field found, or ``""``.
+    """
     workload = data.get("workload") if isinstance(data.get("workload"), dict) else {}
     session = data.get("session") if isinstance(data.get("session"), dict) else {}
     meta = data.get("session_meta") if isinstance(data.get("session_meta"), dict) else {}
@@ -1881,6 +2507,14 @@ def _json_model_field(data: dict) -> str:
 
 
 def _json_claw_session_id(data: dict) -> str:
+    """Extract the Claw session id from a breakdown/metrics JSON.
+
+    Args:
+        data (dict): A parsed session-breakdown/metrics JSON object.
+
+    Returns:
+        str: The first non-empty ``claw_session_id`` found, or ``""``.
+    """
     session = data.get("session") if isinstance(data.get("session"), dict) else {}
     meta = data.get("session_meta") if isinstance(data.get("session_meta"), dict) else {}
     for value in (
@@ -1894,6 +2528,14 @@ def _json_claw_session_id(data: dict) -> str:
 
 
 def _env_truthy(name: str) -> bool:
+    """Report whether an environment variable is set to a truthy value.
+
+    Args:
+        name (str): The environment variable name.
+
+    Returns:
+        bool: True if the value is one of 1/true/yes/y/on (case-insensitive).
+    """
     return (os.environ.get(name) or "").strip().lower() in {
         "1", "true", "yes", "y", "on",
     }
@@ -2028,6 +2670,14 @@ def _nfs_fallback_collect(
         return copied
 
     def _model_field_matches(model_field: str) -> bool:
+        """Check a JSON ``model`` field against the record's expected names.
+
+        Args:
+            model_field (str): The model id read from a candidate result file.
+
+        Returns:
+            bool: True if it normalizes to one of the record's allowed names.
+        """
         observed = _norm_token(model_field)
         allowed = {
             target,
@@ -2038,6 +2688,17 @@ def _nfs_fallback_collect(
         return observed in allowed or _norm_token(model_field.split("/")[-1]) in allowed
 
     def _consider_result_file(path: str, session_dir: str, score_base: int) -> None:
+        """Score a candidate result file and append it to ``candidates``.
+
+        Validates the file's model/session/claw fields against the record and,
+        when it matches, records a ``(score, mtime, path, session_dir)`` tuple
+        for later best-match selection.
+
+        Args:
+            path (str): Path to a candidate result JSON file.
+            session_dir (str): The session directory containing the file.
+            score_base (int): Base score reflecting match-source confidence.
+        """
         if not os.path.isfile(path):
             return
         try:
@@ -2280,6 +2941,33 @@ def wait_and_collect_one(
         log.info("[task %s] current session timestamp hints from artifacts: %s",
                  rec.task_id, ", ".join(sorted(current_session_hints)))
 
+    if not has_safe_breakdown:
+        waited_session = _wait_for_nfs_session_delivery(
+            rec,
+            current_session_hints=current_session_hints,
+            poll_s=poll_s,
+        )
+        if waited_session:
+            # The SaFE artifact index may lag behind the agent's final writes.
+            # Re-list once after the grace wait before falling back to NFS.
+            try:
+                items = safe.list_artifacts(rec.task_id)
+                wanted = [
+                    it for it in items
+                    if _is_wanted_artifact(it.get("path", ""), all_artifacts)
+                ]
+                wanted_paths = [it.get("path", "").lower() for it in wanted]
+                has_safe_breakdown = any(
+                    p.endswith("session_breakdown.json") for p in wanted_paths
+                )
+                current_session_hints.update(_session_hints_from_artifact_items(items))
+                log.info("[task %s] safe artifacts after NFS grace wait: "
+                         "%d total, %d to download",
+                         rec.task_id, len(items), len(wanted))
+            except Exception as e:
+                log.warning("[task %s] post-grace list_artifacts failed: %s",
+                            rec.task_id, e)
+
     task_dir = artifacts_dir / rec.task_id
     rec.artifacts_dir = str(task_dir)
     for it in wanted:
@@ -2360,7 +3048,19 @@ def process_completion(
     all_artifacts: bool,
     parallel: int,
 ) -> None:
-    """Wait + collect for all submitted records, in parallel up to ``parallel``."""
+    """Wait + collect for all submitted records, in parallel up to ``parallel``.
+
+    Args:
+        safe (SafeOptimizeClient): Client used to poll and download artifacts.
+        records (list[SubmissionRecord]): All submission records; only
+            ``submitted`` ones with a task id are awaited.
+        artifacts_dir (Path): Destination root for downloaded artifacts.
+        task_timeout_min (int): Max minutes to wait per task.
+        poll_s (int): Polling interval in seconds.
+        collect (bool): When True, collect artifacts after each task finishes.
+        all_artifacts (bool): When True, also copy full session trees.
+        parallel (int): Max concurrent wait/collect workers (<=1 runs serially).
+    """
     pending = [r for r in records if r.status == "submitted" and r.task_id]
     if not pending:
         log.info("no submitted tasks to wait for")
@@ -2414,6 +3114,16 @@ def write_manifest(
     submit_workspace: str,
     volume: str,
 ) -> None:
+    """Write the submission manifest as JSON and a markdown summary table.
+
+    Args:
+        out_dir (Path): Output directory (created if absent).
+        records (list[SubmissionRecord]): The submission records to serialize.
+        base_url (str): SaFE API base URL recorded in the manifest.
+        register_workspace (str): Workspace used for registration.
+        submit_workspace (str): Workspace used for submission.
+        volume (str): Storage volume name recorded in the manifest.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -2488,6 +3198,12 @@ def write_manifest(
 # ── CLI ─────────────────────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the command-line argument parser for the optimize-submit CLI.
+
+    Returns:
+        argparse.ArgumentParser: The configured parser with model selection,
+            override, SaFE connection, and collection options.
+    """
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2656,10 +3372,27 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="How often to poll task status, seconds (default: 60)")
     parser.add_argument("--wait-parallel", type=int, default=8,
                         help="How many tasks to wait for in parallel (default: 8)")
+    parser.add_argument(
+        "--submit-jitter-sec", type=int,
+        default=int(os.environ.get("SAFE_OPTIMIZE_SUBMIT_JITTER_SEC", "0") or 0),
+        help="Pre-submit random delay window in seconds. Each (parallel matrix) "
+             "job sleeps random(0..N) before touching SaFE so register/submit "
+             "calls de-sync instead of stampeding Claw-session creation all at "
+             "once (the thundering herd that the backend answers with HTTP 500 "
+             "'failed to create Claw session' / 504). 0 = off (default).")
     return parser
 
 
 def main() -> int:
+    """CLI entry point: register, submit, wait/collect, and write the manifest.
+
+    Parses arguments, resolves the model set and SaFE connection, submits
+    optimization tasks, optionally waits for completion and collects artifacts,
+    and writes the submission manifest.
+
+    Returns:
+        int: Process exit code (0 on success, non-zero on fatal errors).
+    """
     args = _build_parser().parse_args()
 
     logging.basicConfig(
@@ -2815,6 +3548,19 @@ def main() -> int:
         log.info("multi-node: nodes=%d tp=%s mode=%s rayjob_image=%s",
                  args.nodes, args.tp, effective_mode,
                  rayjob_image or "(agent-chosen)")
+
+    # Pre-submit jitter. When a large matrix fans out, every job otherwise hits
+    # register/submit (and Claw-session creation) in the same instant — the
+    # backend then sheds load with HTTP 500 "failed to create Claw session" /
+    # 504. A per-process random(0..N) sleep here spreads the herd across an
+    # N-second window so the backend sees a trickle rather than a spike. The
+    # submit_task retry loop still backstops any residual collision.
+    jitter = max(0, args.submit_jitter_sec)
+    if jitter > 0 and not args.dry_run:
+        d = random.uniform(0, jitter)
+        log.info("submit jitter: sleeping %.1fs (window 0-%ds) to de-sync from "
+                 "other parallel jobs before hitting SaFE", d, jitter)
+        time.sleep(d)
 
     records: list[SubmissionRecord] = []
     for repo in repos:

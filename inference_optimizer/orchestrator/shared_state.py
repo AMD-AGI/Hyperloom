@@ -2,7 +2,7 @@
 
 """SharedState — single-writer (Coordinator) persisted session state, backed by atomic JSON at ``$SESSION_DIR/state.json``; enforces CORE_STATE_FIELDS guards.
 
-fields:
+Fields::
 
     session_id          str   — set by Coordinator at session creation
     model_name          str   — e.g. "meta-llama/Llama-3.1-8B-Instruct"
@@ -35,6 +35,7 @@ fields:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -42,7 +43,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+log = logging.getLogger(__name__)
+
+
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond-precision ISO 8601 string.
+
+    Returns:
+        str: The current UTC timestamp formatted via ``datetime.isoformat``
+            with ``timespec="microseconds"`` (e.g. ``"2026-06-02T18:29:00.123456+00:00"``).
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
@@ -94,6 +104,12 @@ _DEFAULT_LAST_FAILURES = 10
 
 # phase_history cap (record_phase_transition).
 _PHASE_HISTORY_CAP = 100
+
+# Lifecycle-event log cap (#266). Unlike phase_history (≤6 transitions),
+# lifecycle events fire at every step boundary (trace_analyze /
+# run_optimization / integrate / report, ×N kernels ×M rounds), so the cap
+# is generous but still bounds state.json growth on a long run.
+_LIFECYCLE_CAP = 500
 
 # roofline_snapshots history cap (record_trace_analyze).
 _ROOFLINE_SNAPSHOTS_CAP = 50
@@ -170,6 +186,21 @@ class TraceAnalyzeSnapshot:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "TraceAnalyzeSnapshot":
+        """Build a typed snapshot from the on-disk ``last_trace_analyze`` dict.
+
+        Each field is coerced to its declared type with a safe default so a
+        partial / legacy blob never raises. Used as a typed reader on the
+        consumer side; the canonical writer remains
+        :meth:`SharedState.record_trace_analyze`.
+
+        Args:
+            d (dict[str, Any] | None): The raw snapshot dict (e.g. from
+                ``state.json``), or ``None`` to build an all-defaults instance.
+
+        Returns:
+            TraceAnalyzeSnapshot: A populated snapshot with every field
+                normalized to its declared type.
+        """
         d = d or {}
         return cls(
             trace_input=str(d.get("trace_input") or ""),
@@ -206,6 +237,13 @@ class SharedState:
     model_class: str = ""
     # Advisory architecture profile; prompt-context only, no deterministic gating (those stay on ``model_class``).
     model_arch: dict = field(default_factory=dict)
+    # Degraded-mode advisory: True when the run is knowingly running a
+    # multimodal checkpoint on the text-only path (--allow-mm-text-fallback).
+    # Advisory only — never a stop_reason, never gates Objective/scoring.
+    degraded_mode: bool = False
+    # Structured degraded-mode / model-compat warnings (e.g. multimodal text
+    # fallback). Surfaced verbatim in reports/final.{json,md}.
+    model_warnings: list[dict[str, Any]] = field(default_factory=list)
     # KB tags from config.json (``architectures`` + ``model_type``); stamped into recipe-snapshot ``extras`` so fine-tuned models carry base arch identity.
     model_architectures: list[str] = field(default_factory=list)
     model_type: str = ""
@@ -445,6 +483,13 @@ class SharedState:
     phase_started_unix: float = 0.0
     # Append-only log of phase transitions (rows from phase_state.make_history_row; reason in PHASE_EXIT_REASONS). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
+    # Append-only operator-facing lifecycle log (#266). Each row is built
+    # by :func:`phase_state.make_lifecycle_event` and records a phase/step
+    # boundary (START / END / ERROR) plus the artifact paths it produced,
+    # so a launcher can surface "phase X ran, outputs at <path>" in chat.
+    # Coordinator-only writer (PolicyGate adds it to ``CORE_STATE_FIELDS``);
+    # capped at ``_LIFECYCLE_CAP``.
+    lifecycle: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget percentages per phase (from CLI flags/defaults); persisted for resume. Empty => library defaults.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
 
@@ -485,11 +530,32 @@ class SharedState:
     # Persistence
     @classmethod
     def state_path(cls, session_dir: Path) -> Path:
+        """Return the canonical ``state.json`` path for a session directory.
+
+        Args:
+            session_dir (Path): The session root directory.
+
+        Returns:
+            Path: ``session_dir / "state.json"``.
+        """
         return Path(session_dir) / "state.json"
 
     @classmethod
     def load_or_init(cls, session_dir: Path) -> "SharedState":
-        """Load existing ``state.json`` or return a fresh blank instance."""
+        """Load existing ``state.json`` or return a fresh blank instance.
+
+        Reads and migrates the persisted state via :meth:`from_dict` when
+        the file exists; otherwise constructs a default instance for a
+        brand-new session.
+
+        Args:
+            session_dir (Path): The session root directory containing (or
+                that will contain) ``state.json``.
+
+        Returns:
+            SharedState: The loaded-and-migrated state, or a fresh default
+                instance when no ``state.json`` exists yet.
+        """
         path = cls.state_path(session_dir)
         if not path.exists():
             inst = cls()
@@ -684,6 +750,16 @@ class SharedState:
         sa_set: set[tuple[str, ...]] = set()
 
         def _normalize_combo(c: Any) -> tuple[str, ...] | None:
+            """Normalize a synergy combo to a sorted tuple of flag names.
+
+            Args:
+                c (Any): A list of flag-name strings or a ``"+"``-joined
+                    combo string.
+
+            Returns:
+                tuple[str, ...] | None: The sorted flag-name tuple, or
+                    ``None`` when the input yields no usable names.
+            """
             if isinstance(c, list):
                 items = tuple(sorted(str(x) for x in c if isinstance(x, str)))
                 return items if items else None
@@ -703,10 +779,25 @@ class SharedState:
         return out
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize this state to a plain JSON-compatible dict.
+
+        Returns:
+            dict[str, Any]: A deep ``dataclasses.asdict`` copy suitable for
+                JSON serialization.
+        """
         return asdict(self)
 
     def save(self, session_dir: Path) -> None:
-        """Atomically write state.json (tmp + os.replace)."""
+        """Atomically write ``state.json`` (tmp file + ``os.replace``).
+
+        Serializes via :meth:`to_dict` and writes to a temp file in the
+        same directory before an atomic rename, so concurrent readers never
+        observe a partial blob. The temp file is cleaned up on failure.
+
+        Args:
+            session_dir (Path): The session root directory; created if it
+                does not already exist.
+        """
         path = self.state_path(session_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".state-", suffix=".json", dir=str(path.parent))
@@ -731,17 +822,40 @@ class SharedState:
 
     # Mutators (Coordinator only — LLM agents go via intents)
     def add_pruned_family(self, family: str) -> bool:
-        """Idempotent add. Returns True iff the family was newly added."""
+        """Idempotently mark an action family as pruned.
+
+        Args:
+            family (str): The action family identifier to prune.
+
+        Returns:
+            bool: ``True`` iff the family was newly added; ``False`` when it
+                was already present.
+        """
         if family in self.pruned_families:
             return False
         self.pruned_families.append(family)
         return True
 
     def is_pruned(self, family: str) -> bool:
+        """Report whether an action family has been pruned.
+
+        Args:
+            family (str): The action family identifier to check.
+
+        Returns:
+            bool: ``True`` when ``family`` is in :attr:`pruned_families`.
+        """
         return family in self.pruned_families
 
     def prune_family(self, family: str) -> bool:
-        """Alias for :meth:`add_pruned_family` (policy-loop stop-loss)."""
+        """Alias for :meth:`add_pruned_family` (policy-loop stop-loss).
+
+        Args:
+            family (str): The action family identifier to prune.
+
+        Returns:
+            bool: ``True`` iff the family was newly added.
+        """
         return self.add_pruned_family(family)
 
     _POLICY_DENIAL_HISTORY_CAP = 50
@@ -756,7 +870,25 @@ class SharedState:
         tick: int,
         intent_payload: dict[str, Any] | None = None,
     ) -> int:
-        """Append a denial row and bump per-(action,rule) streak."""
+        """Append a PolicyGate denial row and bump the per-(action, rule) streak.
+
+        Records a capped rolling history entry and increments the
+        consecutive-denial counter keyed by ``"<action_name>:<rule>"``.
+
+        Args:
+            action_name (str): The action the denied intent targeted (empty
+                is normalized to ``"*"`` in the streak key).
+            rule (str): The PolicyGate rule id that fired.
+            hint (str): Human-readable remediation hint surfaced to the LLM.
+            intent_type (str): The denied intent's type.
+            tick (int): The Coordinator tick at which the denial occurred.
+            intent_payload (dict[str, Any] | None): Optional intent payload;
+                when present, its sorted keys are recorded for context.
+
+        Returns:
+            int: The new consecutive-denial streak value for this
+                (action, rule) pair.
+        """
         key = f"{action_name or '*'}:{rule}"
         streak = int(self.policy_denial_streak.get(key, 0)) + 1
         self.policy_denial_streak[key] = streak
@@ -779,6 +911,16 @@ class SharedState:
         return streak
 
     def reset_policy_denial_streak(self, action_name: str) -> None:
+        """Clear all consecutive-denial streaks for a given action.
+
+        Drops every ``policy_denial_streak`` entry whose key begins with
+        ``"<action_name>:"`` — called when the action finally succeeds so a
+        later denial starts a fresh streak.
+
+        Args:
+            action_name (str): The action whose streaks should be reset; a
+                falsy value is a no-op.
+        """
         if not action_name:
             return
         prefix = f"{action_name}:"
@@ -881,7 +1023,72 @@ class SharedState:
         self.phase_started_unix = now_unix
         return row
 
+    def record_lifecycle_event(
+        self,
+        *,
+        step: str,
+        status: str,
+        phase: str | None = None,
+        label: str | None = None,
+        artifacts: dict[str, str] | None = None,
+        detail: str = "",
+        duration_s: float | None = None,
+        ts: str | None = None,
+    ) -> dict[str, Any]:
+        """Append a structured lifecycle event (#266, method 1).
+
+        Each event marks a phase/step boundary so operators can see — in
+        state.json, and via the launcher in chat — that a phase ran, where
+        its outputs went, and which artifact feeds the next phase.
+
+        ``step`` is the machine step/handler name (e.g. ``trace_analyze``);
+        ``label`` defaults to the human-friendly name from
+        :data:`phase_state.LIFECYCLE_STEP_LABELS` so both naming dimensions
+        are carried. ``phase`` defaults to the current coordinator phase.
+        ``seq`` is monotonic across the cap so consumers can order events
+        even after the oldest rows are trimmed.
+
+        Coordinator-only writer (``policy.CORE_STATE_FIELDS`` guards
+        ``lifecycle`` so an LLM ``update_state`` cannot forge events).
+        Returns the inserted row.
+        """
+        # Lazy import to avoid an import-time cycle with the orchestrator
+        # package (phase_state imports nothing from SharedState).
+        from .phase_state import make_lifecycle_event
+
+        events = self.lifecycle
+        if events is None:
+            events = self.lifecycle = []
+        next_seq = (int(events[-1].get("seq", -1)) + 1) if events else 0
+        event = make_lifecycle_event(
+            step=step,
+            status=status,
+            phase=(phase if phase is not None else (self.phase or "")),
+            label=label,
+            artifacts=artifacts,
+            detail=detail,
+            duration_s=duration_s,
+            seq=next_seq,
+            ts=ts or _now_iso(),
+        )
+        # Append in place and trim only when over the cap, so the common
+        # per-step-boundary path is an O(1) append rather than copying the
+        # whole list on every call.
+        events.append(event)
+        if len(events) > _LIFECYCLE_CAP:
+            del events[: -_LIFECYCLE_CAP]
+        return event
+
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
+        """Render the most recent PolicyGate denials for prompt injection.
+
+        Args:
+            top_k (int): Maximum number of newest denial rows to render.
+
+        Returns:
+            str: A ``=== Recent policy denials ===`` block, or ``""`` when
+                no denials have been recorded.
+        """
         if not self.policy_denial_history:
             return ""
         rows = list(self.policy_denial_history)[-top_k:]
@@ -898,6 +1105,14 @@ class SharedState:
         return "\n".join(lines)
 
     def increment_crash_count(self, by: int = 1) -> int:
+        """Increment the cumulative crash counter.
+
+        Args:
+            by (int): Amount to add to :attr:`crash_count` (default 1).
+
+        Returns:
+            int: The post-increment crash count.
+        """
         self.crash_count += by
         return self.crash_count
 
@@ -937,7 +1152,13 @@ class SharedState:
         return applied
 
     def _format_last_kernel_opt(self) -> str:
-        """Single-line repr of last kernel-opt outcome for prompt injection."""
+        """Single-line repr of last kernel-opt outcome for prompt injection.
+
+        Returns:
+            str: A compact ``kernel_id=... decision=... speedup=...`` line
+                (with optional per-kernel attempts/retired history), or
+                ``"(none)"`` when no kernel_opt has run.
+        """
         if not self.last_kernel_opt:
             return "(none)"
         ko = self.last_kernel_opt
@@ -962,6 +1183,23 @@ class SharedState:
     def _resolve_kernel_patch_identity(
         self, payload: dict[str, Any] | None,
     ) -> tuple[str, str, str, str]:
+        """Resolve a kernel patch's identity tuple from a result/intent payload.
+
+        Pulls ``kernel_id`` / patch path / target file / extra server args
+        from the envelope, back-filling the patch path from
+        :attr:`last_kernel_opt` when the payload omits it but names a
+        matching kernel. The legacy ``extra_sglang_args`` alias is resolved
+        through the compat helper.
+
+        Args:
+            payload (dict[str, Any] | None): The kernel_opt result or LLM
+                intent envelope (``None`` treated as empty).
+
+        Returns:
+            tuple[str, str, str, str]: ``(kernel_id, patch_path,
+                target_file, extra_args)``; any unresolved component is an
+                empty string.
+        """
         payload = payload or {}
         kernel_id = str(payload.get("kernel_id") or "")
         patch_path = str(
@@ -990,6 +1228,16 @@ class SharedState:
         return kernel_id, patch_path, target_file, extra_args
 
     def kernel_patch_key(self, payload: dict[str, Any] | None) -> str:
+        """Compute the dedup key for a kernel patch.
+
+        Args:
+            payload (dict[str, Any] | None): The kernel_opt result or intent
+                envelope.
+
+        Returns:
+            str: ``"<kernel_id>|<patch_path>|<extra_args>"``, or ``""`` when
+                either ``kernel_id`` or ``patch_path`` cannot be resolved.
+        """
         kernel_id, patch_path, _target_file, extra_args = (
             self._resolve_kernel_patch_identity(payload)
         )
@@ -1001,6 +1249,16 @@ class SharedState:
         self,
         payload: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
+        """Look up a previously-rejected patch matching ``payload``.
+
+        Args:
+            payload (dict[str, Any] | None): The kernel_opt result or intent
+                envelope identifying the patch.
+
+        Returns:
+            dict[str, Any] | None: The matching rejected-patch entry, or
+                ``None`` when the key is unresolvable or not on record.
+        """
         key = self.kernel_patch_key(payload)
         if not key:
             return None
@@ -1016,7 +1274,25 @@ class SharedState:
         max_attempts: int = 3,
         keep_threshold_pct: float = 1.0,
     ) -> dict[str, Any] | None:
-        """Persist one integrate E2E result and reject exhausted patch attempts."""
+        """Persist one integrate E2E result and reject exhausted patch attempts.
+
+        Appends the attempt to the per-key ``kernel_integrate_attempts``
+        ledger and, on a REVERT decision or once ``max_attempts`` is hit
+        without a KEEP, moves the patch into ``rejected_kernel_patches`` and
+        records its ``kernel_id`` in ``rejected_kernel_ids``.
+
+        Args:
+            result (dict[str, Any]): The integrate E2E result envelope.
+            max_attempts (int): Max attempts before rejecting a non-KEEP
+                patch (default 3).
+            keep_threshold_pct (float): The gain threshold recorded on the
+                rejection row for context (default 1.0).
+
+        Returns:
+            dict[str, Any] | None: The updated attempts entry (carrying a
+                ``rejected`` sub-dict when rejection fired), or ``None`` when
+                ``result`` is not a dict or its patch key is unresolvable.
+        """
         if not isinstance(result, dict):
             return None
         key = self.kernel_patch_key(result)
@@ -1252,7 +1528,15 @@ class SharedState:
         self.kernel_opt_attempts[kernel_id] = entry
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
-        """Capture the GEAK GEMM tuning result for sequencing and prompts."""
+        """Capture the GEAK GEMM tuning result for sequencing and prompts.
+
+        Snapshots the result into ``last_gemm_tuning`` and appends it to the
+        capped ``gemm_tuning_attempts`` history. A non-dict result is
+        normalized into a failure record.
+
+        Args:
+            result (dict[str, Any]): The GEMM tuning result envelope.
+        """
         if not isinstance(result, dict):
             result = {"status": "failed", "error": "non-dict gemm tuning result"}
         entry = dict(result)
@@ -1264,7 +1548,12 @@ class SharedState:
 
     # Multi-KEEP integrate queue helpers.
     def _kernel_ids_in_optimization_stack(self) -> set[str]:
-        """kernel_ids already absorbed into optimization_stack as integrate entries."""
+        """kernel_ids already absorbed into optimization_stack as integrate entries.
+
+        Returns:
+            set[str]: The set of ``kernel_id`` values that appear on an
+                ``integrate`` entry of :attr:`optimization_stack`.
+        """
         return {
             str(e.get("kernel_id"))
             for e in (self.optimization_stack or [])
@@ -1347,10 +1636,21 @@ class SharedState:
 
     @property
     def has_keep_pending_integrate(self) -> bool:
+        """Whether any KEEP kernel is still awaiting integrate.
+
+        Returns:
+            bool: ``True`` when :meth:`next_pending_keep_kernel_id` is
+                non-empty.
+        """
         return bool(self.next_pending_keep_kernel_id())
 
     @property
     def kernel_opt_attempts_count(self) -> int:
+        """Number of distinct kernels with recorded kernel_opt attempts.
+
+        Returns:
+            int: The size of the ``kernel_opt_attempts`` ledger.
+        """
         return len(self.kernel_opt_attempts or {})
 
     # Hot-kernel report gate: report blocked until meaningful reusable hot kernels are attempted/rejected.
@@ -1591,6 +1891,36 @@ class SharedState:
         self.last_action_failures = history
         return entry
 
+    def _resolve_baseline_achieved_tput(self) -> float:
+        """Baseline throughput for a baseline-arm roofline snapshot.
+
+        Prefers ``baseline_tput``; falls back to ``last_baseline``'s
+        ``tput``/``output_throughput`` so a state that lost ``baseline_tput``
+        still stamps an achieved value (avoids an empty within/gap pct).
+        """
+        if isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
+            return float(self.baseline_tput)
+        last_bl = self.last_baseline if isinstance(self.last_baseline, dict) else {}
+        for key in ("tput", "output_throughput"):
+            val = last_bl.get(key)
+            if isinstance(val, (int, float)) and val > 0:
+                return float(val)
+        return 0.0
+
+    def _resolve_current_best_achieved_tput(self) -> float:
+        """Optimized-arm throughput for a current_best roofline snapshot.
+
+        Reads ``current_best``'s ``tput``/``output_throughput`` so a
+        current_best-tagged snapshot keeps its arm even when ``tput`` is
+        momentarily absent (avoids silently downgrading to the baseline arm).
+        """
+        cb = self.current_best if isinstance(self.current_best, dict) else {}
+        for key in ("tput", "output_throughput"):
+            val = cb.get(key)
+            if isinstance(val, (int, float)) and val > 0:
+                return float(val)
+        return 0.0
+
     def record_trace_analyze(
         self,
         payload: dict[str, Any],
@@ -1761,20 +2091,50 @@ class SharedState:
                 compute_roofline_from_perfmodel,
                 load_model_meta,
             )
-            # Primary decode ceiling plus memory/compute sides; PerfModel bottom-up formula, legacy is fallback only.
-            breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
-            try:
-                breakdown = compute_roofline_breakdown_from_state(self)
-            except Exception:  # noqa: BLE001 — ceiling is best-effort
-                pass
-            peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
+            # Resolve which arm this snapshot measures FIRST so the ceiling's
+            # precision is anchored to the SAME arm as achieved: a baseline
+            # snapshot keeps its dtype on baseline even after current_best is
+            # promoted (else a later fp8 best would retro-inflate the ceiling).
+            # An explicit ``roofline_arm`` on the payload wins — a delayed
+            # PRELUDE roofline must record as baseline even though current_best
+            # has already been promoted by warm-replay. Absent it, fall back to
+            # inferring the arm from current_best.tput.
+            forced_arm = str((payload or {}).get("roofline_arm") or "").strip()
+            # Unknown arm values fall through to current_best inference; warn so
+            # a typo'd payload tag is visible instead of silently mis-anchored.
+            if forced_arm and forced_arm not in ("baseline", "current_best"):
+                log.warning(
+                    "record_trace_analyze: ignoring unknown roofline_arm=%r; "
+                    "falling back to current_best inference", forced_arm,
+                )
+                forced_arm = ""
             achieved_tput = 0.0
             cb = self.current_best if isinstance(self.current_best, dict) else {}
             cb_tput = cb.get("tput")
-            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+            if forced_arm == "baseline":
+                snapshot_arm = "baseline"
+                achieved_tput = self._resolve_baseline_achieved_tput()
+            elif forced_arm == "current_best":
+                # Explicit tag wins: keep the optimized arm even if tput is
+                # momentarily absent, never downgrade to baseline (the profile
+                # actually ran current_best params, so the ceiling must match).
+                snapshot_arm = "current_best"
+                achieved_tput = self._resolve_current_best_achieved_tput()
+            elif isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                snapshot_arm = "current_best"
                 achieved_tput = float(cb_tput)
-            elif isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
-                achieved_tput = float(self.baseline_tput)
+            else:
+                snapshot_arm = "baseline"
+                achieved_tput = self._resolve_baseline_achieved_tput()
+            # Primary decode ceiling plus memory/compute sides; PerfModel bottom-up formula, legacy is fallback only.
+            breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
+            try:
+                breakdown = compute_roofline_breakdown_from_state(
+                    self, arm=snapshot_arm,
+                )
+            except Exception:  # noqa: BLE001 — ceiling is best-effort
+                pass
+            peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
             history_entry = build_roofline_snapshot(
                 snapshot_id=snapshot_id,
                 ts=ts_iso,
@@ -1788,7 +2148,7 @@ class SharedState:
             # Per-op PerfModel breakdown for dashboard visualization.
             try:
                 from .roofline_ceiling import resolve_runtime_workload
-                runtime = resolve_runtime_workload(self)
+                runtime = resolve_runtime_workload(self, arm=snapshot_arm)
                 meta = load_model_meta(
                     runtime.model_path,
                     precision_hint=runtime.precision,
@@ -1800,8 +2160,9 @@ class SharedState:
                     )
                     eff_conc = runtime.concurrency
                     # Use the dtype the run actually read (e.g. fp8 over a
-                    # float32 checkpoint), not the on-disk torch_dtype.
-                    rt = resolve_runtime_dtype(self, meta)
+                    # float32 checkpoint), not the on-disk torch_dtype; pinned
+                    # to this snapshot's arm so baseline keeps baseline dtype.
+                    rt = resolve_runtime_dtype(self, meta, arm=snapshot_arm)
                     meta = apply_runtime_dtype(meta, rt)
                     pm_bd = compute_roofline_from_perfmodel(
                         meta=meta,
@@ -1871,6 +2232,16 @@ class SharedState:
             pass
 
     def record_sweep(self, result: dict[str, Any]) -> None:
+        """Snapshot the most recent workload sweep into ``last_sweep``.
+
+        Selects the best succeeded grid entry by ``output_throughput`` and
+        records grid size, per-concurrency bests, the Pareto front, and the
+        workspace path.
+
+        Args:
+            result (dict[str, Any]): The sweep executor result envelope. A
+                non-dict result is a no-op.
+        """
         if not isinstance(result, dict):
             return
         grid = result.get("sweep_grid") or []
@@ -2009,6 +2380,15 @@ class SharedState:
             others = [g for g in self.gaps if g is not merged]
 
             def _sort_key(g: dict[str, Any]) -> str:
+                """Sort key for gap trimming: newest-updated timestamp.
+
+                Args:
+                    g (dict[str, Any]): A gap row.
+
+                Returns:
+                    str: ``last_updated_ts`` (falling back to
+                        ``first_seen_ts`` then ``""``) for chronological sort.
+                """
                 return str(g.get("last_updated_ts") or g.get("first_seen_ts") or "")
 
             others.sort(key=_sort_key)
@@ -2224,7 +2604,12 @@ class SharedState:
         return self.specialist_patch_verdicts.get(sid, "") or ""
 
     def update_last_specialist(self, snapshot: dict[str, Any]) -> None:
-        """Snapshot the most recent specialist task (parity with last_*)."""
+        """Snapshot the most recent specialist task (parity with last_*).
+
+        Args:
+            snapshot (dict[str, Any]): The specialist task snapshot to copy
+                into ``last_specialist``. A non-dict value is ignored.
+        """
         if isinstance(snapshot, dict):
             self.last_specialist = dict(snapshot)
 
@@ -2351,7 +2736,11 @@ class SharedState:
 
     # No action-score API; ``increment_tick`` is a pure monotonic counter for plateau/phase budget math.
     def increment_tick(self) -> int:
-        """Bump the Coordinator tick counter and return the new value."""
+        """Bump the Coordinator tick counter.
+
+        Returns:
+            int: The post-increment monotonic tick value.
+        """
         self.tick = int(self.tick or 0) + 1
         return self.tick
 
@@ -2470,6 +2859,12 @@ class SharedState:
         return "\n".join(lines)
 
     def _format_current_best_for_mission(self) -> str:
+        """Render the ``current_best`` one-liner for the mission summary.
+
+        Returns:
+            str: ``action=... tput=... variant=...``, or ``"(none)"`` when
+                no current best is set.
+        """
         if not isinstance(self.current_best, dict) or not self.current_best:
             return "(none)"
         return (
@@ -2790,7 +3185,13 @@ class SharedState:
         return "\n".join(rows)
 
     def to_prompt_summary(self) -> str:
-        """Compact, human-readable snapshot for prompt injection (DESIGN §8.3)."""
+        """Compact, human-readable snapshot for prompt injection (DESIGN §8.3).
+
+        Returns:
+            str: A multi-line dump of the session's key fact-layer and
+                audit fields (baseline / current best / gains / kernel-opt
+                queue / attempts history / failures / phase status).
+        """
         lines = [
             f"session_id={self.session_id or '(unset)'}",
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
@@ -2861,7 +3262,15 @@ class SharedState:
     # Audit-trail renderers (per-action attempts + global failure log); compact one-liners.
     @staticmethod
     def _format_attempt(entry: dict[str, Any] | None) -> str:
-        """Render one ``last_<action>`` snapshot or attempts[-1] entry."""
+        """Render one ``last_<action>`` snapshot or ``attempts[-1]`` entry.
+
+        Args:
+            entry (dict[str, Any] | None): The attempt snapshot to render.
+
+        Returns:
+            str: A compact ``status=... decision=... <metric> err=... ws=...``
+                line, or ``"(none)"`` when the entry is empty.
+        """
         if not isinstance(entry, dict) or not entry:
             return "(none)"
         metric = entry.get("key_metric")
@@ -2923,6 +3332,12 @@ class SharedState:
         return " | ".join(rows) + suffix if rows else "(none)"
 
     def _format_rejected_kernel_patches(self) -> str:
+        """Render the most recent rejected kernel patches for the prompt.
+
+        Returns:
+            str | list[str]: A list of compact per-patch lines (last 5), or
+                ``"(none)"`` when no patches have been rejected.
+        """
         if not self.rejected_kernel_patches:
             return "(none)"
         return [
@@ -2935,6 +3350,12 @@ class SharedState:
         ] or "(none)"
 
     def _format_discovered_flags(self) -> str:
+        """Render the per-framework discovered-flag counts for the prompt.
+
+        Returns:
+            str: ``<framework>:backend=N/param=M`` parts joined by commas,
+                or a hint string when no flags have been discovered yet.
+        """
         if not self.discovered_flags:
             return "(none — first backends/params round will populate)"
         parts: list[str] = []
@@ -3035,6 +3456,12 @@ class SharedState:
         return "\n".join(out)
 
     def _format_explore_search(self) -> str:
+        """Render the unified ``explore_search`` ledger for the prompt.
+
+        Returns:
+            str: The :meth:`_format_search_state` render of
+                :attr:`explore_search`.
+        """
         return self._format_search_state(self.explore_search)
 
     @staticmethod
@@ -3070,6 +3497,12 @@ class SharedState:
         return "\n".join(out)
 
     def _format_optimization_stack(self) -> str:
+        """Render the optimization stack as ``action:variant`` parts.
+
+        Returns:
+            str | list[str]: A list of ``action:variant_name`` strings, or
+                ``"(none)"`` when the stack is empty.
+        """
         if not self.optimization_stack:
             return "(none)"
         parts = []
@@ -3123,6 +3556,19 @@ class SharedState:
         return self._format_trace_analyze_blob(self.last_trace_analyze)
 
     def _format_trace_analyze_blob(self, blob: dict[str, Any] | None) -> str:
+        """Render a trace-analyze cache blob as a compact prompt line.
+
+        Surfaces the trace input, candidates path, top kernel ids, reusable
+        native kernel ids, and any trace-health routing warnings.
+
+        Args:
+            blob (dict[str, Any] | None): A ``last_trace_analyze``-shaped
+                dict to render.
+
+        Returns:
+            str: The compact one-line render, or ``"(none)"`` when the blob
+                is empty.
+        """
         if not blob:
             return "(none)"
         ids = [
@@ -3171,6 +3617,12 @@ class SharedState:
         return f"{base}{skipped_suffix} warnings=[{'; '.join(rendered)}]"
 
     def _format_last_sweep(self) -> str:
+        """Render the last workload sweep result for the prompt.
+
+        Returns:
+            str: ``grid_size=... best=... tput=... conc/isl/osl=...``, or
+                ``"(none)"`` when no sweep has run.
+        """
         if not self.last_sweep:
             return "(none)"
         best = self.last_sweep.get("best_overall") or {}

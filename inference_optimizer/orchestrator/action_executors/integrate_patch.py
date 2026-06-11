@@ -11,7 +11,8 @@ Deterministic Python executor (no LLM). Per Inv-5.1, this is the single
 allowed ``git apply`` channel against framework_source_roots (specialists
 author patches into their isolated worktree only).
 
-Inputs (``ctx.task.params``):
+Inputs (``ctx.task.params``)::
+
     specialist_task_id (str, required) — completed specialist task
         whose worktree under ``runs/specialist/<task_id>/`` carries
         the patches.
@@ -38,7 +39,8 @@ Inputs (``ctx.task.params``):
         ``status='applied_no_bench'`` so downstream bookkeeping can
         differentiate from a genuine KEEP/REVERT.
 
-Outputs (dict, returned to the bus as ``delegated_result.result``):
+Outputs (dict, returned to the bus as ``delegated_result.result``)::
+
     status: "kept" | "reverted" | "apply_failed" | "no_patches" |
             "applied_no_bench" | "failed"
     output_throughput: float | None
@@ -74,7 +76,11 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
-from ._workload_envs import default_baseline_config, materialize_config_with_envs
+from ._workload_envs import (
+    FrameworkScriptMismatchError,
+    default_baseline_config,
+    materialize_config_with_envs,
+)
 
 
 log = logging.getLogger(__name__)
@@ -85,6 +91,11 @@ DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; aligns with BASELINE_DEFAULT_TIME
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as an ISO 8601 string.
+
+    Returns:
+        str: The current UTC timestamp in ISO 8601 format.
+    """
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
 
@@ -244,7 +255,16 @@ def _git_apply_reverse(
 
 def _git_checkout_clean(framework_root: Path) -> tuple[bool, str]:
     """``git checkout -- .`` to discard every uncommitted change.
-    Last-resort REVERT path when individual reverse-apply fails."""
+
+    Last-resort REVERT path when individual reverse-apply fails.
+
+    Args:
+        framework_root (Path): Directory to run ``git checkout`` in.
+
+    Returns:
+        tuple[bool, str]: ``(ok, stderr)`` where ``ok`` is ``True`` on
+        return code 0.
+    """
     cmd = ["git", "-C", str(framework_root), "checkout", "--", "."]
     try:
         cp = subprocess.run(
@@ -309,6 +329,15 @@ def _resolve_patch_paths(
 
 
 def _read_done_payload(workspace: Path) -> dict[str, Any] | None:
+    """Read and parse ``specialist_done.json`` from a workspace.
+
+    Args:
+        workspace (Path): The specialist task workspace directory.
+
+    Returns:
+        dict[str, Any] | None: The parsed payload, or ``None`` when the
+        file is absent or cannot be parsed.
+    """
     done = workspace / "specialist_done.json"
     if not done.exists():
         return None
@@ -332,6 +361,18 @@ class IntegratePatchExecutor:
         variant_timeout_sec: int = DEFAULT_VARIANT_TIMEOUT_SEC,
         keep_threshold_pct: float = DEFAULT_KEEP_THRESHOLD_PCT,
     ):
+        """Initialize the integrate-patch executor.
+
+        Args:
+            session_dir (Path | str | None): Session output directory;
+                auto-resolved when ``None``.
+            default_config_path (Path | str | None): Fallback benchmark
+                config path, if any.
+            variant_timeout_sec (int): Per-variant benchmark hard timeout.
+                Defaults to :data:`DEFAULT_VARIANT_TIMEOUT_SEC`.
+            keep_threshold_pct (float): Minimum gain to KEEP a patch.
+                Defaults to :data:`DEFAULT_KEEP_THRESHOLD_PCT`.
+        """
         self.session_dir = (
             Path(session_dir) if session_dir else _resolve_session_dir()
         )
@@ -342,6 +383,21 @@ class IntegratePatchExecutor:
         self.keep_threshold_pct = float(keep_threshold_pct)
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Apply a specialist's patches/config changes and benchmark them.
+
+        Resolves the completed specialist's patches and config changes,
+        applies them against the framework source root, benchmarks the
+        result with KEEP/REVERT gating, and reverts on regression.
+
+        Args:
+            ctx: The action runner context carrying the task and params
+                (notably ``specialist_task_id``).
+
+        Returns:
+            dict[str, Any]: The integration result payload (status plus
+            applied/reverted patches and config changes), or a failure
+            dict on error.
+        """
         params = dict(ctx.task.params or {})
         specialist_task_id = str(params.get("specialist_task_id") or "").strip()
         if not specialist_task_id:
@@ -548,6 +604,19 @@ class IntegratePatchExecutor:
                 config_changes_applied=config_changes_applied,
                 specialist_task_id=specialist_task_id,
             )
+        except FrameworkScriptMismatchError as exc:
+            reverted = self._revert_patches(framework_root, applied)
+            return {
+                "status": "reverted",
+                "error_class": "framework_script_mismatch",
+                "error": str(exc),
+                "specialist_task_id": specialist_task_id,
+                "patches_applied": [],
+                "patches_reverted": [str(p) for p in reverted],
+                "config_changes_applied": {},
+                "reason": str(exc),
+                "workspace": str(output_root),
+            }
         except Exception as exc:  # noqa: BLE001
             reverted = self._revert_patches(framework_root, applied)
             return {

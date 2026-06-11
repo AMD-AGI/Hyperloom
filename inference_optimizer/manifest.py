@@ -37,6 +37,11 @@ SCHEMA_VERSION = 3
 
 
 def _utc_now_compact() -> str:
+    """Format the current UTC time as a compact session-id timestamp.
+
+    Returns:
+        str: Timestamp in ``YYYYMMDDTHHMMSSZ`` form.
+    """
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
@@ -51,6 +56,15 @@ _STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
 
 
 def _read_first_line(path: Path) -> str:
+    """Return the first non-empty, stripped line of a file.
+
+    Args:
+        path (Path): File to read.
+
+    Returns:
+        str: First non-blank line stripped of surrounding whitespace, or an
+        empty string when the file is missing, empty, or unreadable.
+    """
     try:
         if not path.exists():
             return ""
@@ -103,13 +117,26 @@ def _detect_stack_fingerprint() -> dict[str, str]:
 
 
 def _git_revision() -> str:
-    """Best-effort short git SHA of the repo containing this package; empty on failure."""
+    """Best-effort short git SHA of the repo containing this package.
+
+    Returns:
+        str: Short HEAD SHA, or an empty string when the package directory is
+        not a git checkout or the lookup fails.
+    """
     here = Path(__file__).resolve().parent
     return _git_revision_at(here)
 
 
 def _git_revision_at(path: Path) -> str:
-    """Best-effort short git SHA at ``path``; empty when not a checkout."""
+    """Best-effort short git SHA at ``path``.
+
+    Args:
+        path (Path): Directory expected to be (within) a git checkout.
+
+    Returns:
+        str: Short HEAD SHA, or an empty string when ``path`` is not a checkout
+        or the git invocation fails.
+    """
     try:
         out = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--short", "HEAD"],
@@ -123,7 +150,15 @@ def _git_revision_at(path: Path) -> str:
 
 
 def _git_remote_at(path: Path) -> str:
-    """Best-effort ``origin`` remote URL at ``path``; empty on failure."""
+    """Best-effort ``origin`` remote URL at ``path``.
+
+    Args:
+        path (Path): Directory expected to be (within) a git checkout.
+
+    Returns:
+        str: ``remote.origin.url`` value, or an empty string when unset or the
+        git invocation fails.
+    """
     try:
         out = subprocess.run(
             ["git", "-C", str(path), "config", "--get", "remote.origin.url"],
@@ -178,9 +213,10 @@ def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
         return
     log.warning(
         "%s=%s is a pod-local path outside %s=%s; runtime artefacts there are "
-        "erased on pod recycle. install.sh writes dependencies under "
-        "%s/runtime by default — point %s back there to persist them.",
-        env_var, raw, _paths.ENV_USER_DATA_PATH, user_data, user_data, env_var,
+        "erased on pod recycle. install.sh now defaults open-source "
+        "dependencies to pod-local storage; set a stable %s or "
+        "HYPERLOOM_OPEN_SOURCE_ROOT only when the checkout must persist.",
+        env_var, raw, _paths.ENV_USER_DATA_PATH, user_data, env_var,
     )
 
 
@@ -189,6 +225,14 @@ def _describe_dep(env_var: str) -> dict[str, str]:
     pointed at by ``$env_var``. All fields default to empty string when
     the env var is unset, the directory is missing, or git is unhappy —
     we never raise out of here.
+
+    Args:
+        env_var (str): Name of the environment variable holding the dependency
+            checkout path.
+
+    Returns:
+        dict[str, str]: Mapping with ``path``, ``commit``, and ``remote`` keys;
+        any unresolved field is an empty string.
     """
     raw = (os.environ.get(env_var) or "").strip()
     if not raw:
@@ -250,7 +294,16 @@ def _detect_image() -> str | None:
 
 
 def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
-    """Mirror cli._run_optimize's objective derivation, without importing it."""
+    """Mirror cli._run_optimize's objective derivation, without importing it.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args; checked for
+            ``target_gain``, ``target_tput``, and ``target_baseline_dir``.
+
+    Returns:
+        dict[str, Any]: Objective mapping with ``kind`` (one of ``gain_pct``,
+        ``tput``, ``baseline``, ``time_only``) and an associated ``value``.
+    """
     if getattr(args, "target_gain", None):
         return {"kind": "gain_pct", "value": float(args.target_gain)}
     if getattr(args, "target_tput", None):
@@ -273,6 +326,22 @@ def build_manifest(
     args: argparse.Namespace | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
+    """Assemble the schema-v3 session manifest dictionary.
+
+    Merges environment variables and (optional) parsed CLI args into the
+    canonical resume tag, including workload, objective, dependency
+    provenance, stack fingerprint, image, and warm-replay settings.
+
+    Args:
+        session_dir (Path): Session directory the manifest describes.
+        args (argparse.Namespace | None): Parsed CLI args overriding env-based
+            defaults; ``None`` uses environment/defaults only.
+        session_id (str | None): Explicit session-id label; derived from the
+            model name when ``None``.
+
+    Returns:
+        dict[str, Any]: JSON-serializable manifest mapping.
+    """
     model_path = ""
     model_name = ""
     framework = os.environ.get("FRAMEWORK", "")

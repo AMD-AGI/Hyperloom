@@ -19,8 +19,6 @@ from inference_optimizer.cli import (
 )
 from inference_optimizer.recipe_kb import (
     LocalRecipeStore,
-    RecipeKB,
-    RemoteRecipeClient,
     cid_to_path_components,
     recipe_canonical_id,
 )

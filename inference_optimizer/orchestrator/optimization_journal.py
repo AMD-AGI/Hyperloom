@@ -41,6 +41,22 @@ KIND_PROFILE:      str = "profile"
 KIND_OTHER:        str = "other"
 
 
+def _optional_int(value: Any) -> int | None:
+    """Coerce a value to int, or ``None`` on absence / bad type.
+
+    Used to load the optional ``tick`` field tolerantly: an old journal
+    written before D1 has no ``tick`` key, and a corrupted value must not
+    crash :meth:`JournalEntry.from_dict` (the journal is a best-effort
+    audit artifact loaded on resume).
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class JournalEntry:
     """One KEEP / REVERT / no_promote decision (``None`` distinguishes "not measured" from "measured zero")."""
@@ -57,14 +73,34 @@ class JournalEntry:
     task_id:           str = ""
     variant_name:      str = ""
     ts:                str = ""
+    # Full-trace D1: orchestrator tick at the moment of decision. Lets the
+    # decision-trace collector join this KEEP/REVERT row to the LLM calls
+    # recorded for the same tick. Defaults to ``None`` (not 0) so older
+    # journals — and call sites that don't know the tick — are stripped by
+    # ``to_dict`` and remain indistinguishable from "tick unknown" rather
+    # than masquerading as the pre-first-increment tick 0.
+    tick:              int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Strip ``None`` values so the file stays compact and JSON-diffable."""
+        """Strip ``None`` values so the file stays compact and JSON-diffable.
+
+        Returns:
+            dict[str, Any]: The entry as a dict with ``None``/empty fields
+                removed.
+        """
         raw = dataclasses.asdict(self)
         return {k: v for k, v in raw.items() if v is not None and v != ""}
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> JournalEntry:
+        """Reconstruct a :class:`JournalEntry` from a plain dict.
+
+        Args:
+            d (dict[str, Any]): The serialised entry.
+
+        Returns:
+            JournalEntry: The reconstructed entry with coerced field types.
+        """
         return cls(
             phase=str(d.get("phase", "")),
             iter=int(d.get("iter", 0)),
@@ -78,6 +114,7 @@ class JournalEntry:
             task_id=str(d.get("task_id", "")),
             variant_name=str(d.get("variant_name", "")),
             ts=str(d.get("ts", "")),
+            tick=_optional_int(d.get("tick")),
         )
 
     def dedupe_key(self) -> tuple[str, int, str, str, str, str, str]:
@@ -149,6 +186,14 @@ class Journal:
 
     @staticmethod
     def _journal_path(session_dir: Path) -> Path:
+        """Resolve (and create) the journal file path under a session dir.
+
+        Args:
+            session_dir (Path): The session directory root.
+
+        Returns:
+            Path: The path to the journal file inside ``reports/``.
+        """
         reports = Path(session_dir) / "reports"
         reports.mkdir(parents=True, exist_ok=True)
         return reports / JOURNAL_FILENAME
@@ -201,6 +246,11 @@ class Journal:
             log.warning("optimization_journal flush failed (%s): %s", self.path, exc)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the whole journal (header + entries) to a dict.
+
+        Returns:
+            dict[str, Any]: The journal as a JSON-serialisable dict.
+        """
         out: dict[str, Any] = {
             "session_id":          self.session_id,
             "model":               self.model,
@@ -216,7 +266,11 @@ class Journal:
 
 # helpers
 def _now_iso() -> str:
-    """ISO-8601 UTC timestamp (seconds precision) used for entry ``ts``."""
+    """ISO-8601 UTC timestamp (seconds precision) used for entry ``ts``.
+
+    Returns:
+        str: The current UTC timestamp with a ``Z`` suffix.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
         "+00:00", "Z",
     )

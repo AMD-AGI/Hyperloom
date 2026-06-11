@@ -72,6 +72,8 @@ from .resource_lock import (
 from .shared_state import SharedState
 from .sub_agent_runner import SubAgentResult, SubAgentRunner
 from .task_registry import Task, TaskRegistry
+from .trace.conversation_trace import ConversationRecord, append_conversation
+from .trace.llm_trace import LLMCallRecord, append_llm_call
 from .action_executors.benchmark_result import is_valid_measurement
 from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     _BASELINE_FINGERPRINT_KEYS,
@@ -202,6 +204,37 @@ class PendingProposal:
     kb_edge_ids: dict[str, str] = field(default_factory=dict)
 
 
+# #266 lifecycle: path-like keys worth surfacing from a kernel handler
+# payload (inputs) or result (outputs) so operators can see where a step's
+# artifacts went without enumerating every per-handler return shape.
+_LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
+    "trace_input", "trace_dir", "candidates_path", "analysis_md_path",
+    "kernel_candidates", "best_artifact_path", "patch_path", "target_file",
+    "workspace", "workspace_path", "out_dir", "output_dir", "run_dir",
+    "report_path", "json_path", "md_path", "tracelens_agent_transcript",
+    "tracelens_agent_report",
+    # TraceLens analysis outputs surfaced by trace_analyze_handler — the
+    # analysis.md report, its alias, the per-run audit summary, the roofline
+    # sidecar and the CLI log — so operators can reach them from lifecycle END.
+    "trace_report_path", "analysis_report_path", "tracelens_summary_path",
+    "kernel_roofline_path", "cli_log_path",
+)
+
+
+def _lifecycle_paths(payload: Any) -> dict[str, str]:
+    """Extract present, non-empty path-like fields from a kernel handler
+    payload or result dict (#266). Best-effort: a non-dict argument yields
+    an empty mapping so callers never have to guard the type."""
+    if not isinstance(payload, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key in _LIFECYCLE_PATH_KEYS:
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            out[key] = val
+    return out
+
+
 @dataclass
 class CoordinatorState:
     """In-memory ephemeral state for the reactor + dispatcher."""
@@ -230,6 +263,56 @@ class Coordinator:
         warm_replay_min_confidence: float = 0.7,
         warm_replay_min_reproduce_pct: float = 0.8,
     ):
+        """Construct the single per-session Coordinator and wire its plane.
+
+        Builds the persistence layer (SQLite connection, MessageBus,
+        ResourceLockManager, TaskRegistry, CursorStore), the PolicyGate,
+        the phase machine, and the per-agent reactor bookkeeping, then
+        detects whether this session is a resume and anchors the Cortex KB.
+
+        Args:
+            session_dir (Path): Directory holding this session's state.json,
+                SQLite DB and artifacts.
+            backends (dict[str, Backend]): Map of agent-role name to its
+                Backend; every role in ``role_registry`` must be present.
+            role_registry (dict[str, AgentRole] | None): Agent-role registry;
+                ``None`` uses :func:`default_role_registry`.
+            sub_agent_runner (SubAgentRunner | None): Runner for delegated
+                sub-agent tasks; ``None`` constructs a default one.
+            bus_class (type[MessageBus]): MessageBus class to instantiate.
+            compare_against_gpu (str | None): Reference GPU id for target
+                analysis priors; ``None``/blank disables external comparison.
+            model_class (str | None): Model-class override seeded into
+                SharedState when none is already persisted.
+            cortex_kb (RecipeKB | None): Recipe-snapshot KB dispatcher; ``None``
+                makes the fact-write hooks no-ops.
+            phase_budget_pct (dict[str, float] | None): Per-phase wall-clock
+                budget percentages; ``None`` uses library defaults.
+            knowledge_plane (Any): Optional KnowledgePlane facade used to
+                pre-warm specialist knowledge before enqueue.
+            warm_replay_enabled (bool): Whether warm-recipe replay may
+                auto-apply the KB best_config.
+            warm_replay_min_confidence (float): Minimum KB confidence required
+                to fire a warm replay.
+            warm_replay_min_reproduce_pct (float): Minimum reproduce fraction
+                required to fire a warm replay.
+
+        Raises:
+            ValueError: If a role in ``role_registry`` has no matching backend.
+
+        Attributes:
+            session_dir (Path): Session working directory.
+            backends (dict[str, Backend]): Wired per-role backends.
+            db (SqliteConnection): Session persistence connection.
+            bus (MessageBus): Message routing bus.
+            locks (ResourceLockManager): Lane/resource lease manager.
+            tasks (TaskRegistry): Delegated-task registry.
+            cursors (CursorStore): Per-agent message cursors.
+            sub (SubAgentRunner): Sub-agent task runner.
+            shared_state (SharedState): Persistent session state (state.json).
+            policy (PolicyGate): Intent-validation choke-point.
+            state (CoordinatorState): In-memory reactor/dispatcher state.
+        """
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
         # Recipe-snapshot KB dispatcher; ``None`` makes fact-write hooks no-ops.
@@ -285,6 +368,13 @@ class Coordinator:
 
         # Persistent session state (state.json) — load existing for resume.
         self.shared_state = SharedState.load_or_init(self.session_dir)
+        # #266 lifecycle save debounce: terminal events (END/ERROR) flush
+        # immediately so operators see produced artifacts promptly; bursty
+        # non-terminal markers (START/ENTER) coalesce within a short window to
+        # avoid amplifying state.json writes on long / multi-kernel sessions
+        # over NFS. ``_lifecycle_last_save`` is a monotonic timestamp.
+        self._lifecycle_last_save: float = 0.0
+        self._lifecycle_save_min_interval_s: float = 2.0
         # Thread live SharedState into the runner (constructed earlier) so
         # executors get it via ctx.extra; durable backstop for per-dispatch
         # ``base_tput`` injection.
@@ -864,6 +954,13 @@ class Coordinator:
 
     # Lifecycle
     async def stop(self) -> None:
+        """Signal shutdown, cancel reactor tasks, finalize, and close the DB.
+
+        Sets the stop event, cancels and awaits every running reactor task,
+        runs the Cortex T4 safety-net finalize hook (in case the CLOSE phase
+        sequencer never ran), then closes the SQLite connection. Exceptions
+        raised by reactor tasks during teardown are logged, not propagated.
+        """
         self._stop.set()
         for t in self._tasks_running:
             if not t.done():
@@ -1029,6 +1126,22 @@ class Coordinator:
             reason=reason,
             evidence=evidence,
         )
+        # #266: mirror the phase boundary into the operator-facing
+        # lifecycle log so a launcher poll surfaces "entered <phase>" in
+        # chat (with the human-friendly label) alongside the step-level
+        # events. Uses the ENTER status (not START): a phase boundary is a
+        # point-in-time marker, not a paired START/END interval, so it must
+        # not read as "still running" forever. Best-effort; must never roll
+        # back the transition.
+        try:
+            state.record_lifecycle_event(
+                step=target,
+                status=_phase_state.LIFECYCLE_STATUS_ENTER,
+                phase=target,
+                detail=f"reason={reason}" if reason else "",
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.debug("Coordinator: lifecycle phase emit failed", exc_info=True)
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
@@ -1384,6 +1497,11 @@ class Coordinator:
         urls: list[str] = []
 
         def _add(u: str) -> None:
+            """Append a trimmed URL to ``urls`` if non-empty and not already present.
+
+            Args:
+                u (str): A candidate repo URL.
+            """
             u = (u or "").strip()
             if u and u not in urls:
                 urls.append(u)
@@ -1609,7 +1727,18 @@ class Coordinator:
         return True
 
     async def _enqueue_framework_pr_task(self, candidate: dict[str, Any]) -> None:
-        """Enqueue a single ``framework_pr`` task for ``candidate``."""
+        """Enqueue a single ``framework_pr`` task for ``candidate``.
+
+        Builds the task params (candidate, batch id, baseline throughput,
+        framework) and creates an idempotent ``framework_pr`` task holding the
+        server / workspace / benchmark lanes. On enqueue failure, records an
+        ``enqueue_failed`` progress row so the pump skips the candidate next
+        tick instead of spinning.
+
+        Args:
+            candidate (dict[str, Any]): The discovered PR candidate to apply
+                and benchmark.
+        """
         state = self.shared_state
         params = {
             "candidate": candidate,
@@ -1875,7 +2004,18 @@ class Coordinator:
             await self._run_kernel_opt_after_gemm()
 
     def _promote_gemm_tuning_keep(self, result: dict[str, Any]) -> None:
-        """Promote a successful GEMM tuning run into the main gain ledger."""
+        """Promote a successful GEMM tuning run into the main gain ledger.
+
+        Only acts on a successful, ``KEEP``-decision result with a speedup
+        greater than 1.0 and a known baseline. Appends an entry to the
+        optimization stack (deduped on tuned file), updates ``current_best``,
+        and stamps ``cumulative_gain`` / ``cumulative_gain_validated`` since
+        the GEMM benchmark is itself an end-to-end serving measurement.
+
+        Args:
+            result (dict[str, Any]): The GEMM tuning handler result; ignored if
+                not a successful KEEP.
+        """
         if not isinstance(result, dict):
             return
         status = str(result.get("status") or "").strip().lower()
@@ -1941,6 +2081,12 @@ class Coordinator:
         )
 
     def _should_continue_kernel_after_gemm(self) -> bool:
+        """Decide whether to run source-level kernel_opt right after GEMM tuning.
+
+        Returns:
+            bool: ``True`` when the ``continue_kernel_after_gemm`` flag is set
+                and there are untried hot reusable kernels remaining.
+        """
         if not bool(getattr(self.shared_state, "continue_kernel_after_gemm", True)):
             return False
         return bool(self.shared_state.untried_hot_reusable_kernels())
@@ -2470,6 +2616,7 @@ class Coordinator:
                     gain_pct=round(measured_gain, 3),
                     throughput_after=tput,
                     task_id=str(task.task_id if task is not None else ""),
+                    tick=int(state.tick or 0),
                 ))
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("warm-replay journal append failed")
@@ -2532,11 +2679,24 @@ class Coordinator:
             "source": "coordinator_internal",
             "reason": str(reason),
         }
-        cb = state.current_best or {}
-        if isinstance(cb, dict):
-            cb_args = str(cb.get("extra_server_args") or "")
-            if cb_args:
-                params["base_extra_args"] = cb_args
+        if reason != "prelude_initial":
+            cb = state.current_best or {}
+            if isinstance(cb, dict):
+                cb_args = str(cb.get("extra_server_args") or "")
+                if cb_args:
+                    params["base_extra_args"] = cb_args
+        else:
+            # PRELUDE roofline profiles the baseline arm: inject baseline's own
+            # server args (from its materialized yaml), never current_best's,
+            # so a later warm-replay can't swap in compile/fp8 flags that
+            # destabilize profiling and skew the baseline ceiling.
+            try:
+                from .roofline_ceiling import read_baseline_server_args
+                bl_args = read_baseline_server_args(state).strip()
+            except Exception:  # noqa: BLE001 — best-effort; empty falls through
+                bl_args = ""
+            if bl_args:
+                params["base_extra_args"] = bl_args
         last_bl = state.last_baseline or {}
         if isinstance(last_bl, dict):
             bs = str(last_bl.get("benchmark_script") or "").strip()
@@ -2751,6 +2911,15 @@ class Coordinator:
                 sweep_grid = sg
 
         def _coerce_int_list(value: Any) -> list[int] | None:
+            """Coerce a recipe value into a non-empty list of ints.
+
+            Args:
+                value (Any): The raw recipe field (expected: list of ints).
+
+            Returns:
+                list[int] | None: The coerced ints, or ``None`` if ``value`` is
+                    not a non-empty all-int list.
+            """
             if not isinstance(value, list) or not value:
                 return None
             out: list[int] = []
@@ -2762,6 +2931,17 @@ class Coordinator:
             return out if out else None
 
         def _coerce_isl_osl_list(value: Any) -> list[str] | None:
+            """Coerce a recipe value into a list of ``"<ISL>:<OSL>"`` strings.
+
+            Accepts either ``"<ISL>:<OSL>"`` strings or ``[isl, osl]`` pairs.
+
+            Args:
+                value (Any): The raw recipe field.
+
+            Returns:
+                list[str] | None: Normalized ISL:OSL strings, or ``None`` if the
+                    value is not a recognisable non-empty list.
+            """
             if not isinstance(value, list) or not value:
                 return None
             out: list[str] = []
@@ -2856,6 +3036,11 @@ class Coordinator:
 
         # Step 1: report
         try:
+            self._emit_lifecycle(
+                step="report",
+                status="START",
+                detail="close_phase_entry",
+            )
             report_task = await self._enqueue_internal_report_task(
                 reason="close_phase_entry",
             )
@@ -2866,14 +3051,42 @@ class Coordinator:
                     "report", status="done",
                     task_id=report_task.task_id,
                 )
+                # #266: surface the final report location in the lifecycle
+                # log. report_executor writes final.{json,md} under
+                # reports_dir(session_dir); advertise whichever exist.
+                from ..session_paths import reports_dir as _reports_dir
+                _rd = _reports_dir(self.session_dir)
+                _artifacts = {
+                    "json_path": str(_rd / "final.json")
+                    if (_rd / "final.json").exists() else "",
+                    "md_path": str(_rd / "final.md")
+                    if (_rd / "final.md").exists() else "",
+                }
+                self._emit_lifecycle(
+                    step="report",
+                    status="END",
+                    artifacts=_artifacts,
+                    detail="close_phase_entry",
+                )
             else:
+                detail = f"task_state={terminal_state!r}"
+                self._emit_lifecycle(
+                    step="report",
+                    status="ERROR",
+                    detail=detail,
+                )
                 await self._record_close_step(
                     "report", status="failed",
                     task_id=report_task.task_id,
-                    detail=f"task_state={terminal_state!r}",
+                    detail=detail,
                 )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.exception("CLOSE step 1 (report) failed")
+            self._emit_lifecycle(
+                step="report",
+                status="ERROR",
+                detail=repr(exc)[:240],
+            )
             await self._record_close_step(
                 "report", status="failed", detail=repr(exc)[:240],
             )
@@ -2903,7 +3116,62 @@ class Coordinator:
                 detail=repr(exc)[:240],
             )
 
-        # Step 4: fact finalize (Cortex commit) — update_recipe + finalise local journal.
+        # ---------------- Step 2.5: Langfuse flush + receipt splice --------
+        # MUST run before the artifact package (step 2.6): flush_session
+        # reconciles out-of-process children + flips the receipt to final
+        # counts, and patch_breakdown_langfuse splices that post-flush
+        # receipt back into session_breakdown.json. If this ran AFTER
+        # packaging, the bundled SBD would carry counts_final=false and the
+        # final langfuse_receipt.json would be missing from the bundle.
+        # No-op unless live push is enabled; idempotent (a later cli.finally
+        # flush only re-writes the receipt). Best-effort.
+        try:
+            from .trace.langfuse_emitter import flush_session
+            flush_session(self.session_dir)
+            from ..breakdown import patch_breakdown_langfuse
+            patch_breakdown_langfuse(self.session_dir)
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.debug("CLOSE step 2.5 (langfuse flush) failed", exc_info=True)
+            await self._record_close_step(
+                "langfuse_flush", status="failed", detail=repr(exc)[:240],
+            )
+
+        # ---------------- Step 2.6: artifact package -> /workspace -------
+        # Bundle the curated result/report/analysis files (incl. the
+        # session_breakdown just written in step 2) into a single zip
+        # placed under ``/workspace`` so the Claw sandbox sync ships it
+        # to object storage even when ``$USER_DATA_PATH`` points at a
+        # wekafs path outside ``/workspace`` (the common production case).
+        # Best-effort: failures are recorded but never abort the close
+        # sequence. The zip carries its own PACKAGE_MANIFEST log of what
+        # went in / what was missing.
+        try:
+            from ..breakdown import package_session_artifacts
+            pkg_path = package_session_artifacts(
+                self.session_dir,
+                session_id=str(getattr(self.shared_state, "session_id", "") or ""),
+            )
+            if pkg_path is not None:
+                await self._record_close_step(
+                    "artifact_package", status="done", detail=str(pkg_path),
+                )
+            else:
+                await self._record_close_step(
+                    "artifact_package", status="skipped",
+                    detail="no artifacts matched or dest unwritable",
+                )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.exception("CLOSE step 2.6 (artifact_package) failed")
+            await self._record_close_step(
+                "artifact_package", status="failed", detail=repr(exc)[:240],
+            )
+
+        # ---------------- Step 4: fact finalize (Cortex commit) ----------
+        # The canonical step-4 "Cortex session commit": writes
+        # update_recipe + finalises the local journal (final_throughput /
+        # total_gain_pct). Recorded as the ``fact_finalize`` close_step.
+        # Ordered before the retired NDJSON-drain no-op (step 3) so the
+        # recipe write is part of the same flush.
         try:
             self.cortex_finalize_recipe_and_journal()
             await self._record_close_step("fact_finalize", status="done")
@@ -3191,6 +3459,14 @@ class Coordinator:
         Polling interval is 100ms — small relative to typical report /
         session_breakdown wall time (5-30s); large enough to not
         thrash sqlite under contention.
+
+        Args:
+            task_id (str): The task to wait on.
+            timeout_sec (float): Maximum wall-clock seconds to poll.
+
+        Returns:
+            str | None: The terminal task state, or ``None`` on timeout or if
+                the task is not found.
         """
         from .task_registry import TaskNotFound
 
@@ -3550,7 +3826,12 @@ class Coordinator:
         return closing_deadline
 
     async def _closing_report_terminal(self) -> bool:
-        """True when the closing-phase report task reached a terminal state."""
+        """Report whether the closing-phase report task has finished.
+
+        Returns:
+            bool: ``True`` when the report task reached a terminal state (or is
+                missing); ``False`` while it is still queued or running.
+        """
         task_id = self.shared_state.closing_report_task_id
         if not task_id:
             return False
@@ -3566,6 +3847,17 @@ class Coordinator:
 
     # Reactor
     async def _reactor_pass(self, agent_name: str) -> None:
+        """Run one reactor turn for ``agent_name`` and route its intents.
+
+        Composes the prompt + system prompt, invokes the agent's backend, and
+        dispatches every emitted intent through :meth:`_handle_intent`. Backend
+        errors, missing intents, and unexpected exceptions are recorded as
+        structured observations so a single bad turn never stops the run;
+        repeated crashes still bump ``crash_count`` toward the emergency stop.
+
+        Args:
+            agent_name (str): The agent role to run this pass for.
+        """
         backend = self.backends[agent_name]
         prompt = await self._compose_prompt(agent_name)
         # Accumulate orchestration prompt size as a proxy for conversation growth (plan Step 4).
@@ -3614,11 +3906,102 @@ class Coordinator:
         if self._backend_error_streak.get(agent_name):
             self._backend_error_streak[agent_name] = 0
             self._backend_error_alarm_armed[agent_name] = True
+        # Full-trace A1: record this reactor turn's token spend on the
+        # unified ledger. One call site covers every in-process reactor
+        # role (orchestration / kernel) whose backend reports usage on
+        # metadata (ClaudeBackend + CodexBackend). Best-effort: a trace
+        # failure must never affect intent routing.
+        self._trace_reactor_llm_call(agent_name, result)
+        # Full-trace (conversations): persist the full, redacted
+        # prompt+response for this reactor turn. Separate file from the
+        # token ledger; same best-effort posture.
+        self._record_reactor_conversation(agent_name, result)
         # Completed orchestration turn means SEED delivered; flip flag so later turns send DELTA (plan Step 3).
         if agent_name == "orchestration":
             self._orchestration_seeded = True
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
+
+    def _trace_reactor_llm_call(
+        self, agent_name: str, result: BackendTurnResult,
+    ) -> None:
+        """Append one ``llm_calls.jsonl`` row for a reactor turn.
+
+        The reactor role name (``orchestration`` / ``kernel`` / ``critic`` /
+        ``robustness``) doubles as both the trace ``component`` and
+        ``role``. Only rows carrying real token counters are written, so
+        subprocess-backed reactors (critic / robustness) that don't report
+        usage here don't pollute the ledger with empty rows — their token
+        spend is captured by the dedicated agent collectors instead.
+
+        Wrapped in a broad ``try`` so any unexpected error in trace
+        assembly degrades to a logged warning rather than breaking the
+        tick loop.
+        """
+        try:
+            metadata = result.metadata or {}
+            has_tokens = any(
+                metadata.get(k) is not None
+                for k in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                )
+            )
+            if not has_tokens:
+                return
+            record = LLMCallRecord.from_metadata(
+                session_id=self.session_dir.name,
+                component=agent_name,
+                role=agent_name,
+                metadata=metadata,
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break the loop
+            log.debug(
+                "full-trace: reactor llm_call append failed for %s",
+                agent_name, exc_info=True,
+            )
+
+    def _record_reactor_conversation(
+        self, agent_name: str, result: BackendTurnResult,
+    ) -> None:
+        """Append one ``conversations.jsonl`` row for a reactor turn.
+
+        Persists the full (redacted) prompt + completion the backend put on
+        ``metadata`` (``prompt`` / ``response``). Only rows that actually
+        carry conversation text are written, so subprocess-backed reactors
+        (critic / robustness) that don't surface text here don't emit empty
+        rows — their conversation is captured by their own workdir artefacts.
+
+        Best-effort: any failure degrades to a logged warning rather than
+        breaking the tick loop.
+        """
+        try:
+            metadata = result.metadata or {}
+            prompt = metadata.get("prompt")
+            response = metadata.get("response")
+            if not prompt and not response:
+                return
+            record = ConversationRecord(
+                session_id=self.session_dir.name,
+                component=agent_name,
+                role=agent_name,
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+                model=metadata.get("model"),
+                prompt=prompt or "",
+                response=response or "",
+            )
+            append_conversation(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break the loop
+            log.debug(
+                "full-trace: reactor conversation append failed for %s",
+                agent_name, exc_info=True,
+            )
 
     async def _track_backend_error_streak(
         self, agent_name: str, exc: BackendError,
@@ -4024,12 +4407,25 @@ class Coordinator:
 
     @staticmethod
     def _skip_gemm_tuning() -> bool:
+        """Report whether GEMM tuning is disabled via the env escape hatch.
+
+        Returns:
+            bool: ``True`` when ``INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING`` is set.
+        """
         return os.environ.get(
             "INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "",
         ).strip().lower() in {"1", "true", "yes", "on"}
 
     def _gemm_tuning_required_before_kernel_opt(self) -> bool:
-        """Return True when FP8 SGLang GEMM tuning should run first."""
+        """Decide whether FP8 SGLang GEMM tuning must run before kernel_opt.
+
+        Only required for ``precision='fp8'`` + ``framework='sglang'`` sessions
+        whose ``last_gemm_tuning`` has not yet reached a terminal status.
+
+        Returns:
+            bool: ``True`` when GEMM tuning should run before source-level
+                ``kernel_opt``.
+        """
         if self._skip_gemm_tuning():
             return False
         ss = self.shared_state
@@ -4051,6 +4447,17 @@ class Coordinator:
 
     # Intent handling
     async def _handle_intent(self, source: str, intent: Intent) -> None:
+        """Validate an emitted intent through PolicyGate, then route it.
+
+        Runs the intent through :meth:`PolicyGate.validate_intent`; a
+        :class:`PolicyDenied` is recorded and the intent dropped. Valid intents
+        are dispatched to the matching ``_handle_*`` method by type, and the
+        agent's message cursor is advanced to the latest sequence afterward.
+
+        Args:
+            source (str): The agent that emitted the intent.
+            intent (Intent): The parsed intent to validate and route.
+        """
         try:
             self.policy.validate_intent(source, intent)
         except PolicyDenied as denied:
@@ -4119,6 +4526,18 @@ class Coordinator:
 
     # PROPOSE_ACTION + REVIEW_VERDICT
     async def _handle_propose_action(self, source: str, intent: Intent) -> None:
+        """Gate a proposed action and enqueue it for Critic Review.
+
+        Drops proposals for pruned families, applies the pending-roofline and
+        execution-order denials, then publishes a ``proposal`` message and
+        registers a :class:`PendingProposal` so the Critic gate (§18) can later
+        return a verdict.
+
+        Args:
+            source (str): The agent proposing the action.
+            intent (Intent): The PROPOSE_ACTION intent; ``payload`` carries
+                ``action_name`` and optional ``params`` / ``predicted_gain_pct``.
+        """
         action_name = intent.payload["action_name"]
         # Pruned families are advisory: proposal still queues, but the inbox carries an advisory note.
         if self.shared_state.is_pruned(action_name):
@@ -4541,6 +4960,18 @@ class Coordinator:
 
     # DELEGATE
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
+        """Validate and enqueue a delegated action as a TaskRegistry task.
+
+        Drops pruned families and execution-order violations, re-routes
+        ``explore`` grids through the Critic-review path, and otherwise
+        materialises the delegated action (specialist, dynamic action, etc.)
+        into a task with the appropriate lanes, tools and warmed params.
+
+        Args:
+            source (str): The agent issuing the delegation.
+            intent (Intent): The DELEGATE intent; ``payload`` carries
+                ``action_name`` and optional ``params``.
+        """
         action_name = intent.payload["action_name"]
         if self.shared_state.is_pruned(action_name):
             await self._record_observation(
@@ -5804,7 +6235,62 @@ class Coordinator:
         return entry
 
     # REQUEST / RESPONSE (Plan A)
+    # ------------------------------------------------------------------
+    def _emit_lifecycle(
+        self,
+        *,
+        step: str,
+        status: str,
+        artifacts: dict[str, str] | None = None,
+        detail: str = "",
+        duration_s: float | None = None,
+    ) -> None:
+        """Record + persist one operator-facing lifecycle event (#266).
+
+        Best-effort by design: operator-facing logging must never break the
+        orchestration loop, so any failure is swallowed at debug level.
+        """
+        try:
+            self.shared_state.record_lifecycle_event(
+                step=step,
+                status=status,
+                artifacts=artifacts,
+                detail=detail,
+                duration_s=duration_s,
+            )
+            # Terminal events (END/ERROR) carry the produced artifact paths an
+            # operator is waiting on — always flush them. Non-terminal markers
+            # (START / phase ENTER) are debounced: skip the write if we flushed
+            # within the last ``_lifecycle_save_min_interval_s`` seconds, since
+            # the next terminal event (or a later marker past the window) will
+            # persist the coalesced tail anyway.
+            terminal = status in ("END", "ERROR")
+            now = time.monotonic()
+            if terminal or (
+                now - self._lifecycle_last_save
+                >= self._lifecycle_save_min_interval_s
+            ):
+                self.shared_state.save(self.session_dir)
+                self._lifecycle_last_save = now
+        except Exception:  # noqa: BLE001 — defensive
+            log.debug(
+                "Coordinator: lifecycle emit failed (step=%s status=%s)",
+                step, status, exc_info=True,
+            )
+
     async def _handle_request(self, source: str, intent: Intent) -> None:
+        """Route a REQUEST intent to its target agent (Plan A: → kernel).
+
+        Applies the kernel-request execution-order gate, records the request on
+        the bus for the target reactor / replay, and auto-rejects requests whose
+        target agent is not in the role registry (e.g. ``--no-kernel``) so the
+        requester never hangs.
+
+        Args:
+            source (str): The agent issuing the request.
+            intent (Intent): The REQUEST intent; ``payload`` carries
+                ``target_agent`` and ``kind``.
+        """
         target_agent = intent.payload["target_agent"]
         kind = intent.payload["kind"]
         denied = self._sequence_denial_for_request(target_agent, kind)
@@ -5859,6 +6345,17 @@ class Coordinator:
                 if cached_result is not None:
                     result = cached_result
                     cache_hit_source = "shared_state_cache"
+                    # #266: a cache hit produces a response but never runs the
+                    # handler, so emit a single END (no paired START). Without
+                    # this the lifecycle log would show no record at all for a
+                    # cache-served step, leaving an operator unsure whether it
+                    # ran. detail=cache_hit marks it as served-from-cache.
+                    self._emit_lifecycle(
+                        step=kind,
+                        status="END",
+                        artifacts=_lifecycle_paths(result),
+                        detail="cache_hit",
+                    )
                 else:
                     rejected = (
                         self.shared_state.find_rejected_kernel_patch(merged_payload)
@@ -5880,6 +6377,16 @@ class Coordinator:
                             "reason": rejected.get("reason"),
                         }
                         cache_hit_source = "shared_state_kernel_rejection"
+                        # #266: a short-circuited integrate (patch already
+                        # exhausted) also never runs the handler; emit a lone
+                        # END so the log records the step was resolved as a
+                        # rejection rather than silently missing.
+                        self._emit_lifecycle(
+                            step=kind,
+                            status="END",
+                            artifacts=_lifecycle_paths(result),
+                            detail="rejected",
+                        )
                     else:
                         # Inject base_tput from current_best.tput when an integrate request omits it (else 2nd/3rd multi-KEEP integrate fails base_tput > 0); operator value wins.
                         if (
@@ -5900,6 +6407,19 @@ class Coordinator:
                             handler_kwargs["record_partial"] = (
                                 self._record_kernel_opt_partial
                             )
+                        # #266: bracket the programmatic kernel step with
+                        # START / END lifecycle events so operators see the
+                        # step ran, how long it took, and where its outputs
+                        # landed. ``kind`` is the machine step name
+                        # (trace_analyze / run_optimization / integrate /
+                        # run_gemm_tuning); the human label is resolved by
+                        # SharedState from LIFECYCLE_STEP_LABELS.
+                        _lc_t0 = time.monotonic()
+                        self._emit_lifecycle(
+                            step=kind,
+                            status="START",
+                            artifacts=_lifecycle_paths(merged_payload),
+                        )
                         try:
                             result = await handler(
                                 merged_payload,
@@ -5915,6 +6435,27 @@ class Coordinator:
                                 "error_class": "handler_exception",
                                 "error": repr(exc),
                             }
+                        _lc_status = (
+                            "ERROR"
+                            if str(result.get("status", "")).lower()
+                            in ("failed", "error")
+                            else "END"
+                        )
+                        _lc_detail = " ".join(
+                            str(p) for p in (
+                                result.get("decision"),
+                                result.get("status"),
+                                f"kernel={result.get('kernel_id')}"
+                                if result.get("kernel_id") else "",
+                            ) if p
+                        )
+                        self._emit_lifecycle(
+                            step=kind,
+                            status=_lc_status,
+                            artifacts=_lifecycle_paths(result),
+                            detail=_lc_detail,
+                            duration_s=time.monotonic() - _lc_t0,
+                        )
                 await self.bus.append_and_seq(Message.new(
                     "kernel", source, "response",
                     {
@@ -5992,6 +6533,16 @@ class Coordinator:
         }
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
+        """Route a RESPONSE intent back to the original requester.
+
+        Looks up the request message referenced by ``in_reply_to`` to address
+        the response, then publishes it on the bus.
+
+        Args:
+            source (str): The agent emitting the response.
+            intent (Intent): The RESPONSE intent; ``payload`` carries
+                ``in_reply_to``.
+        """
         in_reply_to = intent.payload["in_reply_to"]
         # Locate the original requester so we can address the response.
         original = await self.bus.lookup_by_id(in_reply_to)
@@ -6003,6 +6554,16 @@ class Coordinator:
 
     # Robustness scheduling-police
     async def _handle_kill_task(self, source: str, intent: Intent) -> None:
+        """Cancel a queued/running task in response to a kill_task intent.
+
+        Records an observation for unknown task ids, transitions a
+        queued/running task to ``cancelled``, and broadcasts a ``kill`` event.
+
+        Args:
+            source (str): The agent (typically robustness) issuing the kill.
+            intent (Intent): The KILL_TASK intent; ``payload`` carries
+                ``task_id`` and optional ``reason``.
+        """
         task_id = intent.payload["task_id"]
         try:
             task = await self.tasks.get(task_id)
@@ -6023,6 +6584,16 @@ class Coordinator:
         ))
 
     async def _handle_prune_branch(self, source: str, intent: Intent) -> None:
+        """Prune an action family and cancel its in-flight tasks.
+
+        Adds the family to the persistent pruned set, cancels any tasks in that
+        family, and broadcasts a ``prune_branch`` event.
+
+        Args:
+            source (str): The agent issuing the prune.
+            intent (Intent): The PRUNE_BRANCH intent; ``payload`` carries
+                ``family`` and optional ``reason``.
+        """
         family = intent.payload["family"]
         if self.shared_state.add_pruned_family(family):
             self.shared_state.save(self.session_dir)
@@ -6097,6 +6668,16 @@ class Coordinator:
 
     # SEND_MESSAGE / ALERT / UPDATE_STATE — minimal persistence
     async def _handle_send_message(self, source: str, intent: Intent) -> None:
+        """Publish a free-form message onto the bus.
+
+        Soft-degrades an unknown topic to ``observation`` per DESIGN §13.2 and
+        routes to the requested recipient (defaulting to broadcast).
+
+        Args:
+            source (str): The sending agent.
+            intent (Intent): The SEND_MESSAGE intent; ``payload`` may carry
+                ``topic`` / ``to`` plus arbitrary message fields.
+        """
         topic = intent.payload.get("topic", "observation")
         if topic not in __import__("inference_optimizer.orchestrator.message_bus",
                                     fromlist=["TOPIC_ALLOWLIST"]).TOPIC_ALLOWLIST:
@@ -6108,12 +6689,33 @@ class Coordinator:
         ))
 
     async def _handle_alert(self, source: str, intent: Intent) -> None:
+        """Broadcast an alert message, prioritized by severity.
+
+        High-severity alerts are published at priority 0; everything else at
+        priority 1.
+
+        Args:
+            source (str): The alerting agent.
+            intent (Intent): The ALERT intent; ``payload`` may carry
+                ``severity`` plus alert detail.
+        """
         prio = 0 if intent.payload.get("severity") == "high" else 1
         await self.bus.append_and_seq(Message.new(
             source, "*", "alert", dict(intent.payload), priority=prio,
         ))
 
     async def _handle_update_state(self, source: str, intent: Intent) -> None:
+        """Apply agent-requested SharedState changes and report the result.
+
+        Applies the requested changes (core fields disallowed), persists when
+        anything changed, and broadcasts an observation listing the applied vs
+        rejected keys.
+
+        Args:
+            source (str): The agent requesting the state update.
+            intent (Intent): The UPDATE_STATE intent; ``payload`` carries a
+                ``changes`` dict.
+        """
         # Apply to persistent SharedState (PolicyGate already enforced that
         # the source role can't write CORE_STATE_FIELDS unless allowed).
         applied = self.shared_state.apply_changes(
@@ -6136,6 +6738,19 @@ class Coordinator:
         *,
         action_name: str | None = None,
     ) -> None:
+        """Record a PolicyGate denial and apply escalation side effects.
+
+        Publishes a ``policy_denied`` observation, records the denial streak,
+        auto-prunes the action family at streak >= 5, and sets the
+        ``policy_loop`` stop reason at streak >= 10.
+
+        Args:
+            source (str): The agent whose intent was denied.
+            intent (Intent): The denied intent.
+            denied (PolicyDenied): The denial carrying rule / hint / reason.
+            action_name (str | None): Explicit action name override; falls back
+                to ``intent.payload['action_name']``.
+        """
         await self.bus.append_and_seq(Message.new(
             "coordinator", source, "observation",
             {
@@ -6161,9 +6776,21 @@ class Coordinator:
         )
 
     async def _record_observation(self, source: str, topic: str, payload: dict) -> None:
+        """Append a broadcast observation message to the bus.
+
+        Args:
+            source (str): The agent recording the observation.
+            topic (str): The bus topic to publish under.
+            payload (dict): The observation payload.
+        """
         await self.bus.append_and_seq(Message.new(source, "*", topic, payload))
 
     async def _cursor_advance_to_latest(self, agent_name: str) -> None:
+        """Advance an agent's read cursor to the latest message addressed to it.
+
+        Args:
+            agent_name (str): The agent whose inbox cursor to advance.
+        """
         latest = await self.bus.tail(n=1, to_agent=agent_name)
         if latest:
             top = latest[0]
@@ -6182,6 +6809,17 @@ class Coordinator:
             )
 
     async def _record_integrate_keep(self, result: dict[str, Any]) -> None:
+        """Promote a kernel integrate KEEP into the optimization stack.
+
+        Appends a deduped ``integrate`` entry to the optimization stack, mirrors
+        the gain into the per-entry gain ledger, updates ``current_best`` and
+        ``cumulative_gain`` / ``cumulative_gain_validated``, and fires a
+        watermark roofline when the gain crosses the threshold. No-op when the
+        result lacks a positive ``new_tput``.
+
+        Args:
+            result (dict[str, Any]): The integrate-patch executor result.
+        """
         new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
@@ -6266,6 +6904,21 @@ class Coordinator:
 
     # Dispatcher (pulls queued tasks → SubAgentRunner)
     def _is_promotable_result(self, task_kind: str, result: dict[str, Any]) -> bool:
+        """Decide whether a settled task result should be promoted.
+
+        Per-kind rules: baseline/profile require a valid measurement, sweep
+        requires ``status == "succeeded"``, ``replay_warm_recipe`` always routes
+        through promotion (it owns its own failure bookkeeping), and everything
+        else is promotable unless ``status == "failed"``.
+
+        Args:
+            task_kind (str): The task's kind.
+            result (dict[str, Any]): The task result payload.
+
+        Returns:
+            bool: ``True`` when the result should go through
+                :meth:`_promote_to_shared_state`.
+        """
         if not isinstance(result, dict):
             return False
         if task_kind in ("baseline", "profile"):
@@ -6780,6 +7433,11 @@ class Coordinator:
         return None
 
     def _journal_entry_phase(self) -> str:
+        """Return the current phase label for journal entries.
+
+        Returns:
+            str: The uppercased phase name, or ``"UNKNOWN"`` when unset.
+        """
         return str(getattr(self.shared_state, "phase", "") or "").strip().upper() or "UNKNOWN"
 
     def _record_fact_per_task(
@@ -6823,6 +7481,7 @@ class Coordinator:
             error_class=error_class,
             reason=reason,
             task_id=task.task_id,
+            tick=int(self.shared_state.tick or 0),
         ))
 
         if self.cortex_kb is None:
@@ -6986,6 +7645,7 @@ class Coordinator:
             reason=reason,
             task_id=task.task_id,
             variant_name=variant_name,
+            tick=int(self.shared_state.tick or 0),
         ))
 
         if self.cortex_kb is None:

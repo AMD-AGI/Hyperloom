@@ -39,6 +39,17 @@ def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
 
 
 def _load_manifest(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
+    """Read ``manifest.json`` as a plain dict.
+
+    Args:
+        session_dir (Path): The hyperloom session directory.
+        warnings (list[str]): Accumulator appended to when the file is missing
+            or unparseable.
+
+    Returns:
+        dict[str, Any]: The parsed ``manifest.json`` contents, or an empty
+            dict on any failure.
+    """
     manifest_path = session_dir / "manifest.json"
     if not manifest_path.exists():
         warnings.append(f"manifest.json missing at {manifest_path}")
@@ -213,6 +224,38 @@ def build(
                                         ),
                                         warnings,
                                         default={}))
+    # Full-trace: unified token + decision timeline. Joins the per-call
+    # token ledger (reports/trace/llm_calls.jsonl + ext/*.jsonl) with the
+    # KEEP/REVERT journal + dynamic_action dispatch history. Empty (zeroed
+    # rollup) on sessions that predate the trace subsystem. Also writes
+    # reports/trace/decision_trace.jsonl as a side effect.
+    decision_trace     = _safe_collect("decision_trace",
+                                        lambda: collectors.collect_decision_trace(
+                                            sd, state, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
+    # Promoted, discoverable token-spend rollup. Pure/derived from
+    # decision_trace's already-computed token_rollup (no second ledger read)
+    # plus an action_timeline correlation on task_id. Surfaces the full
+    # session total + by component/phase + decision attribution at top level
+    # so callers don't have to dig into decision_trace.token_rollup.
+    token_usage        = _safe_collect("token_usage",
+                                        lambda: collectors.collect_token_usage(
+                                            decision_trace, phase_timeline, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
+    # Live-Langfuse push receipt (opt-in second sink): enabled? / redacted
+    # config / counts. Prefers the post-flush ``langfuse_receipt.json``;
+    # falls back to a live emitter read. The local trace jsonl is always
+    # written regardless of this section.
+    langfuse           = _safe_collect("langfuse",
+                                        lambda: collectors.collect_langfuse(
+                                            sd, manifest, warnings,
+                                        ),
+                                        warnings,
+                                        default={})
 
     source_files = collectors.collect_source_files(
         sd,
@@ -263,6 +306,20 @@ def build(
         # Optimization-progress curve (spec §2); ``ceiling_available`` False
         # when the watermark roofline pipeline never ran.
         "roofline_progress":   roofline_progress,
+        # Full-trace token + decision timeline (FULL_TRACE_DESIGN §6).
+        # ``decision_trace`` is the per-decision join (phase/tick/decision
+        # + token rollup); ``token_rollup`` is the by_phase / by_component
+        # / session_total summary. New optional section — v1 readers ignore
+        # it. Empty on pre-trace sessions.
+        "decision_trace":      decision_trace,
+        # Promoted token-spend summary (full total + by component/phase +
+        # decision attribution + action_timeline correlation). Derived from
+        # decision_trace.token_rollup; additive, v1 readers ignore it.
+        "token_usage":         token_usage,
+        # Live-Langfuse push receipt; ``enabled`` False (with a
+        # ``disabled_reason``) on the default path. Local jsonl ledger is
+        # always written regardless.
+        "langfuse":            langfuse,
 
         "warnings":            warnings,
         "source_files":        source_files,
@@ -350,8 +407,70 @@ def write_breakdown_json(
     return target
 
 
+def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
+    """Refresh only the ``langfuse`` section of an already-written breakdown.
+
+    ``session_breakdown.json`` is written *before* the session-end
+    ``flush_session`` (the flush depends on ``decision_trace.jsonl``, which the
+    breakdown produces). So the breakdown's first ``langfuse`` section carries
+    the pre-flush, in-process counts (``counts_final=False``). Call this right
+    after ``flush_session`` to splice in the post-flush
+    ``langfuse_receipt.json`` (final counts) without rebuilding the whole file.
+
+    Best-effort and self-skipping: returns False (no-op) when no breakdown or
+    no receipt exists yet, when live push was disabled, or on any error. Never
+    raises -- it must not mask the session's stop_reason at shutdown.
+    """
+    from ..orchestrator.trace.langfuse_emitter import read_receipt
+
+    sd = Path(session_dir).resolve()
+    target = sd / BREAKDOWN_FILENAME
+    try:
+        receipt = read_receipt(sd)
+        if receipt is None or not target.exists():
+            return False
+        receipt["receipt_source"] = "receipt_file"
+        breakdown = json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(breakdown, dict):
+            return False
+        if breakdown.get("langfuse") == receipt:
+            return False  # already current
+        breakdown["langfuse"] = receipt
+        payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{BREAKDOWN_FILENAME}.", suffix=".tmp", dir=str(target.parent),
+        )
+        os.close(fd)
+        tmp_path = Path(tmp)
+        try:
+            tmp_path.write_text(payload, encoding="utf-8")
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
+        log.info("session_breakdown: refreshed langfuse section in %s", target)
+        return True
+    except Exception:  # noqa: BLE001
+        log.debug("session_breakdown: langfuse patch failed (non-fatal)", exc_info=True)
+        return False
+
+
 def _json_default(obj: Any) -> Any:
-    """Stringify objects json.dumps can't handle natively (Path, set, ...)."""
+    """Stringify objects json.dumps can't handle natively (Path, set, ...).
+
+    Args:
+        obj (Any): The object ``json.dumps`` could not serialize.
+
+    Returns:
+        Any: ``str(obj)`` for :class:`~pathlib.Path`, a sorted list for
+            ``set``.
+
+    Raises:
+        TypeError: If ``obj`` is of an unsupported type.
+    """
     if isinstance(obj, Path):
         return str(obj)
     if isinstance(obj, set):
@@ -386,6 +505,16 @@ def write_minimal_final_report(
     breakdown_link = sd / BREAKDOWN_FILENAME
 
     def _fmt_attempt(d: dict[str, Any] | None, label: str) -> str:
+        """Format one ``last_*`` attempt record as a markdown bullet.
+
+        Args:
+            d (dict[str, Any] | None): The attempt record (or ``None``).
+            label (str): The bullet label (e.g. ``"last_sweep"``).
+
+        Returns:
+            str: A markdown bullet line; ``"(none)"`` when the record is
+                empty.
+        """
         if not isinstance(d, dict) or not d:
             return f"- **{label}**: (none)"
         ts = d.get("ts") or "-"
@@ -416,7 +545,7 @@ def write_minimal_final_report(
         sw_line = "(none)"
 
     lines = [
-        f"# Inference Optimizer — emergency final report",
+        "# Inference Optimizer — emergency final report",
         "",
         "> **Auto-generated safety-net.** The CLOSE phase 5-step "
         + "sequencer did not run to completion (process exited before "
@@ -444,7 +573,7 @@ def write_minimal_final_report(
         _fmt_attempt(getattr(state, "last_explore", None), "last_explore"),
         _fmt_attempt(state.last_sweep, "last_sweep"),
         "",
-        f"## Structured detail",
+        "## Structured detail",
         "",
         f"See `{breakdown_link.name}` (sibling of session root) for the "
         f"complete `phase_history` / `critic_robustness` / "

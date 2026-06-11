@@ -48,6 +48,19 @@ def _build_summary_dict(
     *,
     external_baseline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Assemble the machine-readable session summary dict.
+
+    Args:
+        state (SharedState): The session's shared state.
+        ev_counts (dict[str, int]): Event counts keyed by bus topic.
+        highlights (list[dict]): Top-N highlighted decisions/verdicts.
+        external_baseline (dict[str, Any] | None): Optional external
+            baseline comparison block to embed.
+
+    Returns:
+        dict[str, Any]: The summary payload written to ``final.json``,
+        including an optional roofline-comparison block.
+    """
     summary: dict[str, Any] = {
         "session_id":       state.session_id,
         "model_name":       state.model_name,
@@ -82,6 +95,10 @@ def _build_summary_dict(
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
         "event_counts_by_topic": ev_counts,
         "highlights": highlights,
+        # Degraded-mode advisory: surfaces a multimodal-text-fallback run so the
+        # reader knows benchmark numbers reflect the text path only.
+        "degraded_mode": bool(getattr(state, "degraded_mode", False)),
+        "model_warnings": list(getattr(state, "model_warnings", None) or []),
     }
     if external_baseline:
         summary["external_baseline"] = external_baseline
@@ -98,6 +115,15 @@ def _build_summary_dict(
 
 
 def _format_md(summary: dict[str, Any]) -> str:
+    """Render the human-readable Markdown report from a summary dict.
+
+    Args:
+        summary (dict[str, Any]): The summary payload built by
+            :func:`_build_summary_dict`.
+
+    Returns:
+        str: The full Markdown report body.
+    """
     cb = summary.get("current_best") or {}
     cb_tput = cb.get("tput") if isinstance(cb, dict) else None
     lines: list[str] = []
@@ -108,6 +134,11 @@ def _format_md(summary: dict[str, Any]) -> str:
     stop_detail = str(summary.get("stop_detail") or "").strip()
     if stop_detail:
         lines.append(f"- **Stop detail**: {stop_detail}")
+    if summary.get("degraded_mode"):
+        lines.append(
+            "- **⚠ Degraded mode**: ran on the TEXT path only "
+            "(multimodal inputs ignored) — see 'Degraded mode' below"
+        )
     lines.append(f"- **Budget**: {summary['max_minutes']} minutes")
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
     lines.append("")
@@ -171,6 +202,8 @@ def _format_md(summary: dict[str, Any]) -> str:
             )
     lines.append("")
 
+    lines.extend(_format_degraded_mode_section(summary))
+
     # steward verdict transcript.
     lines.extend(_format_steward_section(summary))
 
@@ -183,6 +216,33 @@ def _format_md(summary: dict[str, Any]) -> str:
         lines.extend(_format_external_baseline_section(ext))
 
     return "\n".join(lines)
+
+
+def _format_degraded_mode_section(summary: dict[str, Any]) -> list[str]:
+    """Render the degraded-mode section (multimodal models run on the text path).
+
+    Empty when the run was not degraded. Lists each recorded model warning so
+    the reader knows benchmark numbers reflect the text decoder alone.
+    """
+    warnings = summary.get("model_warnings") or []
+    if not summary.get("degraded_mode") and not warnings:
+        return []
+    lines = ["## Degraded mode", ""]
+    lines.append(
+        "This run executed on the **text path only**. Multimodal (image/audio) "
+        "inputs were ignored, so throughput/accuracy reflect the text decoder "
+        "alone. Pass `--no-allow-mm-text-fallback` to fail-fast instead."
+    )
+    lines.append("")
+    for w in warnings:
+        if not isinstance(w, dict):
+            continue
+        name = w.get("model_name") or "?"
+        arch = w.get("architecture") or "?"
+        signal = w.get("signal") or w.get("kind") or "multimodal signal"
+        lines.append(f"- `{name}` (arch `{arch}`): {signal}")
+    lines.append("")
+    return lines
 
 
 def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
@@ -587,7 +647,17 @@ def _read_ko_summary_totals(path: Path) -> dict[str, int]:
 
 
 def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
-    """Pick the most useful 1-line summary out of an event's payload."""
+    """Pick the most useful 1-line summary out of an event's payload.
+
+    Args:
+        payload (dict): The bus event payload.
+        topic (str): The event topic, which selects the summary format.
+        from_agent (str): The agent that emitted the event.
+
+    Returns:
+        dict[str, Any]: A highlight record with ``topic``, ``from_agent``,
+        a 1-line ``summary``, and the original ``payload``.
+    """
     summary = ""
     if topic == "proposal":
         summary = f"action_name={payload.get('action_name')}"
@@ -619,7 +689,8 @@ def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
 class ReportExecutor:
     """ActionRunner for the ``report`` action.
 
-    Honours ``ctx.task.params``:
+    Honours ``ctx.task.params``::
+
         output_dir:        write final.{md,json} here (default
                            ``$SESSION_DIR/reports``)
         highlight_topics:  list of topics to surface in ``highlights``
@@ -634,6 +705,12 @@ class ReportExecutor:
     )
 
     def __init__(self, *, max_highlights: int = 50):
+        """Initialize the report executor.
+
+        Args:
+            max_highlights (int): Maximum number of highlight events to
+                include in the report. Defaults to ``50``.
+        """
         self.max_highlights = int(max_highlights)
 
     async def __call__(self, ctx) -> dict[str, Any]:
