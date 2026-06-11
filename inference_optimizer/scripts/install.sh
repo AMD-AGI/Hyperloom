@@ -178,6 +178,17 @@ log() { echo "[inference-optimizer] $*"; }
 warn() { echo "[inference-optimizer WARN] $*" >&2; }
 die() { echo "[inference-optimizer ERROR] $*" >&2; exit 1; }
 
+# Truthy/falsy test for boolean-ish env vars. Numeric `-eq` comparisons choke on
+# string values (`[ false -eq 0 ]` errors and reads as true under set -e), so a
+# user writing MAGPIE_PATCH_STRICT=false would get the OPPOSITE of intent. Accept
+# the common spellings case-insensitively; returns success (0) when falsy.
+is_falsy() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    0|false|no|off|"") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 run() {
   log "$*"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
@@ -573,8 +584,8 @@ ensure_magpie() {
 # apply, the script-tearing race is genuinely unpatched — review the
 # warning. Override the gate via PATCH_MAGPIE=0 to skip the step entirely.
 ensure_magpie_atomic_scripts_patch() {
-  if [ "${PATCH_MAGPIE:-1}" -eq 0 ]; then
-    log "PATCH_MAGPIE=0 — skipping Magpie atomic-write patch (caller asserts upstream already fixed)"
+  if is_falsy "${PATCH_MAGPIE:-1}"; then
+    log "PATCH_MAGPIE is falsy — skipping Magpie atomic-write patch (caller asserts upstream already fixed)"
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -616,10 +627,10 @@ PY
       # GENUINE failure: the legacy block is gone AND upstream is not atomic
       # (or a read/write error). bugs.md §C #1 (script-tearing race) is NOT
       # mitigated — `profile`/`baseline` can hit `syntax error near unexpected
-      # token 'fi'`. Strict mode (default) aborts; MAGPIE_PATCH_STRICT=0 keeps
-      # the legacy fail-soft behaviour and only warns.
-      if [ "${MAGPIE_PATCH_STRICT:-1}" -eq 0 ]; then
-        warn "Magpie atomic-write patch GENUINELY failed (race unmitigated); MAGPIE_PATCH_STRICT=0 set, continuing anyway — review _magpie_patcher.py."
+      # token 'fi'`. Strict mode (default) aborts; a falsy MAGPIE_PATCH_STRICT
+      # (0/false/no/off) keeps the legacy fail-soft behaviour and only warns.
+      if is_falsy "${MAGPIE_PATCH_STRICT:-1}"; then
+        warn "Magpie atomic-write patch GENUINELY failed (race unmitigated); MAGPIE_PATCH_STRICT=${MAGPIE_PATCH_STRICT:-} (falsy), continuing anyway — review _magpie_patcher.py."
       else
         die "Magpie atomic-write patch GENUINELY failed: neither the legacy shutil.copy2 block nor an upstream atomic copy was found in benchmarker.py. bugs.md §C #1 (script-tearing race) is unmitigated. Re-pin MAGPIE_REF to a supported commit, review _magpie_patcher.py, or set MAGPIE_PATCH_STRICT=0 to downgrade to a warning (or PATCH_MAGPIE=0 to skip entirely)."
       fi
