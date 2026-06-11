@@ -21,7 +21,11 @@ except ImportError:  # Python 3.10 fallback — mirror 3.11 StrEnum semantics
 
     class StrEnum(str, Enum):
         def __str__(self) -> str:
-            """Return the enum's string value (mirrors 3.11 ``StrEnum``)."""
+            """Return the enum's string value (mirrors 3.11 ``StrEnum``).
+
+            Returns:
+                The member's underlying string value.
+            """
             return str(self.value)
 
 
