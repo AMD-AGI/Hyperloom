@@ -56,14 +56,26 @@ _GIT_TIMEOUT_SEC = 30
 
 
 def _log(msg: str) -> None:
-    """Stderr-only timestamped log line (stdout is reserved for the final JSON)."""
+    """Stderr-only timestamped log line (stdout is reserved for the final JSON).
+
+    Args:
+        msg: The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[tracelens_patch_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _versioned_patches_subdir_name(version: str) -> str | None:
-    """``0.5.11`` -> ``sglang_0_5_11`` (tolerates ``-rc1`` / ``+local`` suffixes)."""
+    """``0.5.11`` -> ``sglang_0_5_11`` (tolerates ``-rc1`` / ``+local`` suffixes).
+
+    Args:
+        version: The sglang version string to convert.
+
+    Returns:
+        str | None: The versioned subdir name, or ``None`` if ``version`` is
+        empty or not a dotted numeric form.
+    """
     text = (version or "").strip()
     if not text:
         return None
@@ -75,7 +87,16 @@ def _versioned_patches_subdir_name(version: str) -> str | None:
 
 
 def _resolve_sglang_install(sglang_module_path: Path) -> tuple[Path, int] | None:
-    """Decide ``(apply_root, -p<N> strip)`` from any sglang anchor (wheel/editable/namespace-dir layouts); ``None`` if unrecognised."""
+    """Decide ``(apply_root, -p<N> strip)`` from any sglang anchor (wheel/editable/namespace-dir layouts); ``None`` if unrecognised.
+
+    Args:
+        sglang_module_path: A path anchored in the sglang install (module
+            file, submodule file, or namespace dir).
+
+    Returns:
+        tuple[Path, int] | None: The ``(apply_root, strip_level)`` pair, or
+        ``None`` if the layout is not recognised.
+    """
     resolved = sglang_module_path.resolve()
     # Pass 1: walk up to the ``sglang/`` package dir (the one with a ``srt/`` subdir).
     pkg_dir: Path | None = None
@@ -123,7 +144,15 @@ def _all_markers_present(path: Path, markers: tuple[str, ...]) -> bool:
 
 
 def _run_git(args: tuple[str, ...], cwd: Path) -> tuple[int, str, str]:
-    """Run ``git <args>``; return ``(rc, stdout, stderr)`` (never raises on non-zero exit)."""
+    """Run ``git <args>``; return ``(rc, stdout, stderr)`` (never raises on non-zero exit).
+
+    Args:
+        args: The git subcommand and arguments (without the leading ``git``).
+        cwd: Working directory to run git in.
+
+    Returns:
+        tuple[int, str, str]: The ``(returncode, stdout, stderr)`` triple.
+    """
     proc = subprocess.run(  # noqa: S603
         ["git", *args],
         cwd=str(cwd),
@@ -141,7 +170,19 @@ def _apply_on_pod(
     tracelens_internal_root: str,
     sglang_version_pin: str | None,
 ) -> dict[str, Any]:
-    """Apply (or verify) the TraceLens SGLang patch set on this pod; never raises (failures become ``status=failed``)."""
+    """Apply (or verify) the TraceLens SGLang patch set on this pod; never raises (failures become ``status=failed``).
+
+    Args:
+        tracelens_root: Path to the public TraceLens checkout on the pod.
+        tracelens_internal_root: Path to the TraceLens-internal checkout
+            (reserved; not consumed by current patch logic).
+        sglang_version_pin: Optional advisory version pin, logged on mismatch.
+
+    Returns:
+        dict[str, Any]: The per-pod summary with ``status`` (``applied``,
+        ``skipped``, or ``failed``), resolved version, applied patches, and
+        elapsed time.
+    """
     host = socket.gethostname()
     started = time.time()
     result: dict[str, Any] = {

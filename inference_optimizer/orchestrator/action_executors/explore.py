@@ -123,6 +123,12 @@ def _coerce_args_str(value: Any) -> str:
     ``vllm serve ... $EXTRA_VLLM_ARGS`` splices verbatim, so the server rejects
     it as ``unrecognized arguments`` and every server-arg variant aborts.
     Lists/tuples are space-joined into individual tokens.
+
+    Args:
+        value: The raw payload value (string, list/tuple, or None).
+
+    Returns:
+        The coerced shell-arg string ("" when ``value`` is None).
     """
     if value is None:
         return ""
@@ -150,6 +156,12 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
 
     Unknown keys ignored; unstamped ``provenance`` defaults to
     ``'default_grid'`` (keeps seed grids distinct from ``'llm_direct'``).
+
+    Args:
+        payload: List of variant dicts from the LLM/specialist grid.
+
+    Returns:
+        The parsed ``GridVariant`` objects (entries without a name skipped).
     """
     out: list[GridVariant] = []
     for raw in payload or []:
@@ -207,6 +219,15 @@ def _atom_default_grid(
     ``apply_compatibility_filter`` is the second-line drop for flags not in
     ``atom --help``. Variant names are ``atom_``-prefixed for cross-session
     disambiguation.
+
+    Args:
+        model_class: Model-class label that gates which variants are emitted.
+        conc: Live concurrency used to bracket cudagraph capture sizes.
+        isl: Input sequence length (reserved for future gating).
+        osl: Output sequence length (reserved for future gating).
+
+    Returns:
+        The curated list of atom ``GridVariant`` seeds.
     """
     mc_l = (model_class or "").strip().lower()
     is_moe = "moe" in mc_l
@@ -287,6 +308,16 @@ def _default_grid_for_framework(
 
     Atom returns a curated seed grid; sglang / vllm / unknown return ``[]``
     ("no programmatic seed") and rely on LLM-emitted ``default_grid`` variants.
+
+    Args:
+        framework: Inference framework name to dispatch on.
+        model_class: Model-class label forwarded to the seed grid builder.
+        conc: Live concurrency forwarded to the seed grid builder.
+        isl: Input sequence length forwarded to the seed grid builder.
+        osl: Output sequence length forwarded to the seed grid builder.
+
+    Returns:
+        The framework's default ``GridVariant`` seeds, or ``[]`` when none.
     """
     fw = (framework or "").strip().lower()
     if fw == "atom":

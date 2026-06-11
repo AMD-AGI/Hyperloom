@@ -79,6 +79,12 @@ def _scalar(value: Any) -> str:
     ``type``. Everything else is JSON double-quoted (valid YAML) so the
     parser never reinterprets a number-ish / bool-ish / underscore-
     separated token — e.g. ``0_5_11`` must not become octal ``329``.
+
+    Args:
+        value: The scalar value to render.
+
+    Returns:
+        A YAML-safe token: bare for safe identifiers, JSON-quoted otherwise.
     """
     if value is None:
         return "null"
@@ -93,7 +99,15 @@ def _scalar(value: Any) -> str:
 
 
 def _emit_yaml(obj: Mapping[str, Any], indent: int = 0) -> str:
-    """Minimal recursive YAML emitter for scalars / nested dicts / scalar lists."""
+    """Minimal recursive YAML emitter for scalars / nested dicts / scalar lists.
+
+    Args:
+        obj: The mapping to render as YAML.
+        indent: Current indentation depth (two spaces per level).
+
+    Returns:
+        The rendered YAML text.
+    """
     pad = "  " * indent
     lines: list[str] = []
     for key, val in obj.items():
@@ -143,6 +157,12 @@ def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, s
     Reads the args via the compat helper (canonical with read-only legacy
     fallback). For envs, a nested map wins; otherwise the remaining scalar
     sibling keys (minus non-env metadata) are taken as flat envs.
+
+    Args:
+        best_config: The champion config dict in either nested or flat shape.
+
+    Returns:
+        A tuple of the launch-args string and the env-var dict.
     """
     args = read_extra_server_args(dict(best_config)).strip()
     nested = best_config.get("extra_envs")
@@ -161,7 +181,15 @@ def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, s
 
 
 def _has_shareable_signal(recipe: Mapping[str, Any]) -> bool:
-    """Return True when a seed-only recipe carries reusable prior signal."""
+    """Return True when a seed-only recipe carries reusable prior signal.
+
+    Args:
+        recipe: The recipe dict to inspect.
+
+    Returns:
+        ``True`` when the recipe has a positive-throughput session, any
+        negative-knowledge list, or architecture/model-class hints.
+    """
     for s in (recipe.get("sessions") or []):
         if not isinstance(s, Mapping):
             continue
@@ -186,6 +214,13 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     even pure seed-only anchors are mirrored so future gbrain reads can hit the
     5-tuple (tier=seed_only); set RECIPE_KB_MIRROR_REQUIRE_SIGNAL=1 to restore
     the old stricter gate (best_config OR reusable prior).
+
+    Args:
+        recipe: The v2 recipe dict to convert.
+
+    Returns:
+        A ``(slug, content)`` page tuple, or ``None`` when the recipe lacks a
+        canonical id (or fails the strict mirror gate).
     """
     best_config = recipe.get("best_config") if isinstance(recipe.get("best_config"), Mapping) else {}
     canonical = str(recipe.get("canonical_id") or "").strip()
@@ -265,7 +300,17 @@ def ingest_local_to_gbrain(
     mcp: _GbrainMcp | None,
     dry_run: bool,
 ) -> dict[str, int]:
-    """Ingest a list of v2 recipe dicts into gbrain. Returns counters."""
+    """Ingest a list of v2 recipe dicts into gbrain. Returns counters.
+
+    Args:
+        recipes: The v2 recipe dicts to ingest.
+        mcp: The gbrain MCP client, or ``None`` to skip the actual writes.
+        dry_run: When ``True``, count rows as ingested without writing.
+
+    Returns:
+        A counters dict with ``total`` / ``ingested`` / ``skipped_*`` /
+        ``errors`` tallies.
+    """
     stats = {
         "total": len(recipes),
         "ingested": 0,
@@ -302,6 +347,13 @@ def mirror_recipe(recipe: Mapping[str, Any], mcp: _GbrainMcp | None) -> bool:
     ``canonical_id``, strict-gate rejection, no mcp) or on a transport
     error. Never raises — the local write is authoritative and a gbrain
     hiccup must not affect it.
+
+    Args:
+        recipe: The recipe dict to mirror.
+        mcp: The gbrain MCP client, or ``None`` to skip mirroring.
+
+    Returns:
+        ``True`` when a page was written, ``False`` when skipped or on error.
     """
     if mcp is None:
         return False
@@ -318,7 +370,12 @@ def mirror_recipe(recipe: Mapping[str, Any], mcp: _GbrainMcp | None) -> bool:
 
 
 def build_mirror_mcp_from_env() -> _GbrainMcp | None:
-    """Build a write-side gbrain MCP client from env (background timeout)."""
+    """Build a write-side gbrain MCP client from env (background timeout).
+
+    Returns:
+        A configured :class:`_GbrainMcp`, or ``None`` when ``GBRAIN_BASE_URL``
+        / ``GBRAIN_TOKEN`` are not set.
+    """
     base_url = (os.environ.get("GBRAIN_BASE_URL", "") or "").strip()
     token = (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
     if not base_url or not token:

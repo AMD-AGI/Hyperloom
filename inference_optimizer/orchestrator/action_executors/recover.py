@@ -347,6 +347,9 @@ class RecoverExecutor:
 
         Returns one record per signalled PID (cmdline at discovery + final
         signal name ``"TERM"`` / ``"KILL"``).
+
+        Returns:
+            One record per signalled PID, or ``[]`` when none were stale.
         """
         candidates = self._discover_stale_pids()
         if not candidates:
@@ -369,7 +372,12 @@ class RecoverExecutor:
 
     def _discover_stale_pids(self) -> list[dict[str, Any]]:
         """Run ``pgrep -a -f -- <pattern>`` per owner pattern (matches the
-        full cmdline) and return unique PID records, excluding our own PID."""
+        full cmdline) and return unique PID records, excluding our own PID.
+
+        Returns:
+            Unique PID records matching the owner patterns, or ``[]`` when
+            ``pgrep`` is unavailable or nothing matched.
+        """
         if not shutil.which("pgrep"):
             log.warning("recover_executor: pgrep not on PATH; skipping kill stage")
             return []

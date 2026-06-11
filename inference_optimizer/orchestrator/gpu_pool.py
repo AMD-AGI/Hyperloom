@@ -20,7 +20,12 @@ DEFAULT_GPU_LEASE_TTL_SEC = 1800
 
 
 def _now_iso() -> str:
-    """Return the current UTC time as a microsecond ISO-8601 string."""
+    """Return the current UTC time as a microsecond ISO-8601 string.
+
+    Returns:
+        The current UTC time formatted as an ISO-8601 string with microsecond
+        precision.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
@@ -53,6 +58,13 @@ def resolve_gpu_specialist_devices(capacity: int) -> list[int]:
 
     ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES`` may name an explicit pool;
     absent → ``range(capacity)``. Capacity zero disables dispatch.
+
+    Args:
+        capacity: Maximum number of GPU ids to return; zero or negative
+            disables dispatch.
+
+    Returns:
+        GPU ids available to specialists, capped at ``capacity``.
     """
     cap = max(0, int(capacity or 0))
     if cap <= 0:
@@ -95,7 +107,11 @@ class SpecialistGpuPool:
 
     @property
     def capacity(self) -> int:
-        """Return the number of GPUs the pool manages."""
+        """Return the number of GPUs the pool manages.
+
+        Returns:
+            The count of GPU ids managed by this pool.
+        """
         return len(self.gpu_ids)
 
     async def try_acquire(
@@ -106,7 +122,18 @@ class SpecialistGpuPool:
         task_id: str,
         ttl_sec: int = DEFAULT_GPU_LEASE_TTL_SEC,
     ) -> GpuLease | None:
-        """Acquire ``count`` GPU ids or return ``None`` if the pool is full."""
+        """Acquire ``count`` GPU ids or return ``None`` if the pool is full.
+
+        Args:
+            count: Number of GPU ids to acquire.
+            holder_id: Identifier of the lease holder.
+            task_id: Identifier of the task requesting the GPUs.
+            ttl_sec: Lease time-to-live in seconds before the lease expires.
+
+        Returns:
+            A ``GpuLease`` over the acquired GPU ids, or ``None`` when the
+            request cannot be satisfied (invalid count or too few free GPUs).
+        """
         n = int(count or 0)
         if n <= 0 or n > self.capacity:
             return None

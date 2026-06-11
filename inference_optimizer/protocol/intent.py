@@ -256,6 +256,14 @@ def _validate_review_verdict_payload(
 
     PolicyGate handles content validation (verdict vocab, variant_name vs
     grid); this only guarantees at-most-one-present for downstream callers.
+
+    Args:
+        payload: The REVIEW_VERDICT intent payload to validate.
+        index: Position of the intent in the envelope (for error messages).
+
+    Raises:
+        IntentValidationError: If neither or both of ``verdict`` and
+            ``verdict_map`` are present, or ``verdict_map`` is malformed.
     """
     has_single = "verdict" in payload
     has_map = "verdict_map" in payload
