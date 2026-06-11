@@ -2667,11 +2667,12 @@ class Coordinator:
             "source": "coordinator_internal",
             "reason": str(reason),
         }
-        cb = state.current_best or {}
-        if isinstance(cb, dict):
-            cb_args = str(cb.get("extra_server_args") or "")
-            if cb_args:
-                params["base_extra_args"] = cb_args
+        if reason != "prelude_initial":
+            cb = state.current_best or {}
+            if isinstance(cb, dict):
+                cb_args = str(cb.get("extra_server_args") or "")
+                if cb_args:
+                    params["base_extra_args"] = cb_args
         last_bl = state.last_baseline or {}
         if isinstance(last_bl, dict):
             bs = str(last_bl.get("benchmark_script") or "").strip()
