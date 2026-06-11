@@ -25,9 +25,18 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .trace.llm_trace import LLMCallRecord, append_llm_call
+from .trace.parse_usage import parse_geak_usage, parse_oob_json_usage
+
 
 log = logging.getLogger(__name__)
 _BACKGROUND_ROCPROF_TASKS: set[asyncio.Task[Any]] = set()
+
+# kernel_optimization attempt backends whose stdout log we mine for token
+# usage. ``geak`` uses litellm (OpenAI-shape usage); ``oob`` runs ``oob run
+# --json`` whose envelope may carry a ``usage`` block. The other backends
+# (claude/codex/cursor) already account their spend via their own paths.
+_TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"geak", "oob"})
 
 
 # Where the kernel-agent shell tools live; read lazily so cli.py's late env injection wins.
@@ -2186,7 +2195,72 @@ async def _run_optimization_single(
             result["kernel_id"] = str(payload["kernel_id"])
         if not result.get("source_file") and payload.get("source_file"):
             result["source_file"] = str(payload["source_file"])
+    # Full-trace: mine each geak/oob attempt's stdout log for token usage and
+    # append an ``llm_calls.jsonl`` row. Best-effort; a no-op when the backend
+    # emits no usage block (claude/codex/cursor account spend elsewhere).
+    _trace_kernel_attempt_usage(result, session_dir=session_dir)
     return result
+
+
+def _trace_kernel_attempt_usage(
+    result: Any, *, session_dir: Path,
+) -> None:
+    """Append ``llm_calls.jsonl`` rows for geak/oob attempts in ``result``.
+
+    Each ``kernel_optimization`` attempt record carries ``backend`` plus
+    ``optimized_path`` (the backend's full ``*_stdout.log``). For the
+    token-traced backends (:data:`_TOKEN_TRACED_KERNEL_BACKENDS`) we read that
+    log and run the matching usage parser (``geak`` → :func:`parse_geak_usage`,
+    ``oob`` → :func:`parse_oob_json_usage`). A row is appended only when a
+    usage block is actually recovered — backends that don't emit usage stay a
+    silent no-op rather than logging fabricated zeros.
+
+    Best-effort end to end: any read/parse/append failure is logged at debug
+    and swallowed so kernel optimization never breaks on a trace write.
+    """
+    if not isinstance(result, dict):
+        return
+    attempts = result.get("attempts")
+    if not isinstance(attempts, list):
+        return
+    kernel_id = str(result.get("kernel_id") or "") or None
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        backend = str(attempt.get("backend") or "").strip().lower()
+        if backend not in _TOKEN_TRACED_KERNEL_BACKENDS:
+            continue
+        log_path = str(attempt.get("optimized_path") or "").strip()
+        if not log_path:
+            continue
+        try:
+            stdout_text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+        try:
+            if backend == "geak":
+                usage = parse_geak_usage(stdout_text)
+            else:
+                usage = parse_oob_json_usage(stdout_text)
+            if not usage:
+                continue
+            record = LLMCallRecord(
+                session_id=session_dir.name,
+                component=backend,
+                task_id=kernel_id,
+                input_tokens=usage.get("input_tokens"),
+                output_tokens=usage.get("output_tokens"),
+                cache_creation_input_tokens=usage.get(
+                    "cache_creation_input_tokens"
+                ),
+                cache_read_input_tokens=usage.get("cache_read_input_tokens"),
+            )
+            append_llm_call(session_dir=session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break optimization
+            log.debug(
+                "full-trace: kernel attempt usage append failed "
+                "(backend=%s, log=%s)", backend, log_path, exc_info=True,
+            )
 
 
 def _shape_tool_result(rc: int, stdout: str, stderr: str) -> HandlerResult:

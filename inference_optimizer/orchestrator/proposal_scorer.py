@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .backends.base import parse_call_timeout_env
+from .trace.conversation_trace import ConversationRecord, append_conversation
 from .trace.llm_trace import LLMCallRecord, append_llm_call
 
 log = logging.getLogger(__name__)
@@ -257,6 +258,9 @@ class ProposalScorer:
         # Best-effort + a no-op when ``session_dir`` is unset (tests).
         self._trace_scorer_llm_call(model, getattr(resp, "usage", None))
         text = (resp.choices[0].message.content or "")
+        # Full-trace: persist the full (redacted) prompt + reply so the
+        # scorer's conversation lines up with its token row.
+        self._record_scorer_conversation(model, full_prompt, text)
         parsed = _extract_scores_json(text)
         if parsed is None:
             raise RuntimeError(
@@ -286,7 +290,8 @@ class ProposalScorer:
             record = LLMCallRecord(
                 session_id=self.session_dir.name,
                 component="proposal_scorer",
-                model=str(model),
+                role="proposal_scorer",  # must match the conversation row's
+                model=str(model),        # role for Langfuse token<->text pairing
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
             )
@@ -294,6 +299,39 @@ class ProposalScorer:
         except Exception:  # noqa: BLE001 — trace must never break scoring
             log.debug(
                 "full-trace: proposal_scorer llm_call append failed for "
+                "model=%s", model, exc_info=True,
+            )
+
+    def _record_scorer_conversation(
+        self, model: str, prompt: str, response: str,
+    ) -> None:
+        """Append one ``conversations.jsonl`` row for a proposal-scoring call.
+
+        Persists the full (redacted) scoring prompt + model reply under
+        ``component=proposal_scorer``, mirroring the per-call token row from
+        :meth:`_trace_scorer_llm_call`. No-op when ``session_dir`` is unset
+        (tests) or when both prompt and reply are empty. tick/phase are
+        unknown here (the scorer runs off the dispatch path); the collector
+        backfills phase from the ts window. Best-effort: never raises into
+        the scoring path.
+        """
+        if self.session_dir is None:
+            return
+        if not prompt and not response:
+            return
+        try:
+            record = ConversationRecord(
+                session_id=self.session_dir.name,
+                component="proposal_scorer",
+                role="proposal_scorer",
+                model=str(model),
+                prompt=prompt or "",
+                response=response or "",
+            )
+            append_conversation(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break scoring
+            log.debug(
+                "full-trace: proposal_scorer conversation append failed for "
                 "model=%s", model, exc_info=True,
             )
 

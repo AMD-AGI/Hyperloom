@@ -24,7 +24,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .trace.parse_usage import parse_claude_stream_json_usage
+from .trace.parse_usage import (
+    parse_claude_stream_json_response,
+    parse_claude_stream_json_usage,
+)
 
 
 log = logging.getLogger(__name__)
@@ -118,6 +121,14 @@ class SpecialistSubprocessResult:
     a ``usage`` block (e.g. the subprocess crashed before completing).
     This is how the *production-default* specialist path's token spend —
     otherwise invisible to the parent — re-enters the unified ledger."""
+
+    response: str | None = None
+    """Assistant reply text recovered from the same Claude CLI
+    ``stream-json`` log (full-trace B1 conversation). The prompt is held by
+    the parent (the CLI takes it via a prompt file, so it never appears in
+    the stream); pairing the parent-side prompt with this response lands the
+    production specialist turn in ``conversations.jsonl``. ``None`` when no
+    response text could be recovered (crash before any reply)."""
 
     error: str = ""
 
@@ -350,6 +361,12 @@ class SpecialistSubprocessDispatcher:
         #    memory — re-enters the unified ledger. Best-effort: a missing
         #    / truncated log yields ``None`` (parser swallows its own I/O).
         usage = parse_claude_stream_json_usage(process_log)
+        # Conversation sibling of the usage recovery above: the same
+        # stream-json log carries the assistant's reply. Recover it so the
+        # production specialist turn lands in conversations.jsonl (the prompt
+        # is paired in by the parent runner). Best-effort: returns None on a
+        # missing / truncated log.
+        response = parse_claude_stream_json_response(process_log)
 
         return SpecialistSubprocessResult(
             done_payload=done_payload,
@@ -360,6 +377,7 @@ class SpecialistSubprocessDispatcher:
             process_log_path=str(process_log),
             patches=patches,
             usage=usage,
+            response=response,
             error=outcome["error"],
         )
 

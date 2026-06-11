@@ -29,6 +29,7 @@ from ...protocol.intent import (
     validate_envelope,
 )
 from ...session_paths import manifest_path
+from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from .base import BackendError, BackendTurnResult
 
@@ -876,6 +877,18 @@ class CriticAgentBackend:
 
         text, finish = await self._run_reasoning_loop(messages)
 
+        # Full-trace conversation: the reasoning loop already folded token
+        # spend onto llm_calls.jsonl; mirror the full prompt + reply onto
+        # conversations.jsonl so the critic turn is replayable alongside the
+        # orchestration / specialist turns. The system + user prompt is the
+        # full request the critic saw; ``text`` is its externally-visible
+        # reply. Best-effort and never raised into the review path.
+        self._record_critic_conversation(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response=text,
+        )
+
         review = _extract_review_json(text)
         if review is None:
             # Empty list → commit-review emits a heartbeat; don't raise.
@@ -1004,6 +1017,45 @@ class CriticAgentBackend:
         except Exception:  # noqa: BLE001 — trace must never break review
             log.debug(
                 "full-trace: critic llm_call append failed", exc_info=True,
+            )
+
+    def _record_critic_conversation(
+        self,
+        *,
+        system_prompt: str | None,
+        user_prompt: str,
+        response: str,
+    ) -> None:
+        """Append one ``conversations.jsonl`` row for a critic reasoning loop.
+
+        Persists the full (redacted) prompt + reply under
+        ``component=critic``. The prompt is the system message (when present)
+        joined to the judge-bundle user message — the complete request the
+        critic reasoned over. tick/phase are unknown to the critic backend
+        (it runs as its own reactor); the collector backfills from the ts
+        window. Best-effort: never raises into the review path. No-op when
+        both prompt and reply are empty.
+        """
+        try:
+            prompt = (
+                f"{system_prompt}\n---\n{user_prompt}"
+                if system_prompt
+                else user_prompt
+            )
+            if not prompt and not response:
+                return
+            record = ConversationRecord(
+                session_id=self.session_dir.name,
+                component="critic",
+                role="critic",
+                model=self.codex_model,
+                prompt=prompt or "",
+                response=response or "",
+            )
+            append_conversation(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break review
+            log.debug(
+                "full-trace: critic conversation append failed", exc_info=True,
             )
 
     async def _execute_tool_call(self, tool_call: Any) -> str:

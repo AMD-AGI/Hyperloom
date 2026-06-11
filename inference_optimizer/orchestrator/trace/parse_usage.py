@@ -123,6 +123,83 @@ def parse_claude_stream_json_usage(
     return normalize_usage(last_usage)
 
 
+def parse_claude_stream_json_response(
+    log_path: str | Path,
+) -> str | None:
+    """Recover the assistant's full reply text from a Claude CLI stream-json log.
+
+    Sibling of :func:`parse_claude_stream_json_usage`: that function reads the
+    *token* counts off the same ``process.log``, this one reads the
+    *conversation* response so the production-default specialist path (B1)
+    can land its completion in ``conversations.jsonl``. The prompt is not
+    echoed into the stream (the CLI takes it via ``-p`` / a prompt file), so
+    only the response is recovered here; the caller already holds the prompt
+    in memory and pairs the two.
+
+    The ``claude --output-format stream-json`` log is one JSON object per
+    line. We reconstruct the reply from two sources, preferring the
+    authoritative one:
+
+    1. the terminal ``{"type": "result", ..., "result": "<text>"}`` row,
+       whose ``result`` is the consolidated final answer (mirrors the SDK's
+       ``ResultMessage.result``); when present and non-empty it wins;
+    2. otherwise we concatenate the ``text`` blocks from every
+       ``{"type": "assistant"}`` message in order — covering a truncated or
+       crashed run that never emitted a ``result`` row. ``thinking`` and
+       ``tool_use`` blocks are intentionally dropped: the response field is
+       the model's externally-visible answer, not its scratch reasoning or
+       tool plumbing.
+
+    Tolerant by contract: a missing file, malformed lines, or a stream with
+    no recoverable text returns ``None`` so the best-effort trace path
+    degrades to "no response captured" instead of raising.
+    """
+    path = Path(log_path)
+    result_text: str | None = None
+    assistant_chunks: list[str] = []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                obj_type = obj.get("type")
+                if obj_type == "result":
+                    res = obj.get("result")
+                    if isinstance(res, str) and res.strip():
+                        result_text = res
+                elif obj_type == "assistant":
+                    message = obj.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    for block in message.get("content") or []:
+                        if (
+                            isinstance(block, dict)
+                            and block.get("type") == "text"
+                        ):
+                            text = block.get("text")
+                            if isinstance(text, str) and text:
+                                assistant_chunks.append(text)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        log.warning(
+            "parse_usage: failed reading stream-json log %s: %r", path, exc
+        )
+        return None
+    if result_text is not None:
+        return result_text
+    if assistant_chunks:
+        return "\n".join(assistant_chunks)
+    return None
+
+
 def parse_oob_json_usage(stdout: str) -> dict[str, int | None] | None:
     """Extract ``usage`` from ``oob run --json`` stdout.
 
@@ -231,6 +308,7 @@ def _find_usage_in_obj(obj: Any, _depth: int = 0) -> dict[str, Any] | None:
 
 __all__ = [
     "normalize_usage",
+    "parse_claude_stream_json_response",
     "parse_claude_stream_json_usage",
     "parse_geak_usage",
     "parse_oob_json_usage",
