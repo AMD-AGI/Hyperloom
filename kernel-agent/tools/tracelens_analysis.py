@@ -1534,6 +1534,116 @@ def load_op_category_map(
     return out
 
 
+# ── #727 companion: trace-anchored shape capture for the fused-MoE expert kernel ──
+#
+# The Triton fused-MoE expert kernel surfaces in the torch trace as a pybind
+# built-in (``sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427``)
+# whose top-level kernel event carries NO resolvable ``Input Dims`` — so the
+# moe_fused category metric (and the LLM-rendered analysis.md ``Args`` column)
+# emit the candidate with ``shapes: []``. Hyperloom's dispatch gate
+# (``_validate_kernel_shape_and_paths`` → ``empty_kernel_shape``) then rejects the
+# whole geak→claude→codex ladder before any harness is built.
+#
+# TraceLens DOES still capture the operands for this kernel: the per-shape rows in
+# ``perf_report_csvs/ops_unique_args.csv`` carry the wrapped invocation's
+# ``Input Dims`` / ``Input type`` (the gate/up and down grouped-GEMM operands).
+# This recovers those operand shapes from that deterministic sidecar so the
+# emitted candidate carries non-empty, trace-anchored ``shapes`` with
+# ``shape_provenance="torch_trace"``. Scoped to the fused-MoE invoke kernel so
+# other ops are untouched.
+_FUSED_MOE_KERNEL_MARKER = "invoke_fused_moe_kernel"
+
+# torch ``Input type`` token → compact dtype suffix used by TraceLens shape
+# strings (e.g. ``(15360,2048) bf16``). Unmapped/empty types emit a bare shape.
+_TRACE_DTYPE_SUFFIX = {
+    "c10::bfloat16": "bf16",
+    "bfloat16": "bf16",
+    "c10::half": "f16",
+    "half": "f16",
+    "float16": "f16",
+    "float": "f32",
+    "float32": "f32",
+    "double": "f64",
+    "float64": "f64",
+    "int": "i32",
+    "int32": "i32",
+    "long": "i64",
+    "int64": "i64",
+    "short": "i16",
+    "int16": "i16",
+    "char": "i8",
+    "int8": "i8",
+    "uint8": "u8",
+    "bool": "bool",
+}
+
+
+def _format_trace_shape(dims: Any, dtype: Any) -> str | None:
+    """Render one operand as ``(d0,d1,...) <dtype>`` (matching TraceLens shape strings); ``None`` for scalar/empty operands."""
+    if not isinstance(dims, (list, tuple)) or not dims:
+        return None
+    try:
+        body = ",".join(str(int(d)) for d in dims)
+    except (TypeError, ValueError):
+        return None
+    shape = f"({body},)" if len(dims) == 1 else f"({body})"
+    suffix = _TRACE_DTYPE_SUFFIX.get(str(dtype or "").strip().lower())
+    return f"{shape} {suffix}" if suffix else shape
+
+
+def resolve_fused_moe_shapes_from_csv(
+    perf_report_csv_dir: Path | str | None,
+) -> list[str]:
+    """Recover the fused-MoE expert kernel operand shapes from ``ops_unique_args.csv``.
+
+    Reads each per-shape row whose op name embeds ``invoke_fused_moe_kernel`` and
+    parses its ``Input Dims`` / ``Input type`` tuple-of-tuples into TraceLens-style
+    shape strings (e.g. ``(15360,2048) bf16``), deduped across rows in first-seen
+    order. Returns ``[]`` when the sidecar is absent or carries no fused-MoE rows
+    (so callers leave the candidate's empty ``shapes`` untouched).
+    """
+    if not perf_report_csv_dir:
+        return []
+    csv_path = Path(perf_report_csv_dir) / "ops_unique_args.csv"
+    if not csv_path.is_file():
+        return []
+    shapes: list[str] = []
+    seen: set[str] = set()
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                name = str(row.get("name") or "").strip().lower()
+                if _FUSED_MOE_KERNEL_MARKER not in name:
+                    continue
+                try:
+                    dims = ast.literal_eval(str(row.get("Input Dims") or "").strip() or "()")
+                    dtypes = ast.literal_eval(str(row.get("Input type") or "").strip() or "()")
+                except (ValueError, SyntaxError):
+                    continue
+                if not isinstance(dims, (list, tuple)):
+                    continue
+                if not isinstance(dtypes, (list, tuple)):
+                    dtypes = ()
+                for i, operand in enumerate(dims):
+                    dtype = dtypes[i] if i < len(dtypes) else ""
+                    s = _format_trace_shape(operand, dtype)
+                    if s and s not in seen:
+                        seen.add(s)
+                        shapes.append(s)
+    except (OSError, csv.Error):
+        return []
+    return shapes
+
+
+def _is_fused_moe_candidate(item: dict[str, Any]) -> bool:
+    """True for the Triton fused-MoE expert-kernel candidate (by op name or moe_fused category)."""
+    name = str(item.get("name") or "").lower()
+    if _FUSED_MOE_KERNEL_MARKER in name:
+        return True
+    cat = str(item.get("tracelens_category") or "").strip().lower()
+    return cat == "moe_fused" and "moe" in name
+
+
 # ── #514: high-GPU-time "other"-bucket candidate recovery (defense-in-depth) ──
 #
 # Hyperloom builds candidates EXCLUSIVELY from analysis.md reasoning-candidate
@@ -1884,11 +1994,22 @@ def _finalize_candidates(
     )
     sum_dur = total_dur if total_dur is not None else sum(it.get("duration_us", 0.0) for it in top)
     sum_dur = sum_dur or 1.0
+    # #727 companion: the fused-MoE expert kernel's top-level trace event carries
+    # no Input Dims, so its candidate would emit empty ``shapes`` and trip the
+    # dispatch gate. Recover its operand shapes once from the ops_unique_args
+    # sidecar and graft them onto any fused-MoE candidate that lacks shapes.
+    _fused_moe_shapes: list[str] | None = None
     for idx, item in enumerate(top, 1):
         item.pop("_extracted_source_checked", None)
         item.setdefault("source_file", "")
         item.setdefault("source_type", "unknown")
         item.setdefault("shapes", [])
+        if not item.get("shapes") and _is_fused_moe_candidate(item):
+            if _fused_moe_shapes is None:
+                _fused_moe_shapes = resolve_fused_moe_shapes_from_csv(perf_report_csv_dir)
+            if _fused_moe_shapes:
+                item["shapes"] = list(_fused_moe_shapes)
+                item["shape_provenance"] = "torch_trace"
         # Mark trace-extracted shapes so the dispatch-time validator can tell their provenance.
         if item.get("shapes"):
             item.setdefault("shape_provenance", "torch_trace")
