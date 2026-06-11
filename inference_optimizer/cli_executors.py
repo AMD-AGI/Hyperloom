@@ -42,6 +42,14 @@ log = logging.getLogger(__name__)
 
 
 async def _noop_prep(ctx) -> dict:
+    """No-op preparation executor used as a stub.
+
+    Args:
+        ctx: Action context (only ``ctx.task.kind`` is read).
+
+    Returns:
+        A success result envelope tagged as a noop stub.
+    """
     return {"status": "succeeded", "kind": ctx.task.kind, "note": "noop-stub"}
 
 
@@ -153,6 +161,14 @@ def _build_specialist_executor(
         )
     else:
         def _backend_factory(domain: Any) -> Any:
+            """Build an in-process Claude backend for a specialist domain.
+
+            Args:
+                domain: The specialist domain requesting a backend.
+
+            Returns:
+                A configured :class:`ClaudeBackend` instance.
+            """
             # in-process Claude path (fallback).
             return ClaudeBackend(
                 model=claude_model, max_turns_default=max_turns,
