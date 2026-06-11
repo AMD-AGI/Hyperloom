@@ -133,7 +133,18 @@ def _build_cmd(agent: str, prompt_file: Path, output_dir: Path,
 
 
 def _parse_oob_init(stdout: str) -> dict[str, str]:
-    """Extract cwd / session_id / thread_id from oob run --json output (trailing summary, else ndjson init)."""
+    """Extract workspace and session identifiers from ``oob run`` JSON output.
+
+    Prefers the trailing oob-run JSON summary, falling back to the ndjson init
+    record.
+
+    Args:
+        stdout: The captured stdout from ``oob run --json``.
+
+    Returns:
+        A dict with ``cli_workspace``, ``session_id``, and ``thread_id`` keys
+        (empty strings when not found).
+    """
     info = {"cli_workspace": "", "session_id": "", "thread_id": ""}
     if not stdout:
         return info
