@@ -227,7 +227,23 @@ def _extract_changed_files(
 
 
 def _enrich_candidate_via_primus(req: ExploreRequest, candidate: Candidate) -> Candidate:
-    """Fetch pr_get + pr_files for PR-typed candidates (hard-fails on primus errors); branch / tag / commit refs returned unchanged."""
+    """Enrich a PR-typed candidate with metadata from Primus Cortex.
+
+    Fetches ``pr_get`` + ``pr_files`` for PR candidates; branch / tag /
+    commit refs are returned unchanged.
+
+    Args:
+        req: The explore request carrying the Primus Cortex config.
+        candidate: The candidate to enrich.
+
+    Returns:
+        The enriched candidate, or the original when enrichment does not
+        apply.
+
+    Raises:
+        primus_cortex.PrimusCortexError: If the repo URL is malformed or a
+            required Primus call fails.
+    """
     if req.primus_cortex is None:
         return candidate
     number = candidate.pr_number
@@ -263,7 +279,19 @@ def _enrich_candidate_via_primus(req: ExploreRequest, candidate: Candidate) -> C
 
 
 def _passes_filter(c: Candidate, f: PrFilter) -> tuple[bool, str]:
-    """Apply :class:`PrFilter` to one candidate: ``(True, '')`` on empty filter or pass, ``(False, reason)`` otherwise; metadata-dependent constraints fail when that metadata is missing (enrichment skipped)."""
+    """Apply a :class:`PrFilter` to one candidate.
+
+    Metadata-dependent constraints fail when the required metadata is
+    missing (e.g. enrichment was skipped).
+
+    Args:
+        c: The candidate to test.
+        f: The filter to apply.
+
+    Returns:
+        ``(True, "")`` on an empty filter or a pass, otherwise
+        ``(False, reason)`` describing the first failing constraint.
+    """
     if f.is_empty:
         return True, ""
 
@@ -321,7 +349,19 @@ def _passes_filter(c: Candidate, f: PrFilter) -> tuple[bool, str]:
 def _enumerate_with_skipped(
     req: ExploreRequest,
 ) -> tuple[list[Candidate], list[dict[str, str]]]:
-    """Return ``(kept, skipped)`` after enrichment + filtering: unions sources, enriches PR candidates via primus, then applies ``req.pr_filter``; explicit candidates bypass the filter (operator intent wins) but are still enriched."""
+    """Enumerate, enrich, and filter candidates.
+
+    Unions the configured sources, enriches PR candidates via Primus, then
+    applies ``req.pr_filter``. Explicit candidates bypass the filter
+    (operator intent wins) but are still enriched.
+
+    Args:
+        req: The explore request.
+
+    Returns:
+        A ``(kept, skipped)`` tuple where ``skipped`` entries carry the
+        ref, source, and skip reason.
+    """
     from .sources import enumerate_candidates as _enum_raw
 
     raw = _enum_raw(req)
@@ -398,10 +438,20 @@ def _prepare_candidate_workspace_with_artifacts(
     index: int,
     execute: bool,
 ) -> tuple[WorkspacePaths, dict[str, str]]:
-    """Drop audit material (``pr.patches`` / ``pr_files.json``) per candidate
-    regardless of execute mode, then delegate the worktree + venv step to
-    :mod:`isolation` when execute is True. Returns ``(WorkspacePaths,
-    artifact_paths)``.
+    """Prepare a candidate workspace and drop its audit artifacts.
+
+    Drops audit material (``pr.patches`` / ``pr_files.json``) for the
+    candidate regardless of execute mode, then delegates the worktree +
+    venv step to :mod:`isolation` when ``execute`` is True.
+
+    Args:
+        req: The explore request.
+        candidate: The candidate to prepare.
+        index: Zero-based candidate index (used in the directory name).
+        execute: Whether to materialize the worktree and venv.
+
+    Returns:
+        A ``(WorkspacePaths, artifact_paths)`` tuple.
     """
     candidate_dir = req.work_dir / "candidates" / f"{index:02d}_{candidate.slug}"
     candidate_dir.mkdir(parents=True, exist_ok=True)
@@ -415,9 +465,23 @@ def _prepare_candidate_workspace_with_artifacts(
 def _write_pr_artifacts(
     req: ExploreRequest, candidate: Candidate, candidate_dir: Path
 ) -> dict[str, str]:
-    """Drop ``pr.patches`` + ``pr_files.json`` per PR candidate. No-op when
-    primus_cortex is unconfigured or the candidate is not a PR ref;
-    hard-fails on network errors (CLI converts to exit code 2).
+    """Write ``pr.patches`` + ``pr_files.json`` for a PR candidate.
+
+    No-op when Primus Cortex is unconfigured or the candidate is not a PR
+    ref; hard-fails on network errors (the CLI converts these to exit
+    code 2).
+
+    Args:
+        req: The explore request carrying the Primus config and repo URL.
+        candidate: The candidate whose artifacts to write.
+        candidate_dir: Directory to write the artifacts into.
+
+    Returns:
+        A mapping of artifact names to written file paths (empty when the
+        candidate is not a PR or Primus is unconfigured).
+
+    Raises:
+        primus_cortex.PrimusCortexError: If the repo URL is malformed.
     """
     if req.primus_cortex is None:
         return {}
@@ -532,6 +596,15 @@ def _run_single_candidate(
     free beyond the workspace it owns. Concurrency safety: callers must
     ensure two candidates never share an ``index`` (slug collisions could
     overwrite material).
+
+    Args:
+        req: The explore request.
+        candidate: The candidate to run.
+        index: Unique candidate index (must be distinct across callers).
+        execute: When False, plan only; when True, build and benchmark.
+
+    Returns:
+        The :class:`CandidateResult` for the candidate.
     """
     workspace, artifact_paths = _prepare_candidate_workspace_with_artifacts(
         req, candidate, index=index, execute=execute,
@@ -610,10 +683,19 @@ async def _run_candidates_concurrent(
     *,
     execute: bool,
 ) -> list[CandidateResult]:
-    """Run candidates with ``asyncio.gather`` bounded by a ``build_concurrency``
-    semaphore. Each task wraps :func:`_run_single_candidate` in
+    """Run candidates concurrently, bounded by a ``build_concurrency`` semaphore.
+
+    Each task wraps :func:`_run_single_candidate` in
     :func:`asyncio.to_thread`; bench/accuracy stay inside the worker so two
     candidates only overlap when concurrency > 1 (the explicit user knob).
+
+    Args:
+        req: The explore request.
+        candidates: Candidates to run.
+        execute: Whether to build and benchmark (vs plan only).
+
+    Returns:
+        The per-candidate results in submission order.
     """
     semaphore = asyncio.Semaphore(max(1, req.build_concurrency))
 
@@ -713,6 +795,17 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
 
     Disk preflight (execute=True and ``disk_min_free_gb != 0``) runs first;
     failure raises :class:`isolation.DiskPreflightError`.
+
+    Args:
+        req: The explore request driving the run.
+        execute: When False, plan only; when True, build and benchmark.
+
+    Returns:
+        A summary dict describing the run, candidates, winner, and KB
+        contribution.
+
+    Raises:
+        isolation.DiskPreflightError: If the disk preflight check fails.
     """
     log.info(
         "explore start framework=%s repo=%s work_dir=%s execute=%s "
@@ -819,8 +912,16 @@ def _contribute_findings_to_kb(
 
     Fires only when ``execute=True``, ``req.kb_domain`` is non-empty, and a
     ``winner`` exists. Best-effort: any KB write error is captured into the
-    returned ``kb_contribution`` metadata dict so the explore summary stays
-    usable even if the KB directory is read-only.
+    returned metadata dict so the explore summary stays usable even if the
+    KB directory is read-only.
+
+    Args:
+        req: The explore request (supplies KB domain and baseline).
+        winner: The winning candidate result, if any.
+        execute: Whether the run was in execute mode.
+
+    Returns:
+        A ``kb_contribution`` metadata dict with a ``status`` field.
     """
     if not execute or not req.kb_domain or winner is None:
         return {"status": "skipped", "reason": "execute+kb_domain+winner required"}
