@@ -403,6 +403,11 @@ def magpie_scripts_patch_status(
             "_magpie_patcher: MAGPIE_DIR unset or benchmarker.py missing — "
             "skipping patch (fine for tests / dry-runs)",
         )
+        # remote_trust_ok=True here means "not applicable / not checked"
+        # (no Magpie tree to inspect), NOT "trust patch verified". It is set
+        # True only so this no-op path does not emit a spurious remote-trust
+        # warning; the atomic_ok=False below still drives the generic
+        # fail-soft (install.sh exit 1), matching the legacy behaviour.
         return MagpiePatchStatus(atomic_ok=False, remote_trust_ok=True)
 
     with _file_lock(_LOCK_PATH):

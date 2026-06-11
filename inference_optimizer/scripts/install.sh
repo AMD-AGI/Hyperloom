@@ -594,6 +594,10 @@ if not status.atomic_ok:
     sys.exit(1)
 if not status.remote_trust_ok:
     sys.exit(2)
+# Unreachable while ``ok == atomic_ok and remote_trust_ok`` (a not-ok status
+# means at least one of the two bits is False, caught above). Kept as a
+# defensive non-zero catch-all so a future change to MagpiePatchStatus.ok
+# cannot make the script fall through and exit 0 on an unhandled state.
 sys.exit(3)
 PY
   then
