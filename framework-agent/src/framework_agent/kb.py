@@ -411,6 +411,12 @@ def _synthesize_via_llm(
     import asyncio
 
     async def _drive() -> None:
+        """Stream the SDK query and accumulate text into ``chunks``.
+
+        Iterates the async generator returned by ``sdk.query`` and appends every
+        non-empty text fragment from each message to the enclosing ``chunks``
+        list.
+        """
         async for message in sdk.query(prompt=prompt, options=options):
             for text in _iter_message_text(message):
                 if text:

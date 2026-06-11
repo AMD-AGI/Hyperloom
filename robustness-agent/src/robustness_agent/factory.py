@@ -490,6 +490,16 @@ class _QuietFallback:
     reason: str
 
     async def fetch(self, ctx: Any) -> SourceData:  # noqa: ARG002 - protocol
+        """Return empty source data describing the disabled local probe.
+
+        Args:
+            ctx: Fetch context supplied by the source protocol; unused because
+                this fallback never collects data.
+
+        Returns:
+            A :class:`SourceData` with no signals, annotated with a
+            ``degraded_reason`` explaining that the local probe is disabled.
+        """
         return SourceData(
             degraded_reason=f"local-probe disabled: {self.reason}",
             sources_used=[self.name],

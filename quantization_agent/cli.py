@@ -35,6 +35,18 @@ from .driver.runner import DEFAULT_MODEL
 
 
 def _interactive_value(raw: str) -> bool | None:
+    """Parse the ``--interactive`` flag into a tri-state value.
+
+    Args:
+        raw: Raw flag value supplied on the command line.
+
+    Returns:
+        ``None`` for ``auto`` (tty auto-detection), ``True`` for the on-style
+        values, and ``False`` for the off-style values.
+
+    Raises:
+        argparse.ArgumentTypeError: If ``raw`` is not a recognized value.
+    """
     raw = raw.strip().lower()
     if raw in ("auto", "", "default"):
         return None
@@ -48,6 +60,14 @@ def _interactive_value(raw: str) -> bool | None:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Build the argument parser and parse the CLI arguments.
+
+    Args:
+        argv: Argument list to parse; defaults to ``sys.argv`` when ``None``.
+
+    Returns:
+        The populated :class:`argparse.Namespace`.
+    """
     p = argparse.ArgumentParser(
         prog="quantization_agent",
         description="Drive the AMD Quark PTQ skill chain from a natural-language prompt.",
@@ -104,7 +124,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def _run(args: argparse.Namespace) -> int:
+    """Run one quantization request and print a JSON summary.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        Process exit code: ``0`` on success or partial success, ``1`` when the
+        resulting model is unusable.
+    """
     def log(line: str) -> None:
+        """Write a line to stderr when verbose output is enabled.
+
+        Args:
+            line: Text to emit.
+        """
         if args.verbose:
             print(line, file=sys.stderr, flush=True)
 
@@ -134,6 +168,14 @@ async def _run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for the quantization agent.
+
+    Args:
+        argv: Argument list to parse; defaults to ``sys.argv`` when ``None``.
+
+    Returns:
+        The process exit code produced by :func:`_run`.
+    """
     args = _parse_args(argv)
     return asyncio.run(_run(args))
 

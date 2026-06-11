@@ -45,6 +45,15 @@ class AttemptResult:
 
 
 def _import_sdk() -> tuple[Any, Any]:
+    """Import the Claude Agent SDK and return its query primitives.
+
+    Returns:
+        A ``(query, ClaudeAgentOptions)`` tuple from ``claude_agent_sdk``.
+
+    Raises:
+        RuntimeError: If the SDK is not installed or is missing the required
+            ``query`` / ``ClaudeAgentOptions`` attributes.
+    """
     try:
         import claude_agent_sdk as sdk  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover - exercised via injection seams in tests
@@ -57,6 +66,17 @@ def _import_sdk() -> tuple[Any, Any]:
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
+    """Yield text fragments from a Claude Agent SDK message.
+
+    Handles the varying SDK message shapes: ``.content`` blocks exposing
+    ``.text`` (object or dict) and a top-level ``.result`` string.
+
+    Args:
+        message: An SDK message object.
+
+    Yields:
+        Each non-empty text fragment found on the message.
+    """
     for block in list(getattr(message, "content", None) or []):
         text = getattr(block, "text", None)
         if isinstance(text, str) and text:
