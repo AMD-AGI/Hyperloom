@@ -71,6 +71,68 @@ def _sdk_available() -> bool:
         return False
 
 
+def _to_ns(dt: Any) -> int | None:
+    """Datetime -> integer nanoseconds since epoch (langfuse v4 ``end_time``).
+
+    v4's OTEL-based SDK wants integer ns for ``end_time``; v2/v3 accepted a
+    ``datetime``. Returns None for a None/zero input so callers can omit the
+    kwarg entirely. Best-effort: an unparseable value yields None.
+    """
+    if dt is None:
+        return None
+    try:
+        from datetime import datetime
+
+        if isinstance(dt, datetime):
+            return int(dt.timestamp() * 1_000_000_000)
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _start_obs(parent: Any, **kwargs: Any) -> Any:
+    """Create a child/root observation, tolerant of v2/v3 vs v4 signatures.
+
+    v2/v3 accepted ``start_time=<datetime>`` on ``start_observation``; v4
+    removed it (the start is auto-stamped at creation). We try with the
+    caller's kwargs first and, if the SDK rejects ``start_time`` with a
+    TypeError, retry without it. This keeps backdated timestamps where the
+    SDK supports them and degrades to "start = now" only on the SDKs that
+    require it, instead of unconditionally dropping the timestamp.
+    """
+    try:
+        return parent.start_observation(**kwargs)
+    except TypeError:
+        kwargs.pop("start_time", None)
+        return parent.start_observation(**kwargs)
+
+
+def _end_obs(obs: Any, end_dt: Any) -> None:
+    """End an observation, tolerant of v2/v3 (datetime) vs v4 (int ns).
+
+    Tries the datetime first (v2/v3), falls back to integer-ns (v4), then to
+    a bare ``end()`` so a signature change can never strand an open span.
+    """
+    if obs is None:
+        return
+    try:
+        if end_dt is not None:
+            obs.end(end_time=end_dt)
+        else:
+            obs.end()
+        return
+    except (TypeError, ValueError):
+        pass
+    ns = _to_ns(end_dt)
+    try:
+        if ns is not None:
+            obs.end(end_time=ns)
+        else:
+            obs.end()
+    except Exception:  # noqa: BLE001
+        obs.end()
+
+
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     import json
 
@@ -231,13 +293,14 @@ class LangfuseEmitter:
         try:
             parent = self._ensure_agent_span(lfmap.UNPHASED, "probe", now)
             meta = {"probe": True, "note": note or "session-start"}
-            gen = parent.start_observation(
+            gen = _start_obs(
+                parent,
                 name="probe:session-start",
                 as_type="generation",
                 start_time=now,
                 metadata=meta,
             )
-            gen.end(end_time=now)
+            _end_obs(gen, now)
             self._counts["generations_sent"] += 1
             self._counts["generations_token_only"] += 1
             self._client.flush()
@@ -260,7 +323,8 @@ class LangfuseEmitter:
     def _ensure_root(self, start: Any) -> Any:
         """Lazily open the root span and stamp trace-level attrs once."""
         if self._root_span is None:
-            self._root_span = self._client.start_observation(
+            self._root_span = _start_obs(
+                self._client,
                 name=self._trace_name(),
                 as_type="span",
                 start_time=start,
@@ -283,7 +347,8 @@ class LangfuseEmitter:
         span = self._phase_spans.get(phase)
         if span is None:
             root = self._ensure_root(start)
-            span = root.start_observation(
+            span = _start_obs(
+                root,
                 name=f"phase:{phase}", as_type="span", start_time=start,
                 metadata={"phase": phase},
             )
@@ -298,7 +363,8 @@ class LangfuseEmitter:
         span = self._agent_spans.get(key)
         if span is None:
             phase_span = self._ensure_phase_span(phase, start)
-            span = phase_span.start_observation(
+            span = _start_obs(
+                phase_span,
                 name=f"agent:{agent}", as_type="span", start_time=start,
                 metadata={"phase": phase, "agent": agent},
             )
@@ -353,7 +419,8 @@ class LangfuseEmitter:
         has_text = conv_row is not None
         try:
             parent = self._ensure_agent_span(phase, agent, start)
-            gen = parent.start_observation(
+            gen = _start_obs(
+                parent,
                 name=lfmap.generation_name(base),
                 as_type="generation",
                 start_time=start,
@@ -363,7 +430,7 @@ class LangfuseEmitter:
                 metadata=lfmap.generation_metadata(base, phase=phase, has_text=has_text),
                 usage_details=lfmap.usage_details(token_row or {}),
             )
-            gen.end(end_time=start)
+            _end_obs(gen, start)
             self._counts["generations_sent"] += 1
             if token_row is not None and conv_row is not None:
                 self._counts["generations_paired"] += 1
