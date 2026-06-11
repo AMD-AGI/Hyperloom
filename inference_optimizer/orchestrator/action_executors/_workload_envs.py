@@ -165,6 +165,22 @@ def materialize_config_with_envs(
             bench.pop("benchmark_script", None)
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
+    # Fail fast on framework/script mismatch (e.g. vllm image + sglang script):
+    # guards the QRWKV-72B bug where $FRAMEWORK fell back to sglang and booted
+    # `sglang.launch_server` in a vllm-only image -> ModuleNotFoundError. Only
+    # trip when the script carries a DIFFERENT known framework's prefix, so
+    # custom/non-prefixed scripts are not falsely rejected.
+    _script = str(bench.get("benchmark_script") or "").lower()
+    _fw = str(bench.get("framework") or "").lower()
+    _known_fw = ("sglang", "vllm", "atom")
+    if _script and _fw in _known_fw:
+        _other = [k for k in _known_fw if k != _fw and _script.startswith(f"{k}_")]
+        if _other:
+            raise ValueError(
+                f"framework/script mismatch: framework={_fw!r} but "
+                f"benchmark_script={_script!r} targets {_other[0]!r}; refusing "
+                f"to boot server (would launch the wrong framework's entrypoint)"
+            )
     inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if inferencex_path:
         # Persist $INFERENCEX_PATH into the YAML so Magpie's runtime checkout
