@@ -447,6 +447,12 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # Architecture-identity tags from config.json fanned into recipe-snapshot extras; locked against pollution.
     "model_architectures",
     "model_type",
+    # Multimodal text-fallback degraded-run markers (cli._preflight). Coordinator/
+    # preflight are the sole writers; locked so an LLM update_state cannot forge
+    # or clear "degraded run" — it drives the final report's degraded warning
+    # (report.py) and must reflect the real preflight verdict, not LLM intent.
+    "degraded_mode",
+    "model_warnings",
 })
 
 
