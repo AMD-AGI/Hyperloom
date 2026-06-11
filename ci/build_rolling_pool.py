@@ -39,15 +39,40 @@ from generate_hf_matrix import slugify  # noqa: E402
 
 
 def _norm(repo: str | None) -> str:
+    """Normalize a repo id for case-insensitive comparison.
+
+    Args:
+        repo: Repo id, possibly ``None``.
+
+    Returns:
+        The trimmed, lower-cased repo id (empty string when ``repo`` is falsy).
+    """
     return (repo or "").strip().lower()
 
 
 def _candidate_keys(repo_id: str) -> set[str]:
+    """Build the set of slug keys a candidate may be matched by.
+
+    Args:
+        repo_id: Full Hugging Face repo id (``org/name``).
+
+    Returns:
+        Slugs for both the full repo id and its basename, since Pulse may store
+        either form as ``model_name``.
+    """
     repo_id = (repo_id or "").strip()
     return {slugify(repo_id), slugify(repo_id.split("/")[-1])}
 
 
 def _pulse_model_keys() -> set[str]:
+    """Fetch slug keys for every model already seen in Pulse breakdowns.
+
+    Pages through the Pulse session-breakdowns API (with retries) and collects
+    a slugified key per ``model_name``.
+
+    Returns:
+        The set of slugified model keys that have already been run.
+    """
     keys: set[str] = set()
     offset = 0
     limit = 200
@@ -79,6 +104,15 @@ def _pulse_model_keys() -> set[str]:
 
 
 def main() -> int:
+    """Merge the production and new-model pools and write the rolling outputs.
+
+    Reads the curated production corpus and the new-models list, applies the
+    production exclusion policy, de-duplicates by repo id, then writes the
+    merged pool, the reserved manual top-100, and the unrun subset.
+
+    Returns:
+        Process exit code (``0`` on success).
+    """
     prod = json.loads(PROD.read_text(encoding="utf-8"))
     newm = json.loads(NEWM.read_text(encoding="utf-8"))
 
@@ -90,6 +124,15 @@ def main() -> int:
     excl_kw = [k.lower() for k in policy.get("exclusion_keywords", [])]
 
     def excluded(repo: str) -> bool:
+        """Return whether a repo is filtered out by the exclusion policy.
+
+        Args:
+            repo: Candidate repo id.
+
+        Returns:
+            ``True`` when the repo is empty, exactly excluded, or matches an
+            exclusion keyword.
+        """
         k = _norm(repo)
         if not k:
             return True
@@ -146,6 +189,13 @@ def main() -> int:
     generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
     def dump(path: Path, cands: list[dict], note: str) -> None:
+        """Write a candidate pool to ``path`` as the standard corpus JSON.
+
+        Args:
+            path: Destination file; its stem is used as the ``pool_id``.
+            cands: Candidate records to serialize.
+            note: Human-readable description stored under the ``note`` key.
+        """
         path.write_text(json.dumps({
             "schema_version": "hyperloom.production_corpus.v1",
             "pool_id": path.stem,
