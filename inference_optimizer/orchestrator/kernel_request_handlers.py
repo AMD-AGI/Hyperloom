@@ -1533,11 +1533,19 @@ def _optimization_wrapper_timeout_sec(payload: dict) -> int:
 def _backend_order(payload: dict) -> list[str]:
     """Resolve the ordered list of optimization backends to try.
 
-    Uses an explicit ``payload['backend_order']`` or
-    ``KERNEL_OPT_BACKEND_ORDER`` env if present; otherwise falls back to the
-    default GEAK-first ladder. Unknown backends are filtered out, and
-    ``cursor`` is dropped from the auto-derived ladder when ``CURSOR_API_KEY``
-    is unset (explicit orders are respected as-is).
+    Precedence (highest to lowest):
+
+    1. ``payload['backend_order']`` – explicit per-request override.
+    2. ``KERNEL_OPT_BACKEND_ORDER`` env var – comma-separated list.
+    3. ``KERNEL_OPT_BACKENDS`` env var – accepted as an alias for
+       ``KERNEL_OPT_BACKEND_ORDER``.
+    4. The built-in GEAK-first default ladder.
+
+    All backend names are normalised to lowercase before filtering, so
+    values like ``"GEAK"`` or ``"Claude"`` are treated the same as their
+    lowercase equivalents.  Unknown backends are silently dropped, and
+    ``cursor`` is removed from the auto-derived ladder when
+    ``CURSOR_API_KEY`` is unset (explicit orders are respected as-is).
 
     Args:
         payload (dict): Request payload that may carry ``backend_order``.
