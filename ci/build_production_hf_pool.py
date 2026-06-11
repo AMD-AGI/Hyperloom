@@ -63,10 +63,16 @@ DEFAULT_AUTHOR_SLICES = [
 
 
 def _load_yaml_exclusions(path: Path) -> tuple[set[str], list[str]]:
-    """Read ``ci/inferenceX_models.yaml`` and return ``(exact_ids, keywords)``.
+    """Read ``ci/inferenceX_models.yaml`` and return its exclusions.
 
     Consumes ``models[].hf_model`` (exact lower-case match) and
     ``production_pool_exclusion_keywords`` (substring match).
+
+    Args:
+        path: Path to the InferenceX models YAML file.
+
+    Returns:
+        An ``(exact_ids, keywords)`` tuple; empty when the file is missing.
     """
     if not path.exists():
         return set(), []
