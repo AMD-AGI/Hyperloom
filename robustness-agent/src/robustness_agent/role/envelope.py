@@ -170,6 +170,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # specialist sub-agent ledger.
     "specialist_rounds",
     "specialist_domain_empty_streak",
+    # per-kb_anchor coverage counters (point 1); Coordinator-only writers.
+    "rounds_since_last_specialist",
+    "rounds_since_last_keep",
     "last_specialist",
     "research_lane_capacity",
     "gpu_specialist_capacity",

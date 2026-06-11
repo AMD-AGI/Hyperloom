@@ -491,6 +491,70 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     assert any(workspace.iterdir()), "specialist workspace should be non-empty"
 
 
+# 7. Point 2 — stalled-domain hard-trigger
+@pytest.fixture
+def force_coord(tmp_path: Path):
+    """Coordinator stand-in with a real SharedState + mocked _handle_intent."""
+    from inference_optimizer.orchestrator.coordinator import Coordinator
+    from inference_optimizer.orchestrator.shared_state import SharedState
+
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState()
+    c.shared_state.phase = "EXPLORE"
+    c._handle_intent = AsyncMock()  # type: ignore[method-assign]
+    return c
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_domain_dispatches_when_gap_pending(force_coord):
+    state = force_coord.shared_state
+    # serving_specialist (anchor=framework) idles past threshold.
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    state.upsert_gap({
+        "canonical_id": "gap.framework.scheduler.s1",
+        "domain_hint": "serving_specialist", "severity": "high",
+    })
+
+    await force_coord._maybe_force_stalled_domain_specialist()
+
+    force_coord._handle_intent.assert_awaited_once()
+    src, intent = force_coord._handle_intent.call_args.args
+    assert src == "orchestration"
+    params = intent.payload["params"]
+    assert params["domain"] == "serving_specialist"
+    assert params["gap_canonical_id"] == "gap.framework.scheduler.s1"
+    assert params["scope"] == "domain"
+    assert "forced-stalled-framework" in intent.payload["idempotency_key"]
+    # Counter is zeroed up-front so it can't re-fire next tick.
+    assert state.rounds_since_last_specialist["framework"] == 0
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_domain_noop_without_pending_gap(force_coord):
+    state = force_coord.shared_state
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    # No gap in the ledger -> nothing to force even though counters are high.
+    await force_coord._maybe_force_stalled_domain_specialist()
+    force_coord._handle_intent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_domain_noop_outside_explore(force_coord):
+    state = force_coord.shared_state
+    state.phase = "KERNEL"
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    state.upsert_gap({
+        "canonical_id": "gap.x", "domain_hint": "serving_specialist",
+        "severity": "high",
+    })
+    await force_coord._maybe_force_stalled_domain_specialist()
+    force_coord._handle_intent.assert_not_awaited()
+
+
 # 6. Intent routing branch wired into _handle_intent
 def test_handle_intent_dispatch_table_has_specialist_done_branch():
     """Gap-03 regression: the dispatch table routes SPECIALIST_DONE to ``_handle_specialist_done``."""

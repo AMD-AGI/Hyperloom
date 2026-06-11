@@ -768,6 +768,79 @@ def test_shared_state_specialist_rounds_default_empty():
     assert s.specialist_domain_empty_streak == {}
     assert s.last_specialist == {}
     assert s.research_lane_capacity == 1
+    assert s.rounds_since_last_specialist == {}
+    assert s.rounds_since_last_keep == {}
+
+
+# 8b. Per-anchor coverage counters (point 1)
+def test_domain_round_counters_tick_all_anchors():
+    from inference_optimizer.orchestrator.specialist_domains import (
+        KNOWLEDGE_DOMAIN_TAGS,
+    )
+
+    s = SharedState()
+    s.bump_domain_round_counters()
+    s.bump_domain_round_counters()
+    for anchor in KNOWLEDGE_DOMAIN_TAGS:
+        assert s.rounds_since_last_specialist[anchor] == 2
+        assert s.rounds_since_last_keep[anchor] == 2
+
+
+def test_note_specialist_dispatched_resets_only_its_anchor():
+    s = SharedState()
+    s.bump_domain_round_counters()
+    s.bump_domain_round_counters()
+    # serving_specialist maps to the "framework" kb_anchor.
+    s.note_specialist_dispatched("serving_specialist")
+    assert s.rounds_since_last_specialist["framework"] == 0
+    # A different anchor is untouched.
+    assert s.rounds_since_last_specialist["kernel"] == 2
+    # keep counter is independent of the dispatch reset.
+    assert s.rounds_since_last_keep["framework"] == 2
+
+
+def test_note_domain_keep_resets_keep_counter_by_anchor():
+    s = SharedState()
+    s.bump_domain_round_counters()
+    s.note_domain_keep("framework")
+    assert s.rounds_since_last_keep["framework"] == 0
+    assert s.rounds_since_last_specialist["framework"] == 1
+
+
+def test_best_gap_for_anchor_picks_high_severity_least_attempted():
+    s = SharedState()
+    s.upsert_gap({"canonical_id": "gap.a", "domain_hint": "serving_specialist",
+                  "severity": "medium"})
+    s.upsert_gap({"canonical_id": "gap.b", "domain_hint": "framework",
+                  "severity": "high"})
+    # framework is serving_specialist's anchor -> both resolve to "framework".
+    assert s.best_gap_for_anchor("framework") == "gap.b"
+    assert s.best_gap_for_anchor("serving_specialist") == "gap.b"
+    # An anchor with no matching gap returns "".
+    assert s.best_gap_for_anchor("communication") == ""
+
+
+def test_stalled_domains_reports_over_threshold_widest_first():
+    s = SharedState()
+    for _ in range(5):
+        s.bump_domain_round_counters()
+    # framework recently dispatched -> below specialist threshold.
+    s.note_specialist_dispatched("framework")
+    s.note_domain_keep("framework")
+    stalled = s.stalled_domains(specialist_threshold=3, keep_threshold=3)
+    assert "framework" not in stalled
+    assert "kernel" in stalled  # never dispatched/kept -> at 5
+    # Ordering: widest gap first, ties broken by anchor name.
+    assert stalled == sorted(
+        stalled,
+        key=lambda a: (
+            -max(
+                s.rounds_since_last_specialist.get(a, 0),
+                s.rounds_since_last_keep.get(a, 0),
+            ),
+            a,
+        ),
+    )
 
 
 def test_record_specialist_round_dedup_by_round_id():

@@ -810,6 +810,12 @@ _VERDICT_VISION_ONLY = "vision_only"
 _TEXT_COERCIBLE_MODEL_TYPES = frozenset({
     "kimi_k25",
     "qwen3_5_moe",
+    # Gemma-4 ships a vision_config (Gemma4ForConditionalGeneration) but its
+    # text decoder (text_config / gemma4_text) is a standard dense causal LM
+    # that vLLM serves text-only (both Gemma4ForCausalLM and
+    # Gemma4ForConditionalGeneration are registered). Text benchmarks never
+    # exercise the vision tower, so route to the degraded text path.
+    "gemma4",
 })
 
 

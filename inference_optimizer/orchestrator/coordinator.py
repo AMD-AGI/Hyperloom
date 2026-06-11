@@ -118,6 +118,12 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset({
 # Default per-repo candidate cap for ``fa phase-discover`` (FRAMEWORK_PR).
 DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES: int = 8
 
+# Point 2 hard-trigger thresholds: EXPLORE rounds a domain may go without a
+# specialist dispatch / a KEEP before the Coordinator force-dispatches one (a
+# real scheduling event, not an advisory nudge). Overridable via SharedState.
+FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
+FORCE_STALLED_KEEP_ROUNDS: int = 12
+
 
 # Result keys surfaced in delegated_result inbox line; first match wins per group.
 _OUTCOME_GAIN_KEYS: tuple[str, ...] = (
@@ -1191,6 +1197,7 @@ class Coordinator:
         )
         if str(state.phase or "").upper() == "EXPLORE":
             await self._maybe_enqueue_explore_research_scout()
+            await self._maybe_force_stalled_domain_specialist()
         await self._maybe_enqueue_trajectory_reviewer()
         if next_phase is None:
             return
@@ -3650,6 +3657,100 @@ class Coordinator:
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: EXPLORE re-dispatch failed")
+
+    async def _maybe_force_stalled_domain_specialist(self) -> None:
+        """Hard-trigger (point 2): force-dispatch a domain specialist for a
+        domain that has gone untouched for too many EXPLORE rounds *and* still
+        has an open gap in the gaps[] ledger.
+
+        This is the L2 supervisor escalation the long-run coverage lower-bound
+        relies on — a real scheduling event (a normal domain delegate routed
+        through PolicyGate + warmup + the GPU specialist pool), not an advisory
+        nudge. Idempotent per ``(anchor, round)`` so it can't spam the bus, and
+        it self-throttles by zeroing the per-anchor counter on dispatch. Routes
+        through ``_handle_intent`` exactly as an LLM delegate would; at most one
+        forced dispatch per tick.
+        """
+        state = self.shared_state
+        if str(getattr(state, "phase", "") or "").upper() != "EXPLORE":
+            return None
+        if not bool(getattr(state, "force_stalled_specialist_enabled", True)):
+            return None
+        spec_thr = max(1, int(
+            getattr(state, "force_stalled_specialist_rounds", 0)
+            or FORCE_STALLED_SPECIALIST_ROUNDS
+        ))
+        keep_thr = max(1, int(
+            getattr(state, "force_stalled_keep_rounds", 0)
+            or FORCE_STALLED_KEEP_ROUNDS
+        ))
+        try:
+            stalled = state.stalled_domains(
+                specialist_threshold=spec_thr, keep_threshold=keep_thr,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("stalled-domain force: stalled_domains() failed")
+            return None
+        if not stalled:
+            return None
+
+        from .specialist_domains import domain_for_tag
+
+        round_id = int((state.explore_search or {}).get("cursor") or 0)
+        for anchor in stalled:
+            gap_cid = state.best_gap_for_anchor(anchor)
+            if not gap_cid:
+                # No pending work pinned to this domain → nothing to force.
+                continue
+            dom = domain_for_tag(anchor)
+            if dom is None:
+                continue
+            params: dict[str, Any] = {
+                "domain": dom.key,
+                "tags": [anchor],
+                "gap_canonical_id": gap_cid,
+                "scope": "domain",
+                "source": "coordinator_internal",
+                "reason": f"stalled_domain_force:{anchor}",
+            }
+            intent = Intent(
+                type=IntentType.DELEGATE,
+                payload={
+                    "action_name": "specialist",
+                    "params": params,
+                    "idempotency_key": (
+                        f"forced-stalled-{anchor}-round{round_id}"
+                    ),
+                },
+            )
+            # Zero the counter up-front so a slow enqueue can't re-fire next
+            # tick; the eventual specialist completion resets it again.
+            try:
+                state.note_specialist_dispatched(anchor)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "stalled-domain force: counter reset failed for %s", anchor,
+                )
+            try:
+                await self._handle_intent("orchestration", intent)
+            except Exception:  # noqa: BLE001 — defensive, never crash the tick
+                log.exception(
+                    "stalled-domain force: dispatch failed for anchor=%s "
+                    "domain=%s gap=%s", anchor, dom.key, gap_cid,
+                )
+                continue
+            try:
+                state.save(self.session_dir)
+            except Exception:  # noqa: BLE001
+                log.exception("stalled-domain force: state save failed")
+            log.info(
+                "stalled-domain force: dispatched domain=%s anchor=%s gap=%s "
+                "round=%d (spec_thr=%d keep_thr=%d)",
+                dom.key, anchor, gap_cid, round_id, spec_thr, keep_thr,
+            )
+            # One forced dispatch per tick keeps the scheduler calm.
+            return None
+        return None
 
     async def _maybe_enqueue_trajectory_reviewer(self) -> None:
         """On a plateau, dispatch a Coordinator-owned readonly specialist seeded
@@ -6201,6 +6302,18 @@ class Coordinator:
             log.exception(
                 "specialist bookkeeping: bump_specialist_domain_empty_streak "
                 "failed for task=%s", task.task_id,
+            )
+
+        # Per-anchor coverage ledger (point 1): every specialist completion is
+        # one "round" — tick all anchors, then zero the one that just ran so a
+        # long-idle domain's counter climbs until the hard-trigger forces it.
+        try:
+            self.shared_state.bump_domain_round_counters()
+            self.shared_state.note_specialist_dispatched(domain)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "specialist bookkeeping: domain round-counter update failed "
+                "for task=%s", task.task_id,
             )
 
         try:
@@ -9047,6 +9160,19 @@ class Coordinator:
                     accepted.setdefault("accepted_at_round", round_id)
                     accepted.setdefault("provenance", winner.get("provenance") or "llm_direct")
                     self.shared_state.record_explore_accepted(accepted)
+                    # Per-anchor coverage (point 1): a specialist-provenance KEEP
+                    # zeroes that domain's rounds_since_last_keep counter.
+                    prov = str(accepted.get("provenance") or "")
+                    if prov.startswith("specialist:"):
+                        try:
+                            self.shared_state.note_domain_keep(
+                                prov.split(":", 1)[1].strip()
+                            )
+                        except Exception:  # noqa: BLE001 — defensive
+                            log.exception(
+                                "depth: note_domain_keep failed for "
+                                "provenance=%r", prov,
+                            )
                     changed = True
                 # 4. Lift the best winner into current_best / optimization_stack (best_tput is post-rebench).
                 if (

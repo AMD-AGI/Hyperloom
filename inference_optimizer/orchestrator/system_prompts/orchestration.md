@@ -328,14 +328,24 @@ no separate `dynamic_action` / `dynamic_specialist` actions:
   cross-domain rules), or `freeform` (no domain lock — you write the whole task
   in natural language, no tags/gap required). `domain` and `freeform` are
   **co-equal first-class entry points**, not default-vs-fallback — pick by fit
-  (see "When to pick which scope" below).
+  (see "When to pick which scope" below). If you omit `scope` entirely and pass
+  no domain/tag anchor, the dispatch falls back to the cheap, read-only
+  `freeform`/`research`/`cpu` lane (safe & cheap first) — so opt **in** to
+  `mode=patch`/`lane=gpu` explicitly when you want a worktree patch.
 - **`mode`** — `research` (read-only; produce findings) or `patch` (write a
   real unified diff in an isolated worktree). Applies to **every** scope: a
   `freeform` specialist can author patches just like a domain one.
 - **`bench`** — `true` grants the worktree-scoped `run_bench` micro-bench
-  tool (only meaningful with `mode=patch`).
+  tool (only meaningful with `mode=patch`). This is what gives a specialist a
+  real **measure → edit → measure** loop inside its own worktree, so prefer
+  `mode=patch + bench=true` (with `needs_gpu`) when you want it to *validate*
+  an idea rather than just reason about it.
 - **`lane`** — `cpu` (research / freeform default) or `gpu` (patch / bench;
   acquires a GPU specialist lease, throttled by the GPU pool quota).
+  `needs_gpu`/`bench` are governed by the **same GPU-pool ceiling for every
+  scope** — a `freeform` specialist that asks for GPU clears the identical
+  `specialist_gpu_pool_disabled` / capacity checks as a domain one (there is no
+  freeform GPU loophole).
 
 ### When to pick which scope (co-equal — choose by fit, not by default)
 
@@ -390,6 +400,20 @@ emit_intent({
   }}
 })
 ```
+
+**Free-form specialist with a measurement loop (`mode=patch + bench + GPU`):**
+```
+emit_intent({
+  intent_type: "delegate",
+  payload: {action_name: "specialist", params: {
+    scope: "freeform",
+    task_description: "Tune the decode attention kernel for our shapes; micro-bench each variant and keep the fastest.",
+    mode: "patch", bench: true, lane: "gpu", needs_gpu: true, gpu_count: 1
+  }}
+})
+```
+(Requires a non-zero GPU specialist pool; `needs_gpu` clears the same ceiling
+as any other scope.)
 
 **Free-form recon wave (`scope=freeform` + `tasks:[...]`) — fan out N at once:**
 ```

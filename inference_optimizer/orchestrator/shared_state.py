@@ -478,6 +478,13 @@ class SharedState:
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
     # Per-domain "empty proposal_set" streak; reset on non-empty specialist_done. Robustness escalates on persistent emptiness.
     specialist_domain_empty_streak: dict[str, int] = field(default_factory=dict)
+    # Per-kb_anchor coverage counters (point 1: long-run per-domain lower-bound).
+    # ``rounds_since_last_specialist`` — EXPLORE rounds since a specialist for
+    # that anchor was dispatched; ``rounds_since_last_keep`` — rounds since a
+    # KEEP landed for it. Both ++ once per EXPLORE round (bump_domain_round_counters),
+    # reset on dispatch / KEEP. Threshold consumed by the Coordinator escalation.
+    rounds_since_last_specialist: dict[str, int] = field(default_factory=dict)
+    rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
     # Legacy session_steward slots (steward removed in P3_17); kept only for resume + report.py back-compat, never written.
     last_remaining_gaps_assessment: dict[str, Any] = field(default_factory=dict)
     remaining_gaps_assessments: list[dict[str, Any]] = field(default_factory=list)
@@ -2353,6 +2360,96 @@ class SharedState:
         else:
             self.specialist_domain_empty_streak[d] = 0
         return self.specialist_domain_empty_streak[d]
+
+    # per-anchor coverage counters (point 1)
+    def bump_domain_round_counters(self) -> None:
+        """Increment both per-anchor round counters for every knowledge-domain
+        anchor. Called once per EXPLORE round so a long-idle domain's counters
+        climb until the Coordinator escalation forces a dispatch."""
+        from .specialist_domains import KNOWLEDGE_DOMAIN_TAGS
+
+        for anchor in KNOWLEDGE_DOMAIN_TAGS:
+            self.rounds_since_last_specialist[anchor] = int(
+                self.rounds_since_last_specialist.get(anchor, 0) or 0
+            ) + 1
+            self.rounds_since_last_keep[anchor] = int(
+                self.rounds_since_last_keep.get(anchor, 0) or 0
+            ) + 1
+
+    @staticmethod
+    def _anchor_for(domain_or_anchor: str) -> str:
+        """Resolve a domain key or raw tag to its canonical kb_anchor."""
+        from .specialist_domains import domain_for_tag, get_domain
+
+        s = str(domain_or_anchor or "").strip()
+        if not s:
+            return ""
+        d = get_domain(s)
+        if d and d.kb_anchor:
+            return d.kb_anchor
+        dt = domain_for_tag(s)
+        if dt and dt.kb_anchor:
+            return dt.kb_anchor
+        return s
+
+    def note_specialist_dispatched(self, domain_or_anchor: str) -> None:
+        """Reset ``rounds_since_last_specialist`` for the dispatched anchor."""
+        anchor = self._anchor_for(domain_or_anchor)
+        if anchor:
+            self.rounds_since_last_specialist[anchor] = 0
+
+    def note_domain_keep(self, domain_or_anchor: str) -> None:
+        """Reset ``rounds_since_last_keep`` for the anchor that just KEPT."""
+        anchor = self._anchor_for(domain_or_anchor)
+        if anchor:
+            self.rounds_since_last_keep[anchor] = 0
+
+    def stalled_domains(
+        self, *, specialist_threshold: int, keep_threshold: int,
+    ) -> list[str]:
+        """Return anchors whose ``rounds_since_last_specialist`` ≥
+        ``specialist_threshold`` OR ``rounds_since_last_keep`` ≥
+        ``keep_threshold`` (point 1 lower-bound; point 2 hard-trigger reads
+        this). Deterministically ordered by widest gap first."""
+        anchors = (
+            set(self.rounds_since_last_specialist)
+            | set(self.rounds_since_last_keep)
+        )
+        hits: list[tuple[int, str]] = []
+        for anchor in anchors:
+            spec = int(self.rounds_since_last_specialist.get(anchor, 0) or 0)
+            keep = int(self.rounds_since_last_keep.get(anchor, 0) or 0)
+            if spec >= specialist_threshold or keep >= keep_threshold:
+                hits.append((max(spec, keep), anchor))
+        hits.sort(key=lambda x: (-x[0], x[1]))
+        return [anchor for _, anchor in hits]
+
+    def best_gap_for_anchor(self, anchor: str) -> str:
+        """Return the canonical_id of the most actionable open gap whose
+        ``domain_hint`` resolves to ``anchor`` (or ``""`` when none). Selection:
+        highest severity, then least-attempted, then oldest (point 2 reads this
+        to force-dispatch a stalled domain that still has pending work)."""
+        target = self._anchor_for(anchor)
+        if not target:
+            return ""
+        severity_rank = {"high": 3, "medium": 2, "low": 1}
+        matches: list[tuple[tuple[int, int, str], str]] = []
+        for g in self.gaps:
+            if not isinstance(g, dict):
+                continue
+            cid = str(g.get("canonical_id") or "").strip()
+            if not cid:
+                continue
+            if self._anchor_for(str(g.get("domain_hint") or "")) != target:
+                continue
+            sev = severity_rank.get(str(g.get("severity") or "").lower(), 0)
+            attempts = len(g.get("attempts") or [])
+            first_seen = str(g.get("first_seen_ts") or "")
+            matches.append(((-sev, attempts, first_seen), cid))
+        if not matches:
+            return ""
+        matches.sort(key=lambda m: m[0])
+        return matches[0][1]
 
     # gaps ledger helpers
     def find_gap(self, canonical_id: str) -> dict[str, Any] | None:
