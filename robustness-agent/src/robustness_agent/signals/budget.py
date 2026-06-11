@@ -204,7 +204,18 @@ def _burn_no_gain_symptom(
 def _strategy_drift_symptom(
     snap: SharedStateSnapshot, *, burn_pct: float, cfg: BudgetConfig,
 ) -> Symptom:
-    """H2 early warning: 50% burnt and nothing to ship; MEDIUM (diagnose only)."""
+    """H2 early-warning symptom: budget half-burnt with nothing to ship.
+
+    MEDIUM severity (diagnose only).
+
+    Args:
+        snap: Current shared-state snapshot.
+        burn_pct: Fraction of the wall-clock budget consumed.
+        cfg: Budget configuration thresholds.
+
+    Returns:
+        The constructed :class:`Symptom`.
+    """
     return Symptom(
         name="budget_strategy_drift",
         severity=SymptomSeverity.MEDIUM,
@@ -238,7 +249,19 @@ def _deadline_warning_symptom(
     validated: float,
     cfg: BudgetConfig,
 ) -> Symptom:
-    """H1 absolute-time warning (<30 min): MEDIUM with validated gain, HIGH without."""
+    """H1 absolute-time warning symptom (deadline approaching).
+
+    MEDIUM severity when validated gain exists, HIGH without.
+
+    Args:
+        snap: Current shared-state snapshot.
+        remaining: Minutes remaining in the budget.
+        validated: Cumulative validated gain percentage.
+        cfg: Budget configuration thresholds.
+
+    Returns:
+        The constructed :class:`Symptom`.
+    """
     if validated < cfg.productive_gain_pct:
         severity = SymptomSeverity.HIGH
         tail = "validated_gain still 0; wind the session down now"
@@ -277,7 +300,18 @@ def _deadline_warning_symptom(
 def _hard_cutoff_symptom(
     snap: SharedStateSnapshot, *, remaining: float, cfg: BudgetConfig,
 ) -> Symptom:
-    """H1 absolute-time emergency cut (<=5 min): always HIGH + delegate(report)."""
+    """H1 absolute-time emergency-cutoff symptom (deadline imminent).
+
+    Always HIGH severity and suggests delegating to the final report.
+
+    Args:
+        snap: Current shared-state snapshot.
+        remaining: Minutes remaining in the budget.
+        cfg: Budget configuration thresholds.
+
+    Returns:
+        The constructed :class:`Symptom`.
+    """
     return Symptom(
         name="deadline_hard_cutoff",
         severity=SymptomSeverity.HIGH,
