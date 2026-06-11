@@ -864,11 +864,17 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
 
     # A multimodal config key (vision_config, image_token_id, …) is only a
     # degrade signal, not a hard block: if a text decoder exists we coerce to
-    # the text path with a warning instead of fail-fasting.
+    # the text path with a warning instead of fail-fasting. Routing to
+    # text_coercible requires a *positive* text-decoder signal — either an
+    # explicitly coercible model_type family or a confirmed text-generation
+    # architecture class. We deliberately do NOT fall back to
+    # ``_SUPPORTED_MODEL_TYPES`` here: that allowlist is a last-resort match
+    # for a bare model_type with no architectures, and a mislabeled VLM config
+    # (e.g. a real vision model carrying model_type="llama" but no ForCausalLM
+    # arch) must fail-fast rather than silently degrade to a text run.
     _has_text_decoder = (
         model_type_l in _TEXT_COERCIBLE_MODEL_TYPES
         or any(_arch_is_supported_text_generation(a) for a in architectures)
-        or model_type_l in _SUPPORTED_MODEL_TYPES
     )
     for key in _UNSUPPORTED_CONFIG_KEYS:
         if key in config:

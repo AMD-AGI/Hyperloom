@@ -979,6 +979,35 @@ def test_266_transcript_failure_never_aborts_run(tmp_path):
     assert res.report_path.exists()
 
 
+def test_266_transcript_caps_oversized_fields():
+    """#266: a megabyte tool_result / text block must be truncated so the
+    diagnostic transcript cannot grow unbounded. The cap applies to direct
+    string fields and to strings nested inside tool inputs/results."""
+    cap = tlr._TRANSCRIPT_FIELD_MAX_CHARS
+
+    # _cap_str leaves short strings alone, clips long ones with a marker.
+    assert tlr._cap_str("short") == "short"
+    big = "x" * (cap + 5000)
+    capped = tlr._cap_str(big)
+    assert len(capped) < len(big)
+    assert capped.startswith("x" * cap)
+    assert "truncated" in capped
+
+    # _json_safe caps strings at any nesting depth (tool_result content).
+    nested = tlr._json_safe({"out": ["y" * (cap + 100)]})
+    assert len(nested["out"][0]) <= cap + 64
+
+    class _ToolResultBlock:
+        def __init__(self, content):
+            self.content = content
+            self.tool_use_id = "tu_1"
+            self.is_error = False
+
+    rec = tlr._serialize_sdk_block(_ToolResultBlock("z" * (cap + 9000)))
+    assert "truncated" in rec["content"]
+    assert len(rec["content"]) < cap + 9000
+
+
 # ===========================================================================
 # T2 — analysis.md is the only contracted TraceLens output.
 def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):

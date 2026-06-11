@@ -582,42 +582,55 @@ ensure_magpie_atomic_scripts_patch() {
     return 0
   fi
   log "applying Hyperloom #C1 atomic-write patch to Magpie._prepare_benchmark_scripts"
+  # Exit-code contract (read below): 0 ok · 2 remote-trust drift only ·
+  # 4 GENUINE atomic failure (race unmitigated) · 1 benign atomic no-op.
   if MAGPIE_DIR="$MAGPIE_DIR" "$PYTHON" - <<'PY'
 import os, sys
 from inference_optimizer.orchestrator.action_executors._magpie_patcher import (
     magpie_scripts_patch_status,
 )
 status = magpie_scripts_patch_status(os.environ["MAGPIE_DIR"])
+print(f"_magpie_patcher: atomic_reason={status.atomic_reason} "
+      f"atomic_ok={status.atomic_ok} remote_trust_ok={status.remote_trust_ok}",
+      file=sys.stderr)
 if status.ok:
     sys.exit(0)
+# A GENUINE atomic failure (unrecognized shape / I/O error) means the
+# script-tearing race is actually unmitigated — distinct exit so a strict
+# install can fail-loud instead of swallowing it as an expected no-op.
+if status.atomic_genuine_failure:
+    sys.exit(4)
 if not status.atomic_ok:
     sys.exit(1)
 if not status.remote_trust_ok:
     sys.exit(2)
-# Unreachable while ``ok == atomic_ok and remote_trust_ok`` (a not-ok status
-# means at least one of the two bits is False, caught above). Kept as a
-# defensive non-zero catch-all so a future change to MagpiePatchStatus.ok
-# cannot make the script fall through and exit 0 on an unhandled state.
+# Defensive catch-all: a not-ok status with none of the bits above set should
+# never happen, but exit non-zero so we never fall through to exit 0.
 sys.exit(3)
 PY
   then
     log "Magpie #C1 patch OK"
   else
     rc=$?
-    if [ "$rc" -eq 2 ]; then
+    if [ "$rc" -eq 4 ]; then
+      # GENUINE failure: the legacy block is gone AND upstream is not atomic
+      # (or a read/write error). bugs.md §C #1 (script-tearing race) is NOT
+      # mitigated — `profile`/`baseline` can hit `syntax error near unexpected
+      # token 'fi'`. Strict mode (default) aborts; MAGPIE_PATCH_STRICT=0 keeps
+      # the legacy fail-soft behaviour and only warns.
+      if [ "${MAGPIE_PATCH_STRICT:-1}" -eq 0 ]; then
+        warn "Magpie atomic-write patch GENUINELY failed (race unmitigated); MAGPIE_PATCH_STRICT=0 set, continuing anyway — review _magpie_patcher.py."
+      else
+        die "Magpie atomic-write patch GENUINELY failed: neither the legacy shutil.copy2 block nor an upstream atomic copy was found in benchmarker.py. bugs.md §C #1 (script-tearing race) is unmitigated. Re-pin MAGPIE_REF to a supported commit, review _magpie_patcher.py, or set MAGPIE_PATCH_STRICT=0 to downgrade to a warning (or PATCH_MAGPIE=0 to skip entirely)."
+      fi
+    elif [ "$rc" -eq 2 ]; then
       warn "Magpie SGLang remote trust patch did not apply. If MAGPIE_TRUST_REMOTE_CODE=1 is required for custom-code models (for example Kimi/Qwen tokenizer paths), remote benchmark clients may still fail to pass trust; review _magpie_patcher.py or set PATCH_MAGPIE=0 only if this is intentional."
     else
-      # Fail-soft (was fail-loud): with MAGPIE_REF now pinned to an upstream
-      # commit that already copies benchmark scripts atomically
-      # (_copy_benchmark_script_atomic), the in-place patcher finds no legacy
-      # `shutil.copy2` block and returns False — which is the EXPECTED no-op
-      # state, not a regression. bugs.md §C #1 is already mitigated upstream in
-      # that case. A sibling branch makes the patcher upstream-aware; this warn
-      # is defense in depth so a pinned/atomic Magpie does not abort install.
-      # If you are NOT on a pinned/atomic Magpie, the script-tearing race is
-      # genuinely unpatched — review _magpie_patcher.py. PATCH_MAGPIE=0 skips
-      # this step entirely.
-      warn "Magpie atomic-write patch did not apply (legacy block not found). Expected when MAGPIE_REF is pinned to an upstream-atomic commit (patch is a no-op); otherwise bugs.md §C #1 may be unpatched — review _magpie_patcher.py or set PATCH_MAGPIE=0."
+      # Benign no-op (rc=1): MAGPIE_DIR unset / benchmarker.py missing. With
+      # MAGPIE_REF pinned to an upstream-atomic commit the patcher reports
+      # ``upstream_atomic`` (exit 0) instead, so this branch is just the
+      # missing-tree case — warn and continue. PATCH_MAGPIE=0 skips the step.
+      warn "Magpie atomic-write patch skipped (no benchmarker.py under MAGPIE_DIR). Fine for tests/dry-runs; otherwise check MAGPIE_DIR or set PATCH_MAGPIE=0."
     fi
   fi
 }

@@ -190,6 +190,22 @@ def test_detect_qwen35_moe_text_coercible(tmp_path):
     assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
 
 
+def test_detect_mislabeled_vlm_with_vision_config_is_vision_only(tmp_path):
+    """A multimodal config whose model_type is merely in the text allowlist
+    (e.g. a real VLM mislabeled model_type='qwen2') but with NO confirmed
+    text-generation architecture must fail-fast (vision_only), not degrade.
+    Guards against _SUPPORTED_MODEL_TYPES widening text_coercible routing."""
+    m = tmp_path / "mislabeled"
+    _write_config(m, {
+        "architectures": ["SomeVisionForConditionalGeneration"],
+        "model_type": "qwen2",
+        "vision_config": {"hidden_size": 1024},
+    })
+    hit = cli._detect_unsupported_model(str(m))
+    assert hit is not None
+    assert hit["verdict"] == cli._VERDICT_VISION_ONLY
+
+
 def test_detect_missing_config_returns_none(tmp_path):
     assert cli._detect_unsupported_model(str(tmp_path / "nope")) is None
 
