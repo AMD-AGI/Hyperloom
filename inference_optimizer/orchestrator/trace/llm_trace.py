@@ -287,6 +287,17 @@ def append_llm_call(
             record.component, record.session_id, exc,
         )
 
+    # Second sink (opt-in): mirror in-process calls to Langfuse live. Skipped
+    # for ext/ shards (target set) — those are out-of-process children that
+    # the parent backfills at flush_session. Best-effort; never raises.
+    if target is None:
+        try:
+            from .langfuse_emitter import get_emitter
+
+            get_emitter(session_dir).record_llm_call(row)
+        except Exception:  # noqa: BLE001 — Langfuse must never break the ledger
+            log.debug("llm_trace: langfuse mirror failed", exc_info=True)
+
 
 def row_field_set() -> frozenset[str]:
     """Public accessor for the closed row schema (used by the collector)."""
