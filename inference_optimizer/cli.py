@@ -762,6 +762,9 @@ _UNSUPPORTED_MODEL_TYPES = frozenset({
 })
 
 _UNSUPPORTED_ARCHITECTURES = frozenset({
+    # RWKV6/Qwen2 hybrid linear-attention arch: not in sglang's supported list
+    # (only plain RwkvForCausalLM is), fails ModelConfig validation at boot.
+    "RWKV6Qwen2ForCausalLM",
     "Gemma3ForConditionalGeneration",
     "InternVLChatModel",
     "Phi3VForCausalLM",
@@ -792,6 +795,7 @@ _UNSUPPORTED_CONFIG_KEYS = (
 
 _TEXT_COMPAT_MULTIMODAL_EXCEPTIONS = frozenset({
     ("kimi_k25", "KimiK25ForConditionalGeneration"),
+    ("qwen3_5_moe", "Qwen3_5MoeForConditionalGeneration"),
 })
 
 
@@ -810,11 +814,11 @@ def _is_text_compatible_multimodal_exception(
 ) -> bool:
     """Allow known multimodal configs whose text path is benchmark-compatible.
 
-    Kimi-K2.6 ships as ``KimiK25ForConditionalGeneration`` with
-    ``vision_config`` even when used as a text-only checkpoint. SGLang can serve
-    its text-generation path for our benchmark; the generic multimodal gate was
-    too broad and rejected it before baseline could start. Keep this list exact
-    so ordinary VLMs remain fail-fast.
+    Kimi-K2.6 and Qwen3.6 MoE ship with ``vision_config`` even when used as
+    text-only checkpoints. Their serving stacks can exercise the text-generation
+    path for our benchmark; the generic multimodal gate was too broad and
+    rejected them before baseline could start. Keep this list exact so ordinary
+    VLMs remain fail-fast.
     """
     return any(
         (model_type_l, arch) in _TEXT_COMPAT_MULTIMODAL_EXCEPTIONS
@@ -832,6 +836,13 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     if config is None:
         return None
     architectures = _config_architectures(config)
+    # Wrapper models may nest the real arch under text_config; merge so the
+    # unsupported-arch blocklist still matches (e.g. RWKV6Qwen2ForCausalLM).
+    nested = config.get("text_config")
+    if isinstance(nested, dict):
+        for a in _config_architectures(nested):
+            if a not in architectures:
+                architectures.append(a)
     model_type = str(config.get("model_type") or "").strip()
     model_type_l = model_type.lower()
 
@@ -955,6 +966,43 @@ def _model_has_dual_chunk_attention(model_path: str) -> bool:
     )
 
 
+def _model_is_moe(model_path: str) -> bool:
+    """Best-effort detect a Mixture-of-Experts model from config.json.
+
+    MoE checkpoints declare an expert count (``num_experts`` /
+    ``num_local_experts`` / ``n_routed_experts``), a ``moe_intermediate_size``,
+    or carry a ``moe`` marker in ``architectures`` / ``model_type`` (e.g.
+    Qwen3MoeForCausalLM / qwen3_moe). On ROCm/aiter, sglang's default
+    ``--moe-runner-backend auto`` routes these through aiter's CK 2-stage
+    fused-MoE kernel, whose first-request JIT build is broken in some images;
+    callers use this to switch to a ROCm-capable MoE runner. Checks the top
+    level and a nested ``text_config``. Soft-degrades to False on any missing
+    / unreadable / invalid config.
+    """
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return False
+    candidates = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    expert_keys = ("num_experts", "num_local_experts", "n_routed_experts")
+    for cfg in candidates:
+        for key in expert_keys:
+            val = cfg.get(key)
+            if isinstance(val, bool):
+                continue
+            if isinstance(val, int) and val > 1:
+                return True
+        if cfg.get("moe_intermediate_size"):
+            return True
+        if "moe" in str(cfg.get("model_type") or "").lower():
+            return True
+        if any("moe" in arch.lower() for arch in _config_architectures(cfg)):
+            return True
+    return False
+
+
 def _context_headroom_tokens() -> int:
     """Resolve the context headroom (tokens); env override, else default."""
     raw = os.environ.get(_CONTEXT_HEADROOM_ENV, "").strip()
@@ -1057,6 +1105,67 @@ _ROPE_CONFIG_KEYS = ("rope_scaling", "rope_parameters", "rope_theta")
 _AMD_UNSUPPORTED_MODEL_TYPES = frozenset({"deepseek_v32"})
 _AMD_UNSUPPORTED_ARCHITECTURES = frozenset({"deepseekv32forcausallm"})
 
+# model_type values that ship a custom AutoConfig (auto_map) but aren't
+# registered in sglang/vLLM's config mapping. sglang falls back to
+# PreTrainedConfig (base class), which lacks max_position_embeddings etc.,
+# causing AttributeError deep in engine init.
+_UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
+
+# Quantization formats with no ROCm/AMD runtime path. NVIDIA ModelOpt FP8/NVFP4
+# use vendor-specific scale packing (no sglang ROCm loader); bitsandbytes ships
+# CUDA-only kernels; NVFP4/FP4 need Blackwell hardware. AMD-native fp8 (Quark /
+# compressed-tensors), gptq, awq are NOT listed so they keep running.
+_AMD_UNSUPPORTED_QUANT_ALGOS = frozenset({"nvfp4", "fp4"})
+_AMD_UNSUPPORTED_QUANT_METHODS = frozenset({"bitsandbytes", "bnb"})
+
+
+def _detect_amd_unsupported_quant(model_path: str) -> str | None:
+    """Return a reason when the model ships a quant format unsupported on ROCm.
+
+    Reads both ``config.json:quantization_config`` (standard HF) and the
+    separate ``hf_quant_config.json`` (NVIDIA ModelOpt). Returns None when the
+    format is ROCm-runnable or absent.
+    """
+    if not model_path:
+        return None
+    cfg = _load_model_config_dict(model_path) or {}
+    qc = cfg.get("quantization_config")
+    if isinstance(qc, dict):
+        method = str(qc.get("quant_method") or "").strip().lower()
+        if method in _AMD_UNSUPPORTED_QUANT_METHODS:
+            return (
+                f"quantization_config.quant_method '{method}' ships CUDA-only "
+                f"kernels with no ROCm equivalent; it crashes in engine init "
+                f"on AMD."
+            )
+    # NVIDIA ModelOpt writes a separate hf_quant_config.json, not config.json.
+    hq_path = Path(model_path) / "hf_quant_config.json"
+    if hq_path.is_file():
+        try:
+            hq = json.loads(hq_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            hq = None
+        if isinstance(hq, dict):
+            producer = str(
+                (hq.get("producer") or {}).get("name") or "",
+            ).strip().lower()
+            algo = str(
+                (hq.get("quantization") or {}).get("quant_algo") or "",
+            ).strip().lower()
+            if producer == "modelopt" and algo:
+                return (
+                    f"NVIDIA ModelOpt '{algo.upper()}' quantization "
+                    f"(hf_quant_config.json) uses vendor-specific scale packing "
+                    f"with no sglang ROCm loader (e.g. 'modelopt_fp8 ... not "
+                    f"supported in ROCm'); use an AMD-native (Quark) checkpoint."
+                )
+            if algo in _AMD_UNSUPPORTED_QUANT_ALGOS:
+                return (
+                    f"'{algo.upper()}' quantization needs NVIDIA Blackwell "
+                    f"hardware; no AMD/ROCm runtime path exists."
+                )
+    return None
+
 
 def _detect_incompatible_model_config(
     model_path: str, gpu_type: str | None = None,
@@ -1093,6 +1202,9 @@ def _detect_incompatible_model_config(
     # Reject DSA-like architectures only on AMD/ROCm.
     # The same model can still run on vendor-supported NVIDIA engines.
     if _resolve_amd_gpu_type(gpu_type):
+        quant_reason = _detect_amd_unsupported_quant(model_path)
+        if quant_reason is not None:
+            return quant_reason
         model_type = str(data.get("model_type") or "").strip().lower()
         arches = {a.lower() for a in _config_architectures(data)}
         if (
@@ -1125,6 +1237,32 @@ def _detect_incompatible_model_config(
             f"({', '.join(_MAXPOS_CONFIG_KEYS)}); transformers/vLLM rope "
             "init dereferences a missing max_position_embeddings and crashes "
             "in engine init (DeepSeek-V3.2-Exp class)."
+        )
+    # Custom AutoConfig with unregistered model_type: sglang/vLLM fall
+    # back to PreTrainedConfig (no max_position_embeddings attr) → crash.
+    auto_map = data.get("auto_map")
+    model_type = str(data.get("model_type") or "").strip().lower()
+    if (
+        isinstance(auto_map, dict)
+        and auto_map.get("AutoConfig")
+        and model_type in _UNREGISTERED_CUSTOM_CONFIG_TYPES
+    ):
+        return (
+            f"model_type '{model_type}' ships a custom AutoConfig "
+            f"({auto_map['AutoConfig']}) but is not registered in sglang/"
+            f"vLLM's config mapping; the engine falls back to "
+            f"PreTrainedConfig which lacks key attributes "
+            f"(max_position_embeddings) and crashes in init."
+        )
+    # Dual-chunk attention on AMD/ROCm: sglang hard-requires
+    # dual_chunk_flash_attn (sm90+ only) and rejects all other backends.
+    if _resolve_amd_gpu_type(gpu_type) and _model_has_dual_chunk_attention(
+        model_path
+    ):
+        return (
+            "model declares dual_chunk_attention_config but sglang requires "
+            "the dual_chunk_flash_attn backend which only builds on sm90+ "
+            "(NVIDIA Hopper); no compatible backend exists for AMD/ROCm."
         )
     return None
 
@@ -2538,18 +2676,18 @@ def _preflight(
     if not inferencex_path:
         from .paths import (
             magpie_dir as _magpie_default,
-            runtime_dir as _runtime_default,
+            open_source_root as _open_source_default,
         )
-        runtime_root = _runtime_default(_session_dir_resolve())
+        open_source_root = _open_source_default()
         magpie_root = (
             Path(os.environ["MAGPIE_DIR"])
             if os.environ.get("MAGPIE_DIR")
             else _magpie_default(_session_dir_resolve())
         )
-        # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone runtime checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
+        # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone pod-local checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
         for candidate in (
             magpie_root / "InferenceX",
-            runtime_root / "InferenceX",
+            open_source_root / "InferenceX",
         ):
             if _inferencex_checkout_ok(candidate):
                 if os.access(candidate, os.W_OK):
@@ -2565,8 +2703,8 @@ def _preflight(
     # than falling back to a read-only host mount. baseline cannot run
     # without InferenceX, so a clone failure is a hard error.
     if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
-        from .paths import runtime_dir as _runtime_default
-        dest = _runtime_default(_session_dir_resolve()) / "InferenceX"
+        from .paths import open_source_root as _open_source_default
+        dest = _open_source_default() / "InferenceX"
         print(f"Preflight: InferenceX not found; cloning into {dest} ...")
         inferencex_path = _clone_inferencex(dest)
         if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
@@ -5200,6 +5338,17 @@ def main(argv: list[str] | None = None) -> int:
         int: The process exit code (``optimize`` result, or ``2`` for no/unknown
         command).
     """
+    # Force line-buffering so output piped through `tee` (or any
+    # non-TTY sink) flushes every line immediately instead of
+    # block-buffering ~8 KB.  Without this the top-level log appears
+    # frozen for the entire duration of a Magpie subprocess (~30-60 min)
+    # because no new print() calls happen while communicate() blocks.
+    # See #468.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+
     parser = _build_parser()
     args = parser.parse_args(argv)
     level = logging.WARNING - 10 * min(args.verbose, 2)

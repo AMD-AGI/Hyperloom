@@ -1857,6 +1857,219 @@ def _record_has_task_window(rec: SubmissionRecord) -> bool:
     return _parse_safe_timestamp(rec.safe_started_at) is not None
 
 
+def _env_float(name: str, default: float) -> float:
+    """Read a float environment setting with a safe fallback."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning("%s=%r is not a float; using %.1f", name, raw, default)
+        return default
+
+
+def _read_session_state(session_dir: str | Path) -> dict:
+    """Best-effort read of a session's state.json."""
+    path = Path(session_dir) / "state.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _session_has_terminal_marker(session_dir: str | Path) -> bool:
+    """True when a session has reached a state where CI should collect now."""
+    root = Path(session_dir)
+    if (root / "session_breakdown.json").is_file():
+        return True
+    if (root / "complete").is_file():
+        return True
+    state = _read_session_state(root)
+    if state.get("close_sequence_done") is True:
+        return True
+    return False
+
+
+def _session_activity_mtime(session_dir: str | Path) -> float:
+    """Return a bounded best-effort activity timestamp for a session.
+
+    ``state.json`` can be quiet while long Magpie subprocesses append logs or
+    traces, so include the runtime subtrees CI relies on. The file cap avoids
+    expensive walks for very large sessions.
+    """
+    root = Path(session_dir)
+    mtimes: list[float] = []
+    for rel in (
+        "state.json",
+        "session_breakdown.json",
+        "complete",
+        "reports/final.md",
+        "reports/final.json",
+    ):
+        p = root / rel
+        try:
+            if p.exists():
+                mtimes.append(p.stat().st_mtime)
+        except OSError:
+            continue
+
+    seen = 0
+    for sub in ("optimizer_runs", "runs", "reports"):
+        base = root / sub
+        if not base.exists():
+            continue
+        for walk_root, _dirs, files in os.walk(base):
+            for name in files:
+                seen += 1
+                if seen > 5000:
+                    return max(mtimes) if mtimes else 0.0
+                if not name.endswith((".log", ".json", ".txt", ".md", ".csv", ".gz")):
+                    continue
+                try:
+                    mtimes.append((Path(walk_root) / name).stat().st_mtime)
+                except OSError:
+                    continue
+    return max(mtimes) if mtimes else 0.0
+
+
+def _find_nfs_state_session_dir(
+    rec: SubmissionRecord,
+    current_session_hints: set[str] | None = None,
+) -> str | None:
+    """Locate the current NFS session using state.json, not breakdown files."""
+    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    users_root = Path(nfs_root) / "users"
+    if not rec.safe_user_id or not users_root.is_dir():
+        return None
+    uid_path = users_root / rec.safe_user_id
+    if not uid_path.is_dir():
+        return None
+
+    hints = set(current_session_hints or set())
+    candidates: list[tuple[int, float, str]] = []
+    for model_dir_name in _candidate_model_dir_names(rec):
+        model_dir = uid_path / model_dir_name
+        if not model_dir.is_dir():
+            continue
+        try:
+            ts_entries = sorted(os.listdir(model_dir), reverse=True)
+        except OSError:
+            continue
+        for ts_entry in ts_entries:
+            session_dir = model_dir / ts_entry
+            if not session_dir.is_dir():
+                continue
+            state_path = session_dir / "state.json"
+            if not state_path.is_file():
+                continue
+            if hints:
+                if not _path_has_session_hint(str(session_dir), hints):
+                    continue
+                score = 40
+            else:
+                ts = _session_timestamp_from_path(ts_entry)
+                if not _timestamp_in_task_window(ts, rec):
+                    continue
+                score = 30
+            state = _read_session_state(session_dir)
+            workload = state.get("workload") if isinstance(state.get("workload"), dict) else {}
+            model_field = str(
+                state.get("model")
+                or state.get("model_name")
+                or workload.get("model_name")
+                or ""
+            )
+            if model_field and not _record_model_field_matches(rec, model_field):
+                continue
+            if model_field:
+                score += 100
+            try:
+                mtime = state_path.stat().st_mtime
+            except OSError:
+                continue
+            candidates.append((score, mtime, str(session_dir)))
+
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][2]
+
+
+def _wait_for_nfs_session_delivery(
+    rec: SubmissionRecord,
+    current_session_hints: set[str] | None = None,
+    poll_s: int = 60,
+    grace_min: float | None = None,
+    idle_min: float | None = None,
+) -> str | None:
+    """After SaFE early terminal, wait while the NFS session is still active."""
+    grace_min = _env_float("SAFE_OPTIMIZE_NFS_LIVE_GRACE_MIN", 180.0) \
+        if grace_min is None else grace_min
+    idle_min = _env_float("SAFE_OPTIMIZE_NFS_IDLE_GRACE_MIN", 20.0) \
+        if idle_min is None else idle_min
+    if grace_min <= 0 or idle_min <= 0:
+        return None
+
+    session_dir = _find_nfs_state_session_dir(rec, current_session_hints)
+    if not session_dir:
+        return None
+
+    now = time.time()
+    activity = _session_activity_mtime(session_dir)
+    if not activity:
+        return session_dir
+    if now - activity > idle_min * 60 and not _session_has_terminal_marker(session_dir):
+        log.info(
+            "[task %s] NFS session %s found but inactive for %.1fmin; "
+            "collecting without grace wait",
+            rec.task_id, session_dir, (now - activity) / 60,
+        )
+        return session_dir
+
+    deadline = now + grace_min * 60
+    idle_deadline = activity + idle_min * 60
+    log.warning(
+        "[task %s] SaFE status=%s but NFS session still appears active: %s; "
+        "waiting up to %.1fmin (idle %.1fmin) for delivery contract files",
+        rec.task_id, rec.final_status, session_dir, grace_min, idle_min,
+    )
+    while time.time() < deadline:
+        if _session_has_terminal_marker(session_dir):
+            log.info(
+                "[task %s] NFS session reached terminal/delivery marker: %s",
+                rec.task_id, session_dir,
+            )
+            return session_dir
+        latest = _session_activity_mtime(session_dir)
+        if latest > activity:
+            activity = latest
+            idle_deadline = latest + idle_min * 60
+            log.info(
+                "[task %s] NFS session still active (last activity %s)",
+                rec.task_id,
+                datetime.fromtimestamp(latest, tz=timezone.utc).isoformat(),
+            )
+        if time.time() > idle_deadline:
+            log.warning(
+                "[task %s] NFS session idle for %.1fmin without delivery "
+                "marker; proceeding to collect",
+                rec.task_id, idle_min,
+            )
+            return session_dir
+        time.sleep(max(1, min(poll_s, 60)))
+
+    log.warning(
+        "[task %s] NFS live-session grace wait expired after %.1fmin; "
+        "proceeding to collect",
+        rec.task_id, grace_min,
+    )
+    return session_dir
+
+
 def _category_from_arch(arch: str | None) -> str:
     """Coarse model-shape classification: "moe" if arch contains "moe", else
     "dense"; "" when unknown so downstream JSON stays "n/a"."""
@@ -2727,6 +2940,33 @@ def wait_and_collect_one(
     if current_session_hints:
         log.info("[task %s] current session timestamp hints from artifacts: %s",
                  rec.task_id, ", ".join(sorted(current_session_hints)))
+
+    if not has_safe_breakdown:
+        waited_session = _wait_for_nfs_session_delivery(
+            rec,
+            current_session_hints=current_session_hints,
+            poll_s=poll_s,
+        )
+        if waited_session:
+            # The SaFE artifact index may lag behind the agent's final writes.
+            # Re-list once after the grace wait before falling back to NFS.
+            try:
+                items = safe.list_artifacts(rec.task_id)
+                wanted = [
+                    it for it in items
+                    if _is_wanted_artifact(it.get("path", ""), all_artifacts)
+                ]
+                wanted_paths = [it.get("path", "").lower() for it in wanted]
+                has_safe_breakdown = any(
+                    p.endswith("session_breakdown.json") for p in wanted_paths
+                )
+                current_session_hints.update(_session_hints_from_artifact_items(items))
+                log.info("[task %s] safe artifacts after NFS grace wait: "
+                         "%d total, %d to download",
+                         rec.task_id, len(items), len(wanted))
+            except Exception as e:
+                log.warning("[task %s] post-grace list_artifacts failed: %s",
+                            rec.task_id, e)
 
     task_dir = artifacts_dir / rec.task_id
     rec.artifacts_dir = str(task_dir)

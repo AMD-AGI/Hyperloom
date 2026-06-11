@@ -306,6 +306,117 @@ def test_load_op_category_map_missing_returns_empty(tmp_path):
     assert tla.load_op_category_map(tmp_path / "perf_report_csvs") == {}
 
 
+# ── #727 companion: fused-MoE trace-anchored shape capture ────────────────────
+
+# The two operand-tuple rows TraceLens writes for the fused-MoE expert kernel in
+# ``ops_unique_args.csv`` (gate/up GEMM then down GEMM), as captured for the
+# Qwen3-30B-A3B MoE decode workload (conc 64, ISL/OSL 1024).
+_FUSED_MOE_OPS_UNIQUE_ARGS = (
+    "name,op category,Input Dims,Input type\n"
+    'sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427,MoE_fused,'
+    '"((15360, 2048), (128, 1536, 2048), (), (122880, 1536), (), (), (), '
+    '(15360, 8), (15360, 8), (131007,), (2047,), (1,), ())",'
+    "\"('c10::BFloat16', 'c10::BFloat16', '', 'c10::BFloat16', '', '', '', "
+    "'float', 'int', 'int', 'int', 'int', '')\"\n"
+    'sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427,MoE_fused,'
+    '"((122880, 768), (128, 2048, 768), (), (15360, 8, 2048), (), (), (), '
+    '(15360, 8), (15360, 8), (131007,), (2047,), (1,), ())",'
+    "\"('c10::BFloat16', 'c10::BFloat16', '', 'c10::BFloat16', '', '', '', "
+    "'float', 'int', 'int', 'int', 'int', '')\"\n"
+)
+
+
+def _write_fused_moe_ops_unique_args(tmp_path):
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "ops_unique_args.csv").write_text(
+        _FUSED_MOE_OPS_UNIQUE_ARGS, encoding="utf-8"
+    )
+    return csv_dir
+
+
+def test_resolve_fused_moe_shapes_matches_manual_harness(tmp_path):
+    """Operand dims recovered from ops_unique_args.csv match the manual GEAK harness shapes."""
+    csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
+    shapes = tla.resolve_fused_moe_shapes_from_csv(csv_dir)
+    # gate/up GEMM: A(num_tokens,H) x w1(E,2I,H) -> C(T,2I)
+    assert "(15360,2048) bf16" in shapes      # A
+    assert "(128,1536,2048) bf16" in shapes   # w1 (2*I=1536)
+    assert "(122880,1536) bf16" in shapes     # C (T=num_tokens*topk)
+    # down GEMM: A(T,I) x w2(E,H,I) -> C(num_tokens,topk,H)
+    assert "(122880,768) bf16" in shapes      # A (I=768)
+    assert "(128,2048,768) bf16" in shapes    # w2
+    assert "(15360,8,2048) bf16" in shapes    # C
+    # 1-tuples keep the trailing comma; ints map to i32, floats to f32.
+    assert "(131007,) i32" in shapes
+    assert "(15360,8) f32" in shapes
+    # No empty/scalar operand leaks through.
+    assert all(s and s != "()" for s in shapes)
+
+
+def test_resolve_fused_moe_shapes_missing_csv_returns_empty(tmp_path):
+    """Absent sidecar / no fused-MoE rows => [] so the candidate's empty shapes stay untouched."""
+    assert tla.resolve_fused_moe_shapes_from_csv(tmp_path / "nope") == []
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "ops_unique_args.csv").write_text(
+        "name,op category,Input Dims,Input type\n"
+        'aten::mm,GEMM,"((15360, 2048),)","(\'c10::BFloat16\',)"\n',
+        encoding="utf-8",
+    )
+    assert tla.resolve_fused_moe_shapes_from_csv(csv_dir) == []
+
+
+def test_finalize_grafts_fused_moe_shapes_onto_empty_candidate(tmp_path):
+    """The empty-shaped fused-MoE candidate is back-filled with trace-anchored shapes + provenance."""
+    csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
+    candidates = [{
+        "name": "invoke_fused_moe_kernel",
+        "duration_us": 302429.0,
+        "call_count": 96,
+        "source_file": (
+            "/sgl-workspace/sglang/python/sglang/srt/layers/moe/"
+            "moe_runner/triton_utils/fused_moe.py"
+        ),
+        "source_type": "python",
+        "shapes": [],
+        "tracelens_category": "moe_fused",
+    }]
+    out = tla._finalize_candidates(
+        candidates, total_dur=302429.0, perf_report_csv_dir=csv_dir,
+    )
+    assert out[0]["shapes"], "fused-MoE candidate must carry non-empty shapes"
+    assert "(15360,2048) bf16" in out[0]["shapes"]
+    assert out[0]["shape_provenance"] == "torch_trace"
+
+
+def test_finalize_does_not_touch_non_moe_or_already_shaped(tmp_path):
+    """Resolver is scoped: non-MoE ops and MoE candidates that already have shapes are left as-is."""
+    csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
+    candidates = [
+        {  # non-MoE op: must NOT be back-filled from the fused-MoE sidecar
+            "name": "aten::mm",
+            "duration_us": 100.0,
+            "shapes": [],
+            "source_file": "",
+            "source_type": "unknown",
+        },
+        {  # MoE op that already carries shapes: keep them verbatim
+            "name": "invoke_fused_moe_kernel",
+            "duration_us": 200.0,
+            "shapes": ["(99,99) bf16"],
+            "source_file": "",
+            "source_type": "python",
+            "tracelens_category": "moe_fused",
+        },
+    ]
+    out = tla._finalize_candidates(
+        candidates, total_dur=300.0, perf_report_csv_dir=csv_dir,
+    )
+    assert out[0]["shapes"] == []
+    assert out[1]["shapes"] == ["(99,99) bf16"]
+
+
 def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
     """Backward compatibility: no csv => the name heuristic still tags aiter::ck_moe_* as MoE (csv path is additive)."""
     candidates = [{
@@ -835,6 +946,151 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert "Task" in captured["options"]["allowed_tools"]
 
 
+def test_266_run_tracelens_skill_writes_agent_transcript(tmp_path):
+    """#266: the SDK runner must persist a full stream-JSON transcript
+    (text + tool_use/tool_result blocks) next to ``analysis.md`` so an
+    operator can inspect the agent's lifecycle and the artifacts it
+    produced *during* execution. The transcript path is surfaced via
+    ``artifact_paths`` so it flows into the kernel-agent status sidecar.
+
+    Granularity is top-level orchestrator only: ``Task``-tool subagent
+    turns are collapsed by the SDK into a single tool_use/tool_result
+    pair at this level, which is sufficient for lifecycle visibility.
+    """
+    import asyncio
+    import json as _json
+    from dataclasses import dataclass, field
+    from typing import Any
+
+    # Fakes named to match the real claude-agent-sdk class names so the
+    # serializer's class-name-based ``block`` tag mirrors production.
+    @dataclass
+    class TextBlock:
+        text: str
+
+    @dataclass
+    class ToolUseBlock:
+        name: str
+        input: dict
+        id: str = "tu_1"
+
+    @dataclass
+    class AssistantMessage:
+        content: list[Any]
+
+    @dataclass
+    class ResultMessage:
+        content: list[Any] = field(default_factory=list)
+        result: str = ""
+        usage: dict = field(default_factory=dict)
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+
+    async def _fake_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield AssistantMessage(content=[TextBlock("starting analysis")])
+        yield AssistantMessage(content=[
+            ToolUseBlock(name="Bash", input={"command": "ls"}, id="tu_42"),
+        ])
+        yield ResultMessage(result="done", usage={"input_tokens": 10})
+
+    res = asyncio.run(tlr.run_tracelens_skill(
+        skill_path=tmp_path / "skill.md",
+        trace_path=tmp_path / "trace.json.gz",
+        output_dir=output_dir,
+        tracelens_root=tmp_path,
+        tracelens_internal_root=tmp_path / "TraceLens-internal",
+        platform="MI300X",
+        framework="sglang",
+        analysis_mode="default",
+        capture_folder=None,
+        budget_minutes=1,
+        sdk_query_factory=_fake_query,
+        sdk_options_cls=_FakeOptions,
+    ))
+
+    transcript_path = output_dir / "agent_transcript.jsonl"
+    assert transcript_path.exists(), "stream-JSON transcript must be written"
+    assert res.artifact_paths.get("tracelens_agent_transcript") == str(transcript_path)
+
+    lines = [
+        _json.loads(line)
+        for line in transcript_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(lines) == 3, f"one JSON object per SDK message, got {len(lines)}"
+
+    # The tool_use block must be captured with its name + input so an
+    # operator can see which command the agent ran (lifecycle visibility).
+    tool_blocks = [
+        b
+        for rec in lines
+        for b in rec.get("content", [])
+        if b.get("block") in ("ToolUseBlock", "ServerToolUseBlock")
+    ]
+    assert any(
+        b.get("name") == "Bash" and b.get("input", {}).get("command") == "ls"
+        for b in tool_blocks
+    ), f"tool_use block not captured: {tool_blocks}"
+
+    # Terminal ResultMessage usage is captured for token accounting.
+    assert any(rec.get("usage", {}).get("input_tokens") == 10 for rec in lines)
+
+
+def test_266_transcript_failure_never_aborts_run(tmp_path):
+    """#266: transcript capture is best-effort — a serialization or IO
+    error on the logging side must never abort an otherwise-successful
+    TraceLens run. ``analysis.md`` is still the contracted exit point."""
+    import asyncio
+    from typing import Any
+
+    class _Unserializable:
+        """A content block whose attributes raise on access."""
+
+        @property
+        def text(self):  # noqa: D401
+            raise RuntimeError("boom")
+
+    class _Message:
+        def __init__(self, content):
+            self.content = content
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+
+    async def _fake_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield _Message(content=[_Unserializable()])
+
+    res = asyncio.run(tlr.run_tracelens_skill(
+        skill_path=tmp_path / "skill.md",
+        trace_path=tmp_path / "trace.json.gz",
+        output_dir=output_dir,
+        tracelens_root=tmp_path,
+        tracelens_internal_root=tmp_path / "TraceLens-internal",
+        platform="MI300X",
+        framework="sglang",
+        analysis_mode="default",
+        capture_folder=None,
+        budget_minutes=1,
+        sdk_query_factory=_fake_query,
+        sdk_options_cls=_FakeOptions,
+    ))
+
+    # Run still succeeds: report resolved, no crash from transcript path.
+    assert res.report_path.exists()
+
+
+# ===========================================================================
 # T2 — analysis.md is the only contracted TraceLens output.
 def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
     """SDK orchestrator sidecars must not be surfaced as Hyperloom inputs."""
