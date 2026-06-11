@@ -16,7 +16,14 @@ from typing import Any, TypedDict
 #: capability row, kb_writes_summary, the action_timeline alias, the
 #: explore_search ledger, and the kernel_optimization_summary /
 #: conc_sweep_summary sections. Additive-only, so v1 readers still parse v2.
+#: Emitted only on the legacy fallback path (no recorder fragments).
 SCHEMA_VERSION = "hyperloom.session_breakdown.v2"
+
+#: breakdown schema version stamped when the file was assembled from the
+#: author-time recorder fragments ("new way"). Same additive wire shape as v2
+#: plus the recorder-only sections; the version bump just lets consumers tell
+#: a recorder-aggregated breakdown apart from a legacy collector fallback.
+SCHEMA_VERSION_V3 = "hyperloom.session_breakdown.v3.0"
 
 
 # §1 Session metadata
@@ -1757,6 +1764,7 @@ class SessionBreakdown(TypedDict, total=False):
 
 __all__ = [
     "SCHEMA_VERSION",
+    "SCHEMA_VERSION_V3",
     "AdoptedKernel",
     "Attribution",
     "Baseline",

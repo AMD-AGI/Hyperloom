@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import collectors
-from .schema import SCHEMA_VERSION
+from .schema import SCHEMA_VERSION, SCHEMA_VERSION_V3
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +96,10 @@ def build(
     # when absent the legacy collectors are used as fallback, so historical
     # sessions and recorder-disabled runs behave exactly as before.
     assembled = _load_assembled(sd, warnings)
+    # Version stamp follows the aggregation path: a recorder-aggregated
+    # breakdown ("new way", any fragments present) is v3.0; the legacy
+    # collector-only fallback keeps the previous v2 version unchanged.
+    schema_version = SCHEMA_VERSION_V3 if assembled else SCHEMA_VERSION
 
     def _pick(section: str, collector_value: Any) -> Any:
         """Fragment value if recorded and non-empty, else the collector value."""
@@ -272,7 +276,7 @@ def build(
     )
 
     return {
-        "schema_version":      SCHEMA_VERSION,
+        "schema_version":      schema_version,
         "exported_at_utc":     exported_at,
         "exporter_version":    EXPORTER_VERSION,
 
