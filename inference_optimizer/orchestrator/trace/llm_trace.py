@@ -88,6 +88,11 @@ class LLMTraceRowError(ValueError):
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond-precision ISO string.
+
+    Returns:
+        ISO 8601 timestamp in UTC.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
@@ -206,6 +211,14 @@ class LLMCallRecord:
 
 
 def _coerce_optional_str(value: Any) -> str | None:
+    """Coerce a value to a non-empty stripped string or ``None``.
+
+    Args:
+        value: Arbitrary value to normalize.
+
+    Returns:
+        The stripped string, or ``None`` if it is empty or ``None``.
+    """
     if value is None:
         return None
     s = str(value).strip()
