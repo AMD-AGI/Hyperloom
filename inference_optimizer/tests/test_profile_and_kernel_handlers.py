@@ -826,9 +826,45 @@ def test_profile_executor_sanitizes_current_best_args(monkeypatch, tmp_path):
     result = asyncio.run(ProfileExecutor()(ctx))
 
     assert result["status"] == "succeeded"
-    merged = captured["extra_sglang_args"]
+    merged = captured["extra_server_args"]
+    assert "extra_sglang_args" not in captured
     assert "--enable-torch-compile" not in merged
     assert "--torch-compile-max-bs" not in merged
+    assert "--quantization fp8" in merged
+
+
+def test_profile_executor_sanitizes_canonical_extra_server_args(monkeypatch, tmp_path):
+    """Canonical extra_server_args must not bypass the profile sanitizer."""
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    captured: dict[str, str] = {}
+
+    async def _fake_parent(self, ctx):
+        captured.update(ctx.task.params)
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(BaselineExecutor, "__call__", _fake_parent)
+
+    task = SimpleNamespace(
+        params={
+            "base_extra_args": "--attention-backend AITER",
+            "extra_server_args": (
+                "--enable-torch-compile --torch-compile-max-bs 32 "
+                "--quantization fp8"
+            ),
+            "extra_sglang_args": "--enable-torch-compile",
+        },
+        task_id="t-profile-canonical-sanitize",
+    )
+    ctx = SimpleNamespace(task=task, extra={"workspace": str(tmp_path / "ws")})
+
+    result = asyncio.run(ProfileExecutor()(ctx))
+
+    assert result["status"] == "succeeded"
+    merged = captured["extra_server_args"]
+    assert "extra_sglang_args" not in captured
+    assert "--enable-torch-compile" not in merged
+    assert "--torch-compile-max-bs" not in merged
+    assert "--attention-backend AITER" in merged
     assert "--quantization fp8" in merged
 
 
