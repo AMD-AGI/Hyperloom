@@ -2705,8 +2705,22 @@ async def integrate_handler(
     new_tput = float(bench_result.get("output_throughput") or 0.0)
     # base_tput > 0 already guaranteed by the early guard above.
     gain_pct = (new_tput - base_tput) / base_tput * 100.0
+    stack_positive_keep = False
+    try:
+        from .shared_state import SharedState
+        state = SharedState.load_or_init(session_dir)
+        current_best = state.current_best or {}
+        current_best_tput = float(current_best.get("tput") or 0.0)
+        stack_positive_keep = (
+            bool(state.optimization_stack)
+            and str(current_best.get("action") or "") == "integrate"
+            and current_best_tput > 0
+            and new_tput > current_best_tput
+        )
+    except Exception:  # noqa: BLE001 - fall back to the original threshold
+        stack_positive_keep = False
     decision = (
-        "KEEP" if gain_pct > keep_threshold_pct
+        "KEEP" if (gain_pct > keep_threshold_pct or stack_positive_keep)
         else ("REVERT" if gain_pct < -keep_threshold_pct
               else "NEEDS_REVIEW")
     )
@@ -2742,6 +2756,8 @@ async def integrate_handler(
         "revert_result": revert_result,
         "rebuild_check": rebuild_check,
     }
+    if stack_positive_keep and gain_pct <= keep_threshold_pct:
+        result["decision_reason"] = "stack_positive_increment"
     if rocprof_after_info:
         result["rocprof_after_kernel_opt"] = rocprof_after_info
     return result

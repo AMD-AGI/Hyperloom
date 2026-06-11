@@ -182,6 +182,55 @@ async def test_integrate_handler_keep_decision(session_dir, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_integrate_handler_keeps_positive_stack_increment(
+    session_dir, tmp_path,
+):
+    """When a kernel stack already exists, a positive incremental gain should KEEP."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    state = SharedState.load_or_init(session_dir)
+    state.baseline_tput = 90.0
+    state.current_best = {
+        "action": "integrate",
+        "kernel_id": "k004",
+        "tput": 100.0,
+    }
+    state.optimization_stack = [{
+        "action": "integrate",
+        "kernel_id": "k004",
+        "tput": 100.0,
+    }]
+    state.save(session_dir)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=100.75)
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="ok", stderr="",
+        )
+
+    target, patch_file = _write_patch_pair(tmp_path)
+    payload = {
+        "base_tput": 100.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k001",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+    }
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert res["status"] == "ok"
+    assert res["decision"] == "KEEP"
+    assert res["gain_pct"] == pytest.approx(0.75)
+    assert res["decision_reason"] == "stack_positive_increment"
+    assert res["revert_result"]["status"] == "skipped"
+
+
+@pytest.mark.asyncio
 async def test_integrate_handler_accepts_valid_rebaseline_with_wrapper_warning(session_dir, tmp_path):
     """Valid throughput should drive KEEP even if Magpie reports success=false."""
     base_yaml = tmp_path / "base.yaml"
