@@ -279,7 +279,16 @@ def evaluate_gpu_leak_signals(
     ctx: ReactorContext,
     data: SourceData,
 ) -> list[Symptom]:
-    """Module-level helper adapting the stateful detector to the ``(ctx, data)`` entry-point signature."""
+    """Adapt the stateful detector to the ``(ctx, data)`` entry point.
+
+    Args:
+        detector: The stateful GPU-leak detector instance.
+        ctx: Reactor context for the current tick.
+        data: Collected source data.
+
+    Returns:
+        The symptoms produced by the detector.
+    """
     return detector.evaluate(ctx, data)
 
 
