@@ -60,6 +60,17 @@ class LaunchTemplate:
 
 
 def load_session_state(session_dir: Path) -> dict[str, Any]:
+    """Load a session's ``state.json``.
+
+    Args:
+        session_dir: Hyperloom session directory.
+
+    Returns:
+        The parsed state mapping.
+
+    Raises:
+        SystemExit: If ``state.json`` is missing.
+    """
     state_path = session_dir / "state.json"
     if not state_path.is_file():
         raise SystemExit(f"state.json not found at {state_path}")
@@ -108,6 +119,18 @@ class SglangServer:
         gpu_id: int,
         ready_timeout_sec: int = 900,
     ) -> None:
+        """Initialize the sglang server wrapper.
+
+        Args:
+            model_path: Path to the model to serve.
+            tp: Tensor-parallel size.
+            port: Port to bind the server on.
+            extra_args: Extra server CLI args (space-separated).
+            extra_envs: Extra environment variables for the server process.
+            log_path: File to capture server stdout/stderr.
+            gpu_id: Physical GPU id to pin via ``ROCR_VISIBLE_DEVICES``.
+            ready_timeout_sec: Max seconds to wait for the server to be ready.
+        """
         self.model_path = model_path
         self.tp = tp
         self.port = port
@@ -119,6 +142,14 @@ class SglangServer:
         self.proc: subprocess.Popen | None = None
 
     def __enter__(self) -> "SglangServer":
+        """Launch the server process and block until it is ready.
+
+        Returns:
+            This server instance.
+
+        Raises:
+            RuntimeError: If the server dies or never becomes ready.
+        """
         cmd = [
             sys.executable, "-m", "sglang.launch_server",
             f"--model-path={self.model_path}",
@@ -156,6 +187,12 @@ class SglangServer:
         return self
 
     def _wait_ready(self) -> None:
+        """Poll the health endpoint until the server is ready or times out.
+
+        Raises:
+            RuntimeError: If the server process dies or does not become ready
+                within ``ready_timeout_sec``.
+        """
         import urllib.request
         deadline = time.time() + self.ready_timeout_sec
         url = f"http://127.0.0.1:{self.port}/health_generate"
@@ -177,6 +214,11 @@ class SglangServer:
         )
 
     def __exit__(self, *_exc: Any) -> None:
+        """Terminate the server process group on context exit.
+
+        Args:
+            *_exc: Exception info from the ``with`` block (unused).
+        """
         if self.proc is None:
             return
         try:
@@ -192,6 +234,7 @@ class SglangServer:
 
     @property
     def base_url(self) -> str:
+        """Return the server's local base URL."""
         return f"http://127.0.0.1:{self.port}"
 
 
@@ -248,6 +291,22 @@ def compute_ceiling(
     *, model_meta: Any, gpu_type: str, num_gpus: int,
     conc: int, isl: int, osl: int,
 ) -> float:
+    """Compute the theoretical peak output throughput for one concurrency.
+
+    Thin wrapper over :func:`compute_theoretical_peak_output_tok_per_sec` that
+    unpacks the model metadata fields.
+
+    Args:
+        model_meta: Loaded model metadata (weights, layers, KV shape, ...).
+        gpu_type: GPU type key into the hardware specs.
+        num_gpus: Number of GPUs (tensor-parallel size).
+        conc: Concurrency level.
+        isl: Input sequence length.
+        osl: Output sequence length.
+
+    Returns:
+        The theoretical peak output tokens/second.
+    """
     return compute_theoretical_peak_output_tok_per_sec(
         gpu_type=gpu_type,
         num_gpus=num_gpus,
@@ -275,6 +334,27 @@ def sweep_one_template(
     concs: list[int], dataset: str, num_prompts_factor: int,
     output_dir: Path,
 ) -> list[dict[str, Any]]:
+    """Sweep a launch template across all concurrencies on one reused server.
+
+    Args:
+        tmpl: Launch template (baseline or optimized).
+        model_path: Path to the model to serve.
+        model_meta: Loaded model metadata used for ceiling computation.
+        gpu_type: GPU type key.
+        tp: Tensor-parallel size.
+        gpu_id: Physical GPU id to pin.
+        port: Server port.
+        isl: Input sequence length.
+        osl: Output sequence length.
+        concs: Concurrency levels to benchmark.
+        dataset: Benchmark dataset name.
+        num_prompts_factor: ``num_prompts = max(conc * factor, 16)``.
+        output_dir: Directory for server/bench logs.
+
+    Returns:
+        One result row per concurrency with measured throughput, ceiling, MBU,
+        and status.
+    """
     rows: list[dict[str, Any]] = []
     server_log = output_dir / f"server_{tmpl.label}.log"
     bench_out_dir = output_dir / f"bench_{tmpl.label}"
@@ -326,6 +406,12 @@ def sweep_one_template(
 # Output: csv + svg
 # ---------------------------------------------------------------------------
 def write_csv(rows: list[dict[str, Any]], csv_path: Path) -> None:
+    """Write sweep result rows to a CSV file.
+
+    Args:
+        rows: Result rows from :func:`sweep_one_template`.
+        csv_path: Destination CSV path (parents created as needed).
+    """
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     fields = ["conc", "config", "measured_tps", "ceiling_tps", "target_70_tps", "mbu_pct", "status"]
     with csv_path.open("w", newline="", encoding="utf-8") as f:
@@ -340,12 +426,33 @@ def plot_svg(
     model_label: str, gpu_label: str, tp: int, isl: int, osl: int,
     target_ratio: float = 0.70,
 ) -> None:
+    """Render the dual-panel throughput/MBU roofline chart as SVG.
+
+    Args:
+        rows: Sweep result rows.
+        svg_path: Destination SVG path.
+        model_label: Model name shown in the title.
+        gpu_label: GPU label shown in the title.
+        tp: Tensor-parallel size shown in the title.
+        isl: Input sequence length shown in the title.
+        osl: Output sequence length shown in the title.
+        target_ratio: Roofline fraction drawn as the target line.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     concs = sorted({r["conc"] for r in rows})
     def _series(label: str, key: str) -> list[float | None]:
+        """Return per-concurrency values for one config/metric.
+
+        Args:
+            label: Config label (``baseline`` / ``optimized``).
+            key: Metric key to extract from each row.
+
+        Returns:
+            A list aligned with ``concs``; ``None`` where a value is missing.
+        """
         out: list[float | None] = []
         for c in concs:
             row = next((r for r in rows if r["conc"] == c and r["config"] == label), None)
@@ -429,6 +536,14 @@ def plot_svg(
 # CLI
 # ---------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for the roofline concurrency sweep.
+
+    Args:
+        argv: Argument list to parse; defaults to ``sys.argv`` when ``None``.
+
+    Returns:
+        Process exit code (``0`` on success).
+    """
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--session-dir", required=True, type=Path,
                     help="Hyperloom session directory (contains state.json)")
