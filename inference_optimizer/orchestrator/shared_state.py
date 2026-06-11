@@ -2722,7 +2722,10 @@ class SharedState:
                 f"elapsed_sec={elapsed} remaining_sec={int(remaining)}"
             )
         proposable = tuple(sorted(
-            llm_proposable_actions_for_with_interleave(phase)
+            llm_proposable_actions_for_with_interleave(
+                phase,
+                explore_enabled=self.explore_enabled if hasattr(self, "explore_enabled") else None,
+            )
         ))
         allowed_line = (
             f"allowed   : {', '.join(proposable) if proposable else '(none)'}"

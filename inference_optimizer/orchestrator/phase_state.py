@@ -127,6 +127,12 @@ _INTERLEAVE_KERNEL_EXTRAS: frozenset[str] = frozenset({
     "explore", "specialist", "integrate_patch",
 })
 
+# When --no-explore, only integrate_patch is useful in KERNEL interleave
+# (explore/specialist dispatch config variants that belong to the EXPLORE phase).
+_INTERLEAVE_KERNEL_NO_EXPLORE: frozenset[str] = frozenset({
+    "integrate_patch",
+})
+
 
 def is_phase_interleave_enabled() -> bool:
     """Return True when EXPLORE↔KERNEL interleave is enabled (default ON, P3_18; env is rollback knob)."""
@@ -136,8 +142,15 @@ def is_phase_interleave_enabled() -> bool:
 
 def llm_proposable_actions_for_with_interleave(
     phase: str, *, interleave: bool | None = None,
+    explore_enabled: bool | None = None,
 ) -> frozenset[str]:
-    """Return the active LLM-proposable set for ``phase`` (when interleave on, EXPLORE adds kernel-owned names, KERNEL adds the explore triple)."""
+    """Return the active LLM-proposable set for ``phase``.
+
+    When interleave is on, EXPLORE adds kernel-owned names and KERNEL adds the
+    explore triple.  However, when ``explore_enabled=False`` (--no-explore), the
+    KERNEL extras are narrowed to ``integrate_patch`` only — explore/specialist
+    are EXPLORE-phase actions and must not leak into a kernel-only session.
+    """
     key = (phase or "").strip().upper()
     base = PHASE_LLM_PROPOSABLE_ACTIONS.get(key, frozenset())
     if interleave is None:
@@ -147,17 +160,20 @@ def llm_proposable_actions_for_with_interleave(
     if key == PHASE_EXPLORE:
         return base | _INTERLEAVE_EXPLORE_EXTRAS
     if key == PHASE_KERNEL:
+        if explore_enabled is False:
+            return base | _INTERLEAVE_KERNEL_NO_EXPLORE
         return base | _INTERLEAVE_KERNEL_EXTRAS
     return base
 
 
 def is_action_llm_proposable_in_phase_with_interleave(
     action_name: str, phase: str, *, interleave: bool | None = None,
+    explore_enabled: bool | None = None,
 ) -> bool:
     """Mirror of :func:`is_action_llm_proposable_in_phase` honoring the
     interleave flag."""
     proposable = llm_proposable_actions_for_with_interleave(
-        phase, interleave=interleave,
+        phase, interleave=interleave, explore_enabled=explore_enabled,
     )
     return (action_name or "").strip() in proposable
 

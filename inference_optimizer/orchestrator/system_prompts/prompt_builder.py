@@ -133,7 +133,7 @@ def _section_session_context(
     ]
 
 
-def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
+def _section_phase_semantics(*, kernel_enabled: bool, explore_enabled: bool = True) -> list[str]:
     """Render the per-phase allowed-action contract (current phase injected
     dynamically by the Coordinator)."""
     from ..phase_state import (
@@ -156,6 +156,7 @@ def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
         proposable = sorted(
             llm_proposable_actions_for_with_interleave(
                 phase, interleave=interleave,
+                explore_enabled=explore_enabled if interleave else None,
             )
         )
         if not kernel_enabled and phase == "KERNEL":
@@ -760,6 +761,7 @@ def build_orchestration_prompt(
     enabled_actions: Iterable[str],
     framework: str = "sglang",
     kernel_enabled: bool | None = None,
+    explore_enabled: bool = True,
     objective_kind: str = "time_only",
     objective_value: float | str | None = None,
     max_minutes: int = 0,
@@ -798,7 +800,7 @@ def build_orchestration_prompt(
             framework_source_roots=framework_source_roots,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
-        _section_phase_semantics(kernel_enabled=kernel_enabled),
+        _section_phase_semantics(kernel_enabled=kernel_enabled, explore_enabled=explore_enabled),
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled),
     ]
