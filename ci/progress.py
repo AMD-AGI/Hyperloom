@@ -45,7 +45,16 @@ def _load_json(path: Path) -> dict:
 
 
 def _summary_rows(summary_path: Path) -> list[dict]:
-    """Extract rows from a ci_summary.json; accepts `{"rows": [...]}`, `{"models": [...]}`, or a bare list."""
+    """Extract rows from a ci_summary.json file.
+
+    Accepts ``{"rows": [...]}``, ``{"models": [...]}``, or a bare list.
+
+    Args:
+        summary_path: Path to the ci_summary.json file.
+
+    Returns:
+        The extracted row dicts (empty when none found).
+    """
     data = _load_json(summary_path)
     if isinstance(data, list):
         return data
@@ -53,7 +62,16 @@ def _summary_rows(summary_path: Path) -> list[dict]:
 
 
 def _classify_status(row: dict) -> tuple[str, str | None]:
-    """Return (status, reason): completed (baseline+optimized), partial (one only), or failed (no usable data)."""
+    """Classify a summary row's completion status.
+
+    Args:
+        row: A ci_summary row dict.
+
+    Returns:
+        A ``(status, reason)`` tuple where status is ``"completed"``
+        (baseline + optimized + gain), ``"partial"`` (one data point), or
+        ``"failed"`` (no usable data); ``reason`` is ``None`` when completed.
+    """
     fs = row.get("final_status")
     submit = row.get("submit_status")
     has_opt = row.get("optimized_tok_per_gpu") is not None
