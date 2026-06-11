@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,9 +18,19 @@ from inference_optimizer.orchestrator.proposal_scorer import (
     _extract_scores_json,
 )
 from inference_optimizer.orchestrator.policy import SPECIALIST_FROM_AGENT_PREFIX
+from inference_optimizer.session_paths import (
+    conversations_path,
+    llm_calls_path,
+)
 
 
 # Fake OpenAI client (test seam)
+@dataclass
+class _FakeUsage:
+    prompt_tokens: int
+    completion_tokens: int
+
+
 @dataclass
 class _FakeMessage:
     content: str
@@ -33,6 +44,7 @@ class _FakeChoice:
 @dataclass
 class _FakeResp:
     choices: list[_FakeChoice]
+    usage: _FakeUsage | None = None
 
 
 class _FakeCompletions:
@@ -47,7 +59,10 @@ class _FakeCompletions:
         result = self._behaviour.get(model)
         if isinstance(result, BaseException):
             raise result
-        return _FakeResp(choices=[_FakeChoice(_FakeMessage(result or ""))])
+        return _FakeResp(
+            choices=[_FakeChoice(_FakeMessage(result or ""))],
+            usage=_FakeUsage(prompt_tokens=120, completion_tokens=30),
+        )
 
 
 class _FakeChat:
@@ -120,6 +135,61 @@ async def test_score_two_models_happy_path():
     assert out["models"]["claude-opus-4-7"]["cuda_graph_bs_512"]["score"] == 8.0
     assert out["models"]["gpt-5.4"]["disable_radix"]["score"] == 5.0
     assert out["errors"] == {}
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_scoring_call_writes_full_conversation_trace(tmp_path: Path):
+    """With ``session_dir`` set, each scoring call records both a token row
+    (component=proposal_scorer) and a full prompt/reply conversation row."""
+    session_dir = tmp_path / "SESSION"
+    session_dir.mkdir()
+    client = _FakeClient({
+        "claude-opus-4-7": _scores_json(("cuda_graph_bs_512", 8.0, "fit")),
+    })
+    scorer = ProposalScorer(
+        models=("claude-opus-4-7",),
+        client_factory=lambda: client,
+        session_dir=session_dir,
+    )
+    await scorer.score(gap=_GAP, proposals=_PROPOSALS)
+
+    conv_rows = _read_jsonl(conversations_path(session_dir))
+    assert len(conv_rows) == 1
+    row = conv_rows[0]
+    assert row["component"] == "proposal_scorer"
+    assert row["role"] == "proposal_scorer"
+    assert row["model"] == "claude-opus-4-7"
+    # The prompt carries the scoring instructions + proposals; the reply is
+    # the model's verbatim (fenced) scores JSON.
+    assert "cuda_graph_bs_512" in row["prompt"]
+    assert "cuda_graph_bs_512" in row["response"]
+
+    token_rows = _read_jsonl(llm_calls_path(session_dir))
+    assert any(
+        r["component"] == "proposal_scorer"
+        and r["input_tokens"] == 120
+        and r["output_tokens"] == 30
+        for r in token_rows
+    )
+
+
+@pytest.mark.asyncio
+async def test_scoring_without_session_dir_writes_no_trace(tmp_path: Path):
+    """The default (tests / no full-trace) path writes no conversation file."""
+    scorer = _make_scorer({"m1": _scores_json(("cuda_graph_bs_512", 7.0, "x"))})
+    await scorer.score(gap=_GAP, proposals=_PROPOSALS)
+    # session_dir is None → nothing on disk (and no crash).
+    assert scorer.session_dir is None
 
 
 @pytest.mark.asyncio
