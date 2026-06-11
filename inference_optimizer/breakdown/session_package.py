@@ -13,7 +13,11 @@ reach Claw storage and the ``/v1/sessions/<sid>/files`` endpoint can't
 serve them. Rather than move the whole (multi-hundred-MB) session tree,
 this module copies just the small set of result/report/analysis files
 (KB–MB total) into one zip placed *inside* ``/workspace``, where Claw's
-sync is guaranteed to see it.
+sync is guaranteed to see it. By default it ALSO drops the same files
+*loose* (uncompressed, original relative tree) directly under the dest
+root itself (e.g. ``/workspace/session_breakdown.json``,
+``/workspace/reports/final.json``), so a consumer can fetch a single
+file without unzipping (disable via ``HYPERLOOM_SESSION_PACKAGE_LOOSE=0``).
 
 A processing log (``PACKAGE_MANIFEST.json`` + ``PACKAGE_MANIFEST.txt``)
 recording exactly which files were included / missing is written into
@@ -36,6 +40,7 @@ import fnmatch
 import json
 import logging
 import os
+import shutil
 import tempfile
 import zipfile
 from datetime import datetime, timezone
@@ -50,6 +55,13 @@ log = logging.getLogger(__name__)
 # and tests.
 ENV_PACKAGE_DEST_ROOT = "HYPERLOOM_SESSION_PACKAGE_DEST"
 DEFAULT_DEST_ROOT = Path("/workspace")
+
+# In addition to the zip, also lay the same curated files down *loose*
+# (uncompressed, keeping their relative tree) directly under the dest
+# root, so a consumer can fetch a single file (e.g.
+# /v1/sessions/<sid>/files/<rel>) without unzipping. Set to
+# "0"/"false"/"no" to write only the zip.
+ENV_PACKAGE_LOOSE = "HYPERLOOM_SESSION_PACKAGE_LOOSE"
 
 #: Subdir under the dest root where bundles land.
 PACKAGE_SUBDIR = "hyperloom-session-packages"
@@ -109,6 +121,49 @@ _MAX_TOTAL_BYTES = 256 * 1024 * 1024  # 256 MB
 def _dest_root() -> Path:
     override = (os.environ.get(ENV_PACKAGE_DEST_ROOT) or "").strip()
     return Path(override) if override else DEFAULT_DEST_ROOT
+
+
+def _loose_enabled() -> bool:
+    """Whether to also drop loose (unzipped) copies. Defaults to True."""
+    raw = (os.environ.get(ENV_PACKAGE_LOOSE) or "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _copy_loose_tree(
+    included: list[tuple[Path, str, int]],
+    manifest: dict,
+    loose_dir: Path,
+) -> int:
+    """Copy each included file into ``loose_dir`` preserving its relative
+    tree, plus the two manifest files. Best-effort, per-file isolated:
+    one unreadable file never aborts the rest. Returns the count copied.
+
+    Files are overwritten in place (no wholesale wipe of ``loose_dir``):
+    the dest is the shared ``/workspace`` root, so deleting it is never
+    safe. A stale file from a previous, larger selection is left as-is;
+    the per-run ``PACKAGE_MANIFEST`` is the source of truth for what this
+    run actually included.
+    """
+    loose_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for src, rel, _sz in included:
+        dst = loose_dir / rel
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            copied += 1
+        except OSError:
+            log.warning("session package: failed to copy loose file %s", rel)
+    try:
+        (loose_dir / MANIFEST_JSON_NAME).write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8",
+        )
+        (loose_dir / MANIFEST_TXT_NAME).write_text(
+            _manifest_text(manifest), encoding="utf-8",
+        )
+    except OSError:
+        log.warning("session package: failed to write loose manifest")
+    return copied
 
 
 def _iter_session_files(session_dir: Path) -> list[Path]:
@@ -297,6 +352,21 @@ def package_session_artifacts(
             "session package: wrote %s (%d files, %d bytes pre-zip)",
             target, len(included), total,
         )
+
+        # Also lay the same files down loose (uncompressed, original tree)
+        # directly under the dest root (e.g. ``/workspace/``) so a consumer
+        # can grab one file without unzip. NOT under the package subdir —
+        # straight at the root, preserving each file's relative path.
+        if _loose_enabled():
+            try:
+                copied = _copy_loose_tree(included, manifest, root)
+                log.info(
+                    "session package: copied %d loose files into %s",
+                    copied, root,
+                )
+            except Exception:  # noqa: BLE001 — loose copy must not mask the zip
+                log.exception("session package: loose copy failed (non-fatal)")
+
         return target
     except Exception:  # noqa: BLE001 — never let packaging mask stop_reason
         log.exception("session package failed (non-fatal)")

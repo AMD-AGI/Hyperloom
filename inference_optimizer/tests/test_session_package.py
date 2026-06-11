@@ -13,7 +13,10 @@ import json
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from inference_optimizer.breakdown.session_package import (
+    ENV_PACKAGE_LOOSE,
     MANIFEST_JSON_NAME,
     MANIFEST_TXT_NAME,
     PACKAGE_SUBDIR,
@@ -188,3 +191,64 @@ def test_atomic_no_tmp_left_behind(tmp_path: Path) -> None:
     package_session_artifacts(sd, session_id="sid", dest_root=dest)
     leftovers = list((dest / PACKAGE_SUBDIR).glob(".*tmp"))
     assert leftovers == []
+
+
+def test_loose_files_dropped_at_dest_root(tmp_path: Path) -> None:
+    sd = tmp_path / "session"
+    _build_session(sd)
+    dest = tmp_path / "workspace"
+
+    out = package_session_artifacts(sd, session_id="sid-123", dest_root=dest)
+    assert out is not None
+    assert out.exists()  # zip still under the package subdir
+    assert out == dest / PACKAGE_SUBDIR / "sid-123.zip"
+
+    # loose files land DIRECTLY under the dest root (not under <sid>/),
+    # preserving each file's original relative path
+    for rel in (
+        "session_breakdown.json",
+        "state.json",
+        "reports/final.json",
+        "reports/trace/decision_trace.jsonl",
+        "kernel-agent/runs/20260609T010022Z/20260609T012416Z_tl-abc/tracelens/analysis.md",
+        "runs/baseline/abc/measure_round/benchmark_sglang_x/benchmark_report.json",
+    ):
+        assert (dest / rel).is_file(), f"missing loose file: {rel}"
+
+    # noise stays out of the loose tree too
+    assert not (dest / "hands.log").exists()
+    assert not (dest / "critic-workdir" / "000001" / "request.json").exists()
+
+    # manifest also written loose at the root
+    assert (dest / MANIFEST_JSON_NAME).is_file()
+    assert (dest / MANIFEST_TXT_NAME).is_file()
+
+    # loose content matches source byte-for-byte
+    assert (dest / "session_breakdown.json").read_text(encoding="utf-8") == '{"a":1}'
+
+
+def test_loose_can_be_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ENV_PACKAGE_LOOSE, "0")
+    sd = tmp_path / "session"
+    _build_session(sd)
+    dest = tmp_path / "workspace"
+
+    out = package_session_artifacts(sd, session_id="sid-123", dest_root=dest)
+    assert out is not None and out.exists()  # zip still written
+    assert not (dest / "session_breakdown.json").exists()  # no loose copies
+
+
+def test_loose_does_not_wipe_dest_root(tmp_path: Path) -> None:
+    sd = tmp_path / "session"
+    _build_session(sd)
+    dest = tmp_path / "workspace"
+    dest.mkdir()
+    # a pre-existing unrelated file at the dest root must survive
+    keep = dest / "unrelated-other-session.txt"
+    keep.write_text("keep me", encoding="utf-8")
+
+    package_session_artifacts(sd, session_id="sid-123", dest_root=dest)
+
+    assert keep.is_file()  # loose copy must never blow away the root
+    assert keep.read_text(encoding="utf-8") == "keep me"
+    assert (dest / "session_breakdown.json").is_file()  # loose copy still landed
