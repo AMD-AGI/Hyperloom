@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -494,6 +495,31 @@ def test_ensure_local_inferencex_mirrors_network_path(tmp_path, monkeypatch):
     assert (Path(dest) / "utils" / "marker.txt").read_text() == "payload"
 
 
+def test_ensure_local_inferencex_isolates_per_task_mirrors(
+    tmp_path, monkeypatch,
+):
+    """#523: callers can include a task/output-dir key in the mirror hash so
+    two overlapping baselines sharing one wekafs checkout never rmtree/replace
+    a directory that another server is currently ``cd``-ed into."""
+    from inference_optimizer.orchestrator.action_executors import baseline as bl
+
+    src = tmp_path / "wekafs_InferenceX"
+    (src / "benchmarks").mkdir(parents=True)
+    (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched lib")
+    local_root = tmp_path / "local_cache"
+    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", str(local_root),
+    )
+
+    dest_a = bl._ensure_local_inferencex(str(src), mirror_key="task-a")
+    dest_b = bl._ensure_local_inferencex(str(src), mirror_key="task-b")
+
+    assert dest_a != dest_b
+    assert (Path(dest_a) / "benchmarks" / "benchmark_lib.sh").is_file()
+    assert (Path(dest_b) / "benchmarks" / "benchmark_lib.sh").is_file()
+
+
 def test_ensure_local_inferencex_disabled_by_env(tmp_path, monkeypatch):
     """#523: the relocation can be opted out of via env even on a network
     mount (escape hatch for multi-node / shared-mount setups)."""
@@ -553,6 +579,7 @@ def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
     )
 
     assert bl._ensure_local_inferencex(str(src)) == str(src)
+    assert not [p for p in local_root.iterdir() if p.is_dir()]
 
 
 def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
@@ -620,6 +647,9 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
     magpie_ix = seen["env"]["MAGPIE_INFERENCEX_PATH"]
     assert magpie_ix != str(ix_src), seen["env"]
     assert str(local_root) in magpie_ix
+    # Relocation is task-local; the process-wide env remains the original
+    # source path, avoiding cross-task races between concurrent materializers.
+    assert os.environ["INFERENCEX_PATH"] == str(ix_src)
 
 
 def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):

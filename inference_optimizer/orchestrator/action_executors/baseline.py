@@ -213,8 +213,8 @@ def _mirror_lock(lock_path: str) -> Iterator[None]:
             fp.close()
 
 
-def _ensure_local_inferencex(src: str) -> str:
-    """Mirror an already-patched InferenceX checkout onto stable local disk.
+def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
+    """Mirror an InferenceX checkout onto stable local disk.
 
     #523: returns a local-disk path Magpie can ``cd`` into so the sglang
     server's relative-path cuda-graph snapshot dump survives a network-mount
@@ -227,13 +227,17 @@ def _ensure_local_inferencex(src: str) -> str:
 
     Best-effort — never raises; on failure it falls back to ``src`` so the
     run proceeds (degraded to the pre-fix behaviour) rather than aborting.
+    ``mirror_key`` lets callers isolate long-running tasks that share the same
+    source checkout: Baseline/Profile pass their task output dir, so a later
+    overlapping task cannot ``rmtree`` a mirror another server is still
+    ``cd``-ed into.
 
-    Ordering: the caller relocates BEFORE config materialization and points
-    ``$INFERENCEX_PATH`` at the returned mirror, so the subsequent
-    ProfileExecutor patch step (``_after_materialize_config``) patches the
-    LOCAL mirror in place — the mirror therefore ends up carrying the
-    NUM_PROMPTS / PROFILE_EXTRA_BODY patches, and Magpie ``cd``-s into the
-    patched local copy.
+    Ordering: the caller relocates BEFORE config materialization and passes
+    the returned path explicitly into materialization, so the subsequent
+    ProfileExecutor patch step (``_after_materialize_config`` reads the
+    materialized YAML first) patches the LOCAL mirror in place — the mirror
+    therefore ends up carrying the NUM_PROMPTS / PROFILE_EXTRA_BODY patches,
+    and Magpie ``cd``-s into the patched local copy.
     """
     src = str(src)
     if os.environ.get(
@@ -253,7 +257,12 @@ def _ensure_local_inferencex(src: str) -> str:
             os.path.expanduser("~"), ".cache", "hyperloom", "inferencex_local",
         )
     )
-    dest = local_root / hashlib.sha1(real_src.encode("utf-8")).hexdigest()[:16]
+    src_hash = hashlib.sha1(real_src.encode("utf-8")).hexdigest()[:16]
+    key_hash = hashlib.sha1(
+        str(mirror_key or "").encode("utf-8")
+    ).hexdigest()[:16]
+    dest_name = src_hash if not mirror_key else f"{src_hash}-{key_hash}"
+    dest = local_root / dest_name
     try:
         local_root.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -299,6 +308,7 @@ def _ensure_local_inferencex(src: str) -> str:
             "baseline_executor: local InferenceX mirror at %s is incomplete; "
             "using original %s", dest, real_src,
         )
+        shutil.rmtree(dest, ignore_errors=True)
         return src
     log.info(
         "baseline_executor: #523 — mirrored InferenceX from network mount %s "
@@ -562,22 +572,16 @@ class BaselineExecutor:
         # the rendered ``benchmark.inferencex_path`` (which Magpie actually
         # honours — the MAGPIE_INFERENCEX_PATH env is only a fallback), the
         # ProfileExecutor patch step, and Magpie all use the local mirror.
+        #
+        # Keep this value task-local. Mutating process-wide $INFERENCEX_PATH
+        # would let two overlapping asyncio tasks race between relocation,
+        # materialization and Magpie env export. Passing the same explicit path
+        # through all three call sites also documents the invariant directly.
         ix_env = os.environ.get("INFERENCEX_PATH", "").strip()
-        if ix_env:
-            local_ix = _ensure_local_inferencex(ix_env)
-            if local_ix != ix_env:
-                # Set process-wide on purpose: materialize_config_with_envs and
-                # ProfileExecutor._after_materialize_config both read
-                # ``$INFERENCEX_PATH`` from the environment (not a passed arg),
-                # and so does _run_single_benchmark when it exports
-                # MAGPIE_INFERENCEX_PATH — all three must see the local mirror.
-                # Not restored afterwards by design: the mirror dir is keyed by
-                # a hash of the source path, so a later task whose env already
-                # points at the mirror short-circuits (_is_network_fs → local →
-                # no-op) and reuses the same patched copy instead of re-pointing
-                # back to wekafs. Opt out entirely with
-                # INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX=1.
-                os.environ["INFERENCEX_PATH"] = local_ix
+        effective_inferencex_path = (
+            _ensure_local_inferencex(ix_env, mirror_key=str(output_dir))
+            if ix_env else ""
+        )
 
         timeout_sec = self._resolve_timeout(params)
         # Model path: task.params['model_path'] > $MODEL_PATH; if neither,
@@ -612,6 +616,7 @@ class BaselineExecutor:
                 extra_envs=dict(params.get("extra_envs") or {}),
                 model_path=resolved_model,
                 gpu_type=resolved_gpu,
+                inferencex_path=effective_inferencex_path,
                 benchmark_script=override_script,
             )
         except FrameworkScriptMismatchError as exc:
@@ -649,6 +654,7 @@ class BaselineExecutor:
             "override_result_dir": override_result_dir,
             "resolved_model": resolved_model,
             "materialized_config_path": materialized_config_path,
+            "inferencex_path": effective_inferencex_path,
             "params": params,
             "ctx": ctx,
         }
@@ -902,6 +908,7 @@ class BaselineExecutor:
         override_result_dir: str | None,
         resolved_model: str,
         materialized_config_path: Path,
+        inferencex_path: str,
         params: dict[str, Any],
         ctx: RunnerContext,
     ) -> dict[str, Any]:
@@ -920,11 +927,10 @@ class BaselineExecutor:
         # Put the venv first in PATH so the benchmark script's `python3`
         # resolves to one with torch+rocm (defense in depth vs Magpie YAML).
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        # #210: pin Magpie's InferenceX resolution to ``$INFERENCEX_PATH``
-        # via highest-precedence ``MAGPIE_INFERENCEX_PATH`` so Magpie loads
-        # the SAME checkout ``_inferencex_patcher`` patched (else it falls
-        # through to a separate, unpatched checkout).
-        inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+        # #210/#523: pin Magpie's InferenceX resolution to the same per-task
+        # checkout rendered into benchmark.inferencex_path and patched by
+        # ProfileExecutor. Do not re-read process env here; the task-local
+        # explicit value avoids cross-task races on $INFERENCEX_PATH.
         if inferencex_path:
             env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
         # Always-on ``$RESULT_DIR`` default for scripts that respect it
