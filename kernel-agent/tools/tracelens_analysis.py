@@ -1292,28 +1292,85 @@ _BENCHMARK_DIRS = ("op_tests", "tests", "benchmarks", "benchmark", "test", "perf
 
 
 _KNOWN_HARNESS_HINTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    # --- Normalization ---
     (
-        ("rmsnorm_quant", "add_rmsnorm_quant", "rmsnorm"),
+        ("rmsnorm_quant", "add_rmsnorm_quant", "rmsnorm", "add_rmsnorm"),
         (
             "/sgl-workspace/aiter/op_tests/test_rmsnorm2dFusedAddQuant.py",
             "/sgl-workspace/aiter/op_tests/test_rmsnorm2d.py",
             "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_rmsnorm.py",
             "/sgl-workspace/sglang/sgl-kernel/benchmark/bench_rmsnorm.py",
+            "/sgl-workspace/aiter/op_tests/triton_tests/normalization/test_rmsnorm.py",
+            "/sgl-workspace/aiter/op_tests/triton_tests/normalization/test_fused_add_rmsnorm_pad.py",
         ),
     ),
+    # --- Activation ---
     (
         ("activation", "act_and_mul", "silu"),
         (
             "/sgl-workspace/aiter/op_tests/test_activation.py",
             "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_ff_a16w16_fused.py",
+            "/sgl-workspace/sglang/sgl-kernel/tests/test_activation.py",
+            "/sgl-workspace/sglang/sgl-kernel/benchmark/bench_activation.py",
+            "/sgl-workspace/sglang/python/sglang/jit_kernel/tests/test_activation.py",
+            "/sgl-workspace/sglang/python/sglang/jit_kernel/benchmark/bench_activation.py",
         ),
     ),
+    # --- Attention ---
     (
         ("paged_attention", "fmha", "attention"),
         (
             "/sgl-workspace/aiter/op_tests/test_pa.py",
             "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_pa_decode.py",
             "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_pa_prefill.py",
+        ),
+    ),
+    # --- MLA decode ---
+    (
+        ("mla_decode", "pseudo_mla", "mla_persistent"),
+        (
+            "/sgl-workspace/aiter/op_tests/test_mla.py",
+            "/sgl-workspace/aiter/op_tests/test_mla_persistent.py",
+            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_mla_decode.py",
+        ),
+    ),
+    # --- MoE CK two-stage ---
+    (
+        ("ck_moe_stage", "moe_2stage", "moe_stage1", "moe_stage2"),
+        (
+            "/sgl-workspace/aiter/op_tests/test_moe_2stage.py",
+            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_moe.py",
+        ),
+    ),
+    # --- MoE FP8 blockscale (ASM) ---
+    (
+        ("fmoe_fp8_blockscale", "moe_blockscale"),
+        (
+            "/sgl-workspace/aiter/op_tests/test_moe_blockscale.py",
+            "/sgl-workspace/aiter/op_tests/triton_tests/moe/test_moe_gemm_a8w8_blockscale.py",
+        ),
+    ),
+    # --- GEMM A8W8 blockscale ---
+    (
+        ("gemm_a8w8_blockscale",),
+        (
+            "/sgl-workspace/aiter/op_tests/test_gemm_a8w8_blockscale.py",
+            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_gemm_a8w8_blockscale.py",
+        ),
+    ),
+    # --- Quantization ---
+    (
+        ("dynamic_per_token_scaled_quant", "per_token_quant"),
+        (
+            "/sgl-workspace/aiter/op_tests/test_quant.py",
+            "/sgl-workspace/aiter/op_tests/triton_tests/quant/test_quant.py",
+        ),
+    ),
+    # --- Batch-invariant addmm (Triton) ---
+    (
+        ("batch_invariant", "addmm"),
+        (
+            "/sgl-workspace/sglang/test/registered/unit/batch_invariant_ops/test_batch_invariant_ops.py",
         ),
     ),
 )
@@ -2114,7 +2171,14 @@ def _run_deterministic_tracelens_steps(
     manifest_path = output_dir / "category_data" / "category_manifest.json"
     category_failures: list[int] = []
     if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            append_log(
+                log_path,
+                f"deterministic: failed to parse {manifest_path}: {exc}",
+            )
+            return 1
         for cat_entry in manifest.get("categories", []):
             cat_name = cat_entry.get("name", "")
             tier = cat_entry.get("tier", "")
@@ -2169,6 +2233,24 @@ def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
     return None
 
 
+def _extract_total_time_us_from_gpu_timeline(output_dir: Path) -> float | None:
+    """Read the trace total_time from gpu_timeline.csv (ms -> us)."""
+    csv_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
+    if not csv_path.exists():
+        return None
+    try:
+        with open(csv_path, encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                if (row.get("type") or "").strip().lower() == "total_time":
+                    return float(row.get("time ms", 0)) * 1000.0
+    except (OSError, csv.Error, ValueError):
+        pass
+    return None
+
+
+_MATCH_OP_MAX_DELTA_MS = 5.0
+
+
 def _match_op_by_time(
     ops: list[dict[str, Any]], name: str, time_ms: float,
 ) -> dict[str, Any]:
@@ -2177,6 +2259,10 @@ def _match_op_by_time(
     Multiple operations can share the same name (e.g. ``aten::mm`` with
     different shapes). We match by ``time_ms`` with a small tolerance to
     account for floating-point rounding in JSON serialization.
+
+    Returns an empty dict when no candidate is within
+    ``_MATCH_OP_MAX_DELTA_MS`` milliseconds, preventing silent
+    mis-association of launcher paths and shapes.
     """
     best: dict[str, Any] = {}
     best_delta = float("inf")
@@ -2190,6 +2276,8 @@ def _match_op_by_time(
             best = op
             if delta < 0.01:
                 break
+    if best_delta > _MATCH_OP_MAX_DELTA_MS:
+        return {}
     return best
 
 
@@ -2221,6 +2309,8 @@ def _resolve_source_file_from_kernel_path(kernel_path: str) -> str:
 def deterministic_extract_hot_kernels(
     output_dir: Path,
     top_k: int = 10,
+    *,
+    log_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Extract hot kernels directly from TraceLens deterministic outputs.
 
@@ -2274,6 +2364,17 @@ def deterministic_extract_hot_kernels(
             # Match by (name, time_ms) to avoid collisions when multiple
             # ops share the same name (e.g. many aten::mm instances).
             full_op = _match_op_by_time(cat_ops, op_name, member_time_ms)
+            if not full_op:
+                if log_path is not None:
+                    append_log(
+                        log_path,
+                        "deterministic: skipping priority member with no "
+                        "matching metrics row "
+                        f"(category={category!r}, operation={op_name!r}, "
+                        f"time_ms={member_time_ms!r}, "
+                        f"max_delta_ms={_MATCH_OP_MAX_DELTA_MS})",
+                    )
+                continue
 
             duration_us = member_time_ms * 1000
             eff_pct = member.get("efficiency_pct", 0)
@@ -2285,11 +2386,22 @@ def deterministic_extract_hot_kernels(
 
             shapes_raw = full_op.get("args", "")
             shapes = [shapes_raw] if shapes_raw else []
+            op_count = full_op.get("count", 1)
+
+            # Build non-synthetic input_shapes directly from TraceLens
+            # metrics so _structured_benchmark_shape_cases sees real data
+            # instead of the synthetic conversion in enrich_candidates.
+            input_shapes: list[dict[str, Any]] = []
+            if shapes_raw:
+                input_shapes.append({
+                    "call_num": op_count,
+                    "shape": shapes_raw,
+                })
 
             candidate = {
                 "name": op_name,
                 "duration_us": round(duration_us, 3),
-                "call_count": full_op.get("count", 1),
+                "call_count": op_count,
                 "efficiency_percent": round(eff_pct, 2),
                 "impact_score": member.get("impact_score", impact_score),
                 "bound_type": member.get("bound_type", ""),
@@ -2299,6 +2411,7 @@ def deterministic_extract_hot_kernels(
                 "tracelens_launcher_path": launcher_path,
                 "source_file": source_file,
                 "shapes": shapes,
+                "input_shapes": input_shapes,
                 "library": member.get("library", full_op.get("library", "")),
             }
             candidates.append(candidate)
@@ -2832,6 +2945,7 @@ def enrich_candidates_with_runtime_metadata(
             item["input_shapes"] = _shape_call_entries(
                 item.get("shapes", []) or [], item.get("call_count"),
             )
+            item["_input_shapes_synthetic"] = True
         item.setdefault("output_shapes", [])
         item.setdefault("input_dtypes", item.get("dtypes", []) or [])
         item.setdefault("output_dtypes", [])
@@ -3760,12 +3874,17 @@ def main() -> int:
                             "-- below gate, extracting candidates",
                         )
                     raw_det_candidates = deterministic_extract_hot_kernels(
-                        tracelens_dir, args.top_k,
+                        tracelens_dir, args.top_k, log_path=log_path,
                     )
                     if raw_det_candidates:
-                        total_dur = sum(
-                            float(c.get("duration_us") or 0)
-                            for c in raw_det_candidates
+                        total_dur = (
+                            _extract_total_time_us_from_gpu_timeline(
+                                tracelens_dir
+                            )
+                            or sum(
+                                float(c.get("duration_us") or 0)
+                                for c in raw_det_candidates
+                            )
                         )
                         agent_candidates = _finalize_candidates(
                             raw_det_candidates,

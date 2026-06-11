@@ -9,6 +9,7 @@ TraceLens now consumes only ``analysis.md``; legacy CSV fallbacks are gone.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -3096,3 +3097,183 @@ def test_resolve_launcher_via_atom_fallback_root(tmp_path, monkeypatch):
     )
     assert line == 125
     assert func == "forward"
+
+
+# ---------------------------------------------------------------------------
+# deterministic_extract_hot_kernels
+# ---------------------------------------------------------------------------
+
+def _write_priority_json(output_dir, findings):
+    p = output_dir / "priority_data.json"
+    p.write_text(json.dumps({"findings": findings}), encoding="utf-8")
+
+
+def _write_metrics_json(output_dir, category, operations, status="OK"):
+    cat_dir = output_dir / "category_data"
+    cat_dir.mkdir(parents=True, exist_ok=True)
+    (cat_dir / f"{category}_metrics.json").write_text(
+        json.dumps({
+            "category": category,
+            "status": status,
+            "operations": operations,
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_deterministic_extract_hot_kernels_basic(tmp_path):
+    ops = [
+        {"name": "aten::mm", "time_ms": 10.0, "count": 5,
+         "args": "(1024,1024) bf16", "launcher_path": ""},
+    ]
+    _write_metrics_json(tmp_path, "gemm", ops)
+    _write_priority_json(tmp_path, [
+        {"global_rank": 1, "category": "gemm", "impact_score": 0.8,
+         "members": [
+             {"operation": "aten::mm", "time_ms": 10.0,
+              "efficiency_pct": 45.0, "bound_type": "compute"},
+         ]},
+    ])
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+    assert len(result) == 1
+    c = result[0]
+    assert c["name"] == "aten::mm"
+    assert c["duration_us"] == 10000.0
+    assert c["call_count"] == 5
+    assert c["efficiency_percent"] == 45.0
+    assert c["shapes"] == ["(1024,1024) bf16"]
+    assert c["input_shapes"] == [{"call_num": 5, "shape": "(1024,1024) bf16"}]
+
+
+def test_deterministic_extract_hot_kernels_empty_priority(tmp_path):
+    _write_priority_json(tmp_path, [])
+    assert tla.deterministic_extract_hot_kernels(tmp_path, top_k=5) == []
+
+
+def test_deterministic_extract_hot_kernels_missing_priority(tmp_path):
+    assert tla.deterministic_extract_hot_kernels(tmp_path, top_k=5) == []
+
+
+def test_deterministic_extract_hot_kernels_top_k_limit(tmp_path):
+    ops = [
+        {"name": f"op{i}", "time_ms": float(i), "count": 1, "args": ""}
+        for i in range(10)
+    ]
+    _write_metrics_json(tmp_path, "gemm", ops)
+    members = [
+        {"operation": f"op{i}", "time_ms": float(i),
+         "efficiency_pct": 50.0}
+        for i in range(10)
+    ]
+    _write_priority_json(tmp_path, [
+        {"global_rank": 1, "category": "gemm",
+         "impact_score": 1.0, "members": members},
+    ])
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=3)
+    assert len(result) == 3
+
+
+def test_deterministic_extract_sets_non_synthetic_input_shapes(tmp_path):
+    """Input shapes from deterministic extraction must NOT be synthetic."""
+    ops = [
+        {"name": "aiter::mm", "time_ms": 5.0, "count": 3,
+         "args": "(512,256) fp16<br>(256,128) fp16", "launcher_path": ""},
+    ]
+    _write_metrics_json(tmp_path, "gemm", ops)
+    _write_priority_json(tmp_path, [
+        {"global_rank": 1, "category": "gemm", "impact_score": 0.5,
+         "members": [
+             {"operation": "aiter::mm", "time_ms": 5.0,
+              "efficiency_pct": 60.0},
+         ]},
+    ])
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+    c = result[0]
+    assert c["input_shapes"] == [
+        {"call_num": 3, "shape": "(512,256) fp16<br>(256,128) fp16"},
+    ]
+    assert "_input_shapes_synthetic" not in c
+
+
+def test_deterministic_extract_skips_metric_mismatch(tmp_path):
+    ops = [
+        {"name": "aten::mm", "time_ms": 100.0, "count": 5,
+         "args": "(1024,1024) bf16", "launcher_path": ""},
+    ]
+    _write_metrics_json(tmp_path, "gemm", ops)
+    _write_priority_json(tmp_path, [
+        {"global_rank": 1, "category": "gemm", "impact_score": 0.8,
+         "members": [
+             {"operation": "aten::mm", "time_ms": 10.0,
+              "efficiency_pct": 45.0, "bound_type": "compute"},
+         ]},
+    ])
+
+    log_path = tmp_path / "deterministic.log"
+    result = tla.deterministic_extract_hot_kernels(
+        tmp_path, top_k=5, log_path=log_path,
+    )
+
+    assert result == []
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "skipping priority member with no matching metrics row" in log_text
+    assert "operation='aten::mm'" in log_text
+
+
+# ---------------------------------------------------------------------------
+# _match_op_by_time
+# ---------------------------------------------------------------------------
+
+def test_match_op_by_time_exact_match():
+    ops = [
+        {"name": "a", "time_ms": 10.0, "args": "shape1"},
+        {"name": "a", "time_ms": 20.0, "args": "shape2"},
+    ]
+    result = tla._match_op_by_time(ops, "a", 20.0)
+    assert result["args"] == "shape2"
+
+
+def test_match_op_by_time_close_match():
+    ops = [{"name": "a", "time_ms": 10.005, "args": "ok"}]
+    result = tla._match_op_by_time(ops, "a", 10.0)
+    assert result["args"] == "ok"
+
+
+def test_match_op_by_time_rejects_distant_match():
+    ops = [{"name": "a", "time_ms": 100.0, "args": "wrong"}]
+    result = tla._match_op_by_time(ops, "a", 10.0)
+    assert result == {}
+
+
+def test_match_op_by_time_no_name_match():
+    ops = [{"name": "b", "time_ms": 10.0}]
+    result = tla._match_op_by_time(ops, "a", 10.0)
+    assert result == {}
+
+
+def test_match_op_by_time_empty_ops():
+    assert tla._match_op_by_time([], "a", 10.0) == {}
+
+
+# ---------------------------------------------------------------------------
+# _extract_total_time_us_from_gpu_timeline
+# ---------------------------------------------------------------------------
+
+def test_extract_total_time_us_from_gpu_timeline(tmp_path):
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "gpu_timeline.csv").write_text(
+        "type,time ms,percent\n"
+        "compute_time,100.5,80.0\n"
+        "total_time,125.0,100.0\n"
+        "idle_time,24.5,20.0\n",
+        encoding="utf-8",
+    )
+    result = tla._extract_total_time_us_from_gpu_timeline(tmp_path)
+    assert result == 125000.0
+
+
+def test_extract_total_time_us_returns_none_when_missing(tmp_path):
+    assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
