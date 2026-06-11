@@ -1572,7 +1572,19 @@ def _known_harness_files(name: str, source_file: str) -> list[Path]:
 
 
 def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> list[str]:
-    """Find test/benchmark files matching the kernel keywords under *repo_root*'s known subdirs (absolute paths)."""
+    """Find test/benchmark files matching a kernel under a repo's subdirs.
+
+    Searches ``repo_root``'s known benchmark/test subdirectories for the
+    kernel keywords, returning absolute paths.
+
+    Args:
+        name: Kernel symbol/name.
+        repo_root: Repo root to search; empty returns only curated harnesses.
+        source_file: Resolved source-file path, used to derive extra keywords.
+
+    Returns:
+        Up to ten matching harness paths, with multi-GPU tests demoted.
+    """
     known = _known_harness_files(name, source_file)
     if not repo_root:
         return [str(p) for p in known[:10]]
@@ -1724,9 +1736,18 @@ def upgrade_aiter_compile_ops_launcher(
 ) -> str:
     """Promote an aiter ``@compile_ops`` Python wrapper to the device ``.cu``.
 
-    Promotes when source_file is a ``.py`` under ``aiter/ops/``, kernel_name matches a
-    :data:`_AITER_COMPILE_OPS_PROMOTIONS` pattern, and the ``.cu`` exists under kernel_repo
-    (or :data:`_AITER_FALLBACK_REPO`). Otherwise returns source_file unchanged.
+    Promotes when source_file is a ``.py`` under ``aiter/ops/``, kernel_name
+    matches a :data:`_AITER_COMPILE_OPS_PROMOTIONS` pattern, and the ``.cu``
+    exists under kernel_repo (or :data:`_AITER_FALLBACK_REPO`).
+
+    Args:
+        source_file: The candidate's resolved source path.
+        kernel_name: The kernel name used for pattern matching.
+        kernel_repo: The resolved kernel repo root.
+
+    Returns:
+        The promoted device ``.cu`` path, or ``source_file`` unchanged when no
+        promotion applies.
     """
     if not source_file or not kernel_name:
         return source_file
@@ -1772,10 +1793,20 @@ def upgrade_aiter_compile_ops_launcher(
 
 def upgrade_pybind_shim_source(source_file: str, kernel_name: str,
                                kernel_repo: str) -> str:
-    """If `source_file` is a tiny pybind11 shim, find the real device .cu/.cuh implementing `kernel_name`.
+    """Promote a tiny pybind11 shim to the real device source.
 
-    Prefers a same-stem file under csrc/py_itfs_cu|kernels|include, then greps the symbol.
-    Returns `source_file` unchanged if no better target is found.
+    When ``source_file`` is a pybind11 shim, finds the ``.cu``/``.cuh``
+    implementing ``kernel_name``, preferring a same-stem file under
+    ``csrc/py_itfs_cu|kernels|include`` before grepping the symbol.
+
+    Args:
+        source_file: The candidate's resolved source path.
+        kernel_name: The kernel name used to locate the device source.
+        kernel_repo: The resolved kernel repo root.
+
+    Returns:
+        The real device source path, or ``source_file`` unchanged when no
+        better target is found.
     """
     if not _is_pybind_shim(source_file):
         return source_file
@@ -1882,7 +1913,14 @@ def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any
 def derive_kernel_category(candidate: dict[str, Any]) -> str:
     """Map a candidate to its GEAK-facing kernel category (#125).
 
-    Priority: explicit TraceLens category (normalized), then a kernel-name heuristic, then ``unknown``.
+    Priority: explicit TraceLens category (normalized), then a kernel-name
+    heuristic, then ``unknown``.
+
+    Args:
+        candidate: The hot-kernel candidate dict.
+
+    Returns:
+        The GEAK-facing kernel category string.
     """
     cat = (candidate.get("tracelens_category") or "").strip()
     if cat:
@@ -2003,7 +2041,16 @@ def analyze_trace_files(trace_files: list[Path], top_k: int) -> list[dict[str, A
 def load_op_category_map(
     perf_report_csv_dir: Path | str,
 ) -> dict[str, str]:
-    """Read ``{name: raw TraceLens op category}`` from unified_perf_summary.csv (first non-empty per name; ``{}`` when absent)."""
+    """Read a ``{name: raw op category}`` map from the unified perf summary.
+
+    Args:
+        perf_report_csv_dir: Directory containing
+            ``unified_perf_summary.csv``.
+
+    Returns:
+        A mapping of kernel name to its first non-empty TraceLens op category,
+        or ``{}`` when the CSV is absent or unreadable.
+    """
     csv_path = Path(perf_report_csv_dir) / "unified_perf_summary.csv"
     if not csv_path.is_file():
         return {}
@@ -2065,7 +2112,15 @@ _TRACE_DTYPE_SUFFIX = {
 
 
 def _format_trace_shape(dims: Any, dtype: Any) -> str | None:
-    """Render one operand as ``(d0,d1,...) <dtype>`` (matching TraceLens shape strings); ``None`` for scalar/empty operands."""
+    """Render one operand as a TraceLens-style ``(d0,d1,...) <dtype>`` string.
+
+    Args:
+        dims: The operand dimensions (list/tuple of ints).
+        dtype: The operand dtype token.
+
+    Returns:
+        The formatted shape string, or ``None`` for scalar/empty operands.
+    """
     if not isinstance(dims, (list, tuple)) or not dims:
         return None
     try:
@@ -2085,8 +2140,15 @@ def resolve_fused_moe_shapes_from_csv(
     Reads each per-shape row whose op name embeds ``invoke_fused_moe_kernel`` and
     parses its ``Input Dims`` / ``Input type`` tuple-of-tuples into TraceLens-style
     shape strings (e.g. ``(15360,2048) bf16``), deduped across rows in first-seen
-    order. Returns ``[]`` when the sidecar is absent or carries no fused-MoE rows
-    (so callers leave the candidate's empty ``shapes`` untouched).
+    order.
+
+    Args:
+        perf_report_csv_dir: Directory containing ``ops_unique_args.csv``.
+
+    Returns:
+        The recovered operand shape strings, or ``[]`` when the sidecar is
+        absent or carries no fused-MoE rows (callers then leave the
+        candidate's empty ``shapes`` untouched).
     """
     if not perf_report_csv_dir:
         return []
@@ -2122,7 +2184,16 @@ def resolve_fused_moe_shapes_from_csv(
 
 
 def _is_fused_moe_candidate(item: dict[str, Any]) -> bool:
-    """True for the Triton fused-MoE expert-kernel candidate (by op name or moe_fused category)."""
+    """Detect the Triton fused-MoE expert-kernel candidate.
+
+    Matches by op name or the ``moe_fused`` category.
+
+    Args:
+        item: The candidate dict to test.
+
+    Returns:
+        ``True`` when the candidate is the fused-MoE expert kernel.
+    """
     name = str(item.get("name") or "").lower()
     if _FUSED_MOE_KERNEL_MARKER in name:
         return True
