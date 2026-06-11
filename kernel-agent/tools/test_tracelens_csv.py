@@ -24,6 +24,128 @@ import tracelens_analysis as tla  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
 
 
+def test_deterministic_category_analysis_command_maps_manifest_names(tmp_path):
+    """Deterministic route must invoke the real TraceLens script for manifest category names."""
+    cases = {
+        "sdpa_fwd": (
+            "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis",
+            ["--category", "sdpa_fwd"],
+        ),
+        "sdpa_bwd": (
+            "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis",
+            ["--category", "sdpa_bwd"],
+        ),
+        "inferenceattention": (
+            "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis",
+            ["--category", "inferenceattention"],
+        ),
+        "norm_bwd": (
+            "TraceLens.Agent.Analysis.category_analyses.norm_analysis",
+            ["--category", "norm_bwd"],
+        ),
+        "rmsnorm": (
+            "TraceLens.Agent.Analysis.category_analyses.norm_analysis",
+            ["--category", "rmsnorm"],
+        ),
+        "moe_unfused": (
+            "TraceLens.Agent.Analysis.category_analyses.moe_analysis",
+            ["--category", "moe_unfused"],
+        ),
+        "customcollective": (
+            "TraceLens.Agent.Analysis.category_analyses.other_analysis",
+            ["--category", "customcollective"],
+        ),
+        "triton": (
+            "TraceLens.Agent.Analysis.category_analyses.triton_analysis",
+            [],
+        ),
+    }
+    for category, (module_name, extra_args) in cases.items():
+        cmd = tla._category_analysis_command(category, "compute_kernel", tmp_path)
+        assert cmd is not None
+        assert module_name in cmd
+        for arg in extra_args:
+            assert arg in cmd
+
+
+def test_deterministic_category_analysis_command_handles_grouped_gemm(tmp_path):
+    cmd = tla._category_analysis_command(
+        "groupedgemm_fwd",
+        "compute_kernel",
+        tmp_path,
+    )
+
+    assert cmd is not None
+    assert cmd[:2] == [sys.executable, "-c"]
+    snippet = cmd[2]
+    assert "gemm_analysis" in snippet
+    assert "category='groupedgemm_fwd'" in snippet
+    assert "--category" not in cmd
+
+
+def test_deterministic_category_analysis_command_skips_non_compute(tmp_path):
+    assert tla._category_analysis_command("sdpa_fwd", "system", tmp_path) is None
+    assert tla._category_analysis_command("cpu_idle", "compute_kernel", tmp_path) is None
+    assert tla._category_analysis_command("unknown_new_category", "compute_kernel", tmp_path) is None
+
+
+def test_deterministic_pipeline_failure_cannot_return_empty_hot_kernels():
+    with pytest.raises(RuntimeError, match="refusing to return empty hot_kernels"):
+        tla._raise_on_empty_failed_deterministic_pipeline(2, [])
+
+    tla._raise_on_empty_failed_deterministic_pipeline(0, [])
+    tla._raise_on_empty_failed_deterministic_pipeline(
+        2,
+        [{"name": "already_extracted"}],
+    )
+
+
+def test_deterministic_steps_return_category_script_failure(monkeypatch, tmp_path):
+    output_dir = tmp_path / "out"
+    category_dir = output_dir / "category_data"
+    category_dir.mkdir(parents=True)
+    (category_dir / "category_manifest.json").write_text(
+        """
+        {
+          "categories": [
+            {"name": "sdpa_fwd", "tier": "compute_kernel"}
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    (tmp_path / "trace.json").write_text("{}", encoding="utf-8")
+    log_path = tmp_path / "tl.log"
+    calls: list[list[str]] = []
+
+    def fake_run_command(cmd, *, cwd, log_path, timeout_s, env=None):
+        calls.append(cmd)
+        if "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis" in cmd:
+            return 7
+        return 0
+
+    monkeypatch.setattr(tla, "run_command", fake_run_command)
+
+    rc = tla._run_deterministic_tracelens_steps(
+        trace_path=tmp_path / "trace.json",
+        output_dir=output_dir,
+        tl_root=tmp_path,
+        platform="MI300X",
+        analysis_mode="standalone",
+        framework="sglang",
+        capture_folder=None,
+        log_path=log_path,
+        budget_minutes=1,
+    )
+
+    assert rc == 7
+    assert any(
+        "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis" in cmd
+        for cmd in calls
+    )
+    assert any("generate_priority_data" in " ".join(cmd) for cmd in calls)
+
+
 # A path — is_kernel_event strict cat == 'kernel'
 def test_a_filters_python_function_synchronize():
     """The exact event that ranked #1 in the buggy resume3/4 trace."""

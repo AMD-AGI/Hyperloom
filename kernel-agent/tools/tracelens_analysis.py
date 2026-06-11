@@ -1958,6 +1958,93 @@ def build_notes(candidate: dict[str, Any]) -> str:
 # Deterministic analysis route — runs TraceLens Python toolchain without LLM
 # ---------------------------------------------------------------------------
 
+_CATEGORY_ANALYSIS_ROUTES: dict[str, tuple[str, str | None]] = {
+    "convolution": ("convolution", None),
+    "conv_fwd": ("convolution", "conv_fwd"),
+    "conv_bwd": ("convolution", "conv_bwd"),
+    "customcollective": ("other", "customcollective"),
+    "elementwise": ("elementwise", None),
+    "gemm": ("gemm", None),
+    "groupedgemm_fwd": ("gemm", "groupedgemm_fwd"),
+    "groupedgemm_bwd": ("gemm", "groupedgemm_bwd"),
+    "inferenceattention": ("sdpa", "inferenceattention"),
+    "moe_fused": ("moe", "moe_fused"),
+    "moe_unfused": ("moe", "moe_unfused"),
+    "norm": ("norm", None),
+    "norm_fwd": ("norm", "norm_fwd"),
+    "norm_bwd": ("norm", "norm_bwd"),
+    "other": ("other", "other"),
+    "reduce": ("reduce", None),
+    "rmsnorm": ("norm", "rmsnorm"),
+    "sdpa": ("sdpa", "sdpa_fwd"),
+    "sdpa_fwd": ("sdpa", "sdpa_fwd"),
+    "sdpa_bwd": ("sdpa", "sdpa_bwd"),
+    "triton": ("triton", None),
+}
+_SKIP_DETERMINISTIC_CATEGORIES: set[str] = {
+    "cpu_idle",
+    "kernel_fusion",
+    "multi_kernel",
+}
+
+
+def _category_analysis_command(
+    cat_name: str,
+    tier: str,
+    output_dir: Path,
+) -> list[str] | None:
+    """Return the TraceLens category-analysis command for one manifest category."""
+    if tier != "compute_kernel":
+        return None
+    if cat_name in _SKIP_DETERMINISTIC_CATEGORIES:
+        return None
+    route = _CATEGORY_ANALYSIS_ROUTES.get(cat_name)
+    if route is None:
+        return None
+    script_base, category_arg = route
+    if script_base == "gemm" and category_arg is not None:
+        # TraceLens gemm_analysis.py currently hard-codes category="gemm" and
+        # has no --category flag. Reuse its helpers while passing the manifest
+        # category so groupedgemm_* CSVs produce their own *_metrics.json.
+        snippet = (
+            "from TraceLens.Agent.Analysis.category_analyses.gemm_analysis "
+            "import classify_gemm_operation, extract_category_specific; "
+            "from TraceLens.Agent.Analysis.category_analyses.analysis_utils "
+            "import run_category_analysis; "
+            "run_category_analysis("
+            f"category={cat_name!r}, "
+            f"output_dir={str(output_dir)!r}, "
+            "config={"
+            "'extra_fields': ['Input Dims', 'Input type', 'has_perf_model'], "
+            "'operation_classifier': classify_gemm_operation"
+            "}, "
+            "extract_fn=extract_category_specific"
+            ")"
+        )
+        return [sys.executable, "-c", snippet]
+    cmd = [
+        sys.executable, "-m",
+        f"TraceLens.Agent.Analysis.category_analyses.{script_base}_analysis",
+        "--output-dir", str(output_dir),
+    ]
+    if category_arg is not None:
+        cmd += ["--category", category_arg]
+    return cmd
+
+
+def _raise_on_empty_failed_deterministic_pipeline(
+    det_rc: int,
+    raw_candidates: list[dict[str, Any]],
+) -> None:
+    """Fail deterministic route when the TraceLens toolchain failed and yielded no usable candidates."""
+    if det_rc == 0 or raw_candidates:
+        return
+    raise RuntimeError(
+        "Deterministic TraceLens pipeline failed before producing hot-kernel "
+        f"candidates (rc={det_rc}); refusing to return empty hot_kernels[]. "
+        "Inspect the tracelens/ artifacts and logs."
+    )
+
 
 def _run_deterministic_tracelens_steps(
     trace_path: Path,
@@ -2009,42 +2096,32 @@ def _run_deterministic_tracelens_steps(
     if rc != 0:
         return rc
 
-    # Step 7: category analysis scripts
-    # Map manifest category names to actual script module names where they
-    # differ. Categories not in this map use f"{cat_name}_analysis".
-    _CATEGORY_SCRIPT_MAP: dict[str, str] = {
-        "rmsnorm": "norm",
-        "sdpa": "sdpa",
-    }
-    # Categories that have no standalone analysis script (system-tier or
-    # handled by the orchestrator's own subagents).
-    _SKIP_CATEGORIES: set[str] = {
-        "cpu_idle", "multi_kernel", "kernel_fusion", "customcollective",
-    }
+    # Step 7: category analysis scripts. The TraceLens manifest uses analyzer
+    # category names (e.g. sdpa_fwd / norm_bwd), while the Python modules are
+    # shared by families (sdpa_analysis / norm_analysis).
     manifest_path = output_dir / "category_data" / "category_manifest.json"
+    category_failures: list[int] = []
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         for cat_entry in manifest.get("categories", []):
             cat_name = cat_entry.get("name", "")
             tier = cat_entry.get("tier", "")
-            if tier != "compute_kernel":
+            analysis_cmd = _category_analysis_command(cat_name, tier, output_dir)
+            if analysis_cmd is None:
+                append_log(
+                    log_path,
+                    f"deterministic: no category analysis script for "
+                    f"category={cat_name!r} tier={tier!r}; skipping",
+                )
                 continue
-            if cat_name in _SKIP_CATEGORIES:
-                continue
-            base = _CATEGORY_SCRIPT_MAP.get(cat_name, cat_name)
-            script_name = f"{base}_analysis"
-            analysis_cmd = [
-                sys.executable, "-m",
-                f"TraceLens.Agent.Analysis.category_analyses.{script_name}",
-                "--output-dir", str(output_dir),
-            ]
             rc_cat = run_command(
                 analysis_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s,
             )
             if rc_cat != 0:
+                category_failures.append(rc_cat)
                 append_log(
                     log_path,
-                    f"deterministic: category script {script_name} exited "
+                    f"deterministic: category script for {cat_name} exited "
                     f"with rc={rc_cat}; continuing with remaining categories",
                 )
 
@@ -2055,6 +2132,10 @@ def _run_deterministic_tracelens_steps(
         f"generate_priority_data; generate_priority_data('{output_dir}')",
     ]
     rc = run_command(priority_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s)
+    if rc != 0:
+        return rc
+    if category_failures:
+        return category_failures[0]
     return rc
 
 
@@ -2209,11 +2290,11 @@ def generate_minimal_analysis_md(
     candidates: list[dict[str, Any]],
     idle_pct: float | None = None,
 ) -> Path:
-    """Generate a minimal deterministic analysis.md for downstream consumption.
+    """Generate a minimal deterministic analysis.md for human-readable output.
 
-    The report is a structured template (no LLM) containing the Executive
-    Summary, Top Ops table, and per-P-item Data tables that
-    ``shared_state.analysis_md_text`` can inject into orchestrator prompts.
+    Deterministic hot-kernel extraction uses structured ``*_metrics.json`` and
+    ``priority_data.json`` directly. This Markdown report is intentionally not
+    the parser contract used by the LLM-agent route.
     """
     report_path = output_dir / "analysis.md"
     lines: list[str] = []
@@ -2273,7 +2354,8 @@ def generate_minimal_analysis_md(
             )
         lines.append("")
 
-    # Per-P-item Detailed Analysis (mirrors the format parse_analysis_md expects)
+    # Per-P-item details for humans/downstream display; deterministic route
+    # consumers should use the structured JSON artifacts instead of parsing this.
     seen_ranks: set[int] = set()
     for c in candidates:
         rank = c.get("tracelens_pitem_rank", 0)
@@ -3612,14 +3694,12 @@ def main() -> int:
                     log_path=log_path,
                     budget_minutes=args.budget_minutes,
                 )
-                if det_rc != 0:
-                    append_log(
-                        log_path,
-                        f"deterministic pipeline returned rc={det_rc}; "
-                        "attempting partial extraction from available outputs",
-                    )
-
                 orchestrator_mode = "deterministic"
+                if det_rc != 0:
+                    orchestrator_error = (
+                        "Deterministic TraceLens pipeline returned "
+                        f"rc={det_rc}"
+                    )
 
                 idle_pct_value = _extract_idle_pct_from_gpu_timeline(
                     tracelens_dir,
@@ -3658,6 +3738,18 @@ def main() -> int:
                     raw_det_candidates = deterministic_extract_hot_kernels(
                         tracelens_dir, args.top_k,
                     )
+                    _raise_on_empty_failed_deterministic_pipeline(
+                        det_rc,
+                        raw_det_candidates,
+                    )
+                    if det_rc != 0:
+                        append_log(
+                            log_path,
+                            f"deterministic pipeline returned rc={det_rc}, "
+                            f"but {len(raw_det_candidates)} candidates were "
+                            "already available; continuing with partial "
+                            "structured results",
+                        )
                     if raw_det_candidates:
                         total_dur = sum(
                             float(c.get("duration_us") or 0)
