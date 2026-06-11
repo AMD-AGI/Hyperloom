@@ -560,6 +560,19 @@ class SharedState:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
+        """Construct a :class:`SharedState` from a raw mapping, migrating it.
+
+        Acts as the unified migration entry point: an absent
+        ``schema_version`` is treated as 1, legacy keys are renamed to
+        their canonical form, and unknown keys are dropped. The operation
+        is idempotent and short-circuits when already at the latest schema.
+
+        Args:
+            raw: Decoded state mapping (e.g. from JSON on disk).
+
+        Returns:
+            A fully-populated, migrated :class:`SharedState` instance.
+        """
         # Unified migration entry point; absent schema_version treated as 1. Idempotent (latest version short-circuits).
         incoming_version = int(raw.get("schema_version") or 1)
         needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
@@ -2426,6 +2439,14 @@ class SharedState:
         ledger = [e for e in (self.intervention_mix or []) if isinstance(e, dict)]
 
         def _ct(entry: dict[str, Any]) -> str:
+            """Return an entry's normalized ``change_type`` string.
+
+            Args:
+                entry: A single intervention-mix ledger entry.
+
+            Returns:
+                The lowercased, stripped change type (empty if absent).
+            """
             return str(entry.get("change_type") or "").strip().lower()
 
         total_config = sum(1 for e in ledger if _ct(e) == "config")
@@ -3506,6 +3527,11 @@ class SharedState:
         )
 
     def _format_last_trace_analyze(self) -> str:
+        """Render the most recent trace-analyze blob for the prompt.
+
+        Returns:
+            A formatted summary of ``last_trace_analyze``.
+        """
         return self._format_trace_analyze_blob(self.last_trace_analyze)
 
     def _format_trace_analyze_blob(self, blob: dict[str, Any] | None) -> str:
