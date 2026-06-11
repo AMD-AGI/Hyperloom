@@ -133,7 +133,17 @@ _APPROVE_REQUIRES_BY_CLASS: dict[str, tuple[str, ...]] = {
 
 
 def classify_proposal_action(action_name: str | None) -> str:
-    """Map ``action_name`` to a review class; unknown/missing → evidence_producer (cold-start safe)."""
+    """Map an action name to its review class.
+
+    Unknown or missing actions fall back to the evidence-producer class,
+    which is the cold-start-safe default.
+
+    Args:
+        action_name: The proposed action's name, if any.
+
+    Returns:
+        The review class constant for the action.
+    """
     if not isinstance(action_name, str):
         return ACTION_CLASS_EVIDENCE_PRODUCER
     name = action_name.strip()
@@ -162,8 +172,15 @@ def _discover_robustness_findings_path(session_id: str) -> Path | None:
     """Locate ``<session>.jsonl`` from the Robustness FindingSink.
 
     Resolution order: ``$CRITIC_ROBUSTNESS_FINDINGS_DIR`` (explicit override
-    dir) then ``$ROBUSTNESS_AGENT_SESSION_DIR`` (auto-discovery). Returns
-    ``None`` when neither env is set or the file does not exist.
+    dir) then ``$ROBUSTNESS_AGENT_SESSION_DIR`` (auto-discovery).
+
+    Args:
+        session_id: Session identifier used to build the ``<session>.jsonl``
+            filename (falls back to ``"default"`` when empty).
+
+    Returns:
+        Path to the findings file, or ``None`` when neither env var is set
+        or the file does not exist.
     """
     explicit = os.environ.get("CRITIC_ROBUSTNESS_FINDINGS_DIR", "").strip()
     if explicit:
@@ -188,7 +205,18 @@ def _load_robustness_priors(
     limit: int,
     min_severity: str,
 ) -> list[dict[str, Any]]:
-    """Tail the JSONL and return up to ``limit`` priors matching severity."""
+    """Tail the JSONL and return priors that meet the severity floor.
+
+    Args:
+        path: Path to the robustness findings JSONL file.
+        limit: Maximum number of priors to return.
+        min_severity: Minimum severity to include (``"high"``,
+            ``"medium"``, or ``"low"``).
+
+    Returns:
+        Up to ``limit`` prior records matching the severity filter; an
+        empty list if the file cannot be read.
+    """
     min_rank = _SEVERITY_RANK.get(min_severity, _SEVERITY_RANK["high"])
     try:
         text = path.read_text(encoding="utf-8")
@@ -756,6 +784,14 @@ class DecisionReviewer:
         With ``proposals``, ``approve_requires`` is the batch's strictest
         action class and ``proposal_action_classes`` carries the per-proposal
         bar; empty/None defaults to the strict ``patch_landing`` checklist.
+
+        Args:
+            proposals: Proposals in the bundle; when ``None`` or empty the
+                strict patch-landing checklist is used.
+
+        Returns:
+            A constraints payload with allowed verdicts, the approval
+            checklist, and (when proposals are given) per-proposal classes.
         """
         constraints: dict[str, Any] = {
             "allowed_verdicts": sorted(ALLOWED_VERDICTS),
