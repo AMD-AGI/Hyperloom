@@ -99,6 +99,14 @@ def _precedence_key(row: dict[str, Any]) -> tuple[int, float, int, float]:
 
 
 def _is_empty(value: Any) -> bool:
+    """Return whether a value counts as empty for back-fill purposes.
+
+    Args:
+        value: Value to test.
+
+    Returns:
+        ``True`` for ``None``, empty containers/strings, and numeric zero.
+    """
     if value is None:
         return True
     if isinstance(value, (str, list, dict, tuple)) and len(value) == 0:
@@ -197,6 +205,14 @@ class CompositeRemoteRecipeClient:
     returns_arbor_shape = True
 
     def __init__(self, sources: Iterable[Any], *, names: list[str] | None = None) -> None:
+        """Initialize the composite over an ordered list of sub-remotes.
+
+        Args:
+            sources: Sub-remote clients, in precedence order; ``None`` entries
+                are dropped.
+            names: Optional display names parallel to ``sources``; defaults to
+                each source's ``_name`` or class name.
+        """
         self._sources = [s for s in sources if s is not None]
         self._names = names or [
             getattr(s, "_name", None) or type(s).__name__ for s in self._sources
@@ -208,6 +224,12 @@ class CompositeRemoteRecipeClient:
         return any(getattr(s, "enabled", False) for s in self._sources)
 
     def _active(self) -> list[tuple[str, Any]]:
+        """Return ``(name, source)`` pairs for the enabled sub-remotes.
+
+        Returns:
+            The enabled sources paired with their display names, in precedence
+            order.
+        """
         return [
             (self._names[i], s)
             for i, s in enumerate(self._sources)
@@ -234,6 +256,15 @@ class CompositeRemoteRecipeClient:
         return out
 
     def _merged_search(self, *, per_source_limit: int, kwargs: dict[str, Any]) -> list[dict[str, Any]]:
+        """Fan out a search to all active sources and merge by canonical id.
+
+        Args:
+            per_source_limit: Row limit applied to each sub-remote.
+            kwargs: Search keyword arguments forwarded to each source.
+
+        Returns:
+            Field-merged rows, one per canonical id, sorted by precedence.
+        """
         sub_kwargs = dict(kwargs)
         sub_kwargs["limit"] = per_source_limit
         grouped: dict[str, list[dict[str, Any]]] = {}
@@ -259,6 +290,20 @@ class CompositeRemoteRecipeClient:
         limit: int = 50,
         prefer: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        """Search all active sources and return merged, ranked rows.
+
+        Args:
+            label_match: Exact label filters (the 5-tuple identity labels).
+            metric_filters: ``{metric: {min, max}}`` filters.
+            updated_since: Lower bound on ``updated_at``.
+            order_by: Ordering directive forwarded to sub-remotes.
+            limit: Maximum number of merged rows to return.
+            prefer: Workload-similarity hints (accepted for parity; rerank is
+                applied by the dispatcher).
+
+        Returns:
+            Up to ``limit`` merged recipe rows.
+        """
         # Main's dispatcher passes workload-similarity hints through this
         # parameter. Sub-remotes accept it for interface parity while the
         # dispatcher performs the actual client-side rerank.
@@ -299,6 +344,14 @@ class CompositeRemoteRecipeClient:
     # are only hit by direct callers). Delegate to the first capable source.
     # ------------------------------------------------------------------
     def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Return the most recent merged recipes across all sources.
+
+        Args:
+            limit: Maximum number of rows to return.
+
+        Returns:
+            Up to ``limit`` merged recipe rows ordered most-recent first.
+        """
         return self._merged_search(
             per_source_limit=max(int(limit), _FETCH_FLOOR),
             kwargs={"label_match": None, "limit": limit, "metric_filters": None,
@@ -306,19 +359,47 @@ class CompositeRemoteRecipeClient:
         )[: int(limit)]
 
     def _first_active(self) -> Any | None:
+        """Return the first enabled sub-remote, or ``None`` if none are active."""
         for _name, source in self._active():
             return source
         return None
 
     def list_attempts(self, *, canonical_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Return attempt rows for a recipe from the first active source.
+
+        Args:
+            canonical_id: Canonical recipe id.
+            limit: Maximum number of attempts.
+
+        Returns:
+            Attempt rows from the first active source, or ``[]`` when none are
+            active.
+        """
         src = self._first_active()
         return src.list_attempts(canonical_id=canonical_id, limit=limit) if src else []
 
     def list_session_attempts(self, *, session_id: str, limit: int = 500) -> list[dict[str, Any]]:
+        """Return attempt rows for a session from the first active source.
+
+        Args:
+            session_id: Session identifier.
+            limit: Maximum number of attempts.
+
+        Returns:
+            Session attempt rows, or ``[]`` when no source is active.
+        """
         src = self._first_active()
         return src.list_session_attempts(session_id=session_id, limit=limit) if src else []
 
     def session_summary(self, *, session_id: str) -> dict[str, Any] | None:
+        """Return a session summary from the first active source.
+
+        Args:
+            session_id: Session identifier.
+
+        Returns:
+            The session summary, or ``None`` when no source is active.
+        """
         src = self._first_active()
         return src.session_summary(session_id=session_id) if src else None
 
@@ -333,6 +414,7 @@ class CompositeRemoteRecipeClient:
         return False
 
     def close(self) -> None:
+        """Close all sub-remotes, ignoring individual close failures."""
         for source in self._sources:
             try:
                 source.close()

@@ -142,6 +142,15 @@ class TargetGainObjective(Objective):
         return state.cumulative_gain >= self.target_gain_pct
 
     def pressure_input(self, state: "SharedState") -> float:
+        """Compute normalized progress toward the gain target.
+
+        Args:
+            state: Current shared state.
+
+        Returns:
+            Progress in ``[0.0, 1.0]``; stays ``0.0`` until the baseline
+            throughput has been measured.
+        """
         # Stays 0 until baseline finishes.
         if state.baseline_tput <= 0:
             return 0.0

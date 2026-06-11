@@ -136,6 +136,24 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
     @ray.remote(num_gpus=num_gpus)
     def _task(prompt_file_str: str, output_dir_str: str, kernel_path: str,
               cost_limit, timeout_s: int, kernel_repo: str, test_command: str) -> dict:
+        """Run one GEAK CLI attempt inside a Ray worker.
+
+        Self-contained because Ray workers do not inherit the driver's
+        ``sys.path``; all imports and GPU-visibility remapping happen here.
+
+        Args:
+            prompt_file_str: Path to the prompt file.
+            output_dir_str: Output directory for this attempt.
+            kernel_path: Path to the kernel under optimization.
+            cost_limit: Optional cost ceiling for the GEAK run.
+            timeout_s: Per-attempt timeout in seconds.
+            kernel_repo: Kernel repository identifier.
+            test_command: Command used to validate the kernel.
+
+        Returns:
+            A result dict with ``returncode``, ``stdout_tail``,
+            ``stderr_tail``, ``gpu_ids``, ``elapsed_s``, and ``cmd``.
+        """
         # Self-contained: Ray workers lack the driver's sys.path.
         import os as _os, shutil as _shutil, subprocess as _sp, time as _t
         import re as _re
@@ -245,6 +263,25 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
 def run_via_cli(prompt_file: Path, output_dir: Path, kernel_path: str,
                 cost_limit: float | None, timeout_s: int,
                 kernel_repo: str = "", test_command: str = "") -> dict:
+    """Run one GEAK CLI attempt in a subprocess (non-Ray path).
+
+    Builds a child environment with ROCR→logical GPU remapping and per-attempt
+    compile caches, then runs the GEAK CLI under a timeout.
+
+    Args:
+        prompt_file: Path to the prompt file.
+        output_dir: Output directory for this attempt.
+        kernel_path: Path to the kernel under optimization.
+        cost_limit: Optional cost ceiling for the GEAK run.
+        timeout_s: Per-attempt timeout in seconds.
+        kernel_repo: Kernel repository identifier.
+        test_command: Command used to validate the kernel.
+
+    Returns:
+        A result dict with ``returncode``, ``stdout_tail``, ``stderr_tail``,
+        ``gpu_ids``, ``elapsed_s``, and ``cmd``. Timeouts return code ``124``
+        and input errors return code ``2``.
+    """
     # Child env with ROCR→logical GPU mapping; avoids leaking GPU vars to later steps.
     child_env = os.environ.copy()
     rocr_raw = child_env.get("ROCR_VISIBLE_DEVICES", "")

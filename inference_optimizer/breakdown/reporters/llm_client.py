@@ -63,6 +63,15 @@ class OpenAIHttpClient:
     timeout_sec: float = 60.0
 
     def complete(self, *, system: str, user: str) -> str:
+        """Issue a single chat-completion request and return the text.
+
+        Args:
+            system: System prompt content.
+            user: User prompt content.
+
+        Returns:
+            The content of the first choice's message.
+        """
         import httpx  # local import (see module docstring)
 
         url = self.base_url.rstrip("/") + "/chat/completions"

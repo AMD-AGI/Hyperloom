@@ -2054,10 +2054,27 @@ def _coerce_float(value: Any) -> float | None:
 
 
 def _lower_keyed(row: dict) -> dict[str, Any]:
+    """Return a copy of ``row`` with keys trimmed and lower-cased.
+
+    Args:
+        row: Source mapping (e.g. a CSV/JSON record).
+
+    Returns:
+        A new dict keyed by the normalized column names.
+    """
     return {str(k).strip().lower(): v for k, v in row.items()}
 
 
 def _first_present(low: dict[str, Any], keys: tuple[str, ...]) -> str:
+    """Return the first non-empty value among candidate keys.
+
+    Args:
+        low: Lower-keyed record to read from.
+        keys: Candidate keys, in priority order.
+
+    Returns:
+        The first present, non-empty value as a stripped string, or ``""``.
+    """
     for k in keys:
         v = low.get(k)
         if v is not None and str(v).strip():
@@ -2101,6 +2118,14 @@ def _record_gpu_us(low: dict[str, Any]) -> float | None:
 
 
 def _record_gpu_pct(low: dict[str, Any]) -> float | None:
+    """Extract the GPU-time percentage from a per-op ranking record.
+
+    Args:
+        low: Lower-keyed ranking record.
+
+    Returns:
+        The GPU-time percentage, or ``None`` when no recognized key parses.
+    """
     for k in _RANK_PCT_KEYS:
         if k in low:
             val = _coerce_float(low[k])
@@ -2110,6 +2135,15 @@ def _record_gpu_pct(low: dict[str, Any]) -> float | None:
 
 
 def _ranking_record(raw: dict) -> dict[str, Any] | None:
+    """Normalize a raw ranking row into a standard candidate record.
+
+    Args:
+        raw: Raw CSV/JSON ranking row.
+
+    Returns:
+        A dict with ``name``, ``category``, ``gpu_us``, and ``gpu_pct``, or
+        ``None`` when the row has no usable op name.
+    """
     low = _lower_keyed(raw)
     name = _first_present(low, _RANK_NAME_KEYS)
     if not name:
@@ -2123,6 +2157,15 @@ def _ranking_record(raw: dict) -> dict[str, Any] | None:
 
 
 def _load_ops_ranking_csv(path: Path) -> list[dict[str, Any]]:
+    """Load per-op ranking records from a CSV sidecar.
+
+    Args:
+        path: Path to the CSV file.
+
+    Returns:
+        Normalized ranking records, or ``[]`` when the file is missing or
+        cannot be read.
+    """
     if not path.is_file():
         return []
     out: list[dict[str, Any]] = []
@@ -2138,6 +2181,17 @@ def _load_ops_ranking_csv(path: Path) -> list[dict[str, Any]]:
 
 
 def _iter_json_ranking_records(data: Any) -> list[dict]:
+    """Extract the list of ranking record dicts from parsed JSON.
+
+    Accepts either a top-level list or a dict containing the records under one
+    of several known keys.
+
+    Args:
+        data: Parsed JSON value.
+
+    Returns:
+        The list of dict records, or ``[]`` when none are found.
+    """
     if isinstance(data, list):
         return [r for r in data if isinstance(r, dict)]
     if isinstance(data, dict):
@@ -2152,6 +2206,15 @@ def _iter_json_ranking_records(data: Any) -> list[dict]:
 
 
 def _load_ops_ranking_json(path: Path) -> list[dict[str, Any]]:
+    """Load per-op ranking records from a JSON sidecar.
+
+    Args:
+        path: Path to the JSON file.
+
+    Returns:
+        Normalized ranking records, or ``[]`` when the file is missing or
+        cannot be parsed.
+    """
     if not path.is_file():
         return []
     try:
@@ -2192,6 +2255,12 @@ def load_ops_ranking(
 
 
 def _resolve_other_bucket_min_gpu_pct() -> float:
+    """Return the minimum GPU-time percentage for other-bucket recovery.
+
+    Returns:
+        The value from ``HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT`` when set to a
+        valid non-negative number, otherwise the default threshold.
+    """
     raw = os.environ.get(_OTHER_BUCKET_MIN_GPU_PCT_ENV, "").strip()
     if raw:
         val = _coerce_float(raw)
@@ -2201,6 +2270,15 @@ def _resolve_other_bucket_min_gpu_pct() -> float:
 
 
 def _is_other_like_category(category: str) -> bool:
+    """Return whether a category counts as the ``other`` bucket.
+
+    Args:
+        category: Raw or upstream category label.
+
+    Returns:
+        ``True`` if the label (or its normalized upstream form) is an
+        other-like category.
+    """
     raw_l = str(category or "").strip().lower()
     if raw_l in _OTHER_LIKE_CATEGORIES:
         return True
@@ -2254,6 +2332,15 @@ def recover_other_bucket_candidates(
     ) or 0.0
 
     def _pct(rec: dict[str, Any]) -> float | None:
+        """Return a record's GPU-time percentage.
+
+        Args:
+            rec: A ranking record.
+
+        Returns:
+            The explicit ``gpu_pct`` when present, else the share of
+            ``total_us`` derived from ``gpu_us``, else ``None``.
+        """
         if rec.get("gpu_pct") is not None:
             return float(rec["gpu_pct"])
         if total_us > 0 and rec.get("gpu_us") is not None:
@@ -2453,6 +2540,18 @@ def run_command(
     timeout_s: int,
     env: dict[str, str] | None = None,
 ) -> int:
+    """Run a subprocess, tee its output to a log, and return the exit code.
+
+    Args:
+        cmd: Command and arguments to execute.
+        cwd: Working directory, or ``None`` to inherit the current one.
+        log_path: Log file the command line and output are appended to.
+        timeout_s: Subprocess timeout in seconds.
+        env: Optional environment for the child process.
+
+    Returns:
+        The process return code.
+    """
     append_log(log_path, f"$ {' '.join(cmd)}")
     proc = subprocess.run(
         cmd,

@@ -80,6 +80,12 @@ class Assessment:
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict:
+        """Serialize the assessment to a JSON-friendly dictionary.
+
+        Returns:
+            A dict with the final outcome, per-attempt outcomes, recovery flag,
+            evaluation gap, and notes, using enum *values* for outcome ids.
+        """
         return {
             "final": self.final.value if self.final is not None else None,
             "attempts": [a.value if a is not None else None for a in self.attempts],
@@ -120,6 +126,15 @@ _QUANTIZED_LOAD_PATTERNS = (
 
 
 def _contains_any(haystack: str, needles: tuple[str, ...]) -> bool:
+    """Return whether any needle substring appears in ``haystack``.
+
+    Args:
+        haystack: String to search within.
+        needles: Candidate substrings to look for.
+
+    Returns:
+        ``True`` if at least one needle is found, otherwise ``False``.
+    """
     for n in needles:
         if n in haystack:
             return True
@@ -127,6 +142,15 @@ def _contains_any(haystack: str, needles: tuple[str, ...]) -> bool:
 
 
 def _parse_blocked_outcome(text: str | None) -> OutcomeId | None:
+    """Extract an explicit ``BLOCKED`` outcome id from agent output text.
+
+    Args:
+        text: Free-form text that may contain a ``BLOCKED`` outcome marker.
+
+    Returns:
+        The matching :class:`OutcomeId`, or ``None`` when no valid marker is
+        present.
+    """
     if not text:
         return None
     m = _BLOCKED_OUTCOME_RE.search(text)
@@ -234,6 +258,15 @@ def _classify_phase_artifact_gap(
 
 
 def _classify_bootstrap_sdk_error(sdk_error: str) -> OutcomeId | None:
+    """Classify a bootstrap-phase SDK error message into an outcome.
+
+    Args:
+        sdk_error: Raw error text raised before the skill chain started.
+
+    Returns:
+        The matching bootstrap :class:`OutcomeId` (e.g. missing Quark root,
+        unwritable workspace, runtime error), or ``None`` if unrecognized.
+    """
     msg = sdk_error.lower()
     if "quark_root" in msg or ("quark root" in msg and ("missing" in msg or "not found" in msg)):
         return OutcomeId.quark_root_missing

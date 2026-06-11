@@ -339,8 +339,18 @@ def _entry_slug(entry: dict | str) -> str:
 
 
 def _parse_explicit_models(value: str) -> list[str]:
-    # Whitespace OR comma separated, both supported (workflow_dispatch UI is
-    # space-friendly; downstream callers may comma-list).
+    """Split an explicit model list into individual repo ids.
+
+    Accepts whitespace- or comma-separated input so both the
+    ``workflow_dispatch`` UI (space-friendly) and programmatic callers
+    (comma-lists) work.
+
+    Args:
+        value: Raw model-list string.
+
+    Returns:
+        The non-empty repo ids in order.
+    """
     return [r for r in re.split(r"[\s,]+", value.strip()) if r]
 
 

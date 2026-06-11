@@ -91,10 +91,27 @@ MAX_BENCH_WALL_CLOCK_SEC: float = 60.0
 
 
 def _error(reason: str, **extra: Any) -> dict[str, Any]:
+    """Build a failure result envelope.
+
+    Args:
+        reason: Human-readable failure reason.
+        **extra: Additional fields to merge into the envelope.
+
+    Returns:
+        Dict with ``ok=False`` plus the reason and any extra fields.
+    """
     return {"ok": False, "reason": reason, **extra}
 
 
 def _ok(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build a success result envelope.
+
+    Args:
+        payload: Optional fields to merge into the envelope.
+
+    Returns:
+        Dict with ``ok=True`` plus any payload fields.
+    """
     out: dict[str, Any] = {"ok": True}
     if payload:
         out.update(payload)

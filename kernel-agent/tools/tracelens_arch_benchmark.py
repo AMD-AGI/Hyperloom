@@ -78,6 +78,14 @@ _VISIBLE_DEVICE_VARS = (
 
 
 def normalize_platform(platform: str) -> str:
+    """Normalize a platform/arch name to its canonical upper-case form.
+
+    Args:
+        platform: Platform or architecture name.
+
+    Returns:
+        The trimmed, upper-cased platform name.
+    """
     return (platform or "").strip().upper()
 
 
@@ -168,6 +176,15 @@ def resolve_arch_json_path(platform: str) -> Path | None:
 
 
 def default_arch_output_path(tracelens_root: Path, platform: str) -> Path:
+    """Return the default arch-spec JSON path for a platform.
+
+    Args:
+        tracelens_root: Root of the TraceLens checkout.
+        platform: Platform/architecture name.
+
+    Returns:
+        The conventional ``.../arch/<PLATFORM>.json`` path.
+    """
     canonical = normalize_platform(platform)
     return (
         tracelens_root

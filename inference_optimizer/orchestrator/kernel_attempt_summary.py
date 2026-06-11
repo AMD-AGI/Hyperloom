@@ -553,6 +553,16 @@ def _render_unattempted_row(
     reason_code: str,
     reason_detail: str,
 ) -> dict[str, Any]:
+    """Build a summary row for a kernel that was not attempted.
+
+    Args:
+        top_entry: The kernel's roofline/top-list entry.
+        reason_code: Machine-readable reason the kernel was skipped.
+        reason_detail: Human-readable explanation of the skip.
+
+    Returns:
+        A row dict tagged with the unattempted category and reason.
+    """
     return {
         "kernel_id": str(top_entry.get("kernel_id") or ""),
         "kernel_name": str(top_entry.get("name") or ""),
@@ -580,6 +590,22 @@ def _render_attempted_row(
     session_dir: Path,
     last_kernel_opt: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    """Build a summary row for a kernel that was attempted.
+
+    Loads the backend ladder and kernel result, then assembles a row
+    capturing the attempt outcome and verification details.
+
+    Args:
+        top_entry: The kernel's roofline/top-list entry.
+        attempt: The recorded attempt metadata.
+        category: Outcome category for the row.
+        results_dir: Directory holding per-kernel result artifacts.
+        session_dir: Session directory for the run.
+        last_kernel_opt: Most recent kernel-optimization record, if any.
+
+    Returns:
+        A row dict describing the attempt and its results.
+    """
     kid = str(top_entry.get("kernel_id") or attempt.get("kernel_id") or "")
     ladder, ladder_unavailable = _load_backend_ladder(results_dir, kid)
     kernel_result, _ = _load_kernel_result(results_dir, kid)
@@ -814,6 +840,14 @@ def _find_highest_impact_missed(
 
 
 def _to_float(v: Any) -> float | None:
+    """Coerce a value to a 4-decimal float, or ``None`` on failure.
+
+    Args:
+        v: Arbitrary value to convert.
+
+    Returns:
+        The rounded float, or ``None`` if it cannot be parsed.
+    """
     if v is None:
         return None
     try:

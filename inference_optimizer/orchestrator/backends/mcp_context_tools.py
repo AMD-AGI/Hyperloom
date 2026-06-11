@@ -22,6 +22,14 @@ MCP_SERVER_NAME = "inference_optimizer_context"
 
 
 def _qualified(tool_name: str) -> str:
+    """Return the fully-qualified MCP tool name.
+
+    Args:
+        tool_name: Bare tool name.
+
+    Returns:
+        The name prefixed with ``mcp__<server>__``.
+    """
     return f"mcp__{MCP_SERVER_NAME}__{tool_name}"
 
 
@@ -45,6 +53,16 @@ class ContextProvider:
     action_runner: Callable[[str, dict[str, Any]], str] | None = None
 
     def _safe(self, fn: Callable[[], str], label: str) -> str:
+        """Invoke a projection callable, never letting it crash the reactor.
+
+        Args:
+            fn: Zero-argument projection returning a summary string.
+            label: Short name used in log and fallback messages.
+
+        Returns:
+            The projection output, or a short error/empty marker string when
+            ``fn`` raises or returns nothing usable.
+        """
         try:
             out = fn()
         except Exception as exc:  # noqa: BLE001 — never crash a pull
@@ -54,28 +72,43 @@ class ContextProvider:
 
     # Projections backed by SharedState.to_*_summary.
     def mission_status(self) -> str:
+        """Return the mission-status summary projection."""
         return self._safe(self.shared_state.to_mission_summary, "mission_status")
 
     def shared_state_summary(self) -> str:
+        """Return the prompt-oriented shared-state summary projection."""
         return self._safe(self.shared_state.to_prompt_summary, "shared_state")
 
     def gaps(self) -> str:
+        """Return the open-gaps summary projection."""
         return self._safe(self.shared_state.to_gaps_summary, "gaps")
 
     def warm_start(self) -> str:
+        """Return the warm-start summary projection."""
         return self._safe(self.shared_state.to_warm_start_summary, "warm_start")
 
     def proposal_scores(self) -> str:
+        """Return the proposal-scores summary projection."""
         return self._safe(
             self.shared_state.to_proposal_scores_summary, "proposal_scores"
         )
 
     def intervention_mix(self) -> str:
+        """Return the intervention-mix summary projection."""
         return self._safe(
             self.shared_state.to_intervention_mix_summary, "intervention_mix"
         )
 
     def why_denied(self, top_k: int = 6) -> str:
+        """Return a summary of recent policy denials.
+
+        Args:
+            top_k: Maximum number of denial entries to include.
+
+        Returns:
+            The denial summary from the denial reader when wired, otherwise the
+            shared-state policy-denial projection.
+        """
         if self.denial_reader is not None:
             return self._safe(lambda: self.denial_reader(top_k), "why_denied")
         return self._safe(
@@ -84,16 +117,38 @@ class ContextProvider:
         )
 
     def analysis_md(self) -> str:
+        """Return the current ``analysis.md`` contents.
+
+        Returns:
+            The analysis text, or a not-wired marker when no reader is bound.
+        """
         if self.analysis_reader is None:
             return "(analysis.md reader not wired)"
         return self._safe(self.analysis_reader, "analysis_md")
 
     def inbox(self, since_seq: int = 0) -> str:
+        """Return inbox messages newer than a sequence number.
+
+        Args:
+            since_seq: Only messages with a sequence greater than this are
+                returned.
+
+        Returns:
+            The inbox text, or a not-wired marker when no reader is bound.
+        """
         if self.inbox_reader is None:
             return "(inbox reader not wired)"
         return self._safe(lambda: self.inbox_reader(since_seq), "inbox")
 
     def recent_outcomes(self, top_k: int = 8) -> str:
+        """Return a summary of recent action outcomes.
+
+        Args:
+            top_k: Maximum number of recent outcomes to include.
+
+        Returns:
+            The outcomes summary, or a not-wired marker when no reader is bound.
+        """
         if self.recent_outcomes_reader is None:
             return "(recent outcomes reader not wired)"
         return self._safe(
@@ -103,6 +158,16 @@ class ContextProvider:
     def run_action_now(
         self, action_name: str = "", params: dict[str, Any] | None = None,
     ) -> str:
+        """Run a whitelisted lane-light action inline.
+
+        Args:
+            action_name: Name of the action to run.
+            params: Optional action parameters.
+
+        Returns:
+            The action result string, or a not-wired marker when no action
+            runner is bound.
+        """
         if self.action_runner is None:
             return "(run_action_now not wired)"
         return self._safe(
@@ -240,6 +305,16 @@ CONTEXT_TOOL_QUALIFIED_NAMES: tuple[str, ...] = tuple(
 
 
 def _resolve_sdk(sdk_module: Any | None) -> Any | None:
+    """Resolve the Claude Agent SDK module.
+
+    Args:
+        sdk_module: Explicit module to use (for tests), or ``None`` to import
+            the real SDK.
+
+    Returns:
+        The provided or imported SDK module, or ``None`` when it is not
+        installed.
+    """
     if sdk_module is not None:
         return sdk_module
     try:
@@ -254,6 +329,15 @@ def _make_handler(
     """Build an async MCP handler returning the provider method's string."""
 
     async def _handler(args: dict[str, Any]) -> dict[str, Any]:
+        """Invoke the bound provider method and wrap its string result.
+
+        Args:
+            args: Tool call arguments; recognized keys (``top_k``,
+                ``since_seq``, ``action_name``, ``params``) are forwarded.
+
+        Returns:
+            An MCP tool result dict carrying the provider method's output.
+        """
         method = getattr(provider, method_name)
         kwargs: dict[str, Any] = {}
         if isinstance(args, dict):

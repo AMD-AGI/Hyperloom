@@ -232,6 +232,15 @@ class ClawClient:
         ))["data"]
 
     def download_file(self, session_id: str, file_path: str) -> bytes:
+        """Download a sandbox file and return its raw bytes.
+
+        Args:
+            session_id (str): Session id owning the file.
+            file_path (str): Path of the file within the sandbox.
+
+        Returns:
+            bytes: The file's contents.
+        """
         # Percent-encode the full path including any leading slash.
         encoded = quote(file_path, safe="")
         resp = self._session.get(

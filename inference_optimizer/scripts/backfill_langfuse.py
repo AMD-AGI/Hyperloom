@@ -93,6 +93,15 @@ UNPHASED = lfmap.UNPHASED
 # IO helpers
 # ---------------------------------------------------------------------------
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Load a JSONL file into a list of dict records.
+
+    Args:
+        path: Path to the ``.jsonl`` file.
+
+    Returns:
+        The dict records; a missing file yields ``[]`` and malformed lines are
+        skipped.
+    """
     out: list[dict[str, Any]] = []
     if not path.exists():
         return out
@@ -110,6 +119,15 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _load_json(path: Path) -> dict[str, Any]:
+    """Load a JSON object file.
+
+    Args:
+        path: Path to the JSON file.
+
+    Returns:
+        The parsed object, or ``{}`` when the file is missing, unreadable, or
+        not a JSON object.
+    """
     if not path.exists():
         return {}
     try:
@@ -185,6 +203,15 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
 
 
 def _time_bounds(gens: list[dict]) -> tuple[datetime | None, datetime | None]:
+    """Return the earliest and latest timestamps across generations.
+
+    Args:
+        gens: Generation rows each carrying a ``ts`` field.
+
+    Returns:
+        A ``(min, max)`` datetime tuple, or ``(None, None)`` when no row has a
+        parseable timestamp.
+    """
     times = [lfmap.parse_ts(g["ts"]) for g in gens]
     times = [t for t in times if t is not None]
     if not times:
@@ -195,6 +222,14 @@ def _time_bounds(gens: list[dict]) -> tuple[datetime | None, datetime | None]:
 def _phase_time_bounds(
     agents: "OrderedDict[str, list[dict]]",
 ) -> tuple[datetime | None, datetime | None]:
+    """Return the time bounds across all agents in a phase.
+
+    Args:
+        agents: Mapping of agent name to its generation rows.
+
+    Returns:
+        A ``(min, max)`` datetime tuple over every generation in the phase.
+    """
     flat = [g for gens in agents.values() for g in gens]
     return _time_bounds(flat)
 
@@ -203,6 +238,11 @@ def _phase_time_bounds(
 # Dry-run printer
 # ---------------------------------------------------------------------------
 def print_plan(plan: dict[str, Any]) -> None:
+    """Print a human-readable dry-run summary of a backfill plan.
+
+    Args:
+        plan: The plan dict produced by the plan builder.
+    """
     s = plan["stats"]
     print(f"Trace: {plan['name']}  (session_id={plan['session_id']})")
     print(f"  claw_session_id = {plan.get('claw_session_id') or '(none)'}  "
@@ -242,6 +282,18 @@ def print_plan(plan: dict[str, Any]) -> None:
 # Real ingest (needs the langfuse SDK)
 # ---------------------------------------------------------------------------
 def ingest(plan: dict[str, Any]) -> int:
+    """Emit a backfill plan to Langfuse as a full trace tree.
+
+    Recreates the trace -> phase -> agent -> generation hierarchy from a
+    completed session and attaches decision scores to the owning agent spans.
+
+    Args:
+        plan: The backfill plan produced by the plan builder.
+
+    Returns:
+        Process exit code: ``0`` on success, ``3`` when the Langfuse SDK is not
+        importable.
+    """
     try:
         from langfuse import get_client  # type: ignore
     except Exception as exc:  # noqa: BLE001
@@ -348,6 +400,11 @@ def ingest(plan: dict[str, Any]) -> int:
 # CLI
 # ---------------------------------------------------------------------------
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser.
+
+    Returns:
+        The configured :class:`argparse.ArgumentParser`.
+    """
     p = argparse.ArgumentParser(
         prog="backfill_langfuse",
         description=__doc__,
@@ -362,6 +419,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: build and (optionally) emit a backfill plan.
+
+    Args:
+        argv: Argument list to parse; defaults to ``sys.argv`` when ``None``.
+
+    Returns:
+        Process exit code from the plan/ingest path.
+    """
     args = _build_parser().parse_args(argv)
     logging.basicConfig(
         level=(logging.DEBUG if args.verbose >= 2

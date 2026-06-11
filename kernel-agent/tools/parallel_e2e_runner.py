@@ -266,6 +266,24 @@ def run_one_attempt(
     harness_path: str,
     num_gpus: int = 1,
 ) -> dict[str, Any]:
+    """Run a single backend/replica kernel-optimization attempt.
+
+    Args:
+        backend: Backend name to run (e.g. ``geak`` / ``oob``).
+        replica: Replica index within the backend's parallel fan-out.
+        gpu_id: Logical GPU id assigned to this attempt (informational; Ray
+            sets the visible-device env vars in workers).
+        args: Parsed CLI arguments for the run.
+        run_dir: Per-run output directory.
+        env: Base environment to extend for the child process.
+        kernel_id: Identifier of the kernel being optimized.
+        source_file: Path to the kernel source file.
+        harness_path: Path to the benchmark/validation harness.
+        num_gpus: Number of GPUs allotted to this attempt.
+
+    Returns:
+        A result dict describing the attempt's outcome and artifact paths.
+    """
     # Do NOT set HIP/ROCR/CUDA_VISIBLE_DEVICES here; Ray assigns them in workers.
     local_env = {
         **env,
