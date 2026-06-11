@@ -138,6 +138,7 @@ def materialize_config_with_envs(
     extra_envs: dict[str, Any] | None = None,
     model_path: str | None = None,
     gpu_type: str | None = None,
+    inferencex_path: str | None = None,
     benchmark_script: str | None = None,
     out_name: str = "baseline_config.with_envs.yaml",
 ) -> Path:
@@ -150,8 +151,10 @@ def materialize_config_with_envs(
     after that; ``PRECISION`` → ``precision``; ``CONC/ISL/OSL/MAX_MODEL_LEN/TP/
     RANDOM_RANGE_RATIO`` → ``benchmark.envs``; ``ROCR_VISIBLE_DEVICES``
     reconciled against TP; ``RUN_EVAL`` defaulted; ``NUM_PROMPTS`` /
-    ``NUM_WARMUPS`` computed adaptively. ``extra_server_args`` routes into the
-    framework env; ``extra_envs`` overrides any of the above.
+    ``NUM_WARMUPS`` computed adaptively. ``inferencex_path`` explicitly pins
+    ``benchmark.inferencex_path`` for one task (falling back to
+    ``$INFERENCEX_PATH`` for existing callers). ``extra_server_args`` routes
+    into the framework env; ``extra_envs`` overrides any of the above.
 
     Returns the materialized YAML path (stable file name across calls).
     """
@@ -189,11 +192,16 @@ def materialize_config_with_envs(
                 f"benchmark_script={_script!r} targets {_other[0]!r}; refusing "
                 f"to boot server (would launch the wrong framework's entrypoint)"
             )
-    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
-    if inferencex_path:
-        # Persist $INFERENCEX_PATH into the YAML so Magpie's runtime checkout
-        # matches Hyperloom's patch target.
-        bench["inferencex_path"] = inferencex_path
+    effective_inferencex_path = (
+        str(inferencex_path or "").strip()
+        or os.environ.get("INFERENCEX_PATH", "").strip()
+    )
+    if effective_inferencex_path:
+        # Persist the resolved InferenceX checkout into the YAML so Magpie's
+        # runtime checkout matches Hyperloom's patch target. Baseline/Profile
+        # pass the per-task local mirror explicitly to avoid process-wide env
+        # races; legacy callers still fall back to $INFERENCEX_PATH.
+        bench["inferencex_path"] = effective_inferencex_path
     envs = bench.setdefault("envs", {})
     for env_key in (
         "CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP",
