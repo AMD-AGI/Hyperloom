@@ -110,6 +110,39 @@ def _write_patch_pair(
 
 
 # integrate_handler
+def test_resolve_integrate_payload_fills_source_when_patch_path_present(
+    session_dir, tmp_path,
+):
+    """Queued KEEPs may pass patch_path while relying on kernel_opt_attempts for source_file."""
+    state = SharedState.load_or_init(session_dir)
+    patch_path = tmp_path / "k001_opt.cu"
+    source_path = tmp_path / "gemm_moe_ck2stages.cu"
+    patch_path.write_text("// optimized\n", encoding="utf-8")
+    source_path.write_text("// original\n", encoding="utf-8")
+    state.last_kernel_opt = {
+        "kernel_id": "k004",
+        "best_artifact_path": "/tmp/k004_opt.cu",
+        "source_file": "/tmp/rmsnorm.cu",
+    }
+    state.kernel_opt_attempts = {
+        "k001": {
+            "last_decision": "KEEP",
+            "last_artifact_path": str(patch_path),
+            "last_source_file": str(source_path),
+        },
+    }
+    state.save(session_dir)
+
+    resolved, err = krh._resolve_integrate_payload(
+        {"kernel_id": "k001", "patch_path": str(patch_path)},
+        session_dir=session_dir,
+    )
+
+    assert err is None
+    assert resolved["patch_path"] == str(patch_path)
+    assert resolved["source_file"] == str(source_path)
+
+
 @pytest.mark.asyncio
 async def test_integrate_handler_keep_decision(session_dir, tmp_path):
     """re-baseline returns 900 vs base 800 → KEEP."""

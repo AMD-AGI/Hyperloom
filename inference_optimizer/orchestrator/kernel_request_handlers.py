@@ -937,12 +937,9 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
             resolved["source_file"] = str(last_kernel["source_file"])
 
     # Multi-KEEP queue fallback: ``last_kernel_opt`` holds only the strongest pending KEEP, so pull patch_path/source_file from the per-kernel ledger for other queued KEEPs.
-    if (
-        kernel_id
-        and not resolved.get("patch_path")
-    ):
+    if kernel_id:
         attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
-        if attempt.get("last_artifact_path"):
+        if not resolved.get("patch_path") and attempt.get("last_artifact_path"):
             resolved["patch_path"] = str(attempt["last_artifact_path"])
         if not resolved.get("source_file") and attempt.get("last_source_file"):
             resolved["source_file"] = str(attempt["last_source_file"])
