@@ -168,7 +168,17 @@ def _classify_eval_outcome(
     *,
     acceptable_eval_gap: float | None,
 ) -> OutcomeId | None:
-    """Map eval-phase artifacts → outcome. ``None`` means 'eval not exercised'."""
+    """Map eval-phase artifacts to an outcome.
+
+    Args:
+        art: Collected artifacts for the attempt.
+        acceptable_eval_gap: Maximum tolerated relative accuracy gap, if
+            configured.
+
+    Returns:
+        The matching eval :class:`OutcomeId`, or ``None`` when eval was
+        not exercised this attempt.
+    """
 
     if art.eval_skipped_reason:
         reason = art.eval_skipped_reason.lower()
@@ -202,10 +212,16 @@ def _classify_sdk_phase_error(
     sdk_error: str,
     phase: str | None,
 ) -> OutcomeId | None:
-    """Map ``sdk_error`` text under a known phase to a phase-specific outcome.
+    """Map an SDK error under a known phase to a phase-specific outcome.
 
-    Returns ``None`` if the message doesn't look phase-specific; the caller
-    then falls through to bootstrap-level patterns.
+    Args:
+        sdk_error: Raw SDK error text.
+        phase: The phase that was executing when the error occurred.
+
+    Returns:
+        The matching :class:`OutcomeId`, or ``None`` if the message is not
+        phase-specific (the caller then falls through to bootstrap-level
+        patterns).
     """
 
     msg = sdk_error.lower()
@@ -238,10 +254,16 @@ def _classify_phase_artifact_gap(
     art: CollectedArtifacts,
     phase: str | None,
 ) -> OutcomeId | None:
-    """Disk-evidence gaps that depend on which phase last wrote ``last_phase.txt``.
+    """Detect disk-evidence gaps relative to the last-written phase.
 
-    Returns ``None`` if nothing is amiss at this phase boundary — the caller
-    then continues to MUST-have / validator / eval checks.
+    Args:
+        art: Collected artifacts for the attempt.
+        phase: The phase that last wrote ``last_phase.txt``.
+
+    Returns:
+        The matching :class:`OutcomeId`, or ``None`` if nothing is amiss
+        at this phase boundary (the caller then continues to MUST-have /
+        validator / eval checks).
     """
 
     if phase == "intake" and not art.model_analysis_present:
@@ -293,11 +315,20 @@ def classify_attempt(
 ) -> OutcomeId | None:
     """Classify a single attempt's workspace state.
 
-    Returns ``None`` for clean success, an ``OutcomeId`` otherwise. The retry
-    loop assembles attempts and derives the final ``Assessment``.
+    The retry loop assembles per-attempt outcomes and derives the final
+    ``Assessment``.
 
-    ``artifacts`` may be supplied if the caller already scanned the workspace
-    (saves a duplicate disk pass).
+    Args:
+        workspace: Attempt workspace directory to inspect.
+        sdk_error: Raw SDK error text, if the attempt raised one.
+        last_phase: Phase that last executed (overrides the on-disk marker).
+        acceptable_eval_gap: Maximum tolerated relative accuracy gap.
+        artifacts: Pre-scanned artifacts; supply to avoid a duplicate disk
+            pass.
+
+    Returns:
+        ``None`` for a clean success, otherwise the classified
+        :class:`OutcomeId`.
     """
 
     art = artifacts if artifacts is not None else collect_artifacts(Path(workspace))
@@ -385,6 +416,15 @@ def build_assessment(
     * ``final`` = last attempt's outcome.
     * ``recovered`` = True iff len(attempts) > 1 AND final ∈ SUCCESS_TAGS.
     * ``eval_gap`` = ``relative_gap`` from the latest ``eval_report.json``.
+
+    Args:
+        attempts: Per-attempt outcomes in chronological order.
+        workspace: Workspace directory used to collect artifacts.
+        artifacts: Pre-scanned artifacts; supply to avoid a disk pass.
+        notes: Extra human-readable notes to attach to the assessment.
+
+    Returns:
+        The assembled :class:`Assessment`.
     """
 
     if not attempts:
@@ -414,8 +454,15 @@ def build_assessment(
 def derive_status(assessment: Assessment, artifacts: CollectedArtifacts) -> str:
     """Map an ``Assessment`` to a public status string per design §5.4.
 
-    Returns ``"success"`` / ``"partial"`` / ``"failed"``. Consumed by
+    Consumed by
     :class:`quantization_agent.driver.retry.QuantSkillRunResult`.
+
+    Args:
+        assessment: The assembled assessment to map.
+        artifacts: Collected artifacts used for status demotion checks.
+
+    Returns:
+        One of ``"success"``, ``"partial"``, or ``"failed"``.
     """
 
     final = assessment.final
