@@ -29,6 +29,7 @@ _MEMORY_KEYS: tuple[str, ...] = (
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a second-resolution ISO-8601 string."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
@@ -50,6 +51,18 @@ class CheckpointPolicy:
         chars_since_last: int,
         phase_changed: bool,
     ) -> bool:
+        """Decide whether a checkpoint is due under this policy.
+
+        Args:
+            ticks_since_last: Ticks elapsed since the last checkpoint.
+            minutes_since_last: Minutes elapsed since the last checkpoint.
+            chars_since_last: Characters accumulated since the last checkpoint.
+            phase_changed: Whether a phase boundary was just crossed.
+
+        Returns:
+            ``True`` when any enabled trigger (phase boundary, tick, time, or
+            char budget) is met.
+        """
         if phase_changed and self.on_phase_boundary:
             return True
         if self.every_ticks > 0 and ticks_since_last >= self.every_ticks:
@@ -118,6 +131,16 @@ def parse_checkpoint_reply(raw_text: str) -> dict[str, Any]:
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
+    """Extract the first JSON object embedded in free-form text.
+
+    Args:
+        text: Text that may contain a fenced ```json``` block or a bare
+            ``{ ... }`` span.
+
+    Returns:
+        The parsed JSON object, or ``None`` when none is found or it does not
+        parse to a dict.
+    """
     if not text:
         return None
     # Prefer a fenced ```json ... ``` block.
@@ -184,6 +207,12 @@ def render_memory_for_seed(memory: dict[str, Any]) -> str:
         lines.append(f"current_plan: {plan}")
 
     def _block(label: str, key: str) -> None:
+        """Append a labeled bullet block for a memory list field.
+
+        Args:
+            label: Section heading to render.
+            key: Memory key whose list items are rendered as bullets.
+        """
         items = memory.get(key) or []
         if items:
             lines.append(f"{label}:")
@@ -212,9 +241,21 @@ class CheckpointTracker:
     last_phase: str = ""
 
     def chars_add(self, n: int) -> None:
+        """Accumulate characters produced since the last checkpoint.
+
+        Args:
+            n: Number of characters to add (negatives are clamped to 0).
+        """
         self.chars_since_last += max(0, int(n))
 
     def reset(self, *, tick: int, minute_mark: float, phase: str) -> None:
+        """Reset the tracker after a checkpoint lands.
+
+        Args:
+            tick: Current tick to record as the last checkpoint tick.
+            minute_mark: Current minute mark to record.
+            phase: Current phase to record.
+        """
         self.last_tick = int(tick)
         self.last_minute_mark = float(minute_mark)
         self.chars_since_last = 0

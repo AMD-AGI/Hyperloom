@@ -2381,6 +2381,14 @@ def _record_after_kernel_opt_rocprof_status(
 
 
 def _rocprof_timeout_sec() -> int:
+    """Resolve the rocprof roofline subprocess timeout in seconds.
+
+    Reads ``HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC`` and clamps it to a
+    minimum of 60 seconds.
+
+    Returns:
+        The timeout in seconds (defaults to 1800).
+    """
     try:
         return max(60, int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800")))
     except (TypeError, ValueError):
@@ -2388,6 +2396,17 @@ def _rocprof_timeout_sec() -> int:
 
 
 def _rocprof_profile_command(test_command: str) -> str:
+    """Rewrite a test command to run in rocprof profiling mode.
+
+    Swaps a ``--correctness`` flag for ``--profile`` only when the command
+    targets a recognized unittest harness; otherwise returns it unchanged.
+
+    Args:
+        test_command: The original kernel test command.
+
+    Returns:
+        The (possibly rewritten) command string.
+    """
     if "--correctness" not in test_command:
         return test_command
     if "/unittest/harness_" not in test_command and " harness_" not in test_command:
@@ -2548,6 +2567,20 @@ def _schedule_after_kernel_opt_rocprof(
     session_dir: Path,
     log: logging.Logger,
 ) -> dict[str, Any]:
+    """Schedule a background rocprof roofline run after a kernel integrate.
+
+    Honors ``HYPERLOOM_ROCPROF_ROOFLINE`` to disable profiling; otherwise
+    records a ``scheduled`` status and launches the run as a tracked
+    background task.
+
+    Args:
+        kernel_id: Identifier of the integrated kernel.
+        session_dir: Session directory for status sidecars.
+        log: Logger for status and error reporting.
+
+    Returns:
+        A status dict indicating whether the run was scheduled or skipped.
+    """
     rocprof_env = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE", "1").strip().lower()
     if rocprof_env in {"0", "false", "no", "off"}:
         _record_after_kernel_opt_rocprof_status(
@@ -2574,6 +2607,11 @@ def _schedule_after_kernel_opt_rocprof(
     _BACKGROUND_ROCPROF_TASKS.add(task)
 
     def _done(done_task: asyncio.Task[Any]) -> None:
+        """Completion callback that drops the task and logs failures.
+
+        Args:
+            done_task: The finished background rocprof task.
+        """
         _BACKGROUND_ROCPROF_TASKS.discard(done_task)
         try:
             done_task.result()
@@ -2676,6 +2714,11 @@ async def integrate_handler(
         os.environ["AITER_REBUILD"] = "1"
 
     def _restore_aiter_rebuild_env() -> None:
+        """Restore the ``AITER_REBUILD`` env var to its prior value.
+
+        No-op unless a forced rebuild was applied for this re-baseline;
+        otherwise pops or restores the original value (GH #458).
+        """
         if not force_aiter_rebuild:
             return
         if _prev_aiter_rebuild is None:

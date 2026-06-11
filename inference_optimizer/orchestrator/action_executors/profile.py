@@ -580,6 +580,18 @@ class ProfileExecutor(BaselineExecutor):
         return None
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Run the profiling action for the given context.
+
+        Launches a profiling run (sglang/vllm or the Magpie atom path),
+        merging the current-best server args with caller params, and
+        returns the captured trace artifacts.
+
+        Args:
+            ctx: Action context carrying the task and its parameters.
+
+        Returns:
+            A result dict describing the profiling outcome and artifacts.
+        """
         # atom: the Magpie atom wrapper bridges PROFILE=1 to atom's
         # --torch-profiler-dir; atom writes standard *.pt.trace.json.gz that
         # _candidate_trace_dirs + TraceLens consume unchanged, so the executor

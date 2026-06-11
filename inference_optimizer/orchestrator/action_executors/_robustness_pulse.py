@@ -31,6 +31,14 @@ _OFF_VALUES = frozenset({"0", "false", "no", "off", ""})
 
 
 def _enabled() -> bool:
+    """Whether the robustness pulse should run.
+
+    Disabled under pytest (the pulse spawns a real subprocess that
+    bypasses test mocks) and via ``HYPERLOOM_GRID_ROBUSTNESS_PULSE``.
+
+    Returns:
+        ``True`` if the pulse is enabled in the current environment.
+    """
     # Disable inside pytest — the pulse spawns a real subprocess that bypasses
     # test mocks. Mirrors ``_run_magpie``'s guard.
     if os.environ.get("PYTEST_CURRENT_TEST"):
