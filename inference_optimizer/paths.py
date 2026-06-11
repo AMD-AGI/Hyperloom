@@ -68,7 +68,6 @@ _SESSION_SKELETON: tuple[str, ...] = (
 # install.sh + reused for every session_dir launched from this workspace.
 _WORKSPACE_SKELETON: tuple[str, ...] = (
     "runtime",                 # pod-local env files (kernel-agent.env.sh, etc.)
-    "runtime/source-mirrors",  # writable mirrors of GEAK / OOB / TraceLens sources
     "runtime/geak-config",     # generated litellm config consumed by GEAK CLI
     # Cortex KB per-session bookkeeping (.kb_sid / .kb_warm.json / ...);
     # created up-front so the KB client never mkdir's on the hot path.
@@ -292,25 +291,35 @@ def agent_session_dir(session_dir: Path, agent_name: str) -> Path:
 # paths by hand.
 def runtime_dir(session_dir: Path | None = None) -> Path:
     """``<workspace_root>/runtime/`` — workspace-shared writable runtime
-    (kernel-agent env file, GEAK litellm config, source mirrors). Survives
-    across sessions; the ``session_dir`` param is ignored (back-compat).
+    (kernel-agent env file, GEAK litellm config). Survives across sessions;
+    the ``session_dir`` param is ignored (back-compat).
     """
     return workspace_root() / "runtime"
 
 
-def source_mirrors_dir(session_dir: Path | None = None) -> Path:
-    """``<workspace_root>/runtime/source-mirrors/`` — writable GEAK / OOB /
-    TraceLens mirrors so ``pip install -e`` works even when the source mount
-    is read-only. ``session_dir`` param ignored (back-compat).
+def open_source_root() -> Path:
+    """Pod-local base for auto-cloned open-source deps, mirroring the install
+    scripts: ``$HYPERLOOM_OPEN_SOURCE_ROOT`` else
+    ``${TMPDIR:-/tmp}/hyperloom/open-source-repos``. Decoupled from
+    ``$USER_DATA_PATH`` so a shared workspace root never collocates concurrent
+    pods' checkouts.
     """
-    return runtime_dir() / "source-mirrors"
+    override = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT")
+    if override:
+        return Path(override)
+    tmp = os.environ.get("TMPDIR") or "/tmp"
+    return Path(tmp) / "hyperloom" / "open-source-repos"
 
 
 def magpie_dir(session_dir: Path | None = None) -> Path:
-    """``<workspace_root>/runtime/Magpie/`` — Magpie clone (workspace-shared;
-    ``$MAGPIE_DIR`` overrides). ``session_dir`` param ignored (back-compat).
+    """``<open_source_root>/Magpie/`` — Magpie clone (pod-local; ``$MAGPIE_DIR``
+    overrides). Aligned with install.sh so script and runtime resolve the same
+    checkout. ``session_dir`` param ignored (back-compat).
     """
-    return runtime_dir() / "Magpie"
+    override = os.environ.get("MAGPIE_DIR")
+    if override:
+        return Path(override)
+    return open_source_root() / "Magpie"
 
 
 def kernel_agent_runs_root(session_dir: Path) -> Path:
@@ -355,10 +364,10 @@ __all__ = [
     "magpie_dir",
     "make_session_dir",
     "mn_profile_trace_root",
+    "open_source_root",
     "optimizer_runs_dir",
     "runtime_dir",
     "session_dir",
-    "source_mirrors_dir",
     "find_latest_per_session_dir",
     "workspace_root",
 ]

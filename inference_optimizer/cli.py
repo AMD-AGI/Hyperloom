@@ -762,6 +762,9 @@ _UNSUPPORTED_MODEL_TYPES = frozenset({
 })
 
 _UNSUPPORTED_ARCHITECTURES = frozenset({
+    # RWKV6/Qwen2 hybrid linear-attention arch: not in sglang's supported list
+    # (only plain RwkvForCausalLM is), fails ModelConfig validation at boot.
+    "RWKV6Qwen2ForCausalLM",
     "Gemma3ForConditionalGeneration",
     "InternVLChatModel",
     "Phi3VForCausalLM",
@@ -833,6 +836,13 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     if config is None:
         return None
     architectures = _config_architectures(config)
+    # Wrapper models may nest the real arch under text_config; merge so the
+    # unsupported-arch blocklist still matches (e.g. RWKV6Qwen2ForCausalLM).
+    nested = config.get("text_config")
+    if isinstance(nested, dict):
+        for a in _config_architectures(nested):
+            if a not in architectures:
+                architectures.append(a)
     model_type = str(config.get("model_type") or "").strip()
     model_type_l = model_type.lower()
 
@@ -1101,6 +1111,61 @@ _AMD_UNSUPPORTED_ARCHITECTURES = frozenset({"deepseekv32forcausallm"})
 # causing AttributeError deep in engine init.
 _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 
+# Quantization formats with no ROCm/AMD runtime path. NVIDIA ModelOpt FP8/NVFP4
+# use vendor-specific scale packing (no sglang ROCm loader); bitsandbytes ships
+# CUDA-only kernels; NVFP4/FP4 need Blackwell hardware. AMD-native fp8 (Quark /
+# compressed-tensors), gptq, awq are NOT listed so they keep running.
+_AMD_UNSUPPORTED_QUANT_ALGOS = frozenset({"nvfp4", "fp4"})
+_AMD_UNSUPPORTED_QUANT_METHODS = frozenset({"bitsandbytes", "bnb"})
+
+
+def _detect_amd_unsupported_quant(model_path: str) -> str | None:
+    """Return a reason when the model ships a quant format unsupported on ROCm.
+
+    Reads both ``config.json:quantization_config`` (standard HF) and the
+    separate ``hf_quant_config.json`` (NVIDIA ModelOpt). Returns None when the
+    format is ROCm-runnable or absent.
+    """
+    if not model_path:
+        return None
+    cfg = _load_model_config_dict(model_path) or {}
+    qc = cfg.get("quantization_config")
+    if isinstance(qc, dict):
+        method = str(qc.get("quant_method") or "").strip().lower()
+        if method in _AMD_UNSUPPORTED_QUANT_METHODS:
+            return (
+                f"quantization_config.quant_method '{method}' ships CUDA-only "
+                f"kernels with no ROCm equivalent; it crashes in engine init "
+                f"on AMD."
+            )
+    # NVIDIA ModelOpt writes a separate hf_quant_config.json, not config.json.
+    hq_path = Path(model_path) / "hf_quant_config.json"
+    if hq_path.is_file():
+        try:
+            hq = json.loads(hq_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            hq = None
+        if isinstance(hq, dict):
+            producer = str(
+                (hq.get("producer") or {}).get("name") or "",
+            ).strip().lower()
+            algo = str(
+                (hq.get("quantization") or {}).get("quant_algo") or "",
+            ).strip().lower()
+            if producer == "modelopt" and algo:
+                return (
+                    f"NVIDIA ModelOpt '{algo.upper()}' quantization "
+                    f"(hf_quant_config.json) uses vendor-specific scale packing "
+                    f"with no sglang ROCm loader (e.g. 'modelopt_fp8 ... not "
+                    f"supported in ROCm'); use an AMD-native (Quark) checkpoint."
+                )
+            if algo in _AMD_UNSUPPORTED_QUANT_ALGOS:
+                return (
+                    f"'{algo.upper()}' quantization needs NVIDIA Blackwell "
+                    f"hardware; no AMD/ROCm runtime path exists."
+                )
+    return None
+
 
 def _detect_incompatible_model_config(
     model_path: str, gpu_type: str | None = None,
@@ -1137,6 +1202,9 @@ def _detect_incompatible_model_config(
     # Reject DSA-like architectures only on AMD/ROCm.
     # The same model can still run on vendor-supported NVIDIA engines.
     if _resolve_amd_gpu_type(gpu_type):
+        quant_reason = _detect_amd_unsupported_quant(model_path)
+        if quant_reason is not None:
+            return quant_reason
         model_type = str(data.get("model_type") or "").strip().lower()
         arches = {a.lower() for a in _config_architectures(data)}
         if (
@@ -2608,18 +2676,18 @@ def _preflight(
     if not inferencex_path:
         from .paths import (
             magpie_dir as _magpie_default,
-            runtime_dir as _runtime_default,
+            open_source_root as _open_source_default,
         )
-        runtime_root = _runtime_default(_session_dir_resolve())
+        open_source_root = _open_source_default()
         magpie_root = (
             Path(os.environ["MAGPIE_DIR"])
             if os.environ.get("MAGPIE_DIR")
             else _magpie_default(_session_dir_resolve())
         )
-        # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone runtime checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
+        # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone pod-local checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
         for candidate in (
             magpie_root / "InferenceX",
-            runtime_root / "InferenceX",
+            open_source_root / "InferenceX",
         ):
             if _inferencex_checkout_ok(candidate):
                 if os.access(candidate, os.W_OK):
@@ -2635,8 +2703,8 @@ def _preflight(
     # than falling back to a read-only host mount. baseline cannot run
     # without InferenceX, so a clone failure is a hard error.
     if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
-        from .paths import runtime_dir as _runtime_default
-        dest = _runtime_default(_session_dir_resolve()) / "InferenceX"
+        from .paths import open_source_root as _open_source_default
+        dest = _open_source_default() / "InferenceX"
         print(f"Preflight: InferenceX not found; cloning into {dest} ...")
         inferencex_path = _clone_inferencex(dest)
         if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):

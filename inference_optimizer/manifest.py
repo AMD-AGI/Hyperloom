@@ -213,9 +213,10 @@ def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
         return
     log.warning(
         "%s=%s is a pod-local path outside %s=%s; runtime artefacts there are "
-        "erased on pod recycle. install.sh writes dependencies under "
-        "%s/runtime by default — point %s back there to persist them.",
-        env_var, raw, _paths.ENV_USER_DATA_PATH, user_data, user_data, env_var,
+        "erased on pod recycle. install.sh now defaults open-source "
+        "dependencies to pod-local storage; set a stable %s or "
+        "HYPERLOOM_OPEN_SOURCE_ROOT only when the checkout must persist.",
+        env_var, raw, _paths.ENV_USER_DATA_PATH, user_data, env_var,
     )
 
 

@@ -40,6 +40,7 @@ from ._grid_runner import (
     sanitize_script_name,
 )
 from ._workload_envs import (
+    FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
 )
@@ -255,14 +256,21 @@ class SweepExecutor:
                 "error_class": "bad_param",
                 "error": str(exc),
             }
-        config_path = materialize_config_with_envs(
-            config_path,
-            output_root,
-            model_path=resolved_model or None,
-            gpu_type=resolved_gpu or None,
-            benchmark_script=override_script,
-            out_name="sweep_base.with_envs.yaml",
-        )
+        try:
+            config_path = materialize_config_with_envs(
+                config_path,
+                output_root,
+                model_path=resolved_model or None,
+                gpu_type=resolved_gpu or None,
+                benchmark_script=override_script,
+                out_name="sweep_base.with_envs.yaml",
+            )
+        except FrameworkScriptMismatchError as exc:
+            return {
+                "status": "failed",
+                "error_class": "framework_script_mismatch",
+                "error": str(exc),
+            }
 
         conc_values = list(params.get("conc_values") or self.default_conc_values)
         isl_osl_configs = list(
