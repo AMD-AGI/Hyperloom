@@ -278,6 +278,11 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
 ):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
+        # Bypass the execution-order gate: an integrate request is denied in
+        # the initial phase, which would return before reaching the emit.
+        monkeypatch.setattr(
+            c, "_sequence_denial_for_request", lambda target, kind: None,
+        )
         monkeypatch.setattr(
             c, "_cached_kernel_request", lambda kind, payload: None,
         )
