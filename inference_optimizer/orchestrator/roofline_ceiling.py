@@ -878,9 +878,19 @@ def compute_roofline_breakdown_from_state(
     return legacy
 
 
-def compute_peak_from_state(state: Any) -> float:
-    """Convenience scalar wrapper for ``T_peak`` only (kept for backward compat; prefer ``compute_roofline_breakdown_from_state``)."""
-    return compute_roofline_breakdown_from_state(state).peak_tok_per_sec
+def compute_peak_from_state(state: Any, *, arm: str | None = None) -> float:
+    """Convenience scalar wrapper for ``T_peak`` only (kept for backward compat; prefer ``compute_roofline_breakdown_from_state``). ``arm`` pins precision to a specific arm."""
+    return compute_roofline_breakdown_from_state(state, arm=arm).peak_tok_per_sec
+
+
+def read_baseline_server_args(state: Any) -> str:
+    """Public accessor for the baseline arm's runtime server args.
+
+    Stable entry point for callers (e.g. Coordinator profile injection) that
+    must read baseline's own flags without depending on the private
+    ``_read_baseline_yaml_server_args`` helper.
+    """
+    return _read_baseline_yaml_server_args(state)
 
 
 # ---------------------------------------------------------------------------
@@ -1265,7 +1275,9 @@ def compute_roofline_from_perfmodel(
     )
 
 
-def compute_roofline_breakdown_from_state_v2(state: Any) -> "tuple[RooflineBreakdown, PerfModelBreakdown | None]":
+def compute_roofline_breakdown_from_state_v2(
+    state: Any, *, arm: str | None = None,
+) -> "tuple[RooflineBreakdown, PerfModelBreakdown | None]":
     """Return the primary roofline breakdown AND the per-op PerfModel breakdown.
 
     The first element is a ``RooflineBreakdown`` from
@@ -1275,10 +1287,11 @@ def compute_roofline_breakdown_from_state_v2(state: Any) -> "tuple[RooflineBreak
 
     The second element is the full per-op ``PerfModelBreakdown`` (``None`` when
     the GPU or model config is unsupported).  Its ``decode_tok_per_s`` equals
-    ``breakdown.peak_tok_per_sec`` for supported configs.
+    ``breakdown.peak_tok_per_sec`` for supported configs. ``arm`` pins precision
+    to a specific arm ("baseline" anchors the ceiling dtype to baseline).
     """
-    legacy = compute_roofline_breakdown_from_state(state)
-    runtime = resolve_runtime_workload(state)
+    legacy = compute_roofline_breakdown_from_state(state, arm=arm)
+    runtime = resolve_runtime_workload(state, arm=arm)
     meta = load_model_meta(
         runtime.model_path,
         precision_hint=runtime.precision,
@@ -1286,7 +1299,7 @@ def compute_roofline_breakdown_from_state_v2(state: Any) -> "tuple[RooflineBreak
     pm_bd: "PerfModelBreakdown | None" = None
     if meta is not None:
         try:
-            rt = resolve_runtime_dtype(state, meta)
+            rt = resolve_runtime_dtype(state, meta, arm=arm)
             meta = apply_runtime_dtype(meta, rt)
             pm_bd = compute_roofline_from_perfmodel(
                 meta=meta,

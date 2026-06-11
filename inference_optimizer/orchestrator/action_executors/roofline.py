@@ -283,10 +283,13 @@ class RooflineExecutor:
         # baseline arm; without this the recorder would infer "current_best"
         # from a warm-replay-promoted state and retro-inflate the ceiling.
         _task_params = ctx.task.params or {}
+        # Pin every roofline's arm explicitly so the ceiling precision never
+        # relies on a transient current_best inference: PRELUDE measures the
+        # baseline arm; all other reasons (watermark etc.) measure current_best.
         roofline_arm = (
             "baseline"
             if str(_task_params.get("reason") or "") == "prelude_initial"
-            else ""
+            else "current_best"
         )
         ta_payload: dict[str, Any] = {"trace_input": str(trace_path)}
         if roofline_arm:

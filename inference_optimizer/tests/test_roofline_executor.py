@@ -859,12 +859,13 @@ def test_prelude_roofline_records_baseline_arm(tmp_path):
     assert payload.get("roofline_arm") == "baseline"
 
 
-def test_watermark_roofline_omits_forced_arm(tmp_path):
-    """A non-prelude roofline leaves arm inference to the recorder (no forced tag)."""
+def test_watermark_roofline_tags_current_best_arm(tmp_path):
+    """A non-prelude roofline explicitly tags arm=current_best (no reliance on
+    transient recorder inference)."""
     payload = _run_roofline_captured_payload(
         tmp_path, reason="explore_keep_watermark",
     )
-    assert "roofline_arm" not in payload
+    assert payload.get("roofline_arm") == "current_best"
 
 
 def test_extract_picks_first_non_empty_mode():

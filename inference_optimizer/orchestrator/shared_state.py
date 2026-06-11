@@ -35,12 +35,16 @@ Fields::
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
+
 
 def _now_iso() -> str:
     """Return the current UTC time as a microsecond-precision ISO 8601 string.
@@ -1851,6 +1855,36 @@ class SharedState:
         self.last_action_failures = history
         return entry
 
+    def _resolve_baseline_achieved_tput(self) -> float:
+        """Baseline throughput for a baseline-arm roofline snapshot.
+
+        Prefers ``baseline_tput``; falls back to ``last_baseline``'s
+        ``tput``/``output_throughput`` so a state that lost ``baseline_tput``
+        still stamps an achieved value (avoids an empty within/gap pct).
+        """
+        if isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
+            return float(self.baseline_tput)
+        last_bl = self.last_baseline if isinstance(self.last_baseline, dict) else {}
+        for key in ("tput", "output_throughput"):
+            val = last_bl.get(key)
+            if isinstance(val, (int, float)) and val > 0:
+                return float(val)
+        return 0.0
+
+    def _resolve_current_best_achieved_tput(self) -> float:
+        """Optimized-arm throughput for a current_best roofline snapshot.
+
+        Reads ``current_best``'s ``tput``/``output_throughput`` so a
+        current_best-tagged snapshot keeps its arm even when ``tput`` is
+        momentarily absent (avoids silently downgrading to the baseline arm).
+        """
+        cb = self.current_best if isinstance(self.current_best, dict) else {}
+        for key in ("tput", "output_throughput"):
+            val = cb.get(key)
+            if isinstance(val, (int, float)) and val > 0:
+                return float(val)
+        return 0.0
+
     def record_trace_analyze(
         self,
         payload: dict[str, Any],
@@ -2030,23 +2064,32 @@ class SharedState:
             # has already been promoted by warm-replay. Absent it, fall back to
             # inferring the arm from current_best.tput.
             forced_arm = str((payload or {}).get("roofline_arm") or "").strip()
+            # Unknown arm values fall through to current_best inference; warn so
+            # a typo'd payload tag is visible instead of silently mis-anchored.
+            if forced_arm and forced_arm not in ("baseline", "current_best"):
+                log.warning(
+                    "record_trace_analyze: ignoring unknown roofline_arm=%r; "
+                    "falling back to current_best inference", forced_arm,
+                )
+                forced_arm = ""
             achieved_tput = 0.0
             cb = self.current_best if isinstance(self.current_best, dict) else {}
             cb_tput = cb.get("tput")
             if forced_arm == "baseline":
                 snapshot_arm = "baseline"
-                if isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
-                    achieved_tput = float(self.baseline_tput)
-            elif forced_arm == "current_best" and isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                achieved_tput = self._resolve_baseline_achieved_tput()
+            elif forced_arm == "current_best":
+                # Explicit tag wins: keep the optimized arm even if tput is
+                # momentarily absent, never downgrade to baseline (the profile
+                # actually ran current_best params, so the ceiling must match).
                 snapshot_arm = "current_best"
-                achieved_tput = float(cb_tput)
+                achieved_tput = self._resolve_current_best_achieved_tput()
             elif isinstance(cb_tput, (int, float)) and cb_tput > 0:
                 snapshot_arm = "current_best"
                 achieved_tput = float(cb_tput)
             else:
                 snapshot_arm = "baseline"
-                if isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
-                    achieved_tput = float(self.baseline_tput)
+                achieved_tput = self._resolve_baseline_achieved_tput()
             # Primary decode ceiling plus memory/compute sides; PerfModel bottom-up formula, legacy is fallback only.
             breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
             try:

@@ -2691,8 +2691,8 @@ class Coordinator:
             # so a later warm-replay can't swap in compile/fp8 flags that
             # destabilize profiling and skew the baseline ceiling.
             try:
-                from .roofline_ceiling import _read_baseline_yaml_server_args
-                bl_args = _read_baseline_yaml_server_args(state).strip()
+                from .roofline_ceiling import read_baseline_server_args
+                bl_args = read_baseline_server_args(state).strip()
             except Exception:  # noqa: BLE001 — best-effort; empty falls through
                 bl_args = ""
             if bl_args:

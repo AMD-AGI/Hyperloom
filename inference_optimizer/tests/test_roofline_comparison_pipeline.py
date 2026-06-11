@@ -674,6 +674,106 @@ class TestRecordTraceAnalyzeStampsCeiling:
         assert snap["achieved_tok_per_sec"] == 527.5
         assert snap["within_roofline_pct"] == 52.75
 
+    def test_baseline_arm_falls_back_to_last_baseline_tput(
+        self, tmp_path, monkeypatch
+    ):
+        """When baseline_tput is lost, a baseline-arm snapshot still stamps
+        achieved from last_baseline so within/gap pct are not empty."""
+        from inference_optimizer.orchestrator.shared_state import SharedState
+        self._mock_breakdown(
+            monkeypatch, mem=1000.0, cmp=5000.0, peak=1000.0, kind="memory",
+        )
+        md = tmp_path / "analysis.md"
+        md.write_text(
+            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
+        )
+        state = SharedState()
+        state.baseline_tput = 0.0
+        state.last_baseline = {"output_throughput": 480.0}
+        state.current_best = {}
+        state.record_trace_analyze(
+            {"trace_input": "/tmp/trace.json", "roofline_arm": "baseline"},
+            {
+                "hot_kernels": [],
+                "trace_report_path": str(md),
+                "candidates_path": "/tmp/kc.json",
+            },
+        )
+        snap = state.roofline_snapshots[0]
+        assert snap["achieved_tok_per_sec"] == 480.0
+        assert snap["within_roofline_pct"] == 48.0
+
+    def test_unknown_roofline_arm_falls_back_to_inference(
+        self, tmp_path, monkeypatch
+    ):
+        """An invalid roofline_arm is ignored and the recorder infers from
+        current_best.tput (here a promoted optimized arm)."""
+        from inference_optimizer.orchestrator.shared_state import SharedState
+        self._mock_breakdown(
+            monkeypatch, mem=1000.0, cmp=5000.0, peak=1000.0, kind="memory",
+        )
+        md = tmp_path / "analysis.md"
+        md.write_text(
+            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
+        )
+        state = SharedState()
+        state.baseline_tput = 527.5
+        state.current_best = {"tput": 900.0}
+        state.record_trace_analyze(
+            {"trace_input": "/tmp/trace.json", "roofline_arm": "bogus"},
+            {
+                "hot_kernels": [],
+                "trace_report_path": str(md),
+                "candidates_path": "/tmp/kc.json",
+            },
+        )
+        snap = state.roofline_snapshots[0]
+        assert snap["achieved_tok_per_sec"] == 900.0
+
+    def test_current_best_arm_keeps_arm_when_tput_missing(
+        self, tmp_path, monkeypatch
+    ):
+        """A current_best-tagged snapshot keeps its arm even when current_best
+        carries no live tput; the ceiling must not downgrade to baseline."""
+        from inference_optimizer.orchestrator import roofline_ceiling
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            RooflineBreakdown,
+        )
+        seen_arm: dict[str, object] = {}
+
+        def _capture(_state, **kw):
+            seen_arm["arm"] = kw.get("arm")
+            return RooflineBreakdown(1000.0, 5000.0, 1000.0, "memory")
+
+        monkeypatch.setattr(
+            roofline_ceiling,
+            "compute_roofline_breakdown_from_state",
+            _capture,
+        )
+        from inference_optimizer.orchestrator.shared_state import SharedState
+        md = tmp_path / "analysis.md"
+        md.write_text(
+            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
+        )
+        state = SharedState()
+        state.baseline_tput = 527.5
+        # No live tput, but a recorded output_throughput from the run.
+        state.current_best = {
+            "action": "params", "output_throughput": 690.0,
+        }
+        state.record_trace_analyze(
+            {"trace_input": "/tmp/trace.json", "roofline_arm": "current_best"},
+            {
+                "hot_kernels": [],
+                "trace_report_path": str(md),
+                "candidates_path": "/tmp/kc.json",
+            },
+        )
+        # Arm stays current_best (not downgraded), achieved from fallback.
+        assert seen_arm["arm"] == "current_best"
+        snap = state.roofline_snapshots[0]
+        assert snap["achieved_tok_per_sec"] == 690.0
+
     def test_zero_peak_keeps_within_gap_none(self, tmp_path, monkeypatch):
         from inference_optimizer.orchestrator.shared_state import SharedState
         self._mock_breakdown(monkeypatch)

@@ -1991,3 +1991,37 @@ class TestArmPinnedPrecision:
         # fp8 halves weight IO, so the best-arm ceiling must be higher.
         assert baseline_peak > 0
         assert best_peak > baseline_peak
+
+
+class TestReadBaselineServerArgs:
+    """Public ``read_baseline_server_args`` reads the baseline yaml's flags."""
+
+    def test_reads_extra_sglang_args_from_yaml(self, tmp_path):
+        import yaml as _yaml  # type: ignore[reportMissingModuleSource]
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            read_baseline_server_args,
+        )
+        yaml_path = tmp_path / "bl.yaml"
+        yaml_path.write_text(
+            _yaml.safe_dump({
+                "benchmark": {
+                    "envs": {
+                        "EXTRA_SGLANG_ARGS": "--attention-backend AITER",
+                    },
+                },
+            }),
+            encoding="utf-8",
+        )
+        state = SimpleNamespace(
+            last_baseline={"extras": {"materialized_config": str(yaml_path)}},
+        )
+        assert read_baseline_server_args(state) == "--attention-backend AITER"
+
+    def test_returns_empty_when_yaml_missing(self):
+        from inference_optimizer.orchestrator.roofline_ceiling import (
+            read_baseline_server_args,
+        )
+        state = SimpleNamespace(
+            last_baseline={"extras": {"materialized_config": "/no/such.yaml"}},
+        )
+        assert read_baseline_server_args(state) == ""
