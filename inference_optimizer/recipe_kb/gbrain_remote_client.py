@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Mapping
@@ -57,10 +58,12 @@ log = logging.getLogger(__name__)
 # consumable verbatim by warm-replay.
 _ENVS_KEY = "extra_envs"
 
-# Listing the whole recipe type is cheap (the corpus is small) but we
-# still cap the scan so a runaway corpus can never block the main loop.
-_RECIPE_SCAN_CAP = 500
+# Listing the whole recipe type is a fallback path; prefer exact slug reads for
+# get_recipe and cache broad scans so one warm-start tick does not issue
+# thousands of MCP get_page calls repeatedly.
+_RECIPE_SCAN_CAP = 5000
 _LIST_PAGE_SIZE = 100
+_SCAN_CACHE_TTL_SEC = 60.0
 
 
 class GbrainRemoteError(RemoteRecipeClientError):
@@ -326,6 +329,8 @@ class GbrainRemoteRecipeClient:
         )
         self.enabled = bool(enabled and self.base_url and self.token)
         self._mcp = _GbrainMcp(self.base_url, self.token, self.timeout_sec) if self.enabled else None
+        self._scan_cache: list[dict[str, Any]] | None = None
+        self._scan_cache_ts = 0.0
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:  # symmetry with RemoteRecipeClient
@@ -342,32 +347,63 @@ class GbrainRemoteRecipeClient:
             return False
 
     # -- internal scan -----------------------------------------------------
+    def _scan_cache_ttl(self) -> float:
+        raw = os.environ.get("GBRAIN_RECIPE_SCAN_TTL_SEC", "").strip()
+        if raw:
+            try:
+                return max(0.0, float(raw))
+            except ValueError:
+                log.warning("invalid GBRAIN_RECIPE_SCAN_TTL_SEC=%r; using default", raw)
+        return _SCAN_CACHE_TTL_SEC
+
+    def _get_page_recipe(self, slug: str) -> dict[str, Any] | None:
+        """Fetch one gbrain recipe page by slug and project it."""
+        if not self.enabled or self._mcp is None:
+            return None
+        page = self._mcp.call("get_page", {"slug": slug})
+        fm = page.get("frontmatter") if isinstance(page, dict) else None
+        if not isinstance(fm, Mapping):
+            return None
+        return _page_to_recipe(fm)
+
     def _scan_recipes(self, *, limit: int) -> list[dict[str, Any]]:
-        """List recipe pages (newest first) and project each to a Recipe dict."""
+        """List recipe pages and project each to a Recipe dict.
+
+        Use forward pagination (``updated_asc`` + ``updated_after``). The
+        reverse cursor (``updated_desc`` + ``updated_before``) can terminate
+        early when many pages share the same ``updated_at``, hiding older
+        recipes from client-side search. Dedup by slug across page boundaries
+        and return newest-first to preserve the previous caller contract.
+        """
         if not self.enabled or self._mcp is None:
             return []
+        now = time.monotonic()
+        ttl = self._scan_cache_ttl()
+        if self._scan_cache is not None and ttl > 0.0 and now - self._scan_cache_ts <= ttl:
+            return list(self._scan_cache[: int(limit) if limit and limit > 0 else len(self._scan_cache)])
         out: list[dict[str, Any]] = []
         cursor: str | None = None
+        seen_slugs: set[str] = set()
         cap = min(int(limit) if limit and limit > 0 else _RECIPE_SCAN_CAP, _RECIPE_SCAN_CAP)
         pages = 0
-        while len(out) < cap and pages < (_RECIPE_SCAN_CAP // _LIST_PAGE_SIZE + 2):
+        max_pages = max(1, (_RECIPE_SCAN_CAP // _LIST_PAGE_SIZE) + 3)
+        while len(out) < cap and pages < max_pages:
             params: dict[str, Any] = {
-                "type": "recipe", "limit": _LIST_PAGE_SIZE, "sort": "updated_desc",
+                "type": "recipe", "limit": _LIST_PAGE_SIZE, "sort": "updated_asc",
             }
             if cursor:
-                params["updated_before"] = cursor
+                params["updated_after"] = cursor
             batch = self._mcp.call("list_pages", params)
             if not isinstance(batch, list) or not batch:
                 break
+            new_slugs = 0
             for entry in batch:
                 slug = entry.get("slug") if isinstance(entry, dict) else None
-                if not slug:
+                if not slug or slug in seen_slugs:
                     continue
-                page = self._mcp.call("get_page", {"slug": slug})
-                fm = page.get("frontmatter") if isinstance(page, dict) else None
-                if not isinstance(fm, Mapping):
-                    continue
-                recipe = _page_to_recipe(fm)
+                seen_slugs.add(slug)
+                new_slugs += 1
+                recipe = self._get_page_recipe(str(slug))
                 if recipe is not None:
                     out.append(recipe)
                     if len(out) >= cap:
@@ -376,9 +412,12 @@ class GbrainRemoteRecipeClient:
             if len(batch) < _LIST_PAGE_SIZE:
                 break
             last = batch[-1].get("updated_at") if isinstance(batch[-1], dict) else None
-            if not last or last == cursor:
+            if not last or (last == cursor and new_slugs == 0):
                 break
             cursor = last
+        out.sort(key=lambda r: str(r.get("updated_at") or ""), reverse=True)
+        self._scan_cache = list(out)
+        self._scan_cache_ts = time.monotonic()
         return out
 
     # -- read surface (mirrors RemoteRecipeClient) -------------------------
@@ -409,6 +448,11 @@ class GbrainRemoteRecipeClient:
             C.F_LABEL_FRAMEWORK_VERSION: framework_version,
             C.F_LABEL_PRECISION: precision,
         }
+        # Fast path: gbrain recipe slugs are the canonical id with ':' as path
+        # separators, so exact 5-tuple reads do not need a full corpus scan.
+        direct = self._get_page_recipe("recipe-snapshot/" + canonical_id.replace(":", "/"))
+        if direct is not None and direct.get(C.F_CANONICAL_ID) == canonical_id:
+            return direct
         rows = self.search(label_match=label_match, limit=1)
         return rows[0] if rows else None
 

@@ -58,6 +58,35 @@ def _build_recipe_kb_dispatcher(
     if bool(getattr(args, "degraded_kb", False)):
         return RecipeKB(local=local_store, remote=None)  # opt-out: no network
 
+    # Aggregated read remote (opt-in: RECIPE_KB_REMOTE=both). Fans reads across
+    # gbrain (GBRAIN_*) and the cortex kb-service (--cortex-kb-url /
+    # $CORTEX_KB_URL), then dedups/field-merges same-cid rows. Writes remain
+    # local-only; mirroring policy is handled only by the gbrain-only path.
+    if os.environ.get("RECIPE_KB_REMOTE", "").strip().lower() == "both":
+        from .recipe_kb.composite_remote import CompositeRemoteRecipeClient
+        from .recipe_kb.gbrain_remote_client import build_gbrain_remote_from_env
+
+        sources: list[Any] = []
+        names: list[str] = []
+        gbrain_remote = build_gbrain_remote_from_env()
+        if gbrain_remote is not None and gbrain_remote.enabled:
+            sources.append(gbrain_remote)
+            names.append("gbrain")
+        cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
+        if not cortex_url:
+            cortex_url = (os.environ.get("CORTEX_KB_URL", "") or "").strip()
+        if cortex_url:
+            sources.append(
+                RemoteRecipeClient(kb_url=cortex_url, foreground=True, enabled=True)
+            )
+            names.append("cortex")
+        if sources:
+            return RecipeKB(
+                local=local_store,
+                remote=CompositeRemoteRecipeClient(sources, names=names),
+            )
+        return RecipeKB(local=local_store, remote=None)
+
     # gbrain read-side remote (opt-in: RECIPE_KB_REMOTE=gbrain + GBRAIN_*).
     # Writes stay local-only; gbrain serves the read side only.
     if os.environ.get("RECIPE_KB_REMOTE", "").strip().lower() == "gbrain":
