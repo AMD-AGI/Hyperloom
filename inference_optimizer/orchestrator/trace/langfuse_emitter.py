@@ -107,30 +107,91 @@ def _start_obs(parent: Any, **kwargs: Any) -> Any:
         return parent.start_observation(**kwargs)
 
 
+def _end_time_wants_int(obs: Any) -> bool:
+    """Whether this SDK's ``end(end_time=...)`` wants integer ns (v4) vs a
+    datetime (v2/v3), decided by inspecting the parameter annotation.
+
+    We must get the type right on the FIRST call: v4's ``end(datetime)``
+    raises a TypeError only *after* it has already ended the underlying
+    OTEL span, so a "try datetime then retry int" pattern double-ends the
+    span and emits a noisy "Calling end() on an ended span" warning.
+    Falls back to datetime (False) when the annotation can't be read.
+    """
+    try:
+        import inspect
+
+        sig = inspect.signature(obs.end)
+        ann = sig.parameters.get("end_time")
+        ann_str = "" if ann is None else str(ann.annotation)
+    except (TypeError, ValueError):
+        return False
+    return "int" in ann_str.lower()
+
+
 def _end_obs(obs: Any, end_dt: Any) -> None:
     """End an observation, tolerant of v2/v3 (datetime) vs v4 (int ns).
 
-    Tries the datetime first (v2/v3), falls back to integer-ns (v4), then to
-    a bare ``end()`` so a signature change can never strand an open span.
+    Picks the right ``end_time`` type up front (see :func:`_end_time_wants_int`)
+    so the span is never ended twice. Falls back to a bare ``end()`` if the
+    typed call is rejected, so a signature change can't strand an open span.
     """
     if obs is None:
         return
-    try:
-        if end_dt is not None:
-            obs.end(end_time=end_dt)
-        else:
+    if end_dt is None:
+        try:
             obs.end()
+        except Exception:  # noqa: BLE001
+            pass
         return
-    except (TypeError, ValueError):
-        pass
-    ns = _to_ns(end_dt)
+    end_time = _to_ns(end_dt) if _end_time_wants_int(obs) else end_dt
     try:
-        if ns is not None:
-            obs.end(end_time=ns)
-        else:
+        obs.end(end_time=end_time)
+    except (TypeError, ValueError):
+        try:
             obs.end()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _set_trace_attrs(
+    span: Any,
+    *,
+    name: str | None = None,
+    session_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Stamp trace-level name/session_id/metadata, tolerant of v2/v3 vs v4.
+
+    v2/v3 exposed ``span.update_trace(...)``. v4 removed it (decomposed the
+    method), so we fall back to writing the documented v4 OTEL trace
+    attributes directly on the underlying span (``langfuse.trace.name``,
+    ``session.id``, ``langfuse.trace.metadata.*``). Best-effort: a missing
+    API on either side just means the trace label isn't set, never a raise.
+    """
+    try:
+        span.update_trace(name=name, session_id=session_id, metadata=metadata)
+        return
+    except AttributeError:
+        pass  # v4: no update_trace — fall through to OTEL attributes
     except Exception:  # noqa: BLE001
-        obs.end()
+        log.debug("langfuse: update_trace failed", exc_info=True)
+        return
+    otel = getattr(span, "_otel_span", None)
+    if otel is None or not hasattr(otel, "set_attribute"):
+        log.debug("langfuse: no OTEL span to set trace attrs on")
+        return
+    try:
+        if name is not None:
+            otel.set_attribute("langfuse.trace.name", name)
+        if session_id is not None:
+            otel.set_attribute("session.id", session_id)
+        for k, v in (metadata or {}).items():
+            try:
+                otel.set_attribute(f"langfuse.trace.metadata.{k}", v)
+            except Exception:  # noqa: BLE001 — skip unserialisable values
+                continue
+    except Exception:  # noqa: BLE001
+        log.debug("langfuse: setting OTEL trace attrs failed", exc_info=True)
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -332,14 +393,12 @@ class LangfuseEmitter:
                 metadata=lfmap.trace_metadata(self._manifest),
             )
             if not self._trace_attrs_set:
-                try:
-                    self._root_span.update_trace(
-                        name=self._trace_name(),
-                        session_id=self._session_label,
-                        metadata=lfmap.trace_metadata(self._manifest),
-                    )
-                except Exception:  # noqa: BLE001 — older SDKs may lack it
-                    log.debug("langfuse: update_trace unavailable", exc_info=True)
+                _set_trace_attrs(
+                    self._root_span,
+                    name=self._trace_name(),
+                    session_id=self._session_label,
+                    metadata=lfmap.trace_metadata(self._manifest),
+                )
                 self._trace_attrs_set = True
         return self._root_span
 
