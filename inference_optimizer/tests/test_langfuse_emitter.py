@@ -367,6 +367,29 @@ def test_flush_backfills_ext_shards(tmp_path, monkeypatch):
     assert geak_gens[0].kwargs["metadata"]["has_text"] is False
 
 
+def test_flush_session_is_idempotent_no_duplicate_reemit(tmp_path, monkeypatch):
+    """A second flush_session() must NOT re-scan ext shards / decision_trace
+    and re-emit -- otherwise Langfuse gets duplicate Generations/Scores."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    (sd / "reports" / "trace" / "ext" / "geak-1.jsonl").write_text(
+        json.dumps(_llm_row(component="geak", role=None, input_tokens=500,
+                            output_tokens=60)) + "\n",
+        encoding="utf-8",
+    )
+    em = lfe.LangfuseEmitter(sd)
+
+    em.flush_session()
+    gens_after_first = len(client.generations)
+    assert gens_after_first >= 1
+
+    # Second call: receipt re-written, but no new Generation emitted.
+    em.flush_session()
+    assert len(client.generations) == gens_after_first
+
+
 def test_flush_creates_decision_scores(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
@@ -520,3 +543,39 @@ def test_disabled_flush_still_writes_receipt(tmp_path, monkeypatch):
     assert persisted is not None
     assert persisted["enabled"] is False
     assert persisted["disabled_reason"] == "disabled"
+
+
+# ---------------------------------------------------------------------------
+# pair_key: token <-> conversation join identity
+# ---------------------------------------------------------------------------
+def test_pair_key_distinguishes_same_second_burst():
+    """Two calls in the same (component, tick, role) and same UTC second but
+    different turns must NOT collide -- otherwise a token row pairs with the
+    wrong conversation row in a burst (e.g. multi-turn specialist/critic)."""
+    base = {
+        "component": "specialist", "tick": 3, "role": "assistant",
+        "task_id": "t1", "dyn_id": "d1", "ts": "2026-06-11T10:00:00.100Z",
+    }
+    turn_a = {**base, "turn": 1}
+    turn_b = {**base, "turn": 2, "ts": "2026-06-11T10:00:00.800Z"}  # same second
+    assert lfmap.pair_key(turn_a) != lfmap.pair_key(turn_b)
+
+
+def test_pair_key_matches_token_and_text_halves_of_one_call():
+    """The two streams of the SAME logical call (a few ms apart) still pair:
+    identical identity fields + same UTC second => equal key."""
+    token = {
+        "component": "critic", "tick": 5, "role": "assistant", "turn": 2,
+        "task_id": "tk", "dyn_id": "dy", "ts": "2026-06-11T10:00:01.020Z",
+    }
+    text = {**token, "ts": "2026-06-11T10:00:01.450Z"}  # same second, +430ms
+    assert lfmap.pair_key(token) == lfmap.pair_key(text)
+
+
+def test_pair_key_degrades_when_turn_absent():
+    """Legacy rows without turn/task_id/dyn_id still produce a stable key
+    (all the new slots are None) rather than raising."""
+    row = {"component": "oob", "tick": 1, "role": None,
+           "ts": "2026-06-11T10:00:00Z"}
+    k = lfmap.pair_key(row)
+    assert lfmap.pair_key(dict(row)) == k  # stable / deterministic

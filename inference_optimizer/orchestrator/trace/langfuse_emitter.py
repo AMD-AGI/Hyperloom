@@ -477,12 +477,20 @@ class LangfuseEmitter:
         """Emit leftovers + out-of-process Generations + decision Scores, then flush.
 
         Run once at session end (from the Coordinator/CLI). Safe to call when
-        disabled (no-op) and safe to call more than once (idempotent-ish: the
-        derived trace_id keeps re-runs on one trace).
+        disabled (no-op). **Idempotent**: a second call is a no-op for the
+        push side -- it only re-writes the receipt. Without this guard a
+        re-run would re-scan ``ext/*.jsonl`` + ``decision_trace`` and re-emit
+        the same out-of-process Generations / Scores, producing duplicates in
+        Langfuse (the derived trace_id keeps re-runs on one trace, but the
+        children would still double up).
         """
         if not self._enabled:
             # Still drop a receipt so the breakdown can report *why* nothing
             # was pushed (disabled / no_credentials / sdk_missing).
+            self._write_receipt()
+            return
+        if self._flushed:
+            log.debug("langfuse: flush_session already ran; skipping re-emit")
             self._write_receipt()
             return
         try:

@@ -231,6 +231,9 @@ def _build_manifest(
     session_id: str,
     included: list[tuple[str, int]],
     missing_globs: list[str],
+    *,
+    truncated: bool = False,
+    dropped_files: list[str] | None = None,
 ) -> dict:
     total = sum(sz for _, sz in included)
     return {
@@ -243,6 +246,10 @@ def _build_manifest(
         "included_files": [{"path": rel, "bytes": sz} for rel, sz in included],
         "unmatched_globs": missing_globs,
         "selection_globs": list(PACKAGE_GLOBS),
+        # True when a size/count cap stopped the bundle short -- a consumer
+        # MUST treat the package as incomplete and consult dropped_files.
+        "truncated": truncated,
+        "dropped_files": list(dropped_files or []),
     }
 
 
@@ -254,11 +261,18 @@ def _manifest_text(manifest: dict) -> str:
         f"  source dir   : {manifest.get('session_dir')}",
         f"  files        : {manifest.get('included_count')}",
         f"  total bytes  : {manifest.get('included_total_bytes')}",
+        f"  truncated    : {manifest.get('truncated')}",
         "",
         "Included files:",
     ]
     for entry in manifest.get("included_files") or []:
         lines.append(f"  + {entry['path']}  ({entry['bytes']} B)")
+    dropped = manifest.get("dropped_files") or []
+    if dropped:
+        lines.append("")
+        lines.append("DROPPED (bundle hit size/count cap — package is INCOMPLETE):")
+        for d in dropped:
+            lines.append(f"  ! {d}")
     missing = manifest.get("unmatched_globs") or []
     if missing:
         lines.append("")
@@ -301,18 +315,26 @@ def package_session_artifacts(
             log.warning("session package skipped: no artifacts matched in %s", sd)
             return None
 
-        # Apply safety caps.
+        # Apply safety caps. If we hit a cap, record what got dropped and
+        # flag the manifest as truncated so a consumer never mistakes a
+        # partial bundle for a complete one (a long session can hit the cap
+        # before, say, conversations.jsonl is reached).
         included: list[tuple[Path, str, int]] = []
         total = 0
-        for p in matched:
+        truncated = False
+        dropped: list[str] = []
+        for i, p in enumerate(matched):
             try:
                 sz = p.stat().st_size
             except OSError:
                 continue
             if len(included) >= _MAX_FILES or total + sz > _MAX_TOTAL_BYTES:
+                truncated = True
+                dropped = [q.relative_to(sd).as_posix() for q in matched[i:]]
                 log.warning(
-                    "session package: hit size/count cap, truncating bundle "
-                    "(files=%d, bytes=%d)", len(included), total,
+                    "session package: hit size/count cap, TRUNCATING bundle "
+                    "(included=%d, bytes=%d, dropped=%d). Manifest flagged "
+                    "truncated=true.", len(included), total, len(dropped),
                 )
                 break
             included.append((p, p.relative_to(sd).as_posix(), sz))
@@ -320,6 +342,7 @@ def package_session_artifacts(
 
         manifest = _build_manifest(
             sd, sid, [(rel, sz) for _, rel, sz in included], missing_globs,
+            truncated=truncated, dropped_files=dropped,
         )
 
         root = Path(dest_root).resolve() if dest_root else _dest_root()

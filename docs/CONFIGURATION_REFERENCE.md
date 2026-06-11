@@ -140,6 +140,34 @@ populate `session_breakdown.json` for downstream consumers
 | `SANDBOX_USER_ID` | Hosted SaFE / Claw user id, written to `session.sandbox_user_id`. Set by PrimusClaw; unset for local runs.                                            |
 | `HYPERLOOM_LANGFUSE_ENABLE` | Master switch (default **off**) for live Langfuse trace push. NOTE: when this flag is on in the environment / `.env`, `scripts/install.sh` auto-installs the optional `langfuse` SDK on demand (and skips it entirely when off), so no separate `pip install '...[trace]'` is required. When `1/true/yes/on` *and* the three `LANGFUSE_*` credentials are set, every in-process LLM call is mirrored into Langfuse while the run is live, and a session-end flush backfills the out-of-process children (geak / oob / robustness / specialist) and KEEP/REVERT decision Scores. The local `reports/trace/*.jsonl` ledger is always written regardless. Requires the optional `langfuse` dependency (`pip install 'hyperloom-inference_optimizer[trace]'`); a missing SDK degrades to a no-op. **Correlation:** the Langfuse trace id and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session id for standalone runs, so live push and the offline `backfill_langfuse` CLI collapse onto one trace per PrimusClaw session. **Span layout:** `trace → phase span (PRELUDE/EXPLORE/KERNEL/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/oob/…) → Generation`; each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision (trace-level fallback when no matching span exists). **Receipt:** every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting whether the push was enabled (or the `disabled_reason`), the redacted connection config (host + key-presence booleans, never the keys), the derived `trace_id`/`session_id`, and how many generations/scores/spans were actually sent — so an operator can confirm post-hoc whether a run reached Langfuse. |
 
+#### Langfuse / artifact-package — security & known limitations
+
+* **Sensitive data surface.** When live push is on, `conversations.jsonl`
+  (and Langfuse Generations) carry full prompt/response text. `redact_secrets`
+  scrubs common token shapes (Bearer, `sk-`/`pk-`, GitHub tokens, some
+  `KEY=value`) but is **not** a complete DLP filter — bare keys without a
+  recognizable prefix (e.g. raw AWS `AKIA…`) can slip through. The artifact
+  packager also copies `reports/trace/*.jsonl` and, with the loose mode on by
+  default (`HYPERLOOM_SESSION_PACKAGE_LOOSE`), drops them under `/workspace`
+  for the Claw sync. If a session may contain customer code / secrets, define
+  an explicit retention + access-control policy for both the Langfuse project
+  and the `/workspace` package destination, and consider disabling live push
+  or loose packaging for those runs.
+* **`live push` + `backfill_langfuse` overlap.** Both derive the same
+  `trace_id` from `claw_session_id`, so running the offline backfill *after* a
+  live run re-emits the out-of-process children onto the same trace and can
+  duplicate observations. Use one path per session, or treat backfill as a
+  recovery tool only when live push did not run.
+* **`flush_session` is idempotent.** A second flush only re-writes the receipt
+  (no re-emit), so a duplicated CLOSE step won't double-push.
+* **Package truncation.** The bundle caps at 5000 files / 256 MB. On a very
+  long session the cap can stop the bundle short; the `PACKAGE_MANIFEST` then
+  sets `truncated: true` and lists `dropped_files`, so consumers must not treat
+  a truncated package as complete.
+* **Generation duration is ~0.** Both live and backfill stamp a single
+  timestamp (`end == start`), so Langfuse shows no meaningful per-Generation
+  duration — counts/usage are accurate, latency is not captured.
+
 ### `token_usage` section (in `session_breakdown.json`)
 
 Every breakdown carries a top-level `token_usage` section: a promoted,

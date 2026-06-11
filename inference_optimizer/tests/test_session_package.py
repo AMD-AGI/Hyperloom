@@ -238,6 +238,38 @@ def test_loose_can_be_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert not (dest / "session_breakdown.json").exists()  # no loose copies
 
 
+def test_truncation_is_flagged_in_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import inference_optimizer.breakdown.session_package as sp
+
+    # Force a tiny byte cap so the bundle truncates after the first file.
+    monkeypatch.setattr(sp, "_MAX_TOTAL_BYTES", 5)
+    sd = tmp_path / "session"
+    _build_session(sd)
+    dest = tmp_path / "workspace"
+
+    out = sp.package_session_artifacts(sd, session_id="sid-trunc", dest_root=dest)
+    assert out is not None
+    with zipfile.ZipFile(out) as zf:
+        manifest = json.loads(zf.read(MANIFEST_JSON_NAME))
+
+    assert manifest["truncated"] is True
+    assert len(manifest["dropped_files"]) > 0  # what got left out is recorded
+    # the dropped set and the included set are disjoint
+    incl = {e["path"] for e in manifest["included_files"]}
+    assert not (incl & set(manifest["dropped_files"]))
+
+
+def test_no_truncation_flag_when_under_cap(tmp_path: Path) -> None:
+    sd = tmp_path / "session"
+    _build_session(sd)
+    out = package_session_artifacts(sd, session_id="sid-ok", dest_root=tmp_path / "ws")
+    assert out is not None
+    with zipfile.ZipFile(out) as zf:
+        manifest = json.loads(zf.read(MANIFEST_JSON_NAME))
+    assert manifest["truncated"] is False
+    assert manifest["dropped_files"] == []
+
+
 def test_loose_does_not_wipe_dest_root(tmp_path: Path) -> None:
     sd = tmp_path / "session"
     _build_session(sd)

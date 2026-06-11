@@ -117,12 +117,22 @@ def utc_second_key(ts: str | None) -> str:
 def pair_key(row: dict[str, Any]) -> tuple:
     """Stable join key pairing a token row with its conversation row.
 
-    Keyed on (component, tick, role, UTC-second-of-ts) -- the identity a
-    single logical call shares across the two streams.
+    Both streams (``llm_calls.jsonl`` / ``conversations.jsonl``) share the
+    same closed schema, so we key on every per-call identity field they
+    carry -- (component, task_id, dyn_id, tick, turn, role) -- and fall back
+    to the UTC-second of ``ts`` only to disambiguate. ``turn`` / ``task_id``
+    / ``dyn_id`` are what keep a *burst* of calls in the same UTC second and
+    same (component, tick, role) -- e.g. multi-turn specialist/critic within
+    one tick -- from cross-pairing a token row with the wrong text row.
+    Older rows that predate these fields simply carry ``None`` for them, so
+    the key degrades gracefully to the previous coarser behaviour.
     """
     return (
         str(row.get("component") or ""),
+        row.get("task_id"),
+        row.get("dyn_id"),
         row.get("tick"),
+        row.get("turn"),
         str(row.get("role") or ""),
         utc_second_key(row.get("ts")),
     )
