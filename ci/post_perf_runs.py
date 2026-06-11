@@ -84,10 +84,18 @@ _CRASH_STOP_REASONS = {
 
 
 def is_complete_session(data: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
-    """Reject incomplete or crashed sessions; returns (ok, reason_if_rejected).
+    """Validate that a session is complete and did not crash.
 
-    A 'good' session needs baseline + final throughput_tok_s_per_gpu > 0 and a
-    stop_reason not in _CRASH_STOP_REASONS ('signal'/'time_exhausted' are kept).
+    A "good" session needs baseline + final ``throughput_tok_s_per_gpu`` > 0
+    and a ``stop_reason`` not in ``_CRASH_STOP_REASONS``
+    (``signal`` / ``time_exhausted`` are kept).
+
+    Args:
+        data: The session breakdown data dict.
+
+    Returns:
+        An ``(ok, reason_if_rejected)`` tuple; ``reason`` is ``None`` when
+        accepted.
     """
     baseline = data.get("baseline") or {}
     final = data.get("final") or {}
@@ -113,9 +121,18 @@ def is_complete_session(data: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
 # ---------------------------------------------------------------------------
 
 def build_body(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Returns (body, error_msg); body is None on error.
+    """Build the perf_runs POST body from a breakdown file.
 
-    `body` is the JSON we POST, with keys matching the perf_runs DTO 1:1.
+    Accepts four layouts (strictest first): bare V2 breakdown, V2 wrapper
+    (``{source, data}``), legacy V1 flat schema, and the universal fallback.
+
+    Args:
+        path: Path to the session breakdown JSON file.
+
+    Returns:
+        A ``(body, error_msg)`` tuple; ``body`` is ``None`` on error and
+        ``error_msg`` carries the reason. The body keys match the perf_runs
+        DTO 1:1.
     """
     try:
         with path.open("r", encoding="utf-8") as f:
