@@ -181,7 +181,8 @@ def test_ingest_counts_and_gates(monkeypatch) -> None:
     stats = ingest_local_to_gbrain(recipes=recipes, mcp=mcp, dry_run=False)
     assert stats["total"] == 4
     assert stats["ingested"] == 3
-    assert stats["skipped_no_config"] == 1
+    assert stats["skipped_unmirrorable"] == 1
+    assert stats["skipped_no_config"] == 1  # legacy alias
     assert stats["errors"] == 0
     assert len(mcp.puts) == 3
 

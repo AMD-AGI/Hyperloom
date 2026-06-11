@@ -9,10 +9,12 @@ them back to a future session's warm-start. This module is the
 store into gbrain so a remote read actually returns the champion config
 instead of a bare anchor.
 
-Policy (mirrors the gain-gate on the write side):
+Mirror gate (default: permissive so seed-only anchors participate in
+warm-start reads):
 
-* Only recipes carrying a concrete ``best_config`` are ingested — a bare
-  identity anchor with no config is not worth a remote round-trip.
+* Any recipe with a ``canonical_id`` is mirrored, including bare seed-only
+  anchors (empty ``best_config``). Set ``RECIPE_KB_MIRROR_REQUIRE_SIGNAL=1``
+  to restore the stricter gate (``best_config`` OR reusable prior signal).
 * Idempotent: each recipe maps to a stable ``type: recipe`` page keyed by
   its 5-tuple canonical id, so re-running overwrites in place.
 
@@ -285,9 +287,10 @@ def ingest_local_to_gbrain(
 def mirror_recipe(recipe: Mapping[str, Any], mcp: _GbrainMcp | None) -> bool:
     """Best-effort mirror of ONE recipe dict into gbrain (read cache).
 
-    Returns True when a page was written, False when skipped (no config /
-    no mcp) or on a transport error. Never raises — the local write is
-    authoritative and a gbrain hiccup must not affect it.
+    Returns True when a page was written, False when skipped (no
+    ``canonical_id``, strict-gate rejection, no mcp) or on a transport
+    error. Never raises — the local write is authoritative and a gbrain
+    hiccup must not affect it.
     """
     if mcp is None:
         return False
@@ -320,9 +323,10 @@ class GbrainMirroringRecipeKB:
     Preserves the local-first contract: the wrapped dispatcher's local
     write is authoritative and runs first; the gbrain mirror is a
     post-write side-effect that never blocks or fails the local result.
-    Only recipes with a concrete ``best_config`` are mirrored (a T0
-    anchor has none -> skipped). Every other call (reads / append_attempt
-    / ...) delegates to the wrapped dispatcher unchanged.
+    Mirrors any recipe with a ``canonical_id`` (seed-only anchors included
+    by default; see ``RECIPE_KB_MIRROR_REQUIRE_SIGNAL``). Every other call
+    (reads / append_attempt / ...) delegates to the wrapped dispatcher
+    unchanged.
     """
 
     def __init__(self, inner: Any, mcp: _GbrainMcp | None) -> None:
