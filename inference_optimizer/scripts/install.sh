@@ -126,6 +126,8 @@ Usage: inference_optimizer/scripts/install.sh [options]
 
 Installs:
   - inference_optimizer Python package (with claude_agent_sdk via [test])
+  - langfuse SDK, but ONLY when HYPERLOOM_LANGFUSE_ENABLE is on in the
+    environment / .env (opt-in live trace push; skipped otherwise)
   - Magpie (cloned to $HYPERLOOM_RUNTIME_DIR/Magpie by default)
   - Detects/exports INFERENCEX_PATH
   - Chains to kernel-agent/scripts/install.sh for Ray + ray-head start,
@@ -728,6 +730,54 @@ ensure_bench_serving_deps() {
   log "bench_serving deps installed OK"
 }
 
+# --- 4c. Langfuse SDK (opt-in live trace push) ---
+# The local reports/trace/*.jsonl ledger never needs this. Only the opt-in
+# live-Langfuse sink (HYPERLOOM_LANGFUSE_ENABLE=1) imports the SDK, and when
+# absent the emitter degrades to a silent no-op — so a run can look "fine"
+# while pushing nothing. Operators kept hitting that gap: they flipped the
+# flag + set the keys but forgot the separate `pip install '...[trace]'`,
+# and only noticed when session_breakdown showed sdk_available=false.
+#
+# Fix: when (and ONLY when) the Langfuse master switch is on in the loaded
+# environment (.env is sourced above by load_dotenv_no_clobber, so the flag
+# is visible here), guarantee the SDK is importable — install it on demand,
+# mirroring ensure_bench_serving_deps (import-probe first, pip only on miss).
+# Switch off => skipped entirely, so environments that don't use Langfuse
+# stay lean. Fail-soft: a failed install warns (the emitter's own no-op
+# fallback still protects the run) rather than aborting the whole install.
+_langfuse_enabled() {
+  case "$(printf '%s' "${HYPERLOOM_LANGFUSE_ENABLE:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ensure_langfuse_when_enabled() {
+  if ! _langfuse_enabled; then
+    log "langfuse: HYPERLOOM_LANGFUSE_ENABLE not set; skipping SDK install (local jsonl ledger is unaffected)"
+    return 0
+  fi
+  if "$PYTHON" -c "import langfuse" >/dev/null 2>&1; then
+    log "langfuse: SDK already importable"
+    return 0
+  fi
+  log "langfuse: HYPERLOOM_LANGFUSE_ENABLE is on but SDK missing — installing langfuse"
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "langfuse: SDK missing (check-only; would install 'langfuse>=2.0')"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would install 'langfuse>=2.0'"
+    return 0
+  fi
+  if "$PYTHON" -m pip install --quiet --no-cache-dir "${PIP_EXTRA[@]}" "langfuse>=2.0" \
+      && "$PYTHON" -c "import langfuse" >/dev/null 2>&1; then
+    log "langfuse: SDK installed OK"
+  else
+    warn "langfuse: SDK install failed; live push will degrade to a no-op (local jsonl ledger still written). Preinstall 'langfuse' in the image or run: \"\$PYTHON\" -m pip install 'langfuse>=2.0'"
+  fi
+}
+
 # --- 4b. rocprof-compute (kernel roofline profiler) ---
 # kernel_optimization.py's before-GEAK roofline step shells out to
 # `rocprof-compute` (apt package rocprofiler-compute, ships under
@@ -833,6 +883,7 @@ chain_framework_agent() {
 }
 
 ensure_inference_optimizer
+ensure_langfuse_when_enabled
 # Hold the install lock for the whole mirror-mutating region (Magpie /
 # InferenceX clones + the chained kernel-agent GEAK/OOB/TraceLens clones).
 acquire_install_lock
