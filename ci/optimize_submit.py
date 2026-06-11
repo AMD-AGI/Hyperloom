@@ -1704,8 +1704,19 @@ def _is_wanted_artifact(path: str, all_artifacts: bool) -> bool:
 
 
 def _safe_local_path(artifacts_dir: Path, task_id: str, remote_path: str) -> Path:
-    """Map a session-relative remote path to a local file path, stripping leading
-    slashes / '..' so we never escape the artifacts dir."""
+    """Map a session-relative remote path to a safe local file path.
+
+    Strips leading slashes and ``..`` segments so the result never escapes
+    the artifacts directory.
+
+    Args:
+        artifacts_dir: Root artifacts directory.
+        task_id: Task id used as a subdirectory.
+        remote_path: The session-relative remote path.
+
+    Returns:
+        The sanitized local path under ``artifacts_dir/task_id``.
+    """
     rel = remote_path.lstrip("/").replace("\\", "/")
     parts = [seg for seg in rel.split("/") if seg and seg != ".." and seg != "."]
     return artifacts_dir / task_id / Path(*parts) if parts else artifacts_dir / task_id / "artifact.bin"
@@ -1864,9 +1875,17 @@ def _json_has_any_number(value) -> bool:
 
 
 def _breakdown_has_basic_data(path: Path) -> bool:
-    """True when a session_breakdown JSON carries usable audit/perf payload. The
-    delivery contract is "has structured data", not "has positive gain" (aborted
-    runs may legitimately be zero)."""
+    """Report whether a session_breakdown JSON carries usable payload.
+
+    The delivery contract is "has structured data", not "has positive gain"
+    (aborted runs may legitimately be zero).
+
+    Args:
+        path: Path to the session_breakdown JSON file.
+
+    Returns:
+        ``True`` when the file parses and contains a known data key.
+    """
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
@@ -2078,7 +2097,15 @@ def _record_has_task_window(rec: SubmissionRecord) -> bool:
 
 
 def _env_float(name: str, default: float) -> float:
-    """Read a float environment setting with a safe fallback."""
+    """Read a float environment setting with a safe fallback.
+
+    Args:
+        name: Environment variable name.
+        default: Value returned when unset or unparseable.
+
+    Returns:
+        The parsed float, or ``default`` on failure.
+    """
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
@@ -2090,7 +2117,14 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _read_session_state(session_dir: str | Path) -> dict:
-    """Best-effort read of a session's state.json."""
+    """Best-effort read of a session's ``state.json``.
+
+    Args:
+        session_dir: The session directory to read from.
+
+    Returns:
+        The parsed state dict, or ``{}`` when missing or unreadable.
+    """
     path = Path(session_dir) / "state.json"
     if not path.is_file():
         return {}
@@ -2102,7 +2136,15 @@ def _read_session_state(session_dir: str | Path) -> dict:
 
 
 def _session_has_terminal_marker(session_dir: str | Path) -> bool:
-    """True when a session has reached a state where CI should collect now."""
+    """Report whether a session has reached a collectable terminal state.
+
+    Args:
+        session_dir: The session directory to inspect.
+
+    Returns:
+        ``True`` when a breakdown / complete marker or close-sequence flag
+        is present.
+    """
     root = Path(session_dir)
     if (root / "session_breakdown.json").is_file():
         return True
@@ -2120,6 +2162,13 @@ def _session_activity_mtime(session_dir: str | Path) -> float:
     ``state.json`` can be quiet while long Magpie subprocesses append logs or
     traces, so include the runtime subtrees CI relies on. The file cap avoids
     expensive walks for very large sessions.
+
+    Args:
+        session_dir: The session directory to scan.
+
+    Returns:
+        The newest relevant mtime as a Unix timestamp, or ``0.0`` when none
+        found.
     """
     root = Path(session_dir)
     mtimes: list[float] = []
@@ -2160,7 +2209,16 @@ def _find_nfs_state_session_dir(
     rec: SubmissionRecord,
     current_session_hints: set[str] | None = None,
 ) -> str | None:
-    """Locate the current NFS session using state.json, not breakdown files."""
+    """Locate the current NFS session using state.json, not breakdown files.
+
+    Args:
+        rec: The submission record (user / model / task window).
+        current_session_hints: Optional session-id hints to bias matching.
+
+    Returns:
+        The best-matching session directory path, or ``None`` when none
+        match.
+    """
     nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
     users_root = Path(nfs_root) / "users"
     if not rec.safe_user_id or not users_root.is_dir():
