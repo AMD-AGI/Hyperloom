@@ -853,8 +853,17 @@ class SafeOptimizeClient:
         return resp.json() if resp.content else {}
 
     def find_model(self, repo_id: str) -> dict | None:
-        """Look up an existing SaFE Model by HF source URL, scoped to
-        register_workspace (where the canonical Model CR + LocalPaths live)."""
+        """Look up an existing SaFE Model by HF source URL.
+
+        Scoped to ``register_workspace`` (where the canonical Model CR +
+        LocalPaths live).
+
+        Args:
+            repo_id: HF repo id to look up.
+
+        Returns:
+            The matching model record, or ``None`` when not found.
+        """
         hf_url = f"https://huggingface.co/{repo_id}".rstrip("/")
         from urllib.parse import quote
         try:
@@ -875,10 +884,18 @@ class SafeOptimizeClient:
     ) -> str:
         """Register a model record with SaFE so submit_task has a model_id.
 
-        local_path set → accessMode=local_path: SaFE skips its Download Job
-        (phase=Ready immediately) since files are already on disk (prewarm path).
-        local_path empty → accessMode=local: SaFE downloads from HF (slow
-        fallback when prewarm can't run).
+        ``local_path`` set → accessMode=local_path: SaFE skips its Download Job
+        (phase=Ready immediately) since files are already on disk (prewarm
+        path). ``local_path`` empty → accessMode=local: SaFE downloads from HF
+        (slow fallback when prewarm can't run).
+
+        Args:
+            repo_id: HF repo id to register.
+            hf_token: Optional HF token for gated downloads.
+            local_path: On-disk model path; enables local_path access mode.
+
+        Returns:
+            The registered model id.
         """
         if local_path:
             # local_path mode bypasses SaFE's HF metadata fetch, so we MUST
@@ -1113,11 +1130,20 @@ class SafeOptimizeClient:
     def wait_task_done(
         self, task_id: str, timeout_min: int = 480, poll_s: int = 60,
     ) -> tuple[str, dict]:
-        """Wait until the task reaches a terminal status. Returns (status, last_task).
+        """Wait until the task reaches a terminal status.
 
-        Prefer the Claw SSE stream (SaFE's task status lags Claw by minutes), and
-        fall back to SaFE polling when no clawSessionId exists or SSE fails.
-        Returns ('Timeout', {}) if neither sees a terminal status by the deadline.
+        Prefers the Claw SSE stream (SaFE's task status lags Claw by minutes),
+        and falls back to SaFE polling when no clawSessionId exists or SSE
+        fails.
+
+        Args:
+            task_id: The SaFE task id to wait on.
+            timeout_min: Overall deadline in minutes.
+            poll_s: Poll interval in seconds for the SaFE fallback.
+
+        Returns:
+            A ``(status, last_task)`` tuple; ``("Timeout", {})`` when no
+            terminal status is seen by the deadline.
         """
         log.info("[task %s] waiting for completion (timeout=%dm, poll=%ds)",
                  task_id, timeout_min, poll_s)
@@ -1266,8 +1292,15 @@ class SafeOptimizeClient:
         return "idle_timeout"
 
     def _claw_session_id_for(self, task_id: str) -> str | None:
-        """Resolve clawSessionId for a task (per-instance cached). None when
-        SaFE has no session attached (e.g. task failed before session creation)."""
+        """Resolve the clawSessionId for a task (per-instance cached).
+
+        Args:
+            task_id: The SaFE task id.
+
+        Returns:
+            The clawSessionId, or ``None`` when SaFE has no session attached
+            (e.g. the task failed before session creation).
+        """
         if not hasattr(self, "_claw_session_cache"):
             self._claw_session_cache = {}
         if task_id in self._claw_session_cache:
@@ -1285,9 +1318,15 @@ class SafeOptimizeClient:
     def list_artifacts(self, task_id: str) -> list[dict]:
         """List task artifacts via the SaFE standard endpoint.
 
-        Returns items shaped {path, size, lastModified, downloadPath}.
-        downloadPath is server-relative; download_artifact() uses it when present,
-        else builds the /artifacts/download?path= URL from path.
+        ``downloadPath`` is server-relative; ``download_artifact`` uses it when
+        present, else builds the ``/artifacts/download?path=`` URL from path.
+
+        Args:
+            task_id: The SaFE task id.
+
+        Returns:
+            Artifact items shaped ``{path, size, lastModified, downloadPath}``
+            (empty list on error).
         """
         try:
             data = self._request(
@@ -1303,8 +1342,19 @@ class SafeOptimizeClient:
         return items
 
     def download_artifact(self, task_id: str, path_or_item: "str | dict") -> bytes:
-        """Download a single task artifact. Accepts a string path or a
-        list_artifacts item dict; prefers the item's downloadPath when present."""
+        """Download a single task artifact.
+
+        Args:
+            task_id: The SaFE task id.
+            path_or_item: An artifact path string or a ``list_artifacts``
+                item dict; the item's ``downloadPath`` is preferred.
+
+        Returns:
+            The artifact bytes.
+
+        Raises:
+            RuntimeError: If the download responds with status ``>= 400``.
+        """
         if isinstance(path_or_item, dict):
             download_path = (path_or_item.get("downloadPath") or "").strip()
             if download_path:
