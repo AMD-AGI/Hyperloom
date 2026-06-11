@@ -89,6 +89,9 @@ def workspace_root() -> Path:
     ``DEFAULT_SESSION_DIR``), regardless of layout mode. Workspace-shared
     artefacts (runtime/, logs/) live here. Falling back to the default emits
     one loud warning so a misconfigured launcher is visible.
+
+    Returns:
+        The workspace root path.
     """
     global _WARNED_NO_USER_DATA
     user_data = os.environ.get(ENV_USER_DATA_PATH)
@@ -110,7 +113,11 @@ def workspace_root() -> Path:
 
 def _layout_mode() -> str:
     """Effective layout mode: ``flat`` or ``per_model_ts`` (default), pinnable
-    via the env override."""
+    via the env override.
+
+    Returns:
+        Either ``"flat"`` or ``"per_model_ts"``.
+    """
     raw = (os.environ.get(ENV_SESSION_LAYOUT) or "").strip().lower()
     if raw in ("flat", "per_model_ts"):
         return raw
@@ -119,7 +126,14 @@ def _layout_mode() -> str:
 
 def _sanitize_model_basename(model_name: str | os.PathLike[str]) -> str:
     """Reduce ``model_name`` (path, HF id, or Path) to a filename-safe
-    basename (trailing path component). Empty/all-invalid -> ``"session"``."""
+    basename (trailing path component). Empty/all-invalid -> ``"session"``.
+
+    Args:
+        model_name: Model path, HF id, or Path to reduce to a basename.
+
+    Returns:
+        A filename-safe basename, or ``"session"`` when empty/all-invalid.
+    """
     stem = ("" if model_name is None else str(model_name)).strip()
     if not stem:
         return "session"
@@ -135,6 +149,9 @@ def session_dir() -> Path:
     ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` (pin from make_session_dir,
     inherited by subprocesses) -> ``$USER_DATA_PATH`` (flat layout) ->
     ``DEFAULT_SESSION_DIR``.
+
+    Returns:
+        The absolute session directory for the current run.
     """
     pinned = os.environ.get(ENV_CURRENT_SESSION_DIR)
     if pinned:
@@ -149,6 +166,13 @@ def find_latest_per_session_dir(
     ``--resume`` without ``--resume-from``). Selects by the
     ``%Y%m%dT%H%M%SZ`` timestamp in the directory name (lex sort), not mtime.
     Returns None when no matching subdir exists.
+
+    Args:
+        model_name: Restrict the scan to one model's subtree, or ``None`` to
+            scan every model basename.
+
+    Returns:
+        The latest per-session directory, or ``None`` when none match.
     """
     ws = workspace_root()
     if not ws.is_dir():
@@ -184,6 +208,13 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
     is ``<workspace_root>/<model>/<UTC_ts>/`` and is pinned via
     ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR``; otherwise it is
     workspace_root (flat layout). Idempotent.
+
+    Args:
+        model_name: Model name selecting the per-model subtree, or ``None``
+            for the flat layout.
+
+    Returns:
+        The created (and pinned) session directory.
     """
     ws = workspace_root()
     ws.mkdir(parents=True, exist_ok=True)
@@ -282,7 +313,15 @@ def asset_kernel_opt_dir() -> Path:
 
 def agent_session_dir(session_dir: Path, agent_name: str) -> Path:
     """Per-agent inbox/outbox dir under the session (created by
-    make_session_dir; this only computes the path)."""
+    make_session_dir; this only computes the path).
+
+    Args:
+        session_dir: The session directory root.
+        agent_name: The agent name subdirectory.
+
+    Returns:
+        ``<session_dir>/agents/<agent_name>``.
+    """
     return Path(session_dir) / "agents" / agent_name
 
 
@@ -293,6 +332,12 @@ def runtime_dir(session_dir: Path | None = None) -> Path:
     """``<workspace_root>/runtime/`` — workspace-shared writable runtime
     (kernel-agent env file, GEAK litellm config). Survives across sessions;
     the ``session_dir`` param is ignored (back-compat).
+
+    Args:
+        session_dir: Ignored; accepted for back-compat.
+
+    Returns:
+        ``<workspace_root>/runtime``.
     """
     return workspace_root() / "runtime"
 
@@ -303,6 +348,9 @@ def open_source_root() -> Path:
     ``${TMPDIR:-/tmp}/hyperloom/open-source-repos``. Decoupled from
     ``$USER_DATA_PATH`` so a shared workspace root never collocates concurrent
     pods' checkouts.
+
+    Returns:
+        The pod-local open-source repos root path.
     """
     override = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT")
     if override:
@@ -315,6 +363,12 @@ def magpie_dir(session_dir: Path | None = None) -> Path:
     """``<open_source_root>/Magpie/`` — Magpie clone (pod-local; ``$MAGPIE_DIR``
     overrides). Aligned with install.sh so script and runtime resolve the same
     checkout. ``session_dir`` param ignored (back-compat).
+
+    Args:
+        session_dir: Ignored; accepted for back-compat.
+
+    Returns:
+        The Magpie checkout path.
     """
     override = os.environ.get("MAGPIE_DIR")
     if override:
@@ -326,13 +380,26 @@ def kernel_agent_runs_root(session_dir: Path) -> Path:
     """``<sd>/kernel-agent/`` — kernel-agent CLI tool output root (one
     ``runs/<session_id>/`` per invocation). Distinct from the kernel_id-keyed
     ``<sd>/kernel-agent-workspace/``.
+
+    Args:
+        session_dir: The session directory root.
+
+    Returns:
+        ``<session_dir>/kernel-agent``.
     """
     return Path(session_dir) / "kernel-agent"
 
 
 def optimizer_runs_dir(session_dir: Path) -> Path:
     """``<sd>/optimizer_runs/`` — launcher stdout / PID / robustness monitor
-    logs."""
+    logs.
+
+    Args:
+        session_dir: The session directory root.
+
+    Returns:
+        ``<session_dir>/optimizer_runs``.
+    """
     return Path(session_dir) / "optimizer_runs"
 
 
@@ -341,6 +408,9 @@ def mn_profile_trace_root() -> Path:
     root (``<rayjob_id>/torch_trace/`` per provision). Multi-node operators
     MUST set ``$USER_DATA_PATH`` to a cluster-shared path or the sandbox never
     sees pod-side trace files. Single-node never reads this.
+
+    Returns:
+        ``<workspace_root>/profile-traces``.
     """
     return workspace_root() / "profile-traces"
 

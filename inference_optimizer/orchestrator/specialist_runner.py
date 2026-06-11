@@ -59,7 +59,15 @@ log = logging.getLogger(__name__)
 def _extra_focus_tags(
     params: dict[str, Any], domain: "SpecialistDomain",
 ) -> tuple[str, ...]:
-    """Knowledge-domain tags beyond the primary domain's anchor (anchor dropped to avoid double-rendering)."""
+    """Knowledge-domain tags beyond the primary domain's anchor (anchor dropped to avoid double-rendering).
+
+    Args:
+        params: The dispatch params carrying the tag list.
+        domain: The primary specialist domain whose anchor is excluded.
+
+    Returns:
+        The extra focus tags, excluding the primary domain's anchor.
+    """
     tags = normalize_dispatch_tags(params)
     primary_anchor = (domain.kb_anchor or "").strip()
     return tuple(t for t in tags if t and t != primary_anchor)
@@ -212,6 +220,13 @@ def classify_specialist_failure(
     / crash); ``empty_synthesised`` means it exited cleanly without a usable
     ``specialist_done`` (genuine empty, max-turns, or a config error encoded in
     ``error``).
+
+    Args:
+        runner_status: The :class:`SpecialistRunResult` status string.
+        error: The associated error string (drives sub-classification).
+
+    Returns:
+        A ``(failure_type, retry_eligible)`` tuple.
     """
     status = (runner_status or "").strip().lower()
     err = (error or "").strip().lower()
@@ -245,6 +260,15 @@ def build_empty_specialist_done(
 
     Satisfies PolicyGate R3 schema (``empty=true``, ``proposal_set=[]``,
     non-empty summary).
+
+    Args:
+        gap_canonical_id: Canonical id of the gap the specialist addressed.
+        domain: The specialist domain key.
+        reason: Why the specialist exited empty (becomes summary/reason).
+        confidence: Confidence score, clamped to ``[0.0, 1.0]``.
+
+    Returns:
+        The canonical empty ``specialist_done`` payload dict.
     """
     return {
         "gap_canonical_id": gap_canonical_id,
@@ -282,6 +306,19 @@ class SpecialistRunner:
         Exactly one of ``backend_factory`` (in-process, tests) /
         ``subprocess_config`` (PR-A2 ``claude`` subprocess, production) must
         be supplied. ``knowledge_plane`` gates ``mcp__pr_monitor__*`` tools.
+
+        Args:
+            backend_factory: In-process backend factory (tests path).
+            subprocess_config: Subprocess spawn config (production path).
+            session_dir: Session output directory.
+            default_tools: Default tool whitelist for specialists.
+            default_max_turns: Default per-task max turn budget.
+            per_turn_max_seconds: Per-turn wall-clock soft limit.
+            knowledge_plane: KnowledgePlane gating ``mcp__pr_monitor__*`` tools.
+
+        Raises:
+            ValueError: If neither or both of ``backend_factory`` and
+                ``subprocess_config`` are supplied.
         """
         if backend_factory is None and subprocess_config is None:
             raise ValueError(
@@ -319,6 +356,14 @@ class SpecialistRunner:
         ``Task.allowed_tools``; grants the worktree-scoped ``run_bench`` tool
         only to bench-enabled specialists (``grant_bench`` and the bench tool
         globally enabled); enforces :data:`SPECIALIST_TOOL_DENYLIST` last.
+
+        Args:
+            task_allowed_tools: Narrower per-task tool whitelist override.
+            grant_bench: When True (and bench globally enabled), grant the
+                worktree-scoped ``run_bench`` tool.
+
+        Returns:
+            The resolved per-task tool whitelist.
         """
         tools = (
             list(task_allowed_tools)
@@ -363,6 +408,14 @@ class SpecialistRunner:
 
         Never raises a Backend error past the boundary — every failure ends
         with a valid specialist_done payload (Inv-5.3 single exit).
+
+        Args:
+            ctx: The runner context for this specialist task.
+            prompt_inputs: Pre-built prompt inputs; built from ``ctx`` when
+                omitted.
+
+        Returns:
+            The :class:`SpecialistRunResult` for the task.
         """
         prep = await self._prepare(ctx, prompt_inputs=prompt_inputs)
         if prep.early_return is not None:
@@ -565,6 +618,11 @@ class SpecialistRunner:
         No-op when ``self.session_dir`` is unset (some test harnesses run
         the runner without a session dir) or the backend reported no token
         counters. Wrapped broadly so a trace failure never aborts the run.
+
+        Args:
+            task_id: The specialist task id.
+            turn: The turn index being traced.
+            metadata: Backend turn metadata carrying token counters.
         """
         if self.session_dir is None:
             return
@@ -605,6 +663,11 @@ class SpecialistRunner:
         """Append one ``conversations.jsonl`` row for an in-process specialist
         turn. Persists the full (redacted) prompt + completion the backend put
         on ``metadata``. No-op without a session dir; best-effort otherwise.
+
+        Args:
+            task_id: The specialist task id.
+            turn: The turn index being recorded.
+            metadata: Backend turn metadata carrying the prompt + response.
         """
         if self.session_dir is None:
             return
@@ -636,7 +699,15 @@ class SpecialistRunner:
         self, ctx: RunnerContext, prep: "_PreparedRun",
     ) -> SpecialistRunResult:
         """Drive ``Backend.run`` one turn at a time until a specialist_done
-        intent shows up."""
+        intent shows up.
+
+        Args:
+            ctx: The runner context for this specialist task.
+            prep: The prepared-run state (domain, gap, workspace, prompts).
+
+        Returns:
+            The :class:`SpecialistRunResult` for the task.
+        """
         assert self.backend_factory is not None  # narrowed by run()
         domain = prep.domain
         gap = prep.gap
@@ -1077,9 +1148,16 @@ class SpecialistRunner:
     ) -> tuple[Path | None, Path | None, str]:
         """Provision a per-task git worktree when in subprocess mode.
 
-        Returns ``(worktree_dir, worktree_base, error)``; empty/None in
-        in-process mode or on git failure. Best-effort: the specialist still
-        dispatches without isolation and the reason lands in ``notes``.
+        Best-effort: the specialist still dispatches without isolation and the
+        reason lands in ``notes``.
+
+        Args:
+            ctx: The runner context for this specialist task.
+            workspace: The task workspace the worktree is created under.
+
+        Returns:
+            A ``(worktree_dir, worktree_base, error)`` tuple; ``worktree_dir``
+            is ``None`` in in-process/readonly mode or on git failure.
         """
         if self.subprocess_config is None or workspace is None:
             return None, None, ""

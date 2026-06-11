@@ -592,6 +592,18 @@ class RemoteRecipeClient:
         server-side prefer ranking, so the dispatcher applies a
         client-side rerank over the returned rows; this client only
         forwards the ``required`` filter.
+
+        Args:
+            label_match: Identity labels to filter on.
+            metric_filters: ``{metric: {min, max}}`` bounds to apply.
+            updated_since: Lower bound on ``updated_at``.
+            order_by: Ordering directive forwarded to the server.
+            limit: Maximum number of rows to request.
+            prefer: Accepted for signature parity; ignored here (rerank lives
+                in the dispatcher).
+
+        Returns:
+            The matching recipe rows, or ``[]`` when the client is disabled.
         """
         del prefer  # client-side rerank lives in RecipeKB
         if not self.enabled:

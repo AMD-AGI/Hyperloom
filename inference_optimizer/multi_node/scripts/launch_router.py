@@ -29,7 +29,11 @@ _DEFAULT_LOG_FILE = "/tmp/multi_node_logs/router.log"
 
 
 def _log(msg: str) -> None:
-    """Stderr line with timestamp."""
+    """Stderr line with timestamp.
+
+    Args:
+        msg: The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[launch_router {ts}] {msg}\n")
     sys.stderr.flush()
@@ -40,7 +44,16 @@ def _build_sglang_router_cmd(
     decode_url: str,
     public_port: int,
 ) -> list[str]:
-    """Compose the sglang_router PD-disaggregation launch command (one prefill + one decode group)."""
+    """Compose the sglang_router PD-disaggregation launch command (one prefill + one decode group).
+
+    Args:
+        prefill_url: Internal prefill group HTTP endpoint.
+        decode_url: Internal decode group HTTP endpoint.
+        public_port: Port the router binds for the client.
+
+    Returns:
+        list[str]: The argv for launching the sglang router.
+    """
     return [
         "python3", "-m", "sglang_router.launch_router",
         "--pd-disaggregation",
@@ -57,7 +70,18 @@ def _build_vllm_router_cmd(
     public_port: int,
     override_cmd: str = "",
 ) -> list[str]:
-    """Compose the vllm router/proxy launch command; ``--vllm-router-cmd`` overrides it ({prefill}/{decode}/{port} placeholders)."""
+    """Compose the vllm router/proxy launch command; ``--vllm-router-cmd`` overrides it ({prefill}/{decode}/{port} placeholders).
+
+    Args:
+        prefill_url: Internal prefill group HTTP endpoint.
+        decode_url: Internal decode group HTTP endpoint.
+        public_port: Port the router binds for the client.
+        override_cmd: Optional full command template; supports ``{prefill}``,
+            ``{decode}``, and ``{port}`` placeholders.
+
+    Returns:
+        list[str]: The argv for launching the vllm router/proxy.
+    """
     if override_cmd:
         rendered = (
             override_cmd
@@ -80,7 +104,20 @@ def _detach_router(
     log_file: Path,
     pid_file: Path,
 ) -> int:
-    """Run ``cmd`` detached via bash+nohup+setsid so it survives the dashboard job exit and dies cleanly under kill_multinode."""
+    """Run ``cmd`` detached via bash+nohup+setsid so it survives the dashboard job exit and dies cleanly under kill_multinode.
+
+    Args:
+        cmd: The router argv to launch.
+        log_file: Path the router's stdout/stderr is appended to.
+        pid_file: Path the spawned router PID is written to.
+
+    Returns:
+        int: The PID of the detached router process.
+
+    Raises:
+        RuntimeError: If the spawn shell fails, the PID file is missing or
+            invalid, or the router is not alive 0.5s after launch.
+    """
     log_file.parent.mkdir(parents=True, exist_ok=True)
     pid_file.parent.mkdir(parents=True, exist_ok=True)
     log_q = shlex.quote(str(log_file))
