@@ -188,6 +188,14 @@ class KnowledgePlane:
 
     @property
     def cortex_enabled(self) -> bool:
+        """Whether Cortex is enabled (always ``False``).
+
+        Backwards-compatible shim; the knowledge plane no longer wires
+        Cortex.
+
+        Returns:
+            ``False``.
+        """
         # Backwards-compatible shim; KnowledgePlane no longer wires Cortex.
         return False
 

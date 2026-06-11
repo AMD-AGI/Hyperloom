@@ -839,6 +839,19 @@ def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
 
 
 def abort_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
+    """Detect a PRELUDE-aborting stop reason on the state.
+
+    Recognizes terminal stop reasons (e.g. ``cortex_t0_failed``,
+    ``time_exhausted_during_prelude``) so phase history captures the
+    boundary.
+
+    Args:
+        state: Object exposing a ``stop_reason`` attribute.
+
+    Returns:
+        A ``(reason, metadata)`` tuple when an abort reason is present,
+        otherwise ``None``.
+    """
     # Treat cortex_t0_failed / time_exhausted_during_prelude etc. as a PRELUDE
     # abort so phase_history captures the boundary.
     sr = (getattr(state, "stop_reason", "") or "").strip()

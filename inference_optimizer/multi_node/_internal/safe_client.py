@@ -32,6 +32,13 @@ class SafeApiError(RuntimeError):
     """
 
     def __init__(self, status: int | None, body: str, *, endpoint: str) -> None:
+        """Initialize the SaFE error with response context.
+
+        Args:
+            status: HTTP status code, or ``None`` if unavailable.
+            body: Raw response body (truncated in the message).
+            endpoint: The SaFE endpoint that produced the error.
+        """
         # Truncate body to keep the agent's stderr legible.
         snippet = body[:500] + ("..." if len(body) > 500 else "")
         super().__init__(f"SaFE {endpoint} -> status={status} body={snippet}")
