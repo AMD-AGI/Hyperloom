@@ -1067,12 +1067,24 @@ class Coordinator:
             )
 
     def _kernel_enabled(self) -> bool:
+        """Whether the kernel role is registered and enabled.
+
+        Returns:
+            ``True`` if the kernel role exists and the persisted
+            ``kernel_enabled`` flag is set.
+        """
         # Mirror persisted kernel_enabled flag; --no-kernel removes the kernel role.
         return "kernel" in self.role_registry and bool(
             getattr(self.shared_state, "kernel_enabled", True)
         )
 
     def _explore_enabled(self) -> bool:
+        """Whether the EXPLORE phase is enabled for this run.
+
+        Returns:
+            ``True`` unless ``--no-explore`` disabled it (collapsing to
+            KERNEL/SWEEP).
+        """
         # Mirror persisted explore_enabled flag; --no-explore collapses to KERNEL/SWEEP. EXPLORE is a phase, not a role.
         return bool(getattr(self.shared_state, "explore_enabled", True))
 
@@ -4335,6 +4347,15 @@ class Coordinator:
         return "\n".join(sections)
 
     async def _load_system_prompt(self, agent_name: str) -> str:
+        """Load the system prompt for an agent, honoring overrides.
+
+        Args:
+            agent_name: Name of the agent/role whose prompt to load.
+
+        Returns:
+            The override prompt if configured, the role's prompt file
+            contents, or a placeholder string when none exists.
+        """
         # Demo/test override via self.system_prompt_overrides[agent_name].
         override = getattr(self, "system_prompt_overrides", {}).get(agent_name)
         if override is not None:
@@ -6606,6 +6627,15 @@ class Coordinator:
         ))
 
     async def _handle_force_dispatch(self, source: str, intent: Intent) -> None:
+        """Handle a ``force_dispatch`` intent by emitting an event.
+
+        Currently a P0-3 stub: it broadcasts a ``force_dispatch`` event;
+        real dispatcher reordering arrives in P0-5 with the priority queue.
+
+        Args:
+            source: Identifier of the intent's originating agent.
+            intent: The ``force_dispatch`` intent carrying ``task_id``.
+        """
         # P0-3 stub: emit an event; real dispatcher reordering lands in P0-5 with the priority queue.
         await self.bus.append_and_seq(Message.new(
             source, "*", "event",
