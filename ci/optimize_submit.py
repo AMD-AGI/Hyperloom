@@ -127,7 +127,15 @@ _KERNEL_BACKEND_ALIASES = {
 
 
 def normalize_gpu_profile(gpu_type: str | None, *, warn: bool = True) -> str | None:
-    """Return the GPU profile key when ``gpu_type`` maps to a known CI profile."""
+    """Return the GPU profile key when ``gpu_type`` maps to a known CI profile.
+
+    Args:
+        gpu_type: Free-form GPU type/alias, or ``None``.
+        warn: When True, log a warning if no profile matches.
+
+    Returns:
+        The matching profile key, or ``None`` when no profile matches.
+    """
     raw = (gpu_type or "").strip()
     compact = re.sub(r"[^a-z0-9]", "", raw.lower())
     for key, profile in GPU_PROFILES.items():
@@ -166,8 +174,14 @@ _PROMPT_PREFIX_FILE = Path(__file__).resolve().parent / "prompt_prefix.txt"
 
 
 def _load_default_prompt_prefix() -> str:
-    """Resolve the default ``--prompt-prefix``: $SAFE_OPTIMIZE_PROMPT_PREFIX,
-    else ci/prompt_prefix.txt, else empty string."""
+    """Resolve the default ``--prompt-prefix`` value.
+
+    Resolution order: ``$SAFE_OPTIMIZE_PROMPT_PREFIX``, then
+    ``ci/prompt_prefix.txt``, then an empty string.
+
+    Returns:
+        The resolved prompt prefix text.
+    """
 
     env_value = os.environ.get("SAFE_OPTIMIZE_PROMPT_PREFIX", "")
     if env_value:
@@ -187,11 +201,18 @@ _MULTINODE_BNXT_TAR = "/wekafs/primus/data/libbnxt/libbnxt_re-234.0.154.0.tar.gz
 
 
 def _multinode_prompt_suffix(nodes: int, rayjob_image: str) -> str:
-    """RayJob topology block injected into the prompt when nodes > 1.
+    """Build the RayJob topology block injected into the prompt for multi-node.
 
     The SaFE tasks body has no node-count field, so multi-node is expressed the
     same way the Claw-direct CI does: tell the agent to fan out to an N-node
-    RayJob with the exact topology. Returns "" for single-node (unchanged path).
+    RayJob with the exact topology.
+
+    Args:
+        nodes: Number of nodes; values <= 1 yield no suffix.
+        rayjob_image: RayJob container image to reference in the block.
+
+    Returns:
+        The prompt suffix, or ``""`` for single-node runs.
     """
     if nodes <= 1:
         return ""
@@ -280,8 +301,15 @@ GENERATIVE_ARCH_SUFFIXES: tuple[str, ...] = (
 
 
 def is_generative_arch(arch: str) -> bool:
-    """True if the HF arch is causal-LM-style inference; False for empty/unknown
-    (better to skip than waste a sandbox slot)."""
+    """Report whether an HF architecture is causal-LM-style for inference.
+
+    Args:
+        arch: The HF architecture name.
+
+    Returns:
+        ``True`` for generative architectures; ``False`` for empty/unknown
+        (better to skip than waste a sandbox slot).
+    """
     if not arch:
         return False
     return any(arch.endswith(s) for s in GENERATIVE_ARCH_SUFFIXES)
@@ -385,6 +413,13 @@ class HuggingFaceClient:
         Pool-then-filter: the listing API matches on tags only, so re-validate
         per-repo on pipeline_tag == "text-generation" AND a generative
         architectures[0] suffix; either failing (or a gated 401) → skip.
+
+        Args:
+            limit: Maximum number of repos to return.
+            min_params_b: Minimum parameter count in billions (0 disables).
+
+        Returns:
+            Repo ids passing all gates, in download-rank order.
         """
         pool_size = max(limit * 10, 100)
         listing = self._get(
@@ -459,10 +494,19 @@ class DetectedConfig:
 
 
 def _quant_type(config: dict) -> str:
-    """Read the quantization tag from HF config.json (vendors disagree on the
-    field name). Priority: quant_algo (NVIDIA modelopt — quant_method there is
-    just the tool name) > quant_type > quantization_type > quant_method
-    (current de-facto standard) > method. First non-empty wins, lowercased."""
+    """Read the quantization tag from an HF ``config.json``.
+
+    Vendors disagree on the field name. Priority: ``quant_algo`` (NVIDIA
+    modelopt — ``quant_method`` there is just the tool name) > ``quant_type``
+    > ``quantization_type`` > ``quant_method`` (current de-facto standard) >
+    ``method``. First non-empty wins.
+
+    Args:
+        config: An HF ``config.json`` dict.
+
+    Returns:
+        The quantization tag lowercased, or ``""`` when none is present.
+    """
     quant = config.get("quantization_config") or {}
     raw = (
         quant.get("quant_algo")
@@ -545,7 +589,15 @@ def detect_param_count(hf_info: dict, config: dict) -> float:
 
 
 def detect_max_context_tokens(config: dict) -> int:
-    """Return the model context length from HF config.json when present."""
+    """Return the model context length from an HF ``config.json``.
+
+    Args:
+        config: An HF ``config.json`` dict.
+
+    Returns:
+        The smallest positive context-length field found, or ``0`` when none
+        is present.
+    """
     candidates = []
     for key in ("max_position_embeddings", "max_sequence_length", "n_positions", "seq_length"):
         value = config.get(key)
@@ -580,9 +632,17 @@ def context_too_short(
 
 def detect_tp(params_b: float, precision: str = "BF16",
               gpu_type: str | None = None) -> int:
-    """Pick tensor parallelism from param count and GPU profile. precision is
-    kept for API compatibility but unused — CI policy stays predictable across
-    precision variants of the same model family."""
+    """Pick tensor parallelism from param count and GPU profile.
+
+    Args:
+        params_b: Parameter count in billions.
+        precision: Kept for API compatibility but unused — CI policy stays
+            predictable across precision variants of the same model family.
+        gpu_type: GPU type used to select the threshold profile.
+
+    Returns:
+        The tensor-parallel size (1, 2, 4, or 8).
+    """
     if params_b <= 0:
         return 1
     profile_key = normalize_gpu_profile(gpu_type) or DEFAULT_GPU_PROFILE
@@ -624,6 +684,12 @@ def _sglang_image_for(repo_id: str = "") -> str:
     attention CUDA-graph-capture SIGABRT. Matched on the repo basename so it
     fires for the HF repo id (the /wekafs/<org>-<repo> local path is derived
     downstream from this same id).
+
+    Args:
+        repo_id: HF repo id used to detect per-model image needs.
+
+    Returns:
+        The SGLang image reference to use.
     """
     basename = (repo_id or "").split("/")[-1].lower()
     if "mimo-v2" in basename:
