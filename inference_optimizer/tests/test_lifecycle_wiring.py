@@ -37,6 +37,7 @@ from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
 from inference_optimizer.orchestrator.task_registry import Task
 from inference_optimizer.paths import make_session_dir
+from inference_optimizer.session_paths import reports_dir
 from inference_optimizer.protocol.intent import Intent, IntentType
 
 
@@ -377,6 +378,11 @@ async def test_on_enter_close_emits_report_end(session_dir, monkeypatch):
             state = "succeeded"
 
         async def fake_run_task(task):
+            if task.kind == "report":
+                rd = reports_dir(session_dir)
+                rd.mkdir(parents=True, exist_ok=True)
+                (rd / "final.json").write_text("{}", encoding="utf-8")
+                (rd / "final.md").write_text("# final\n", encoding="utf-8")
             return _Res()
 
         monkeypatch.setattr(
@@ -393,13 +399,116 @@ async def test_on_enter_close_emits_report_end(session_dir, monkeypatch):
 
         await c._on_enter_close(from_phase="SWEEP")
 
-        rpt = [e for e in c.shared_state.lifecycle
-               if e["step"] == "report" and e["status"] == "END"]
-        assert rpt, f"want a report END, got {c.shared_state.lifecycle}"
+        rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
+        statuses = [e["status"] for e in rpt]
+        assert statuses == ["START", "END"]
         ev = rpt[-1]
         assert ev["label"] == "Report"
         assert ev["detail"] == "close_phase_entry"
         assert ev["artifacts"]["md_path"].endswith("final.md")
         assert ev["artifacts"]["json_path"].endswith("final.json")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_on_enter_close_emits_report_error_for_failed_task(
+    session_dir, monkeypatch,
+):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        report_task = Task(
+            task_id="rpt-1", kind="report", state="running", params={},
+            idempotency_key="internal-report-close", requires_lanes=[],
+        )
+        bd_task = Task(
+            task_id="bd-1", kind="session_breakdown", state="running",
+            params={}, idempotency_key="internal-breakdown-close",
+            requires_lanes=[],
+        )
+
+        async def fake_enqueue_report(*, reason):
+            return report_task
+
+        async def fake_enqueue_breakdown(*, reason):
+            return bd_task
+
+        class _Failed:
+            state = "failed"
+
+        class _Succeeded:
+            state = "succeeded"
+
+        async def fake_run_task(task):
+            return _Failed() if task.kind == "report" else _Succeeded()
+
+        monkeypatch.setattr(
+            c, "_enqueue_internal_report_task", fake_enqueue_report,
+        )
+        monkeypatch.setattr(
+            c, "_enqueue_internal_session_breakdown_task",
+            fake_enqueue_breakdown,
+        )
+        monkeypatch.setattr(c.sub, "run_task", fake_run_task)
+        monkeypatch.setattr(
+            c, "cortex_finalize_recipe_and_journal", lambda: None,
+        )
+
+        await c._on_enter_close(from_phase="SWEEP")
+
+        rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
+        assert [e["status"] for e in rpt] == ["START", "ERROR"]
+        assert rpt[-1]["detail"] == "task_state='failed'"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_on_enter_close_emits_report_error_for_exception(
+    session_dir, monkeypatch,
+):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        report_task = Task(
+            task_id="rpt-1", kind="report", state="running", params={},
+            idempotency_key="internal-report-close", requires_lanes=[],
+        )
+        bd_task = Task(
+            task_id="bd-1", kind="session_breakdown", state="running",
+            params={}, idempotency_key="internal-breakdown-close",
+            requires_lanes=[],
+        )
+
+        async def fake_enqueue_report(*, reason):
+            return report_task
+
+        async def fake_enqueue_breakdown(*, reason):
+            return bd_task
+
+        class _Succeeded:
+            state = "succeeded"
+
+        async def fake_run_task(task):
+            if task.kind == "report":
+                raise RuntimeError("report boom")
+            return _Succeeded()
+
+        monkeypatch.setattr(
+            c, "_enqueue_internal_report_task", fake_enqueue_report,
+        )
+        monkeypatch.setattr(
+            c, "_enqueue_internal_session_breakdown_task",
+            fake_enqueue_breakdown,
+        )
+        monkeypatch.setattr(c.sub, "run_task", fake_run_task)
+        monkeypatch.setattr(
+            c, "cortex_finalize_recipe_and_journal", lambda: None,
+        )
+
+        await c._on_enter_close(from_phase="SWEEP")
+
+        rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
+        assert [e["status"] for e in rpt] == ["START", "ERROR"]
+        assert "report boom" in rpt[-1]["detail"]
     finally:
         await c.stop()

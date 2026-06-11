@@ -3011,6 +3011,11 @@ class Coordinator:
 
         # Step 1: report
         try:
+            self._emit_lifecycle(
+                step="report",
+                status="START",
+                detail="close_phase_entry",
+            )
             report_task = await self._enqueue_internal_report_task(
                 reason="close_phase_entry",
             )
@@ -3026,23 +3031,37 @@ class Coordinator:
                 # reports_dir(session_dir); advertise whichever exist.
                 from ..session_paths import reports_dir as _reports_dir
                 _rd = _reports_dir(self.session_dir)
+                _artifacts = {
+                    "json_path": str(_rd / "final.json")
+                    if (_rd / "final.json").exists() else "",
+                    "md_path": str(_rd / "final.md")
+                    if (_rd / "final.md").exists() else "",
+                }
                 self._emit_lifecycle(
                     step="report",
                     status="END",
-                    artifacts={
-                        "json_path": str(_rd / "final.json"),
-                        "md_path": str(_rd / "final.md"),
-                    },
+                    artifacts=_artifacts,
                     detail="close_phase_entry",
                 )
             else:
+                detail = f"task_state={terminal_state!r}"
+                self._emit_lifecycle(
+                    step="report",
+                    status="ERROR",
+                    detail=detail,
+                )
                 await self._record_close_step(
                     "report", status="failed",
                     task_id=report_task.task_id,
-                    detail=f"task_state={terminal_state!r}",
+                    detail=detail,
                 )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.exception("CLOSE step 1 (report) failed")
+            self._emit_lifecycle(
+                step="report",
+                status="ERROR",
+                detail=repr(exc)[:240],
+            )
             await self._record_close_step(
                 "report", status="failed", detail=repr(exc)[:240],
             )
