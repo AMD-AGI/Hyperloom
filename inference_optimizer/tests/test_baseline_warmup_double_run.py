@@ -361,6 +361,98 @@ def test_baseline_server_dead_returncode_classifies_server_init_dead(
     assert result["error_class"] == "server_init_dead", result
 
 
+def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
+    tmp_path, monkeypatch,
+):
+    """#524: when Magpie DOES create a benchmark_* workspace but it carries no
+    valid measurement, a server.log death marker takes precedence — the
+    failure is classified ``server_init_dead`` (not the generic ``no_report`` /
+    ``invalid_measurement``) and the real engine fault is surfaced in
+    ``error``."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        # Workspace exists (clears the no_workspace guard) but has no
+        # benchmark_report.json, so the measurement is invalid.
+        (slot / "benchmark_vllm_20260602_010101").mkdir(parents=True)
+        (slot / "server.log").write_text(
+            "(APIServer pid=42) RuntimeError: Engine core initialization "
+            "failed. See root cause above. Failed core proc(s): {}\n",
+            encoding="utf-8",
+        )
+        # Magpie exits 0 here on purpose: classification must be driven by the
+        # server.log marker, not the wrapper returncode.
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "server_init_dead", result
+    assert "Engine core initialization failed" in result["error"]
+
+
+def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
+    """#524 hardening: a stale server.log death marker left behind in a reused
+    output_dir must NOT bias a fresh attempt's classification. The executor
+    clears the prior log before launching, so an attempt that boots fine but
+    yields no report is classified by its own outcome (``no_report``) — never
+    the previous attempt's ``server_init_dead``."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    output_dir.mkdir(parents=True)
+    # Stale death marker from a PRIOR attempt in the same slot.
+    (output_dir / "server.log").write_text(
+        "(APIServer pid=1) RuntimeError: Engine core initialization failed. "
+        "Failed core proc(s): {}\n",
+        encoding="utf-8",
+    )
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        # This attempt boots fine but produces no report; crucially it does
+        # NOT (re)write a death marker into server.log.
+        (slot / "benchmark_vllm_20260602_010101").mkdir(parents=True)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed"
+    assert result["error_class"] != "server_init_dead", result
+    assert result["error_class"] == "no_report", result
+
+
 def test_ensure_local_inferencex_noop_for_local_path(tmp_path, monkeypatch):
     """#523: a checkout already on a local filesystem is returned unchanged
     (no needless copy)."""
@@ -412,6 +504,53 @@ def test_ensure_local_inferencex_disabled_by_env(tmp_path, monkeypatch):
     (src / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
     monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "1")
+
+    assert bl._ensure_local_inferencex(str(src)) == str(src)
+
+
+def test_ensure_local_inferencex_falls_back_on_copy_failure(
+    tmp_path, monkeypatch,
+):
+    """#523: when the mirror copy itself fails (e.g. local disk full), the
+    helper degrades to the original network-mount path instead of raising, so
+    the run still proceeds (pre-fix behaviour) rather than aborting."""
+    from inference_optimizer.orchestrator.action_executors import baseline as bl
+
+    src = tmp_path / "wekafs_InferenceX"
+    (src / "benchmarks").mkdir(parents=True)
+    (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched")
+    local_root = tmp_path / "local_cache"
+    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", str(local_root),
+    )
+
+    def _boom(*_a, **_k):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(bl.shutil, "copytree", _boom)
+
+    assert bl._ensure_local_inferencex(str(src)) == str(src)
+
+
+def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
+    tmp_path, monkeypatch,
+):
+    """#523: if the copy lands but the mirror is missing the load-bearing
+    ``benchmarks/benchmark_lib.sh`` (partial / corrupt tree), the helper
+    rejects it and returns the original path rather than handing Magpie a
+    broken ``cd`` target."""
+    from inference_optimizer.orchestrator.action_executors import baseline as bl
+
+    # Source has NO benchmark_lib.sh, so the post-copy completeness check fails.
+    src = tmp_path / "wekafs_InferenceX"
+    (src / "utils").mkdir(parents=True)
+    (src / "utils" / "marker.txt").write_text("payload")
+    local_root = tmp_path / "local_cache"
+    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", str(local_root),
+    )
 
     assert bl._ensure_local_inferencex(str(src)) == str(src)
 

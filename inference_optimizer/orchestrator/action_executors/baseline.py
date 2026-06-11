@@ -25,8 +25,9 @@ import signal
 import subprocess
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import yaml
 
@@ -174,6 +175,43 @@ def _is_network_fs(path: str) -> bool:
     return _path_fstype(path).lower() in _NETWORK_FS_TYPES
 
 
+@contextmanager
+def _mirror_lock(lock_path: str) -> Iterator[None]:
+    """Best-effort cross-process exclusive lock around the InferenceX mirror
+    copy+swap (#523).
+
+    Two tasks (or two sandbox processes) that resolve the SAME network-mount
+    source to the same hash-keyed ``dest`` would otherwise ``rmtree`` /
+    ``os.replace`` the mirror under each other — corrupting a tree another
+    run's server may be ``cd``-ed into. Serializing the swap makes the loser
+    wait for the winner and then overwrite a consistent tree. Degrades to no
+    exclusion when ``fcntl`` is unavailable (non-Linux) or the lock file
+    cannot be opened — the unique staging dir still prevents torn copies.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    try:
+        fp = open(lock_path, "w")
+    except OSError as exc:
+        log.warning(
+            "baseline_executor: cannot open InferenceX mirror lock %s (%s); "
+            "proceeding without cross-process exclusion", lock_path, exc,
+        )
+        yield
+        return
+    try:
+        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+        finally:
+            fp.close()
+
+
 def _ensure_local_inferencex(src: str) -> str:
     """Mirror an already-patched InferenceX checkout onto stable local disk.
 
@@ -217,15 +255,29 @@ def _ensure_local_inferencex(src: str) -> str:
     dest = local_root / hashlib.sha1(real_src.encode("utf-8")).hexdigest()[:16]
     try:
         local_root.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(dir=str(local_root)))
-        staged_ix = staging / "InferenceX"
-        # Copy the patched tree; re-copy every run because the patch state
-        # changes per task. 8-9 MB onto local disk is sub-second.
-        shutil.copytree(real_src, staged_ix, symlinks=True)
-        if dest.exists():
-            shutil.rmtree(dest, ignore_errors=True)
-        os.replace(staged_ix, dest)
-        shutil.rmtree(staging, ignore_errors=True)
+    except OSError as exc:
+        log.warning(
+            "baseline_executor: could not create local InferenceX root %s "
+            "(%s); using the network-mount checkout.", local_root, exc,
+        )
+        return src
+    # Lock keyed on dest so concurrent tasks mirroring the same source
+    # serialize their rmtree/replace instead of racing (see _mirror_lock).
+    lock_path = str(local_root / f".{dest.name}.lock")
+    staging: Path | None = None
+    try:
+        with _mirror_lock(lock_path):
+            staging = Path(tempfile.mkdtemp(dir=str(local_root)))
+            staged_ix = staging / "InferenceX"
+            # Copy the tree fresh; re-copy every run because the per-task
+            # patch step (_after_materialize_config) rewrites the mirror in
+            # place. 8-9 MB onto local disk is sub-second. Holding the lock
+            # across rmtree+replace stops a concurrent task swapping ``dest``
+            # out from under this copy.
+            shutil.copytree(real_src, staged_ix, symlinks=True)
+            if dest.exists():
+                shutil.rmtree(dest, ignore_errors=True)
+            os.replace(staged_ix, dest)
     except OSError as exc:
         log.warning(
             "baseline_executor: could not mirror InferenceX %s to local disk "
@@ -234,6 +286,12 @@ def _ensure_local_inferencex(src: str) -> str:
             real_src, exc,
         )
         return src
+    finally:
+        # Always clear the staging dir: empty after a successful os.replace,
+        # or holding a half-finished copy after a failure. Either way it must
+        # not accumulate under local_root across runs.
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
 
     if not (dest / "benchmarks" / "benchmark_lib.sh").is_file():
         log.warning(
@@ -924,6 +982,24 @@ class BaselineExecutor:
         # ``_ensure_local_inferencex`` above, which keeps that checkout on
         # stable local disk.
         output_dir.mkdir(parents=True, exist_ok=True)
+        # #524 hardening: a reused output_dir (explicit ``params['output_dir']``
+        # on a retry, or a re-run of the same task slot) may still hold a
+        # PRIOR attempt's server.log. Its terminal engine/worker-init markers
+        # would otherwise misclassify THIS attempt as ``server_init_dead`` even
+        # when the current server booted fine — the post-run scan
+        # (``server_log_death_excerpt`` below) can't tell a stale marker from a
+        # fresh one. Clear it so classification only sees this attempt's log.
+        stale_server_log = output_dir / "server.log"
+        try:
+            stale_server_log.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.warning(
+                "baseline_executor: could not clear stale server.log %s (%s); "
+                "a prior attempt's markers may bias failure classification.",
+                stale_server_log, exc,
+            )
         try:
             proc = await asyncio.to_thread(
                 run_with_session_kill, cmd,
