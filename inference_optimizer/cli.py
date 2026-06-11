@@ -5270,6 +5270,17 @@ def main(argv: list[str] | None = None) -> int:
         int: The process exit code (``optimize`` result, or ``2`` for no/unknown
         command).
     """
+    # Force line-buffering so output piped through `tee` (or any
+    # non-TTY sink) flushes every line immediately instead of
+    # block-buffering ~8 KB.  Without this the top-level log appears
+    # frozen for the entire duration of a Magpie subprocess (~30-60 min)
+    # because no new print() calls happen while communicate() blocks.
+    # See #468.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+
     parser = _build_parser()
     args = parser.parse_args(argv)
     level = logging.WARNING - 10 * min(args.verbose, 2)

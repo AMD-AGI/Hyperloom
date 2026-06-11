@@ -255,6 +255,23 @@ def test_run_with_session_kill_soft_deadline_does_not_fire_for_quick_child():
     assert "hi" in (cp.stdout or "")
 
 
+def test_run_with_session_kill_streams_child_output_to_parent(capsys):
+    """Captured child output is also mirrored immediately to parent streams."""
+    code = (
+        "import sys\n"
+        "print('child-out', flush=True)\n"
+        "print('child-err', file=sys.stderr, flush=True)\n"
+    )
+    cp = run_with_session_kill([sys.executable, "-c", code], timeout=10)
+
+    captured = capsys.readouterr()
+    assert cp.returncode == 0
+    assert "child-out" in (cp.stdout or "")
+    assert "child-err" in (cp.stderr or "")
+    assert "child-out" in captured.out
+    assert "child-err" in captured.err
+
+
 def test_run_with_session_kill_legacy_timeout_still_raises():
     """With ``soft_deadline_sec`` None, a child exceeding the hard ``timeout`` still raises ``TimeoutExpired``."""
     with pytest.raises(subprocess.TimeoutExpired):
