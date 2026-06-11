@@ -24,6 +24,13 @@ from typing import Any, Callable, Iterable
 DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
 
+# #266 transcript field cap: a single tool_result / text / thinking block can
+# be megabytes (a big file Read, a CSV dump), and the transcript is diagnostic
+# only — so cap every serialized string field. Without this the
+# agent_transcript.jsonl grows unbounded and can dwarf the artifacts it exists
+# to point at. Truncation appends a marker so a reader knows it was clipped.
+_TRANSCRIPT_FIELD_MAX_CHARS = 16_384
+
 
 # Upstream TraceLens category enum (orchestrator_prepare.py CATEGORY_SKILL_MAP) → GEAK labels.
 UPSTREAM_CATEGORY_TO_GEAK: dict[str, str] = {
@@ -311,22 +318,34 @@ def _iter_message_text(message: Any) -> Iterable[str]:
         yield result_text
 
 
-def _json_safe(value: Any) -> Any:
+def _cap_str(value: str, limit: int = _TRANSCRIPT_FIELD_MAX_CHARS) -> str:
+    """Truncate a transcript string to ``limit`` chars with a clip marker so a
+    reader can tell the field was bounded (#266)."""
+    if len(value) <= limit:
+        return value
+    return value[:limit] + f"... [truncated {len(value) - limit} chars]"
+
+
+def _json_safe(value: Any, *, cap: bool = True) -> Any:
     """Best-effort coercion of an SDK field into a JSON-serializable value.
 
     Tool inputs / results are usually plain dicts already, but the SDK may
     hand back nested objects; falling back to ``str`` keeps the transcript
     write infallible so a serialization edge case never aborts a TraceLens
-    run (#266)."""
+    run (#266). When ``cap`` is set every string (at any nesting depth) is
+    bounded to ``_TRANSCRIPT_FIELD_MAX_CHARS`` so a megabyte tool_result cannot
+    bloat the transcript."""
+    if isinstance(value, str):
+        return _cap_str(value) if cap else value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v, cap=cap) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v, cap=cap) for v in value]
     try:
         json.dumps(value)
         return value
     except (TypeError, ValueError):
-        if isinstance(value, dict):
-            return {str(k): _json_safe(v) for k, v in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [_json_safe(v) for v in value]
-        return str(value)
+        return _cap_str(str(value)) if cap else str(value)
 
 
 def _serialize_sdk_block(block: Any) -> dict[str, Any]:
@@ -348,10 +367,10 @@ def _serialize_sdk_block(block: Any) -> dict[str, Any]:
     record: dict[str, Any] = {"block": cls_name}
     text = getattr(block, "text", None)
     if isinstance(text, str):
-        record["text"] = text
+        record["text"] = _cap_str(text)
     thinking = getattr(block, "thinking", None)
     if isinstance(thinking, str):
-        record["thinking"] = thinking
+        record["thinking"] = _cap_str(thinking)
     name = getattr(block, "name", None)
     if isinstance(name, str):
         record["name"] = name
@@ -395,7 +414,7 @@ def _serialize_sdk_message(message: Any, *, seq: int) -> dict[str, Any]:
         record["content"] = [_serialize_sdk_block(b) for b in list(blocks)]
     result_text = getattr(message, "result", None)
     if isinstance(result_text, str) and result_text:
-        record["result"] = result_text
+        record["result"] = _cap_str(result_text)
     usage = getattr(message, "usage", None)
     if isinstance(usage, dict) and usage:
         record["usage"] = _json_safe(usage)
