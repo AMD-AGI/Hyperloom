@@ -227,7 +227,105 @@ async def test_integrate_handler_keeps_positive_stack_increment(
     assert res["decision"] == "KEEP"
     assert res["gain_pct"] == pytest.approx(0.75)
     assert res["decision_reason"] == "stack_positive_increment"
+    assert res["stack_incremental_gain_pct"] == pytest.approx(0.75)
+    assert res["stack_incremental_keep_threshold_pct"] == pytest.approx(0.5)
     assert res["revert_result"]["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_rejects_stack_increment_under_noise_floor(
+    session_dir, tmp_path,
+):
+    """A sub-0.5% stack increment should remain NEEDS_REVIEW, not KEEP."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    state = SharedState.load_or_init(session_dir)
+    state.baseline_tput = 90.0
+    state.current_best = {
+        "action": "integrate",
+        "kernel_id": "k004",
+        "tput": 100.0,
+    }
+    state.optimization_stack = [{
+        "action": "integrate",
+        "kernel_id": "k004",
+        "tput": 100.0,
+    }]
+    state.save(session_dir)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=100.49)
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="ok", stderr="",
+        )
+
+    target, patch_file = _write_patch_pair(tmp_path)
+    payload = {
+        "base_tput": 100.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k001",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+    }
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert res["status"] == "ok"
+    assert res["decision"] == "NEEDS_REVIEW"
+    assert res["gain_pct"] == pytest.approx(0.49)
+    assert "decision_reason" not in res
+    assert res["revert_result"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_keeps_exact_stack_increment_noise_floor(
+    session_dir, tmp_path,
+):
+    """A +0.5% stack increment should KEEP at the configured noise floor."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    state = SharedState.load_or_init(session_dir)
+    state.baseline_tput = 90.0
+    state.current_best = {
+        "action": "integrate",
+        "kernel_id": "k004",
+        "tput": 100.0,
+    }
+    state.optimization_stack = [{
+        "action": "integrate",
+        "kernel_id": "k004",
+        "tput": 100.0,
+    }]
+    state.save(session_dir)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=100.5)
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="ok", stderr="",
+        )
+
+    target, patch_file = _write_patch_pair(tmp_path)
+    payload = {
+        "base_tput": 100.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k001",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+    }
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert res["status"] == "ok"
+    assert res["decision"] == "KEEP"
+    assert res["stack_incremental_gain_pct"] == pytest.approx(0.5)
 
 
 @pytest.mark.asyncio

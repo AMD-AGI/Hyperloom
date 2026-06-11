@@ -2720,8 +2720,16 @@ class Coordinator:
     def _positive_needs_review_integrates(self) -> list[dict[str, Any]]:
         """Return positive NEEDS_REVIEW integrate entries eligible for stack validation."""
         out: list[dict[str, Any]] = []
+        stack_resolved_ids = self._stack_resolved_kernel_ids()
         for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
             if not isinstance(entry, dict):
+                continue
+            kernel_id = str(entry.get("kernel_id") or "").strip()
+            if (
+                bool(entry.get("stack_resolved"))
+                or bool(entry.get("stack_validation_in_progress"))
+                or kernel_id in stack_resolved_ids
+            ):
                 continue
             if str(entry.get("last_decision") or "").upper() != "NEEDS_REVIEW":
                 continue
@@ -2733,11 +2741,195 @@ class Coordinator:
                 continue
             patch_path = str(entry.get("patch_path") or "").strip()
             target_file = str(entry.get("target_file") or "").strip()
-            kernel_id = str(entry.get("kernel_id") or "").strip()
             if patch_path and target_file and kernel_id:
                 out.append(entry)
         out.sort(key=lambda e: float(e.get("best_gain_pct") or 0.0), reverse=True)
         return out
+
+    def _stack_resolved_kernel_ids(self) -> set[str]:
+        """Kernel ids already covered by a kept stack validation."""
+        resolved: set[str] = set()
+        for item in self.shared_state.optimization_stack or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("action") != "integrate":
+                continue
+            stack_ids = item.get("stack_kernel_ids")
+            if isinstance(stack_ids, list):
+                resolved.update(str(kid) for kid in stack_ids if str(kid))
+                continue
+            kernel_id = str(item.get("kernel_id") or "")
+            if "+" in kernel_id:
+                resolved.update(kid for kid in kernel_id.split("+") if kid)
+        return resolved
+
+    def _mark_stack_validation_entries_resolved(
+        self,
+        entries: list[dict[str, Any]],
+        result: dict[str, Any],
+    ) -> None:
+        """Mark component NEEDS_REVIEW entries as handled by a kept stack."""
+        stack_id = str(result.get("kernel_id") or "")
+        decision = str(result.get("decision") or "").upper()
+        if decision != "KEEP" or not stack_id:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        wanted = {
+            (
+                str(entry.get("kernel_id") or ""),
+                str(entry.get("patch_path") or ""),
+                str(entry.get("target_file") or ""),
+            )
+            for entry in entries
+            if isinstance(entry, dict)
+        }
+        for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            identity = (
+                str(entry.get("kernel_id") or ""),
+                str(entry.get("patch_path") or ""),
+                str(entry.get("target_file") or ""),
+            )
+            if identity not in wanted:
+                continue
+            entry["stack_resolved"] = True
+            entry["stack_validation_kernel_id"] = stack_id
+            entry["stack_decision"] = decision
+            entry["stack_resolved_at"] = now
+            entry.pop("stack_validation_in_progress", None)
+
+    def _stack_component_identities(
+        self, entries: list[dict[str, Any]],
+    ) -> set[tuple[str, str, str]]:
+        """Return (kernel_id, patch_path, target_file) tuples for stack members."""
+        return {
+            (
+                str(entry.get("kernel_id") or ""),
+                str(entry.get("patch_path") or ""),
+                str(entry.get("target_file") or ""),
+            )
+            for entry in entries
+            if isinstance(entry, dict)
+        }
+
+    def _mark_stack_validation_in_progress(
+        self,
+        entries: list[dict[str, Any]],
+        stack_id: str,
+    ) -> None:
+        """Persist an in-flight stack guard before applying patches."""
+        now = datetime.now(timezone.utc).isoformat()
+        wanted = self._stack_component_identities(entries)
+        for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            identity = (
+                str(entry.get("kernel_id") or ""),
+                str(entry.get("patch_path") or ""),
+                str(entry.get("target_file") or ""),
+            )
+            if identity not in wanted:
+                continue
+            entry["stack_validation_in_progress"] = True
+            entry["stack_validation_kernel_id"] = stack_id
+            entry["stack_validation_started_at"] = now
+
+    def _clear_stack_validation_in_progress(
+        self, entries: list[dict[str, Any]],
+    ) -> None:
+        """Clear the in-flight stack guard for component integrate entries."""
+        wanted = self._stack_component_identities(entries)
+        for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            identity = (
+                str(entry.get("kernel_id") or ""),
+                str(entry.get("patch_path") or ""),
+                str(entry.get("target_file") or ""),
+            )
+            if identity not in wanted:
+                continue
+            entry.pop("stack_validation_in_progress", None)
+
+    def _clear_pending_stack_validation_checkpoints(self) -> None:
+        """Drop crash-recovery checkpoints once a stack attempt is finished."""
+        self.shared_state.pending_stack_validation_result = {}
+        self.shared_state.pending_stack_validation_apply_results = []
+
+    async def _recover_interrupted_stack_validation(self) -> bool:
+        """Resume or abort a stack validation interrupted by crash."""
+        from .kernel_request_handlers import _maybe_revert_kernel_patch
+
+        pending = self.shared_state.pending_stack_validation_result
+        if isinstance(pending, dict) and pending:
+            stack = self._stack_entries_for_validation(
+                pending.get("stack_kernel_ids") or [],
+                stack_id=str(pending.get("kernel_id") or ""),
+            )
+            if len(stack) >= 2:
+                await self._finalize_stack_validation_outcome(stack, pending)
+                return True
+
+        partial_applies = list(
+            self.shared_state.pending_stack_validation_apply_results or [],
+        )
+        in_progress = [
+            entry for entry in (self.shared_state.kernel_integrate_attempts or {}).values()
+            if isinstance(entry, dict) and entry.get("stack_validation_in_progress")
+        ]
+        if not partial_applies and not in_progress:
+            return False
+
+        if partial_applies:
+            for applied in reversed(partial_applies):
+                _maybe_revert_kernel_patch(applied)
+        if in_progress:
+            self._clear_stack_validation_in_progress(in_progress)
+        self._clear_pending_stack_validation_checkpoints()
+        self.shared_state.save(self.session_dir)
+        log.warning(
+            "Recovered interrupted stack validation: reverted partial applies "
+            "and cleared in-progress guards",
+        )
+        return True
+
+    def _stack_entries_for_validation(
+        self,
+        kernel_ids: list[Any],
+        *,
+        stack_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """Rebuild component integrate ledger rows for a stack id."""
+        wanted_ids = {str(kid) for kid in kernel_ids if str(kid)}
+        if not wanted_ids and stack_id:
+            wanted_ids = {kid for kid in stack_id.split("+") if kid}
+        out: list[dict[str, Any]] = []
+        for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            kid = str(entry.get("kernel_id") or "")
+            if kid in wanted_ids:
+                out.append(entry)
+        out.sort(key=lambda e: str(e.get("kernel_id") or ""))
+        return out
+
+    async def _finalize_stack_validation_outcome(
+        self,
+        stack: list[dict[str, Any]],
+        result: dict[str, Any],
+    ) -> None:
+        """Record stack validation, promote KEEP, and clear recovery checkpoints."""
+        self.shared_state.record_kernel_integrate_result(result)
+        decision = str(result.get("decision") or "").upper()
+        if decision == "KEEP":
+            self._mark_stack_validation_entries_resolved(stack, result)
+            self.shared_state.save(self.session_dir)
+            await self._record_integrate_keep(result)
+        else:
+            self._clear_stack_validation_in_progress(stack)
+        self._clear_pending_stack_validation_checkpoints()
+        self.shared_state.save(self.session_dir)
 
     async def _maybe_validate_positive_needs_review_stack(self) -> None:
         """Run one E2E stack validation for multiple small positive kernel patches.
@@ -2746,6 +2938,8 @@ class Coordinator:
         more pending kernel patches individually show positive but sub-threshold
         E2E gain, validate their combined effect once before moving to SWEEP.
         """
+        if await self._recover_interrupted_stack_validation():
+            return
         entries = self._positive_needs_review_integrates()
         if len(entries) < 2:
             return
@@ -2760,13 +2954,19 @@ class Coordinator:
             stack.append(entry)
         if len(stack) < 2:
             return
+        stack_id = "+".join(str(e.get("kernel_id") or "") for e in stack)
+        self._mark_stack_validation_in_progress(stack, stack_id)
+        self._clear_pending_stack_validation_checkpoints()
+        self.shared_state.save(self.session_dir)
         result = await self._run_kernel_stack_validation_e2e(stack)
         if not isinstance(result, dict):
+            self._clear_stack_validation_in_progress(stack)
+            self._clear_pending_stack_validation_checkpoints()
+            self.shared_state.save(self.session_dir)
             return
-        self.shared_state.record_kernel_integrate_result(result)
-        if str(result.get("decision") or "").upper() == "KEEP":
-            await self._record_integrate_keep(result)
+        self.shared_state.pending_stack_validation_result = result
         self.shared_state.save(self.session_dir)
+        await self._finalize_stack_validation_outcome(stack, result)
 
     async def _run_kernel_stack_validation_e2e(
         self, entries: list[dict[str, Any]],
@@ -2775,6 +2975,7 @@ class Coordinator:
         from .action_executors.baseline import BaselineExecutor
         from .action_executors.benchmark_result import is_valid_measurement
         from .kernel_request_handlers import (
+            KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
             _maybe_apply_kernel_patch,
             _maybe_revert_kernel_patch,
         )
@@ -2799,6 +3000,10 @@ class Coordinator:
                     kernel_id=str(entry.get("kernel_id") or ""),
                 )
                 apply_results.append(applied)
+                self.shared_state.pending_stack_validation_apply_results = list(
+                    apply_results,
+                )
+                self.shared_state.save(self.session_dir)
                 if applied.get("status") != "ok":
                     raise RuntimeError(
                         f"stack patch apply failed for {entry.get('kernel_id')}: {applied}"
@@ -2835,7 +3040,11 @@ class Coordinator:
                     (new_tput - base_tput) / base_tput * 100.0
                     if base_tput > 0 else 0.0
                 )
-                decision = "KEEP" if gain_pct > 1.0 else "REVERT"
+                decision = (
+                    "KEEP"
+                    if gain_pct > KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
+                    else "REVERT"
+                )
 
             result = {
                 "status": "ok",
@@ -2852,6 +3061,9 @@ class Coordinator:
                 "stack_kernel_ids": kernel_ids,
                 "stack_validation": True,
             }
+            for metric in ("ttft_mean_ms", "e2el_mean_ms", "tpot_mean_ms"):
+                if isinstance(bench_result, dict) and metric in bench_result:
+                    result[metric] = bench_result.get(metric)
             if decision != "KEEP":
                 result["revert_result"] = {
                     "status": "ok",
@@ -6846,20 +7058,33 @@ class Coordinator:
             )
         ).strip()
         apply_result = result.get("apply_result") or {}
+        backup_manifest = (
+            apply_result.get("manifest_path")
+            if isinstance(apply_result, dict) else None
+        )
+        if not backup_manifest and isinstance(apply_result, dict):
+            stack_applies = apply_result.get("stack_apply_results")
+            if isinstance(stack_applies, list):
+                for applied in stack_applies:
+                    if isinstance(applied, dict) and applied.get("manifest_path"):
+                        backup_manifest = applied.get("manifest_path")
+                        break
         entry = {
             "action": "integrate",
             "kernel_id": result.get("kernel_id"),
             "patch_path": result.get("patch_path"),
             "target_file": result.get("target_file"),
-            "backup_manifest": (
-                apply_result.get("manifest_path")
-                if isinstance(apply_result, dict) else None
-            ),
+            "backup_manifest": backup_manifest,
             "gain_pct": result.get("gain_pct"),
             "tput": float(new_tput),
             "workspace": result.get("workspace"),
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        stack_kernel_ids = result.get("stack_kernel_ids")
+        if isinstance(stack_kernel_ids, list) and stack_kernel_ids:
+            entry["stack_kernel_ids"] = [
+                str(kid) for kid in stack_kernel_ids if str(kid)
+            ]
         integrate_gap_cid = str(result.get("gap_canonical_id") or "").strip()
         if integrate_gap_cid:
             entry["gap_canonical_id"] = integrate_gap_cid

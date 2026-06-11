@@ -28,6 +28,8 @@ from typing import Any, Awaitable, Callable
 
 log = logging.getLogger(__name__)
 _BACKGROUND_ROCPROF_TASKS: set[asyncio.Task[Any]] = set()
+STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
+KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 
 
 # Where the kernel-agent shell tools live; read lazily so cli.py's late env injection wins.
@@ -2706,16 +2708,21 @@ async def integrate_handler(
     # base_tput > 0 already guaranteed by the early guard above.
     gain_pct = (new_tput - base_tput) / base_tput * 100.0
     stack_positive_keep = False
+    stack_incremental_gain_pct: float | None = None
     try:
         from .shared_state import SharedState
         state = SharedState.load_or_init(session_dir)
         current_best = state.current_best or {}
         current_best_tput = float(current_best.get("tput") or 0.0)
+        if current_best_tput > 0:
+            stack_incremental_gain_pct = (
+                (new_tput - current_best_tput) / current_best_tput * 100.0
+            )
         stack_positive_keep = (
             bool(state.optimization_stack)
             and str(current_best.get("action") or "") == "integrate"
             and current_best_tput > 0
-            and new_tput > current_best_tput
+            and stack_incremental_gain_pct >= STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
         )
     except Exception:  # noqa: BLE001 - fall back to the original threshold
         stack_positive_keep = False
@@ -2758,6 +2765,10 @@ async def integrate_handler(
     }
     if stack_positive_keep and gain_pct <= keep_threshold_pct:
         result["decision_reason"] = "stack_positive_increment"
+        result["stack_incremental_gain_pct"] = stack_incremental_gain_pct
+        result["stack_incremental_keep_threshold_pct"] = (
+            STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
+        )
     if rocprof_after_info:
         result["rocprof_after_kernel_opt"] = rocprof_after_info
     return result

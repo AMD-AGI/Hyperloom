@@ -217,7 +217,11 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
             "workspace": f"/tmp/integrate-{kid}",
         })
 
+    validation_calls = 0
+
     async def _fake_stack_validation(entries):
+        nonlocal validation_calls
+        validation_calls += 1
         assert {e["kernel_id"] for e in entries} == {"k001", "k004"}
         return {
             "status": "ok",
@@ -230,6 +234,7 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
             "gain_pct": 2.0,
             "workspace": str(tmp_path / "integrate-stack"),
             "apply_result": {"status": "ok"},
+            "stack_kernel_ids": ["k001", "k004"],
             "stack_validation": True,
         }
 
@@ -244,6 +249,115 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
     assert c.shared_state.current_best["action"] == "integrate"
     assert c.shared_state.current_best["kernel_id"] == "k001+k004"
     assert c.shared_state.cumulative_gain_validated == pytest.approx(2.0)
+    assert validation_calls == 1
+    resolved_entries = [
+        entry for entry in c.shared_state.kernel_integrate_attempts.values()
+        if entry.get("kernel_id") in {"k001", "k004"}
+    ]
+    assert all(entry["stack_resolved"] is True for entry in resolved_entries)
+    assert {
+        entry["stack_validation_kernel_id"] for entry in resolved_entries
+    } == {"k001+k004"}
+
+    await c._maybe_validate_positive_needs_review_stack()
+
+    assert validation_calls == 1
+    stack_entries = [
+        item for item in c.shared_state.optimization_stack
+        if isinstance(item, dict) and item.get("kernel_id") == "k001+k004"
+    ]
+    assert stack_entries
+    assert stack_entries[0].get("stack_kernel_ids") == ["k001", "k004"]
+
+
+@pytest.mark.asyncio
+async def test_recovers_pending_stack_validation_after_crash(tmp_path: Path):
+    """A saved pending stack result should finish promotion without re-applying."""
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        current_best={"action": "baseline", "tput": 100.0},
+    )
+    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
+        c.shared_state.record_kernel_integrate_result({
+            "status": "ok",
+            "decision": "NEEDS_REVIEW",
+            "kernel_id": kid,
+            "patch_path": f"/tmp/{kid}_opt.cu",
+            "target_file": f"/tmp/{kid}.cu",
+            "new_tput": 100.0 + gain,
+            "gain_pct": gain,
+            "workspace": f"/tmp/integrate-{kid}",
+        })
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    c._mark_stack_validation_in_progress(stack, "k001+k004")
+    c.shared_state.pending_stack_validation_result = {
+        "status": "ok",
+        "decision": "KEEP",
+        "kernel_id": "k001+k004",
+        "patch_path": "/tmp/k001_opt.cu+/tmp/k004_opt.cu",
+        "target_file": "/tmp/k001.cu+/tmp/k004.cu",
+        "base_tput": 100.0,
+        "new_tput": 102.0,
+        "gain_pct": 2.0,
+        "workspace": str(tmp_path / "integrate-stack"),
+        "apply_result": {"status": "ok"},
+        "stack_kernel_ids": ["k001", "k004"],
+        "stack_validation": True,
+    }
+    c.shared_state.save(tmp_path)
+
+    validation_calls = 0
+
+    async def _should_not_run(entries):
+        nonlocal validation_calls
+        validation_calls += 1
+        raise AssertionError("stack validation should not re-run during recovery")
+
+    async def _noop_roofline(*, reason: str):
+        return None
+
+    c._run_kernel_stack_validation_e2e = _should_not_run
+    c._maybe_enqueue_watermark_roofline = _noop_roofline
+
+    await c._recover_interrupted_stack_validation()
+
+    assert validation_calls == 0
+    assert c.shared_state.current_best["kernel_id"] == "k001+k004"
+    assert not c.shared_state.pending_stack_validation_result
+    resolved = [
+        entry for entry in c.shared_state.kernel_integrate_attempts.values()
+        if entry.get("kernel_id") in {"k001", "k004"}
+    ]
+    assert all(entry.get("stack_resolved") for entry in resolved)
+
+
+def test_positive_needs_review_integrates_skip_in_progress_entries():
+    """In-flight stack members must not be re-selected for another validation."""
+    c = Coordinator.__new__(Coordinator)
+    c.shared_state = SharedState()
+    c.shared_state.kernel_integrate_attempts = {
+        "k001": {
+            "kernel_id": "k001",
+            "patch_path": "/tmp/k001_opt.cu",
+            "target_file": "/tmp/k001.cu",
+            "last_decision": "NEEDS_REVIEW",
+            "best_gain_pct": 0.6,
+            "stack_validation_in_progress": True,
+        },
+        "k004": {
+            "kernel_id": "k004",
+            "patch_path": "/tmp/k004_opt.cu",
+            "target_file": "/tmp/k004.cu",
+            "last_decision": "NEEDS_REVIEW",
+            "best_gain_pct": 0.8,
+        },
+    }
+
+    eligible = c._positive_needs_review_integrates()
+    assert len(eligible) == 1
+    assert eligible[0]["kernel_id"] == "k004"
 
 
 # 1. _build_sweep_params_from_recipe — pure static helper

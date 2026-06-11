@@ -441,6 +441,11 @@ class SharedState:
     plateau_overrides: dict[str, Any] = field(default_factory=dict)
     # E2E integrate bookkeeping keyed by kernel_id+patch_path+args; prevents re-validating the same patch after NEEDS_REVIEW/REVERT.
     kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
+    # Crash-safe stack-validation checkpoints (SWEEP-entry combo E2E).
+    pending_stack_validation_result: dict[str, Any] = field(default_factory=dict)
+    pending_stack_validation_apply_results: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
     rejected_kernel_patches: list[dict[str, Any]] = field(default_factory=list)
     # Kernel ids with no remaining automated path (from REVERTs + exhausted integrate attempts).
     rejected_kernel_ids: list[str] = field(default_factory=list)
