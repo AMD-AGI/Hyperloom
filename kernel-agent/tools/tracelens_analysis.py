@@ -71,6 +71,9 @@ def _resolve_idle_pct_threshold() -> float:
     Relaxed from the docx §2 ~20% target to 80% because real SGLang inference traces
     sit structurally at ~50-60% idle (host scheduling + JIT/launch overhead), which the
     20% gate over-suppressed. Pin via ``HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD``.
+
+    Returns:
+        The idle-percent gate threshold.
     """
     raw = os.environ.get(HIGH_IDLE_PCT_THRESHOLD_ENV, "").strip()
     if not raw:
@@ -90,6 +93,9 @@ def _resolve_arch_benchmark_timeout_s() -> int:
     Configured via ``TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC``. Empty, non-numeric,
     or out-of-range values fall back to the 600s floor rather than crashing the
     pipeline with a ``ValueError`` before the microbenchmark runs.
+
+    Returns:
+        The arch microbenchmark timeout in seconds (at least the 600s floor).
     """
     raw = os.environ.get(ARCH_BENCHMARK_TIMEOUT_ENV, "").strip()
     if not raw:
@@ -104,7 +110,18 @@ def _resolve_arch_benchmark_timeout_s() -> int:
 def _build_high_idle_warning(
     *, idle_pct: float, threshold_pct: float, report_path: Path,
 ) -> dict[str, Any]:
-    """Build the ``trace_health_warnings[]`` entry for a high-idle trace (consumed by trace_analyze_handler T4 to route to param optimization)."""
+    """Build the ``trace_health_warnings[]`` entry for a high-idle trace.
+
+    Consumed by ``trace_analyze_handler`` T4 to route to param optimization.
+
+    Args:
+        idle_pct: The measured GPU idle percentage.
+        threshold_pct: The idle-gate threshold that was exceeded.
+        report_path: Path to the source report, recorded in the entry.
+
+    Returns:
+        The structured ``high_gpu_idle_pct`` warning entry.
+    """
     return {
         "code": "high_gpu_idle_pct",
         "severity": "warning",
@@ -178,6 +195,17 @@ def _check_selected_chunk_has_gpu_events(
     returns ``None`` when the chunk carries real GPU work, else a ``steady_state_chunk_empty``
     warning the caller appends and raises on. A data-validity gate, not a reorder — falling
     back to another mode is the operator's call (never a silent swap).
+
+    Args:
+        split_dir: Directory holding the splitter's ``execution_details.csv``.
+        selected_chunk: The chunk file selected by the steady-state mode.
+        mode: The requested ``--steady-state-mode``.
+        available_modes: Mapping of mode to its ``(label, chunks)`` for
+            surfacing non-empty alternatives.
+
+    Returns:
+        ``None`` when the chunk has real GPU work, else a
+        ``steady_state_chunk_empty`` warning dict.
     """
     details_path = split_dir / "execution_details.csv"
     if not details_path.is_file():
@@ -305,7 +333,17 @@ def _resolve_min_busy_ratio() -> float:
 
 
 def _busy_ratio(num_events: float, busy_us: float, dur_us: float) -> float | None:
-    """Return ``busy_us / dur_us`` or ``None`` when undefined (caller defers to N25)."""
+    """Compute the clamped busy ratio for a chunk.
+
+    Args:
+        num_events: GPU event count for the chunk.
+        busy_us: GPU busy duration in microseconds.
+        dur_us: Total chunk duration in microseconds.
+
+    Returns:
+        ``busy_us / dur_us`` clamped to ``[0, 1]``, or ``None`` when undefined
+        (the caller defers to the N25 structural gate).
+    """
     if dur_us <= 0.0 or num_events <= 0:
         return None
     return max(0.0, min(1.0, busy_us / dur_us))
@@ -320,9 +358,19 @@ def _check_selected_chunk_has_gpu_events_quality(
 ) -> "dict[str, Any] | None":
     """Quality gate complementing N25's structural gate.
 
-    ``None`` when the chunk is acceptable (busy_ratio >= threshold), no alternate is
-    materially better, or the CSV/row is absent. Otherwise a ``steady_state_chunk_low_quality``
-    warning (same shape as N25 for the N26 retry path). See the module-level N36 comment.
+    See the module-level N36 comment for the gate's rationale.
+
+    Args:
+        split_dir: Directory holding the splitter's ``execution_details.csv``.
+        selected_chunk: The chunk file selected by the steady-state mode.
+        mode: The requested ``--steady-state-mode``.
+        available_modes: Mapping of mode to its ``(label, chunks)`` for
+            evaluating better alternatives.
+
+    Returns:
+        ``None`` when the chunk is acceptable (busy_ratio >= threshold), no
+        alternate is materially better, or the CSV/row is absent. Otherwise a
+        ``steady_state_chunk_low_quality`` warning dict (same shape as N25).
     """
     details_path = split_dir / "execution_details.csv"
     if not details_path.is_file():
@@ -605,9 +653,17 @@ def open_json(path: Path) -> dict[str, Any]:
 
 
 def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> int:
-    """Count GPU kernel events in a torch_profiler trace (pre-flight check for CPU-only traces).
+    """Count GPU kernel events in a torch_profiler trace.
 
-    Counts only real GPU kernels via :func:`is_kernel_event`, not host-side wrappers.
+    Used as a pre-flight check for CPU-only traces. Counts only real GPU
+    kernels via :func:`is_kernel_event`, not host-side wrappers.
+
+    Args:
+        trace_file: Path to the torch_profiler trace (JSON or ``.gz``).
+        max_events: Early-exit cap on the number of events counted.
+
+    Returns:
+        The GPU kernel event count, or 0 when the trace is unreadable.
     """
     try:
         payload = open_json(trace_file)
@@ -626,7 +682,17 @@ def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> in
 
 
 def _trace_input_sort_key(path: Path) -> tuple[int, str]:
-    """Prefer the merged annotated trace over rank/phase shards during directory discovery (TraceLens splitter needs the large trace)."""
+    """Compute the discovery sort key for a trace input path.
+
+    Prefers the merged annotated trace over rank/phase shards (the TraceLens
+    splitter needs the large trace).
+
+    Args:
+        path: The trace file path to rank.
+
+    Returns:
+        A ``(priority, name)`` sort key (lower priority sorts first).
+    """
     name = path.name
     if name.startswith("merged-"):
         return (0, name)
@@ -677,7 +743,17 @@ def discover_trace_inputs(trace_input: Path) -> tuple[str, list[Path]]:
 
 
 def is_kernel_event(event: dict[str, Any]) -> bool:
-    """Strict GPU-kernel filter: only ``cat == 'kernel'`` events (excludes host-side sync/launch wrappers that would eclipse real kernels)."""
+    """Apply a strict GPU-kernel filter to a trace event.
+
+    Only ``cat == 'kernel'`` events qualify, excluding host-side sync/launch
+    wrappers that would eclipse real kernels.
+
+    Args:
+        event: A single trace event dict.
+
+    Returns:
+        ``True`` if the event is a real GPU kernel.
+    """
     cat = str(event.get("cat") or event.get("category") or "").lower()
     if cat != "kernel":
         return False
@@ -741,7 +817,16 @@ _FLYDSL_SCAN_BYTES = 4096
 
 
 def _looks_like_flydsl_source(source_file: str) -> bool:
-    """Return True when ``source_file`` is a FlyDSL kernel source (content-sniff first 4 KiB for FlyDSL markers)."""
+    """Detect whether a source file is a FlyDSL kernel source.
+
+    Content-sniffs the first 4 KiB for FlyDSL markers.
+
+    Args:
+        source_file: Path to the candidate ``.py`` source.
+
+    Returns:
+        ``True`` when FlyDSL markers are found in the file head.
+    """
     if not source_file or not source_file.endswith(".py"):
         return False
     try:
@@ -808,7 +893,15 @@ _COMPILE_GENERATED_NAME_MARKERS = (
 )
 @functools.lru_cache(maxsize=1)
 def _framework_patch_roots() -> tuple[str, ...]:
-    """Framework install roots (from framework_paths.resolve_patch_target_roots); also emits a lower-case variant of each (``/app/ATOM/atom/`` -> ``/app/atom/atom/``) for case-insensitive matching."""
+    """Resolve framework install roots for patch-target matching.
+
+    Roots come from ``framework_paths.resolve_patch_target_roots``; a
+    lower-case variant of each (e.g. ``/app/ATOM/atom/`` ->
+    ``/app/atom/atom/``) is also emitted for case-insensitive matching.
+
+    Returns:
+        The framework install roots, including lower-case variants.
+    """
     try:
         if _resolve_patch_target_roots is None:
             raise ImportError
@@ -830,9 +923,14 @@ def _framework_patch_roots() -> tuple[str, ...]:
 
 @functools.lru_cache(maxsize=1)
 def _aiter_csrc_root() -> str:
-    """aiter's own device-source root (e.g. ``.../aiter_meta/csrc/``),
-    resolved from the installed package. Empty when aiter is not importable.
-    Cached once per process."""
+    """Resolve aiter's own device-source root from the installed package.
+
+    Cached once per process.
+
+    Returns:
+        The aiter csrc root (e.g. ``.../aiter_meta/csrc/``), or ``""`` when
+        aiter is not importable.
+    """
     if _aiter_jit_core is None:
         return ""
     raw = (getattr(_aiter_jit_core, "AITER_CSRC_DIR", "") or "").replace(os.sep, "/")
@@ -840,7 +938,13 @@ def _aiter_csrc_root() -> str:
 
 
 def _flydsl_reusable_roots() -> tuple[str, ...]:
-    """FlyDSL checkout root(s) for PR #668 moe_flydsl pseudo-ops, lower-cased ($DSL2_ROOT/$FLYDSL_ROOT take precedence over the WekaFS default)."""
+    """Resolve FlyDSL checkout root(s) for PR #668 moe_flydsl pseudo-ops.
+
+    ``$DSL2_ROOT`` / ``$FLYDSL_ROOT`` take precedence over the WekaFS default.
+
+    Returns:
+        The lower-cased FlyDSL checkout roots.
+    """
     out: list[str] = []
     for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
         val = (os.environ.get(env_key, "") or "").strip()
@@ -921,13 +1025,30 @@ def is_torch_dispatch_shim_source(source_file: str) -> bool:
     tensor op to a vendor backend and hold no rewritable device kernel, so a
     symbol attributed here must be treated as a non-reusable dispatch stub
     (same handling as ``@compile_ops`` JIT stubs in ``aiter/ops/moe_op.py``).
+
+    Args:
+        source_file: The resolved source-file path.
+
+    Returns:
+        ``True`` when the file is a known torch-dispatch interception shim.
     """
     posix = str(source_file or "").replace("\\", "/")
     return any(posix.endswith(suffix) for suffix in _TORCH_DISPATCH_SHIM_SOURCES)
 
 
 def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
-    """Return True for torch.compile / Inductor / cache-generated kernels (not portable across serving runs)."""
+    """Detect torch.compile / Inductor / cache-generated kernels.
+
+    These are not portable across serving runs.
+
+    Args:
+        name: The kernel symbol/name.
+        source_file: The resolved source-file path.
+
+    Returns:
+        ``True`` for a runtime-generated kernel that is not a stable in-repo
+        Triton source.
+    """
     lower_name = (name or "").lower()
     lower_file = (source_file or "").lower()
     if any(marker in lower_file for marker in _RUNTIME_GENERATED_SOURCE_MARKERS):
@@ -941,9 +1062,16 @@ def is_runtime_generated_kernel(name: str, source_file: str) -> bool:
 def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
     """Return ``(reusable, skip_reason)`` for a hot-kernel candidate.
 
-    Single source of truth for the kernel-opt routing gate; ``skip_reason`` is empty
-    when reusable, else a short audit explanation. Also rejects vendor/collective/native-op
-    name markers (:data:`_NON_PATCHABLE_NAME_MARKERS`) and library-less ``aten::*`` ops.
+    Single source of truth for the kernel-opt routing gate. Also rejects
+    vendor/collective/native-op name markers
+    (:data:`_NON_PATCHABLE_NAME_MARKERS`) and library-less ``aten::*`` ops.
+
+    Args:
+        candidate: The hot-kernel candidate dict.
+
+    Returns:
+        A ``(reusable, skip_reason)`` tuple; ``skip_reason`` is empty when
+        reusable, else a short audit explanation.
     """
     source_file = str(candidate.get("source_file") or "")
     name = str(candidate.get("name") or "")
@@ -1025,7 +1153,19 @@ _VENDOR_KEYWORD_NAMES = (
 
 
 def is_vendor_dispatch_wrapper(name: str, source_file: str) -> bool:
-    """Heuristic: True when source_file is a thin dispatch wrapper around a precompiled vendor binary (.so/.co); nothing to rewrite."""
+    """Detect a thin dispatch wrapper around a precompiled vendor binary.
+
+    Uses a small file size plus content signatures so that real small kernels
+    survive (conservative).
+
+    Args:
+        name: The kernel symbol/name.
+        source_file: The resolved source-file path.
+
+    Returns:
+        ``True`` when the source is a dispatch wrapper around a ``.so``/``.co``
+        with nothing to rewrite.
+    """
     nm = (name or "").lower()
     if any(kw in nm for kw in _VENDOR_KEYWORD_NAMES):
         return True
@@ -1249,6 +1389,13 @@ def _compound_subwindow_keywords(name: str) -> list[str]:
     shorter trailing windows (longest first, most specific) so the embedded
     function symbol (e.g. ``invoke_fused_moe_kernel``) still resolves. The
     namespace/profiler prefix and a trailing numeric id are stripped first.
+
+    Args:
+        name: The compound/profiler-wrapped symbol name.
+
+    Returns:
+        Progressively shorter trailing snake_case windows (longest first),
+        capped at six.
     """
     cleaned = _strip_template_args(name.strip())
     if "::" in cleaned:
@@ -1275,7 +1422,15 @@ def _file_defines_symbol(path: Path, keyword: str) -> bool:
     Distinguishes a kernel's definition site (``def invoke_fused_moe_kernel``,
     a Triton ``@triton.jit`` function, or a C/HIP ``__global__``) from a file
     that only calls/wraps it (e.g. sglang's ``kernel_shape_profiler.py`` dispatch
-    shim). Best-effort: returns False on read errors.
+    shim).
+
+    Args:
+        path: The source file to inspect.
+        keyword: The symbol name to look for a definition of.
+
+    Returns:
+        ``True`` when the file defines the symbol; ``False`` on read errors or
+        when it only mentions it.
     """
     kw = re.escape(keyword)
     try:
@@ -1291,7 +1446,15 @@ def _file_defines_symbol(path: Path, keyword: str) -> bool:
 
 
 def _prefer_symbol_definition(keyword: str, hits: list[Path]) -> list[Path]:
-    """Rank definition sites of ``keyword`` ahead of mere mentions."""
+    """Rank definition sites of a symbol ahead of mere mentions.
+
+    Args:
+        keyword: The symbol name to prefer definitions of.
+        hits: Candidate source paths to rank.
+
+    Returns:
+        The ranked paths, preferring files that define ``keyword``.
+    """
     definers = [h for h in hits if _file_defines_symbol(h, keyword)]
     return _rank_paths(definers) if definers else _rank_paths(hits)
 
