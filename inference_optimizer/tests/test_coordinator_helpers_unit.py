@@ -197,6 +197,21 @@ def test_dedupe_positional_token():
     assert out == "foo --tp 8"
 
 
+def test_dedupe_normalizes_equals_form():
+    out = ch._dedupe_extra_server_args(
+        "--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA"
+    )
+    assert out == "--attention-backend ROCM_AITER_FA"
+
+
+def test_dedupe_leaves_json_arg_untouched():
+    args = (
+        '--json-model-override-args {"rope_scaling":null} '
+        "--attention-backend ROCM_ATTN --attention-backend ROCM_AITER_FA"
+    )
+    assert ch._dedupe_extra_server_args(args) == args
+
+
 # ---- _merge_cumulative_extra_*_args (name built to dodge the rename guard) ----
 
 _merge = getattr(ch, "_merge_cumulative_extra_" + "sglang_args")
@@ -218,3 +233,20 @@ def test_merge_candidate_contains_base():
 
 def test_merge_candidate_only():
     assert _merge("", "--b 2", "") == "--b 2"
+
+
+def test_merge_dedupes_attention_backend_equals_space_mix():
+    out = _merge(
+        "--attention-backend=ROCM_ATTN",
+        "--attention-backend ROCM_AITER_FA",
+        "",
+    )
+    assert out == "--attention-backend ROCM_AITER_FA"
+
+
+def test_merge_leaves_json_arg_untouched():
+    args = (
+        '--json-model-override-args {"rope_scaling":null} '
+        "--attention-backend ROCM_ATTN --attention-backend ROCM_AITER_FA"
+    )
+    assert _merge("", args, "") == args

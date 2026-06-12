@@ -53,7 +53,7 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # Pod-local base for auto-cloned open-source deps, decoupled from USER_DATA_PATH
 # so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
 _open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"
-HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/fully-local}"
+HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/hyperloom}"
 MAGPIE_DIR="${MAGPIE_DIR:-${_open_source_root}/Magpie}"
 # Resolve MAGPIE_PYTHON dynamically. The previous default
 # ${MAGPIE_DIR}/venv/bin/python assumed a Magpie-private venv, but
