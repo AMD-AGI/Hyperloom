@@ -26,8 +26,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-import ray
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+# NOTE: ``ray`` is imported lazily inside ``_fanout_to_all_nodes`` only. The
+# dynamo (SSH) backend runs this script with ``--local`` on each GPU pod where
+# ray is not installed, so a top-level ``import ray`` would crash --local before
+# it can run. The ray fan-out path imports it on demand.
 
 
 # Sentinel markers (keep in sync with _server_patcher._discover_sglang_plan).
@@ -304,50 +306,24 @@ def _apply_on_pod(
 # ---------------------------------------------------------------------------
 # Ray actor scaffolding (mirrors kernel_patch_multinode.py's per-node fan-out)
 # ---------------------------------------------------------------------------
-@ray.remote
-def _actor_apply(
-    *,
-    tracelens_root: str,
-    tracelens_internal_root: str,
-    sglang_version_pin: str | None,
-) -> dict[str, Any]:
-    """Ray actor entrypoint that patches one pod.
-
-    Pinned to one node via NodeAffinityScheduling so every pod (head +
-    workers) runs the patcher exactly once.
-
-    Args:
-        tracelens_root (str): Path to the TraceLens checkout on the pod.
-        sglang_version_pin (str | None): Optional advisory version pin.
-
-    Returns:
-        dict[str, Any]: The per-pod summary from :func:`_apply_on_pod`.
-    """
-    return _apply_on_pod(
-        tracelens_root=tracelens_root,
-        tracelens_internal_root=tracelens_internal_root,
-        sglang_version_pin=sglang_version_pin,
-    )
-
-
 def _fanout_to_all_nodes(
     *,
     tracelens_root: str,
     tracelens_internal_root: str,
     sglang_version_pin: str | None,
 ) -> list[dict[str, Any]]:
-    """Spawn one actor per alive node and collect all summaries.
+    """Spawn one actor per alive node; collect all summaries.
 
-    Args:
-        tracelens_root (str): Path to the TraceLens checkout on the pods.
-        sglang_version_pin (str | None): Optional advisory version pin.
-
-    Returns:
-        list[dict[str, Any]]: One per-pod summary dict per alive node.
+    ray is imported here (not at module top) so the ``--local`` dynamo path
+    runs on pods without ray installed.
 
     Raises:
         RuntimeError: If ``ray.nodes()`` reports no alive nodes.
     """
+    import ray
+    from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+    actor_apply = ray.remote(_apply_on_pod)
     ray.init(address="auto", ignore_reinit_error=True)
     nodes = [n for n in ray.nodes() if n.get("Alive")]
     if not nodes:
@@ -357,7 +333,7 @@ def _fanout_to_all_nodes(
     actors = []
     for n in nodes:
         node_id = n["NodeID"]
-        opts = _actor_apply.options(
+        opts = actor_apply.options(
             scheduling_strategy=NodeAffinitySchedulingStrategy(
                 node_id=node_id, soft=False,
             ),
@@ -400,6 +376,13 @@ def main() -> int:
         default=os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "") or None,
         help="optional advisory pin (e.g. '0.5.11'); logged on mismatch",
     )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="patch THIS pod only (no ray fan-out). Used by the dynamo SSH "
+             "backend, which ships+runs this script on each GPU pod directly. "
+             "ray is never imported in this mode.",
+    )
     args = parser.parse_args()
 
     if not args.tracelens_root or not Path(args.tracelens_root).is_dir():
@@ -419,6 +402,19 @@ def main() -> int:
             "per_pod": [],
         }, indent=2))
         return 2
+
+    # --local: dynamo SSH backend. Patch only this pod (no ray). The caller
+    # fans this out over SSH to every GPU pod, so the NFS-shared trace dir ends
+    # up annotated the same as the ray path — only the dispatch differs.
+    if args.local:
+        r = _apply_on_pod(
+            tracelens_root=args.tracelens_root,
+            tracelens_internal_root=args.tracelens_internal_root,
+            sglang_version_pin=args.sglang_version_pin or None,
+        )
+        overall = r.get("status") if r.get("status") in ("applied", "skipped") else "failed"
+        print(json.dumps({"status": overall, "per_pod": [r]}, indent=2, sort_keys=True))
+        return 0 if overall in ("applied", "skipped") else 1
 
     try:
         per_pod = _fanout_to_all_nodes(
