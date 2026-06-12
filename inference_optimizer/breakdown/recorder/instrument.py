@@ -404,23 +404,97 @@ def _to_bool(value: Any) -> bool | None:
     return None
 
 
-# Cache of resolved tool metadata, keyed by the resolved root dir. The git
-# probe is a one-shot per root: it never re-runs in the hot path.
+# Cache of resolved tool metadata, keyed by ``tool:root_dir``. The git/CLI/pip
+# probes are a one-shot per key: they never re-run in the hot path.
 _TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
 
+# Per-tool "authoritative version" recipe. ``root_env`` holds the install root
+# (used for the commit probe and the git-based version strategies). ``version``
+# picks how the human version is derived:
+#   * "git_describe" -> ``git describe --tags --always --dirty`` of the root
+#   * "git_short"    -> ``git rev-parse --short HEAD`` of the root (== commit)
+#   * ("cmd", argv)  -> first line of ``argv --version`` style CLI output
+#   * ("dist", names)-> importlib.metadata version of the first matching dist
+# Notes (verified on-cluster): GEAK's version is its git SHA, NOT the pip
+# ``mini-swe-agent`` (that's the upstream core); InferenceX is git-only (no pip
+# package); TraceLens reads best as ``git describe``; OOB sub-agents report via
+# their npm CLIs (codex/claude), and the OOB harness itself via ``oob-mcp-server``.
+_TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
+    "tracelens":    {"root_env": "TRACELENS_ROOT",            "version": "git_describe"},
+    "geak":         {"root_env": "GEAK_ROOT",                 "version": "git_short"},
+    "mini":         {"root_env": "GEAK_ROOT",                 "version": "git_short"},
+    "geak-gaagent": {"root_env": "GEAK_ROOT",                 "version": "git_short"},
+    "claude":       {"root_env": "",                          "version": ("cmd", ("claude", "--version"))},
+    "codex":        {"root_env": "",                          "version": ("cmd", ("codex", "--version"))},
+    "oob":          {"root_env": "",                          "version": ("dist", ("oob-mcp-server",))},
+    "inferencex":   {"root_env": "INFERENCEX_PATH",           "version": "git_short"},
+    "kernel_agent": {"root_env": "HYPERLOOM_KERNEL_AGENT_ROOT", "version": "git_short"},
+}
 
-def _git_short_commit(root: Path) -> str:
-    """Best-effort ``git rev-parse --short HEAD`` for ``root`` (never raises)."""
+
+def _run_first_line(argv: list[str]) -> str:
+    """Run ``argv`` and return the trimmed first output line (never raises)."""
     import subprocess  # local: keep module import cost off the common path
 
     try:
         out = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=3, check=False,
+            argv, capture_output=True, text=True, timeout=3, check=False,
         )
-        return out.stdout.strip() if out.returncode == 0 else ""
     except Exception:  # noqa: BLE001
         return ""
+    if out.returncode != 0:
+        return ""
+    text = (out.stdout or "").strip() or (out.stderr or "").strip()
+    return text.splitlines()[0].strip()[:120] if text else ""
+
+
+def _git_short_commit(root: Path) -> str:
+    """Best-effort ``git rev-parse --short HEAD`` for ``root`` (never raises)."""
+    return _run_first_line(
+        ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+    )
+
+
+def _git_describe(root: Path) -> str:
+    """Best-effort ``git describe --tags --always --dirty`` (never raises)."""
+    return _run_first_line(
+        ["git", "-C", str(root), "describe", "--tags", "--always", "--dirty"],
+    )
+
+
+def _dist_version(names: tuple[str, ...]) -> str:
+    """First resolvable ``importlib.metadata`` version among ``names`` ("" if none)."""
+    try:
+        from importlib.metadata import version as _dist_ver
+    except Exception:  # noqa: BLE001
+        return ""
+    for name in names:
+        try:
+            v = str(_dist_ver(name) or "").strip()
+        except Exception:  # noqa: BLE001
+            continue
+        # Stale ``UNKNOWN.egg-info`` can masquerade as 0.0.0; reject it.
+        if v and v != "0.0.0":
+            return v
+    return ""
+
+
+def _probe_tool_version(strategy: Any, root_dir: str) -> str:
+    """Resolve a tool's human version per its provenance ``strategy``."""
+    try:
+        if strategy == "git_describe":
+            return _git_describe(Path(root_dir)) if root_dir else ""
+        if strategy == "git_short":
+            return _git_short_commit(Path(root_dir)) if root_dir else ""
+        if isinstance(strategy, tuple) and len(strategy) == 2:
+            kind, arg = strategy
+            if kind == "cmd":
+                return _run_first_line(list(arg))
+            if kind == "dist":
+                return _dist_version(tuple(arg))
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
 
 
 def _tool_metadata(
@@ -432,15 +506,23 @@ def _tool_metadata(
 ) -> dict[str, Any]:
     """Resolve ``{tool, root_dir, commit, version}`` for an external tool.
 
-    ``root`` (explicit) wins over ``root_env`` (an env var holding the path).
-    The commit is a cached ``git rev-parse`` of the root; ``version`` is passed
-    through verbatim when the tool already surfaced its own. All best-effort:
-    a missing root just yields empty strings.
+    Root resolution: explicit ``root`` > caller ``root_env`` > the tool's
+    registered ``root_env``. ``commit`` is a cached ``git rev-parse`` of the
+    root. ``version`` is the caller-supplied value when the tool already
+    surfaced its own, else a cached per-tool probe (git describe / CLI
+    ``--version`` / pip dist) following ``_TOOL_PROVENANCE``. All best-effort:
+    nothing here ever raises into the optimizer.
     """
     import os
 
-    root_dir = str(root or (os.environ.get(root_env or "") or "")).strip()
-    cache_key = f"{tool}:{root_dir}"
+    key = str(tool or "").lower()
+    hint = _TOOL_PROVENANCE.get(key, {})
+    root_dir = str(
+        root
+        or os.environ.get(root_env or "", "")
+        or os.environ.get(str(hint.get("root_env") or ""), "")
+    ).strip()
+    cache_key = f"{key}:{root_dir}"
     cached = _TOOL_META_CACHE.get(cache_key)
     if cached is None:
         commit = ""
@@ -450,10 +532,18 @@ def _tool_metadata(
                     commit = _git_short_commit(Path(root_dir))
             except Exception:  # noqa: BLE001
                 commit = ""
-        cached = {"tool": tool, "root_dir": root_dir, "commit": commit}
+        probed = _probe_tool_version(hint.get("version"), root_dir) if hint else ""
+        cached = {
+            "tool": tool, "root_dir": root_dir,
+            "commit": commit, "_probed_version": probed,
+        }
         _TOOL_META_CACHE[cache_key] = cached
-    meta = dict(cached)
-    meta["version"] = str(version or "")
+    meta = {
+        "tool":     cached["tool"],
+        "root_dir": cached["root_dir"],
+        "commit":   cached["commit"],
+    }
+    meta["version"] = str(version or "") or str(cached.get("_probed_version") or "")
     return meta
 
 
@@ -629,12 +719,15 @@ def record_kernel_backend_result(
                 "duration_sec":       _to_float(
                     att.get("duration_sec") or att.get("elapsed_sec")
                     or att.get("elapsed_s")),
+                # Root/version resolved per-backend by the tool registry:
+                # geak -> $GEAK_ROOT git SHA, claude/codex -> CLI --version. An
+                # explicit root/version the backend surfaced still wins.
                 "tool": _tool_metadata(
                     backend or "kernel_agent",
                     root=str(att_meta.get("root_dir") or result_meta.get("root_dir") or "")
                     or None,
-                    root_env="HYPERLOOM_KERNEL_AGENT_ROOT",
-                    version=str(att_meta.get("version") or result_meta.get("version") or ""),
+                    version=str(att_meta.get("version") or result_meta.get("version") or "")
+                    or None,
                 ),
             }
             key = attempt_id or (f"{run_id}-{backend}" if run_id else None)
@@ -680,8 +773,7 @@ def record_kernel_backend_result(
             "tool": _tool_metadata(
                 backend,
                 root=str(result_meta.get("root_dir") or "") or None,
-                root_env="HYPERLOOM_KERNEL_AGENT_ROOT",
-                version=str(result_meta.get("version") or ""),
+                version=str(result_meta.get("version") or "") or None,
             ),
         }
         rec.record_item(

@@ -10,12 +10,28 @@ substream was recorded.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from inference_optimizer.breakdown.recorder import (
     assemble_parts,
     instrument,
 )
+
+
+def _init_git_repo(path: Path) -> str:
+    for argv in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+        ["git", "commit", "--allow-empty", "-q", "-m", "init"],
+    ):
+        subprocess.run(argv, cwd=path, check=True, capture_output=True)
+    out = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--short", "HEAD"],
+        check=True, capture_output=True, text=True,
+    )
+    return out.stdout.strip()
 
 
 def test_kernel_journey_absent_without_substreams(tmp_path: Path) -> None:
@@ -159,6 +175,32 @@ def test_discovery_run_carries_duration(tmp_path: Path) -> None:
     )
     out = assemble_parts(tmp_path)
     assert out["kernel_journey"]["discovery_runs"][0]["duration_sec"] == 4.2
+
+
+def test_tool_version_probe_git_strategies(tmp_path: Path) -> None:
+    sha = _init_git_repo(tmp_path)
+    # geak -> git short SHA (NOT pip mini-swe-agent); commit == version.
+    meta = instrument._tool_metadata("geak", root=str(tmp_path))
+    assert meta["commit"] == sha
+    assert meta["version"] == sha
+    # tracelens -> git describe (--always falls back to the short sha here).
+    meta_tl = instrument._tool_metadata("tracelens", root=str(tmp_path))
+    assert meta_tl["version"]  # non-empty describe output
+    # A caller-supplied version always wins over the probe.
+    meta_explicit = instrument._tool_metadata(
+        "geak", root=str(tmp_path), version="v9.9",
+    )
+    assert meta_explicit["version"] == "v9.9"
+
+
+def test_tool_version_probe_cmd_and_dist() -> None:
+    # CLI strategy: python3 --version is always available in CI.
+    assert instrument._probe_tool_version(
+        ("cmd", ("python3", "--version")), "",
+    ).lower().startswith("python")
+    # dist strategy resolves an installed package and rejects bogus 0.0.0.
+    assert instrument._dist_version(("pytest",))
+    assert instrument._dist_version(("definitely-not-a-real-dist-xyz",)) == ""
 
 
 def test_attach_kernel_roofline_enriches_journey() -> None:
