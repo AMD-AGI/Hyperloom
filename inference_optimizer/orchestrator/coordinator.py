@@ -495,7 +495,12 @@ class Coordinator:
             self._maintenance_every_ticks = MAINTENANCE_EVERY_TICKS
 
         # R2: when cyclic mode is on, pin a per-macro-cycle budget window so the
-        # per-phase budget fractions apply per cycle, not per whole run.
+        # per-phase budget fractions apply per cycle, not per whole run. The
+        # window only *takes effect* for long/unbounded runs — ``_budget_minutes``
+        # (and the reloop gate) ignore it for short bounded runs (--max-hours ≤
+        # 24), whose real budget is not even known here at __init__ (it is set
+        # later in ``run()``). Keeping the assignment unconditional is therefore
+        # harmless: short runs stay anchored on the whole session.
         if _phase_state.is_cyclic_phases_enabled() and float(
             getattr(self.shared_state, "cycle_minutes", 0) or 0
         ) <= 0:

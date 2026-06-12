@@ -398,12 +398,38 @@ def is_cyclic_phases_enabled() -> bool:
 
     Enabled by default; set ``INFERENCE_OPTIMIZER_CYCLIC_PHASES`` to a falsy
     value (``0``/``false``/``off``) to force the legacy monotonic chain. Even
-    when enabled, an actual reloop still requires budget headroom (the reloop
-    floor) and a non-converged run, so short runs never loop in practice.
+    when enabled, the macro-cycle behaviour additionally requires a
+    long/unbounded budget (see :func:`is_long_run`) so short bounded runs never
+    loop in practice.
     """
     return os.environ.get(PHASE_CYCLIC_ENV, "").strip().lower() not in {
         "0", "false", "no", "off",
     }
+
+
+# Long-run gate. The cyclic macro-cycle behaviour (per-cycle budget window +
+# SWEEP→EXPLORE reloop) only engages for unbounded runs or bounded runs longer
+# than this threshold. A short bounded run (``--max-hours ≤ 24``) stays on the
+# legacy single-pass chain with whole-run phase budgets, regardless of the
+# (default-on) cyclic env flag — this is the "≤24h behaves exactly as before"
+# contract. Gating only on the env flag (not the budget) silently compressed
+# short-run phase budgets to the 6h cycle window and let SWEEP reloop with as
+# little as 30min remaining.
+DEFAULT_LONGRUN_THRESHOLD_MINUTES: float = 24 * 60
+
+
+def is_long_run(state: Any) -> bool:
+    """True when the session budget justifies cyclic macro-cycling.
+
+    Unbounded runs (``max_minutes`` == 0, i.e. the 14-day ceiling) and bounded
+    runs longer than :data:`DEFAULT_LONGRUN_THRESHOLD_MINUTES` are "long".
+    Everything ``≤ 24h`` is a short bounded run and must behave like the legacy
+    monotonic chain.
+    """
+    mm = _max_minutes(state)
+    if mm <= 0:
+        return True
+    return mm > float(DEFAULT_LONGRUN_THRESHOLD_MINUTES)
 
 
 def _cumulative_gain_validated(state: Any) -> float:
@@ -435,6 +461,14 @@ def should_reloop_to_explore(
     cycle = int(getattr(state, "macro_cycle", 0) or 0)
     evidence: dict[str, Any] = {"cyclic": is_cyclic_phases_enabled(), "macro_cycle": cycle}
     if not is_cyclic_phases_enabled():
+        return False, evidence
+
+    # Short bounded runs (``--max-hours ≤ 24``) never open a new macro-cycle:
+    # they wind down to CLOSE on a single pass exactly like the legacy chain,
+    # even though cyclic mode is on by default. Without this gate a 4h run that
+    # reached SWEEP with ≥30min remaining would reloop.
+    if not is_long_run(state):
+        evidence["reloop_blocked"] = "short_run_single_pass"
         return False, evidence
 
     # Per-cycle gain since this cycle started → effective no-gain streak. A
@@ -633,6 +667,11 @@ def _budget_minutes(state: Any) -> float:
     budget (``DEFAULT_PHASE_BUDGET_PCT``) is a fraction of ONE macro-cycle's
     window rather than the whole run. 0 (legacy/non-cyclic) falls back to the
     total ``max_minutes`` so behaviour is identical to the monotonic chain.
+
+    The per-cycle window only applies to long/unbounded runs (:func:`is_long_run`).
+    A short bounded run (``--max-hours ≤ 24``) always anchors its phase budgets
+    on the whole session even when ``cycle_minutes`` is set, so its phases are
+    never silently compressed to the 6h cycle window.
     Note: ``session_remaining_seconds`` deliberately keeps using ``max_minutes``
     — the global deadline is per-run, not per-cycle.
     """
@@ -640,7 +679,7 @@ def _budget_minutes(state: Any) -> float:
         cm = float(getattr(state, "cycle_minutes", 0) or 0)
     except (TypeError, ValueError):
         cm = 0.0
-    if cm > 0:
+    if cm > 0 and is_long_run(state):
         return cm
     return _max_minutes(state)
 
@@ -1715,7 +1754,9 @@ __all__ = [
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
     "DEFAULT_CYCLE_MIN_GAIN_PCT",
     "PHASE_CYCLIC_ENV",
+    "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_cyclic_phases_enabled",
+    "is_long_run",
     "should_reloop_to_explore",
     "abort_prelude",
     "allowed_actions_for",
