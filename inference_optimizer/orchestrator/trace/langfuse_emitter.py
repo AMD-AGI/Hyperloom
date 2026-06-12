@@ -340,6 +340,7 @@ class LangfuseEmitter:
             "scores_sent": 0,           # decision Scores created (span + trace)
             "spans_opened": 0,          # phase + agent spans created
             "ext_shards_read": 0,       # out-of-process ext/*.jsonl files swept
+            "breakdown_recorded": 0,    # 1 once the full SBD JSON was attached
             "errors": 0,                # swallowed send failures
         }
         self._flushed = False
@@ -574,6 +575,62 @@ class LangfuseEmitter:
             self._flushed = True
             self._write_receipt()
 
+    def record_session_breakdown(self, breakdown: dict[str, Any]) -> None:
+        """Attach the complete ``session_breakdown.json`` document to the trace.
+
+        Emitted as one ``session_breakdown`` observation whose ``output`` is the
+        full JSON, attached to this session's ``trace_id`` so it lands on the
+        same trace even when called after :meth:`flush_session` has closed the
+        live spans (the normal order: write file -> flush -> patch langfuse ->
+        record here). Idempotent (a second call is a no-op) and best-effort:
+        any send failure is swallowed and never breaks shutdown.
+        """
+        if not self._enabled or not isinstance(breakdown, dict) or not breakdown:
+            return
+        if self._counts.get("breakdown_recorded"):
+            return
+        # Cross-process guard: a prior process (the original run, or an earlier
+        # `recover-session`) may have already attached the document. The
+        # persisted receipt is the only state shared across processes, so an
+        # offline recovery in a fresh process stays idempotent.
+        persisted = read_receipt(self.session_dir) or {}
+        if (persisted.get("counts") or {}).get("breakdown_recorded"):
+            self._counts["breakdown_recorded"] = 1
+            return
+        try:
+            obs = _start_obs(
+                self._client,
+                name="session_breakdown",
+                as_type="span",
+                trace_context={"trace_id": self._trace_id},
+                input=None,
+                output=breakdown,
+                metadata={
+                    "schema_version": breakdown.get("schema_version"),
+                    "exporter_version": breakdown.get("exporter_version"),
+                    "stop_reason": (breakdown.get("session") or {}).get("stop_reason"),
+                },
+            )
+            # Stamp trace name/session_id too, so a session whose only trace
+            # artifact is the breakdown (e.g. no LLM calls) is still grouped.
+            _set_trace_attrs(
+                obs, name=self._trace_name(), session_id=self._session_label,
+            )
+            _end_obs(obs, None)
+            self._counts["breakdown_recorded"] = 1
+        except Exception:  # noqa: BLE001
+            self._counts["errors"] += 1
+            log.debug("langfuse: record_session_breakdown failed", exc_info=True)
+        finally:
+            try:
+                self._client.flush()
+            except Exception:  # noqa: BLE001
+                self._counts["errors"] += 1
+                log.debug("langfuse: flush after breakdown failed", exc_info=True)
+            # Persist the breakdown_recorded flag so a later process (recovery)
+            # sees it and skips re-attaching the document.
+            self._write_receipt()
+
     def _close_spans(self) -> None:
         """End every open span, innermost first (agent -> phase -> root)."""
         for span in list(self._agent_spans.values()):
@@ -752,6 +809,38 @@ def flush_session(session_dir: Path) -> None:
     get_emitter(session_dir).flush_session()
 
 
+def _read_breakdown_file(session_dir: Path) -> dict[str, Any]:
+    """Load the written ``session_breakdown.json`` for ``session_dir`` ({} if absent)."""
+    import json
+
+    from ...breakdown import BREAKDOWN_FILENAME
+
+    path = Path(session_dir) / BREAKDOWN_FILENAME
+    if not path.exists():
+        return {}
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        return obj if isinstance(obj, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def record_session_breakdown(
+    session_dir: Path,
+    breakdown: dict[str, Any] | None = None,
+) -> None:
+    """Attach the final ``session_breakdown.json`` to the session's trace.
+
+    Call after the breakdown is written and the langfuse section patched (so
+    the attached document is the complete, post-flush form). Reads the file
+    from disk when ``breakdown`` is not supplied. No-op when live push is
+    disabled; best-effort (never raises).
+    """
+    if breakdown is None:
+        breakdown = _read_breakdown_file(Path(session_dir))
+    get_emitter(session_dir).record_session_breakdown(breakdown)
+
+
 def read_receipt(session_dir: Path) -> dict[str, Any] | None:
     """Read the persisted ``langfuse_receipt.json`` for ``session_dir``.
 
@@ -777,4 +866,5 @@ __all__ = [
     "flush_session",
     "get_emitter",
     "read_receipt",
+    "record_session_breakdown",
 ]
