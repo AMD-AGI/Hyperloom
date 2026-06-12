@@ -10,7 +10,12 @@
     "framework / precision / tp / conc fields straight into the GitHub Actions",
     "matrix; the workflow forwards them to optimize_submit.py as",
     "--manual --framework --precision --tp --concurrency so per-model config",
-    "is FIXED (no auto-detect). All rows run FP4 per request.",
+    "is FIXED (no auto-detect). Precision is per-model NATIVE because MI300X",
+    "(gfx942) has no native FP4: FP8 for R1/Qwen3-Next/MiMo, INT4 for Kimi,",
+    "FP4 only for MXFP4-native gpt-oss & Qwen3.6. tp8 everywhere except",
+    "MiniMax M2.5/M2.7 (tp4 - their FP8 block-128 weights are not divisible",
+    "by 8: 1536/8=192 is not a multiple of 128). Kimi & MiMo run on sglang",
+    "(vLLM tp8 MLA assert / missing arch respectively).",
     "",
     "Optional per-row fields nodes / rayjob_image drive multi-node RayJob runs",
     "(nodes>1 => optimize_submit forces --mode claw + injects the topology).",
@@ -47,23 +52,23 @@
       "label": "DeepSeek R1",
       "repo_id": "deepseek-ai/DeepSeek-R1-0528",
       "framework": "sglang",
-      "precision": "FP4",
+      "precision": "FP8",
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "Ready (local_path /wekafs/models/deepseek-ai-DeepSeek-R1-0528, hasInferenceX). FP8-native upstream; FP4 is the optimize target."
+      "note": "FP8-native upstream. MI300X has no native FP4; FP4 baseline failed to start, so baseline at FP8. sglang+tp8 starts cleanly."
     },
     {
       "pool_id": "inferencex-daily-fixed",
       "pool_index": 1,
       "label": "Kimi K2.6",
       "repo_id": "moonshotai/Kimi-K2.6",
-      "framework": "vllm",
-      "precision": "FP4",
+      "framework": "sglang",
+      "precision": "INT4",
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "Ready (local /wekafs/models/moonshotai-Kimi-K2.6). Tags show compressed-tensors + multimodal (image-text-to-text)."
+      "note": "INT4 compressed-tensors native. vLLM tp8 hits MLA num_head%16 assert; sglang handles tp8 cleanly. ~554G weights -> ~69G/GPU at tp8."
     },
     {
       "pool_id": "inferencex-daily-fixed",
@@ -71,11 +76,11 @@
       "label": "MiniMax M2.7",
       "repo_id": "MiniMaxAI/MiniMax-M2.7",
       "framework": "vllm",
-      "precision": "FP4",
-      "tp": 8,
+      "precision": "FP8",
+      "tp": 4,
       "conc": 64,
       "registered": true,
-      "note": "Ready (local_path /wekafs/models/MiniMaxAI-MiniMax-M2.7)."
+      "note": "FP8 block-128 native. tp8 crashes: intermediate 1536/8=192 not divisible by 128 (observed). tp4 -> 384=3x128 OK, ~54G/GPU (no OOM)."
     },
     {
       "pool_id": "inferencex-daily-fixed",
@@ -83,11 +88,11 @@
       "label": "MiniMax M2.5",
       "repo_id": "MiniMaxAI/MiniMax-M2.5",
       "framework": "vllm",
-      "precision": "FP4",
-      "tp": 8,
+      "precision": "FP8",
+      "tp": 4,
       "conc": 64,
       "registered": true,
-      "note": "Ready (local_path /wekafs/models/MiniMaxAI-MiniMax-M2.5, id minimax-m2.5-d2kd2, hasInferenceX). Replaces MiniMax-M3 (no official M3). FP4-native variants amd/MiniMax-M2.5-MXFP4 & nvidia/MiniMax-M2.5-NVFP4 also registered if a cleaner FP4 baseline is wanted."
+      "note": "FP8 block-128 native. Same tp8 192-not-div-128 crash as M2.7; tp4 OK (~54G/GPU). Kept original FP8 (not amd MXFP4 variant) per decision."
     },
     {
       "pool_id": "inferencex-daily-fixed",
@@ -95,11 +100,11 @@
       "label": "Qwen3-Next",
       "repo_id": "Qwen/Qwen3-Next-80B-A3B-Instruct",
       "framework": "vllm",
-      "precision": "FP4",
+      "precision": "FP8",
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "Ready (local_path /wekafs/models/Qwen-Qwen3-Next-80B-A3B-Instruct). -Thinking and -Instruct-FP8 variants also registered if ever wanted."
+      "note": "FP8-native. A3B MoE; tp8 keeps per-GPU memory low and starts fine. -Instruct-FP8 variant also registered."
     },
     {
       "pool_id": "inferencex-daily-fixed",
@@ -130,12 +135,12 @@
       "pool_index": 7,
       "label": "MiMo V2.5 Pro",
       "repo_id": "XiaomiMiMo/MiMo-V2.5-Pro",
-      "framework": "vllm",
-      "precision": "FP4",
+      "framework": "sglang",
+      "precision": "FP8",
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "Ready (local /wekafs/models/XiaomiMiMo-MiMo-V2.5-Pro, id mimo-v2-5-pro-pkbhw, ~963G). Replaces MiMo-V2-PRO (does not exist). Downloaded 2026-06-05."
+      "note": "vLLM lacks this arch; needs sglang 0.5.11 ROCm image (verified registered). ~963G -> tp8 required (~120G/GPU). FP8 baseline."
     }
   ]
 }

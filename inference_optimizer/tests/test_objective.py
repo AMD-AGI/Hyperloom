@@ -32,9 +32,7 @@ from inference_optimizer.paths import make_session_dir
 from inference_optimizer.session_paths import target_baseline_json
 
 
-# ===========================================================================
 # fixtures
-# ===========================================================================
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -56,9 +54,7 @@ def _backends_silent() -> dict[str, object]:
     }
 
 
-# ===========================================================================
 # TargetGainObjective
-# ===========================================================================
 def test_target_gain_basic_progress():
     obj = TargetGainObjective(target_gain_pct=10.0)
     s = SharedState(baseline_tput=1000.0, cumulative_gain=0.0)
@@ -91,9 +87,7 @@ def test_target_gain_pressure_zero_before_baseline():
     assert obj.pressure_input(s) == 0.0
 
 
-# ===========================================================================
 # TargetTputObjective
-# ===========================================================================
 def test_target_tput_uses_current_best():
     obj = TargetTputObjective(target_tput_per_gpu=900.0)
     s = SharedState(baseline_tput=800.0, current_best={"tput": 850.0})
@@ -117,9 +111,7 @@ def test_target_tput_zero_rejected():
         TargetTputObjective(target_tput_per_gpu=0)
 
 
-# ===========================================================================
 # TargetBaselineObjective
-# ===========================================================================
 def test_target_baseline_loads_ref_tput(tmp_path):
     workspace = tmp_path / "ref-baseline"
     workspace.mkdir()
@@ -149,9 +141,7 @@ def test_target_baseline_missing_report_rejected(tmp_path):
         TargetBaselineObjective(baseline_dir=str(workspace))
 
 
-# ===========================================================================
 # TimeOnlyObjective
-# ===========================================================================
 def test_time_only_never_reached():
     obj = TimeOnlyObjective()
     s = SharedState(baseline_tput=999.0, current_best={"tput": 9999.0},
@@ -162,9 +152,7 @@ def test_time_only_never_reached():
     assert not obj.reached(s)
 
 
-# ===========================================================================
 # build_objective factory
-# ===========================================================================
 def test_build_objective_target_gain():
     obj = build_objective({"MAX_HOURS": "2", "TARGET_GAIN_PCT": "10"})
     assert isinstance(obj, TargetGainObjective)
@@ -208,9 +196,7 @@ def test_build_objective_treats_empty_target_as_unset():
     assert isinstance(obj, TimeOnlyObjective)
 
 
-# ===========================================================================
 # Coordinator.run() long loop
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_run_stops_on_max_ticks(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
@@ -226,7 +212,6 @@ async def test_run_stops_on_max_ticks(session_dir):
 async def test_run_stops_on_objective_reached(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        # Pre-load state so objective is already reached on tick 1.
         c.shared_state.baseline_tput = 1000.0
         c.shared_state.cumulative_gain = 50.0
         c.shared_state.save(session_dir)
@@ -243,8 +228,6 @@ async def test_run_stops_on_objective_reached(session_dir):
 async def test_run_stops_on_time_exhausted(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        # max_minutes = 0.001 = 60ms; each tick is fast, but the budget is
-        # enforced AFTER each tick so we always run >=1 tick.
         reason = await c.run(max_minutes=0.001, max_ticks=1000)
         assert reason == "time_exhausted"
     finally:
@@ -252,7 +235,6 @@ async def test_run_stops_on_time_exhausted(session_dir):
 
 
 def test_closing_grace_default_scales_with_max_hours():
-    # max_minutes is wall-clock budget in minutes (CLI: max_hours * 60).
     assert effective_closing_grace_sec(120.0, None) == pytest.approx(120.0)
     assert effective_closing_grace_sec(0.6, None) == pytest.approx(0.72)
     assert effective_closing_grace_sec(120.0, 30.0) == 30.0
@@ -347,7 +329,7 @@ async def test_run_closing_phase_skips_reactor(session_dir):
 async def test_run_stops_on_signal_via_stop_event(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        c._stop.set()  # simulate SIGINT
+        c._stop.set()
         reason = await c.run(max_ticks=10)
         assert reason == "signal"
     finally:

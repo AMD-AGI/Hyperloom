@@ -9,14 +9,10 @@ The Critic uses only 4 KB endpoints (contract §4):
 * ``POST /api/kb/batch_insert``
 * ``POST /api/kb/edges/add``
 
-We expose them as plain methods on :class:`KBClient` (a protocol) and ship
-two implementations:
-
-* :class:`HTTPKBClient` — thin urllib-based transport with retry +
-  exponential backoff. We deliberately avoid pulling in ``httpx`` so the
-  runtime stays installable in minimal Codex containers.
-* :class:`InMemoryKBClient` (in ``in_memory_kb_client.py``) — same surface,
-  pure Python state, used by tests and dry-runs.
+Exposed as methods on the :class:`KBClient` protocol with two
+implementations: :class:`HTTPKBClient` (urllib-based, retry + exponential
+backoff; avoids ``httpx`` so it installs in minimal Codex containers) and
+:class:`InMemoryKBClient` (pure-Python, for tests / dry-runs).
 """
 
 from __future__ import annotations
@@ -59,18 +55,56 @@ class KBClient(Protocol):
         limit: int = 10,
         sort_by: str = "updated_at_desc",
         include_deleted: bool = False,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """Read entries matching a scope via ``POST /api/kb/list``.
 
-    def upsert(self, payload: dict[str, Any]) -> dict[str, Any]: ...
+        Args:
+            scope_filter (dict[str, Any]): Scope dimensions to match against.
+            kind (str | None): Optional entry kind filter.
+            metadata_filter (dict[str, Any] | None): Optional metadata filter.
+            limit (int): Maximum number of entries to return.
+            sort_by (str): Server-side sort key (e.g. ``updated_at_desc``).
+            include_deleted (bool): Whether soft-deleted entries are returned.
+
+        Returns:
+            dict[str, Any]: The decoded JSON response body.
+        """
+
+    def upsert(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Insert or update a single entry via ``POST /api/kb/upsert``.
+
+        Args:
+            payload (dict[str, Any]): The entry body to upsert.
+
+        Returns:
+            dict[str, Any]: The decoded JSON response body.
+        """
 
     def batch_insert(
         self,
         items: list[dict[str, Any]],
         *,
         on_conflict: str = "upsert",
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """Insert many entries via ``POST /api/kb/batch_insert``.
 
-    def add_edges(self, edges: list[dict[str, Any]]) -> dict[str, Any]: ...
+        Args:
+            items (list[dict[str, Any]]): Entry bodies to insert.
+            on_conflict (str): Conflict resolution strategy (e.g. ``upsert``).
+
+        Returns:
+            dict[str, Any]: The decoded JSON response body.
+        """
+
+    def add_edges(self, edges: list[dict[str, Any]]) -> dict[str, Any]:
+        """Create graph edges via ``POST /api/kb/edges/add``.
+
+        Args:
+            edges (list[dict[str, Any]]): Edge definitions to add.
+
+        Returns:
+            dict[str, Any]: The decoded JSON response body.
+        """
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +126,22 @@ class HTTPKBClient:
         backoff_base: float = DEFAULT_BACKOFF_BASE,
         sleep_fn=time.sleep,
     ):
+        """Configure the HTTP transport.
+
+        Args:
+            base_url (str): KB service base URL; trailing slash is stripped.
+            token (str | None): Bearer token; falls back to the
+                ``KB_SERVICE_TOKEN`` environment variable when omitted.
+            timeout_ms (int): Per-request timeout in milliseconds.
+            retry_max (int): Maximum number of retries on 429/5xx/network
+                errors.
+            backoff_base (float): Base seconds for exponential backoff.
+            sleep_fn (Callable[[float], None]): Sleep function, injectable for
+                tests.
+
+        Raises:
+            ValueError: If ``base_url`` is empty.
+        """
         if not base_url:
             raise ValueError("HTTPKBClient: base_url is required")
         self.base_url = base_url.rstrip("/")
@@ -114,6 +164,21 @@ class HTTPKBClient:
         sort_by: str = "updated_at_desc",
         include_deleted: bool = False,
     ) -> dict[str, Any]:
+        """Read entries matching a scope via ``POST /api/kb/list``.
+
+        Args:
+            scope_filter (dict[str, Any]): Scope dimensions to match against.
+            kind (str | None): Optional entry kind filter; omitted when
+                ``None``.
+            metadata_filter (dict[str, Any] | None): Optional metadata filter;
+                omitted when ``None``.
+            limit (int): Maximum number of entries to return.
+            sort_by (str): Server-side sort key (e.g. ``updated_at_desc``).
+            include_deleted (bool): Whether soft-deleted entries are returned.
+
+        Returns:
+            dict[str, Any]: The decoded JSON response body.
+        """
         body: dict[str, Any] = {
             "scope_filter": scope_filter,
             "limit": limit,
@@ -127,6 +192,14 @@ class HTTPKBClient:
         return self._request("/api/kb/list", body)
 
     def upsert(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Insert or update a single entry via ``POST /api/kb/upsert``.
+
+        Args:
+            payload (dict[str, Any]): The entry body to upsert.
+
+        Returns:
+            dict[str, Any]: The decoded JSON response body.
+        """
         return self._request("/api/kb/upsert", payload)
 
     def batch_insert(
@@ -135,18 +208,54 @@ class HTTPKBClient:
         *,
         on_conflict: str = "upsert",
     ) -> dict[str, Any]:
+        """Insert many entries via ``POST /api/kb/batch_insert``.
+
+        Args:
+            items (list[dict[str, Any]]): Entry bodies to insert.
+            on_conflict (str): Conflict resolution strategy (e.g. ``upsert``).
+
+        Returns:
+            dict[str, Any]: The decoded JSON response body.
+        """
         return self._request(
             "/api/kb/batch_insert",
             {"items": items, "on_conflict": on_conflict},
         )
 
     def add_edges(self, edges: list[dict[str, Any]]) -> dict[str, Any]:
+        """Create graph edges via ``POST /api/kb/edges/add``.
+
+        Args:
+            edges (list[dict[str, Any]]): Edge definitions to add.
+
+        Returns:
+            dict[str, Any]: The decoded JSON response body.
+        """
         return self._request("/api/kb/edges/add", {"edges": edges})
 
     # ------------------------------------------------------------------
     # Internal — request / retry
     # ------------------------------------------------------------------
     def _request(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """POST ``body`` to ``path`` with retry, backoff, and metrics.
+
+        Retries on 429/5xx/network errors up to ``retry_max`` times. Records
+        write counter and duration metrics on every attempt.
+
+        Args:
+            path (str): Endpoint path appended to ``base_url`` (e.g.
+                ``/api/kb/upsert``).
+            body (dict[str, Any]): JSON-serialisable request body.
+
+        Returns:
+            dict[str, Any]: The decoded JSON response body (``{}`` if empty).
+
+        Raises:
+            KBNotFoundError: On HTTP 404.
+            KBConflictError: On HTTP 409.
+            KBValidationError: On non-retryable 4xx (excluding 429).
+            KBTransportError: When all retries are exhausted.
+        """
         url = f"{self.base_url}{path}"
         data = json.dumps(body).encode("utf-8")
         headers = {
@@ -200,6 +309,15 @@ class HTTPKBClient:
         )
 
     def _backoff_for(self, attempt: int) -> float:
+        """Compute the sleep duration before the next retry.
+
+        Args:
+            attempt (int): 1-based attempt number that just failed.
+
+        Returns:
+            float: Seconds to sleep — exponential in ``attempt`` with jitter
+            to avoid a thundering herd.
+        """
         # Exponential with optional jitter to avoid thundering herd.
         base = self.backoff_base * (2 ** (attempt - 1))
         return base * (0.9 + 0.2 * random.random())

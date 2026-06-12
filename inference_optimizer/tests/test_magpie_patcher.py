@@ -1,34 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``_magpie_patcher.ensure_magpie_atomic_scripts_patch``
-(Hyperloom ``bugs.md`` §C #1 root-cause fix).
-
-The patcher's contract:
-
-* Replace the non-atomic ``shutil.copy2 + chmod`` block inside
-  ``<MAGPIE_DIR>/Magpie/modes/benchmark/benchmarker.py``
-  ``_prepare_benchmark_scripts`` with a temp-file + ``os.replace`` form
-  so concurrent ``bash source`` readers never see a half-truncated
-  ``<InferenceX>/benchmarks/*.sh``.
-* Idempotent — repeated calls are no-ops once the sentinel substring
-  ``Hyperloom #C1 patch`` is present.
-* Concurrency-safe — two installers racing the same checkout end up
-  with one patched file, not double-patched garbage.
-* Fail-soft on layout drift — missing ``MAGPIE_DIR``, missing file, or
-  an already-mutated file all return ``False`` instead of raising. The
-  install script is expected to escalate ``False`` to ``die`` (this is
-  a known RCA fix; the unit-test contract is the soft return only).
-
-The fixtures synthesise a minimal Magpie tree inside ``tmp_path`` so
-we never touch the real ``$MAGPIE_DIR`` checkout. The fixture
-``benchmarker.py`` is reduced to just the ``_prepare_benchmark_scripts``
-method body — that is the entire surface the patcher matches against.
-"""
+"""Tests for ``_magpie_patcher.ensure_magpie_atomic_scripts_patch`` (bugs.md §C #1)."""
 
 from __future__ import annotations
 
 import logging
-import re
 import subprocess
 import sys
 import threading
@@ -38,20 +14,26 @@ from pathlib import Path
 import pytest
 
 from inference_optimizer.orchestrator.action_executors._magpie_patcher import (
+    _ATOMIC_REASON_ALREADY_PATCHED,
+    _ATOMIC_REASON_APPLIED,
+    _ATOMIC_REASON_MISSING,
+    _ATOMIC_REASON_UNRECOGNIZED_SHAPE,
+    _ATOMIC_REASON_UPSTREAM_ATOMIC,
     _LEGACY_BLOCK,
     _PATCH_SENTINEL,
     _PATCHED_BLOCK,
+    _REMOTE_TRUST_SENTINEL,
     _UPSTREAM_ATOMIC_HELPER,
+    _apply_patch_atomic_reason,
     _extract_prepare_region,
     _upstream_is_already_atomic,
     ensure_magpie_atomic_scripts_patch,
+    magpie_scripts_patch_status,
 )
 
 
-# Reduced fixture capturing the exact upstream shape the patcher targets.
-# Indentation is load-bearing — the patcher matches on the exact 12-space
-# prefix to avoid false-positive matches against unrelated `shutil.copy2`
-# references elsewhere in benchmarker.py.
+# Reduced fixture capturing the upstream shape the patcher targets.
+# Indentation is load-bearing (patcher matches the exact 12-space prefix).
 _UPSTREAM_BENCHMARKER_PY = """\
 \"\"\"Reduced benchmarker.py — only the surface the patcher cares about.\"\"\"
 import shutil
@@ -76,11 +58,8 @@ class _FakeBenchmarker:
 """
 
 
-# Newer upstream Magpie: the copy loop was refactored to delegate to a
-# ``_copy_benchmark_script_atomic`` static method that already does
-# mkstemp + copy2 + chmod + os.replace. The legacy two-line block is gone
-# *because upstream fixed the race itself*, so the Hyperloom #C1 patch is a
-# redundant no-op here, not a layout-drift anomaly.
+# Newer upstream Magpie: copy loop delegates to ``_copy_benchmark_script_atomic``
+# (mkstemp + copy2 + chmod + os.replace), so the #C1 patch is a redundant no-op.
 _UPSTREAM_ATOMIC_BENCHMARKER_PY = """\
 \"\"\"Reduced benchmarker.py — upstream refactored to an atomic copy helper.\"\"\"
 import os
@@ -117,9 +96,8 @@ class _FakeBenchmarker:
 """
 
 
-# Same race-safe outcome, but inlined: no named helper, the temp-file +
-# rename dance lives directly in ``_prepare_benchmark_scripts``. Exercises
-# the region-scoped ``mkstemp + os.replace`` detection signal.
+# Same race-safe outcome inlined: temp-file + rename directly in
+# ``_prepare_benchmark_scripts`` (region-scoped detection signal).
 _INLINE_ATOMIC_BENCHMARKER_PY = """\
 \"\"\"Reduced benchmarker.py — inline atomic copy, no named helper.\"\"\"
 import os
@@ -149,9 +127,22 @@ class _FakeBenchmarker:
 """
 
 
-# Genuine layout drift: ``_prepare_benchmark_scripts`` is unrecognisable AND
-# the only ``mkstemp``/``os.replace`` in the file live in an *unrelated*
-# method. Region scoping must keep this out of the "already atomic" bucket.
+_UPSTREAM_SGLANG_MI300X_SH = """\
+#!/usr/bin/env bash
+if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
+  if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
+    # Remote server: call Python benchmark_serving.py directly.
+    SERVER_MONITOR_ARGS=()
+    magpie_run_benchmark_serving_remote_direct || exit $?
+  else
+    run_benchmark_serving --model "$MODEL" || exit $?
+  fi
+fi
+"""
+
+
+# Genuine layout drift: unrecognisable prepare body + atomic ops only in an
+# unrelated method. Region scoping must keep this out of "already atomic".
 _GARBAGE_WITH_UNRELATED_ATOMIC_PY = """\
 \"\"\"Reduced benchmarker.py — drifted prepare; atomic ops live elsewhere.\"\"\"
 import os
@@ -193,12 +184,18 @@ def _write_magpie_tree(root: Path, benchmarker_src: str) -> Path:
     return bench_py
 
 
-# ---------------------------------------------------------------------------
+def _write_sglang_script(root: Path, src: str = _UPSTREAM_SGLANG_MI300X_SH) -> Path:
+    script_dir = root / "Magpie" / "scripts" / "benchmark"
+    script_dir.mkdir(parents=True, exist_ok=True)
+    script = script_dir / "sglang_mi300x.sh"
+    script.write_text(src, encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
 # Basic shape / sanity
-# ---------------------------------------------------------------------------
 def test_legacy_block_is_present_in_fixture():
-    """Sanity: the fixture must contain the exact block the patcher
-    matches against, otherwise the tests are meaningless."""
+    """Sanity: the fixture must contain the exact block the patcher matches."""
     assert _LEGACY_BLOCK in _UPSTREAM_BENCHMARKER_PY
     assert _PATCH_SENTINEL not in _UPSTREAM_BENCHMARKER_PY
 
@@ -220,16 +217,13 @@ def test_env_fallback_resolves_path(monkeypatch, fake_magpie: Path):
     assert ensure_magpie_atomic_scripts_patch(None) is True
 
 
-# ---------------------------------------------------------------------------
 # Patch application + idempotency
-# ---------------------------------------------------------------------------
 def test_patch_applied_replaces_legacy_block(fake_magpie: Path):
     bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
     assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
     text = bench_py.read_text(encoding="utf-8")
     assert _PATCH_SENTINEL in text
     assert _LEGACY_BLOCK not in text
-    # The patched block must appear exactly once — replace(_, _, 1) shape.
     assert text.count(_PATCH_SENTINEL) == 1
 
 
@@ -237,11 +231,60 @@ def test_patch_is_idempotent(fake_magpie: Path):
     bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
     assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
     after_first = bench_py.read_text(encoding="utf-8")
-    # Second invocation should hit fast path; bytes must be identical.
     assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
     after_second = bench_py.read_text(encoding="utf-8")
     assert after_first == after_second
     assert after_second.count(_PATCH_SENTINEL) == 1
+
+
+def test_sglang_remote_client_trust_patch_is_env_gated(fake_magpie: Path):
+    script = _write_sglang_script(fake_magpie)
+
+    assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
+    text = script.read_text(encoding="utf-8")
+
+    assert _REMOTE_TRUST_SENTINEL in text
+    assert '[[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" ]]' in text
+    assert "magpie_run_benchmark_serving_remote_direct trust" in text
+    assert "magpie_run_benchmark_serving_remote_direct || exit $?" in text
+
+    assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
+    assert script.read_text(encoding="utf-8") == text
+
+
+def test_remote_trust_drift_is_reported_separately(
+    tmp_path: Path,
+    caplog,
+):
+    """Atomic copy can be fixed while the SGLang trust patch drifts.
+
+    The status API must expose those as separate bits so install.sh can warn
+    about remote trust specifically instead of blaming the atomic-copy patch.
+    """
+    _write_magpie_tree(tmp_path, _UPSTREAM_ATOMIC_BENCHMARKER_PY)
+    script = _write_sglang_script(
+        tmp_path,
+        _UPSTREAM_SGLANG_MI300X_SH.replace(
+            "magpie_run_benchmark_serving_remote_direct || exit $?",
+            "magpie_run_benchmark_serving_remote_direct \"$@\" || exit $?",
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        status = magpie_scripts_patch_status(tmp_path)
+
+    assert status.atomic_ok is True
+    assert status.remote_trust_ok is False
+    assert status.ok is False
+    assert _REMOTE_TRUST_SENTINEL not in script.read_text(encoding="utf-8")
+    assert any(
+        "remote trust patch did not apply" in r.getMessage()
+        for r in caplog.records
+    )
+
+    # The bool compat wrapper reflects the atomic-copy race only (its name /
+    # docstring), so an optional remote-trust drift must NOT flip it to False.
+    assert ensure_magpie_atomic_scripts_patch(tmp_path) is True
 
 
 def test_patch_preserves_file_mode(fake_magpie: Path):
@@ -255,12 +298,9 @@ def test_patch_preserves_file_mode(fake_magpie: Path):
     )
 
 
-# ---------------------------------------------------------------------------
 # Layout-drift fail-soft (install script escalates to fail-loud)
-# ---------------------------------------------------------------------------
 def test_fail_soft_when_legacy_block_missing(tmp_path: Path):
-    """Upstream refactor / hand-edit removes the legacy two-line block →
-    patcher returns False, leaves the file alone."""
+    """Missing legacy block → patcher returns False, leaves the file alone."""
     bench_dir = tmp_path / "Magpie" / "modes" / "benchmark"
     bench_dir.mkdir(parents=True)
     drifted = (
@@ -274,9 +314,62 @@ def test_fail_soft_when_legacy_block_missing(tmp_path: Path):
     assert (bench_dir / "benchmarker.py").read_text(encoding="utf-8") == drifted
 
 
+# Reason classification — distinguish a GENUINE failure (race unmitigated)
+# from a benign no-op, so install.sh can fail-loud only on the former.
+def test_reason_applied_on_legacy_block(fake_magpie: Path):
+    bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
+    assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_APPLIED
+
+
+def test_reason_already_patched(fake_magpie: Path):
+    bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
+    assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_APPLIED
+    # Second pass sees the sentinel.
+    assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_ALREADY_PATCHED
+
+
+def test_reason_upstream_atomic_is_benign(tmp_path: Path):
+    bench_py = _write_magpie_tree(tmp_path, _UPSTREAM_ATOMIC_BENCHMARKER_PY)
+    assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_UPSTREAM_ATOMIC
+
+
+def test_reason_unrecognized_shape_is_genuine_failure(tmp_path: Path):
+    """Neither legacy block nor atomic upstream → genuine failure: the status
+    must flag atomic_genuine_failure so a strict install fails loud."""
+    drifted = (
+        "class _FakeBenchmarker:\n"
+        "    def _prepare_benchmark_scripts(self):\n"
+        "        pass\n"
+    )
+    bench_py = _write_magpie_tree(tmp_path, drifted)
+    assert (
+        _apply_patch_atomic_reason(bench_py)
+        == _ATOMIC_REASON_UNRECOGNIZED_SHAPE
+    )
+    status = magpie_scripts_patch_status(tmp_path)
+    assert status.atomic_ok is False
+    assert status.atomic_reason == _ATOMIC_REASON_UNRECOGNIZED_SHAPE
+    assert status.atomic_genuine_failure is True
+
+
+def test_missing_tree_is_benign_not_genuine_failure(tmp_path: Path):
+    """No benchmarker.py → atomic_ok False but NOT a genuine failure (the race
+    just cannot be assessed), so a strict install must not abort on it."""
+    status = magpie_scripts_patch_status(tmp_path / "nope")
+    assert status.atomic_ok is False
+    assert status.atomic_reason == _ATOMIC_REASON_MISSING
+    assert status.atomic_genuine_failure is False
+
+
+def test_upstream_atomic_status_is_not_genuine_failure(tmp_path: Path):
+    _write_magpie_tree(tmp_path, _UPSTREAM_ATOMIC_BENCHMARKER_PY)
+    status = magpie_scripts_patch_status(tmp_path)
+    assert status.atomic_ok is True
+    assert status.atomic_genuine_failure is False
+
+
 def test_already_patched_returns_true_without_rewriting(fake_magpie: Path):
-    """If someone (e.g. an upstream PR landing) already inserted the
-    sentinel, we must accept the file as patched and not rewrite."""
+    """An already-present sentinel is accepted as patched without rewriting."""
     bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
     bench_py.write_text(
         f"# top of file\n# {_PATCH_SENTINEL} present here\npass\n",
@@ -287,14 +380,9 @@ def test_already_patched_returns_true_without_rewriting(fake_magpie: Path):
     assert bench_py.read_text(encoding="utf-8") == pre
 
 
-# ---------------------------------------------------------------------------
 # Upstream-aware: an already-atomic Magpie is "already fixed", not drifted.
-# These four cover the contract change in feature/magpie-patcher-upstream-aware:
-#   (1) atomic upstream      -> no-op True, file untouched, no warning
-#   (2) legacy block         -> patched True, sentinel present
-#   (3) already-patched      -> no-op True (sentinel fast path)
-#   (4) neither legacy/atomic -> False + warning (genuine anomaly)
-# ---------------------------------------------------------------------------
+#   (1) atomic upstream -> no-op True; (2) legacy -> patched; (3) already-patched
+#   -> no-op; (4) neither -> False + warning.
 def _patcher_warnings(caplog) -> list:
     return [
         r for r in caplog.records
@@ -303,10 +391,7 @@ def _patcher_warnings(caplog) -> list:
 
 
 def test_atomic_helper_upstream_is_noop_true(tmp_path: Path, caplog):
-    """(1) Newer upstream delegates each copy to
-    ``_copy_benchmark_script_atomic`` (mkstemp + os.replace). The patch is
-    redundant: ``ensure_*`` returns True, leaves the file byte-for-byte
-    unchanged, emits no warning, and logs an explicit info no-op line."""
+    """(1) Atomic upstream: no-op True, file unchanged, no warning, info no-op line."""
     bench_py = _write_magpie_tree(tmp_path, _UPSTREAM_ATOMIC_BENCHMARKER_PY)
     pre = bench_py.read_text(encoding="utf-8")
 
@@ -326,9 +411,7 @@ def test_atomic_helper_upstream_is_noop_true(tmp_path: Path, caplog):
 
 
 def test_inline_atomic_upstream_is_noop_true(tmp_path: Path, caplog):
-    """(1b) Same race-safe outcome with the temp-file + rename inlined into
-    ``_prepare_benchmark_scripts`` (no named helper) — region-scoped
-    mkstemp+os.replace detection. Still a no-op True, file untouched."""
+    """(1b) Inline atomic outcome (no named helper) is still a no-op True, file untouched."""
     bench_py = _write_magpie_tree(tmp_path, _INLINE_ATOMIC_BENCHMARKER_PY)
     pre = bench_py.read_text(encoding="utf-8")
 
@@ -340,8 +423,7 @@ def test_inline_atomic_upstream_is_noop_true(tmp_path: Path, caplog):
 
 
 def test_atomic_upstream_fixture_still_copies_scripts(tmp_path: Path):
-    """End-to-end sanity: the no-op path leaves a *working* Magpie. Exec the
-    untouched atomic fixture and confirm it copies a script with exec bit."""
+    """End-to-end sanity: the no-op path leaves a working Magpie that still copies scripts."""
     bench_py = _write_magpie_tree(tmp_path, _UPSTREAM_ATOMIC_BENCHMARKER_PY)
     assert ensure_magpie_atomic_scripts_patch(tmp_path) is True
 
@@ -364,9 +446,7 @@ def test_atomic_upstream_fixture_still_copies_scripts(tmp_path: Path):
 
 
 def test_legacy_block_still_patched_true(tmp_path: Path):
-    """(2) Old Magpie (the legacy two-line block) is still patched in place:
-    returns True, sentinel present, legacy block gone. Existing behaviour
-    must survive the upstream-aware change."""
+    """(2) Old Magpie (legacy block) is still patched in place: sentinel present, block gone."""
     bench_py = _write_magpie_tree(tmp_path, _UPSTREAM_BENCHMARKER_PY)
     assert ensure_magpie_atomic_scripts_patch(tmp_path) is True
     text = bench_py.read_text(encoding="utf-8")
@@ -375,9 +455,7 @@ def test_legacy_block_still_patched_true(tmp_path: Path):
 
 
 def test_already_patched_sentinel_is_noop_true(tmp_path: Path):
-    """(3) A previously Hyperloom-patched checkout (sentinel present) is a
-    fast-path no-op: returns True, bytes unchanged. Uses the real patched
-    output rather than a synthetic sentinel comment."""
+    """(3) A previously-patched checkout (sentinel present) is a fast-path no-op."""
     patched_src = _UPSTREAM_BENCHMARKER_PY.replace(_LEGACY_BLOCK, _PATCHED_BLOCK, 1)
     assert _PATCH_SENTINEL in patched_src
     bench_py = _write_magpie_tree(tmp_path, patched_src)
@@ -387,9 +465,7 @@ def test_already_patched_sentinel_is_noop_true(tmp_path: Path):
 
 
 def test_neither_legacy_nor_atomic_warns_false(tmp_path: Path, caplog):
-    """(4) A ``_prepare_benchmark_scripts`` with neither the legacy block nor
-    any atomic implementation is a genuine anomaly: returns False, leaves the
-    file untouched, and logs a warning flagging it for manual review."""
+    """(4) Neither legacy nor atomic is a genuine anomaly: False, untouched, warns."""
     drifted = (
         "class _FakeBenchmarker:\n"
         "    def _prepare_benchmark_scripts(self):\n"
@@ -409,10 +485,7 @@ def test_neither_legacy_nor_atomic_warns_false(tmp_path: Path, caplog):
 
 
 def test_unrelated_atomic_ops_do_not_count_as_fixed(tmp_path: Path, caplog):
-    """Region scoping guard: ``mkstemp``/``os.replace`` in an *unrelated*
-    method must NOT be read as an already-atomic ``_prepare_benchmark_scripts``.
-    This stays a genuine anomaly → False + warning, proving the detection is
-    scoped to the method body and not the whole file."""
+    """Region scoping guard: atomic ops in an unrelated method don't count as fixed → False + warning."""
     bench_py = _write_magpie_tree(tmp_path, _GARBAGE_WITH_UNRELATED_ATOMIC_PY)
 
     with caplog.at_level(logging.INFO):
@@ -423,13 +496,9 @@ def test_unrelated_atomic_ops_do_not_count_as_fixed(tmp_path: Path, caplog):
     assert _patcher_warnings(caplog)
 
 
-# ---------------------------------------------------------------------------
 # Concurrency — N patchers racing the same file
-# ---------------------------------------------------------------------------
 def test_concurrent_patchers_produce_one_patch(fake_magpie: Path):
-    """Eight threads invoking ``ensure_*`` simultaneously must end with
-    exactly one applied patch (sentinel appears once) and no torn
-    file content."""
+    """Eight concurrent ``ensure_*`` calls must end with exactly one applied patch."""
     bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
     barrier = threading.Barrier(8)
     results: list[bool] = [False] * 8
@@ -451,17 +520,8 @@ def test_concurrent_patchers_produce_one_patch(fake_magpie: Path):
 
 
 def test_reader_never_sees_torn_file(fake_magpie: Path):
-    """One thread patches the file while N reader threads continuously
-    read its bytes. Every read must observe either the pre-patch or
-    post-patch content, never a torn intermediate state.
-
-    This is the load-bearing test: it exercises exactly the failure
-    mode bugs.md §C #1 describes (a concurrent reader catching a
-    half-written file). The pre-patch fixture is a self-contained
-    Python module, so a "torn" view would fail to compile or be missing
-    the sentinel that the post-patch view must contain. We assert that
-    every snapshot is either the verbatim original or contains the
-    sentinel — there is no third state."""
+    """bugs.md §C #1: a concurrent reader must never see a torn file —
+    every snapshot is either the verbatim original or contains the sentinel."""
     bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
     original = bench_py.read_text(encoding="utf-8")
 
@@ -484,11 +544,9 @@ def test_reader_never_sees_torn_file(fake_magpie: Path):
     for r in readers:
         r.start()
     try:
-        # Give readers a moment to start spinning, then patch.
         time.sleep(0.05)
         assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
-        # Let readers continue for a bit after the patch so we cover
-        # both the during-rename and post-rename window.
+        # Cover both the during-rename and post-rename window.
         time.sleep(0.1)
     finally:
         stop.set()
@@ -501,14 +559,10 @@ def test_reader_never_sees_torn_file(fake_magpie: Path):
     )
 
 
-# ---------------------------------------------------------------------------
-# Smoke — the patched benchmarker.py is still valid Python and produces
-# correct semantics for _prepare_benchmark_scripts
-# ---------------------------------------------------------------------------
+# Smoke — patched benchmarker.py is valid Python with correct semantics
 def test_patched_file_is_valid_python(fake_magpie: Path):
     bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
     assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
-    # Use py_compile via subprocess so we don't have to manage import paths.
     res = subprocess.run(
         [sys.executable, "-c",
          "import py_compile, sys; py_compile.compile(sys.argv[1], doraise=True)",
@@ -525,11 +579,7 @@ def test_patched_file_is_valid_python(fake_magpie: Path):
 def test_patched_benchmarker_copies_scripts_atomically(
     fake_magpie: Path, tmp_path: Path,
 ):
-    """Run the patched ``_prepare_benchmark_scripts`` against a real
-    ``<src>/*.sh`` set and confirm the output is correct + the rename
-    target ends up with the right perms. This is the end-to-end
-    behaviour check: even after patching, the function must still do
-    what upstream did, only atomically."""
+    """The patched ``_prepare_benchmark_scripts`` still copies scripts correctly, atomically."""
     assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
 
     src_dir = tmp_path / "magpie_scripts"
@@ -543,7 +593,6 @@ def test_patched_benchmarker_copies_scripts_atomically(
 
     dst_dir = tmp_path / "InferenceX_benchmarks"
 
-    # Load the patched module out of the fixture and exercise it.
     bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
     namespace: dict = {"__name__": "_patched_benchmarker_smoke"}
     exec(compile(bench_py.read_text("utf-8"), str(bench_py), "exec"), namespace)
@@ -551,7 +600,6 @@ def test_patched_benchmarker_copies_scripts_atomically(
     inst = cls(src_dir, dst_dir)
     inst._prepare_benchmark_scripts()
 
-    # Both scripts copied verbatim, both with exec bit set.
     for name in ("vllm_mi300x.sh", "sglang_mi300x.sh"):
         out = dst_dir / name
         assert out.is_file(), f"missing {out}"
@@ -559,38 +607,25 @@ def test_patched_benchmarker_copies_scripts_atomically(
         assert out.stat().st_mode & 0o111, f"exec bit not set on {out}"
 
 
-# ---------------------------------------------------------------------------
-# Patched-block shape sanity (changes here force the test author to
-# re-read _magpie_patcher.py and acknowledge the change).
-# ---------------------------------------------------------------------------
+# Patched-block shape sanity
 def test_patched_block_calls_os_replace():
-    """The replacement must end in ``os.replace`` (the atomic rename) —
-    if a future edit drops this line we break the whole contract."""
+    """The replacement must end in ``os.replace`` (the atomic rename)."""
     assert "_hyperloom_os.replace(_tmp_name, target_file)" in _PATCHED_BLOCK
 
 
 def test_patched_block_uses_unique_aliases():
-    """Aliases must be ``_hyperloom_*`` so we can't shadow upstream
-    names. Plain ``os`` / ``tempfile`` would only collide harmlessly
-    today but are landmines under future Magpie refactors."""
+    """Aliases must be ``_hyperloom_*`` so they can't shadow upstream names."""
     assert "_hyperloom_os" in _PATCHED_BLOCK
     assert "_hyperloom_tempfile" in _PATCHED_BLOCK
-    # The replacement is a single textual block — no other code can
-    # leak into it accidentally.
-    assert re.match(r"^( {12}#|\s*$)", _PATCHED_BLOCK.splitlines()[0])
+    first_line = _PATCHED_BLOCK.splitlines()[0]
+    assert first_line.startswith("            #") or first_line.strip() == ""
 
 
-# ===========================================================================
 # Helper-method unit tests (formerly test_magpie_patcher_units.py)
-# ===========================================================================
-
 from inference_optimizer.orchestrator.action_executors import _magpie_patcher as mp
 
 
-# Minimal stand-in for the upstream legacy block, byte-for-byte equal to
-# the production ``_LEGACY_BLOCK``. Wrapped in a tiny function body so the
-# patched file still tokenises as valid Python and we can re-import to
-# verify roundtrip.
+# Legacy block wrapped in a tiny function body so the file tokenises as Python.
 _LEGACY_FILE = (
     "def stub():\n"
     "    pass\n"
@@ -607,10 +642,7 @@ def magpie_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
-# ---------------------------------------------------------------------------
 # _resolve_benchmarker_path
-# ---------------------------------------------------------------------------
-
 class TestResolveBenchmarkerPath:
     def test_explicit_dir_returns_existing_file(self, magpie_dir):
         out = mp._resolve_benchmarker_path(magpie_dir)
@@ -630,10 +662,7 @@ class TestResolveBenchmarkerPath:
         assert out is not None
 
 
-# ---------------------------------------------------------------------------
 # _is_patched
-# ---------------------------------------------------------------------------
-
 class TestIsPatched:
     def test_false_when_legacy(self, magpie_dir):
         target = magpie_dir / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
@@ -654,10 +683,7 @@ class TestIsPatched:
         assert mp._is_patched(ghost) is False
 
 
-# ---------------------------------------------------------------------------
 # _apply_patch_atomic
-# ---------------------------------------------------------------------------
-
 class TestApplyPatchAtomic:
     def test_returns_false_when_legacy_block_missing(self, tmp_path):
         target = tmp_path / "benchmarker.py"
@@ -681,47 +707,24 @@ class TestApplyPatchAtomic:
         assert "def stub" in target.read_text()
 
 
-# ---------------------------------------------------------------------------
 # ensure_magpie_atomic_scripts_patch
-# ---------------------------------------------------------------------------
-
 class TestEnsurePatch:
     def test_returns_false_without_magpie_tree(self, monkeypatch):
         monkeypatch.delenv("MAGPIE_DIR", raising=False)
         assert mp.ensure_magpie_atomic_scripts_patch(None) is False
 
     def test_full_roundtrip_idempotent(self, magpie_dir):
-        # First call: applies the patch.
         assert mp.ensure_magpie_atomic_scripts_patch(magpie_dir) is True
-        # Second call: hits the fast path (no flock).
         assert mp.ensure_magpie_atomic_scripts_patch(magpie_dir) is True
         target = magpie_dir / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
-        # Only one copy of the sentinel — the patch ran exactly once.
         assert target.read_text().count(mp._PATCH_SENTINEL) == 1
 
 
-# ===========================================================================
-# Read-only / shared InferenceX/benchmarks deployment
-# (bugs.md §C #1 follow-up).
-#
-# The atomic-write patch put its temp file in the TARGET dir
-# (mkstemp(dir=target_dir)). When InferenceX/benchmarks is a shared
-# read-only mount (e.g. /wekafs/hyperloom/InferenceX), that mkstemp raised
-# `OSError: [Errno 30] Read-only file system` and took down EVERY model's
-# first benchmark session — regardless of model or framework.
-#
-# Contract after the fix:
-#   * target script already byte-identical -> no-op (pre-staged on a
-#     read-only shared deployment is fine);
-#   * target dir writable -> atomic os.replace (unchanged: still closes the
-#     §C #1 torn-read race);
-#   * target dir read-only AND script missing/stale -> a clear, actionable
-#     error naming the script + the read-only dir, NOT a bare [Errno 30].
-# ===========================================================================
+# Read-only / shared InferenceX/benchmarks deployment (bugs.md §C #1 follow-up).
+# Contract: identical target -> no-op; writable -> atomic os.replace; read-only +
+# stale/missing -> a clear error naming the script + dir, not a bare [Errno 30].
 def _exec_patched_benchmarker(fake_magpie: Path):
-    """Apply the patch, then exec the patched benchmarker.py and return its
-    ``_FakeBenchmarker`` class (same technique as the atomic-copy smoke
-    test above)."""
+    """Apply the patch, exec the patched benchmarker.py, return ``_FakeBenchmarker``."""
     assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
     bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
     namespace: dict = {"__name__": "_patched_benchmarker_ro"}
@@ -730,13 +733,7 @@ def _exec_patched_benchmarker(fake_magpie: Path):
 
 
 def _simulate_readonly_dir(monkeypatch, readonly_dir: Path) -> None:
-    """Make ``tempfile.mkstemp`` raise EROFS when targeting ``readonly_dir``.
-
-    Tests run as root, where a ``chmod 0o555`` is bypassed by DAC, so we
-    cannot model a read-only mount with permissions. Patching ``mkstemp``
-    for the one target directory reproduces the exact production failure
-    (mkstemp into a read-only InferenceX/benchmarks) deterministically.
-    """
+    """Make ``tempfile.mkstemp`` raise EROFS when targeting ``readonly_dir``."""
     import errno
     import tempfile as _tempfile
 
@@ -753,9 +750,7 @@ def _simulate_readonly_dir(monkeypatch, readonly_dir: Path) -> None:
 def test_readonly_target_with_uptodate_scripts_is_noop(
     fake_magpie: Path, tmp_path: Path, monkeypatch,
 ):
-    """Read-only target whose scripts are ALREADY identical to Magpie
-    source must be a no-op, not an OSError. This is the exact failure that
-    killed all 8 models' first sessions."""
+    """Read-only target with already-identical scripts is a no-op, not an OSError."""
     import shutil as _shutil
 
     cls = _exec_patched_benchmarker(fake_magpie)
@@ -765,16 +760,14 @@ def test_readonly_target_with_uptodate_scripts_is_noop(
     body = "#!/usr/bin/env bash\necho hi\n"
     (src_dir / "sglang_mi300x.sh").write_text(body, encoding="utf-8")
 
-    # Shared deployment already has the identical script staged.
     dst_dir = tmp_path / "InferenceX_benchmarks"
     dst_dir.mkdir()
     _shutil.copy2(src_dir / "sglang_mi300x.sh", dst_dir / "sglang_mi300x.sh")
 
-    # Now any temp write into dst_dir behaves read-only.
     _simulate_readonly_dir(monkeypatch, dst_dir)
 
     inst = cls(src_dir, dst_dir)
-    # Must NOT raise — the script is already up to date, so no temp write.
+    # Must NOT raise — script already up to date, so no temp write.
     inst._prepare_benchmark_scripts()
 
     assert (dst_dir / "sglang_mi300x.sh").read_text(encoding="utf-8") == body
@@ -783,9 +776,7 @@ def test_readonly_target_with_uptodate_scripts_is_noop(
 def test_readonly_target_with_stale_script_raises_clear_error(
     fake_magpie: Path, tmp_path: Path, monkeypatch,
 ):
-    """Read-only target whose script is stale/missing must raise a clear,
-    actionable error (naming the script + read-only dir), not a bare
-    [Errno 30]."""
+    """Read-only target with a stale script raises a clear error, not a bare [Errno 30]."""
     cls = _exec_patched_benchmarker(fake_magpie)
 
     src_dir = tmp_path / "magpie_scripts"
@@ -796,7 +787,7 @@ def test_readonly_target_with_stale_script_raises_clear_error(
 
     dst_dir = tmp_path / "InferenceX_benchmarks"
     dst_dir.mkdir()
-    # Stale (different) content already present -> needs a rewrite.
+    # Stale content present -> needs a rewrite.
     (dst_dir / "sglang_mi300x.sh").write_text(
         "#!/usr/bin/env bash\necho stale\n", encoding="utf-8",
     )
@@ -812,8 +803,7 @@ def test_readonly_target_with_stale_script_raises_clear_error(
 
 
 def test_writable_target_rewrites_stale_script(fake_magpie: Path, tmp_path: Path):
-    """Regression: a writable target with a stale staged script is still
-    atomically rewritten to match source (exec bit preserved)."""
+    """A writable target with a stale staged script is atomically rewritten."""
     cls = _exec_patched_benchmarker(fake_magpie)
 
     src_dir = tmp_path / "magpie_scripts"
@@ -835,22 +825,16 @@ def test_writable_target_rewrites_stale_script(fake_magpie: Path, tmp_path: Path
 
 
 def test_patched_block_skips_identical_target():
-    """The patched block must contain the idempotent content check so a
-    read-only shared deployment with pre-staged scripts is a no-op rather
-    than a mkstemp OSError."""
+    """The patched block contains the idempotent content check (filecmp)."""
     assert "_hyperloom_filecmp" in _PATCHED_BLOCK
 
 
-# ---------------------------------------------------------------------------
 # _extract_prepare_region
-# ---------------------------------------------------------------------------
-
 class TestExtractPrepareRegion:
     def test_returns_empty_when_marker_absent(self):
         assert _extract_prepare_region("def other():\n    pass\n") == ""
 
     def test_bounds_a_single_method_body(self):
-        # The unrelated helper (and its atomic ops) must fall outside the slice.
         region = _extract_prepare_region(_GARBAGE_WITH_UNRELATED_ATOMIC_PY)
         assert "_prepare_benchmark_scripts" in region
         assert "_unrelated_helper" not in region
@@ -862,10 +846,7 @@ class TestExtractPrepareRegion:
         assert "os.replace(" in region
 
 
-# ---------------------------------------------------------------------------
 # _upstream_is_already_atomic
-# ---------------------------------------------------------------------------
-
 class TestUpstreamIsAlreadyAtomic:
     def test_named_helper_detected(self):
         assert _UPSTREAM_ATOMIC_HELPER in _UPSTREAM_ATOMIC_BENCHMARKER_PY
@@ -878,12 +859,10 @@ class TestUpstreamIsAlreadyAtomic:
         assert _upstream_is_already_atomic(_UPSTREAM_BENCHMARKER_PY) is False
 
     def test_unrelated_atomic_ops_not_detected(self):
-        # Region scoping keeps out mkstemp/os.replace from other methods.
         assert _upstream_is_already_atomic(_GARBAGE_WITH_UNRELATED_ATOMIC_PY) is False
 
     def test_hyperloom_patched_output_is_atomic(self):
-        # Defence in depth: the patcher's own output also reads as atomic
-        # (the sentinel fast path normally short-circuits before this).
+        # Defence in depth: the patcher's own output also reads as atomic.
         patched = _UPSTREAM_BENCHMARKER_PY.replace(
             _LEGACY_BLOCK, _PATCHED_BLOCK, 1,
         )

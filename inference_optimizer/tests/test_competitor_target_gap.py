@@ -1,15 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the competitor target-gap helpers and tpot derivation.
-
-Covers:
-
-* :func:`research_hints.load_competitor_target` — source filtering + fail-soft.
-* :func:`research_hints.gap_analysis` — throughput / tpot / interactivity gaps
-  and ``primary_gap`` selection.
-* :func:`research_hints.full_gap_summary` — advisory block + latency hint.
-* tpot derive fallback in ``benchmark_result._derive_tpot_if_missing``.
-"""
+"""Unit tests for the competitor target-gap helpers and tpot derivation."""
 
 from __future__ import annotations
 
@@ -31,7 +22,7 @@ def test_load_competitor_target_keeps_only_sourced_rows(tmp_path):
         "gpu": "b300", "model": "m",
         "per_conc": [
             {"conc": 64, "tput_per_gpu": 100.0, "source": "https://pr/1"},
-            {"conc": 128, "tput_per_gpu": 200.0},  # sourceless -> dropped
+            {"conc": 128, "tput_per_gpu": 200.0},
         ],
     })
     target = research_hints.load_competitor_target(tmp_path)
@@ -63,11 +54,8 @@ def test_gap_analysis_latency_primary():
         target, our_tput_per_gpu=95.0, our_tpot_ms=20.0, conc=64,
     )
     assert gap is not None
-    # ours 95 vs target 100 -> +5% throughput gap.
     assert round(gap["throughput_gap_pct"], 1) == 5.0
-    # ours 20ms vs target 10ms -> 2x ratio.
     assert round(gap["tpot_ratio"], 2) == 2.0
-    # latency ratio (100%) far exceeds throughput gap (5%) -> latency.
     assert gap["primary_gap"] == "latency"
     assert gap["source"] == "s"
 
@@ -128,7 +116,6 @@ def test_derive_tpot_from_e2el_ttft():
     measurement = {"ttft_mean_ms": 100.0, "e2el_mean_ms": 1090.0}
     report = {"config": {"osl": 100}}
     benchmark_result._derive_tpot_if_missing(measurement, report)
-    # (1090 - 100) / (100 - 1) = 10.0
     assert round(measurement["tpot_mean_ms"], 2) == 10.0
 
 
