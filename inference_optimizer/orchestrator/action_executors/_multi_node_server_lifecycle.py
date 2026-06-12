@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -326,6 +327,7 @@ def _resolve_round_args(
 async def restart_server_for_round(
     *,
     extra_server_args: str = "",
+    extra_env: dict[str, str] | None = None,
     torch_profiler_dir: str = "",
     framework: str | None = None,
     model_path: str | None = None,
@@ -417,6 +419,19 @@ async def restart_server_for_round(
         # doesn't reuse a previous round's path on this restart.
         os.environ.pop("HYPERLOOM_MN_PROFILE_TRACE_DIR", None)
         _LAST_ROUND_TRACE_DIR = ""
+
+    # Per-variant env overrides → forwarded to the SSH-launched sglang via
+    # ``multi_node/cli.py::_collect_forward_env`` (which reads this control
+    # env). Mirrors the HYPERLOOM_MN_PROFILE_TRACE_DIR set/restore pattern:
+    # scoped to this single restart so a later arg-only round doesn't
+    # inherit this round's envs. Restored in the ``finally`` below.
+    saved_fwd_env = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV")
+    if extra_env:
+        os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] = json.dumps(
+            {str(k): str(v) for k, v in extra_env.items()}
+        )
+    else:
+        os.environ.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", None)
 
     # Multi-node TraceLens SGLang patch fan-out (fail-soft).
     #
@@ -607,8 +622,99 @@ async def restart_server_for_round(
             os.environ.pop("HYPERLOOM_MN_PROFILE_TRACE_DIR", None)
         else:
             os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = saved_trace_env
+        # Symmetric restore for the per-variant env forwarding control var.
+        if saved_fwd_env is None:
+            os.environ.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", None)
+        else:
+            os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] = saved_fwd_env
 
 
+# Dynamo system status server port (mirror of launch_dynamo_node.py
+# _DEFAULT_DYN_SYSTEM_PORT). The controller POSTs /engine/{start,stop}_profile
+# here to drive torch profiling on each disagg worker for roofline rounds.
+DEFAULT_DYN_SYSTEM_PORT = 9090
+
+
+def _dynamo_gpu_pod_ips(state: dict | None = None) -> list[str]:
+    """Return the dynamo GPU worker pod IPs (prefill + decode + worker)."""
+    st = state if state is not None else (_read_state() or {})
+    ips: list[str] = []
+    seen: set[str] = set()
+    for key in ("prefill_pod_ips", "decode_pod_ips", "worker_pod_ips"):
+        for ip in (st.get(key) or []):
+            s = str(ip).strip()
+            if s and s not in seen:
+                seen.add(s)
+                ips.append(s)
+    return ips
+
+
+async def trigger_dynamo_engine_profile(
+    action: str, body: dict | None = None,
+) -> None:
+    """Drive torch profiling on every dynamo disagg worker via the system
+    server's ``/engine/{start,stop}_profile`` route.
+
+    No-op unless multi-node AND ``backend == "dynamo"``: the RayJob path
+    triggers profiling through Magpie's own /start_profile against the
+    sglang server, and single-node never reaches a multi-node restart.
+
+    Best-effort / fail-soft: a worker that 404s (system server not enabled
+    on an older launch) or errors is logged and skipped so the profile
+    round still completes (an empty trace just surfaces the existing
+    roofline ``profile_no_trace`` path — no regression vs before this fix).
+
+    ``action`` is ``"start"`` or ``"stop"``. ``body`` is forwarded as the
+    JSON payload to ``start_profile`` (e.g. the optimizer-computed
+    ``PROFILE_EXTRA_BODY`` carrying start_step / num_steps); ignored for
+    stop.
+    """
+    if not is_multi_node():
+        return
+    state = _read_state() or {}
+    if str(state.get("backend") or "").strip().lower() != "dynamo":
+        return
+    ips = _dynamo_gpu_pod_ips(state)
+    if not ips:
+        log.warning(
+            "trigger_dynamo_engine_profile(%s): no GPU pod IPs in state", action,
+        )
+        return
+    try:
+        import httpx as _httpx
+    except ImportError:  # pragma: no cover
+        log.warning("httpx unavailable; cannot trigger dynamo profiling")
+        return
+    port = int(
+        os.environ.get(
+            "HYPERLOOM_DYN_SYSTEM_PORT", str(DEFAULT_DYN_SYSTEM_PORT),
+        ) or DEFAULT_DYN_SYSTEM_PORT
+    )
+    route = "start_profile" if action == "start" else "stop_profile"
+    payload = dict(body or {}) if action == "start" else {}
+    # stop_profile blocks while torch.profiler flushes the (potentially
+    # large) trace to shared-FS synchronously, so it needs a much longer
+    # read timeout than the quick start_profile arm. Overridable via env.
+    if action == "start":
+        client_timeout = 30.0
+    else:
+        client_timeout = float(
+            os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600
+        )
+    async with _httpx.AsyncClient(timeout=client_timeout) as client:
+        for ip in ips:
+            url = f"http://{ip}:{port}/engine/{route}"
+            try:
+                resp = await client.post(url, json=payload)
+                log.info(
+                    "dynamo profile %s -> %s:%d HTTP %d",
+                    route, ip, port, resp.status_code,
+                )
+            except Exception as exc:  # noqa: BLE001 — fail-soft per worker
+                log.warning(
+                    "dynamo profile %s -> %s:%d failed (%s); continuing",
+                    route, ip, port, exc,
+                )
 
 
 async def _wait_for_server_health_async(

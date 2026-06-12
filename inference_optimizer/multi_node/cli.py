@@ -963,6 +963,24 @@ def _collect_forward_env() -> dict[str, str]:
     trace_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if trace_dir and "SGLANG_TORCH_PROFILER_DIR" not in fwd:
         fwd["SGLANG_TORCH_PROFILER_DIR"] = trace_dir
+    # Explicit per-variant env overrides (e.g. specialist-proposed MoE
+    # tuning) come through HYPERLOOM_MN_EXTRA_FWD_ENV as a JSON object set
+    # by restart_server_for_round. Unlike _FORWARD_ENV_PREFIXES these are
+    # forwarded verbatim regardless of key prefix, so an explore variant's
+    # ``extra_envs`` reach the SSH-launched sglang. They take precedence
+    # over prefix-matched values for the same key (explicit > ambient).
+    extra_fwd = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
+    if extra_fwd:
+        try:
+            parsed = json.loads(extra_fwd)
+            if isinstance(parsed, dict):
+                for k, v in parsed.items():
+                    fwd[str(k)] = str(v)
+        except (ValueError, TypeError):
+            warn(
+                "HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; "
+                "skipping per-variant env forwarding"
+            )
     return fwd
 
 
@@ -1225,11 +1243,16 @@ def _dynamo_apply_tracelens_patch(args: argparse.Namespace) -> int:
     timeout = _poll_timeout_from_args(args)
     per_pod: list[dict] = []
     failures: list[dict] = []
+    # Pod-side interpreter: sglang lives in /opt/venv on the canonical
+    # ROCm sglang-dynamo images; /usr/bin/python3 lacks sglang so
+    # _apply_on_pod's `import sglang` fails with "No module named 'sglang'".
+    # Allow override via $HYPERLOOM_MN_POD_PYTHON.
+    pod_python = os.environ.get("HYPERLOOM_MN_POD_PYTHON", "/opt/venv/bin/python")
     for ip in gpu_ips:
         info(f"apply-tracelens-patch (dynamo): ssh -> {ip}")
         try:
             cp = ssh_client.ssh_run_script(
-                ip, script, "python3", op_args,
+                ip, script, pod_python, op_args,
                 key_path=key_path, port=port, timeout=timeout,
             )
         except subprocess.TimeoutExpired:

@@ -92,6 +92,14 @@ def discover_role_pods(
         pod_ip = str(p.get("podIP") or "").strip()
         if not pod_ip:
             continue
+        # Skip terminal / dead pods. A DGD role pod that crashed during early
+        # scheduling lingers in GetWorkload.pods with a stale podIP but no sshd
+        # (phase=Failed/Succeeded). Including it makes restart-server SSH-fan-out
+        # to a dead replica -> "Connection refused" rc=1 -> baseline_failed.
+        # The live replacement replica (same role index) is the one we want.
+        pod_phase = str(p.get("phase") or "").strip().lower()
+        if pod_phase in ("failed", "succeeded", "terminating"):
+            continue
         pod_id = str(p.get("podId") or "")
         role = _classify_pod_role(pod_id, p.get("resourceId"), service_roles)
         if role is None:

@@ -43,6 +43,12 @@ from pathlib import Path
 _DEFAULT_DIST_INIT_PORT = 5000
 # Ray GCS port for the vllm multi-node bootstrap.
 _RAY_GCS_PORT = 6379
+# Dynamo system status server port. A positive value enables the in-worker
+# HTTP server hosting the /engine/* routes (incl. /engine/start_profile),
+# which the controller calls to trigger torch profiling for roofline/profile
+# rounds. Dynamo's default is -1 (disabled), leaving those routes
+# unreachable. Pods have distinct IPs so every worker can share one port.
+_DEFAULT_DYN_SYSTEM_PORT = 9090
 
 
 def _log(msg: str) -> None:
@@ -339,6 +345,18 @@ def main() -> int:
     args = p.parse_args()
 
     env = _recover_container_env()
+    # Enable the Dynamo system status server unless the container already
+    # pinned a positive DYN_SYSTEM_PORT. This exposes /engine/start_profile
+    # on the worker so the controller can drive torch profiling for roofline
+    # rounds (the Dynamo frontend does not propagate /start_profile to
+    # SSH-launched disagg workers). Benign for non-profile rounds.
+    try:
+        _cur_sys_port = int((env.get("DYN_SYSTEM_PORT") or "").strip() or "-1")
+    except ValueError:
+        _cur_sys_port = -1
+    if _cur_sys_port < 0:
+        env["DYN_SYSTEM_PORT"] = str(_DEFAULT_DYN_SYSTEM_PORT)
+        _log(f"enabled Dynamo system server DYN_SYSTEM_PORT={_DEFAULT_DYN_SYSTEM_PORT}")
     node_rank = int(env.get("LWS_WORKER_INDEX", "0") or "0")
     lws_leader = (env.get("LWS_LEADER_ADDRESS", "") or "").strip()
     if lws_leader:

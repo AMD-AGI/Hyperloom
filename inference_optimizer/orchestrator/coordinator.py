@@ -8308,6 +8308,113 @@ class Coordinator:
             return source[len(SPECIALIST_FROM_AGENT_PREFIX):]
         return ""
 
+    # Multi-node only: cap on how many specialist proposal_set entries
+    # are auto-materialised into a single explore grid per specialist
+    # round. Keeps the deterministic bridge from flooding the action
+    # queue when an LLM specialist returns a large proposal_set.
+    _MN_AUTO_EXPLORE_GRID_CAP = 6
+
+    async def _maybe_materialize_mn_explore(
+        self,
+        *,
+        task: Task,
+        domain: str,
+        proposals: list[Any],
+    ) -> None:
+        """Multi-node bridge: turn a specialist ``proposal_set`` into a
+        benchmarked ``explore`` task automatically.
+
+        Single-node is a no-op (``is_multi_node()`` False): there the
+        Orchestration LLM drives ``explore`` directly (local bash +
+        explore delegates), so this deterministic materialisation stays
+        multi-node-scoped and the single-node path is unchanged
+        bit-for-bit.
+
+        Why this exists: in multi-node the GPU cluster lives on remote
+        SSH pods, so the LLM cannot bench proposals via local bash — the
+        only materialisation channel is a structured ``explore`` action.
+        Observation-only surfacing (the default) relies on the LLM
+        emitting that delegate, which it does not do reliably in
+        multi-node, leaving approved proposals un-benchmarked. This
+        helper closes that gap by enqueuing the explore grid itself.
+
+        ``proposal_set`` entries already reuse the explore variant schema
+        (``name`` / ``extra_args`` / ``extra_envs``), so they pass
+        straight through as the grid. The explore executor's
+        ``canonical_fingerprint`` dedup means a later LLM-emitted explore
+        on the same content collapses to the same row (no double-bench),
+        and its per-variant KEEP/REVERT gain gate is the safety net
+        (no critic dependency).
+        """
+        from .action_executors._multi_node_env import is_multi_node
+        if not is_multi_node() or not proposals:
+            return
+        grid: list[dict[str, Any]] = []
+        for i, p in enumerate(proposals[: self._MN_AUTO_EXPLORE_GRID_CAP]):
+            if not isinstance(p, dict):
+                continue
+            args = str(
+                p.get("extra_args") or p.get("extra_server_args") or ""
+            ).strip()
+            envs_raw = p.get("extra_envs")
+            envs = (
+                {str(k): str(v) for k, v in envs_raw.items()}
+                if isinstance(envs_raw, dict) else {}
+            )
+            # Drop entries with neither a server-arg nor an env override —
+            # nothing for the restart to apply (e.g. research-only items).
+            if not args and not envs:
+                continue
+            name = str(p.get("name") or "").strip() or (
+                f"{domain or 'specialist'}-{task.task_id[:8]}-{i}"
+            )
+            grid.append({
+                "name": name,
+                "extra_args": args,
+                "extra_envs": envs,
+                "provenance": f"specialist:{domain}" if domain else "specialist",
+                "note": str(p.get("reason") or "")[:200],
+            })
+        if not grid:
+            return
+        state = self.shared_state
+        params: dict[str, Any] = {
+            "source": "coordinator_internal_mn",
+            "reason": f"mn_auto_materialize:{domain or 'specialist'}",
+            "grid": grid,
+        }
+        if state.baseline_config_path:
+            params["config_path"] = state.baseline_config_path
+        cb = state.current_best or {}
+        if isinstance(cb, dict):
+            cb_args = str(cb.get("extra_server_args") or "")
+            if cb_args:
+                params["base_extra_args"] = cb_args
+        base_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+        if base_tput:
+            params["base_tput"] = base_tput
+        last_bl = state.last_baseline or {}
+        if isinstance(last_bl, dict):
+            bs = str(last_bl.get("benchmark_script") or "").strip()
+            if bs:
+                params["benchmark_script"] = bs
+        try:
+            etask, was_existing = await self.tasks.create_or_return_existing(
+                kind="explore",
+                params=params,
+                idempotency_key=f"mn-auto-explore-{task.task_id}",
+            )
+            log.info(
+                "mn_auto_materialize: enqueued explore task_id=%s "
+                "(variants=%d, from specialist=%s domain=%s, existing=%s)",
+                etask.task_id, len(grid), task.task_id, domain, was_existing,
+            )
+        except Exception:  # noqa: BLE001 — defensive; never block bookkeeping
+            log.exception(
+                "mn_auto_materialize: failed to enqueue explore from "
+                "specialist=%s domain=%s", task.task_id, domain,
+            )
+
     async def _record_specialist_result(
         self,
         *,
@@ -8436,6 +8543,20 @@ class Coordinator:
                 "empty": is_empty,
             },
         )
+
+        # Multi-node only: auto-materialise the proposal_set into a
+        # benchmarked explore task. No-op single-node (LLM drives explore
+        # directly there) and no-op when the proposal_set is empty / has
+        # no applicable variants. See :meth:`_maybe_materialize_mn_explore`.
+        try:
+            await self._maybe_materialize_mn_explore(
+                task=task, domain=domain, proposals=proposals,
+            )
+        except Exception:  # noqa: BLE001 — defensive; never block bookkeeping
+            log.exception(
+                "mn_auto_materialize: bridge raised for task=%s (continuing)",
+                task.task_id,
+            )
 
         # route session_steward_specialist verdicts. Done payload
         # carries extra fields beyond the standard schema; see

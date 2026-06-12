@@ -488,6 +488,7 @@ def main() -> int:
     if args.local:
         r = _apply_on_pod(
             tracelens_root=args.tracelens_root,
+            tracelens_internal_root=args.tracelens_internal_root,
             sglang_version_pin=args.sglang_version_pin or None,
         )
         overall = r.get("status") if r.get("status") in ("applied", "skipped") else "failed"

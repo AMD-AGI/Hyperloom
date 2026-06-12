@@ -1620,6 +1620,11 @@ async def run_grid(
                 extra_server_args=merge_server_args(
                     base_extra_args, variant.extra_server_args,
                 ),
+                # Per-variant env overrides (e.g. MORI_* MoE-dispatch
+                # tuning) so server-side env knobs proposed by specialists
+                # actually take effect on the restarted sglang. Empty dict
+                # for arg-only variants → forwarded as a no-op.
+                extra_env=dict(variant.extra_envs),
                 model_path=model_path,
                 ep=int(os.environ.get("EP") or 0) or None,
             )
