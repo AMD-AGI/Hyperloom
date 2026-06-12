@@ -17,9 +17,9 @@ tree (created by Coordinator) holds cross-task GEAK/OOB work artefacts
 keyed by `kernel_id`. Default `USER_DATA_PATH` is `/workspace/hyperloom`.
 Do not write outside `$USER_DATA_PATH` except for reading user-provided
 trace/source paths, the TraceLens public source at
-`$TRACELENS_ROOT` (default `$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`,
-i.e. `$USER_DATA_PATH/runtime/source-mirrors/TraceLens`; `install.sh`
-clones `AMD-AGI/TraceLens` there and pins it to a fixed SHA. A
+`$TRACELENS_ROOT` (default
+`${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens`;
+`install.sh` clones `AMD-AGI/TraceLens` there and pins it to a fixed SHA. A
 pre-existing checkout you maintain is only used as an explicit operator
 override — export `TRACELENS_ROOT=<path>` to opt in, which makes the
 installer skip both the clone and the SHA pin), and —
@@ -67,9 +67,10 @@ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
 - Node.js 20 + npm when they are missing (required for the `claude` /
   `codex` npm CLIs)
 - TraceLens public editable install from `$TRACELENS_ROOT`
-  (default `$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`; when unset,
-  `install.sh` clones `AMD-AGI/TraceLens` there and pins it to a fixed
-  SHA. Export `TRACELENS_ROOT=<path>` to point at a pre-existing
+  (default
+  `${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens`;
+  when unset, `install.sh` clones `AMD-AGI/TraceLens` there and pins it to a
+  fixed SHA. Export `TRACELENS_ROOT=<path>` to point at a pre-existing
   checkout you maintain — this is an explicit operator override and
   skips both the clone and the SHA pin), plus the
   optional internal extension from `$TRACELENS_INTERNAL_ROOT` only when
@@ -87,7 +88,7 @@ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
   preset. Other yaml budget knobs are not env-overridable on purpose —
   edit `$GEAK_CONFIG` directly if you need to tune them per pod.
 - GEAK MCP tools — installed as four pip packages from
-  `${HYPERLOOM_ROOT}/geak/mcp_tools/`. The bundled `minisweagent` imports
+  `${GEAK_ROOT}/mcp_tools/`. The bundled `minisweagent` imports
   these at preprocess + run time; missing any of them fails the GEAK
   attempt fast (observed on Qwen3-32B 2026-05-15: `profiler_mcp` not
   installed → 4-minute aborts with zero-byte baselines).
@@ -110,7 +111,7 @@ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
 - GEAK cross-session memory env; by default Hyperloom stores GEAK's SQLite
   memory DB at `/wekafs/hyperloom/geak-memory/memory.db`, enables
   `GEAK_SAVE_TO_KNOWLEDGE_BASE=1`, and aligns
-  `GEAK_MEMORY_MIN_SPEEDUP=1.20` with the KEEP gate.
+  `GEAK_MEMORY_MIN_SPEEDUP=1.05` with the KEEP gate.
 - OOB CLI + claude/codex npm CLIs + `@cursor/sdk` global install +
   `~/.claude/config.json` (`customApiUrl` pointed at the upstream
   Anthropic URL derived from `$OPENAI_BASE_URL` with a trailing `/v1`
@@ -141,6 +142,11 @@ GEAK and OOB submit Ray tasks with `num_gpus>=1`. If Ray is started with
 ```bash
 RAY_NUM_GPUS="${RAY_NUM_GPUS:-$(python3 -c 'import torch; print(torch.cuda.device_count() or 1)')}"
 ray stop --force || true
+# issue #433: raise the soft open-files limit before `ray start` so the
+# raylet does not abort / zombie at the container default (1024). Needs a
+# container launched with `--ulimit nofile=1048576` (>= 65536) for the hard
+# cap; `install.sh` and the Python backends apply the same preflight.
+ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true
 ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
 ray status
 ```
@@ -335,9 +341,9 @@ OPTIONAL internal extension (internal users only): if you have access to it,
 install your own checkout (`pip install -e .`) and set `$TRACELENS_INTERNAL_ROOT`
 to its path. Hyperloom keeps no internal URL/path and never clones it.
 
-Default base repo (`TRACELENS_ROOT`): `$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`
-(i.e. `$USER_DATA_PATH/runtime/source-mirrors/TraceLens`). When unset,
-`install.sh` clones `AMD-AGI/TraceLens` there and pins it to the fixed
+Default base repo (`TRACELENS_ROOT`):
+`${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens`.
+When unset, `install.sh` clones `AMD-AGI/TraceLens` there and pins it to the fixed
 SHA recorded in the installer. A pre-existing checkout you maintain is
 **only** used as an explicit operator override — export
 `TRACELENS_ROOT=<path>` to opt in, which skips both the clone and the
@@ -356,10 +362,9 @@ If `tracelens_analysis` fails with "CLI not found", re-run `install.sh` or
 repeat the manual install above.
 
 When `$TRACELENS_ROOT` or `$TRACELENS_INTERNAL_ROOT` is on a read-only mount,
-`ensure_tracelens` automatically mirrors the checkout to
-`${HYPERLOOM_ROOT}/TraceLens` or `${HYPERLOOM_ROOT}/TraceLens-internal`
-respectively (parallel to `${HYPERLOOM_ROOT}/geak` /
-`${HYPERLOOM_ROOT}/OOB/oob_cli`) via `cp -r`, runs `pip install -e` against
+`ensure_tracelens` uses `$TRACELENS_ROOT` for the public checkout and mirrors
+the internal checkout to `$TRACELENS_MIRROR_DIR` when needed (parallel to
+`${GEAK_ROOT}` / `${OOB_CLI_ROOT}`) via `cp -r`, runs `pip install -e` against
 the writable mirror, and `write_env_file` re-exports the resolved root so
 subsequent CLI subprocesses inherit the mirror. Treat these mirrors as
 installer-owned state; do not clone, clean, or edit them by hand.
@@ -368,11 +373,11 @@ If `install.sh` did not finish or the CLI is unexpectedly missing, run a
 manual editable install + smoke test before analysis:
 
 ```bash
-# Default: use the installer-managed clone under $HYPERLOOM_RUNTIME_DIR.
+# Default: use the installer-managed pod-local open-source checkout.
 # Operator override: export TRACELENS_ROOT (e.g.
 # /path/to/your/TraceLens) before running install.sh to skip the clone
 # and the SHA pin.
-export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime}/source-mirrors/TraceLens}"
+export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens}"
 cd "$TRACELENS_ROOT" && pip install -e .
 # OPTIONAL internal extension — only if TRACELENS_INTERNAL_ROOT is set:
 [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && cd "$TRACELENS_INTERNAL_ROOT" && pip install -e .
@@ -460,12 +465,12 @@ than a silent skip.
 
 ## Optimization Goals & Time Budget
 
-- **Target speedup**: `>= 1.20x` on the dominant inference shape(s). Below this
+- **Target speedup**: `>= 1.05x` on the dominant inference shape(s). Below this
   threshold an attempt is `NEEDS_REVIEW` (marginal / shape-specific / risky),
   not `KEEP`. (Prompt still tells agents to aim for `>= 1.50x` to incentivise
-  ambitious optimization, but the KEEP gate is 1.20x because real inference
-  wins are often shape-specific 1.18-1.32x — see r19 GEMM 1.32x, r39 GEAK
-  rms_norm 1.18x.)
+  ambitious optimization, but the KEEP gate is 1.05x (issue #442) because real
+  inference wins are often shape-specific 1.18-1.32x — see r19 GEMM 1.32x, r39
+  GEAK rms_norm 1.18x — and even smaller wins are worth keeping.)
 - **Default budget**:
   - claude / codex / cursor: **60 minutes** per attempt (`--backend-budget-min 60`)
   - GEAK: tracks `$GEAK_RUN_MODE` (set by `install.sh`, exported via
@@ -565,7 +570,7 @@ Return one of `KEEP`, `PARTIAL`, `NEEDS_REVIEW`, or `REVERT`.
 `KEEP` requires ALL evidence:
 - compile/import pass
 - correctness pass
-- microbench speedup `>= 1.20x` (the gate threshold) with `micro_speedup_source`
+- microbench speedup `>= 1.05x` (the gate threshold) with `micro_speedup_source`
   in `{"report_scan", "cli_override"}` (i.e. a real measurement, not a default)
 - E2E does not regress
 - accuracy gate passed or accuracy risk is explicitly zero
@@ -577,7 +582,7 @@ budget boundary, sandbox couldn't rebuild the .so for A/B, GEAK sub-agent
 out-of-time. A human reviewer can read the report and salvage.
 
 `NEEDS_REVIEW` is returned when the attempt completed and produced a measured
-speedup in `(1.0x, 1.20x)` — improvement exists but doesn't meet the gate,
+speedup in `(1.0x, 1.05x)` — improvement exists but doesn't meet the gate,
 needs human judgement on shape coverage / risk.
 
 `REVERT` is returned for `compile fail`, `microbench did not improve`

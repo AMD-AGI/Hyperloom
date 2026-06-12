@@ -124,6 +124,12 @@ class StackFingerprint:
     rocm_version: str = ""
 
     def to_dict(self) -> dict[str, str]:
+        """Serialise the fingerprint to a plain dict.
+
+        Returns:
+            dict[str, str]: A dict with keys ``vllm_version``,
+                ``aiter_commit`` and ``rocm_version``.
+        """
         return {
             "vllm_version": self.vllm_version,
             "aiter_commit": self.aiter_commit,
@@ -132,6 +138,17 @@ class StackFingerprint:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> StackFingerprint:
+        """Build a fingerprint from a (possibly partial) dict.
+
+        Missing keys default to empty strings.
+
+        Args:
+            d (dict[str, Any]): Source mapping; recognised keys are
+                ``vllm_version`` / ``aiter_commit`` / ``rocm_version``.
+
+        Returns:
+            StackFingerprint: The reconstructed fingerprint.
+        """
         return cls(
             vllm_version=str(d.get("vllm_version") or ""),
             aiter_commit=str(d.get("aiter_commit") or ""),
@@ -174,6 +191,12 @@ class KernelOptimization:
     ts: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the kernel-optimization record to a plain dict.
+
+        Returns:
+            dict[str, Any]: All fields coerced to their JSON-friendly
+                types (floats, ints, strings, bool).
+        """
         return {
             "kernel_id":     str(self.kernel_id),
             "source_file":   str(self.source_file),
@@ -189,6 +212,18 @@ class KernelOptimization:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> KernelOptimization:
+        """Build a kernel-optimization record from a dict.
+
+        Missing keys fall back to the dataclass defaults; numeric and
+        boolean fields are coerced.
+
+        Args:
+            d (dict[str, Any]): Source mapping matching the
+                :meth:`to_dict` shape.
+
+        Returns:
+            KernelOptimization: The reconstructed record.
+        """
         return cls(
             kernel_id=str(d.get("kernel_id") or ""),
             source_file=str(d.get("source_file") or ""),
@@ -285,6 +320,16 @@ class Recipe:
     extras: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the recipe to the on-disk ``recipe.json`` shape.
+
+        Nested sub-shapes (findings, failures, gaps, PRs, pitfalls,
+        lessons, sessions, kernel optimizations, stack fingerprint)
+        are expanded to plain dicts, and free-form ``extras`` are
+        splatted at the top level without shadowing well-known keys.
+
+        Returns:
+            dict[str, Any]: The arbor-shape recipe row.
+        """
         out: dict[str, Any] = {
             "canonical_id":      self.canonical_id,
             "version":           int(self.version),
@@ -355,6 +400,19 @@ class Recipe:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Recipe:
+        """Build a recipe from an on-disk / wire dict.
+
+        Nested arrays are parsed back into their typed sub-shapes
+        (skipping non-dict entries), and any unrecognised top-level
+        keys are preserved verbatim in ``extras`` so a newer/older
+        writer's data is never dropped.
+
+        Args:
+            d (dict[str, Any]): Source mapping in arbor recipe shape.
+
+        Returns:
+            Recipe: The reconstructed recipe row.
+        """
         # Stripped set of well-known top-level keys we parse — anything
         # else gets bucketed into ``extras`` so a future read by a
         # newer (or older) writer doesn't lose data.
@@ -486,6 +544,15 @@ class Attempt:
     rationale: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the attempt to a plain dict.
+
+        ``fitness`` is omitted entirely when ``None`` (rather than
+        emitted as null) to match the on-disk NDJSON contract.
+
+        Returns:
+            dict[str, Any]: The attempt row; includes ``fitness`` only
+                when it is set.
+        """
         out: dict[str, Any] = {
             "id":                  int(self.id),
             "recipe_canonical_id": str(self.recipe_canonical_id),
@@ -503,6 +570,18 @@ class Attempt:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Attempt:
+        """Build an attempt from a dict.
+
+        ``fitness`` stays ``None`` when absent; all other fields fall
+        back to their dataclass defaults.
+
+        Args:
+            d (dict[str, Any]): Source mapping matching the
+                :meth:`to_dict` shape.
+
+        Returns:
+            Attempt: The reconstructed attempt row.
+        """
         fitness = d.get("fitness")
         return cls(
             id=int(d.get("id") or 0),

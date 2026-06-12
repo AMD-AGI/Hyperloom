@@ -1,40 +1,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Session_dir layout regression tests (N17 per-model/ts default).
-
-Locks the contract:
-
-* ``paths.session_dir()`` returns ``/workspace/hyperloom`` by default;
-  ``$USER_DATA_PATH`` overrides (when no make_session_dir pin is set).
-* ``paths.workspace_root()`` returns ``$USER_DATA_PATH`` regardless of
-  layout mode (used by runtime/, logs/, install.sh).
-* ``paths.make_session_dir(model_name=...)`` creates
-  ``<workspace_root>/<model>/<UTC ts>/`` and pins
-  ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` so every subsequent
-  ``session_dir()`` call agrees.
-* ``paths.make_session_dir()`` with no model_name (or with
-  ``INFERENCE_OPTIMIZER_SESSION_LAYOUT=flat``) falls back to the legacy
-  flat layout (session_dir == workspace_root) for tests / CI.
-* ``paths.make_session_dir()`` is idempotent and creates the full
-  per-session skeleton (storage / agents / runs / patches / ...).
-* ``runtime_dir()`` / ``magpie_dir()`` / ``source_mirrors_dir()`` are
-  workspace-shared, not session-scoped.
-* ``manifest.write_manifest()`` writes ``manifest.json`` atomically
-  with the v1 schema.
-* ``manifest.load_manifest()`` raises ``FileNotFoundError`` when the
-  session has not been initialised.
-* ``session_paths.runs_dir()`` rejects unknown action names so typos
-  fail loudly.
-* ``SubAgentRunner`` pre-creates ``runs/<action>/<task_id>/`` and
-  injects it into ``RunnerContext.extra['workspace']``.
-* ``PolicyGate`` with ``strict_paths=True`` rejects intents whose
-  path-like fields escape ``session_dir`` and accepts ``source_file``
-  values under the framework allowlist.
-"""
+"""Session_dir layout regression tests (N17 per-model/ts default)."""
 
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -65,17 +36,14 @@ from inference_optimizer.session_paths import (
 from inference_optimizer.storage.connection import SqliteConnection
 
 
-# ---------------------------------------------------------------------------
 # paths.session_dir + skeleton
-# ---------------------------------------------------------------------------
 def test_session_dir_default_is_workspace_hyperloom(monkeypatch):
     monkeypatch.delenv(paths.ENV_USER_DATA_PATH, raising=False)
     assert paths.session_dir() == Path("/workspace/hyperloom")
 
 
 def test_session_dir_user_data_path_overrides_default(tmp_path, monkeypatch):
-    """USER_DATA_PATH is the override knob — when set, session_dir()
-    must honour it instead of falling back to /workspace/hyperloom."""
+    """USER_DATA_PATH overrides the /workspace/hyperloom default."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "ud"))
     assert paths.session_dir() == tmp_path / "ud"
 
@@ -83,33 +51,27 @@ def test_session_dir_user_data_path_overrides_default(tmp_path, monkeypatch):
 def test_make_session_dir_creates_full_skeleton(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
-    # No model_name -> flat layout (legacy), session_dir == workspace_root
+    # No model_name -> flat layout, session_dir == workspace_root.
     assert sd == tmp_path
-    # Every per-session skeleton entry must exist
     for sub in paths._SESSION_SKELETON:
         assert (sd / sub).is_dir(), f"missing per-session skeleton subdir: {sub}"
-    # Workspace-shared skeleton must also exist (sibling of session_dir
-    # under workspace_root, which here happens to BE session_dir).
     for sub in paths._WORKSPACE_SKELETON:
         assert (paths.workspace_root() / sub).is_dir(), (
             f"missing workspace skeleton subdir: {sub}"
         )
-    # Re-running must be a no-op (idempotent).
+    # Re-running must be idempotent.
     sd2 = paths.make_session_dir()
     assert sd2 == sd
 
 
-# ---------------------------------------------------------------------------
 # N17 per-model/ts layout
-# ---------------------------------------------------------------------------
 def test_workspace_root_returns_user_data_path(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     assert paths.workspace_root() == tmp_path
 
 
 def test_workspace_root_independent_of_session_pin(tmp_path, monkeypatch):
-    """workspace_root() never consults the session pin; runtime/ etc.
-    are workspace-scoped regardless of which session is active."""
+    """workspace_root() never consults the session pin (runtime/ etc. are workspace-scoped)."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     monkeypatch.setenv(paths.ENV_CURRENT_SESSION_DIR, str(tmp_path / "x/y/z"))
     assert paths.workspace_root() == tmp_path
@@ -124,31 +86,26 @@ def test_make_session_dir_per_model_ts_layout(tmp_path, monkeypatch):
     assert sd.parent.name == "DeepSeek-R1-0528"
     # Timestamp shape: YYYYMMDDTHHMMSSZ
     assert len(sd.name) == 16 and sd.name.endswith("Z") and "T" in sd.name
-    # Pin propagated for downstream callers + subprocesses
     import os as _os
     assert _os.environ[paths.ENV_CURRENT_SESSION_DIR] == str(sd)
     assert paths.session_dir() == sd
-    # Per-session skeleton landed under sd
     for sub in paths._SESSION_SKELETON:
         assert (sd / sub).is_dir()
-    # Workspace skeleton landed under ws, not under sd
+    # Workspace skeleton landed under ws, not under sd.
     for sub in paths._WORKSPACE_SKELETON:
         assert (tmp_path / sub).is_dir()
         assert not (sd / sub).exists()
 
 
 def test_make_session_dir_sanitises_model_basename(tmp_path, monkeypatch):
-    """HF-style ids ('org/model'), absolute paths, and chars unsafe for
-    bash/Magpie scripts must all reduce to a filename-safe basename."""
+    """HF ids, absolute paths, and unsafe chars all reduce to a filename-safe basename."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    # HF id
     sd = paths.make_session_dir(model_name="meta-llama/Llama-3.1-70B-Instruct")
     assert sd.parent.name == "Llama-3.1-70B-Instruct"
 
 
 def test_make_session_dir_accepts_path_object(tmp_path, monkeypatch):
-    """args.model is a Path() in the CLI (argparse with type=Path) — the
-    helper must accept any os.PathLike, not just str."""
+    """The helper must accept any os.PathLike (args.model is a Path in the CLI), not just str."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir(
         model_name=Path("/wekafs/models/DeepSeek-R1-0528"),
@@ -165,9 +122,7 @@ def test_make_session_dir_flat_layout_via_env(tmp_path, monkeypatch):
 
 
 def test_make_session_dir_overwrites_stale_pin(tmp_path, monkeypatch):
-    """Subsequent make_session_dir() calls (e.g. a second test in the
-    same process) overwrite the pin so cross-test pollution is
-    impossible."""
+    """A subsequent make_session_dir() overwrites the pin (no cross-test pollution)."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd1 = paths.make_session_dir(model_name="A")
     sd2 = paths.make_session_dir(model_name="B")
@@ -180,8 +135,7 @@ def test_make_session_dir_overwrites_stale_pin(tmp_path, monkeypatch):
 def test_find_latest_per_session_dir_returns_none_on_empty(
     tmp_path, monkeypatch,
 ):
-    """No per-session subdir under workspace_root -> None (caller falls
-    back to flat layout or errors out)."""
+    """No per-session subdir under workspace_root -> None."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     assert paths.find_latest_per_session_dir() is None
     assert paths.find_latest_per_session_dir(model_name="DSR1") is None
@@ -190,9 +144,7 @@ def test_find_latest_per_session_dir_returns_none_on_empty(
 def test_find_latest_per_session_dir_picks_lex_latest_ts(
     tmp_path, monkeypatch,
 ):
-    """When multiple per-launch ts dirs exist under one model,
-    lex-sort on the YYYYMMDDTHHMMSSZ name picks the latest in
-    chronological order — robust to mtime touches."""
+    """Lex-sort on the YYYYMMDDTHHMMSSZ name picks the latest ts (robust to mtime touches)."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     (tmp_path / "MyModel").mkdir()
     (tmp_path / "MyModel" / "20260101T000000Z").mkdir()
@@ -206,8 +158,7 @@ def test_find_latest_per_session_dir_picks_lex_latest_ts(
 def test_find_latest_per_session_dir_no_model_scans_all(
     tmp_path, monkeypatch,
 ):
-    """No model_name -> scan all model_basename subdirs for the
-    latest per-launch ts across the entire workspace."""
+    """No model_name -> scan all model_basename subdirs for the latest ts across the workspace."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     (tmp_path / "Qwen-7B").mkdir()
     (tmp_path / "Qwen-7B" / "20260101T000000Z").mkdir()
@@ -222,8 +173,7 @@ def test_find_latest_per_session_dir_no_model_scans_all(
 def test_find_latest_per_session_dir_skips_workspace_shared(
     tmp_path, monkeypatch,
 ):
-    """workspace-shared subdirs (runtime/, logs/) must not be mistaken
-    for model_basename subdirs."""
+    """workspace-shared subdirs (runtime/, logs/) must not be mistaken for model_basename subdirs."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     (tmp_path / "runtime").mkdir()
     (tmp_path / "runtime" / "20260520T120000Z").mkdir()  # decoy
@@ -239,8 +189,7 @@ def test_find_latest_per_session_dir_skips_workspace_shared(
 def test_find_latest_per_session_dir_ignores_non_ts_dirs(
     tmp_path, monkeypatch,
 ):
-    """Only YYYYMMDDTHHMMSSZ-shaped dir names count as ts subdirs;
-    other accidental dirs are ignored."""
+    """Only YYYYMMDDTHHMMSSZ-shaped dir names count as ts subdirs."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     (tmp_path / "MyModel").mkdir()
     (tmp_path / "MyModel" / "scratch").mkdir()  # ignored
@@ -252,20 +201,42 @@ def test_find_latest_per_session_dir_ignores_non_ts_dirs(
 
 
 def test_runtime_dir_is_workspace_shared(tmp_path, monkeypatch):
-    """N17: runtime/ + Magpie/ + source-mirrors/ live under
-    workspace_root, NOT under per-session subdir."""
+    """N17: runtime/ lives under workspace_root, not the per-session subdir."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir(model_name="DeepSeek-R1-0528")
     assert paths.runtime_dir(sd) == tmp_path / "runtime"
-    assert paths.magpie_dir(sd) == tmp_path / "runtime" / "Magpie"
-    assert paths.source_mirrors_dir(sd) == tmp_path / "runtime" / "source-mirrors"
     # Also true when caller passes the historical no-arg form (back-compat)
     assert paths.runtime_dir() == tmp_path / "runtime"
 
 
-# ---------------------------------------------------------------------------
+def test_magpie_dir_is_pod_local_and_decoupled_from_user_data(tmp_path, monkeypatch):
+    # Magpie resolves under the pod-local open-source root (mirrors install.sh),
+    # NOT under $USER_DATA_PATH/runtime, so script + runtime agree on one checkout.
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "shared"))
+    monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
+    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "podlocal"))
+    expected = tmp_path / "podlocal" / "hyperloom" / "open-source-repos"
+    assert paths.open_source_root() == expected
+    assert paths.magpie_dir() == expected / "Magpie"
+    assert str(tmp_path / "shared") not in str(paths.magpie_dir())
+
+
+def test_open_source_root_honours_explicit_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "custom"))
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "ignored"))
+    monkeypatch.delenv("MAGPIE_DIR", raising=False)
+    assert paths.open_source_root() == tmp_path / "custom"
+    assert paths.magpie_dir() == tmp_path / "custom" / "Magpie"
+
+
+def test_magpie_dir_honours_explicit_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAGPIE_DIR", str(tmp_path / "operator-magpie"))
+    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "ignored"))
+    assert paths.magpie_dir() == tmp_path / "operator-magpie"
+
+
 # manifest
-# ---------------------------------------------------------------------------
 def test_write_manifest_writes_v1_schema(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
@@ -276,11 +247,8 @@ def test_write_manifest_writes_v1_schema(tmp_path, monkeypatch):
     assert on_disk == m
 
 
-# ---------------------------------------------------------------------------
-# manifest "dependencies" block (Hyperloom bugs.md §C #1 follow-up:
-# install.sh clones a fresh InferenceX per install, so the SHA recorded
-# here is the only way to answer "which upstream did this run hit?")
-# ---------------------------------------------------------------------------
+# manifest "dependencies" block — records each upstream's SHA/remote so we can
+# answer "which upstream did this run hit?" (install.sh clones fresh per install).
 def test_manifest_records_dependencies_block_empty_when_envs_unset(
     tmp_path, monkeypatch,
 ):
@@ -298,8 +266,7 @@ def test_manifest_records_dependencies_block_empty_when_envs_unset(
 def test_manifest_records_dependencies_block_picks_up_git_metadata(
     tmp_path, monkeypatch,
 ):
-    """Plant two fake git checkouts on disk and confirm we capture both
-    the SHA and origin URL."""
+    """Plant two fake git checkouts and confirm we capture both SHA and origin URL."""
     import subprocess
 
     def _init_repo(path, remote_url, file_contents):
@@ -357,10 +324,27 @@ def test_manifest_dependencies_block_is_fail_soft_on_non_repo_paths(
     }
 
 
+def test_manifest_pod_local_dependency_warning_matches_default_policy(
+    tmp_path, monkeypatch, caplog,
+):
+    from inference_optimizer import manifest
+
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "user_data"))
+    monkeypatch.setenv("MAGPIE_DIR", "/workspace/hyperloom_runtime_smoke/Magpie")
+
+    with caplog.at_level(logging.WARNING, logger="inference_optimizer.manifest"):
+        manifest._describe_dep("MAGPIE_DIR")
+
+    messages = [r.message for r in caplog.records if "MAGPIE_DIR" in r.message]
+    assert messages
+    assert "defaults open-source dependencies to pod-local storage" in messages[0]
+    assert "point MAGPIE_DIR back" not in messages[0]
+
+
 def test_build_session_id_includes_uuid_and_model(monkeypatch):
     sid = build_session_id("Qwen3-8B")
     assert sid.startswith("Qwen3-8B_")
-    # Suffix is <UTC compact ts>_<8 hex chars>; sanity-check length.
+    # Suffix is <UTC compact ts>_<8 hex chars>.
     parts = sid.split("_")
     assert len(parts[-1]) == 8 and all(c in "0123456789abcdef" for c in parts[-1])
 
@@ -370,9 +354,7 @@ def test_load_manifest_missing_raises(tmp_path):
         load_manifest(tmp_path / "no-such-session")
 
 
-# ---------------------------------------------------------------------------
 # session_paths helpers
-# ---------------------------------------------------------------------------
 def test_runs_dir_layout(tmp_path):
     p = runs_dir(tmp_path, "baseline", "task-abcdef01")
     assert p == tmp_path / "runs" / "baseline" / "task-abcdef01"
@@ -394,9 +376,7 @@ def test_agent_prompt_snapshot_path(tmp_path):
     )
 
 
-# ---------------------------------------------------------------------------
 # SubAgentRunner pre-mkdir + workspace injection
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
@@ -446,14 +426,12 @@ async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
     )
     await sub.run_task(task)
     db.close()
-    # target_analysis has no runs/ subtree — workspace stays unset, session_dir is plumbed.
+    # target_analysis has no runs/ subtree — workspace stays unset.
     assert captured["workspace"] is None
     assert captured["session_dir"] == str(sd)
 
 
-# ---------------------------------------------------------------------------
 # PolicyGate strict path-containment
-# ---------------------------------------------------------------------------
 def _gate(tmp_path: Path, *, strict: bool = True) -> PolicyGate:
     return PolicyGate(
         role_registry=default_role_registry(),
@@ -538,7 +516,6 @@ def test_policy_strict_off_skips_path_check(tmp_path):
             "params": {"trace_input": "/tmp/anywhere.json"},
         },
     )
-    # Should not raise — strict_paths=False means the check is a no-op.
     gate.validate_intent("orchestration", intent)
 
 
