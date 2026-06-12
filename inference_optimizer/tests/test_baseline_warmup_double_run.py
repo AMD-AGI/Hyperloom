@@ -857,6 +857,85 @@ def test_pre_start_cleanup_no_kill_when_port_free(tmp_path):
     assert state["calls"] == 2
 
 
+def test_pre_start_cleanup_no_kill_when_metadata_existed(tmp_path):
+    """A healthy port with matching metadata is not a zombie signal.
+
+    The global stale-server reaper must not fire for a likely legitimate
+    server. File preservation is covered by the direct pre-start test below;
+    this full double-run path later removes files in final teardown.
+    """
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    output_dir.mkdir(parents=True)
+    (output_dir / "vllm_8888.pid").write_text("2147483646")
+    (output_dir / "vllm_8888.json").write_text("{}")
+
+    kill_calls = {"n": 0}
+
+    def fake_kill():
+        kill_calls["n"] += 1
+
+    captured: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured)
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch.object(
+        type(executor), "_port_healthy", return_value=True,
+    ), patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "_kill_stale_servers",
+        side_effect=fake_kill,
+    ), patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert kill_calls["n"] == 0
+    assert state["calls"] == 2
+
+
+def test_pre_start_cleanup_preserves_metadata_when_reuse_target_healthy(
+    tmp_path,
+):
+    """Direct guard: do not create port-occupied/no-metadata state."""
+    output_dir = tmp_path / "ws"
+    output_dir.mkdir(parents=True)
+    pid_file = output_dir / "vllm_8888.pid"
+    meta_file = output_dir / "vllm_8888.json"
+    pid_file.write_text("2147483646")
+    meta_file.write_text("{}")
+
+    executor = _executor(tmp_path / "base.yaml", tmp_path)
+    kill_calls = {"n": 0}
+
+    def fake_kill():
+        kill_calls["n"] += 1
+
+    with patch.object(
+        type(executor), "_port_healthy", return_value=True,
+    ), patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "_kill_stale_servers",
+        side_effect=fake_kill,
+    ):
+        executor._pre_start_cleanup(
+            pid_dir=output_dir, framework="vllm", port=8888,
+        )
+
+    assert kill_calls["n"] == 0
+    assert pid_file.exists()
+    assert meta_file.exists()
+
+
 def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path):
     """The pre-start cleanup is best-effort: a raising _kill_stale_servers()
     must not abort the run — the double-run proceeds and still succeeds."""
@@ -980,4 +1059,20 @@ def test_classify_fast_exit_without_pattern():
     """A fast exit without arg-error patterns stays subprocess_nonzero."""
     assert _classify_subprocess_error(
         3.0, "Segmentation fault (core dumped)"
+    ) == "subprocess_nonzero"
+
+
+def test_classify_fast_runtime_value_error_not_arg_error():
+    """A generic fast runtime ValueError is not enough for arg-error routing."""
+    assert _classify_subprocess_error(
+        3.0, "ValueError: tensor shape mismatch during warmup"
+    ) == "subprocess_nonzero"
+
+
+def test_classify_value_error_with_argv_dump_not_arg_error():
+    """A command/argv dump containing flags is not arg validation by itself."""
+    assert _classify_subprocess_error(
+        3.0,
+        "ValueError: tensor shape mismatch during warmup\n"
+        "argv: vllm serve --model /models/foo --tp 8",
     ) == "subprocess_nonzero"

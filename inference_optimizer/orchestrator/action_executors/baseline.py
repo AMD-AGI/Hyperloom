@@ -89,9 +89,18 @@ _ARG_ERROR_PATTERNS = (
     "unrecognized arguments",
     "invalid choice",
     "Unknown attention backend",
-    "ValueError:",
-    "argparse",
     "not a valid",
+)
+_ARG_ERROR_CONTEXT_PATTERNS = (
+    "argument",
+    "argparse",
+    "backend",
+    "choice",
+    "cli",
+    "invalid",
+    "option",
+    "flag",
+    "unknown",
 )
 
 
@@ -100,8 +109,13 @@ def _classify_subprocess_error(
 ) -> str:
     """Return 'fast_exit_arg_error' when the subprocess died fast on an arg
     validation error, else 'subprocess_nonzero'."""
-    if elapsed_sec < FAST_EXIT_THRESHOLD_SEC and any(
-        p in stderr_tail for p in _ARG_ERROR_PATTERNS
+    if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
+        return "subprocess_nonzero"
+    tail = stderr_tail.lower()
+    if any(p.lower() in tail for p in _ARG_ERROR_PATTERNS):
+        return "fast_exit_arg_error"
+    if "valueerror:" in tail and any(
+        p in tail for p in _ARG_ERROR_CONTEXT_PATTERNS
     ):
         return "fast_exit_arg_error"
     return "subprocess_nonzero"
@@ -922,6 +936,19 @@ class BaselineExecutor:
         tag = f"{framework}_{port}"
         pid_file = base / f"{tag}.pid"
         meta_file = base / f"{tag}.json"
+        meta_exists = meta_file.exists()
+        try:
+            port_healthy = self._port_healthy(port)
+        except Exception as exc:  # noqa: BLE001 — best-effort pre-clean
+            log.warning(
+                "baseline_executor: pre-start port probe failed "
+                "(%s); proceeding.", exc,
+            )
+            port_healthy = False
+        if meta_exists and port_healthy:
+            # A healthy reuse target with metadata is not a zombie; keep the
+            # files so Magpie can reattach instead of creating a mismatch.
+            return
         # Unlink stale metadata/pid files only (no signal to possibly-
         # recycled PIDs — _teardown_lifecycle_server is too aggressive here).
         for p in (pid_file, meta_file):
@@ -934,7 +961,7 @@ class BaselineExecutor:
         # zombie (healthy endpoint, no metadata). Avoids killing unrelated
         # servers sharing the pod.
         try:
-            if self._port_healthy(port) and not meta_file.exists():
+            if not meta_exists and port_healthy:
                 _kill_stale_servers()
         except Exception as exc:  # noqa: BLE001 — best-effort pre-clean
             log.warning(
@@ -1275,6 +1302,7 @@ class BaselineExecutor:
                 "workspace": str(workspace),
                 "report_path": str(report_path) if report_path.exists() else None,
                 "reported_success": measurement.get("reported_success"),
+                "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
                 "nonfatal_warnings": warnings,
             }
 
