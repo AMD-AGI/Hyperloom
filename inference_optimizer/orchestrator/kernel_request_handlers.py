@@ -1008,9 +1008,16 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
         from .action_executors._multi_node_env import (
             is_multi_node,
             ray_gcs_address_from_state,
+            dynamo_ssh_env_from_state,
         )
         if is_multi_node():
-            addr = ray_gcs_address_from_state()
+            # Dynamo backend: route GEAK GPU work to a pod over SSH (no Ray).
+            # dynamo_ssh_env_from_state() returns {} for RayJob/single-node, so
+            # the RAY_ADDRESS path below is unchanged for those.
+            ssh_env = dynamo_ssh_env_from_state()
+            if ssh_env:
+                env.update(ssh_env)
+            addr = "" if ssh_env else ray_gcs_address_from_state()
             if addr:
                 env.setdefault("RAY_ADDRESS", addr)
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
