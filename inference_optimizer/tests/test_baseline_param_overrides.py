@@ -405,7 +405,16 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
 
 
 def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
-    """#210 fix: the baseline executor's Magpie subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH`` so Magpie loads the patched checkout."""
+    """#210 fix: the baseline executor's Magpie subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH`` so Magpie loads the patched checkout.
+
+    #536 added a layer on top: by default the executor mirrors a network-mount
+    InferenceX checkout to local disk and pins MAGPIE_INFERENCEX_PATH at that
+    mirror. That mirror behaviour has its own coverage
+    (test_baseline_warmup_double_run.py). Here we isolate the #210 env-inheritance
+    contract by disabling the mirror, so the asserted path is exactly the
+    configured ``$INFERENCEX_PATH`` rather than a hash-named local mirror dir.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "1")
     monkeypatch.setenv("INFERENCEX_PATH", "/wekafs/hyperloom/InferenceX")
     base = tmp_path / "base.yaml"
     _write_yaml(base)
