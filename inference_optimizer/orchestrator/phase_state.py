@@ -130,7 +130,7 @@ _INTERLEAVE_KERNEL_EXTRAS: frozenset[str] = frozenset({
 
 
 def is_phase_interleave_enabled() -> bool:
-    """Return True when EXPLORE↔KERNEL interleave is enabled (default ON, P3_18; env is rollback knob)."""
+    """Return True when EXPLORE↔KERNEL interleave is enabled (default ON; env is rollback knob)."""
     raw = (os.environ.get(PHASE_INTERLEAVE_ENV) or "").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
@@ -290,7 +290,7 @@ def is_valid_phase_exit_reason(value: str) -> bool:
     return (value or "").strip() in PHASE_EXIT_REASONS
 
 
-# Default phase budgets (% of wall-clock); P3_22 rebalance. IR-6 force-exit is the hard EXPLORE backstop; FRAMEWORK_PR uses a time wall.
+# Default phase budgets (% of wall-clock). IR-6 force-exit is the hard EXPLORE backstop; FRAMEWORK_PR uses a time wall.
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
     PHASE_EXPLORE: 0.45,

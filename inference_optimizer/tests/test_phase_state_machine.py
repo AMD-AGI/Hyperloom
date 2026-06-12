@@ -565,7 +565,7 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     row = c.shared_state.phase_history[0]
     assert row["to_phase"] == "PRELUDE"
     assert row["reason"] == "phase_entered"
-    # P3_22 rebalance: EXPLORE/KERNEL carry a larger slice; PRELUDE 3%, SWEEP 12%; sum stays 1.0.
+    # Budget rebalance: EXPLORE/KERNEL carry a larger slice; PRELUDE 3%, SWEEP 12%; sum stays 1.0.
     assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.45
     assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.03
 

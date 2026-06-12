@@ -218,7 +218,7 @@ def test_plateau_kernel_empty_attempts_dict_with_no_entries_does_not_trigger():
 
 # 4. exit_normal_explore / exit_normal_kernel — wired to real plateau
 def test_exit_normal_explore_does_not_exit_on_plateau(monkeypatch):
-    """P3_17: with cyclic off, plateau is advisory only; a bare plateau signal must NOT exit EXPLORE."""
+    """With cyclic off, plateau is advisory only; a bare plateau signal must NOT exit EXPLORE."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "0")
     state = SimpleNamespace(
         phase="EXPLORE",
@@ -256,7 +256,7 @@ def test_exit_normal_explore_skip_to_kernel_hint_short_circuits():
 
 
 def test_exit_normal_kernel_does_not_exit_on_plateau():
-    """P3_17: KERNEL plateau is advisory only; only the skip_to_sweep hint or budget exhaustion may exit KERNEL."""
+    """KERNEL plateau is advisory only; only the skip_to_sweep hint or budget exhaustion may exit KERNEL."""
     state = SimpleNamespace(
         phase="KERNEL",
         phase_started_unix=0.0,
@@ -274,7 +274,7 @@ def test_exit_normal_kernel_does_not_exit_on_plateau():
 
 
 def test_exit_normal_kernel_after_gemm_does_not_exit():
-    """P3_17: the GEMM-completed shortcut is removed; GEMM completion alone never advances KERNEL → SWEEP."""
+    """The GEMM-completed shortcut is removed; GEMM completion alone never advances KERNEL → SWEEP."""
     state = SimpleNamespace(
         phase="KERNEL",
         phase_started_unix=0.0,
@@ -459,7 +459,7 @@ def test_stop_reason_vocab_has_v08_additions():
 
 # 7. plateau is advisory only — pure compute_plateau_* still works
 def test_compute_next_phase_does_not_advance_on_plateau(monkeypatch):
-    """P3_17: with cyclic off, even when the EXPLORE plateau judge fires, compute_next_phase returns None without an explicit hint or budget gate."""
+    """With cyclic off, even when the EXPLORE plateau judge fires, compute_next_phase returns None without an explicit hint or budget gate."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "0")
     state = SimpleNamespace(
         phase="EXPLORE",

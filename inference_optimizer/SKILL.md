@@ -281,10 +281,10 @@ Rules that look reasonable but break the current flow:
   Use `--no-framework` to skip the phase entirely.
 - **`kernel_opt` sequencing** is no longer gated by an
   explore-minimum check (the
-  `explore_attempts_minimum_before_kernel_opt` rule was retired
-  in loosen_plan P1_06). KERNEL phase may propose `kernel_opt`
+  `explore_attempts_minimum_before_kernel_opt` rule was retired).
+  KERNEL phase may propose `kernel_opt`
   directly; the `trace_analyze → run_optimization` data
-  dependency (P2_11 handler-level check) and the reusable
+  dependency (handler-level check) and the reusable
   `kernel_id` validation still keep the inputs valid.
 
 ## Setup

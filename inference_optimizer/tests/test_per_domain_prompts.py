@@ -48,7 +48,7 @@ def test_every_domain_has_focus_template():
 
 
 def test_specialist_domains_m5_covers_all_active_domains():
-    """The M5 active set covers the full catalogue (seven entries after P3_17 retired session_steward_specialist)."""
+    """The M5 active set covers the full catalogue (seven entries after session_steward_specialist was retired)."""
     assert SPECIALIST_DOMAINS_M5 == SPECIALIST_DOMAIN_KEYS
     assert len(SPECIALIST_DOMAINS_M5) == 7
 
@@ -265,7 +265,7 @@ def _valid_done_payload(
 
 # 1. specialist_domains catalogue
 def test_specialist_domains_catalogue_has_seven_entries():
-    """P3_17 retired session_steward_specialist; the active catalogue has seven entries."""
+    """session_steward_specialist was retired; the active catalogue has seven entries."""
     assert len(SPECIALIST_DOMAINS) == 7
     assert SPECIALIST_DOMAIN_KEYS == frozenset(
         d.key for d in SPECIALIST_DOMAINS

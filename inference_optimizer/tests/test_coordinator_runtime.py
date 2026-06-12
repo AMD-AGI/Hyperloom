@@ -490,7 +490,7 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
 
 @pytest.mark.asyncio
 async def test_explore_not_denied_before_profile(session_dir):
-    """P2_10: after baseline, ``explore`` is no longer blocked on empty ``last_profile_trace``."""
+    """After baseline, ``explore`` is no longer blocked on empty ``last_profile_trace``."""
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "explore", "predicted_gain_pct": 5.0,
     })

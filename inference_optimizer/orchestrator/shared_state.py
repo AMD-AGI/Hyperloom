@@ -493,7 +493,7 @@ class SharedState:
     # reset on dispatch / KEEP. Threshold consumed by the Coordinator escalation.
     rounds_since_last_specialist: dict[str, int] = field(default_factory=dict)
     rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
-    # Legacy session_steward slots (steward removed in P3_17); kept only for resume + report.py back-compat, never written.
+    # Legacy session_steward slots (steward removed); kept only for resume + report.py back-compat, never written.
     last_remaining_gaps_assessment: dict[str, Any] = field(default_factory=dict)
     remaining_gaps_assessments: list[dict[str, Any]] = field(default_factory=list)
     steward_continuation_used: bool = False
