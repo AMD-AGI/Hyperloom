@@ -364,7 +364,7 @@ repeat the manual install above.
 When `$TRACELENS_ROOT` or `$TRACELENS_INTERNAL_ROOT` is on a read-only mount,
 `ensure_tracelens` uses `$TRACELENS_ROOT` for the public checkout and mirrors
 the internal checkout to `$TRACELENS_MIRROR_DIR` when needed (parallel to
-`${GEAK_ROOT}` / `${OOB_CLI_ROOT}`) via `cp -r`, runs `pip install -e` against
+`${GEAK_ROOT}` / `${OOB_ROOT}`) via `cp -r`, runs `pip install -e` against
 the writable mirror, and `write_env_file` re-exports the resolved root so
 subsequent CLI subprocesses inherit the mirror. Treat these mirrors as
 installer-owned state; do not clone, clean, or edit them by hand.
