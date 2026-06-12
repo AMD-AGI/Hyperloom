@@ -5166,6 +5166,29 @@ def _build_parser() -> argparse.ArgumentParser:
              "even in multi-node mode).",
     )
     opt.add_argument(
+        "--robustness-disable-server-probe",
+        dest="robustness_disable_server_probe",
+        action="store_true",
+        default=None,
+        help="Force auto_probe_inference_server=false: stop the robustness-agent "
+             "from auto-probing the local inference-server health endpoint "
+             "(http://127.0.0.1:8888/health). Unlike --robustness-disable-local-probe "
+             "this is surgical — the REST of LocalProbe (gpu-leak, gateway 401, "
+             "coordinator-zombie, aiter-JIT, disk/fd) stays active. Use on "
+             "single-node runs where the optimizer restarts the inference server "
+             "between benchmarks: those restart windows otherwise trip "
+             "false-positive local_server_unreachable symptoms (which can escalate "
+             "to a premature skip_to_close / robustness_escalated stop). "
+             "Auto-enabled in multi-node.",
+    )
+    opt.add_argument(
+        "--no-robustness-disable-server-probe",
+        dest="robustness_disable_server_probe",
+        action="store_false",
+        help="Force auto_probe_inference_server=true (keep the 127.0.0.1:8888 "
+             "/health auto-probe even in multi-node mode).",
+    )
+    opt.add_argument(
         "--robustness-enable-cluster-pod-metrics",
         dest="robustness_enable_cluster_pod_metrics",
         action="store_true",
