@@ -1945,6 +1945,54 @@ def _is_stale_proxy_url(url: str | None) -> bool:
     return _STALE_PROXY_HOSTPORT in str(url or "")
 
 
+# Matches the ``base_url:`` line in the GEAK litellm yaml (two-space indent
+# written by kernel-agent/scripts/install.sh, but tolerant of any indent).
+_GEAK_BASE_URL_RE = re.compile(r"(?m)^([ \t]*base_url[ \t]*:[ \t]*).*$")
+
+
+def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
+    """Rewrite ``base_url:`` in the GEAK litellm config to match ``base_url`` (#521).
+
+    GEAK reads its endpoint from ``--config $GEAK_CONFIG`` — a yaml written
+    once at install time — not from ``$GEAK_BASE_URL`` at runtime. So when an
+    operator points ``GEAK_BASE_URL`` at a reachable endpoint (e.g. a
+    host-local reverse tunnel) AFTER install, the env override alone is not
+    enough: the stale yaml still sends GEAK at the unreachable gateway and the
+    KERNEL phase burns budget on connection-error retries. Syncing the yaml in
+    place closes that gap so the kernel agent actually dials the operator's
+    endpoint.
+
+    Best-effort: returns ``False`` (never raises) when the path is empty, the
+    file is missing/unreadable/unwritable, it has no ``base_url:`` line, or it
+    is already in sync. Returns ``True`` only when a rewrite was applied.
+    """
+    if not geak_config_path or not base_url:
+        return False
+    path = Path(geak_config_path)
+    try:
+        if not path.is_file():
+            return False
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    match = _GEAK_BASE_URL_RE.search(text)
+    if match is None:
+        return False
+    current = match.group(0)[len(match.group(1)):].strip()
+    if current == base_url:
+        return False
+    # Use a function replacement so a URL containing regex backreference
+    # characters (e.g. ``\g``) cannot corrupt the rewrite.
+    new_text = _GEAK_BASE_URL_RE.sub(
+        lambda m: m.group(1) + base_url, text, count=1,
+    )
+    try:
+        path.write_text(new_text, encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
 def _derive_anthropic_base_url(openai_base_url: str) -> str:
     """Derive ``ANTHROPIC_BASE_URL`` from ``OPENAI_BASE_URL`` by stripping a trailing ``/v1`` (SDK re-appends it)."""
     from urllib.parse import urlparse, urlunparse
@@ -2772,6 +2820,17 @@ def _preflight(
                     f"Preflight: {alias} {prev or '<unset>'} -> {base_url} "
                     f"({why})"
                 )
+
+    # #521: GEAK reads its endpoint from $GEAK_CONFIG (written at install
+    # time), not from $GEAK_BASE_URL at runtime. Sync the yaml so the resolved
+    # GEAK_BASE_URL above (operator tunnel override, or the gateway default)
+    # actually reaches the kernel agent instead of a stale install-time URL.
+    geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
+    geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
+    if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
+        print(
+            f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})"
+        )
 
     # --- Resolve install interpreters ---
     from .orchestrator.action_executors._grid_runner import _resolve_magpie_python
