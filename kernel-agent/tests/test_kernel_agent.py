@@ -232,9 +232,9 @@ class KernelAgentToolTests(unittest.TestCase):
         # GEAK has a dedicated root so moving it to pod-local storage does not
         # implicitly move TraceLens/OOB via HYPERLOOM_ROOT.
         self.assertIn('GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"', install_text)
-        self.assertIn('OOB_CLI_ROOT="${OOB_CLI_ROOT:-${_open_source_root}/OOB/oob_cli}"', install_text)
-        self.assertIn('elif [ -f "${OOB_SRC}/oob_cli/pyproject.toml" ]; then', install_text)
-        self.assertIn('oob_install_src="${OOB_SRC}/oob_cli"', install_text)
+        self.assertIn('OOB_ROOT="${OOB_ROOT:-${OOB_CLI_ROOT:-${_open_source_root}/OOB}}"', install_text)
+        self.assertIn('run cp -r "$oob_install_src" "${OOB_ROOT}"', install_text)
+        self.assertNotIn('${OOB_SRC}/oob_cli/pyproject.toml', install_text)
         # Override is read but never written into a generated env file.
         self.assertNotIn("export HYPERLOOM_OPEN_SOURCE_ROOT", install_text)
         # Assert the override pattern, not the exact pin, so ref bumps don't break this.

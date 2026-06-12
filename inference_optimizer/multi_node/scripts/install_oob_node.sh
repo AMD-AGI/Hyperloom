@@ -21,8 +21,6 @@ OOB_INSTALL_SRC=""
 if [ -n "$OOB_SRC" ] && [ -d "$OOB_SRC" ]; then
   if [ -f "$OOB_SRC/pyproject.toml" ]; then
     OOB_INSTALL_SRC="$OOB_SRC"
-  elif [ -f "$OOB_SRC/oob_cli/pyproject.toml" ]; then
-    OOB_INSTALL_SRC="$OOB_SRC/oob_cli"
   fi
 fi
 
