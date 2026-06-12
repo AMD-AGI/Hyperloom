@@ -22,12 +22,7 @@ _DEFAULT_USER_DATA_PATH = "/workspace/hyperloom"
 # Substring of the loud fallback notice each script prints to stderr.
 _FALLBACK_WARNING = "USER_DATA_PATH not set"
 
-# ``local_setup.sh`` honours these env vars when present. The optimizer
-# session shell (and CI runners) routinely export them, pointing at host
-# paths/gateways that have nothing to do with the per-test sandbox — e.g.
-# a host ``INFERENCEX_PATH`` that doesn't exist makes the script ``die``.
-# Strip them from the inherited environment so each test runs hermetically
-# and only sees the variables it explicitly sets via ``env``.
+# Strip these host-leaked env vars so each test runs hermetically.
 _HOST_LEAK_VARS = (
     "REPO_ROOT",
     "USER_DATA_PATH",
@@ -119,8 +114,7 @@ def test_local_setup_clones_missing_dependency_repos_and_writes_env(tmp_path: Pa
     assert f"export OOB_SRC='{tmp_path / 'deps' / 'Primus-Claw' / 'OOB'}'" in env_text
     assert f"export INFERENCEX_PATH='{tmp_path / 'deps' / 'InferenceX'}'" in env_text
     assert f"export TRACELENS_ROOT='{tmp_path / 'deps' / 'TraceLens'}'" in env_text
-    # Default is open-source-only: the internal extension is NOT requested and
-    # must not be cloned, exported, or activated via TL_EXTENSION.
+    # Default is open-source-only: no internal extension.
     assert "TRACELENS_INTERNAL_ROOT" not in env_text
     assert "TL_EXTENSION" not in env_text
     assert not (tmp_path / "deps" / "TraceLens-internal").exists()
@@ -133,7 +127,6 @@ def test_local_setup_uses_internal_extension_when_root_set(tmp_path: Path) -> No
     primus = _git_repo(remotes / "Primus-Claw", {"OOB/README.md": "oob\n"})
     inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
     tracelens_public = _git_repo(remotes / "TraceLens", {"README.md": "tracelens\n"})
-    # An existing internal checkout provided via TRACELENS_INTERNAL_ROOT opts in.
     internal_checkout = _git_repo(
         tmp_path / "existing" / "TraceLens-internal", {"README.md": "internal\n"}
     )
@@ -157,8 +150,7 @@ def test_local_setup_uses_internal_extension_when_root_set(tmp_path: Path) -> No
 
 
 def test_local_setup_internal_missing_path_falls_back_to_oss_only(tmp_path: Path) -> None:
-    # TRACELENS_INTERNAL_ROOT set to a non-existent path: Hyperloom never clones
-    # internal (no URL kept), so it must warn and fall back to open-source-only.
+    # A non-existent TRACELENS_INTERNAL_ROOT must warn and fall back to OSS-only.
     remotes = tmp_path / "remotes"
     primus = _git_repo(remotes / "Primus-Claw", {"OOB/README.md": "oob\n"})
     inferencex = _git_repo(remotes / "InferenceX", {"README.md": "inferencex\n"})
@@ -239,41 +231,59 @@ def test_local_setup_dry_run_does_not_write_or_leak_secret(tmp_path: Path) -> No
     assert "Optimize inference for this workload" in result.stdout
 
 
-def test_local_setup_session_dir_rebases_default_deps_root(tmp_path: Path) -> None:
+def test_local_setup_deps_root_stays_pod_local_under_session_dir(tmp_path: Path) -> None:
+    # Deps root must NOT follow --session-dir: it stays on a pod-local base
+    # (TMPDIR) so a shared session tree never collocates concurrent checkouts.
     session_dir = tmp_path / "custom-session"
+    tmpdir = tmp_path / "podlocal"
+    tmpdir.mkdir()
+    env = _clean_base_env()
+    env["TMPDIR"] = str(tmpdir)
     result = subprocess.run(
         ["bash", str(SCRIPT), "--dry-run", "--session-dir", str(session_dir)],
         cwd=REPO_ROOT,
-        env=_clean_base_env(),
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
     )
 
-    expected_deps = session_dir / "runtime" / "source-mirrors"
+    expected_deps = tmpdir / "hyperloom" / "open-source-repos"
     assert result.returncode == 0, result.stderr + result.stdout
     assert f"HYPERLOOM_DEPS_ROOT={expected_deps}" in result.stdout
+    assert str(session_dir / "runtime" / "open-source-repos") not in result.stdout
     assert str(expected_deps / "Primus-Claw") in result.stdout
     assert str(expected_deps / "TraceLens") in result.stdout
-    # Open-source-only by default: internal extension is not requested/cloned.
     assert str(expected_deps / "TraceLens-internal") not in result.stdout
-    assert "c35c787ef31f0425fa0028a605ffc8c60a737c2c" in result.stdout
+    assert "0ebaa7109992b98b8f747a0fc0973e0f3b65d5d9" in result.stdout
 
 
-# ---------------------------------------------------------------------------
-# install-harden (feature/xiaofei/install-path-and-flock):
-#   A. loud USER_DATA_PATH fallback notice across all installers
-#   B. flock around the shared source-mirror clone/build region
-# ---------------------------------------------------------------------------
+def test_local_setup_explicit_deps_root_overrides_pod_local(tmp_path: Path) -> None:
+    # An explicit HYPERLOOM_DEPS_ROOT still wins over the pod-local default.
+    deps = tmp_path / "explicit-deps"
+    env = _clean_base_env()
+    env["HYPERLOOM_DEPS_ROOT"] = str(deps)
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--session-dir", str(tmp_path / "sess")],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
 
-# Scripts that expose ``--help``. ``--help`` runs the top-of-file
-# USER_DATA_PATH resolution (and its fallback notice) and then exits 0
-# *before* any heavy / environment-coupled install work, so it is the fast,
-# hermetic way to exercise exactly the fallback-notice code path. (A full
-# ``--check-only`` / ``--dry-run`` run would clone Magpie, import
-# inference_optimizer, chain to kernel-agent, etc. — far too heavy and
-# flaky for a path-handling unit test.)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert f"HYPERLOOM_DEPS_ROOT={deps}" in result.stdout
+    assert str(deps / "Primus-Claw") in result.stdout
+
+
+# install-harden: loud USER_DATA_PATH fallback notice + flock around the
+# shared source-mirror clone/build region.
+
+# ``--help`` runs the USER_DATA_PATH resolution + fallback notice then exits 0
+# before any heavy install work — the fast hermetic way to test that path.
 _HELP_SCRIPTS = {
     "inference_optimizer_install": IO_INSTALL,
     "kernel_agent_install": KA_INSTALL,
@@ -284,15 +294,7 @@ _HELP_SCRIPTS = {
 def _run_help(
     script: Path, tmp_path: Path, user_data_path: str | None
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``bash <script> --help`` with a hermetic environment.
-
-    ``REPO_ROOT`` points at an empty stub dir so no real ``.env`` is sourced;
-    ``MAGPIE_PYTHON`` / ``GEAK_RAG_INDEX_DEVICE`` are pinned so kernel-agent's
-    top-level probes do not shell out to rocm-smi or import Magpie/torch.
-    ``USER_DATA_PATH`` is exported only when ``user_data_path`` is provided;
-    otherwise it stays stripped (by ``_clean_base_env``) so the unset
-    fallback branch fires.
-    """
+    """Run ``bash <script> --help`` with a hermetic environment."""
     env = _clean_base_env()
     repo_stub = tmp_path / "repo_stub"
     repo_stub.mkdir(exist_ok=True)
@@ -329,10 +331,7 @@ def test_install_silent_when_user_data_path_set(script: Path, tmp_path: Path) ->
 
 @pytest.mark.parametrize("script", [IO_INSTALL, KA_INSTALL], ids=["inference_optimizer", "kernel_agent"])
 def test_install_does_not_reference_default_path_when_set(script: Path, tmp_path: Path) -> None:
-    # local_setup.sh is intentionally excluded: its --help text documents the
-    # default path, so a literal-string check there is meaningless. The two
-    # install.sh entrypoints do not mention it in --help output, so when
-    # USER_DATA_PATH is set their output must not reference the fallback root.
+    # When USER_DATA_PATH is set, install.sh --help output must not reference the fallback root.
     data_root = tmp_path / "data"
     result = _run_help(script, tmp_path, user_data_path=str(data_root))
     assert result.returncode == 0, result.stderr + result.stdout
@@ -346,9 +345,7 @@ def test_install_does_not_reference_default_path_when_set(script: Path, tmp_path
     ids=["inference_optimizer", "kernel_agent", "local_setup", "preflight_kb"],
 )
 def test_all_scripts_emit_user_data_path_fallback_notice(script: Path) -> None:
-    # All four installers must detect the unset case BEFORE applying the
-    # default and warn loudly. Grep-level so it also covers preflight_kb.sh,
-    # which has no --help entrypoint to drive functionally.
+    # Grep-level guard (covers preflight_kb.sh, which has no --help entrypoint).
     text = script.read_text(encoding="utf-8")
     assert "_user_data_was_set" in text, script
     assert _FALLBACK_WARNING in text, script
@@ -356,21 +353,20 @@ def test_all_scripts_emit_user_data_path_fallback_notice(script: Path) -> None:
 
 @pytest.mark.parametrize("script", [IO_INSTALL, KA_INSTALL], ids=["inference_optimizer", "kernel_agent"])
 def test_install_scripts_guard_mirror_writes_with_flock(script: Path) -> None:
-    # Both install.sh entrypoints serialize the source-mirror clone/build
-    # region with an fd-based flock on $HYPERLOOM_RUNTIME_DIR/.install.lock and
-    # hand the lock to the chained installer via HYPERLOOM_INSTALL_LOCK_HELD so
-    # the inference_optimizer -> kernel-agent chain cannot self-deadlock.
+    # Both install.sh entrypoints flock the mirror region and pass HYPERLOOM_INSTALL_LOCK_HELD to avoid self-deadlock.
     text = script.read_text(encoding="utf-8")
     assert ".install.lock" in text, script
     assert "exec 9>" in text, script
     assert "flock 9" in text, script
     assert "HYPERLOOM_INSTALL_LOCK_HELD" in text, script
+    # The lock must live in the pod-local open-source root it guards, not on the
+    # shared $HYPERLOOM_RUNTIME_DIR — otherwise separate pod roots block each other.
+    assert 'exec 9>"${_open_source_root}/.install.lock"' in text, script
+    assert '${HYPERLOOM_RUNTIME_DIR}/.install.lock' not in text, script
 
 
 def test_flock_serializes_concurrent_critical_sections(tmp_path: Path) -> None:
-    # Fast, real serialization check of the exact idiom the installers use
-    # (`exec 9>LOCK; flock 9; <work>`): two workers contending on one lock
-    # must run their critical sections one-at-a-time (no interleaving).
+    # Real serialization check of the installer idiom: two workers must not interleave.
     if shutil.which("flock") is None:
         pytest.skip("flock not available on this host")
     lock = tmp_path / ".install.lock"
@@ -395,29 +391,22 @@ def test_flock_serializes_concurrent_critical_sections(tmp_path: Path) -> None:
     ), f"flock did not serialize critical sections: {lines}"
 
 
-# ---------------------------------------------------------------------------
-# pin-dependency-shas (feature/xiaofei/pin-dependency-shas):
-#   inference_optimizer/scripts/install.sh must clone Magpie / InferenceX
-#   pinned to a commit SHA via the SHA-aware fetch-checkout dance (mirroring
-#   the GEAK_REF pin in kernel-agent/scripts/install.sh), and the Magpie
-#   in-place patch step must be fail-soft (warn, not die) so a pinned
-#   upstream-atomic Magpie does not abort every install.
-#
-# These are grep/static-level guards on the script text (the established
-# pattern for the install.sh entrypoints — see
-# test_install_scripts_guard_mirror_writes_with_flock). A full DRY_RUN run is
-# intentionally not driven here: it imports inference_optimizer, resolves a
-# ROCm python, and runs the torch gate, which is too heavy/host-coupled for a
-# hermetic unit test (the DRY_RUN log is exercised manually in the PR notes).
-# ---------------------------------------------------------------------------
+# pin-dependency-shas: install.sh must clone Magpie / InferenceX pinned to a
+# commit SHA via the SHA-aware fetch-checkout dance, and the Magpie in-place
+# patch must fail-loud on a genuine failure (strict default) while staying
+# soft on a benign no-op. Grep/static-level guards on the script text.
 
 
 def test_io_install_pins_magpie_and_inferencex_to_commit_sha() -> None:
-    # Both deps are pinned to a full 40-char commit SHA and stay operator-
-    # overridable via the ``${VAR:-<sha>}`` form (mirrors GEAK_REF). Pinning a
-    # SHA — not a branch — is what makes a fresh install reproducible and
-    # immune to upstream force-push / HEAD drift (the bugs.md §C #1 root cause).
+    # Both deps pinned to a full 40-char SHA, operator-overridable; immune to HEAD drift (bugs.md §C #1).
     text = IO_INSTALL.read_text(encoding="utf-8")
+    assert (
+        '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}"'
+        in text
+    )
+    assert 'MAGPIE_DIR="${MAGPIE_DIR:-${_open_source_root}/Magpie}"' in text
+    assert 'INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX}"' in text
+    assert "export HYPERLOOM_OPEN_SOURCE_ROOT" not in text
     assert re.search(
         r'^MAGPIE_REF="\$\{MAGPIE_REF:-[0-9a-fA-F]{40}\}"', text, re.M
     ), "MAGPIE_REF must default to a full 40-char commit SHA and be overridable"
@@ -427,10 +416,7 @@ def test_io_install_pins_magpie_and_inferencex_to_commit_sha() -> None:
 
 
 def test_io_install_uses_sha_aware_fetch_checkout_for_both_deps() -> None:
-    # The clone helper must use the GEAK-style SHA-aware fetch-checkout dance
-    # (a raw SHA cannot be passed to ``git clone --branch``) and must be wired
-    # into BOTH ensure_magpie and ensure_inferencex. The old bare
-    # ``git clone --depth 1 <repo>`` of latest HEAD must be gone.
+    # The SHA-aware fetch-checkout dance must be wired into both ensure_magpie and ensure_inferencex.
     text = IO_INSTALL.read_text(encoding="utf-8")
     assert "^[0-9a-fA-F]{7,40}$" in text, "missing raw-SHA detection regex"
     assert 'fetch --depth 1 origin "$ref"' in text, "missing shallow SHA fetch"
@@ -442,19 +428,25 @@ def test_io_install_uses_sha_aware_fetch_checkout_for_both_deps() -> None:
         'git_fetch_pinned "$INFERENCEX_REPO" "$INFERENCEX_PATH" "$INFERENCEX_REF" "InferenceX"'
         in text
     ), "ensure_inferencex must clone via the pinned fetch-checkout helper"
-    # Regression guard: no unpinned ``clone --depth 1 <repo>`` of latest HEAD.
+    # Regression guard: no unpinned clone of latest HEAD.
     assert 'git clone --depth 1 "$MAGPIE_REPO"' not in text
     assert 'git clone --depth 1 "$INFERENCEX_REPO"' not in text
 
 
-def test_io_install_magpie_patch_is_fail_soft() -> None:
-    # Defense in depth: with MAGPIE_REF pinned to an upstream-atomic commit the
-    # in-place patcher finds no legacy block and returns False. That must
-    # warn-and-continue (no-op), not die and abort the install. The
-    # PATCH_MAGPIE=0 hard-skip override must be preserved.
+def test_io_install_magpie_patch_strict_default_with_benign_no_op_soft() -> None:
+    # A GENUINE atomic-patch failure (race unmitigated) must fail-loud by
+    # default; a benign no-op (missing benchmarker tree) must still
+    # warn-and-continue. Both PATCH_MAGPIE and MAGPIE_PATCH_STRICT overrides
+    # are honoured and parsed as boolean-ish strings.
     text = IO_INSTALL.read_text(encoding="utf-8")
-    assert "Magpie atomic-write patch did not apply" in text, "missing fail-soft warn"
     assert "Magpie #C1 patch OK" in text, "success log must be preserved"
     assert "PATCH_MAGPIE=0" in text, "PATCH_MAGPIE=0 override must be preserved"
-    # The previous fail-loud ``die`` on patch failure must be gone.
-    assert 'die "Magpie atomic-write patch failed' not in text
+    # Genuine failure aborts (strict default).
+    assert 'die "Magpie atomic-write patch GENUINELY failed' in text
+    # Strict mode is downgradable to a warning via a falsy MAGPIE_PATCH_STRICT.
+    assert "MAGPIE_PATCH_STRICT" in text
+    assert 'is_falsy "${MAGPIE_PATCH_STRICT:-1}"' in text
+    # Benign no-op (missing tree) still warns and continues.
+    assert "Magpie atomic-write patch skipped" in text, "missing benign no-op warn"
+    # Boolean-ish parsing helper replaces the brittle numeric -eq test.
+    assert 'is_falsy "${PATCH_MAGPIE:-1}"' in text

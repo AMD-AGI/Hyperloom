@@ -23,6 +23,15 @@ from collections import Counter
 
 
 def main() -> int:
+    """Count and print coordinator event topics for a session.
+
+    Resolves the session directory, opens its ``coordinator.db``, tallies
+    proposal/delegated/kernel-request/kernel-response events over the selected
+    window, and prints the counts as JSON.
+
+    Returns:
+        int: ``0`` on success, or ``2`` when ``coordinator.db`` is not found.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "session_dir",

@@ -2,23 +2,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
 """ci/prewarm_models.py — pre-populate /wekafs/models/ from HuggingFace,
-bypassing SaFE playground download (which is single-flight + slow).
+bypassing the single-flight + slow SaFE playground download.
 
-Why exist:
-  SaFE's POST /api/v1/playground/models triggers an internal K8s Job that
-  downloads via huggingface_hub from inside a small worker pool. For a
-  130-model weekly batch this serial-ish path becomes the gate. Pulling
-  the files directly to /wekafs/models/<slug>/ from a node that mounts
-  the volume removes that gate.
-
-  When SaFE register API is later invoked for the same source URL, two
-  possible benign outcomes:
-    1) SaFE backend dedups on existing target files -> returns model_id
-       in seconds, no re-download.
-    2) SaFE backend re-invokes huggingface_hub anyway; in that case the
-       hf-hub local cache (or the target dir itself) makes the second
-       fetch a near-no-op due to ETag / sha256 matching.
-  Either way, the register call ceases to be a bottleneck.
+Downloading directly to the mounted volume removes the SaFE-register
+bottleneck: a later register call dedups on the existing target files (or
+the hf-hub cache makes a re-fetch a near-no-op via ETag/sha256 matching).
 
 Layout (same convention as SaFE-registered models already in /wekafs/models):
   /wekafs/models/<owner>-<repo>/         # final destination
@@ -64,9 +52,6 @@ import sys
 import time
 from pathlib import Path
 
-# huggingface_hub is light + already a transitive dep of vllm/sglang images,
-# but on a bare runner we may need to install it. Workflow installs it
-# explicitly; here we just import.
 try:
     from huggingface_hub import HfApi, snapshot_download
     from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError
@@ -93,15 +78,39 @@ def slug(repo_id: str) -> str:
       meta-llama/Llama-3.1-8B            → meta-llama-Llama-3.1-8B
       deepseek-ai/DeepSeek-R1            → deepseek-ai-DeepSeek-R1
       dphn/dolphin-2.9.1-yi-1.5-34b      → dphn-dolphin-2.9.1-yi-1.5-34b
+
+    Args:
+        repo_id (str): The HuggingFace repo id (``owner/repo``).
+
+    Returns:
+        str: The slug with ``/`` replaced by ``-``.
     """
     return repo_id.replace("/", "-")
 
 
 def dest_dir(target_root: Path, repo_id: str) -> Path:
+    """Compute the final destination directory for a repo.
+
+    Args:
+        target_root (Path): Root directory holding per-model folders.
+        repo_id (str): The HuggingFace repo id.
+
+    Returns:
+        Path: ``target_root/<slug>`` for the repo.
+    """
     return target_root / slug(repo_id)
 
 
 def tmp_dir(target_root: Path, repo_id: str) -> Path:
+    """Compute the in-flight temporary directory for a repo download.
+
+    Args:
+        target_root (Path): Root directory holding per-model folders.
+        repo_id (str): The HuggingFace repo id.
+
+    Returns:
+        Path: ``target_root/.tmp/<slug>.part`` used before the atomic rename.
+    """
     return target_root / ".tmp" / f"{slug(repo_id)}.part"
 
 
@@ -111,10 +120,8 @@ def tmp_dir(target_root: Path, repo_id: str) -> Path:
 def is_complete(dest: Path, repo_id: str, hf_api: HfApi, token: str) -> bool:
     """True iff dest/ has every file the HF repo claims, with non-zero size.
 
-    Cheap: one ``list_repo_files`` call. Tolerant of interrupted prior runs
-    because partial dest dirs miss at least one file or have a zero-sized
-    file (.part suffix is gone after atomic rename, so we don't need to
-    check it here).
+    One ``list_repo_files`` call; partial prior runs fail this because they
+    miss a file or have a zero-sized one.
     """
     if not dest.is_dir():
         return False
@@ -135,7 +142,14 @@ def is_complete(dest: Path, repo_id: str, hf_api: HfApi, token: str) -> bool:
 
 
 def _dir_stats(p: Path) -> tuple[int, float]:
-    """Return (n_files, total_GB) under p, ignoring .part suffixes."""
+    """Return (n_files, total_GB) under p, ignoring .part suffixes.
+
+    Args:
+        p (Path): Directory to walk recursively.
+
+    Returns:
+        tuple[int, float]: The file count and total size in gigabytes.
+    """
     n = 0
     total = 0
     for f in p.rglob("*"):
@@ -149,7 +163,19 @@ def download_one(repo_id: str, target_root: Path, hf_token: str,
                  inner_workers: int = 4) -> dict:
     """Download a single HF repo to <target_root>/<slug>/.
 
-    Returns a dict: status (OK/SKIP/FAIL), size_gb, n_files, elapsed_s, reason.
+    Skips already-complete destinations, downloads into a temporary ``.part``
+    directory, then atomically swaps it into place. Failures are reported in
+    the return dict rather than raised.
+
+    Args:
+        repo_id (str): The HuggingFace repo id to download.
+        target_root (Path): Root directory for per-model folders.
+        hf_token (str): HF token for authenticated/gated repos.
+        inner_workers (int): Parallel file workers for ``snapshot_download``.
+
+    Returns:
+        dict: A result dict with ``status`` (OK/SKIP/FAIL), ``size_gb``,
+        ``n_files``, ``elapsed_s``, and an optional ``reason``.
     """
     start = time.time()
     dest = dest_dir(target_root, repo_id)
@@ -174,9 +200,6 @@ def download_one(repo_id: str, target_root: Path, hf_token: str,
             local_dir_use_symlinks=False,
             token=hf_token or None,
             max_workers=inner_workers,
-            # Skip the giant pytorch_model.bin if a safetensors index already
-            # covers all weights; saves ~half the bytes on many older repos
-            # that ship both. SaFE / vllm prefer safetensors anyway.
             allow_patterns=None,
             ignore_patterns=[
                 "*.h5", "*.msgpack", "*.onnx", "*.tflite",
@@ -200,8 +223,7 @@ def download_one(repo_id: str, target_root: Path, hf_token: str,
                 "elapsed_s": time.time() - start,
                 "reason": f"{type(e).__name__}: {e}"[:200]}
 
-    # Atomic-ish swap. We rmtree dest first if it exists (it shouldn't, since
-    # is_complete returned False earlier, but a partial dest could be there).
+    # Atomic-ish swap; clear any partial dest first.
     if dest.exists():
         shutil.rmtree(dest, ignore_errors=True)
     try:
@@ -221,6 +243,14 @@ def download_one(repo_id: str, target_root: Path, hf_token: str,
 
 
 def _load_candidates(path: Path) -> list[str]:
+    """Load repo ids from a candidates JSON file.
+
+    Args:
+        path (Path): Path to the candidates JSON produced by build_candidates.
+
+    Returns:
+        list[str]: The ``repo_id`` of each candidate entry.
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
     cands = data.get("candidates", [])
     return [c["repo_id"] for c in cands if c.get("repo_id")]
@@ -229,8 +259,7 @@ def _load_candidates(path: Path) -> list[str]:
 def _slice_repos(repos: list[str], batch_index: int | None,
                  batch_size: int | None) -> list[str]:
     """Apply optional --batch-index / --batch-size slice (same semantics as
-    generate_hf_matrix.py so a workflow's prewarm + optimize stages can target
-    the exact same set of repos)."""
+    generate_hf_matrix.py, so prewarm + optimize target the same repos)."""
     if not batch_size:
         return repos
     bi = batch_index or 0
@@ -240,6 +269,20 @@ def _slice_repos(repos: list[str], batch_index: int | None,
 
 
 def load_repos(args: argparse.Namespace) -> list[str]:
+    """Resolve the list of repos to prewarm from CLI args or stdin.
+
+    Precedence: explicit ``--repos``, then ``--candidates`` (with optional
+    batch slicing), then newline-delimited repo ids piped on stdin.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments.
+
+    Returns:
+        list[str]: The repo ids to download.
+
+    Raises:
+        SystemExit: If no input source provides any repos.
+    """
     if args.repos:
         return list(args.repos)
     if args.candidates:
@@ -260,6 +303,15 @@ def load_repos(args: argparse.Namespace) -> list[str]:
 
 
 def _format_extras(result: dict) -> str:
+    """Build a compact one-line summary of a download result for logging.
+
+    Args:
+        result (dict): A result dict from :func:`download_one`.
+
+    Returns:
+        str: A space-joined summary of size, file count, elapsed time, and
+        any reason.
+    """
     parts = [f"{result.get('size_gb', 0):.1f}GB"]
     if result.get("n_files", 0) > 0:
         parts.append(f"{result['n_files']}f")
@@ -275,6 +327,14 @@ def _format_extras(result: dict) -> str:
 
 
 def main() -> int:
+    """Parse CLI arguments and prewarm the requested repos concurrently.
+
+    Resolves the repo list, optionally excludes already-done models, downloads
+    each repo across a thread pool, and logs a final ok/skip/fail summary.
+
+    Returns:
+        int: ``0`` if no downloads failed, otherwise ``1``.
+    """
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--candidates", type=Path,

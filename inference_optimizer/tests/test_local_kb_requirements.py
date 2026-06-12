@@ -1,28 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Conformance tests for the local-kb-recipe-snapshot requirements doc.
-
-This module mirrors the checklist in §4 of
-``primus-cortex-internal/docs/local-kb-recipe-snapshot-requirements.md``.
-Each test maps 1:1 to one requirement bullet so a regression in
-any item shows up under a self-describing test name.
-
-The 9 items from the doc:
-
-1. 五元组 canonical id 生成正确
-2. 本地 KB root 是 ``${USER_DATA_PATH}/kb``
-3. 默认不传中心化 KB 时，读写都走本地 KB
-4. 指定中心化 KB 且可用时，读走中心化 KB，写仍走本地 KB
-5. 指定中心化 KB 但不可用时，读自动 fallback 到本地 KB，写仍走本地 KB
-6. 本地 recipe 文件或目录能区分五元组
-7. model 包含 ``/`` 时，本地路径仍然安全
-8. session 写入会合并已有 recipe 历史，不会清空已有
-   ``sessions`` / ``what_worked`` / ``what_failed`` / ``pitfalls``
-9. 最终本地 KB 文件的数据字段和 Arbor recipe 保持一致
-
-These run as ordinary pytest unit tests against real
-``LocalRecipeStore`` instances + ``respx``-mocked remote server.
-"""
+"""Conformance tests for §4 of the local-kb-recipe-snapshot requirements doc (one test per requirement bullet)."""
 
 from __future__ import annotations
 
@@ -41,8 +19,6 @@ from inference_optimizer.cli import (
 )
 from inference_optimizer.recipe_kb import (
     LocalRecipeStore,
-    RecipeKB,
-    RemoteRecipeClient,
     cid_to_path_components,
     recipe_canonical_id,
 )
@@ -51,13 +27,10 @@ from inference_optimizer.recipe_snapshot_constants import (
 )
 
 
-# ===========================================================================
 # Fixtures
-# ===========================================================================
 @pytest.fixture
 def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Clear the env vars the resolver consults so each test owns
-    its own precedence tier."""
+    """Clear the env vars the resolver consults so each test owns its own precedence tier."""
     for key in (
         "HYPERLOOM_LOCAL_KB_ROOT",
         "USER_DATA_PATH",
@@ -68,8 +41,7 @@ def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _ns(**overrides: Any) -> argparse.Namespace:
-    """Helper to build a CLI Namespace with the four KB-related
-    fields plus any operator-supplied overrides."""
+    """Helper to build a CLI Namespace with the KB-related fields plus overrides."""
     fields: dict[str, Any] = {
         "local_kb_root": None,
         "cortex_kb_url": None,
@@ -79,9 +51,7 @@ def _ns(**overrides: Any) -> argparse.Namespace:
     return argparse.Namespace(**fields)
 
 
-# ===========================================================================
-# §4 Item 1 — 五元组 canonical id 生成正确
-# ===========================================================================
+# §4 Item 1 — Canonical id is generated correctly from the 5-tuple
 def test_item1_canonical_id_is_5tuple_with_inference_prefix() -> None:
     cid = recipe_canonical_id(
         model="DeepSeek-R1",
@@ -91,28 +61,25 @@ def test_item1_canonical_id_is_5tuple_with_inference_prefix() -> None:
         precision="fp8",
     )
     assert cid == "inference:deepseek-r1:mi300x:sglang:0.4.5:fp8"
-    # 6 colon-separated segments: prefix + 5 dimensions.
-    assert len(cid.split(":")) == 6
+    assert len(cid.split(":")) == 6  # prefix + 5 dimensions
 
 
 def test_item1_canonical_id_keyword_only_no_positional_drift() -> None:
-    """Positional args must raise so a future caller can't silently
-    re-order the 5-tuple."""
+    """Positional args must raise so a future caller can't re-order the 5-tuple."""
+    # Splat a runtime-built arg list so the intentional positional drift stays a
+    # runtime check; CodeQL can't statically count *args, so no false arity alert.
+    bad_positional_args = ["m", "h", "fw", "v", "p"]
     with pytest.raises(TypeError):
-        recipe_canonical_id("m", "h", "fw", "v", "p")  # type: ignore[misc]
+        recipe_canonical_id(*bad_positional_args)  # type: ignore[misc]
 
 
-# ===========================================================================
-# §4 Item 2 — 本地 KB root 是 ${USER_DATA_PATH}/kb
-# ===========================================================================
+# §4 Item 2 — Local KB root is ${USER_DATA_PATH}/kb
 def test_item2_default_local_kb_root_is_user_data_path_kb(
     env_clean: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Default resolution (no flag, no HYPERLOOM_LOCAL_KB_ROOT) must
-    land at ``${USER_DATA_PATH}/kb`` — exact match required by
-    requirements doc §2."""
+    """Default resolution lands at ``${USER_DATA_PATH}/kb`` (requirements doc §2)."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     args = _ns()
     assert _resolve_local_kb_root(args) == tmp_path / "kb"
@@ -123,23 +90,19 @@ def test_item2_explicit_flag_wins_over_user_data_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """``--local-kb-root`` is the highest-priority tier — operator
-    can pin a non-default root for tests / sandbox isolation."""
+    """``--local-kb-root`` is the highest-priority tier."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     args = _ns(local_kb_root=str(tmp_path / "alt-root"))
     assert _resolve_local_kb_root(args) == tmp_path / "alt-root"
 
 
-# ===========================================================================
-# §4 Item 3 — 默认不传中心化 KB 时，读写都走本地 KB
-# ===========================================================================
+# §4 Item 3 — No centralized KB configured: both reads and writes go local
 def test_item3_no_central_url_reads_and_writes_go_local(
     env_clean: None,
     tmp_path: Path,
 ) -> None:
     args = _ns(local_kb_root=str(tmp_path))
     kb = _build_recipe_kb_dispatcher(args)
-    # The dispatcher's remote half is None when no URL is configured.
     assert kb.remote is None
 
     cid = recipe_canonical_id(
@@ -153,21 +116,17 @@ def test_item3_no_central_url_reads_and_writes_go_local(
         best_throughput=12345.0,
     )
     assert out["created"] is True
-    # Read goes local because remote is None.
     row = kb.get_recipe(canonical_id=cid)
     assert row is not None
     assert row["best_throughput"] == 12345.0
 
 
-# ===========================================================================
-# §4 Item 4 — 指定中心化 KB 且可用时，读走中心化 KB，写仍走本地 KB
-# ===========================================================================
+# §4 Item 4 — Centralized KB available: reads go centralized, writes still local
 def test_item4_central_kb_reads_central_writes_local(
     env_clean: None,
     tmp_path: Path,
 ) -> None:
-    """Verifies the read-remote / write-local invariant when remote
-    is healthy. Uses respx to stand in for the central kb-service."""
+    """Read-remote / write-local invariant when remote is healthy (respx-mocked)."""
     central_url = "http://central-kb.test"
     args = _ns(
         local_kb_root=str(tmp_path),
@@ -182,7 +141,7 @@ def test_item4_central_kb_reads_central_writes_local(
         framework_version="0.4.5", precision="fp8",
     )
 
-    # Central server has a stale row for this cid.
+    # Central has a stale row for this cid.
     central_payload = {
         "canonical_id": cid,
         "version":      9,
@@ -191,13 +150,9 @@ def test_item4_central_kb_reads_central_writes_local(
         "metrics":      {"throughput": 99999.0},
     }
 
-    # 1. WRITE: must NOT touch central. We respx-mock the central
-    #    service to raise on PUT (only allow GET-style reads). Any
-    #    write attempt would surface as an unmatched-URL exception.
+    # WRITE must NOT touch central — only the /recipes/search read route is mocked,
+    # so any write HTTP call would fail as an unmatched URL.
     with respx.mock(base_url=central_url) as mock:
-        # No write routes — any HTTP call from the dispatcher.put
-        # path would fail the test.
-        # Remote reads go through the single /recipes/search route.
         mock.post(PATH_RECIPES_SEARCH).mock(
             return_value=httpx.Response(200, json={"recipes": [central_payload]}),
         )
@@ -207,23 +162,18 @@ def test_item4_central_kb_reads_central_writes_local(
             framework="sglang", framework_version="0.4.5", precision="fp8",
             best_throughput=11111.0,
         )
-        # Local store has our row.
         local_row = kb.local.get_recipe(canonical_id=cid)
         assert local_row is not None
         assert local_row["best_throughput"] == 11111.0
 
-        # 2. READ: dispatcher returns the CENTRAL row (translated to
-        #    arbor shape), not the local one we just wrote. Central
-        #    is the wider corpus when reachable.
+        # READ returns the CENTRAL row (wider corpus when reachable), not the local one.
         out = kb.get_recipe(canonical_id=cid)
         assert out is not None
         assert out["version"] == 9
         assert out["best_throughput"] == 99999.0  # central wins
 
 
-# ===========================================================================
-# §4 Item 5 — 指定中心化 KB 但不可用时，读自动 fallback 到本地，写仍走本地
-# ===========================================================================
+# §4 Item 5 — Centralized KB unavailable: reads fall back to local, writes still local
 def test_item5_unreachable_central_falls_back_to_local(
     env_clean: None,
     tmp_path: Path,
@@ -242,8 +192,7 @@ def test_item5_unreachable_central_falls_back_to_local(
         framework_version="0.4.5", precision="fp8",
     )
 
-    # Seed the local store BEFORE the test so the fallback has
-    # something to return.
+    # Seed the local store so the fallback has something to return.
     kb.local.put_recipe(
         canonical_id=cid,
         model="m", hardware="mi300x",
@@ -251,33 +200,27 @@ def test_item5_unreachable_central_falls_back_to_local(
         best_throughput=22222.0,
     )
 
-    # Central server unreachable — any call returns 503.
+    # Central unreachable on the search route → fall back to local.
     with respx.mock(base_url=central_url) as mock:
-        # Central unreachable on the search route → fall back to local.
         mock.post(PATH_RECIPES_SEARCH).mock(
             return_value=httpx.Response(503, json={"detail": "warming up"}),
         )
-        # 1. WRITE: still goes local (the dispatcher writes always go
-        #    to local — central is read-only by design).
+        # WRITE still goes local (central is read-only by design).
         kb.put_recipe(
             canonical_id=cid,
             model="m", hardware="mi300x",
             framework="sglang", framework_version="0.4.5", precision="fp8",
             best_throughput=33333.0,
         )
-        # 2. READ: central 503 → fall through to local. The dispatcher
-        #    absorbs the RemoteRecipeClientError silently.
+        # READ: central 503 → fall through to local (RemoteRecipeClientError absorbed).
         out = kb.get_recipe(canonical_id=cid)
         assert out is not None
         assert out["best_throughput"] == 33333.0  # local hit
 
 
-# ===========================================================================
-# §4 Item 6 — 本地 recipe 文件或目录能区分五元组
-# ===========================================================================
+# §4 Item 6 — Local recipe files or directories can disambiguate the 5-tuple
 def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
-    """Two recipes that differ only in framework_version (or any
-    single dimension) must land in distinct on-disk locations."""
+    """Two recipes differing in any single dimension land in distinct on-disk locations."""
     store = LocalRecipeStore(root=tmp_path)
     cid_v1 = recipe_canonical_id(
         model="m", hardware="mi300x", framework="sglang",
@@ -299,15 +242,12 @@ def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
         framework="sglang", framework_version="0.5.0", precision="fp8",
         best_throughput=2.0,
     )
-    # Distinct on-disk paths — last directory level encodes precision,
-    # but framework_version (4th level) differs in this test.
     parts_v1 = cid_to_path_components(cid_v1)
     parts_v2 = cid_to_path_components(cid_v2)
     assert parts_v1 != parts_v2
     assert (tmp_path.joinpath(*parts_v1) / "recipe.json").is_file()
     assert (tmp_path.joinpath(*parts_v2) / "recipe.json").is_file()
-    # And they don't shadow each other — both rows are independently
-    # readable.
+    # And they don't shadow each other — both rows are independently readable.
     row_v1 = store.get_recipe(canonical_id=cid_v1)
     row_v2 = store.get_recipe(canonical_id=cid_v2)
     assert row_v1 is not None and row_v2 is not None
@@ -316,8 +256,7 @@ def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
 
 
 def test_item6_path_levels_match_5_dimensions(tmp_path: Path) -> None:
-    """Documented contract: the on-disk path is exactly 5 levels
-    below the store root, one level per identity dimension."""
+    """The on-disk path is exactly 5 levels below the store root, one per identity dimension."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
         model="m", hardware="hw", framework="fw",
@@ -332,13 +271,9 @@ def test_item6_path_levels_match_5_dimensions(tmp_path: Path) -> None:
     assert expected.is_file()
 
 
-# ===========================================================================
-# §4 Item 7 — model 包含 / 时，本地路径仍然安全
-# ===========================================================================
+# §4 Item 7 — When model contains '/', the local path is still safe
 def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
-    """A model arg like ``/hyperloom/models/Qwen-Qwen3-30B-A3B-Base``
-    must NOT split into three path segments — the slug step
-    basenames it first."""
+    """A model arg like ``/hyperloom/models/Qwen-...`` must NOT split into path segments (slug basenames it first)."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
         model="/hyperloom/models/Qwen-Qwen3-30B-A3B-Base",
@@ -360,8 +295,7 @@ def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
         precision="bf16",
         best_throughput=42.0,
     )
-    # Recipe lives at exactly 5 levels below root, model component
-    # is the basename only.
+    # Recipe lives at exactly 5 levels below root; model component is the basename only.
     expected = (
         tmp_path / "qwen-qwen3-30b-a3b-base"
         / "mi355x" / "sglang" / "0.4.5" / "bf16"
@@ -371,15 +305,13 @@ def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
 
 
 def test_item7_model_with_double_slash_normalises(tmp_path: Path) -> None:
-    """Edge case: trailing slash on the model arg shouldn't split
-    into an empty segment."""
+    """Edge case: a trailing slash on the model arg shouldn't split into an empty segment."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
         model="/some/path/MyModel/",
         hardware="hw", framework="fw",
         framework_version="v", precision="p",
     )
-    # Trailing slash stripped, basename taken.
     assert ":mymodel:" in cid
     store.put_recipe(
         canonical_id=cid,
@@ -391,21 +323,16 @@ def test_item7_model_with_double_slash_normalises(tmp_path: Path) -> None:
     assert expected.is_file()
 
 
-# ===========================================================================
-# §4 Item 8 — session 写入会合并已有 recipe 历史
-# ===========================================================================
+# §4 Item 8 — Session writes merge with existing recipe history
 def test_item8_second_put_preserves_what_worked_when_not_overridden(
     tmp_path: Path,
 ) -> None:
-    """When the second put_recipe doesn't supply ``what_worked``, the
-    previously written value MUST survive. Otherwise the legacy
-    requirement "不会清空已有 what_worked" fails."""
+    """A second put_recipe without ``what_worked`` must preserve the previously written value."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
         model="m", hardware="hw", framework="fw",
         framework_version="v", precision="p",
     )
-    # First put: stamp what_worked, what_failed, pitfalls, sessions.
     store.put_recipe(
         canonical_id=cid,
         model="m", hardware="hw", framework="fw",
@@ -424,10 +351,7 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
         ],
     )
 
-    # Second put through the dispatcher's _kb_amend_recipe-style
-    # read-modify-write: the caller MUST preserve existing fields.
-    # Here we simulate the safe pattern: read live + only override
-    # the field we want to change.
+    # Safe read-modify-write: read live + only override the changed field.
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
     store.put_recipe(
@@ -445,7 +369,6 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
     after = store.get_recipe(canonical_id=cid)
     assert after is not None
     assert after["best_throughput"] == 99.0
-    # All four arrays preserved verbatim.
     assert len(after["what_worked"]) == 1
     assert after["what_worked"][0]["description"] == "X helped"
     assert len(after["what_failed"]) == 1
@@ -457,9 +380,7 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
 
 
 def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
-    """The history archive contract: every put_recipe bumps version
-    and snapshots the prior live row to ``history/v{N}.json`` so
-    rollback is always possible."""
+    """Every put_recipe bumps version and snapshots the prior row to ``history/v{N}.json`` for rollback."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
         model="m", hardware="hw", framework="fw",
@@ -483,17 +404,9 @@ def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
     assert history[0]["snapshot"]["best_throughput"] == 1.0
 
 
-# ===========================================================================
-# §4 Item 9 — 最终本地 KB 文件的数据字段和 Arbor recipe 保持一致
-# ===========================================================================
+# §4 Item 9 — Final local KB file data fields stay consistent with the Arbor recipe
 def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
-    """The persisted ``recipe.json`` must use arbor's documented
-    field names (``what_worked`` / ``what_failed`` /
-    ``remaining_gaps`` / ``pitfalls`` / ``best_config`` /
-    ``best_throughput`` / ``stack_fingerprint`` / ``last_profiled``
-    / ``sessions``) — NOT the v2 wire spec's
-    ``findings`` / ``failures`` / ``gaps`` / ``body`` / ``metrics``.
-    """
+    """The persisted ``recipe.json`` uses arbor field names, NOT the v2 wire spec's findings/failures/gaps/body/metrics."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
         model="m", hardware="hw", framework="fw",
@@ -551,17 +464,11 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
     assert set(on_disk["what_worked"][0])    == {"description", "measured_impact"}
     assert set(on_disk["what_failed"][0])    == {"description", "reason"}
     assert set(on_disk["remaining_gaps"][0]) == {"description", "metrics"}
-    # Pitfall is arbor's ``description`` plus hyperloom's optional
-    # ``severity`` superset field (same spirit as the ``>=`` checks on
-    # sessions / stack_fingerprint above — a superset of arbor, never a
-    # v2 wire key). The Coordinator stamps ``severity`` for warm-start
-    # ranking; arbor consumers ignore the extra key.
+    # Pitfall is arbor's ``description`` plus hyperloom's optional ``severity`` superset.
     assert set(on_disk["pitfalls"][0]) >= {"description"}
     assert set(on_disk["pitfalls"][0]) <= {"description", "severity"}
 
-    # The v2 wire-spec key names MUST NOT appear at the top level
-    # (they're translated by the dispatcher only on read from
-    # central; on-disk is arbor-pure).
+    # The v2 wire-spec key names MUST NOT appear on disk (arbor-pure).
     for v2_only_key in ("findings", "failures", "gaps", "body", "metrics"):
         assert v2_only_key not in on_disk, (
             f"unexpected v2 wire-spec key {v2_only_key!r} in arbor "

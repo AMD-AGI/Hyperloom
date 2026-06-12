@@ -3,53 +3,40 @@
 """ActionRegistry
 
 Loads action metadata from ``actions/_meta/<name>.yaml`` (one file per
-action). The corresponding markdown body at ``actions/<name>.md`` is
-the agent-facing playbook (loaded lazily by SubAgentRunner / Coordinator
-when composing a sub-agent prompt).
+action); the markdown body at ``actions/<name>.md`` is loaded lazily.
 
-Used by:
+Operational fields gate execution/dispatch (``allowed_tools``,
+``requires_lanes``, ``lease_ttl_sec``, ``preferred_backend`` /
+``preferred_model``, ``max_turns``, ``side_effects``); all other fields are
+prompt-advisory only (KB_design §3.9 Inv-9.1 enforced by construction here).
 
-* :class:`PolicyGate` — looks up ``allowed_tools`` for sub-agent dispatch
-  and validates that proposed action names exist
-* :class:`SubAgentRunner` — reads ``requires_lanes`` / ``lease_ttl_sec``
-  / ``allowed_tools`` to gate sub-agent execution
-* Budget-Aware Scheduler (P1+) — uses ``family`` / ``expected_gain_pct``
-  / ``cost_minutes_p75`` / ``accuracy_risk`` / ``crash_risk`` for scoring
-
-v0.6 schema (DESIGN §16.2)::
+Schema (DESIGN §16.2)::
 
     name:                str  (required, must equal the filename stem)
     family:              one of {prep, analysis, shallow, deep_kernel,
                                  long, creative, resilience}
-    cost_minutes_p50:    float
-    cost_minutes_p75:    float
-    expected_gain_pct:   [low, high]   # 2-element list of floats
-    accuracy_risk:       float   # 0..1
-    crash_risk:          float   # 0..1
-    prerequisites:       list[str]
-    requires_lanes:      list[str]
-    allowed_tools:       list[str]
-    side_effects:        list[str]
-    preferred_backend:   "claude" | "codex"
-    preferred_model:     str
-    max_turns:           int
-    lease_ttl_sec:       int
-    applicable_when:     list[str]    # free-form predicates
-    # prompt-builder additions:
-    description:         str          # 1-line action brief consumed by
-                                      # prompt_builder; defaults to name
-                                      # when missing.
-    pipeline_phase:      str          # one of VALID_PIPELINE_PHASES; used
-                                      # by prompt_builder to group actions.
-                                      # Defaults to "explore".
-    typical_runtime_min: float        # display-only typical wallclock for
-                                      # the action; defaults to
+    cost_minutes_p50:    float    # prompt-advisory
+    cost_minutes_p75:    float    # prompt-advisory
+    expected_gain_pct:   [low, high]   # prompt-advisory prior, NOT a sort key
+    accuracy_risk:       float    # 0..1, prompt-advisory
+    crash_risk:          float    # 0..1, prompt-advisory
+    prerequisites:       list[str]    # prompt-advisory ordering hint
+    requires_lanes:      list[str]    # operational
+    allowed_tools:       list[str]    # operational
+    side_effects:        list[str]    # operational
+    preferred_backend:   "claude" | "codex"   # operational
+    preferred_model:     str          # operational
+    max_turns:           int          # operational
+    lease_ttl_sec:       int          # operational
+    applicable_when:     list[str]    # prompt-advisory predicate list
+    description:         str          # prompt rendering; defaults to name.
+    pipeline_phase:      str          # one of VALID_PIPELINE_PHASES;
+                                      # prompt grouping only.
+    typical_runtime_min: float        # display-only; defaults to
                                       # cost_minutes_p50.
-
-v0.6 vs v0.5 schema:
-
-* Removed ``allowed_modes`` (single full mode — DESIGN ADR-34)
-* Family vocabulary unchanged (7 families)
+    verdict_class:       "archival" | "exploration" | "promotion"
+                                      # routes Critic prompt rule set;
+                                      # never a hidden gate (P3_20).
 """
 
 from __future__ import annotations
@@ -61,6 +48,7 @@ from typing import Any
 from ..paths import asset_actions_dir
 
 
+# ``family`` is a prompt grouping label only; no runtime scheduler uses it.
 VALID_FAMILIES: frozenset[str] = frozenset({
     "prep", "analysis", "shallow", "deep_kernel",
     "long", "creative", "resilience",
@@ -68,11 +56,8 @@ VALID_FAMILIES: frozenset[str] = frozenset({
 
 VALID_BACKENDS: frozenset[str] = frozenset({"claude", "codex"})
 
-# Coarse-grained pipeline phase used by prompt_builder to group actions
-# inside the Orchestration system prompt (e.g. "Run prep actions first,
-# then move to explore..."). Kept intentionally small; map onto the
-# DESIGN §11 timeline rather than the family taxonomy because family is
-# scheduler-oriented (prep/analysis/...) while phases are LLM-oriented.
+# Coarse-grained pipeline phase for prompt_builder grouping; prompt-advisory
+# only (the real state machine lives in :mod:`phase_state`).
 VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
     "prep",        # target_analysis / baseline / warm replay
     "measure",     # baseline (gates explore)
@@ -84,40 +69,14 @@ VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
     "support",     # recover (the rest were retired)
 })
 
-# Per-action verdict policy class. Drives the Critic's primary
-# per-proposal rule via the ``action_verdict_policy`` entry in
-# ``judge_bundle.review_constraints`` (built by CriticAgentBackend from
-# this registry), instead of hard-coded carve-out lists in
-# ``critic.md``.
-#
-# * ``archival`` — transcribes existing state to disk; introduces
-#   NO new measurements. Always approve: refusing forces the run
-#   to idle until the wall-clock deadline auto-enqueues the same
-#   action. (Examples: report / session_breakdown / target_analysis.)
-# * ``exploration`` — runs benchmarks / variants to GENERATE the
-#   before/after data the gate would otherwise demand as input.
-#   Approve when the proposal is the natural next TODO per
-#   orchestration's sequencing rules. The measurement IS the
-#   evidence. (Examples: baseline / profile / roofline / explore /
-#   sweep / kernel_opt / ...)
-# * ``promotion`` — MUTATES ``optimization_stack`` by appending a
-#   KEEP'd entry with an E2E gain claim. Genuinely requires
-#   before/after benchmark + accuracy gate + rollback evidence to
-#   approve. Currently the sole member is ``integrate``.
+# Per-action verdict policy class — selects which Critic prompt rule set
+# applies; never a hidden hard gate (loosen P3_20).
 VALID_VERDICT_CLASSES: frozenset[str] = frozenset({
     "archival", "exploration", "promotion",
 })
 
-# Default classifier — exhaustive map for every action shipped today.
-# A yaml file may override its action's class by setting the
-# ``verdict_class`` field; otherwise the loader looks up the action
-# name in this table. Unknown names fall back to ``"exploration"``
-# (the safest non-deadlocking default: it only blocks the rare
-# integrate-shaped action that genuinely needs evidence).
-# Only live actions (those with an ``actions/_meta/<name>.yaml``) are
-# listed here. Retired names are intentionally absent — the loader only
-# consults this table for an action it is already loading from yaml, and
-# any unlisted name falls through to ``_DEFAULT_VERDICT_CLASS_FALLBACK``.
+# Default classifier for live actions; yaml ``verdict_class`` overrides.
+# Unknown names fall back to ``"exploration"`` (safest non-deadlocking default).
 _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     # archival — transcribe state, no new measurement
     "report":                  "archival",
@@ -125,8 +84,7 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     "target_analysis":         "archival",
     # promotion — mutate optimization_stack + claim gain
     "integrate":               "promotion",
-    # exploration — everything else (run benchmarks / variants /
-    # diagnostics to GENERATE data)
+    # exploration — everything else (run benchmarks to generate data)
     "baseline":                "exploration",
     "roofline":                "exploration",
     "sweep":                   "exploration",
@@ -137,20 +95,12 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     "vendor_kernel_config":    "exploration",
     "deep_kernel_analysis":    "exploration",
     "recover":                 "exploration",
-    # dynamic_action — multi-turn ReAct sub-agent that explores a
-    # cross-domain patch combination (dynamic_action.MD P1).
-    "dynamic_action":          "exploration",
 }
 _DEFAULT_VERDICT_CLASS_FALLBACK: str = "exploration"
 
 
 def default_verdict_class_for(action_name: str) -> str:
-    """Look up the default ``verdict_class`` for ``action_name``.
-
-    Returns the registered class if known, else falls back to
-    ``"exploration"`` (safe default: only ``integrate`` semantics
-    deadlock when treated as exploration; everything else is fine).
-    """
+    """Look up the default ``verdict_class``; falls back to ``"exploration"``."""
     return _DEFAULT_VERDICT_CLASS.get(
         action_name, _DEFAULT_VERDICT_CLASS_FALLBACK,
     )
@@ -168,7 +118,11 @@ class ActionRegistryError(RuntimeError):
 
 @dataclass(frozen=True)
 class ActionMetadata:
-    """Mirrors ``actions/_meta/<name>.yaml`` (DESIGN §16.2)."""
+    """Mirrors ``actions/_meta/<name>.yaml`` (DESIGN §16.2).
+
+    Operational fields gate execution; every other field is prompt-advisory
+    only. See module docstring.
+    """
 
     name: str
     family: str
@@ -186,18 +140,32 @@ class ActionMetadata:
     max_turns: int = 30
     lease_ttl_sec: int = 1800
     applicable_when: tuple[str, ...] = ()
-    # prompt-builder fields — see module docstring.
     description: str = ""
     pipeline_phase: str = "explore"
     typical_runtime_min: float = 0.0
-    # per-action verdict policy class. Drives Critic's
-    # ``action_verdict_policy`` lookup (see ``VALID_VERDICT_CLASSES``).
-    # Defaults inferred from ``default_verdict_class_for(name)`` when
-    # the yaml omits the field.
+    # Routes Critic prompt rules only, never a hidden hard gate (loosen P3_20).
     verdict_class: str = ""
 
     @classmethod
     def from_yaml_dict(cls, data: dict[str, Any], expected_name: str) -> "ActionMetadata":
+        """Validate a parsed YAML dict and build an :class:`ActionMetadata`.
+
+        Checks required fields, family / backend / pipeline-phase /
+        verdict-class vocabularies, and numeric ranges, filling optional
+        fields with safe defaults so older yaml keeps parsing.
+
+        Args:
+            data (dict[str, Any]): Parsed contents of one
+                ``actions/_meta/<name>.yaml`` file.
+            expected_name (str): Filename stem the ``name`` field must match.
+
+        Returns:
+            ActionMetadata: The validated, frozen metadata record.
+
+        Raises:
+            ActionRegistryError: On any missing field, name mismatch, or
+                out-of-vocabulary / out-of-range value.
+        """
         for field_name in _REQUIRED_FIELDS:
             if field_name not in data:
                 raise ActionRegistryError(
@@ -230,9 +198,7 @@ class ActionMetadata:
                 f"action {expected_name!r}: preferred_backend={backend!r} not in "
                 f"{sorted(VALID_BACKENDS)!r}"
             )
-        # prompt-builder fields. All optional; missing values fall back
-        # to safe defaults so old yaml files keep parsing while new ones can
-        # opt into richer prompts.
+        # prompt-builder fields — all optional with safe defaults.
         cost_p50 = float(data["cost_minutes_p50"])
         description = str(data.get("description", "")).strip()
         pipeline_phase = str(data.get("pipeline_phase", "explore")).strip() or "explore"
@@ -258,11 +224,7 @@ class ActionMetadata:
                 f"action {expected_name!r}: typical_runtime_min must be >= 0, "
                 f"got {typical_runtime_min}"
             )
-        # verdict_class — explicit yaml override wins; otherwise
-        # the loader fills in the default from the table. Validate
-        # whichever resolved value against the allowlist so a typo in
-        # the yaml fails loudly at boot rather than silently producing
-        # an unknown class the critic doesn't know how to interpret.
+        # verdict_class — yaml override wins, else table default; validated against allowlist.
         verdict_class = str(
             data.get("verdict_class") or "",
         ).strip().lower()
@@ -300,18 +262,34 @@ class ActionMetadata:
 class ActionRegistry:
     """In-memory registry of loaded action metadata.
 
-    Construction is cheap; call :meth:`load` once at boot. ``load()``
-    is idempotent and re-scans the meta directory each call.
+    Call :meth:`load` once at boot; it is idempotent and re-scans each call.
     """
 
     def __init__(self, actions_dir: Path | None = None) -> None:
+        """Initialise an empty registry rooted at an actions directory.
+
+        Args:
+            actions_dir (Path | None): Directory holding ``_meta/*.yaml``;
+                defaults to the packaged asset actions dir when None.
+        """
         self.actions_dir = Path(actions_dir) if actions_dir else asset_actions_dir()
         self.meta_dir = self.actions_dir / "_meta"
         self._cache: dict[str, ActionMetadata] = {}
         self._loaded = False
 
     def load(self) -> "ActionRegistry":
-        """Scan ``_meta/*.yaml``, validate, populate cache. Returns self."""
+        """Scan ``_meta/*.yaml``, validate, populate cache.
+
+        Idempotent — re-scans the meta directory each call. Files whose
+        stem starts with ``_`` are skipped.
+
+        Returns:
+            ActionRegistry: ``self``, for fluent chaining.
+
+        Raises:
+            ActionRegistryError: If PyYAML is unavailable, the meta
+                directory is missing, or any yaml fails validation.
+        """
         try:
             import yaml  # type: ignore[import-untyped]
         except ImportError as exc:  # pragma: no cover
@@ -337,21 +315,50 @@ class ActionRegistry:
         return self
 
     def get(self, name: str) -> ActionMetadata | None:
+        """Return metadata for one action, loading the cache on first use.
+
+        Args:
+            name (str): Action name to look up.
+
+        Returns:
+            ActionMetadata | None: The metadata, or None if unknown.
+        """
         if not self._loaded:
             self.load()
         return self._cache.get(name)
 
     def all(self) -> list[ActionMetadata]:
+        """Return every loaded action's metadata.
+
+        Returns:
+            list[ActionMetadata]: All cached metadata records.
+        """
         if not self._loaded:
             self.load()
         return list(self._cache.values())
 
     def names(self) -> list[str]:
+        """Return the sorted names of all loaded actions.
+
+        Returns:
+            list[str]: Action names in sorted order.
+        """
         if not self._loaded:
             self.load()
         return sorted(self._cache.keys())
 
     def by_family(self, family: str) -> list[ActionMetadata]:
+        """Return all loaded actions belonging to ``family``.
+
+        Args:
+            family (str): Family name; must be in :data:`VALID_FAMILIES`.
+
+        Returns:
+            list[ActionMetadata]: Actions whose ``family`` matches.
+
+        Raises:
+            ActionRegistryError: If ``family`` is not a known family.
+        """
         if family not in VALID_FAMILIES:
             raise ActionRegistryError(
                 f"family={family!r} not in {sorted(VALID_FAMILIES)!r}"
