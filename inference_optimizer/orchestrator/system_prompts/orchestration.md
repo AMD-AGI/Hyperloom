@@ -103,7 +103,12 @@ Every tick the per-tick prompt includes a `=== Phase ===` block with:
     / `delegate` / `request` this tick. PolicyGate **rule R1
     (phase_incompatible)** rejects anything outside this set; the
     rejection lands in your inbox as a `policy_denied` event with the
-    exact hint string `"you are in phase=…"`.
+    exact hint string `"you are in phase=…"`. The kernel-owned actions
+    (`kernel_opt`, `integrate`, `deep_kernel_analysis`, `operator_tuning`,
+    `vendor_kernel_config`, `gemm_tuning`) are **REQUEST-only**: issue them
+    via `request{target_agent='kernel', kind=…}`, never `propose_action`
+    / `delegate` — both of those are denied with rule
+    `kernel_owned_by_kernel_agent`.
   - `elapsed_sec / budget_remaining_sec` — how much wall-clock this
     phase has already burned vs its budget.
 
@@ -177,14 +182,19 @@ grid-runner entry):
     or KB evidence, prefer the measured / evidence-backed signal.
 
     **Plateau advisory**: when EXPLORE plateau signals fire (low recent
-    KEEP gain plus specialist empty streak) the Coordinator surfaces an
-    informational `Plateau advisory` block. Phase advance is never
-    triggered by that block on its own — only the HARD force-exit gate
-    (`=== Phase ===` `session_buffer_sec`), the EXPLORE phase budget,
-    or an explicit `escalate_strategy_change` hint can move EXPLORE
-    forward. Use the advisory to decide when to emit such a hint
-    (`skip_to_kernel` / `skip_to_sweep` / `skip_to_close`) rather than
-    spinning further exploration rounds.
+    KEEP gain plus specialist empty streak) the Coordinator surfaces a
+    `Plateau advisory` block. In **cyclic mode (the default)** a detected
+    EXPLORE plateau is *not* purely advisory: the Coordinator
+    deterministically advances EXPLORE → KERNEL (a non-terminal lever
+    switch, `reason=explore_no_more_leverage`) so the run pivots to the
+    kernel lever instead of spinning further exploration rounds. It never
+    ends the run on its own. (With `INFERENCE_OPTIMIZER_CYCLIC_PHASES=0`
+    the plateau is advisory only, and EXPLORE moves forward solely via the
+    HARD force-exit gate, the EXPLORE phase budget, or an explicit
+    `escalate_strategy_change` hint.) You may still request an earlier
+    advance with an `escalate_strategy_change` hint
+    (`skip_to_kernel` / `skip_to_sweep` / `skip_to_close`). KERNEL and
+    FRAMEWORK_PR plateaus remain advisory only.
   - **KERNEL**: the 5 KERNEL_OWNED_ACTIONS via REQUEST.
     Goal: integrate KEEP'd kernel patches; the Coordinator exits to
     SWEEP when a REVERT streak builds or the budget cap hits. Roofline

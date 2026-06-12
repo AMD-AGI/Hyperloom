@@ -743,10 +743,21 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
-        # Soft check — reject only if registry is wired AND name is unknown AND not kernel-owned.
+        # Kernel-owned actions are REQUEST-only — mirror the delegate guard so the
+        # ownership contract is enforced on BOTH the propose and delegate channels
+        # (action_surfaces.KERNEL_OWNED_ACTIONS). Without this a propose_action
+        # would pass the gate and materialize as a ``kind=<kernel action>`` task
+        # that bypasses the kernel REQUEST handler.
+        if action_name in KERNEL_OWNED_ACTIONS:
+            raise PolicyDenied(
+                f"action={action_name!r} is owned by the kernel agent; "
+                f"emit REQUEST(target_agent='kernel', kind='...') instead "
+                f"of propose_action(action_name={action_name!r})",
+                rule="kernel_owned_by_kernel_agent",
+            )
+        # Soft check — reject only if registry is wired AND name is unknown.
         if (
             self.action_registry is not None
-            and action_name not in KERNEL_OWNED_ACTIONS
             and self.action_registry.get(action_name) is None
         ):
             raise PolicyDenied(
@@ -1503,7 +1514,16 @@ class PolicyGate:
         and the freeform gate (``_validate_freeform_specialist_dispatch``) so a
         ``scope='freeform'`` dispatch that sets ``needs_gpu`` is governed by the
         same ceiling instead of slipping past it via the freeform early-return.
-        No-op when ``needs_gpu`` is falsey.
+        No-op when the dispatch needs no GPU.
+
+        A bench-enabled specialist (``mode=patch`` & ``bench=true``) does not
+        have to set ``needs_gpu`` explicitly: the Coordinator's
+        ``_warm_specialist_params`` auto-defaults it to True at dispatch so the
+        worktree micro-benchmark holds a GPU lease. We mirror that auto-default
+        here, otherwise such a dispatch slips past this gate (no explicit
+        ``needs_gpu``) and later becomes a GPU-needing queued task that can stall
+        forever when the pool is disabled (``--gpu-specialist-capacity 0``)
+        rather than being rejected at the policy layer.
         """
         needs_gpu_raw = params.get("needs_gpu", False)
         if isinstance(needs_gpu_raw, str):
@@ -1512,6 +1532,10 @@ class PolicyGate:
             )
         else:
             needs_gpu = bool(needs_gpu_raw)
+        if not needs_gpu:
+            from .specialist_profile import resolve_specialist_profile
+            if resolve_specialist_profile(params).grants_bench_tool:
+                needs_gpu = True
         if not needs_gpu:
             return
         gpu_count_raw = params.get("gpu_count", 1)

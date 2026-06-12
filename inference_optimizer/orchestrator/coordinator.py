@@ -6622,7 +6622,14 @@ class Coordinator:
             )
 
     def _plateau_advisory_block(self) -> str:
-        """Render the plateau-judgment advisory block (EXPLORE/KERNEL/FRAMEWORK_PR; advisory, never gates). Returns "" when no plateau signal is active."""
+        """Render the plateau-judgment advisory block (EXPLORE/KERNEL/FRAMEWORK_PR). Returns "" when no plateau signal is active.
+
+        KERNEL / FRAMEWORK_PR plateaus are advisory only (never auto-exit the
+        phase). An EXPLORE plateau is advisory in non-cyclic mode, but in cyclic
+        mode (default) it deterministically advances EXPLORE → KERNEL via
+        ``explore_no_more_leverage`` (a non-terminal lever switch); the rendered
+        footer states which regime is active.
+        """
         state = self.shared_state
         phase = (getattr(state, "phase", "") or "").strip().upper()
         overrides = getattr(state, "plateau_overrides", None) or {}
@@ -6710,11 +6717,24 @@ class Coordinator:
                 )
         if not lines:
             return ""
-        lines.append(
-            "Phase advance is driven only by hard limits (IR-6 force-exit, "
-            "phase budget, terminal stop_reason) or explicit "
-            "escalate_strategy_change hints; this block is informational."
-        )
+        if (
+            phase == _phase_state.PHASE_EXPLORE
+            and _phase_state.is_cyclic_phases_enabled()
+        ):
+            lines.append(
+                "Note: in cyclic mode a detected EXPLORE plateau "
+                "deterministically advances EXPLORE → KERNEL (non-terminal "
+                "lever switch, reason=explore_no_more_leverage); it does not "
+                "end the run. You may still request an earlier advance with an "
+                "escalate_strategy_change hint, or keep exploring until the "
+                "plateau/budget gate fires."
+            )
+        else:
+            lines.append(
+                "Phase advance is driven only by hard limits (IR-6 force-exit, "
+                "phase budget, terminal stop_reason) or explicit "
+                "escalate_strategy_change hints; this block is informational."
+            )
         return "\n".join(lines)
 
     def _dominant_roofline_direction(self) -> tuple[str, float]:

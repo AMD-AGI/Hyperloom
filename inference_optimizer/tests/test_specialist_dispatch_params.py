@@ -421,6 +421,40 @@ def test_domain_gpu_request_still_governed_after_refactor(orchestration_role):
     assert exc.value.rule == "specialist_gpu_pool_disabled"
 
 
+def test_bench_specialist_without_explicit_needs_gpu_is_gated(orchestration_role):
+    """A bench-enabled (mode=patch & bench=true) specialist auto-defaults
+    needs_gpu=True at dispatch (_warm_specialist_params); the gate must mirror
+    that so it is rejected when the pool is disabled instead of slipping past
+    the no-needs_gpu early return and stalling as an unschedulable GPU task."""
+    gate = _gate_with_gpu_capacity(0)
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch({
+                "scope": "freeform",
+                "task_description": "patch + bench the decode attention kernel",
+                "mode": "patch", "bench": True,
+                # NOTE: no explicit needs_gpu — the bench profile implies it.
+            }),
+        )
+    assert exc.value.rule == "specialist_gpu_pool_disabled"
+
+
+def test_research_specialist_without_needs_gpu_is_not_gated(orchestration_role):
+    """A non-bench (research) specialist needs no GPU, so the pool-disabled
+    gate must NOT fire for it even when capacity is 0."""
+    gate = _gate_with_gpu_capacity(0)
+    # Must not raise: research/CPU dispatch never contends for the GPU pool.
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch({
+            "scope": "freeform",
+            "task_description": "read-only profile the decode path",
+            "mode": "research",
+        }),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Tool surface: TodoWrite is granted, Task is denied (no recursive sub-agent
 # spawn — that would bypass the dispatcher's lane / GPU accounting).
