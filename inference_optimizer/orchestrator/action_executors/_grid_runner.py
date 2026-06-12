@@ -852,6 +852,68 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
+# Flags whose value can contain spaces / JSON; never tokenize-dedupe these
+# because the downstream Magpie scripts expand $EXTRA_*_ARGS unquoted and the
+# value would be split anyway. Leave the whole arg string untouched if present.
+_SPACE_VALUE_FLAGS = (
+    "--json-model-override-args",
+    "--override-generation-config",
+    "--tool-call-parser",
+)
+_MULTI_VALUE_FLAGS = (
+    "--cuda-graph-bs",
+    "--cuda-graph-max-bs",
+)
+
+
+def _shell_safe_dedupe(args: str) -> str:
+    """Last-wins dedupe for single-token-valued flags only.
+
+    Targeted and conservative: collapses repeated ``--flag value`` (or
+    ``--flag=value``) pairs whose value is a single whitespace-free token,
+    keeping the last occurrence. If the string contains a flag known to carry
+    a space/JSON value (which the unquoted ``$EXTRA_*_ARGS`` expansion in the
+    Magpie scripts cannot safely round-trip anyway), the string is returned
+    unchanged to avoid mangling it.
+    """
+    if not args.strip():
+        return ""
+    if any(f in args for f in _SPACE_VALUE_FLAGS + _MULTI_VALUE_FLAGS):
+        return args
+    tokens = args.split()
+    pairs: dict[str, list[str]] = {}
+    order: list[str] = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t.startswith("--"):
+            if "=" in t:
+                # Normalize ``--flag=value`` so it dedupes against ``--flag value``.
+                flag, _, val = t.partition("=")
+                pair = [flag, val]
+                i += 1
+            else:
+                flag = t
+                i += 1
+                if i < len(tokens) and not tokens[i].startswith("--"):
+                    pair = [flag, tokens[i]]
+                    i += 1
+                else:
+                    pair = [flag]
+            if flag not in pairs:
+                order.append(flag)
+            pairs[flag] = pair
+        else:
+            key = f"__pos_{len(order)}__"
+            order.append(key)
+            pairs[key] = [t]
+            i += 1
+    out: list[str] = []
+    for k in order:
+        out.extend(pairs[k])
+    return " ".join(out)
+
+
 # sglang scheduler watchdog timeout injection: on MI300X with aiter, the first
 # request's ``mha_batch_prefill`` JIT compile can exceed sglang's 300s default
 # watchdog, firing SIGQUIT mid-warmup -> baseline_failed. Inject a longer
@@ -1219,7 +1281,7 @@ def _build_variant_yaml(
         variant.extra_server_args,
     )
     if combined:
-        envs[extra_args_env] = combined
+        envs[extra_args_env] = _shell_safe_dedupe(combined)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
 
@@ -1533,9 +1595,9 @@ async def run_grid(
             # PD knobs auto-resolved from $PD_* env; PD config stays constant
             # across variants within one run.
             await restart_server_for_round(
-                extra_server_args=merge_server_args(
+                extra_server_args=_shell_safe_dedupe(merge_server_args(
                     base_extra_args, variant.extra_server_args,
-                ),
+                )),
                 # Per-variant env overrides (e.g. MORI_* MoE-dispatch
                 # tuning) so server-side env knobs proposed by specialists
                 # actually take effect on the restarted sglang. Empty dict
