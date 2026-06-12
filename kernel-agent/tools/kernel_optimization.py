@@ -1515,9 +1515,22 @@ def build_prompt(
         "Pick whichever option matches the kernel; do NOT just measure baseline\n"
         "and write `speedup: N/A` — that wastes the run.\n"
     )
-    # Multi-node sandbox is GPU-less: tell the LLM to dispatch compile+bench to a
-    # GPU-bearing pod via `inference_optimizer.multi_node kernel-bench`.
-    mn_state_file = Path("/tmp/multi_node_state.json")
+    # Multi-node sandbox is GPU-less: any local `hipcc` / `torch.cuda.*` /
+    # `torch.utils.cpp_extension.load` call WILL fail. Direct the LLM to
+    # delegate compile + execution to a GPU-bearing pod via the
+    # `inference_optimizer.multi_node kernel-bench` subcommand (head pod,
+    # single-GPU actor); LLM still iterates locally on source, just
+    # off-loads each measurement step. The CLI base64-encodes any
+    # supporting files, stages them under --workspace on the pod, runs
+    # the bench inside that workspace with the GPU, and returns
+    # stdout/stderr + any matching result*.json artifacts.
+    # Honour $MULTI_NODE_STATE_FILE (default /tmp/multi_node_state.json), same
+    # resolution as apply_kernel_patch._mn_state_path / _multi_node_env. This
+    # keeps test isolation intact: a stale real /tmp state file no longer
+    # misclassifies a single-node run as multi-node.
+    mn_state_file = Path(
+        os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json")
+    )
     is_multinode_run = False
     try:
         if mn_state_file.is_file():
