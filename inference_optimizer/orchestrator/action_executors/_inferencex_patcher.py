@@ -97,7 +97,9 @@ def _discover_inferencex_roots(
 
     _add(inferencex_path)
     _add(os.environ.get("INFERENCEX_PATH", "").strip() or None)
-    magpie_dir = os.environ.get("MAGPIE_DIR", "").strip()
+    magpie_dir = (
+        os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR") or ""
+    ).strip()
     if magpie_dir:
         _add(Path(magpie_dir) / "InferenceX")
     return roots
