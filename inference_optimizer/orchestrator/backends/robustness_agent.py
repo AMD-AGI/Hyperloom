@@ -259,6 +259,16 @@ class RobustnessAgentBackend:
             "workdir": str(workdir),
         })
 
+        # Author-time breakdown capture: record this robustness signal before
+        # the backend prunes old workdirs (composed into critic_robustness).
+        try:
+            from ...breakdown.recorder import instrument
+            instrument.record_robustness_signal(
+                self.session_dir, workdir=workdir,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         return BackendTurnResult(
             intents=intents,
             raw_text="(robustness-agent)",

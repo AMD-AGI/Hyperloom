@@ -35,6 +35,7 @@ from ._grid_runner import (
     GridVariant,
     VariantResult,
     _resolve_session_dir,
+    apply_multi_node_invalid_variants,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
@@ -309,8 +310,16 @@ class SweepExecutor:
             max_model_len=max_model_len,
         )
 
-        # Reuse resolved_model / resolved_gpu from above (see baseline.py /
-        # _grid_runner.py for why both must flow through).
+        # Drop multi-node-invalid variants (cuda-graph-max-bs < CONC). No-op
+        # in single-node — the helper short-circuits on is_multi_node() and
+        # returns the grid unchanged, so the single-node Pareto sweep is
+        # bit-for-bit identical. No reorder here: sweep keeps CONC order for
+        # the Pareto-front computation downstream.
+        grid, _ = apply_multi_node_invalid_variants(grid)
+
+        # `resolved_model` / `resolved_gpu` were resolved above for the
+        # materialization step; reuse them here. See baseline.py /
+        # _grid_runner.py for the rationale on why both must flow through.
         results = await run_grid(
             base_yaml_path=config_path,
             base_extra_args="",  # sweep variants carry args themselves

@@ -103,6 +103,154 @@ def test_detect_rope_without_maxpos_blocks(tmp_path):
     assert "RoPE" in reason
 
 
+# Phi-3 su/longrope rope_scaling: even a canonical 3-key rope_scaling crashes,
+# because transformers folds the top-level rope_theta into it at load so the
+# Phi3Config validator sees 4 keys and raises before any override can apply.
+# This mirrors the real failing checkpoints (Seacom/anakin87/ReDiX/SciPhi).
+def test_detect_phi3_su_canonical_three_fields_blocks(tmp_path):
+    m = tmp_path / "phi3_su"
+    _write_config(
+        m,
+        model_type="phi3",
+        architectures=["Phi3ForCausalLM"],
+        max_position_embeddings=131072,
+        rope_theta=10000.0,
+        rope_scaling={
+            "type": "su",
+            "short_factor": [1.05, 1.1],
+            "long_factor": [1.03, 1.05],
+        },
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None
+    assert "Phi-3" in reason
+    assert "rope_scaling" in reason
+
+
+def test_detect_phi3_longrope_blocks(tmp_path):
+    m = tmp_path / "phi3_longrope"
+    _write_config(
+        m,
+        model_type="phi3",
+        max_position_embeddings=131072,
+        rope_theta=10000.0,
+        rope_scaling={
+            "type": "longrope",
+            "short_factor": [1.05, 1.1],
+            "long_factor": [1.03, 1.05],
+        },
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None
+    assert "Phi-3" in reason
+
+
+def test_detect_phi3_yarn_rope_not_blocked(tmp_path):
+    # yarn is the non-longrope path and validates differently; do not block it.
+    m = tmp_path / "phi3_yarn"
+    _write_config(
+        m,
+        model_type="phi3",
+        max_position_embeddings=131072,
+        rope_scaling={"type": "yarn", "factor": 4.0},
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_phi3_longrope_without_rope_theta_not_blocked(tmp_path):
+    # Without a top-level rope_theta, transformers does not fold an extra key
+    # into rope_scaling, so the 3-key dict passes Phi3Config validation fine.
+    m = tmp_path / "phi3_longrope_no_theta"
+    _write_config(
+        m,
+        model_type="phi3",
+        max_position_embeddings=131072,
+        rope_scaling={
+            "type": "longrope",
+            "short_factor": [1.05, 1.1],
+            "long_factor": [1.03, 1.05],
+        },
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_non_phi3_su_rope_not_blocked(tmp_path):
+    # The Phi-3 validator is Phi3Config-specific; a non-phi3 model with a
+    # su/longrope-typed rope_scaling must not be caught by this gate.
+    m = tmp_path / "llama_su"
+    _write_config(
+        m,
+        model_type="llama",
+        max_position_embeddings=8192,
+        rope_scaling={"type": "su", "short_factor": [1.05], "extra": 1},
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+# Gemma2 missing hidden_act: sglang's gemma2 runtime reads config.hidden_act
+# unconditionally; some checkpoints ship only hidden_activation (the HF name)
+# and crash with AttributeError in engine init. Hardware-agnostic.
+def test_detect_gemma2_missing_hidden_act_blocks(tmp_path):
+    m = tmp_path / "gemma2_bad"
+    _write_config(
+        m,
+        model_type="gemma2",
+        architectures=["Gemma2ForCausalLM"],
+        max_position_embeddings=8192,
+        hidden_activation="gelu_pytorch_tanh",
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None
+    assert "Gemma2" in reason
+    assert "hidden_act" in reason
+
+
+def test_detect_gemma2_arch_only_missing_hidden_act_blocks(tmp_path):
+    m = tmp_path / "gemma2_arch_only"
+    _write_config(
+        m,
+        architectures=["Gemma2ForCausalLM"],
+        max_position_embeddings=8192,
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None
+    assert "Gemma2" in reason
+
+
+def test_detect_gemma2_with_hidden_act_ok(tmp_path):
+    m = tmp_path / "gemma2_ok"
+    _write_config(
+        m,
+        model_type="gemma2",
+        architectures=["Gemma2ForCausalLM"],
+        max_position_embeddings=8192,
+        hidden_act="gelu_pytorch_tanh",
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_gemma2_hidden_act_in_text_config_ok(tmp_path):
+    m = tmp_path / "gemma2_text_cfg"
+    _write_config(
+        m,
+        model_type="gemma2",
+        architectures=["Gemma2ForCausalLM"],
+        max_position_embeddings=8192,
+        text_config={"hidden_act": "gelu_pytorch_tanh"},
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_non_gemma2_missing_hidden_act_not_blocked(tmp_path):
+    # Only gemma2 reads config.hidden_act unconditionally in sglang; other
+    # model types that omit hidden_act must not be caught by this gate.
+    m = tmp_path / "llama_no_act"
+    _write_config(
+        m, model_type="llama", max_position_embeddings=8192,
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
 def test_detect_corrupt_config_blocks(tmp_path):
     m = tmp_path / "corrupt"
     m.mkdir(parents=True, exist_ok=True)
