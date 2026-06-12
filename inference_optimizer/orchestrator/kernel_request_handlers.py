@@ -1008,9 +1008,16 @@ async def _run_subprocess(cmd: list[str], *, timeout_sec: int) -> tuple[int, str
         from .action_executors._multi_node_env import (
             is_multi_node,
             ray_gcs_address_from_state,
+            dynamo_ssh_env_from_state,
         )
         if is_multi_node():
-            addr = ray_gcs_address_from_state()
+            # Dynamo backend: route GEAK GPU work to a pod over SSH (no Ray).
+            # dynamo_ssh_env_from_state() returns {} for RayJob/single-node, so
+            # the RAY_ADDRESS path below is unchanged for those.
+            ssh_env = dynamo_ssh_env_from_state()
+            if ssh_env:
+                env.update(ssh_env)
+            addr = "" if ssh_env else ray_gcs_address_from_state()
             if addr:
                 env.setdefault("RAY_ADDRESS", addr)
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
@@ -1325,7 +1332,9 @@ async def trace_analyze_handler(
         cmd += ["--dry-run"]
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
 
+    _disc_started = time.monotonic()
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
+    _disc_duration_sec = round(time.monotonic() - _disc_started, 3)
     result = _shape_tool_result(rc, stdout, stderr)
     artifacts = result.get("artifact_paths") if isinstance(result, dict) else None
     if isinstance(artifacts, dict) and artifacts.get("kernel_candidates"):
@@ -1380,6 +1389,33 @@ async def trace_analyze_handler(
                 metadata,
                 trace_report_path=str(report_path or ""),
             )
+
+        # kernel_journey stage 1 (hot-kernel discovery): additive, best-effort.
+        # Records the tracelens run + its hot-kernel list + tool provenance so
+        # the journey can thread discovery -> dispatch -> backends -> e2e.
+        try:
+            from ..breakdown.recorder import instrument
+            _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
+            instrument.record_kernel_discovery(
+                session_dir,
+                source="tracelens",
+                status=str(result.get("status") or ""),
+                hot_kernels=_hot if isinstance(_hot, list) else [],
+                scan={
+                    "splitter_mode":      steady_state_mode,
+                    "trace_dir":          str(trace_input),
+                    "candidates_path":    str(result.get("candidates_path") or ""),
+                    "trace_report_path":  str(result.get("trace_report_path") or ""),
+                },
+                # tracelens version/commit is read from $TRACELENS_ROOT (its
+                # own checkout), resolved by the recorder's tool registry; we
+                # don't pin it to the kernel-agent root here.
+                duration_sec=_disc_duration_sec,
+                error=(str(result.get("error") or "") or None
+                       if str(result.get("status") or "") == "failed" else None),
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return result
 
 
@@ -2331,6 +2367,25 @@ def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+def _record_kernel_roofline_sidecar(session_dir: Path) -> None:
+    """Transcribe ``reports/kernel_roofline.json`` (written by the external
+    kernel-agent tool) into the breakdown recorder as a ``kernel_roofline``
+    singleton. Best-effort; never raises."""
+    try:
+        sidecar_path = Path(session_dir) / "reports" / "kernel_roofline.json"
+        if not sidecar_path.is_file():
+            return
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or not payload:
+            return
+        from ..breakdown.recorder import instrument
+        instrument.record_singleton_section(
+            session_dir, "kernel_roofline", payload, producer="kernel-agent",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _lookup_kernel_roofline_name(session_dir: Path, kernel_id: str) -> str:
     """Resolve the TraceLens/device kernel name for a roofline sidecar row."""
     sidecar_path = session_dir / "reports" / "kernel_roofline.json"
@@ -2551,6 +2606,9 @@ async def _run_after_kernel_opt_rocprof(
             rocprof_status=status,
             phase="after_kernel_opt",
         )
+        # Author-time breakdown capture: transcribe the external tool's sidecar
+        # (reports/kernel_roofline.json) into the recorder right after it lands.
+        _record_kernel_roofline_sidecar(session_dir)
     except Exception as exc:
         log.warning("integrate: after_kernel_opt sidecar update failed: %s", exc)
 
