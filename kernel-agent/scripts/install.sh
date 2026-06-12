@@ -1140,15 +1140,19 @@ ensure_oob() {
       fi
       if [ -z "$oob_install_src" ]; then
         warn "OOB source has no pyproject.toml at $OOB_SRC"
-        return 0
+      else
+        if [ -d "${OOB_ROOT}" ] && [ ! -f "${OOB_ROOT}/pyproject.toml" ]; then
+          log "removing stale OOB install root without pyproject.toml: ${OOB_ROOT}"
+          run rm -rf "${OOB_ROOT}"
+        fi
+        if [ ! -d "${OOB_ROOT}" ]; then
+          run cp -r "$oob_install_src" "${OOB_ROOT}"
+        fi
+        if [ -f "${OOB_ROOT}/requirements.txt" ]; then
+          run python3 -m pip install -q --no-cache-dir --break-system-packages -r "${OOB_ROOT}/requirements.txt"
+        fi
+        run python3 -m pip install -q --no-cache-dir --break-system-packages "${OOB_ROOT}"
       fi
-      if [ ! -d "${OOB_ROOT}" ]; then
-        run cp -r "$oob_install_src" "${OOB_ROOT}"
-      fi
-      if [ -f "${OOB_ROOT}/requirements.txt" ]; then
-        run python3 -m pip install -q --no-cache-dir --break-system-packages -r "${OOB_ROOT}/requirements.txt"
-      fi
-      run python3 -m pip install -q --no-cache-dir --break-system-packages "${OOB_ROOT}"
     else
       warn "OOB source not found: $OOB_SRC"
     fi
