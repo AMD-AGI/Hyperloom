@@ -34,6 +34,10 @@ class _BareState:
     current_best: dict[str, Any] = field(default_factory=dict)
     last_baseline: dict[str, Any] = field(default_factory=dict)
     phase_history: list[dict[str, Any]] = field(default_factory=list)
+    pending_stack_validation_result: dict[str, Any] = field(default_factory=dict)
+    pending_stack_validation_apply_results: list[dict[str, Any]] = field(default_factory=list)
+    kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
+    optimization_stack: list[dict[str, Any]] = field(default_factory=list)
     save_count: int = 0
 
     def save(self, _session_dir: Path | None) -> None:
@@ -360,7 +364,116 @@ def test_positive_needs_review_integrates_skip_in_progress_entries():
     assert eligible[0]["kernel_id"] == "k004"
 
 
-# 1. _build_sweep_params_from_recipe — pure static helper
+@pytest.mark.asyncio
+async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
+    tmp_path: Path, monkeypatch,
+):
+    """Stack validation must run even when has_keep_pending_integrate is False."""
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        current_best={"action": "baseline", "tput": 100.0},
+    )
+    c.tasks = _StubTaskRegistry()
+    c.knowledge_plane = None
+    c.role_registry = {"kernel": object()}
+    # All KEEPs already integrated as NEEDS_REVIEW — no pending KEEP
+    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
+        c.shared_state.record_kernel_integrate_result({
+            "status": "ok",
+            "decision": "NEEDS_REVIEW",
+            "kernel_id": kid,
+            "patch_path": f"/tmp/{kid}_opt.cu",
+            "target_file": f"/tmp/{kid}.cu",
+            "new_tput": 100.0 + gain,
+            "gain_pct": gain,
+            "workspace": f"/tmp/integrate-{kid}",
+        })
+    assert not c.shared_state.has_keep_pending_integrate
+
+    validation_calls = []
+
+    async def _fake_stack_validation(entries):
+        validation_calls.append([e["kernel_id"] for e in entries])
+        return {
+            "status": "ok",
+            "decision": "KEEP",
+            "kernel_id": "k001+k004",
+            "patch_path": "/tmp/k001_opt.cu+/tmp/k004_opt.cu",
+            "target_file": "/tmp/k001.cu+/tmp/k004.cu",
+            "base_tput": 100.0,
+            "new_tput": 102.0,
+            "gain_pct": 2.0,
+            "workspace": str(tmp_path / "integrate-stack"),
+            "apply_result": {"status": "ok"},
+            "stack_kernel_ids": ["k001", "k004"],
+            "stack_validation": True,
+        }
+
+    async def _noop_roofline(*, reason: str):
+        return None
+
+    c._run_kernel_stack_validation_e2e = _fake_stack_validation
+    c._maybe_enqueue_watermark_roofline = _noop_roofline
+
+    await c._on_enter_sweep(from_phase="KERNEL")
+
+    assert len(validation_calls) == 1
+    assert c.shared_state.current_best["kernel_id"] == "k001+k004"
+
+
+@pytest.mark.asyncio
+async def test_drain_uses_current_best_tput_not_baseline(
+    tmp_path: Path, monkeypatch,
+):
+    """Drain should pass current_best.tput (not baseline) so multi-KEEP gain is incremental."""
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        current_best={"action": "integrate", "tput": 110.0, "kernel_id": "k_prev"},
+    )
+    c.shared_state.optimization_stack = [
+        {"action": "integrate", "kernel_id": "k_prev", "tput": 110.0},
+    ]
+    c.shared_state.kernel_opt_attempts = {
+        "k_new": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 2.0,
+            "last_source_file": "/tmp/new.cu",
+        },
+    }
+    captured_payloads = []
+
+    async def _fake_integrate_handler(payload, *, session_dir):
+        captured_payloads.append(payload)
+        return {
+            "status": "ok",
+            "decision": "KEEP",
+            "kernel_id": payload["kernel_id"],
+            "patch_path": "/tmp/new_opt.cu",
+            "target_file": "/tmp/new.cu",
+            "base_tput": payload.get("base_tput", 0.0),
+            "new_tput": 112.0,
+            "gain_pct": (112.0 / payload.get("base_tput", 100.0) - 1) * 100,
+            "workspace": str(tmp_path / "integrate-k_new"),
+        }
+
+    async def _noop_roofline(*, reason: str):
+        return None
+
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.kernel_request_handlers.integrate_handler",
+        _fake_integrate_handler,
+    )
+    c._maybe_enqueue_watermark_roofline = _noop_roofline
+
+    await c._drain_pending_keep_integrates()
+
+    assert len(captured_payloads) == 1
+    # Should use current_best.tput (110.0), not baseline (100.0)
+    assert captured_payloads[0]["base_tput"] == 110.0
 def test_build_sweep_params_defaults_when_no_recipe():
     """No warm_start_recipe → SKILL.md defaults + source='skill_md_default'."""
     from inference_optimizer.orchestrator.action_executors.sweep import (

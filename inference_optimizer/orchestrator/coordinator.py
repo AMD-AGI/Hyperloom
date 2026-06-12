@@ -2768,8 +2768,12 @@ class Coordinator:
                 "kernel_id=%s (drained %d so far)", kid, drained,
             )
             try:
+                base = float(
+                    (state.current_best or {}).get("tput")
+                    or state.baseline_tput or 0.0
+                )
                 result = await integrate_handler(
-                    {"kernel_id": kid, "base_tput": float(state.baseline_tput or 0.0)},
+                    {"kernel_id": kid, "base_tput": base},
                     session_dir=self.session_dir,
                 )
                 if isinstance(result, dict) and result.get("status") != "skipped":
@@ -2788,7 +2792,6 @@ class Coordinator:
                     state.rejected_kernel_ids.append(kid)
                 state.save(self.session_dir)
             drained += 1
-        await self._maybe_validate_positive_needs_review_stack()
         if drained >= max_drain:
             log.warning(
                 "SWEEP entry: drain cap (%d) reached; remaining pending "
@@ -3176,6 +3179,9 @@ class Coordinator:
         # Bug #7 fix: drain pending KEEP integrates from prior KERNEL so sweep measures full current_best.
         if getattr(state, "has_keep_pending_integrate", False):
             await self._drain_pending_keep_integrates()
+        # Always attempt stack validation for positive NEEDS_REVIEW kernels,
+        # regardless of whether there were pending KEEPs to drain.
+        await self._maybe_validate_positive_needs_review_stack()
         try:
             task = await self._enqueue_internal_sweep_task(
                 reason="phase_entry",
