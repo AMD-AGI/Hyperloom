@@ -165,7 +165,7 @@ def _build_orchestration_prompt(
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
     registry = action_registry or ActionRegistry().load()
-    enabled = default_enabled_actions(no_kernel=no_kernel)
+    enabled = default_enabled_actions(no_kernel=no_kernel, no_explore=no_explore)
     kind, value = _objective_summary_for_prompt(objective)
     return build_orchestration_prompt(
         action_registry=registry,
@@ -3955,6 +3955,20 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     print(f"Objective       : kind={objective.kind()} {objective.describe()}")
     no_kernel = getattr(args, "no_kernel", False)
     no_explore = getattr(args, "no_explore", False)
+    no_framework = bool(getattr(args, "no_framework", False))
+    # Unconditional phase-toggle banner lines (mirror the kernel banner so all
+    # three --no-xxx flags surface their ENABLED/DISABLED state at startup).
+    if no_explore:
+        print(
+            "Explore phase   : DISABLED (--no-explore); "
+            f"{'baseline -> SWEEP' if no_kernel else 'baseline -> KERNEL -> SWEEP'}"
+        )
+    else:
+        print("Explore phase   : ENABLED")
+    if no_framework:
+        print("Framework phase : DISABLED (--no-framework)")
+    else:
+        print("Framework phase : ENABLED")
     if no_explore and no_kernel:
         print(
             "WARNING: --no-explore and --no-kernel are both set; the run "
@@ -3963,9 +3977,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             "re-validates the baseline recipe. Continuing as requested.",
             file=sys.stderr,
         )
-    elif no_explore:
-        print("Explore phase   : DISABLED (--no-explore); "
-              f"{'baseline -> SWEEP' if no_kernel else 'baseline -> KERNEL -> SWEEP'}")
     if bool(getattr(args, "research_scout", True)):
         print(
             "Research scout  : ENABLED at PRELUDE (re-dispatch every "

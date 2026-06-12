@@ -60,6 +60,54 @@ def test_orchestration_prompt_no_kernel_marks_kernel_skipped(registry):
     assert "(DISABLED: --no-kernel — phase skipped)" in text
 
 
+def test_orchestration_prompt_no_explore_trims_catalogue_and_marks_skipped(registry):
+    text = build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=default_enabled_actions(no_kernel=False, no_explore=True),
+        framework="sglang",
+        kernel_enabled=True,
+        explore_enabled=False,
+        max_minutes=120,
+    )
+    # PHASE CONTRACT annotates EXPLORE as skipped + SESSION CONTEXT state line.
+    assert "(DISABLED: --no-explore — phase skipped)" in text
+    assert "explore_enabled  : false" in text
+    # ACTION CATALOGUE no longer advertises the `explore` action body. The
+    # catalogue lists actions as `- **<name>** —`; assert that bullet is gone.
+    assert "- **explore** —" not in text
+    # specialist/integrate_patch stay visible (KERNEL still uses them).
+    assert "- **specialist** —" in text
+    assert "- **integrate_patch** —" in text
+
+
+def test_orchestration_prompt_no_framework_marks_skipped_and_context(registry):
+    text = build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=default_enabled_actions(no_kernel=False),
+        framework="sglang",
+        kernel_enabled=True,
+        framework_phase_enabled=False,
+        max_minutes=120,
+    )
+    assert "(DISABLED: --no-framework — phase skipped)" in text
+    assert "framework_phase_enabled : false" in text
+
+
+def test_orchestration_prompt_all_enabled_session_context_true(registry):
+    text = build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=default_enabled_actions(no_kernel=False),
+        framework="sglang",
+        kernel_enabled=True,
+        explore_enabled=True,
+        framework_phase_enabled=True,
+        max_minutes=120,
+    )
+    assert "explore_enabled  : true" in text
+    assert "framework_phase_enabled : true" in text
+    assert "(DISABLED:" not in text
+
+
 def test_critic_prompt_includes_phase_review_contract(registry):
     text = build_critic_prompt(
         action_registry=registry,

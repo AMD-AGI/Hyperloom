@@ -77,6 +77,8 @@ def _section_session_context(
     objective_kind: str,
     objective_value: float | str | None,
     max_minutes: int,
+    explore_enabled: bool = True,
+    framework_phase_enabled: bool = True,
     framework_source_roots: tuple[str, ...] | None = None,
 ) -> list[str]:
     """Build the SESSION CONTEXT section lines.
@@ -106,6 +108,9 @@ def _section_session_context(
         "",
         f"- framework        : {framework}",
         f"- kernel_enabled   : {'true' if kernel_enabled else 'false'}",
+        f"- explore_enabled  : {'true' if explore_enabled else 'false'}",
+        f"- framework_phase_enabled : "
+        f"{'true' if framework_phase_enabled else 'false'}",
         f"- objective        : {obj}",
         f"- max_minutes      : {max_minutes}",
         f"- framework_source_roots: {roots_line}",
@@ -128,8 +133,9 @@ def _section_session_context(
         "anything outside that set returns `policy_denied` with rule",
         "`phase_incompatible`. The 6-phase chain is:",
         "  PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE",
-        "(FRAMEWORK_PR is skipped under ``--no-framework``.)",
-        "Transitions are Coordinator-owned (you cannot write phase).",
+        "Disabled phases (see PHASE CONTRACT below) are skipped but keep "
+        "their place in the chain. Transitions are Coordinator-owned "
+        "(you cannot write phase).",
     ]
 
 
@@ -166,8 +172,7 @@ def _section_phase_semantics(
     lines: list[str] = [
         "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "",
-        "The Coordinator runs the optimization in a 6-phase linear pipeline",
-        "(FRAMEWORK_PR collapses out with `--no-framework`, leaving 5).",
+        "The Coordinator runs the optimization in a 6-phase linear pipeline.",
         "Each tick it injects a `=== Phase ===` block with the current",
         "phase. Per-phase proposable action sets (PolicyGate R1 enforces these):",
         "",
@@ -834,6 +839,8 @@ def build_orchestration_prompt(
             objective_kind=objective_kind,
             objective_value=objective_value,
             max_minutes=max_minutes,
+            explore_enabled=explore_enabled,
+            framework_phase_enabled=framework_phase_enabled,
             framework_source_roots=framework_source_roots,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
@@ -855,18 +862,33 @@ def build_orchestration_prompt(
     return "\n\n".join(parts).rstrip() + "\n"
 
 
-def default_enabled_actions(*, no_kernel: bool) -> tuple[str, ...]:
+def default_enabled_actions(
+    *, no_kernel: bool, no_explore: bool = False,
+) -> tuple[str, ...]:
     """Return the canonical enabled-action set used by the CLI.
 
+    Filters :data:`FULL_ENABLED_ACTIONS` per flag so the flags compose: a
+    ``--no-kernel --no-explore`` run drops both kernel-owned names and the
+    ``explore`` grid-runner. ``--no-framework`` is intentionally absent — the
+    ``framework_pr`` action is Coordinator-internal and never appears in the
+    catalogue, so it has nothing to trim.
+
     Args:
-        no_kernel (bool): When ``True``, return the no-kernel action set;
-            otherwise the full set.
+        no_kernel (bool): When ``True``, drop the kernel-only actions (keep the
+            intersection with :data:`NO_KERNEL_ENABLED_ACTIONS`).
+        no_explore (bool): When ``True``, drop the ``explore`` grid-runner
+            action (EXPLORE phase is skipped).
 
     Returns:
-        tuple[str, ...]: :data:`NO_KERNEL_ENABLED_ACTIONS` when ``no_kernel`` is
-        set, else :data:`FULL_ENABLED_ACTIONS`.
+        tuple[str, ...]: The filtered enabled-action set, preserving
+        :data:`FULL_ENABLED_ACTIONS` ordering.
     """
-    return NO_KERNEL_ENABLED_ACTIONS if no_kernel else FULL_ENABLED_ACTIONS
+    actions = list(FULL_ENABLED_ACTIONS)
+    if no_kernel:
+        actions = [a for a in actions if a in NO_KERNEL_ENABLED_ACTIONS]
+    if no_explore:
+        actions = [a for a in actions if a != "explore"]
+    return tuple(actions)
 
 
 __all__ = [
