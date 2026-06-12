@@ -167,6 +167,29 @@ def test_backend_attempt_maps_kernel_agent_field_names(tmp_path: Path) -> None:
     assert entry["micro_speedup"] == 1.42
 
 
+def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
+    # Discovery + backend recording feed the top-level versions map (one object
+    # per tool, keyed by tool name), and no longer inline `tool` per element.
+    instrument.record_kernel_discovery(
+        tmp_path, source="tracelens", status="success",
+        hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 10.0}],
+        scan={},
+    )
+    instrument.record_kernel_backend_result(tmp_path, {
+        "kernel_id": "k1", "run_id": "r1", "attempts": [
+            {"attempt_id": "a1", "backend": "geak", "status": "completed"},
+        ],
+    })
+    out = assemble_parts(tmp_path)
+    versions = out["versions"]
+    assert isinstance(versions, dict)
+    assert set(versions) >= {"tracelens", "geak"}
+    assert versions["geak"]["tool"] == "geak"
+    # Inline tool metadata is gone from the per-element shapes.
+    assert "tool" not in out["kernel_journey"]["discovery_runs"][0]
+    assert "tool" not in out["kernel_journey"]["kernels"][0]["backend_attempts"][0]
+
+
 def test_discovery_run_carries_duration(tmp_path: Path) -> None:
     instrument.record_kernel_discovery(
         tmp_path, source="tracelens", status="success",

@@ -594,15 +594,11 @@ def record_kernel_discovery(
             if isinstance(k, dict)
         ]
         scan = dict(scan or {})
-        meta = _tool_metadata(
-            source, root=tool_root, root_env=tool_root_env, version=tool_version,
-        )
         payload = {
             "source":           str(source or ""),
             "status":           str(status or ""),
             "ts":               _now_iso_safe(),
             "duration_sec":     _to_float(duration_sec),
-            "tool":             meta,
             "scan":             scan,
             "hot_kernel_count": len(kernels),
             "hot_kernels":      kernels,
@@ -615,8 +611,43 @@ def record_kernel_discovery(
         _recorder(session_dir, producer).record_item(
             "kernel_discovery", payload, key=key,
         )
+        # The discovery tool's authoritative version lands in the top-level
+        # ``versions`` map (keyed by tool name), not inline per run.
+        record_tool_version(
+            session_dir, tool=source, root=tool_root,
+            root_env=tool_root_env, version=tool_version, producer=producer,
+        )
     except Exception:  # noqa: BLE001
         log.debug("record_kernel_discovery failed", exc_info=True)
+
+
+def record_tool_version(
+    session_dir: Path | str | None,
+    *,
+    tool: str,
+    root: str | None = None,
+    root_env: str | None = None,
+    version: str | None = None,
+    producer: str = PRODUCER_KERNEL_AGENT,
+) -> None:
+    """Record one external tool's authoritative version into ``versions``.
+
+    Idempotent per tool name (last write wins). Resolves ``{tool, root_dir,
+    commit, version}`` via the tool provenance registry and spools it as one
+    ``versions`` item; the assembler folds the substream into the top-level
+    ``versions`` map. Best-effort: never raises into the optimizer.
+    """
+    if not session_dir or not tool:
+        return
+    try:
+        meta = _tool_metadata(
+            tool, root=root, root_env=root_env, version=version,
+        )
+        _recorder(session_dir, producer).record_item(
+            "versions", meta, key=str(tool).lower(),
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("record_tool_version failed", exc_info=True)
 
 
 def record_kernel_dispatch(
@@ -719,20 +750,22 @@ def record_kernel_backend_result(
                 "duration_sec":       _to_float(
                     att.get("duration_sec") or att.get("elapsed_sec")
                     or att.get("elapsed_s")),
-                # Root/version resolved per-backend by the tool registry:
-                # geak -> $GEAK_ROOT git SHA, claude/codex -> CLI --version. An
-                # explicit root/version the backend surfaced still wins.
-                "tool": _tool_metadata(
-                    backend or "kernel_agent",
-                    root=str(att_meta.get("root_dir") or result_meta.get("root_dir") or "")
-                    or None,
-                    version=str(att_meta.get("version") or result_meta.get("version") or "")
-                    or None,
-                ),
             }
             key = attempt_id or (f"{run_id}-{backend}" if run_id else None)
             rec.record_item("kernel_backend_result", payload, key=key)
             recorded_any = True
+            # The backend's authoritative version lands in the top-level
+            # ``versions`` map (keyed by backend name), not inline per attempt.
+            # geak -> $GEAK_ROOT git SHA, claude/codex -> CLI --version.
+            if backend:
+                record_tool_version(
+                    session_dir, tool=backend,
+                    root=str(att_meta.get("root_dir")
+                             or result_meta.get("root_dir") or "") or None,
+                    version=str(att_meta.get("version")
+                                or result_meta.get("version") or "") or None,
+                    producer=producer,
+                )
 
         if recorded_any or not kid:
             return
@@ -770,15 +803,16 @@ def record_kernel_backend_result(
             # Distinguishes a pre-dispatch gating failure (no backend ran) from
             # a backend that ran and failed.
             "pre_dispatch_failure": True,
-            "tool": _tool_metadata(
-                backend,
-                root=str(result_meta.get("root_dir") or "") or None,
-                version=str(result_meta.get("version") or "") or None,
-            ),
         }
         rec.record_item(
             "kernel_backend_result", payload,
             key=f"{kid}-predispatch",
+        )
+        record_tool_version(
+            session_dir, tool=backend,
+            root=str(result_meta.get("root_dir") or "") or None,
+            version=str(result_meta.get("version") or "") or None,
+            producer=producer,
         )
     except Exception:  # noqa: BLE001
         log.debug("record_kernel_backend_result failed", exc_info=True)
@@ -940,5 +974,6 @@ __all__ = [
     "record_robustness_signal",
     "record_singleton_section",
     "record_specialist_round",
+    "record_tool_version",
     "snapshot_state_sections",
 ]

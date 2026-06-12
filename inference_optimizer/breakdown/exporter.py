@@ -330,6 +330,9 @@ def build(
     # Pure recorder section (no collector fallback): empty {} on sessions that
     # predate the substreams, so v1/v2 readers that don't know it just ignore
     # it and historical breakdowns stay byte-for-byte identical.
+    # Authoritative external-tool versions, folded into a {tool: meta} map by
+    # the recorder assembler. Pure recorder section (no collector fallback).
+    versions           = _pick("versions", {})
     kernel_journey     = _pick("kernel_journey", {})
     # Attach a copy of the per-kernel roofline metrics onto each journey entry
     # and backfill discovery numeric fields that discovery couldn't surface
@@ -404,6 +407,11 @@ def build(
         # attempts -> e2e), composed from the recorder substreams. Additive,
         # optional; empty {} on sessions that predate the substreams.
         "kernel_journey":      kernel_journey,
+        # Authoritative external-tool versions, one object per tool
+        # (geak / tracelens / claude / codex / ...), keyed by tool name. Each
+        # carries ``{tool, root_dir, commit, version}``. Empty {} on sessions
+        # that predate the recorder.
+        "versions":            versions,
 
         "warnings":            warnings,
         "source_files":        source_files,

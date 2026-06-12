@@ -86,7 +86,24 @@ def assemble_parts(
 
     _compose_critic_robustness(out)
     _compose_kernel_journey(out)
+    _compose_versions(out)
     return out
+
+
+def _compose_versions(out: dict[str, Any]) -> None:
+    """Fold the ``versions`` item substream into a top-level ``{tool: meta}``
+    map (last write per tool wins; the substream is already deduped by tool key
+    at record time). No-op when nothing was recorded."""
+    rows = out.get("versions")
+    if not isinstance(rows, list):
+        return
+    merged: dict[str, Any] = {}
+    for r in rows:
+        if isinstance(r, dict):
+            tool = str(r.get("tool") or "").lower()
+            if tool:
+                merged[tool] = r
+    out["versions"] = merged
 
 
 def _compose_critic_robustness(out: dict[str, Any]) -> None:

@@ -36,6 +36,7 @@ from .instrument import (
     record_robustness_signal,
     record_singleton_section,
     record_specialist_round,
+    record_tool_version,
     snapshot_state_sections,
 )
 from .recorder import Recorder, get_recorder
@@ -66,6 +67,7 @@ __all__ = [
     "record_robustness_signal",
     "record_singleton_section",
     "record_specialist_round",
+    "record_tool_version",
     "section_shape",
     "snapshot_state_sections",
 ]

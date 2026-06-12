@@ -554,18 +554,19 @@ class KernelDiscoveryRun(TypedDict, total=False):
         ts (str): ISO UTC timestamp of the run.
         duration_sec (float | None): Wall-clock seconds the discovery run took
             (source efficiency), or None.
-        tool (KernelToolMetadata): Provenance of the discovery tool.
         scan (dict[str, Any]): Scan inputs/outputs (``splitter_mode`` /
             ``trace_dir`` / ``candidates_path`` / ``trace_report_path``).
         hot_kernel_count (int): Number of hot kernels surfaced.
         hot_kernels (list[DiscoveredHotKernel]): The surfaced hot kernels.
         error (str | None): Failure text, or None on success.
+
+    The discovery tool's authoritative version is not inlined here; it lives in
+    the top-level ``versions`` map keyed by ``source``.
     """
     source: str
     status: str
     ts: str
     duration_sec: float | None
-    tool: KernelToolMetadata
     scan: dict[str, Any]
     hot_kernel_count: int
     hot_kernels: list[DiscoveredHotKernel]
@@ -615,7 +616,9 @@ class KernelBackendAttempt(TypedDict, total=False):
         pre_dispatch_failure (bool): True for a synthetic marker recorded when a
             backend failed before running any real attempt (e.g. geak rejecting
             an empty/non-reusable kernel shape).
-        tool (KernelToolMetadata): Provenance of the backend tool.
+
+    The backend tool's authoritative version is not inlined here; it lives in
+    the top-level ``versions`` map keyed by ``backend``.
     """
     kernel_id: str
     attempt_id: str
@@ -633,7 +636,6 @@ class KernelBackendAttempt(TypedDict, total=False):
     error_class: str | None
     duration_sec: float | None
     pre_dispatch_failure: bool
-    tool: KernelToolMetadata
 
 
 class KernelE2E(TypedDict, total=False):
@@ -1782,6 +1784,11 @@ class SessionBreakdown(TypedDict, total=False):
     # substreams; empty {} on sessions that predate it, so v1/v2 readers that
     # don't know it simply ignore it.
     kernel_journey: KernelJourney
+    # Authoritative external-tool versions, one ``KernelToolMetadata`` object
+    # per tool (geak / tracelens / claude / codex / ...), keyed by tool name.
+    # Additive optional section recorded at author time; empty {} on sessions
+    # that predate the recorder.
+    versions: dict[str, KernelToolMetadata]
 
     warnings: list[str]
     source_files: SourceFiles
