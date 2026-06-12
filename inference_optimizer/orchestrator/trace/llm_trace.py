@@ -87,6 +87,11 @@ class LLMTraceRowError(ValueError):
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond-precision ISO string.
+
+    Returns:
+        ISO 8601 timestamp in UTC.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
@@ -205,6 +210,14 @@ class LLMCallRecord:
 
 
 def _coerce_optional_str(value: Any) -> str | None:
+    """Coerce a value to a non-empty stripped string or ``None``.
+
+    Args:
+        value: Arbitrary value to normalize.
+
+    Returns:
+        The stripped string, or ``None`` if it is empty or ``None``.
+    """
     if value is None:
         return None
     s = str(value).strip()
@@ -285,6 +298,17 @@ def append_llm_call(
             "llm_trace: append failed for component=%s session_id=%s: %r",
             record.component, record.session_id, exc,
         )
+
+    # Second sink (opt-in): mirror in-process calls to Langfuse live. Skipped
+    # for ext/ shards (target set) — those are out-of-process children that
+    # the parent backfills at flush_session. Best-effort; never raises.
+    if target is None:
+        try:
+            from .langfuse_emitter import get_emitter
+
+            get_emitter(session_dir).record_llm_call(row)
+        except Exception:  # noqa: BLE001 — Langfuse must never break the ledger
+            log.debug("llm_trace: langfuse mirror failed", exc_info=True)
 
 
 def row_field_set() -> frozenset[str]:

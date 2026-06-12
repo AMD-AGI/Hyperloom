@@ -379,6 +379,15 @@ def _focus_pr_intel_specialist(inp: SpecialistPromptInputs) -> list[str]:
 def _focus_research_scout_specialist(
     inp: SpecialistPromptInputs,
 ) -> list[str]:
+    """Build the focus section for the research-scout specialist prompt.
+
+    Args:
+        inp: Assembled prompt inputs for the current dispatch.
+
+    Returns:
+        Prompt lines highlighting already-proven priors and steering the
+        scout toward net-new findings.
+    """
     proven_lines: list[str] = []
     if inp.already_proven:
         proven_lines.append(
@@ -832,6 +841,16 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
 
 
 def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
+    """Build the advisory KB-context section of the specialist prompt.
+
+    Falls back to research hints when the structured KB subgraph is empty.
+
+    Args:
+        inp: Assembled prompt inputs for the current dispatch.
+
+    Returns:
+        Prompt lines rendering the KB subgraph (or hint-based fallback).
+    """
     rows = ["## 4. KB CONTEXT (optional, advisory)", ""]
     cold = _is_cold_start(inp)
     if not inp.kb_subgraph:

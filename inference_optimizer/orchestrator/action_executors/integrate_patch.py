@@ -76,7 +76,11 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
-from ._workload_envs import default_baseline_config, materialize_config_with_envs
+from ._workload_envs import (
+    FrameworkScriptMismatchError,
+    default_baseline_config,
+    materialize_config_with_envs,
+)
 
 
 log = logging.getLogger(__name__)
@@ -638,6 +642,19 @@ class IntegratePatchExecutor:
                 config_changes_applied=config_changes_applied,
                 specialist_task_id=specialist_task_id,
             )
+        except FrameworkScriptMismatchError as exc:
+            reverted = self._revert_patches(framework_root, applied)
+            return {
+                "status": "reverted",
+                "error_class": "framework_script_mismatch",
+                "error": str(exc),
+                "specialist_task_id": specialist_task_id,
+                "patches_applied": [],
+                "patches_reverted": [str(p) for p in reverted],
+                "config_changes_applied": {},
+                "reason": str(exc),
+                "workspace": str(output_root),
+            }
         except Exception as exc:  # noqa: BLE001
             reverted = self._revert_patches(framework_root, applied)
             return {

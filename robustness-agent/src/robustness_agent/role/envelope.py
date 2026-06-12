@@ -196,6 +196,10 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # Architecture-identity tags from config.json; mirrors upstream.
     "model_architectures",
     "model_type",
+    # Multimodal text-fallback degraded-run markers (preflight-authored);
+    # locked so an LLM update_state can't forge/clear the degraded verdict.
+    "degraded_mode",
+    "model_warnings",
 })
 
 

@@ -40,6 +40,7 @@ from ._grid_runner import (
     sanitize_script_name,
 )
 from ._workload_envs import (
+    FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
 )
@@ -188,6 +189,17 @@ class SweepExecutor:
         default_num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
         variant_timeout_sec: int = 2400,
     ):
+        """Initialize the sweep executor with default sweep parameters.
+
+        Args:
+            default_config_path: Benchmark config path; ``None`` resolves
+                from ``$FRAMEWORK`` at call time.
+            session_dir: Default session directory for outputs.
+            default_conc_values: Default concurrency values to sweep.
+            default_isl_osl_configs: Default input/output length configs.
+            default_num_prompts_factor: Multiplier for prompt count.
+            variant_timeout_sec: Per-variant timeout in seconds.
+        """
         # None = resolve at call time from $FRAMEWORK; explicit fixture wins.
         self.default_config_path = (
             Path(default_config_path) if default_config_path else None
@@ -255,14 +267,21 @@ class SweepExecutor:
                 "error_class": "bad_param",
                 "error": str(exc),
             }
-        config_path = materialize_config_with_envs(
-            config_path,
-            output_root,
-            model_path=resolved_model or None,
-            gpu_type=resolved_gpu or None,
-            benchmark_script=override_script,
-            out_name="sweep_base.with_envs.yaml",
-        )
+        try:
+            config_path = materialize_config_with_envs(
+                config_path,
+                output_root,
+                model_path=resolved_model or None,
+                gpu_type=resolved_gpu or None,
+                benchmark_script=override_script,
+                out_name="sweep_base.with_envs.yaml",
+            )
+        except FrameworkScriptMismatchError as exc:
+            return {
+                "status": "failed",
+                "error_class": "framework_script_mismatch",
+                "error": str(exc),
+            }
 
         conc_values = list(params.get("conc_values") or self.default_conc_values)
         isl_osl_configs = list(

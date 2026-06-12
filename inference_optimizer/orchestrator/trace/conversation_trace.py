@@ -103,10 +103,23 @@ def redact_secrets(text: str) -> str:
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond-precision ISO string.
+
+    Returns:
+        ISO 8601 timestamp in UTC.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _coerce_optional_str(value: Any) -> str | None:
+    """Coerce a value to a non-empty stripped string or ``None``.
+
+    Args:
+        value: Arbitrary value to normalize.
+
+    Returns:
+        The stripped string, or ``None`` if it is empty or ``None``.
+    """
     if value is None:
         return None
     s = str(value).strip()
@@ -114,6 +127,14 @@ def _coerce_optional_str(value: Any) -> str | None:
 
 
 def _coerce_optional_int(value: Any) -> int | None:
+    """Coerce a value to ``int`` or ``None`` if it cannot be parsed.
+
+    Args:
+        value: Arbitrary value to convert.
+
+    Returns:
+        The integer value, or ``None`` on failure.
+    """
     if value is None:
         return None
     try:
@@ -221,6 +242,16 @@ def append_conversation(
             "conversation_trace: append failed for component=%s session_id=%s: %r",
             record.component, record.session_id, exc,
         )
+
+    # Second sink (opt-in): mirror in-process conversation text to Langfuse
+    # live. Skipped for ext/ shards (target set). Best-effort; never raises.
+    if target is None:
+        try:
+            from .langfuse_emitter import get_emitter
+
+            get_emitter(session_dir).record_conversation(row)
+        except Exception:  # noqa: BLE001 — Langfuse must never break the ledger
+            log.debug("conversation_trace: langfuse mirror failed", exc_info=True)
 
 
 # Sanity guard: dataclass fields (minus the write-time ``ts``) must stay

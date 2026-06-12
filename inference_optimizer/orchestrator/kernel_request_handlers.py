@@ -25,9 +25,18 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .trace.llm_trace import LLMCallRecord, append_llm_call
+from .trace.parse_usage import parse_geak_usage, parse_oob_json_usage
+
 
 log = logging.getLogger(__name__)
 _BACKGROUND_ROCPROF_TASKS: set[asyncio.Task[Any]] = set()
+
+# kernel_optimization attempt backends whose stdout log we mine for token
+# usage. ``geak`` uses litellm (OpenAI-shape usage); ``oob`` runs ``oob run
+# --json`` whose envelope may carry a ``usage`` block. The other backends
+# (claude/codex/cursor) already account their spend via their own paths.
+_TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"geak", "oob"})
 
 
 # Where the kernel-agent shell tools live; read lazily so cli.py's late env injection wins.
@@ -1524,11 +1533,19 @@ def _optimization_wrapper_timeout_sec(payload: dict) -> int:
 def _backend_order(payload: dict) -> list[str]:
     """Resolve the ordered list of optimization backends to try.
 
-    Uses an explicit ``payload['backend_order']`` or
-    ``KERNEL_OPT_BACKEND_ORDER`` env if present; otherwise falls back to the
-    default GEAK-first ladder. Unknown backends are filtered out, and
-    ``cursor`` is dropped from the auto-derived ladder when ``CURSOR_API_KEY``
-    is unset (explicit orders are respected as-is).
+    Precedence (highest to lowest):
+
+    1. ``payload['backend_order']`` – explicit per-request override.
+    2. ``KERNEL_OPT_BACKEND_ORDER`` env var – comma-separated list.
+    3. ``KERNEL_OPT_BACKENDS`` env var – accepted as an alias for
+       ``KERNEL_OPT_BACKEND_ORDER``.
+    4. The built-in GEAK-first default ladder.
+
+    All backend names are normalized to lowercase before filtering, so
+    values like ``"GEAK"`` or ``"Claude"`` are treated the same as their
+    lowercase equivalents.  Unknown backends are silently dropped, and
+    ``cursor`` is removed from the auto-derived ladder when
+    ``CURSOR_API_KEY`` is unset (explicit orders are respected as-is).
 
     Args:
         payload (dict): Request payload that may carry ``backend_order``.
@@ -1537,9 +1554,13 @@ def _backend_order(payload: dict) -> list[str]:
         list[str]: The filtered, ordered backend names (subset of
             ``{"claude", "codex", "cursor", "geak"}``).
     """
-    raw = payload.get("backend_order") or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
+    raw = (
+        payload.get("backend_order")
+        or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
+        or os.environ.get("KERNEL_OPT_BACKENDS")
+    )
     if raw:
-        order = [item.strip() for item in str(raw).split(",") if item.strip()]
+        order = [item.strip().lower() for item in str(raw).split(",") if item.strip()]
         explicit = True
     else:
         # Ignore legacy payload["backends"]; the default ladder (GEAK first) mirrors ``kernel_optimization.choose_backends`` so single/batch agree.
@@ -2186,7 +2207,72 @@ async def _run_optimization_single(
             result["kernel_id"] = str(payload["kernel_id"])
         if not result.get("source_file") and payload.get("source_file"):
             result["source_file"] = str(payload["source_file"])
+    # Full-trace: mine each geak/oob attempt's stdout log for token usage and
+    # append an ``llm_calls.jsonl`` row. Best-effort; a no-op when the backend
+    # emits no usage block (claude/codex/cursor account spend elsewhere).
+    _trace_kernel_attempt_usage(result, session_dir=session_dir)
     return result
+
+
+def _trace_kernel_attempt_usage(
+    result: Any, *, session_dir: Path,
+) -> None:
+    """Append ``llm_calls.jsonl`` rows for geak/oob attempts in ``result``.
+
+    Each ``kernel_optimization`` attempt record carries ``backend`` plus
+    ``optimized_path`` (the backend's full ``*_stdout.log``). For the
+    token-traced backends (:data:`_TOKEN_TRACED_KERNEL_BACKENDS`) we read that
+    log and run the matching usage parser (``geak`` → :func:`parse_geak_usage`,
+    ``oob`` → :func:`parse_oob_json_usage`). A row is appended only when a
+    usage block is actually recovered — backends that don't emit usage stay a
+    silent no-op rather than logging fabricated zeros.
+
+    Best-effort end to end: any read/parse/append failure is logged at debug
+    and swallowed so kernel optimization never breaks on a trace write.
+    """
+    if not isinstance(result, dict):
+        return
+    attempts = result.get("attempts")
+    if not isinstance(attempts, list):
+        return
+    kernel_id = str(result.get("kernel_id") or "") or None
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        backend = str(attempt.get("backend") or "").strip().lower()
+        if backend not in _TOKEN_TRACED_KERNEL_BACKENDS:
+            continue
+        log_path = str(attempt.get("optimized_path") or "").strip()
+        if not log_path:
+            continue
+        try:
+            stdout_text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+        try:
+            if backend == "geak":
+                usage = parse_geak_usage(stdout_text)
+            else:
+                usage = parse_oob_json_usage(stdout_text)
+            if not usage:
+                continue
+            record = LLMCallRecord(
+                session_id=session_dir.name,
+                component=backend,
+                task_id=kernel_id,
+                input_tokens=usage.get("input_tokens"),
+                output_tokens=usage.get("output_tokens"),
+                cache_creation_input_tokens=usage.get(
+                    "cache_creation_input_tokens"
+                ),
+                cache_read_input_tokens=usage.get("cache_read_input_tokens"),
+            )
+            append_llm_call(session_dir=session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break optimization
+            log.debug(
+                "full-trace: kernel attempt usage append failed "
+                "(backend=%s, log=%s)", backend, log_path, exc_info=True,
+            )
 
 
 def _shape_tool_result(rc: int, stdout: str, stderr: str) -> HandlerResult:
@@ -2295,6 +2381,14 @@ def _record_after_kernel_opt_rocprof_status(
 
 
 def _rocprof_timeout_sec() -> int:
+    """Resolve the rocprof roofline subprocess timeout in seconds.
+
+    Reads ``HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC`` and clamps it to a
+    minimum of 60 seconds.
+
+    Returns:
+        The timeout in seconds (defaults to 1800).
+    """
     try:
         return max(60, int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800")))
     except (TypeError, ValueError):
@@ -2302,6 +2396,17 @@ def _rocprof_timeout_sec() -> int:
 
 
 def _rocprof_profile_command(test_command: str) -> str:
+    """Rewrite a test command to run in rocprof profiling mode.
+
+    Swaps a ``--correctness`` flag for ``--profile`` only when the command
+    targets a recognized unittest harness; otherwise returns it unchanged.
+
+    Args:
+        test_command: The original kernel test command.
+
+    Returns:
+        The (possibly rewritten) command string.
+    """
     if "--correctness" not in test_command:
         return test_command
     if "/unittest/harness_" not in test_command and " harness_" not in test_command:
@@ -2462,6 +2567,20 @@ def _schedule_after_kernel_opt_rocprof(
     session_dir: Path,
     log: logging.Logger,
 ) -> dict[str, Any]:
+    """Schedule a background rocprof roofline run after a kernel integrate.
+
+    Honors ``HYPERLOOM_ROCPROF_ROOFLINE`` to disable profiling; otherwise
+    records a ``scheduled`` status and launches the run as a tracked
+    background task.
+
+    Args:
+        kernel_id: Identifier of the integrated kernel.
+        session_dir: Session directory for status sidecars.
+        log: Logger for status and error reporting.
+
+    Returns:
+        A status dict indicating whether the run was scheduled or skipped.
+    """
     rocprof_env = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE", "1").strip().lower()
     if rocprof_env in {"0", "false", "no", "off"}:
         _record_after_kernel_opt_rocprof_status(
@@ -2488,6 +2607,11 @@ def _schedule_after_kernel_opt_rocprof(
     _BACKGROUND_ROCPROF_TASKS.add(task)
 
     def _done(done_task: asyncio.Task[Any]) -> None:
+        """Completion callback that drops the task and logs failures.
+
+        Args:
+            done_task: The finished background rocprof task.
+        """
         _BACKGROUND_ROCPROF_TASKS.discard(done_task)
         try:
             done_task.result()
@@ -2590,6 +2714,11 @@ async def integrate_handler(
         os.environ["AITER_REBUILD"] = "1"
 
     def _restore_aiter_rebuild_env() -> None:
+        """Restore the ``AITER_REBUILD`` env var to its prior value.
+
+        No-op unless a forced rebuild was applied for this re-baseline;
+        otherwise pops or restores the original value (GH #458).
+        """
         if not force_aiter_rebuild:
             return
         if _prev_aiter_rebuild is None:

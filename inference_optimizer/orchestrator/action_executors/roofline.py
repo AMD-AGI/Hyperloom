@@ -166,6 +166,17 @@ class RooflineExecutor:
         self.shared_state = shared_state
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Run the roofline action for the given context.
+
+        Performs a profile sub-step and feeds the resulting trace into
+        TraceLens analysis to produce a roofline characterization.
+
+        Args:
+            ctx: Runner context carrying the task and session metadata.
+
+        Returns:
+            A result dict describing the roofline outcome and artifacts.
+        """
         # atom: the profile sub-step produces *.pt.trace.json.gz that
         # TraceLens consumes unchanged, so this falls through to the
         # sglang/vllm path. Lazy imports keep shell-out/yaml off module load.
@@ -176,6 +187,23 @@ class RooflineExecutor:
         # #266: time the composite so the END lifecycle event reports how
         # long the auto-roofline TraceLens run took.
         _lc_t0 = time.monotonic()
+
+        # #266: emit a paired START so the auto-roofline path (which bypasses
+        # Coordinator._handle_request) does not show a lone END. Without it the
+        # operator sees nothing for the whole profile-retry + TraceLens run —
+        # potentially minutes — then a sudden END. Best-effort, never blocks the
+        # run; the END below carries the produced artifact paths + duration.
+        try:
+            self.shared_state.record_lifecycle_event(
+                step="roofline",
+                status="START",
+                detail="auto-roofline: profile + TraceLens",
+            )
+            _sd0 = Path(session_dir)
+            if _sd0.name and _sd0.is_dir() and (_sd0 / "state.json").exists():
+                self.shared_state.save(_sd0)
+        except Exception:  # noqa: BLE001 — defensive
+            log.debug("roofline: lifecycle START emit failed", exc_info=True)
 
         # ---- Step 1: profile (with retry) ------------------------------------
         # sglang's torch profiler on MI300X/ROCm is unstable: ~86% per-attempt
@@ -261,7 +289,22 @@ class RooflineExecutor:
         )
 
         # ---- Step 2: trace_analyze ----------------------------------------
+        # Pin the snapshot's arm so the ceiling's precision is anchored to the
+        # arm this roofline actually profiled. A PRELUDE roofline measures the
+        # baseline arm; without this the recorder would infer "current_best"
+        # from a warm-replay-promoted state and retro-inflate the ceiling.
+        _task_params = ctx.task.params or {}
+        # Pin every roofline's arm explicitly so the ceiling precision never
+        # relies on a transient current_best inference: PRELUDE measures the
+        # baseline arm; all other reasons (watermark etc.) measure current_best.
+        roofline_arm = (
+            "baseline"
+            if str(_task_params.get("reason") or "") == "prelude_initial"
+            else "current_best"
+        )
         ta_payload: dict[str, Any] = {"trace_input": str(trace_path)}
+        if roofline_arm:
+            ta_payload["roofline_arm"] = roofline_arm
         try:
             ta_result = await trace_analyze_handler(
                 ta_payload,
@@ -299,6 +342,8 @@ class RooflineExecutor:
                     source_warning.get("requested_mode") or ""
                 ),
             }
+            if roofline_arm:
+                ta_payload_retry["roofline_arm"] = roofline_arm
             try:
                 ta_result = await trace_analyze_handler(
                     ta_payload_retry,

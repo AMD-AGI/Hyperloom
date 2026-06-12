@@ -1280,6 +1280,188 @@ class DecisionTrace(TypedDict, total=False):
     unattributed_tokens: TokenBucket
 
 
+# ---------------------------------------------------------------------------
+# Token usage — promoted, discoverable top-level rollup of LLM token spend.
+# ---------------------------------------------------------------------------
+class TokenUsageBucket(TypedDict, total=False):
+    """A token bucket plus two convenience totals for at-a-glance reading.
+
+    Same counters as :class:`TokenBucket` (``total_cache`` appears in the
+    per-action view where creation/read are pre-summed; the rollup view keeps
+    them split). Adds:
+
+    Attributes:
+        total_in_out (int): ``total_in + total_out`` — the non-cache prompt +
+            completion tokens (what most "how many tokens" questions mean).
+        grand_total (int): ``total_in + total_out`` + all cache tokens
+            (creation + read) — the all-in figure.
+    """
+    total_in: int
+    total_out: int
+    total_cache_creation: int
+    total_cache_read: int
+    total_cache: int
+    calls: int
+    total_in_out: int
+    grand_total: int
+
+
+class TokenUsageAttribution(TypedDict, total=False):
+    """How much of the session token spend ties back to a decision.
+
+    Attributes:
+        attributed_to_decisions (TokenUsageBucket): Tokens whose call carried a
+            ``task_id`` / ``dyn_id`` that joined to a KEEP/REVERT or
+            dynamic_action decision (e.g. specialist subprocess turns).
+        unattributed (TokenUsageBucket): Tokens from calls with no decision key
+            (orchestration / kernel / critic / proposal_scorer turns — these
+            are LLM-internal, not bound to a single tracked change).
+        attributed_calls_pct (float): Percentage of calls that were attributed.
+    """
+    attributed_to_decisions: TokenUsageBucket
+    unattributed: TokenUsageBucket
+    attributed_calls_pct: float
+
+
+class TokenUsageTimelineEntry(TypedDict, total=False):
+    """One ``action_timeline`` row annotated with the tokens tied to it.
+
+    Tokens join on ``task_id``; rows whose action carries no LLM token spend
+    (most config-exploration actions) get ``tokens: null`` rather than a zero
+    bucket, to make the (intentional) sparsity visible.
+
+    Attributes:
+        task_id (str | None): The action's task id (join key into the ledger).
+        action (str): The action / change label (mirrors action_timeline).
+        phase (str): Phase the action ran in.
+        decision (str): KEEP / REVERT / ... outcome.
+        ts (str): ISO timestamp of the action.
+        tokens (TokenUsageBucket | None): Tokens attributed to this task_id, or
+            None when no LLM call tied to it.
+    """
+    task_id: str | None
+    action: str
+    phase: str
+    decision: str
+    ts: str
+    tokens: TokenUsageBucket | None
+
+
+class TokenUsage(TypedDict, total=False):
+    """Top-level, discoverable LLM-token-spend summary for the session.
+
+    A promoted view over ``decision_trace.token_rollup`` (the full per-call
+    ledger ``reports/trace/llm_calls.jsonl`` + ``ext/*.jsonl``) plus a
+    timeline correlation. Purely derived — no new disk read — so it always
+    reconciles with ``decision_trace``.
+
+    Attributes:
+        session_total (TokenUsageBucket): Whole-session total across every call.
+        by_component (dict[str, TokenUsageBucket]): Per-agent breakdown
+            (orchestration / kernel / critic / specialist / proposal_scorer / ...).
+        by_phase (dict[str, TokenUsageBucket]): Per-phase breakdown
+            (PRELUDE / FRAMEWORK_PR / EXPLORE / SWEEP / ...).
+        attribution (TokenUsageAttribution): Decision-attributed vs unattributed.
+        timeline (list[TokenUsageTimelineEntry]): ``action_timeline`` rows with
+            their token spend joined on ``task_id``.
+        source (str): The ledger files the totals derive from.
+        correlation (str): How ``timeline`` joins to ``action_timeline``.
+    """
+    session_total: TokenUsageBucket
+    by_component: dict[str, TokenUsageBucket]
+    by_phase: dict[str, TokenUsageBucket]
+    attribution: TokenUsageAttribution
+    timeline: list[TokenUsageTimelineEntry]
+    source: str
+    correlation: str
+
+
+# ---------------------------------------------------------------------------
+# Langfuse push receipt — was the trace mirrored live to Langfuse?
+# ---------------------------------------------------------------------------
+class LangfuseConfig(TypedDict, total=False):
+    """Redacted Langfuse connection config that was in effect this session.
+
+    Credentials are never recorded verbatim: only the host URL (not a secret)
+    and presence booleans for the public/secret keys.
+
+    Attributes:
+        enable_flag (bool): Whether ``HYPERLOOM_LANGFUSE_ENABLE`` was on.
+        host (str | None): ``LANGFUSE_HOST`` URL, or None if unset.
+        public_key_set (bool): Whether ``LANGFUSE_PUBLIC_KEY`` was present.
+        secret_key_set (bool): Whether ``LANGFUSE_SECRET_KEY`` was present.
+        sdk_available (bool): Whether the optional ``langfuse`` SDK importable.
+    """
+    enable_flag: bool
+    host: str | None
+    public_key_set: bool
+    secret_key_set: bool
+    sdk_available: bool
+
+
+class LangfusePushCounts(TypedDict, total=False):
+    """How many observations the live push actually emitted this session.
+
+    Attributes:
+        generations_sent (int): Generations successfully started.
+        generations_paired (int): Of those, ones that had both a token row and
+            conversation text (vs token-only / text-only).
+        generations_text_only (int): Generations from a conversation row only.
+        generations_token_only (int): Generations from a token row only
+            (the typical out-of-process child case).
+        scores_sent (int): Decision Scores created (span- + trace-level).
+        spans_opened (int): Phase + agent spans created.
+        ext_shards_read (int): Out-of-process ``ext/*.jsonl`` shards swept at flush.
+        errors (int): Swallowed send failures (a Langfuse outage never breaks
+            the optimization loop).
+    """
+    generations_sent: int
+    generations_paired: int
+    generations_text_only: int
+    generations_token_only: int
+    scores_sent: int
+    spans_opened: int
+    ext_shards_read: int
+    errors: int
+
+
+class LangfusePush(TypedDict, total=False):
+    """Receipt of whether/where/how much the session was pushed to Langfuse.
+
+    The local ``reports/trace/*.jsonl`` ledger is always written; this section
+    records the *optional* second sink (live Langfuse push, default off). When
+    disabled it still reports the config + ``disabled_reason`` so an operator
+    can see why nothing was sent.
+
+    Attributes:
+        enabled (bool): Whether the live push was active (all gates passed).
+        disabled_reason (str | None): Which gate tripped when not enabled
+            (``disabled`` / ``no_credentials`` / ``sdk_missing`` /
+            ``init_failed``); None when enabled.
+        config (LangfuseConfig): Redacted connection config in effect.
+        trace_id (str | None): Langfuse trace id (derived from the correlation
+            id), or None when disabled.
+        session_id (str | None): Langfuse ``session_id`` grouping value.
+        correlated_on (str): Which id seeded the trace
+            (``claw_session_id`` / ``internal_session_id``).
+        counts (LangfusePushCounts): What was actually emitted.
+        counts_final (bool): True once the session-end flush ran (counts then
+            include out-of-process ext shards + decision scores); False when
+            the breakdown was assembled before flush (in-process counts only).
+        receipt_source (str): Where the collector read this from
+            (``receipt_file`` / ``live_emitter`` / ``config_only``).
+    """
+    enabled: bool
+    disabled_reason: str | None
+    config: LangfuseConfig
+    trace_id: str | None
+    session_id: str | None
+    correlated_on: str
+    counts: LangfusePushCounts
+    counts_final: bool
+    receipt_source: str
+
+
 class SessionBreakdown(TypedDict, total=False):
     """Top-level wire shape of ``session_breakdown.json``.
 
@@ -1317,6 +1499,8 @@ class SessionBreakdown(TypedDict, total=False):
         roofline (list[dict[str, Any]]): Per-snapshot roofline comparison list for
             the markdown report's ``## Roofline`` section.
         roofline_progress (RooflineProgress): Optimization-progress curve for the dashboard.
+        langfuse (LangfusePush): Live-Langfuse push receipt (enabled? / redacted
+            config / counts); the local trace jsonl is always written regardless.
         warnings (list[str]): Collector warnings emitted while assembling the file.
         source_files (SourceFiles): Paths to the source artifacts used.
     """
@@ -1365,6 +1549,16 @@ class SessionBreakdown(TypedDict, total=False):
     # ignores it. Empty dict on sessions that ran before the trace
     # subsystem landed (no reports/trace/ files).
     decision_trace: DecisionTrace
+    # Promoted, discoverable token-spend rollup (full total + by component /
+    # phase + decision attribution + action_timeline correlation). Derived
+    # from decision_trace.token_rollup, so always reconciles with it. Additive
+    # optional section; v1 readers ignore it.
+    token_usage: TokenUsage
+    # Live-Langfuse push receipt: enabled?/redacted config/how much was sent.
+    # Additive optional section; the local trace jsonl is always written
+    # regardless. ``enabled`` is False (with a ``disabled_reason``) on the
+    # default path where HYPERLOOM_LANGFUSE_ENABLE is off.
+    langfuse: LangfusePush
 
     warnings: list[str]
     source_files: SourceFiles
@@ -1387,6 +1581,9 @@ __all__ = [
     "DecisionTrace",
     "DecisionTraceEntry",
     "DetectedKernel",
+    "LangfuseConfig",
+    "LangfusePush",
+    "LangfusePushCounts",
     "Final",
     "GpuMonitorAggregate",
     "Invocation",
@@ -1421,6 +1618,10 @@ __all__ = [
     "Telemetry",
     "TokenBucket",
     "TokenRollup",
+    "TokenUsage",
+    "TokenUsageAttribution",
+    "TokenUsageBucket",
+    "TokenUsageTimelineEntry",
     "Workload",
     "WorkloadObjective",
 ]

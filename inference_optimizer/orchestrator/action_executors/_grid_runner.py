@@ -65,6 +65,17 @@ def _resolve_magpie_python() -> str:
     validated and skipped to avoid ``ModuleNotFoundError`` at benchmark time.
     """
     def _can_import_magpie(py: str) -> bool:
+        """Whether an interpreter can import Magpie and its ``yaml`` dep.
+
+        Probes both ``Magpie`` and ``yaml`` so interpreters that resolve
+        Magpie via a ``.pth`` but lack PyYAML are rejected.
+
+        Args:
+            py: Path to the candidate Python interpreter.
+
+        Returns:
+            ``True`` if both imports succeed in the interpreter.
+        """
         # Probe Magpie AND its top-level runtime dep ``yaml``: an editable
         # install puts Magpie on sys.path via a .pth regardless of whether
         # the interpreter has PyYAML, so ``import Magpie`` alone can succeed
@@ -438,6 +449,16 @@ class GridVariant:
         *,
         extra_sglang_args: str | None = None,
     ) -> None:
+        """Initialize a grid variant descriptor.
+
+        Args:
+            name: Variant name.
+            extra_server_args: Extra server CLI args for this variant.
+            extra_envs: Extra environment variables for this variant.
+            note: Optional reason/category note.
+            extra_sglang_args: Deprecated alias for ``extra_server_args``;
+                routed into the canonical attribute with a warning.
+        """
         # Back-compat alias for the historical ``extra_sglang_args`` kwarg;
         # routed into the canonical attribute with a DeprecationWarning.
         if extra_sglang_args is not None:

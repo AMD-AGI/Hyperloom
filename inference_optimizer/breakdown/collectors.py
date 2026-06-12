@@ -579,6 +579,14 @@ def _benchmark_report_candidates(root: Path) -> list[Path]:
 
 
 def _latest_benchmark_report(candidates: Iterable[Path]) -> Path | None:
+    """Return the most recently modified existing report among candidates.
+
+    Args:
+        candidates: Candidate report paths.
+
+    Returns:
+        The newest existing path by mtime, or ``None`` when none exist.
+    """
     reports = [p for p in candidates if p.exists()]
     if not reports:
         return None
@@ -669,6 +677,17 @@ def _close_phase_stop_reason(state: dict[str, Any]) -> tuple[str, str]:
 
 
 def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> bool:
+    """Decide whether the CLOSE-phase stop reason should override the session's.
+
+    Args:
+        stop_reason: The session-level stop reason.
+        close_stop_reason: The CLOSE-phase stop reason.
+
+    Returns:
+        ``True`` when the close reason is more specific — i.e. it is set and the
+        session reason is empty, or the session merely timed out while the close
+        reason did not.
+    """
     if not close_stop_reason:
         return False
     if not stop_reason:
@@ -1521,6 +1540,17 @@ def collect_capability_summary(
     oob_invocations: list[dict[str, Any]],
     warnings: list[str],
 ) -> dict[str, Any]:
+    """Summarize kernel-optimization capability outcomes for the breakdown.
+
+    Args:
+        state: Session state mapping.
+        geak_invocations: GEAK backend invocation records.
+        oob_invocations: Out-of-box backend invocation records.
+        warnings: Mutable list that collected warnings are appended to.
+
+    Returns:
+        A capability-summary dict (per-kernel status, attempt and keep counts).
+    """
     # Integrate (e2e) outcome per kernel: a kernel-opt KEEP REVERTED at
     # integrate is not a real adoption, so don't inflate the geak/oob tally.
     integ = state.get("kernel_integrate_attempts") or {}
@@ -2716,6 +2746,15 @@ def collect_explore_search(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
+    """Collect the explore-phase search summary for the breakdown.
+
+    Args:
+        state: Session state mapping.
+        warnings: Mutable list that collected warnings are appended to.
+
+    Returns:
+        A dict summarizing the explore-phase search activity and outcomes.
+    """
     # Emit all three ledgers (unified explore + legacy params/backends) so
     # breakdown reprocesses both vintages; unused ones shape to empty shells.
     explore_ledger = _shape_ledger(state.get("explore_search"))
@@ -3379,6 +3418,21 @@ def collect_attribution(
     adopted_kernels: list[dict[str, Any]],
     warnings: list[str],
 ) -> dict[str, Any]:
+    """Attribute end-to-end gains to individual optimization-stack entries.
+
+    Prefers the authoritative ``gain_per_stack_entry`` ledger and falls back to
+    reconstructing attribution from the optimization stack.
+
+    Args:
+        state: Session state mapping.
+        geak_invocations: GEAK backend invocation records.
+        oob_invocations: Out-of-box backend invocation records.
+        adopted_kernels: Kernels adopted into the optimized stack.
+        warnings: Mutable list that collected warnings are appended to.
+
+    Returns:
+        An attribution dict mapping stack entries to their measured gains.
+    """
     # Prefer the authoritative ``gain_per_stack_entry`` ledger; else reconstruct from optimization_stack.
     state_entries = state.get("gain_per_stack_entry")
     state_provided = isinstance(state_entries, list) and len(state_entries) > 0
@@ -4192,6 +4246,15 @@ def collect_phase_segments(
     sub_events = [r for r in rows if not str(r.get("to_phase") or "")]
 
     def _unix(row: dict[str, Any]) -> float | None:
+        """Return a row's timestamp as a Unix epoch float.
+
+        Args:
+            row: Event row carrying ``ts_unix`` and/or ``ts``.
+
+        Returns:
+            The ``ts_unix`` value when numeric, else the parsed ISO ``ts``,
+            else ``None``.
+        """
         u = row.get("ts_unix")
         if isinstance(u, (int, float)):
             return float(u)
@@ -4679,6 +4742,11 @@ def _coerce_token(value: Any) -> int:
 
 
 def _empty_token_bucket() -> dict[str, int]:
+    """Return a fresh, zeroed token-rollup bucket.
+
+    Returns:
+        A dict with zeroed input/output/cache token totals and call count.
+    """
     return {
         "total_in": 0,
         "total_out": 0,
@@ -4689,6 +4757,12 @@ def _empty_token_bucket() -> dict[str, int]:
 
 
 def _fold_call_into_bucket(bucket: dict[str, int], call: dict[str, Any]) -> None:
+    """Add one call's token counts into a rollup bucket in place.
+
+    Args:
+        bucket: Token bucket to accumulate into (mutated).
+        call: Per-call record carrying token counters.
+    """
     bucket["total_in"] += _coerce_token(call.get(_TOKEN_IN_KEY))
     bucket["total_out"] += _coerce_token(call.get(_TOKEN_OUT_KEY))
     bucket["total_cache_creation"] += _coerce_token(
@@ -4807,6 +4881,186 @@ def _decision_key(task_id: str, dyn_id: str) -> str | None:
     if t:
         return f"task:{t}"
     return None
+
+
+def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, int]:
+    """Copy a token bucket and add ``total_in_out`` + ``grand_total``.
+
+    Handles both bucket shapes: the rollup view (split
+    ``total_cache_creation`` / ``total_cache_read``) and the per-decision view
+    (pre-summed ``total_cache``). ``total_in_out`` is prompt+completion only;
+    ``grand_total`` folds in every cache token too.
+    """
+    b = dict(bucket or {})
+    ti = int(b.get("total_in", 0) or 0)
+    to = int(b.get("total_out", 0) or 0)
+    cache = (
+        int(b.get("total_cache", 0) or 0)
+        + int(b.get("total_cache_creation", 0) or 0)
+        + int(b.get("total_cache_read", 0) or 0)
+    )
+    b["total_in_out"] = ti + to
+    b["grand_total"] = ti + to + cache
+    return b
+
+
+def collect_token_usage(
+    decision_trace: dict[str, Any],
+    action_timeline: list[dict[str, Any]],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Promote the token rollup to a discoverable top-level ``token_usage``.
+
+    Pure / derived: reuses the rollup already computed by
+    :func:`collect_decision_trace` (no second ledger read), so the totals here
+    always reconcile with ``decision_trace``. Adds:
+
+    * ``session_total`` / ``by_component`` / ``by_phase`` — every call, with
+      ``total_in_out`` + ``grand_total`` convenience figures.
+    * ``attribution`` — decision-attributed vs unattributed split (most
+      orchestration / kernel / critic / proposal_scorer turns carry no
+      decision key, so they land in ``unattributed``).
+    * ``timeline`` — each ``action_timeline`` row annotated with the tokens
+      that join to it on ``task_id`` (``None`` when an action has no LLM spend).
+
+    Empty-but-valid (zeroed ``session_total``) when ``decision_trace`` is empty
+    (e.g. a pre-trace session), so downstream readers never KeyError.
+    """
+    dt = decision_trace if isinstance(decision_trace, dict) else {}
+    rollup = dt.get("token_rollup") or {}
+    session_total = rollup.get("session_total") or _empty_token_bucket()
+    by_component = rollup.get("by_component") or {}
+    by_phase = rollup.get("by_phase") or {}
+    unattributed = dt.get("unattributed_tokens") or _empty_token_bucket()
+
+    # attributed = session_total - unattributed, field by field.
+    attributed = _empty_token_bucket()
+    for k in attributed:
+        attributed[k] = (
+            int(session_total.get(k, 0) or 0) - int(unattributed.get(k, 0) or 0)
+        )
+    total_calls = int(session_total.get("calls", 0) or 0)
+    attr_calls = int(attributed.get("calls", 0) or 0)
+    attributed_calls_pct = (
+        round(100.0 * attr_calls / total_calls, 2) if total_calls else 0.0
+    )
+
+    # Per-task token map from the per-decision view (only decision-bearing
+    # task_ids carry tokens — i.e. the attributed subset).
+    tokens_by_task: dict[str, dict[str, Any]] = {}
+    for entry in dt.get("decision_trace") or []:
+        if not isinstance(entry, dict):
+            continue
+        dec = entry.get("decision") or {}
+        tid = str(dec.get("task_id") or dec.get("dyn_id") or "").strip()
+        tok = entry.get("tokens") or {}
+        if tid and int(tok.get("calls", 0) or 0) > 0:
+            tokens_by_task[tid] = tok
+
+    # Annotate the visible action timeline with tokens joined on task_id.
+    timeline: list[dict[str, Any]] = []
+    for act in action_timeline or []:
+        if not isinstance(act, dict):
+            continue
+        tid = str(act.get("task_id") or "").strip()
+        tok = tokens_by_task.get(tid) if tid else None
+        timeline.append({
+            "task_id": tid or None,
+            "action": str(act.get("action") or act.get("change") or ""),
+            "phase": str(act.get("phase") or ""),
+            "decision": str(act.get("decision") or ""),
+            "ts": str(act.get("ts") or ""),
+            "tokens": _token_convenience(tok) if tok else None,
+        })
+
+    return {
+        "session_total": _token_convenience(session_total),
+        "by_component": {
+            c: _token_convenience(b) for c, b in by_component.items()
+        },
+        "by_phase": {p: _token_convenience(b) for p, b in by_phase.items()},
+        "attribution": {
+            "attributed_to_decisions": _token_convenience(attributed),
+            "unattributed": _token_convenience(unattributed),
+            "attributed_calls_pct": attributed_calls_pct,
+        },
+        "timeline": timeline,
+        "source": "reports/trace/llm_calls.jsonl (+ reports/trace/ext/*.jsonl)",
+        "correlation": (
+            "timeline[].task_id joins action_timeline[].task_id; components "
+            "without a per-decision task_id (orchestration / kernel / critic / "
+            "proposal_scorer) are counted in session_total/by_component/by_phase "
+            "but appear as tokens=null in timeline (see attribution.unattributed)."
+        ),
+    }
+
+
+def collect_langfuse(
+    session_dir: Path,
+    manifest: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Assemble the ``langfuse`` section: was the trace pushed live, and how much.
+
+    Two-tier source (the breakdown is normally written *before* the
+    session-end ``flush_session``, so the on-disk receipt may not exist yet):
+
+    1. ``reports/trace/langfuse_receipt.json`` if present -- the post-flush
+       receipt with final counts (``receipt_source="receipt_file"``).
+    2. Otherwise a live read of the per-session emitter singleton -- reports
+       the gating + redacted config + in-process running counts
+       (``receipt_source="live_emitter"``, ``counts_final=False``).
+
+    Either way credentials are redacted to host + presence booleans. Never
+    raises: any failure degrades to a minimal ``config_only`` view so the
+    breakdown still records whether the feature was even on.
+    """
+    from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
+
+    # Tier 1: the persisted post-flush receipt (final counts).
+    try:
+        receipt = lfe.read_receipt(session_dir)
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"langfuse: read_receipt failed: {type(exc).__name__}: {exc}")
+        receipt = None
+    if receipt is not None:
+        receipt["receipt_source"] = "receipt_file"
+        return receipt
+
+    # Tier 2: live read of the emitter singleton (pre-flush / in-process).
+    try:
+        section = lfe.get_emitter(session_dir).receipt()
+        section["receipt_source"] = "live_emitter"
+        return section
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"langfuse: live receipt failed: {type(exc).__name__}: {exc}")
+
+    # Tier 3 fallback: config-only view straight from env + manifest, so the
+    # breakdown still records whether the feature was configured at all.
+    from inference_optimizer.orchestrator.trace import trace_env as tenv
+
+    creds = tenv.langfuse_credentials()
+    return {
+        "enabled": False,
+        "disabled_reason": "unknown",
+        "config": {
+            "enable_flag": tenv.langfuse_live_enabled(),
+            "host": creds.get(tenv.ENV_LANGFUSE_HOST),
+            "public_key_set": tenv.ENV_LANGFUSE_PUBLIC_KEY in creds,
+            "secret_key_set": tenv.ENV_LANGFUSE_SECRET_KEY in creds,
+            "sdk_available": None,
+        },
+        "trace_id": None,
+        "session_id": str(manifest.get("claw_session_id") or manifest.get("session_id") or ""),
+        "correlated_on": (
+            "claw_session_id"
+            if str(manifest.get("claw_session_id") or "").strip()
+            else "internal_session_id"
+        ),
+        "counts": {},
+        "counts_final": False,
+        "receipt_source": "config_only",
+    }
 
 
 def collect_decision_trace(
@@ -5017,5 +5271,6 @@ __all__ = [
     "collect_specialist_runs",
     "collect_sweep",
     "collect_telemetry",
+    "collect_token_usage",
     "collect_workload",
 ]

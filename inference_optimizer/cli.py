@@ -762,6 +762,9 @@ _UNSUPPORTED_MODEL_TYPES = frozenset({
 })
 
 _UNSUPPORTED_ARCHITECTURES = frozenset({
+    # RWKV6/Qwen2 hybrid linear-attention arch: not in sglang's supported list
+    # (only plain RwkvForCausalLM is), fails ModelConfig validation at boot.
+    "RWKV6Qwen2ForCausalLM",
     "Gemma3ForConditionalGeneration",
     "InternVLChatModel",
     "Phi3VForCausalLM",
@@ -787,6 +790,12 @@ _UNSUPPORTED_CONFIG_KEYS = (
     "image_processor_type",
     "projector_config",
     "mm_projector_type",
+)
+
+_TEXT_DECODER_CONFIG_KEYS = (
+    "text_config",
+    "language_config",
+    "llm_config",
 )
 
 
@@ -828,6 +837,51 @@ def _arch_is_supported_text_generation(arch: str) -> bool:
     return any(marker in a for marker in _SUPPORTED_ARCH_MARKERS)
 
 
+def _config_declares_text_decoder(config: dict, architectures: list[str], model_type_l: str) -> bool:
+    """True when config positively identifies a usable text decoder.
+
+    For multimodal wrapper configs the top-level architecture often names the
+    wrapper (``*ForConditionalGeneration``), while the benchmarkable decoder is
+    described under ``text_config`` / ``language_config``. Treat those nested
+    text blocks as capability evidence instead of requiring a per-family
+    allowlist entry.
+    """
+    if model_type_l in _TEXT_COERCIBLE_MODEL_TYPES:
+        return True
+    if any(_arch_is_supported_text_generation(a) for a in architectures):
+        return True
+
+    for key in _TEXT_DECODER_CONFIG_KEYS:
+        nested = config.get(key)
+        if not isinstance(nested, dict):
+            continue
+        nested_architectures = _config_architectures(nested)
+        if any(_arch_is_supported_text_generation(a) for a in nested_architectures):
+            return True
+
+        nested_model_type = str(nested.get("model_type") or "").strip().lower()
+        if (
+            nested_model_type in _SUPPORTED_MODEL_TYPES
+            or nested_model_type in _TEXT_COERCIBLE_MODEL_TYPES
+        ):
+            return True
+
+        # Some multimodal configs (including newer family wrappers) expose a
+        # text_config with decoder dimensions but do not use a model_type that
+        # this package has seen yet. Because the evidence is scoped to an
+        # explicitly named text block, this does not widen fallback for a
+        # top-level mislabeled VLM.
+        has_vocab = isinstance(nested.get("vocab_size"), int) and nested["vocab_size"] > 0
+        has_decoder_shape = any(
+            isinstance(nested.get(field), int) and nested[field] > 0
+            for field in ("hidden_size", "num_hidden_layers", "intermediate_size")
+        )
+        if has_vocab and has_decoder_shape:
+            return True
+
+    return False
+
+
 def _detect_unsupported_model(model_path: str) -> dict | None:
     """Best-effort classify a model's text-serving viability.
 
@@ -847,6 +901,13 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     if config is None:
         return None
     architectures = _config_architectures(config)
+    # Wrapper models may nest the real arch under text_config; merge so the
+    # unsupported-arch blocklist still matches (e.g. RWKV6Qwen2ForCausalLM).
+    nested = config.get("text_config")
+    if isinstance(nested, dict):
+        for a in _config_architectures(nested):
+            if a not in architectures:
+                architectures.append(a)
     model_type = str(config.get("model_type") or "").strip()
     model_type_l = model_type.lower()
 
@@ -870,12 +931,16 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
 
     # A multimodal config key (vision_config, image_token_id, …) is only a
     # degrade signal, not a hard block: if a text decoder exists we coerce to
-    # the text path with a warning instead of fail-fasting.
-    _has_text_decoder = (
-        model_type_l in _TEXT_COERCIBLE_MODEL_TYPES
-        or any(_arch_is_supported_text_generation(a) for a in architectures)
-        or model_type_l in _SUPPORTED_MODEL_TYPES
-    )
+    # the text path with a warning instead of fail-fasting. Routing to
+    # text_coercible requires a *positive* text-decoder signal — either an
+    # explicitly coercible model_type family, a confirmed text-generation
+    # architecture class, or a nested text decoder config. We deliberately do
+    # NOT fall back to top-level ``_SUPPORTED_MODEL_TYPES`` here: that allowlist
+    # is a last-resort match for a bare model_type with no architectures, and a
+    # mislabeled VLM config (e.g. a real vision model carrying model_type="llama"
+    # but no decoder evidence) must fail-fast rather than silently degrade to a
+    # text run.
+    _has_text_decoder = _config_declares_text_decoder(config, architectures, model_type_l)
     for key in _UNSUPPORTED_CONFIG_KEYS:
         if key in config:
             verdict = (
@@ -1133,6 +1198,61 @@ _AMD_UNSUPPORTED_ARCHITECTURES = frozenset({"deepseekv32forcausallm"})
 # causing AttributeError deep in engine init.
 _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 
+# Quantization formats with no ROCm/AMD runtime path. NVIDIA ModelOpt FP8/NVFP4
+# use vendor-specific scale packing (no sglang ROCm loader); bitsandbytes ships
+# CUDA-only kernels; NVFP4/FP4 need Blackwell hardware. AMD-native fp8 (Quark /
+# compressed-tensors), gptq, awq are NOT listed so they keep running.
+_AMD_UNSUPPORTED_QUANT_ALGOS = frozenset({"nvfp4", "fp4"})
+_AMD_UNSUPPORTED_QUANT_METHODS = frozenset({"bitsandbytes", "bnb"})
+
+
+def _detect_amd_unsupported_quant(model_path: str) -> str | None:
+    """Return a reason when the model ships a quant format unsupported on ROCm.
+
+    Reads both ``config.json:quantization_config`` (standard HF) and the
+    separate ``hf_quant_config.json`` (NVIDIA ModelOpt). Returns None when the
+    format is ROCm-runnable or absent.
+    """
+    if not model_path:
+        return None
+    cfg = _load_model_config_dict(model_path) or {}
+    qc = cfg.get("quantization_config")
+    if isinstance(qc, dict):
+        method = str(qc.get("quant_method") or "").strip().lower()
+        if method in _AMD_UNSUPPORTED_QUANT_METHODS:
+            return (
+                f"quantization_config.quant_method '{method}' ships CUDA-only "
+                f"kernels with no ROCm equivalent; it crashes in engine init "
+                f"on AMD."
+            )
+    # NVIDIA ModelOpt writes a separate hf_quant_config.json, not config.json.
+    hq_path = Path(model_path) / "hf_quant_config.json"
+    if hq_path.is_file():
+        try:
+            hq = json.loads(hq_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            hq = None
+        if isinstance(hq, dict):
+            producer = str(
+                (hq.get("producer") or {}).get("name") or "",
+            ).strip().lower()
+            algo = str(
+                (hq.get("quantization") or {}).get("quant_algo") or "",
+            ).strip().lower()
+            if producer == "modelopt" and algo:
+                return (
+                    f"NVIDIA ModelOpt '{algo.upper()}' quantization "
+                    f"(hf_quant_config.json) uses vendor-specific scale packing "
+                    f"with no sglang ROCm loader (e.g. 'modelopt_fp8 ... not "
+                    f"supported in ROCm'); use an AMD-native (Quark) checkpoint."
+                )
+            if algo in _AMD_UNSUPPORTED_QUANT_ALGOS:
+                return (
+                    f"'{algo.upper()}' quantization needs NVIDIA Blackwell "
+                    f"hardware; no AMD/ROCm runtime path exists."
+                )
+    return None
+
 
 def _detect_incompatible_model_config(
     model_path: str, gpu_type: str | None = None,
@@ -1169,6 +1289,9 @@ def _detect_incompatible_model_config(
     # Reject DSA-like architectures only on AMD/ROCm.
     # The same model can still run on vendor-supported NVIDIA engines.
     if _resolve_amd_gpu_type(gpu_type):
+        quant_reason = _detect_amd_unsupported_quant(model_path)
+        if quant_reason is not None:
+            return quant_reason
         model_type = str(data.get("model_type") or "").strip().lower()
         arches = {a.lower() for a in _config_architectures(data)}
         if (
@@ -1407,6 +1530,19 @@ def _seed_shared_state(
     *,
     session_id: str,
 ) -> SharedState:
+    """Construct and persist the initial :class:`SharedState` for a run.
+
+    Seeds the state from parsed CLI args, clamping the research-lane
+    capacity to a safe range to protect quota and the PR-Monitor.
+
+    Args:
+        session_dir: Directory for the new session.
+        args: Parsed CLI arguments.
+        session_id: Identifier assigned to the session.
+
+    Returns:
+        The seeded :class:`SharedState` instance.
+    """
     # research_lane capacity is locked for the session; clamp to [0, ceiling] (2×GPU) to protect quota/PR-Monitor.
     from inference_optimizer.orchestrator.policy import (
         research_lane_ceiling,
@@ -2683,18 +2819,18 @@ def _preflight(
     if not inferencex_path:
         from .paths import (
             magpie_dir as _magpie_default,
-            runtime_dir as _runtime_default,
+            open_source_root as _open_source_default,
         )
-        runtime_root = _runtime_default(_session_dir_resolve())
+        open_source_root = _open_source_default()
         magpie_root = (
             Path(os.environ["MAGPIE_DIR"])
             if os.environ.get("MAGPIE_DIR")
             else _magpie_default(_session_dir_resolve())
         )
-        # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone runtime checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
+        # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone pod-local checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
         for candidate in (
             magpie_root / "InferenceX",
-            runtime_root / "InferenceX",
+            open_source_root / "InferenceX",
         ):
             if _inferencex_checkout_ok(candidate):
                 if os.access(candidate, os.W_OK):
@@ -2710,8 +2846,8 @@ def _preflight(
     # than falling back to a read-only host mount. baseline cannot run
     # without InferenceX, so a clone failure is a hard error.
     if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
-        from .paths import runtime_dir as _runtime_default
-        dest = _runtime_default(_session_dir_resolve()) / "InferenceX"
+        from .paths import open_source_root as _open_source_default
+        dest = _open_source_default() / "InferenceX"
         print(f"Preflight: InferenceX not found; cloning into {dest} ...")
         inferencex_path = _clone_inferencex(dest)
         if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
@@ -3325,6 +3461,17 @@ def _export_workload_envs_for_optimize(
 
 
 async def _run_optimize(args: argparse.Namespace) -> int:
+    """Run the ``optimize`` subcommand end to end.
+
+    Resolves topology arguments (nodes, TP/EP, GPUs per node), runs
+    preflight, and drives the optimization session to completion.
+
+    Args:
+        args: Parsed CLI arguments for the ``optimize`` subcommand.
+
+    Returns:
+        Process exit code (``0`` on success).
+    """
     # Surface --nodes (CLI flag wins) before _preflight runs.
     nodes_resolved = max(1, int(args.nodes))
     tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
@@ -4114,6 +4261,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 "Session breakdown : (already written by CLOSE phase "
                 "sequencer; skipping cli.finally safety-net write)"
             )
+            # The sequencer already flushed Langfuse + packaged at step 2.5/2.6.
+            # Re-run flush idempotently as a safety net (only re-writes the
+            # receipt if it already ran), so a step-2.5 failure still gets a
+            # final receipt spliced in.
+            try:
+                from .orchestrator.trace.langfuse_emitter import flush_session
+                flush_session(session_dir)
+                from .breakdown import patch_breakdown_langfuse
+                patch_breakdown_langfuse(session_dir)
+            except Exception:  # noqa: BLE001
+                log.debug("langfuse flush_session (post-sequencer) failed", exc_info=True)
         else:
             try:
                 from .breakdown import write_breakdown_json
@@ -4131,6 +4289,44 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             except Exception:  # noqa: BLE001
                 log.exception(
                     "emergency final report write failed (non-fatal)"
+                )
+            # Live Langfuse push (opt-in, default off): reconcile + flush,
+            # then splice the post-flush receipt (final counts) into the
+            # session_breakdown.json langfuse section (written above with only
+            # the pre-flush in-process counts). MUST run BEFORE the artifact
+            # package below, so the bundled SBD carries counts_final=true and
+            # the bundle includes the final langfuse_receipt.json. No-op unless
+            # HYPERLOOM_LANGFUSE_ENABLE + LANGFUSE_* are set; idempotent if the
+            # CLOSE sequencer already flushed (re-writes the receipt only).
+            try:
+                from .orchestrator.trace.langfuse_emitter import flush_session
+                flush_session(session_dir)
+                from .breakdown import patch_breakdown_langfuse
+                patch_breakdown_langfuse(session_dir)
+            except Exception:  # noqa: BLE001
+                log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
+
+            # Safety-net artifact package -> /workspace. The CLOSE phase
+            # sequencer normally packages at step 2.6, but the wall-clock
+            # deadline path (_enter_closing_phase) and crash paths leave
+            # close_sequence_done False and never run the sequencer, so the
+            # bundle would be missing without this. Best-effort: failures
+            # must not mask stop_reason. Runs after the SBD/final.md +
+            # Langfuse flush above so the freshest products are bundled.
+            try:
+                from .breakdown import package_session_artifacts
+                pkg_path = package_session_artifacts(
+                    session_dir,
+                    session_id=str(
+                        getattr(coordinator.shared_state, "session_id", "")
+                        or "",
+                    ),
+                )
+                if pkg_path is not None:
+                    print(f"Artifact package  : {pkg_path}")
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "session artifact package failed (non-fatal)"
                 )
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
@@ -4158,6 +4354,11 @@ def _default_research_lane_capacity() -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the top-level CLI argument parser and subcommands.
+
+    Returns:
+        The configured :class:`argparse.ArgumentParser`.
+    """
     from inference_optimizer.orchestrator.specialist_domains import (
         DEFAULT_SPECIALIST_MAX_TURNS as _DEFAULT_SPECIALIST_MAX_TURNS,
     )
@@ -5358,6 +5559,17 @@ def main(argv: list[str] | None = None) -> int:
         int: The process exit code (``optimize`` result, or ``2`` for no/unknown
         command).
     """
+    # Force line-buffering so output piped through `tee` (or any
+    # non-TTY sink) flushes every line immediately instead of
+    # block-buffering ~8 KB.  Without this the top-level log appears
+    # frozen for the entire duration of a Magpie subprocess (~30-60 min)
+    # because no new print() calls happen while communicate() blocks.
+    # See #468.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+
     parser = _build_parser()
     args = parser.parse_args(argv)
     level = logging.WARNING - 10 * min(args.verbose, 2)

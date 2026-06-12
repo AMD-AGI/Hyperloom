@@ -24,6 +24,7 @@ from .action_executors._grid_runner import (
     run_grid,
 )
 from .action_executors._workload_envs import (
+    FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
 )
@@ -296,6 +297,15 @@ def _build_roofline_ceiling(
             t_peak = t_mem
 
         def _mbu_pct(measured: Any) -> float | None:
+            """Express a measured throughput as a percent of peak.
+
+            Args:
+                measured: Measured throughput value.
+
+            Returns:
+                The ratio to ``t_peak`` as a percentage, or ``None`` when
+                inputs are non-positive or invalid.
+            """
             if not isinstance(measured, (int, float)) or measured <= 0:
                 return None
             if t_peak <= 0:
@@ -399,13 +409,21 @@ async def run_conc_sweep(
         str(getattr(state, "gpu_type", "") or "").strip().lower()
         or os.environ.get("GPU_TYPE", "").strip().lower()
     )
-    base_yaml_path = materialize_config_with_envs(
-        base_yaml_path,
-        workspace,
-        model_path=resolved_model or None,
-        gpu_type=resolved_gpu or None,
-        out_name="conc_sweep_base.with_envs.yaml",
-    )
+    try:
+        base_yaml_path = materialize_config_with_envs(
+            base_yaml_path,
+            workspace,
+            model_path=resolved_model or None,
+            gpu_type=resolved_gpu or None,
+            out_name="conc_sweep_base.with_envs.yaml",
+        )
+    except FrameworkScriptMismatchError as exc:
+        return _skip(
+            "framework_script_mismatch",
+            error_class="framework_script_mismatch",
+            error=str(exc),
+            workspace=str(workspace),
+        )
 
     grid = _build_grid(
         concs=concs,

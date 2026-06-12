@@ -432,6 +432,17 @@ def _discover_workload_uid() -> str:
 
 
 def _env_bool(name: str, default: bool) -> bool:
+    """Read a boolean configuration value from the environment.
+
+    Args:
+        name: Name of the environment variable to read.
+        default: Value to return when the variable is unset.
+
+    Returns:
+        ``True`` when the variable is set to one of ``1``, ``true``, ``yes``,
+        or ``on`` (case-insensitive); ``False`` for any other set value; and
+        ``default`` when the variable is unset.
+    """
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -439,6 +450,17 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _env_int(name: str, default: int) -> int:
+    """Read an integer configuration value from the environment.
+
+    Args:
+        name: Name of the environment variable to read.
+        default: Value to return when the variable is unset, empty, or not a
+            valid integer.
+
+    Returns:
+        The parsed integer, or ``default`` when the variable is missing or
+        cannot be parsed.
+    """
     raw = (os.environ.get(name) or "").strip()
     if not raw:
         return default

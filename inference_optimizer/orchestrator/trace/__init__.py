@@ -32,10 +32,12 @@ from .llm_trace import (
     LLMTraceRowError,
     append_llm_call,
 )
+from .langfuse_emitter import flush_session, get_emitter
 from .parse_usage import (
     normalize_usage,
     parse_claude_stream_json_usage,
 )
+from .trace_env import langfuse_live_enabled
 
 __all__ = [
     "ConversationRecord",
@@ -44,6 +46,9 @@ __all__ = [
     "LLMTraceRowError",
     "append_conversation",
     "append_llm_call",
+    "flush_session",
+    "get_emitter",
+    "langfuse_live_enabled",
     "normalize_usage",
     "parse_claude_stream_json_usage",
     "redact_secrets",

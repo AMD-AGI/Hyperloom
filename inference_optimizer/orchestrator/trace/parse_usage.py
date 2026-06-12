@@ -48,6 +48,14 @@ _TOKEN_KEYS: tuple[str, ...] = (
 
 
 def _coerce_optional_int(value: Any) -> int | None:
+    """Coerce a value to ``int`` or ``None`` if it cannot be parsed.
+
+    Args:
+        value: Arbitrary value to convert.
+
+    Returns:
+        The integer value, or ``None`` on failure.
+    """
     if value is None:
         return None
     try:
@@ -123,7 +131,191 @@ def parse_claude_stream_json_usage(
     return normalize_usage(last_usage)
 
 
+def parse_claude_stream_json_response(
+    log_path: str | Path,
+) -> str | None:
+    """Recover the assistant's full reply text from a Claude CLI stream-json log.
+
+    Sibling of :func:`parse_claude_stream_json_usage`: that function reads the
+    *token* counts off the same ``process.log``, this one reads the
+    *conversation* response so the production-default specialist path (B1)
+    can land its completion in ``conversations.jsonl``. The prompt is not
+    echoed into the stream (the CLI takes it via ``-p`` / a prompt file), so
+    only the response is recovered here; the caller already holds the prompt
+    in memory and pairs the two.
+
+    The ``claude --output-format stream-json`` log is one JSON object per
+    line. We reconstruct the reply from two sources, preferring the
+    authoritative one:
+
+    1. the terminal ``{"type": "result", ..., "result": "<text>"}`` row,
+       whose ``result`` is the consolidated final answer (mirrors the SDK's
+       ``ResultMessage.result``); when present and non-empty it wins;
+    2. otherwise we concatenate the ``text`` blocks from every
+       ``{"type": "assistant"}`` message in order — covering a truncated or
+       crashed run that never emitted a ``result`` row. ``thinking`` and
+       ``tool_use`` blocks are intentionally dropped: the response field is
+       the model's externally-visible answer, not its scratch reasoning or
+       tool plumbing.
+
+    Tolerant by contract: a missing file, malformed lines, or a stream with
+    no recoverable text returns ``None`` so the best-effort trace path
+    degrades to "no response captured" instead of raising.
+    """
+    path = Path(log_path)
+    result_text: str | None = None
+    assistant_chunks: list[str] = []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                obj_type = obj.get("type")
+                if obj_type == "result":
+                    res = obj.get("result")
+                    if isinstance(res, str) and res.strip():
+                        result_text = res
+                elif obj_type == "assistant":
+                    message = obj.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    for block in message.get("content") or []:
+                        if (
+                            isinstance(block, dict)
+                            and block.get("type") == "text"
+                        ):
+                            text = block.get("text")
+                            if isinstance(text, str) and text:
+                                assistant_chunks.append(text)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        log.warning(
+            "parse_usage: failed reading stream-json log %s: %r", path, exc
+        )
+        return None
+    if result_text is not None:
+        return result_text
+    if assistant_chunks:
+        return "\n".join(assistant_chunks)
+    return None
+
+
+def parse_oob_json_usage(stdout: str) -> dict[str, int | None] | None:
+    """Extract ``usage`` from ``oob run --json`` stdout.
+
+    OOB emits a JSON document on stdout that already carries a ``usage``
+    block (see ``kernel-agent/tools/backends/oob_submit.py``). The exact
+    envelope can vary, so we search defensively:
+
+    1. parse the whole stdout as one JSON object and look for a top-level
+       or nested ``usage`` (common keys: ``usage``, ``token_usage``);
+    2. failing that, scan line-by-line for the last JSON object carrying a
+       ``usage`` block (covers JSONL-style streamed output).
+
+    OpenAI-style OOB has no prompt-cache split, so ``cache_*`` stay
+    ``None``. Returns ``None`` when nothing parseable is found.
+    """
+    if not stdout or not stdout.strip():
+        return None
+    # Attempt 1: whole-document parse.
+    try:
+        obj = json.loads(stdout)
+        found = _find_usage_in_obj(obj)
+        if found is not None:
+            return normalize_usage(found)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # Attempt 2: line-by-line (JSONL / mixed log output).
+    last_usage: dict[str, Any] | None = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        found = _find_usage_in_obj(obj)
+        if found is not None:
+            last_usage = found
+    return normalize_usage(last_usage)
+
+
+def parse_geak_usage(
+    payload: dict[str, Any] | str | None,
+) -> dict[str, int | None] | None:
+    """Extract ``usage`` from a GEAK / litellm result.
+
+    GEAK uses litellm as a *library* (local, not a gateway); a litellm
+    completion response exposes ``usage`` with ``prompt_tokens`` /
+    ``completion_tokens`` (OpenAI shape). ``payload`` may be the already
+    parsed response dict or a JSON string. We map the OpenAI counter names
+    onto our canonical keys (``prompt_tokens`` → ``input_tokens``,
+    ``completion_tokens`` → ``output_tokens``) and also honor a usage block
+    that already uses the canonical names.
+
+    No prompt-cache split, so ``cache_*`` stay ``None``. Returns ``None``
+    when nothing parseable is found.
+    """
+    obj: Any = payload
+    if isinstance(payload, str):
+        if not payload.strip():
+            return None
+        try:
+            obj = json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            return None
+    usage = _find_usage_in_obj(obj)
+    if not isinstance(usage, dict) or not usage:
+        return None
+    # Translate OpenAI counter names if the canonical ones are absent.
+    translated: dict[str, Any] = dict(usage)
+    if "input_tokens" not in translated and "prompt_tokens" in translated:
+        translated["input_tokens"] = translated.get("prompt_tokens")
+    if "output_tokens" not in translated and "completion_tokens" in translated:
+        translated["output_tokens"] = translated.get("completion_tokens")
+    return normalize_usage(translated)
+
+
+def _find_usage_in_obj(obj: Any, _depth: int = 0) -> dict[str, Any] | None:
+    """Best-effort search for a ``usage``/``token_usage`` dict in ``obj``.
+
+    Looks at the object itself, then a shallow set of well-known container
+    keys, then recurses one extra level into nested dicts. Bounded depth
+    keeps this cheap and avoids pathological deep structures; out-of-process
+    envelopes nest ``usage`` at most a couple of levels down in practice.
+    """
+    if _depth > 4 or not isinstance(obj, dict):
+        return None
+    for key in ("usage", "token_usage"):
+        candidate = obj.get(key)
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+    # Recurse into nested dicts (e.g. {"result": {"usage": {...}}},
+    # {"response": {...}}, {"choices": [...]} is handled below).
+    for value in obj.values():
+        if isinstance(value, dict):
+            found = _find_usage_in_obj(value, _depth + 1)
+            if found is not None:
+                return found
+        elif isinstance(value, list):
+            for item in value:
+                found = _find_usage_in_obj(item, _depth + 1)
+                if found is not None:
+                    return found
+    return None
+
+
 __all__ = [
     "normalize_usage",
+    "parse_claude_stream_json_response",
     "parse_claude_stream_json_usage",
 ]

@@ -248,6 +248,20 @@ class ClaudeBackend:
         max_turns: int = 1,
         allow_no_intent: bool = False,
     ) -> BackendTurnResult:
+        """Run a single backend turn against Claude and parse the result.
+
+        Args:
+            prompt: User prompt for this turn.
+            system_prompt: Optional system prompt override.
+            tools: Tool names to enable for the turn.
+            max_turns: Maximum agent turns; falls back to the backend
+                default when falsy.
+            allow_no_intent: When ``True``, relax the guard that requires
+                an ``emit_intent`` (e.g. for summary/checkpoint turns).
+
+        Returns:
+            The parsed :class:`BackendTurnResult` for the turn.
+        """
         # ``allow_no_intent`` (plan Step 4): a summary/checkpoint turn asks
         # for plain-text instead of emit_intent, so relax the no-intent guard.
         full_prompt = self._compose_prompt(prompt)
@@ -417,6 +431,11 @@ class ClaudeBackend:
 
     @property
     def has_context_tools(self) -> bool:
+        """Whether the context-tools MCP server is configured.
+
+        Returns:
+            ``True`` if a context-server config was set up successfully.
+        """
         return self._context_server_config is not None
 
     def reset_conversation(self) -> None:

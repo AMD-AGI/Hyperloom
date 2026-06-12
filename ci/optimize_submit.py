@@ -145,6 +145,15 @@ def normalize_gpu_profile(gpu_type: str | None, *, warn: bool = True) -> str | N
 
 
 def canonical_gpu_type(gpu_type: str | None) -> str:
+    """Resolve a GPU type string to its canonical form.
+
+    Args:
+        gpu_type: Free-form GPU type/alias, or ``None``.
+
+    Returns:
+        The canonical GPU type from the matching profile, or the trimmed input
+        (falling back to ``DEFAULT_GPU_TYPE``) when no profile matches.
+    """
     profile_key = normalize_gpu_profile(gpu_type, warn=False)
     if profile_key:
         return str(GPU_PROFILES[profile_key]["gpu_type"])
@@ -288,6 +297,13 @@ def _proxy() -> str:
 
 
 def _default_sglang_image() -> str:
+    """Return the default SGLang server image.
+
+    Returns:
+        The pinned ``profilerfix`` SGLang image whose patched
+        libamdhip64/libroctracer let rocprofiler capture kernels under
+        ``HipGraphLaunch`` (issue #352).
+    """
     # profilerfix: patched libamdhip64/libroctracer so rocprofiler captures
     # kernels under HipGraphLaunch (issue #352). Pre-profilerfix image (revert):
     # lmsysorg/sglang:v0.5.11-rocm720-mi30x
@@ -295,6 +311,12 @@ def _default_sglang_image() -> str:
 
 
 def _default_vllm_image() -> str:
+    """Return the default vLLM server image.
+
+    Returns:
+        The proxy-qualified vLLM image (v0.19.0, one minor ahead of the
+        InferenceX baseline to avoid v0.20 breakage).
+    """
     # v0.19.0: one minor ahead of InferenceX baseline v0.17.0, avoiding v0.20 breakage.
     return f"{_proxy()}/vllm/vllm-openai-rocm:v0.19.0"
 
@@ -538,6 +560,19 @@ def context_too_short(
     osl: int,
     reserve_tokens: int = DEFAULT_CONTEXT_RESERVE_TOKENS,
 ) -> bool:
+    """Return whether the model context cannot fit the requested workload.
+
+    Args:
+        max_context_tokens: Model's maximum context length; ``<= 0`` means
+            unknown, in which case the check is skipped.
+        isl: Input sequence length.
+        osl: Output sequence length.
+        reserve_tokens: Headroom kept free beyond input + output.
+
+    Returns:
+        ``True`` when the context is known and smaller than
+        ``isl + osl + reserve_tokens``; otherwise ``False``.
+    """
     if max_context_tokens <= 0:
         return False
     return max_context_tokens < (isl + osl + reserve_tokens)
@@ -597,11 +632,35 @@ def _sglang_image_for(repo_id: str = "") -> str:
 
 
 def detect_image(framework: str, repo_id: str = "") -> str:
+    """Select the server image for a framework and model.
+
+    Args:
+        framework: Serving framework (``vllm`` / ``sglang``).
+        repo_id: Model repo id, used to honor per-model image overrides.
+
+    Returns:
+        The default vLLM image for ``vllm``; otherwise the SGLang image chosen
+        by :func:`_sglang_image_for`.
+    """
     return _default_vllm_image() if framework == "vllm" else _sglang_image_for(repo_id)
 
 
 def auto_detect(hf: HuggingFaceClient, repo_id: str,
                 gpu_type: str | None = None) -> DetectedConfig | None:
+    """Derive a benchmark configuration from a model's HF metadata.
+
+    Fetches model info and ``config.json`` and infers framework, precision,
+    tensor parallelism, concurrency, image, and context limits.
+
+    Args:
+        hf: Hugging Face client used to fetch metadata.
+        repo_id: Model repo id to inspect.
+        gpu_type: Target GPU type, used for TP/profile selection.
+
+    Returns:
+        A :class:`DetectedConfig`, or ``None`` when the HF metadata cannot be
+        fetched.
+    """
     log.info("[%s] fetching HF metadata", repo_id)
     try:
         info = hf.model_info(repo_id)
@@ -704,6 +763,21 @@ class SafeOptimizeClient:
 
     def _request(self, method: str, path: str, body: dict | None = None,
                  timeout: float | None = None) -> dict:
+        """Send an HTTP request to the SaFE API and return the parsed JSON.
+
+        Args:
+            method: HTTP method (e.g. ``GET``, ``POST``).
+            path: API path appended to ``base_url``.
+            body: Optional JSON request body.
+            timeout: Optional per-request timeout; falls back to the client
+                default.
+
+        Returns:
+            The decoded JSON response, or an empty dict when there is no body.
+
+        Raises:
+            RuntimeError: If the response status code is ``>= 400``.
+        """
         url = f"{self.base_url}/{path.lstrip('/')}"
         resp = self._sess.request(method, url, json=body,
                                   timeout=timeout or self.timeout)
@@ -837,6 +911,36 @@ class SafeOptimizeClient:
         target_gain: float | None = None,
         results_path: str | None = None,
     ) -> dict:
+        """Submit an optimization task to SaFE and return the API response.
+
+        Builds the task request body from the model and benchmark parameters,
+        choosing a target workspace (single or round-robin across the pool).
+
+        Args:
+            model_id: Registered SaFE model id.
+            display_name: Human-readable task name.
+            framework: Serving framework (``vllm`` / ``sglang``).
+            precision: Model precision (e.g. ``BF16``, ``FP8``).
+            tp: Tensor-parallel size.
+            concurrency: Benchmark concurrency level.
+            isl: Input sequence length.
+            osl: Output sequence length.
+            image: Server image to run, or ``None`` for the framework default.
+            mode: Submission mode (e.g. ``local``).
+            gpu_type: Target GPU type.
+            inferencex_path: Optional InferenceX checkout path.
+            oob_path: Optional out-of-box baseline path.
+            tracelens_root: Optional TraceLens root path.
+            prompt_prefix: Optional prompt prefix override.
+            prompt_suffix: Optional prompt suffix override.
+            kernel_backends: Optional list of kernel backends to enable.
+            max_hours: Optional wall-clock budget for the task.
+            target_gain: Optional target performance gain.
+            results_path: Optional path where results should be written.
+
+        Returns:
+            The decoded API response for the submitted task.
+        """
         # Pick the workspace: single submit_workspace, or round-robin across the
         # pool. Counter is per-instance, not thread-safe — fine since submit_task
         # runs serially (only wait_and_collect is parallel, after submit returns).
@@ -2261,6 +2365,15 @@ def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
     n = 0
 
     def _session_has_matching_json(sess_path: str) -> bool:
+        """Return whether a session dir holds JSON matching the target model.
+
+        Args:
+            sess_path: Session directory to scan.
+
+        Returns:
+            ``True`` if any target JSON file under the known subdirs has a
+            model field matching ``rec``; otherwise ``False``.
+        """
         for sub in subdirs:
             base = os.path.join(sess_path, sub) if sub else sess_path
             if not os.path.isdir(base):
@@ -2279,6 +2392,15 @@ def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
         return False
 
     def _backfill_files(sess_path: str) -> int:
+        """Backfill the model field into target JSON files in a session dir.
+
+        Args:
+            sess_path: Session directory whose target JSON files should be
+                updated.
+
+        Returns:
+            The number of files updated.
+        """
         updated = 0
         for sub in subdirs:
             base = os.path.join(sess_path, sub) if sub else sess_path
@@ -2941,7 +3063,7 @@ def wait_and_collect_one(
         log.info("[task %s] current session timestamp hints from artifacts: %s",
                  rec.task_id, ", ".join(sorted(current_session_hints)))
 
-    if final_status not in ("Succeeded", "Success") and not has_safe_breakdown:
+    if not has_safe_breakdown:
         waited_session = _wait_for_nfs_session_delivery(
             rec,
             current_session_hints=current_session_hints,

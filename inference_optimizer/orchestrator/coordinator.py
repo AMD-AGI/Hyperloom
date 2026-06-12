@@ -234,6 +234,11 @@ _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
     "workspace", "workspace_path", "out_dir", "output_dir", "run_dir",
     "report_path", "json_path", "md_path", "tracelens_agent_transcript",
     "tracelens_agent_report",
+    # TraceLens analysis outputs surfaced by trace_analyze_handler — the
+    # analysis.md report, its alias, the per-run audit summary, the roofline
+    # sidecar and the CLI log — so operators can reach them from lifecycle END.
+    "trace_report_path", "analysis_report_path", "tracelens_summary_path",
+    "kernel_roofline_path", "cli_log_path",
 )
 
 
@@ -384,6 +389,13 @@ class Coordinator:
 
         # Persistent session state (state.json) — load existing for resume.
         self.shared_state = SharedState.load_or_init(self.session_dir)
+        # #266 lifecycle save debounce: terminal events (END/ERROR) flush
+        # immediately so operators see produced artifacts promptly; bursty
+        # non-terminal markers (START/ENTER) coalesce within a short window to
+        # avoid amplifying state.json writes on long / multi-kernel sessions
+        # over NFS. ``_lifecycle_last_save`` is a monotonic timestamp.
+        self._lifecycle_last_save: float = 0.0
+        self._lifecycle_save_min_interval_s: float = 2.0
         # Thread live SharedState into the runner (constructed earlier) so
         # executors get it via ctx.extra; durable backstop for per-dispatch
         # ``base_tput`` injection.
@@ -1264,12 +1276,24 @@ class Coordinator:
             )
 
     def _kernel_enabled(self) -> bool:
+        """Whether the kernel role is registered and enabled.
+
+        Returns:
+            ``True`` if the kernel role exists and the persisted
+            ``kernel_enabled`` flag is set.
+        """
         # Mirror persisted kernel_enabled flag; --no-kernel removes the kernel role.
         return "kernel" in self.role_registry and bool(
             getattr(self.shared_state, "kernel_enabled", True)
         )
 
     def _explore_enabled(self) -> bool:
+        """Whether the EXPLORE phase is enabled for this run.
+
+        Returns:
+            ``True`` unless ``--no-explore`` disabled it (collapsing to
+            KERNEL/SWEEP).
+        """
         # Mirror persisted explore_enabled flag; --no-explore collapses to KERNEL/SWEEP. EXPLORE is a phase, not a role.
         return bool(getattr(self.shared_state, "explore_enabled", True))
 
@@ -3128,11 +3152,24 @@ class Coordinator:
             "source": "coordinator_internal",
             "reason": str(reason),
         }
-        cb = state.current_best or {}
-        if isinstance(cb, dict):
-            cb_args = str(cb.get("extra_server_args") or "")
-            if cb_args:
-                params["base_extra_args"] = cb_args
+        if reason != "prelude_initial":
+            cb = state.current_best or {}
+            if isinstance(cb, dict):
+                cb_args = str(cb.get("extra_server_args") or "")
+                if cb_args:
+                    params["base_extra_args"] = cb_args
+        else:
+            # PRELUDE roofline profiles the baseline arm: inject baseline's own
+            # server args (from its materialized yaml), never current_best's,
+            # so a later warm-replay can't swap in compile/fp8 flags that
+            # destabilize profiling and skew the baseline ceiling.
+            try:
+                from .roofline_ceiling import read_baseline_server_args
+                bl_args = read_baseline_server_args(state).strip()
+            except Exception:  # noqa: BLE001 — best-effort; empty falls through
+                bl_args = ""
+            if bl_args:
+                params["base_extra_args"] = bl_args
         last_bl = state.last_baseline or {}
         if isinstance(last_bl, dict):
             bs = str(last_bl.get("benchmark_script") or "").strip()
@@ -3550,6 +3587,26 @@ class Coordinator:
             await self._record_close_step(
                 "session_breakdown", status="failed",
                 detail=repr(exc)[:240],
+            )
+
+        # ---------------- Step 2.5: Langfuse flush + receipt splice --------
+        # MUST run before the artifact package (step 2.6): flush_session
+        # reconciles out-of-process children + flips the receipt to final
+        # counts, and patch_breakdown_langfuse splices that post-flush
+        # receipt back into session_breakdown.json. If this ran AFTER
+        # packaging, the bundled SBD would carry counts_final=false and the
+        # final langfuse_receipt.json would be missing from the bundle.
+        # No-op unless live push is enabled; idempotent (a later cli.finally
+        # flush only re-writes the receipt). Best-effort.
+        try:
+            from .trace.langfuse_emitter import flush_session
+            flush_session(self.session_dir)
+            from ..breakdown import patch_breakdown_langfuse
+            patch_breakdown_langfuse(self.session_dir)
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log.debug("CLOSE step 2.5 (langfuse flush) failed", exc_info=True)
+            await self._record_close_step(
+                "langfuse_flush", status="failed", detail=repr(exc)[:240],
             )
 
         # ---------------- Step 2.6: artifact package -> /workspace -------
@@ -4961,6 +5018,15 @@ class Coordinator:
         return "\n".join(sections)
 
     async def _load_system_prompt(self, agent_name: str) -> str:
+        """Load the system prompt for an agent, honoring overrides.
+
+        Args:
+            agent_name: Name of the agent/role whose prompt to load.
+
+        Returns:
+            The override prompt if configured, the role's prompt file
+            contents, or a placeholder string when none exists.
+        """
         # Demo/test override via self.system_prompt_overrides[agent_name].
         override = getattr(self, "system_prompt_overrides", {}).get(agent_name)
         if override is not None:
@@ -7036,7 +7102,20 @@ class Coordinator:
                 detail=detail,
                 duration_s=duration_s,
             )
-            self.shared_state.save(self.session_dir)
+            # Terminal events (END/ERROR) carry the produced artifact paths an
+            # operator is waiting on — always flush them. Non-terminal markers
+            # (START / phase ENTER) are debounced: skip the write if we flushed
+            # within the last ``_lifecycle_save_min_interval_s`` seconds, since
+            # the next terminal event (or a later marker past the window) will
+            # persist the coalesced tail anyway.
+            terminal = status in ("END", "ERROR")
+            now = time.monotonic()
+            if terminal or (
+                now - self._lifecycle_last_save
+                >= self._lifecycle_save_min_interval_s
+            ):
+                self.shared_state.save(self.session_dir)
+                self._lifecycle_last_save = now
         except Exception:  # noqa: BLE001 — defensive
             log.debug(
                 "Coordinator: lifecycle emit failed (step=%s status=%s)",
@@ -7371,6 +7450,15 @@ class Coordinator:
         ))
 
     async def _handle_force_dispatch(self, source: str, intent: Intent) -> None:
+        """Handle a ``force_dispatch`` intent by emitting an event.
+
+        Currently a P0-3 stub: it broadcasts a ``force_dispatch`` event;
+        real dispatcher reordering arrives in P0-5 with the priority queue.
+
+        Args:
+            source: Identifier of the intent's originating agent.
+            intent: The ``force_dispatch`` intent carrying ``task_id``.
+        """
         # P0-3 stub: emit an event; real dispatcher reordering lands in P0-5 with the priority queue.
         await self.bus.append_and_seq(Message.new(
             source, "*", "event",

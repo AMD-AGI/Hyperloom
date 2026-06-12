@@ -452,6 +452,12 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # Architecture-identity tags from config.json fanned into recipe-snapshot extras; locked against pollution.
     "model_architectures",
     "model_type",
+    # Multimodal text-fallback degraded-run markers (cli._preflight). Coordinator/
+    # preflight are the sole writers; locked so an LLM update_state cannot forge
+    # or clear "degraded run" — it drives the final report's degraded warning
+    # (report.py) and must reflect the real preflight verdict, not LLM intent.
+    "degraded_mode",
+    "model_warnings",
 })
 
 
@@ -472,6 +478,12 @@ class PolicyGate:
     strict_phase: bool = False
 
     def __post_init__(self) -> None:  # noqa: D401 — dataclass hook
+        """Apply environment overrides for strict-mode flags.
+
+        Lets ``INFERENCE_OPTIMIZER_STRICT_PATHS`` and
+        ``INFERENCE_OPTIMIZER_STRICT_PHASE`` enable strict behavior
+        without threading a constructor argument through every caller.
+        """
         # Allow env to enable strict mode without threading a constructor arg through every caller.
         import os as _os
         if not self.strict_paths and _os.environ.get(
@@ -1968,6 +1980,18 @@ class PolicyGate:
     def _validate_robustness_only(
         self, role: "AgentRole", intent_type: IntentType, payload: dict[str, Any]
     ) -> None:
+        """Enforce that only allowed roles emit robustness-only intents.
+
+        Args:
+            role: The agent role attempting to emit the intent.
+            intent_type: The intent being validated.
+            payload: The intent payload (checked for required fields).
+
+        Raises:
+            PolicyDenied: If the role is not permitted to emit the intent,
+                or a required payload field (e.g. ``family`` for
+                ``PRUNE_BRANCH``) is missing.
+        """
         # Per-intent source override takes precedence; default is robustness-only.
         allowed_sources = _ROBUSTNESS_ONLY_INTENT_SOURCES.get(
             intent_type, ROBUSTNESS_ONLY_SOURCE_ALLOWLIST,
