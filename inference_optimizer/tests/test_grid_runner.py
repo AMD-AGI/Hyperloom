@@ -928,3 +928,73 @@ def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
         f"reason must mention `atom --help` so log readers can tell "
         f"which framework rejected the variant: {dropped[0]['reason']!r}"
     )
+
+
+# Section: dedup_vllm_server_args (#520) — vLLM/atom single-value flag collapse
+
+
+class TestDedupVllmServerArgs:
+    """``dedup_vllm_server_args`` collapses repeated vLLM single-value flags."""
+
+    def test_duplicate_attention_backend_keeps_last(self):
+        # The exact #520 repro: YAML base + variant both inject the flag.
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend ROCM_AITER_FA --attention-backend ROCM_FLASH",
+            "vllm",
+        )
+        assert out == "--attention-backend ROCM_FLASH"
+        assert out.count("--attention-backend") == 1
+
+    def test_identical_duplicate_collapses_to_single(self):
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend ROCM_AITER_FA --attention-backend ROCM_AITER_FA",
+            "vllm",
+        )
+        assert out == "--attention-backend ROCM_AITER_FA"
+
+    def test_preserves_surrounding_and_unknown_flags_in_order(self):
+        out = _grid_runner.dedup_vllm_server_args(
+            "--enforce-eager --attention-backend A --max-model-len 4096 "
+            "--attention-backend B --trust-remote-code",
+            "vllm",
+        )
+        # Earlier --attention-backend span removed; everything else stays ordered.
+        assert out == (
+            "--enforce-eager --max-model-len 4096 "
+            "--attention-backend B --trust-remote-code"
+        )
+
+    def test_equals_form_is_deduped(self):
+        out = _grid_runner.dedup_vllm_server_args(
+            "--gpu-memory-utilization=0.9 --gpu-memory-utilization=0.85",
+            "vllm",
+        )
+        assert out == "--gpu-memory-utilization=0.85"
+
+    def test_atom_framework_also_deduped(self):
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend A --attention-backend B", "atom",
+        )
+        assert out == "--attention-backend B"
+
+    def test_sglang_is_noop_repeats_preserved(self):
+        # sglang tolerates repeats (last-wins at the server); do not mangle.
+        raw = "--attention-backend aiter --attention-backend triton"
+        assert _grid_runner.dedup_vllm_server_args(raw, "sglang") == raw
+
+    def test_no_duplicates_returns_unchanged(self):
+        raw = "--attention-backend ROCM_AITER_FA --max-model-len 8192"
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+
+    def test_empty_and_none_safe(self):
+        assert _grid_runner.dedup_vllm_server_args("", "vllm") == ""
+        assert _grid_runner.dedup_vllm_server_args(None, "vllm") == ""
+
+    def test_unparseable_string_returned_as_is(self):
+        # Unbalanced quote: leave it for vLLM to report rather than mangling.
+        raw = "--attention-backend 'unterminated"
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw.strip()
+
+    def test_distinct_single_value_flags_untouched(self):
+        raw = "--max-num-seqs 256 --block-size 16 --kv-cache-dtype fp8"
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw

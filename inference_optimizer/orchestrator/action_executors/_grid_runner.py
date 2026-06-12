@@ -739,6 +739,96 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
+# vLLM / atom expose argparse-style single-value options. Unlike sglang
+# (where a repeated flag is harmless last-wins), vLLM v0.21.0 hard-errors on a
+# duplicate / conflicting ``--attention-backend`` — the crash propagates
+# through ``EngineCoreClient`` -> ``wait_for_engine_startup`` -> RuntimeError,
+# then NCCL ``Broken pipe`` on every rank (#520). The duplication arises when
+# the operator's YAML ``EXTRA_VLLM_ARGS`` already pins a flag and a sweep /
+# kernel variant appends the same flag via ``extra_server_args``; ``merge_
+# server_args`` keeps BOTH tokens by design. This set lists the single-value
+# flags safe to collapse to last-wins so the variant override survives.
+_VLLM_SINGLE_VALUE_FLAGS = frozenset({
+    "--attention-backend",
+    "--gpu-memory-utilization",
+    "--max-model-len",
+    "--max-num-seqs",
+    "--max-num-batched-tokens",
+    "--block-size",
+    "--kv-cache-dtype",
+    "--quantization",
+    "--dtype",
+    "--swap-space",
+    "--tensor-parallel-size",
+    "--pipeline-parallel-size",
+})
+
+
+def dedup_vllm_server_args(
+    server_args: str | None,
+    framework: str | None,
+) -> str:
+    """Collapse repeated vLLM/atom single-value flags to last-wins (#520).
+
+    vLLM v0.21.0 crashes ``EngineCoreProc`` on a duplicated
+    ``--attention-backend`` (and conflicting copies of other single-value
+    flags); sglang tolerates repeats. So this is scoped to the vllm/atom
+    framework envs and is a no-op for sglang. Only the flags in
+    :data:`_VLLM_SINGLE_VALUE_FLAGS` are touched; every other token (unknown
+    flags, store-true switches, positional values) is preserved verbatim and
+    in order. For each affected flag the LAST occurrence wins, matching the
+    left-to-right override intent of :func:`merge_server_args` (so a
+    sweep/kernel ``extra_args`` value overrides the YAML base).
+
+    Returns ``server_args`` unchanged when the framework is sglang, the string
+    is empty, or it cannot be shell-parsed.
+    """
+    args = str(server_args or "").strip()
+    if not args:
+        return args
+    if server_args_env_name(framework) == "EXTRA_SGLANG_ARGS":
+        return args
+    try:
+        tokens = shlex.split(args)
+    except ValueError:
+        # Unparseable: leave it to vLLM to report rather than mangling it.
+        return args
+    # Collect the token span of every recognized single-value flag.
+    spans: list[tuple[str, int, int]] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        name = tok.split("=", 1)[0] if tok.startswith("--") else None
+        if name in _VLLM_SINGLE_VALUE_FLAGS:
+            if "=" in tok:
+                # ``--flag=value`` is self-contained.
+                spans.append((name, i, i))
+                i += 1
+            elif i + 1 < n and not tokens[i + 1].startswith("-"):
+                # ``--flag value`` consumes the following token.
+                spans.append((name, i, i + 1))
+                i += 2
+            else:
+                # Bare ``--flag`` with no value: treat as a single token.
+                spans.append((name, i, i))
+                i += 1
+        else:
+            i += 1
+    drop: set[int] = set()
+    by_name: dict[str, list[tuple[str, int, int]]] = {}
+    for span in spans:
+        by_name.setdefault(span[0], []).append(span)
+    for occurrences in by_name.values():
+        # Keep only the last occurrence; drop the token span of the earlier ones.
+        for _name, start, end in occurrences[:-1]:
+            drop.update(range(start, end + 1))
+    if not drop:
+        return args
+    kept = [tok for idx, tok in enumerate(tokens) if idx not in drop]
+    return " ".join(kept)
+
+
 # sglang scheduler watchdog timeout injection: on MI300X with aiter, the first
 # request's ``mha_batch_prefill`` JIT compile can exceed sglang's 300s default
 # watchdog, firing SIGQUIT mid-warmup -> baseline_failed. Inject a longer
