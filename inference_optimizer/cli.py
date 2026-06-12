@@ -4553,6 +4553,15 @@ def _build_parser() -> argparse.ArgumentParser:
              "Resolution: --nodes > $INFERENCE_OPTIMIZER_NODES > $NODES > 1.",
     )
     opt.add_argument(
+        "--mn-backend",
+        choices=("rayjob", "dynamo"),
+        default=None,
+        help="Multi-node backend when --nodes>=2: 'rayjob' (default, Ray "
+             "head+workers) or 'dynamo' (idle DynamoDeployment + SSH control "
+             "plane). Resolution: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND "
+             "> rayjob. Single-node runs ignore this flag.",
+    )
+    opt.add_argument(
         "--rayjob-image",
         default=None,
         help="Container image for the multi-node RayJob (head+workers). "
