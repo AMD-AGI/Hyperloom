@@ -17,6 +17,9 @@ import tempfile
 from pathlib import Path
 
 _SENTINEL = "<your_benchmark.py>"  # presence == already patched
+# Upstream GEAK (ec61bdb+) replaced the task_runner.py examples with generic
+# placeholders; when this marker is present the YAML needs no Hyperloom patch.
+_UPSTREAM_FIXED_MARKER = "<your-test-command>"
 
 _OLD_BLOCK = (
     '    - Good example: `command="python3 scripts/task_runner.py performance", '
@@ -84,8 +87,9 @@ def ensure_geak_prompt_patched() -> tuple[bool, str]:
         return False, f"cannot read {yaml_path}: {exc}"
     if _SENTINEL in text:
         return True, f"already patched: {yaml_path}"
+    if _UPSTREAM_FIXED_MARKER in text:
+        return True, f"upstream already fixed (uses generic placeholders): {yaml_path}"
     if _OLD_BLOCK not in text:
-        # Upstream wording changed; refuse to guess and garble the YAML.
         return False, (
             f"upstream example block changed; manual review required: {yaml_path}"
         )
