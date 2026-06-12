@@ -41,12 +41,195 @@ def _safe_call(state: Any, method: str, default: Any) -> Any:
         return default
 
 
+# Benign upstream WARN fragments that must never be promoted as the
+# ``baseline_failed`` headline: they do not correlate with the terminal
+# failure (the model still resolves / runs). Suppression is Hyperloom-side
+# only — the full text still appears in the per-attempt logs. See issue #465.
+_BENIGN_FAILURE_PATTERNS: tuple[str, ...] = (
+    "modeling_cohere2.py",
+)
+
+
+def _is_benign_failure_text(text: str) -> bool:
+    """Return True when ``text`` matches a known-benign upstream WARN pattern."""
+    blob = str(text or "")
+    return any(pat in blob for pat in _BENIGN_FAILURE_PATTERNS)
+
+
+def _highlight_is_benign(highlight: dict[str, Any]) -> bool:
+    """Return True when a highlight record only carries a benign upstream WARN.
+
+    Checks the one-line ``summary`` plus the stringy ``payload`` values so a
+    WARN buried in the event payload is suppressed too.
+    """
+    if _is_benign_failure_text(str(highlight.get("summary", ""))):
+        return True
+    payload = highlight.get("payload")
+    if isinstance(payload, dict):
+        for value in payload.values():
+            if isinstance(value, str) and _is_benign_failure_text(value):
+                return True
+    return False
+
+
+def _classify_root_cause_type(error_class: str, error_text: str) -> str:
+    """Map a baseline attempt's ``error_class`` + message to a coarse enum.
+
+    Returns one of ``oom`` / ``benchmark_timeout`` / ``engine_core_init`` /
+    ``worker_crash`` / ``unknown`` for the dashboard / ops contract.
+    """
+    blob = f"{error_class} {error_text}".lower()
+    if "out of memory" in blob or "hip oom" in blob:
+        return "oom"
+    if error_class == "timeout" or "benchmark exceeded" in blob:
+        return "benchmark_timeout"
+    if (
+        error_class == "server_init_dead"
+        or "engine core" in blob
+        or "enginecore" in blob
+        or "workerproc" in blob
+        or "engine process failed" in blob
+    ):
+        return "engine_core_init"
+    if error_class == "subprocess_nonzero" or "nccl" in blob or "worker" in blob:
+        return "worker_crash"
+    return "unknown"
+
+
+def _pick_failure_headline(text: str) -> str:
+    """Pick the most informative single line out of a server.log excerpt.
+
+    Prefers terminal fault lines (OOM / FATAL / engine-core markers) over the
+    last line, so the headline points at the real root cause.
+    """
+    lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    priority = (
+        "out of memory", "fatal", "runtimeerror", "nccl",
+        "engine core", "enginecore", "workerproc", "error:",
+    )
+    for keyword in priority:
+        for ln in lines:
+            if keyword in ln.lower():
+                return ln
+    return lines[-1]
+
+
+def _build_failure_summary(
+    session_dir: Path, state: SharedState,
+) -> dict[str, Any] | None:
+    """Surface the real terminal error on ``baseline_failed`` (issue #465).
+
+    Reads the most recent ``runs/baseline/<task_id>/result.json`` whose
+    ``status == "failed"`` and lifts its ``error`` / ``error_class`` into a
+    compact ``failure_summary`` block. When that error is missing or matches a
+    benign WARN, falls back to scanning the attempt's ``server.log`` for the
+    terminal engine/worker marker via :func:`server_log_death_excerpt`.
+
+    Best-effort: only fires for ``baseline_failed`` and returns ``None`` on any
+    error so the report still writes.
+    """
+    if str(getattr(state, "stop_reason", "") or "") != "baseline_failed":
+        return None
+    try:
+        from ...session_paths import runs_root as _runs_root
+        baseline_root = _runs_root(session_dir) / "baseline"
+        if not baseline_root.is_dir():
+            return None
+        attempts: list[tuple[float, Path, dict[str, Any]]] = []
+        for task_dir in baseline_root.iterdir():
+            if not task_dir.is_dir():
+                continue
+            result_path = task_dir / "result.json"
+            if not result_path.is_file():
+                continue
+            try:
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("status")) != "failed":
+                continue
+            try:
+                mtime = result_path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            attempts.append((mtime, task_dir, payload))
+        if not attempts:
+            return None
+        attempts.sort(key=lambda item: item[0])
+        _, last_dir, payload = attempts[-1]
+    except Exception:  # noqa: BLE001 — report must never crash on the summary
+        log.warning(
+            "report_executor: failed to build failure_summary", exc_info=True,
+        )
+        return None
+
+    error_class = str(payload.get("error_class") or "unknown")
+    error_text = str(payload.get("error") or "").strip()
+    suppressed: list[str] = []
+    if error_text and _is_benign_failure_text(error_text):
+        suppressed.append(error_text.splitlines()[0][:200])
+        error_text = ""  # force fallback to the server.log terminal marker
+
+    # Locate this attempt's server.log (written at ``output_dir/server.log``).
+    server_log_abs: Path | None = None
+    out_dir = payload.get("output_dir")
+    candidates = [last_dir / "server.log"]
+    if out_dir:
+        candidates.insert(0, Path(str(out_dir)) / "server.log")
+    for cand in candidates:
+        try:
+            if cand.is_file():
+                server_log_abs = cand
+                break
+        except OSError:
+            continue
+
+    # Fallback / enrichment: pull the terminal marker from server.log when the
+    # result carried no error or only the benign WARN.
+    if not error_text and server_log_abs is not None:
+        try:
+            from ._subprocess_kill import server_log_death_excerpt
+            excerpt = server_log_death_excerpt(str(server_log_abs))
+        except Exception:  # noqa: BLE001
+            excerpt = None
+        if excerpt:
+            error_text = excerpt.strip()
+            if error_class == "unknown":
+                error_class = "server_init_dead"
+
+    root_cause = _pick_failure_headline(error_text) or (
+        "(no terminal error captured; see server.log)"
+    )
+    server_log_rel: str | None = None
+    if server_log_abs is not None:
+        try:
+            server_log_rel = server_log_abs.relative_to(session_dir).as_posix()
+        except ValueError:
+            server_log_rel = str(server_log_abs)
+
+    summary: dict[str, Any] = {
+        "root_cause": root_cause[:500],
+        "root_cause_type": _classify_root_cause_type(error_class, error_text),
+        "error_class": error_class,
+        "last_attempt_id": last_dir.name,
+        "server_log": server_log_rel,
+    }
+    if suppressed:
+        summary["suppressed_benign"] = suppressed
+    return summary
+
+
 def _build_summary_dict(
     state: SharedState,
     ev_counts: dict[str, int],
     highlights: list[dict],
     *,
     external_baseline: dict[str, Any] | None = None,
+    session_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Assemble the machine-readable session summary dict.
 
@@ -56,6 +239,8 @@ def _build_summary_dict(
         highlights (list[dict]): Top-N highlighted decisions/verdicts.
         external_baseline (dict[str, Any] | None): Optional external
             baseline comparison block to embed.
+        session_dir (Path | None): Session root; when provided, a
+            ``failure_summary`` block is added on ``baseline_failed`` (#465).
 
     Returns:
         dict[str, Any]: The summary payload written to ``final.json``,
@@ -111,6 +296,12 @@ def _build_summary_dict(
     )
     if cmp:
         summary["roofline_comparison"] = cmp
+    # Real terminal root cause on baseline_failed (#465): promote the last
+    # failed baseline attempt's engine/worker fault over benign upstream WARNs.
+    if session_dir is not None:
+        failure_summary = _build_failure_summary(session_dir, state)
+        if failure_summary:
+            summary["failure_summary"] = failure_summary
     return summary
 
 
@@ -134,6 +325,17 @@ def _format_md(summary: dict[str, Any]) -> str:
     stop_detail = str(summary.get("stop_detail") or "").strip()
     if stop_detail:
         lines.append(f"- **Stop detail**: {stop_detail}")
+    failure_summary = summary.get("failure_summary")
+    if isinstance(failure_summary, dict) and failure_summary.get("root_cause"):
+        lines.append(
+            f"- **Root cause**: "
+            f"`{failure_summary.get('root_cause_type', 'unknown')}` — "
+            f"{failure_summary.get('root_cause')}"
+        )
+        if failure_summary.get("server_log"):
+            lines.append(
+                f"- **Server log**: `{failure_summary.get('server_log')}`"
+            )
     if summary.get("degraded_mode"):
         lines.append(
             "- **⚠ Degraded mode**: ran on the TEXT path only "
@@ -740,7 +942,13 @@ class ReportExecutor:
             highlights: list[dict] = []
             for m in ev_rows:
                 if m.topic in highlight_topics:
-                    highlights.append(_highlight(m.payload or {}, m.topic, m.from_agent))
+                    h = _highlight(m.payload or {}, m.topic, m.from_agent)
+                    # Suppress benign upstream WARNs so they never become the
+                    # top-level highlight on a failure (#465); the full text
+                    # still lives in the per-attempt logs.
+                    if _highlight_is_benign(h):
+                        continue
+                    highlights.append(h)
         finally:
             db.close()
 
@@ -751,6 +959,7 @@ class ReportExecutor:
             dict(ev_counts),
             highlights,
             external_baseline=external_baseline,
+            session_dir=session_dir,
         )
 
         # Kernel-optimization forensic summary in a separate file (pointer
