@@ -35,7 +35,11 @@ from ...compat.payload_aliases import read_extra_server_args
 from ...paths import asset_root
 from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
-from ._grid_runner import sanitize_result_dir, sanitize_script_name
+from ._grid_runner import (
+    _kill_stale_servers,
+    sanitize_result_dir,
+    sanitize_script_name,
+)
 from ._subprocess_kill import (
     SERVER_DEAD_RETURNCODE,
     _process_group_alive,
@@ -77,6 +81,44 @@ MAGPIE_BUILTIN_SCRIPTS = frozenset(
 # ``benchmark.envs.PORT`` is unset; pinned into the per-round YAML so
 # Magpie's reuse keying and our teardown agree.
 BASELINE_REUSE_PORT_DEFAULT = 8888
+
+# #522: fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args)
+# should not consume the slow-baseline retry budget.
+FAST_EXIT_THRESHOLD_SEC = 30.0
+_ARG_ERROR_PATTERNS = (
+    "unrecognized arguments",
+    "invalid choice",
+    "Unknown attention backend",
+    "not a valid",
+)
+_ARG_ERROR_CONTEXT_PATTERNS = (
+    "argument",
+    "argparse",
+    "backend",
+    "choice",
+    "cli",
+    "invalid",
+    "option",
+    "flag",
+    "unknown",
+)
+
+
+def _classify_subprocess_error(
+    elapsed_sec: float, stderr_tail: str,
+) -> str:
+    """Return 'fast_exit_arg_error' when the subprocess died fast on an arg
+    validation error, else 'subprocess_nonzero'."""
+    if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
+        return "subprocess_nonzero"
+    tail = stderr_tail.lower()
+    if any(p.lower() in tail for p in _ARG_ERROR_PATTERNS):
+        return "fast_exit_arg_error"
+    if "valueerror:" in tail and any(
+        p in tail for p in _ARG_ERROR_CONTEXT_PATTERNS
+    ):
+        return "fast_exit_arg_error"
+    return "subprocess_nonzero"
 
 # Server-boot budget for the persistent server phase (server_lifecycle).
 # Override via ``INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC``.
@@ -676,6 +718,12 @@ class BaselineExecutor:
         # discovers round 1's server. Task root keeps it per-task isolated.
         pid_dir = output_dir
         try:
+            # #5: deep-clean zombie listeners + stale pid/meta BEFORE round 1
+            # boots its server. Runs once here (not per round) so round 1's
+            # persistent server survives for round 2's re-attach.
+            self._pre_start_cleanup(
+                pid_dir=pid_dir, framework=framework, port=port,
+            )
             # Round 1 (warmup): boot + run, leave running (cleanup=false) so
             # round 2 can re-attach. Throughput discarded (cold-contaminated).
             warmup_dir = output_dir / "warmup_round"
@@ -859,6 +907,67 @@ class BaselineExecutor:
         with out.open("w", encoding="utf-8") as f:
             yaml.safe_dump(cfg, f, sort_keys=False)
         return out
+
+    @staticmethod
+    def _port_healthy(port: int, timeout: float = 3.0) -> bool:
+        """Return True when localhost:{port}/health responds HTTP 200."""
+        import urllib.request
+        try:
+            r = urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/health", timeout=timeout,
+            )
+            return r.status == 200
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _pre_start_cleanup(
+        self, *, pid_dir: Path, framework: str, port: int,
+    ) -> None:
+        """#5: best-effort startup pre-clean for the double-run path.
+
+        Only acts when there is concrete evidence of a zombie: the reuse
+        port responds to /health but the matching metadata file is absent
+        (the exact "Reuse metadata mismatch" trigger). In that case it
+        calls _kill_stale_servers() to reap the orphan listener. Stale
+        pid/json files are always unlinked (without sending signals to
+        potentially-recycled PIDs). Never raises.
+        """
+        base = Path(pid_dir)
+        tag = f"{framework}_{port}"
+        pid_file = base / f"{tag}.pid"
+        meta_file = base / f"{tag}.json"
+        meta_exists = meta_file.exists()
+        try:
+            port_healthy = self._port_healthy(port)
+        except Exception as exc:  # noqa: BLE001 — best-effort pre-clean
+            log.warning(
+                "baseline_executor: pre-start port probe failed "
+                "(%s); proceeding.", exc,
+            )
+            port_healthy = False
+        if meta_exists and port_healthy:
+            # A healthy reuse target with metadata is not a zombie; keep the
+            # files so Magpie can reattach instead of creating a mismatch.
+            return
+        # Unlink stale metadata/pid files only (no signal to possibly-
+        # recycled PIDs — _teardown_lifecycle_server is too aggressive here).
+        for p in (pid_file, meta_file):
+            try:
+                if p.exists():
+                    p.unlink()
+            except OSError:
+                pass
+        # Narrow trigger: only deep-clean when the port is occupied by a
+        # zombie (healthy endpoint, no metadata). Avoids killing unrelated
+        # servers sharing the pod.
+        try:
+            if not meta_exists and port_healthy:
+                _kill_stale_servers()
+        except Exception as exc:  # noqa: BLE001 — best-effort pre-clean
+            log.warning(
+                "baseline_executor: pre-start _kill_stale_servers failed "
+                "(%s); proceeding.", exc,
+            )
 
     def _teardown_lifecycle_server(
         self, *, pid_dir: Path, framework: str, port: int,
@@ -1132,8 +1241,11 @@ class BaselineExecutor:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
                 return {
                     "status": "failed",
-                    "error_class": "subprocess_nonzero",
+                    "error_class": _classify_subprocess_error(
+                        subprocess_runtime_sec, tail,
+                    ),
                     "returncode": proc_returncode,
+                    "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
                     "error": tail,
                     **failure_extras,
                 }
@@ -1171,7 +1283,9 @@ class BaselineExecutor:
                 error = server_init_dead_error
             elif proc_returncode != 0:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
-                error_class = "subprocess_nonzero"
+                error_class = _classify_subprocess_error(
+                    subprocess_runtime_sec, tail,
+                )
                 error = tail
             elif not report_path.exists():
                 error_class = "no_report"
@@ -1188,6 +1302,7 @@ class BaselineExecutor:
                 "workspace": str(workspace),
                 "report_path": str(report_path) if report_path.exists() else None,
                 "reported_success": measurement.get("reported_success"),
+                "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
                 "nonfatal_warnings": warnings,
             }
 

@@ -1192,6 +1192,20 @@ _AMD_UNSUPPORTED_ARCHITECTURES = frozenset({"deepseekv32forcausallm"})
 # causing AttributeError deep in engine init.
 _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 
+# Phi-3 su/longrope rope_scaling: Phi3Config._rope_scaling_validation() requires
+# rope_scaling to be a dict of EXACTLY 3 keys (type/short_factor/long_factor).
+# These 128k checkpoints ship a top-level rope_theta that transformers folds
+# into the rope_scaling dict during config load, so the validator sees 4 keys
+# and raises ValueError at AutoConfig.from_pretrained() — before SGLang's
+# --json-model-override-args can apply, so the override cannot recover the run.
+_PHI3_ROPE_TYPES = frozenset({"su", "longrope"})
+
+# Gemma2 missing hidden_act: sglang's gemma2 runtime reads config.hidden_act
+# unconditionally. Some checkpoints ship only hidden_activation (the HF field
+# name), so config.hidden_act is absent and the model crashes with
+# AttributeError in engine init. Hardware-agnostic.
+_GEMMA2_ARCHITECTURES = frozenset({"gemma2forcausallm"})
+
 # Quantization formats with no ROCm/AMD runtime path. NVIDIA ModelOpt FP8/NVFP4
 # use vendor-specific scale packing (no sglang ROCm loader); bitsandbytes ships
 # CUDA-only kernels; NVFP4/FP4 need Blackwell hardware. AMD-native fp8 (Quark /
@@ -1246,6 +1260,64 @@ def _detect_amd_unsupported_quant(model_path: str) -> str | None:
                     f"hardware; no AMD/ROCm runtime path exists."
                 )
     return None
+
+
+def _detect_phi3_rope_scaling_incompatible(data: dict) -> str | None:
+    """Return a reason when a Phi-3 su/longrope config crashes Phi3Config validation.
+
+    Phi3Config._rope_scaling_validation() requires rope_scaling to be a 3-key
+    dict, but transformers folds the top-level rope_theta into rope_scaling at
+    load, yielding 4 keys and a ValueError. This is hardware-agnostic and the
+    su/longrope type triggers it; yarn (the non-longrope path) is left alone.
+    """
+    model_type = str(data.get("model_type") or "").strip().lower()
+    arches = {a.lower() for a in _config_architectures(data)}
+    if model_type != "phi3" and "phi3forcausallm" not in arches:
+        return None
+    rope = data.get("rope_scaling")
+    if not isinstance(rope, dict):
+        return None
+    rope_type = str(rope.get("type") or "").strip().lower()
+    if rope_type not in _PHI3_ROPE_TYPES:
+        return None
+    # The crash only triggers when a top-level rope_theta exists: transformers
+    # folds it into rope_scaling, giving 4 keys instead of the required 3.
+    # Without rope_theta the 3-key dict passes validation fine.
+    if data.get("rope_theta") is None:
+        return None
+    return (
+        f"config.json is a Phi-3 model with rope_scaling.type='{rope_type}' "
+        f"and a top-level rope_theta={data['rope_theta']}; "
+        "Phi3Config._rope_scaling_validation requires a 3-key rope_scaling, but "
+        "transformers folds the top-level rope_theta into it at load, so the "
+        "validator sees 4 keys and raises ValueError at "
+        "AutoConfig.from_pretrained — before --json-model-override-args can "
+        "apply, so the engine crashes in init."
+    )
+
+
+def _detect_gemma2_missing_hidden_act(data: dict) -> str | None:
+    """Return a reason when a Gemma2 config omits hidden_act.
+
+    sglang's gemma2 runtime reads config.hidden_act unconditionally; configs
+    that only ship hidden_activation crash with AttributeError in engine init.
+    """
+    model_type = str(data.get("model_type") or "").strip().lower()
+    arches = {a.lower() for a in _config_architectures(data)}
+    if model_type != "gemma2" and not (arches & _GEMMA2_ARCHITECTURES):
+        return None
+    scopes = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        scopes.append(nested)
+    if any(s.get("hidden_act") for s in scopes):
+        return None
+    return (
+        "config.json is a Gemma2 model but lacks hidden_act (only "
+        "hidden_activation may be present); sglang's gemma2 runtime reads "
+        "config.hidden_act unconditionally and crashes with AttributeError "
+        "in engine init."
+    )
 
 
 def _detect_incompatible_model_config(
@@ -1319,6 +1391,15 @@ def _detect_incompatible_model_config(
             "init dereferences a missing max_position_embeddings and crashes "
             "in engine init (DeepSeek-V3.2-Exp class)."
         )
+    # Phi-3 longrope/su rope_scaling with non-canonical keys: hardware-agnostic
+    # (it is a transformers-layer Phi3Config validation, not a ROCm gap).
+    phi3_reason = _detect_phi3_rope_scaling_incompatible(data)
+    if phi3_reason is not None:
+        return phi3_reason
+    # Gemma2 missing hidden_act: also hardware-agnostic.
+    gemma2_reason = _detect_gemma2_missing_hidden_act(data)
+    if gemma2_reason is not None:
+        return gemma2_reason
     # Custom AutoConfig with unregistered model_type: sglang/vLLM fall
     # back to PreTrainedConfig (no max_position_embeddings attr) → crash.
     auto_map = data.get("auto_map")
