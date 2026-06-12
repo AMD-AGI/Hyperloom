@@ -5,22 +5,26 @@
 On ``baseline_failed`` the top-level ``final.json`` / report must headline the
 real terminal engine/worker fault from the last failed baseline attempt, not a
 benign upstream WARN (e.g. transformers' ``modeling_cohere2.py`` ENOENT).
+
+These exercise the real persistence path: a failed baseline result is recorded
+into ``SharedState`` via :meth:`SharedState.record_action_attempt` /
+:meth:`SharedState.record_action_failure` (exactly as the Coordinator does in
+``_handle_unpromotable_result``), and the report layer reads it back from state
+— there is no on-disk ``runs/baseline/<task_id>/result.json``.
 """
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
-
 from inference_optimizer.orchestrator.action_executors.report import (
+    _build_failure_summary,
     _build_summary_dict,
     _classify_root_cause_type,
     _format_md,
     _highlight_is_benign,
     _is_benign_failure_text,
+    _partition_benign_lines,
 )
+from inference_optimizer.orchestrator.shared_state import SharedState
 
 _BENIGN_WARN = (
     "[WARN] Error: [Errno 2] No such file or directory: "
@@ -36,55 +40,45 @@ _SERVER_LOG_OOM = (
     "EngineCore failed to start.\n"
 )
 
-
-def _mock_state(*, stop_reason: str = "baseline_failed") -> SimpleNamespace:
-    """Minimal SharedState-shaped object for ``_build_summary_dict``."""
-    return SimpleNamespace(
-        session_id="sid",
-        model_name="command-a-plus-05-2026-fp8",
-        model_path="/tmp/model",
-        model_class="moe",
-        stop_reason=stop_reason,
-        baseline_tput=0.0,
-        baseline_accuracy=0.0,
-        last_remaining_gaps_assessment={},
-        remaining_gaps_assessments=[],
-        current_best={},
-        cumulative_gain=0.0,
-        cumulative_gain_validated=0.0,
-        cumulative_gain_validated_ts="",
-        cumulative_gain_validated_stack_len=0,
-        optimization_stack=[],
-        crash_count=2,
-        pruned_families=[],
-        max_minutes=720,
-        roofline_snapshots=[],
-    )
+# A subprocess_nonzero stderr tail that mixes the benign WARN with the real
+# fault on separate lines (the #465 reproduction).
+_MIXED_STDERR = (
+    f"{_BENIGN_WARN}\n"
+    "Loading safetensors checkpoint shards: 100% complete\n"
+    "[2] [FATAL ERROR]: HIP failure: 'out of memory' during ncclCommInitRank\n"
+)
 
 
-def _write_baseline_attempt(
-    session_dir: Path,
-    task_id: str,
+def _failed_state(
     *,
     error_class: str,
     error: str,
-    server_log: str | None = None,
-) -> Path:
-    """Materialise ``runs/baseline/<task_id>/result.json`` (+ optional log)."""
-    task_dir = session_dir / "runs" / "baseline" / task_id
-    task_dir.mkdir(parents=True, exist_ok=True)
-    payload: dict[str, Any] = {
+    workspace: str | None = None,
+    task_id: str = "baseline-1",
+    stop_reason: str = "baseline_failed",
+) -> SharedState:
+    """Build a SharedState carrying one failed baseline attempt, like the
+    Coordinator's ``_handle_unpromotable_result`` does."""
+    state = SharedState()
+    state.set_stop_reason(stop_reason)
+    result = {
         "status": "failed",
         "error_class": error_class,
         "error": error,
-        "output_dir": str(task_dir),
     }
-    (task_dir / "result.json").write_text(
-        json.dumps(payload), encoding="utf-8",
+    if workspace is not None:
+        result["workspace"] = workspace
+    state.record_action_attempt(
+        action="baseline",
+        task_id=task_id,
+        status="failed",
+        decision="no_promote",
+        result=result,
     )
-    if server_log is not None:
-        (task_dir / "server.log").write_text(server_log, encoding="utf-8")
-    return task_dir
+    state.record_action_failure(
+        action="baseline", task_id=task_id, result=result,
+    )
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -95,14 +89,21 @@ def test_is_benign_failure_text():
     assert not _is_benign_failure_text("HIP out of memory during ncclCommInitRank")
 
 
-def test_highlight_is_benign_checks_summary_and_payload():
+def test_highlight_is_benign_uses_summary_only():
+    # Benign headline → suppressed.
     assert _highlight_is_benign({"summary": _BENIGN_WARN, "payload": {}})
-    assert _highlight_is_benign(
-        {"summary": "sev=high", "payload": {"detail": _BENIGN_WARN}}
-    )
+    # Real fault headline is kept even when payload mentions the benign file.
     assert not _highlight_is_benign(
-        {"summary": "sev=high EngineCore failed", "payload": {"x": 1}}
+        {"summary": "sev=high EngineCore failed", "payload": {"f": _BENIGN_WARN}}
     )
+
+
+def test_partition_benign_lines_keeps_real_lines():
+    kept, suppressed = _partition_benign_lines(_MIXED_STDERR)
+    joined = "\n".join(kept)
+    assert "out of memory" in joined.lower()
+    assert "modeling_cohere2.py" not in joined
+    assert suppressed and "modeling_cohere2.py" in suppressed[0]
 
 
 def test_classify_root_cause_type():
@@ -114,106 +115,109 @@ def test_classify_root_cause_type():
 
 
 # ---------------------------------------------------------------------------
-# failure_summary from result.json
+# failure_summary sourced from SharedState
 # ---------------------------------------------------------------------------
-def test_failure_summary_from_result_error(tmp_path):
-    """A server_init_dead attempt's excerpt becomes the headline root cause."""
-    _write_baseline_attempt(
-        tmp_path, "attempt1",
-        error_class="server_init_dead",
-        error=_SERVER_LOG_OOM,
-    )
-    state = _mock_state()
-    summary = _build_summary_dict(
-        state, ev_counts={}, highlights=[], session_dir=tmp_path,
-    )
-    fs = summary["failure_summary"]
+def test_failure_summary_from_server_init_dead_attempt():
+    state = _failed_state(error_class="server_init_dead", error=_SERVER_LOG_OOM)
+    fs = _build_failure_summary(state)
+    assert fs is not None
     assert fs["root_cause_type"] == "oom"
     assert "out of memory" in fs["root_cause"].lower()
-    assert fs["last_attempt_id"] == "attempt1"
+    assert fs["last_attempt_id"] == "baseline-1"
 
 
-def test_failure_summary_suppresses_benign_warn_and_falls_back_to_log(tmp_path):
-    """Benign WARN in result.error → fall back to server.log terminal marker."""
-    _write_baseline_attempt(
-        tmp_path, "attempt2",
-        error_class="unknown",
-        error=_BENIGN_WARN,
-        server_log=_SERVER_LOG_OOM,
-    )
-    state = _mock_state()
-    summary = _build_summary_dict(
-        state, ev_counts={}, highlights=[], session_dir=tmp_path,
-    )
-    fs = summary["failure_summary"]
+def test_failure_summary_mixed_error_keeps_real_root_cause():
+    """A benign WARN mixed with a real fault must NOT wipe the real root cause."""
+    state = _failed_state(error_class="subprocess_nonzero", error=_MIXED_STDERR)
+    fs = _build_failure_summary(state)
+    assert fs is not None
     assert fs["root_cause_type"] == "oom"
     assert "out of memory" in fs["root_cause"].lower()
     assert "modeling_cohere2.py" not in fs["root_cause"]
     assert fs["suppressed_benign"]
+
+
+def test_failure_summary_pure_benign_falls_back_to_server_log(tmp_path):
+    """When the only recorded error is the benign WARN, fall back to the
+    attempt's server.log terminal marker."""
+    workspace = tmp_path / "runs" / "baseline" / "baseline-1" / "benchmark_vllm_x"
+    workspace.mkdir(parents=True)
+    (workspace.parent / "server.log").write_text(_SERVER_LOG_OOM, encoding="utf-8")
+    state = _failed_state(
+        error_class="unknown", error=_BENIGN_WARN, workspace=str(workspace),
+    )
+    fs = _build_failure_summary(state, tmp_path)
+    assert fs is not None
+    assert fs["root_cause_type"] == "oom"
+    assert "out of memory" in fs["root_cause"].lower()
+    assert fs["suppressed_benign"]
     assert fs["server_log"].endswith("server.log")
+    # server.log path is rendered session-relative when session_dir is given.
+    assert not fs["server_log"].startswith(str(tmp_path))
 
 
-def test_failure_summary_picks_latest_failed_attempt(tmp_path):
-    """Most recent failed attempt wins when several are present."""
-    import os
-    import time
-
-    first = _write_baseline_attempt(
-        tmp_path, "attempt_old",
-        error_class="timeout",
-        error="baseline benchmark exceeded 600s",
+def test_failure_summary_picks_latest_failed_attempt():
+    state = _failed_state(
+        error_class="timeout", error="baseline benchmark exceeded 600s",
+        task_id="attempt-old",
     )
-    time.sleep(0.01)
-    _write_baseline_attempt(
-        tmp_path, "attempt_new",
-        error_class="server_init_dead",
-        error=_SERVER_LOG_OOM,
+    # A later, more severe attempt.
+    state.record_action_attempt(
+        action="baseline", task_id="attempt-new", status="failed",
+        decision="no_promote",
+        result={"status": "failed", "error_class": "server_init_dead",
+                "error": _SERVER_LOG_OOM},
     )
-    # Make the ordering deterministic regardless of FS mtime granularity.
-    old = time.time() - 100
-    os.utime(first / "result.json", (old, old))
+    fs = _build_failure_summary(state)
+    assert fs is not None
+    assert fs["last_attempt_id"] == "attempt-new"
+    assert fs["root_cause_type"] == "oom"
 
-    state = _mock_state()
-    summary = _build_summary_dict(
-        state, ev_counts={}, highlights=[], session_dir=tmp_path,
+
+def test_failure_summary_falls_back_to_last_action_failures():
+    """When no baseline audit row exists, use the global failure log row."""
+    state = SharedState()
+    state.set_stop_reason("baseline_failed")
+    state.record_action_failure(
+        action="baseline", task_id="b1",
+        result={"status": "failed", "error_class": "server_init_dead",
+                "error": _SERVER_LOG_OOM},
     )
-    assert summary["failure_summary"]["last_attempt_id"] == "attempt_new"
+    assert not state.baseline_attempts
+    fs = _build_failure_summary(state)
+    assert fs is not None
+    assert fs["root_cause_type"] == "oom"
+    assert fs["last_attempt_id"] == "b1"
 
 
-def test_failure_summary_absent_when_not_baseline_failed(tmp_path):
-    """Non-failure stop reasons never attach a failure_summary."""
-    _write_baseline_attempt(
-        tmp_path, "attempt1",
-        error_class="server_init_dead",
-        error=_SERVER_LOG_OOM,
+def test_failure_summary_absent_when_not_baseline_failed():
+    state = _failed_state(
+        error_class="server_init_dead", error=_SERVER_LOG_OOM,
+        stop_reason="time_exhausted",
     )
-    state = _mock_state(stop_reason="time_exhausted")
-    summary = _build_summary_dict(
-        state, ev_counts={}, highlights=[], session_dir=tmp_path,
-    )
-    assert "failure_summary" not in summary
-
-
-def test_failure_summary_absent_without_session_dir(tmp_path):
-    """Back-compat: no session_dir → no failure_summary (legacy callers)."""
-    state = _mock_state()
+    assert _build_failure_summary(state) is None
     summary = _build_summary_dict(state, ev_counts={}, highlights=[])
     assert "failure_summary" not in summary
 
 
+def test_failure_summary_absent_when_no_failed_attempt():
+    state = SharedState()
+    state.set_stop_reason("baseline_failed")
+    assert _build_failure_summary(state) is None
+
+
 # ---------------------------------------------------------------------------
-# markdown rendering
+# wiring through _build_summary_dict / _format_md
 # ---------------------------------------------------------------------------
-def test_format_md_surfaces_root_cause(tmp_path):
-    _write_baseline_attempt(
-        tmp_path, "attempt1",
-        error_class="server_init_dead",
-        error=_SERVER_LOG_OOM,
-    )
-    state = _mock_state()
-    summary = _build_summary_dict(
-        state, ev_counts={}, highlights=[], session_dir=tmp_path,
-    )
+def test_build_summary_dict_attaches_failure_summary():
+    state = _failed_state(error_class="server_init_dead", error=_SERVER_LOG_OOM)
+    summary = _build_summary_dict(state, ev_counts={}, highlights=[])
+    assert summary["failure_summary"]["root_cause_type"] == "oom"
+
+
+def test_format_md_surfaces_root_cause():
+    state = _failed_state(error_class="server_init_dead", error=_SERVER_LOG_OOM)
+    summary = _build_summary_dict(state, ev_counts={}, highlights=[])
     md = _format_md(summary)
     assert "Root cause" in md
     assert "oom" in md

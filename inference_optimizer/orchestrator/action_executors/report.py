@@ -57,19 +57,34 @@ def _is_benign_failure_text(text: str) -> bool:
 
 
 def _highlight_is_benign(highlight: dict[str, Any]) -> bool:
-    """Return True when a highlight record only carries a benign upstream WARN.
+    """Return True when a highlight's *headline* is only a benign upstream WARN.
 
-    Checks the one-line ``summary`` plus the stringy ``payload`` values so a
-    WARN buried in the event payload is suppressed too.
+    Judges the one-line ``summary`` (the text that would surface as the
+    headline) exclusively. Payload-buried mentions are intentionally ignored so
+    a highlight whose summary describes a real fault (e.g. ``EngineCore failed
+    to start``) is never suppressed even if its payload also references a benign
+    file (#465).
     """
-    if _is_benign_failure_text(str(highlight.get("summary", ""))):
-        return True
-    payload = highlight.get("payload")
-    if isinstance(payload, dict):
-        for value in payload.values():
-            if isinstance(value, str) and _is_benign_failure_text(value):
-                return True
-    return False
+    return _is_benign_failure_text(str(highlight.get("summary", "")))
+
+
+def _partition_benign_lines(text: str) -> tuple[list[str], list[str]]:
+    """Split an error blob into ``(kept_lines, suppressed_benign_lines)``.
+
+    Drops only the lines matching a benign upstream WARN pattern and preserves
+    every other line, so a mixed blob (benign WARN + real HIP OOM) keeps its
+    real root cause instead of being wiped wholesale (#465).
+    """
+    kept: list[str] = []
+    suppressed: list[str] = []
+    for line in str(text or "").splitlines():
+        if _is_benign_failure_text(line):
+            stripped = line.strip()
+            if stripped:
+                suppressed.append(stripped[:200])
+        else:
+            kept.append(line)
+    return kept, suppressed
 
 
 def _classify_root_cause_type(error_class: str, error_text: str) -> str:
@@ -116,111 +131,128 @@ def _pick_failure_headline(text: str) -> str:
     return lines[-1]
 
 
+def _last_failed_baseline_attempt(state: SharedState) -> dict[str, Any] | None:
+    """Return the most recent *failed* baseline attempt record, or ``None``.
+
+    Prefers ``SharedState.baseline_attempts`` (the per-action audit log written
+    by ``record_action_attempt``) and falls back to the matching
+    ``last_action_failures`` row. Both are persisted in ``state.json`` — there
+    is no on-disk ``runs/baseline/<task_id>/result.json`` to scan.
+    """
+    attempts = getattr(state, "baseline_attempts", None) or []
+    failed = [
+        a for a in attempts
+        if isinstance(a, dict) and str(a.get("status")) == "failed"
+    ]
+    if failed:
+        return failed[-1]
+    failures = getattr(state, "last_action_failures", None) or []
+    baseline_failures = [
+        f for f in failures
+        if isinstance(f, dict) and str(f.get("action")) == "baseline"
+    ]
+    return baseline_failures[-1] if baseline_failures else None
+
+
+def _resolve_attempt_server_log(attempt: dict[str, Any]) -> Path | None:
+    """Best-effort path to a baseline attempt's ``server.log``.
+
+    The audit row stores the ``benchmark_*`` workspace; ``server.log`` is
+    written one level up (``output_dir/server.log``). Also honours an explicit
+    ``stderr_log_path`` when present.
+    """
+    candidates: list[Path] = []
+    workspace = attempt.get("workspace")
+    if workspace:
+        ws = Path(str(workspace))
+        candidates.append(ws.parent / "server.log")
+        candidates.append(ws / "server.log")
+    stderr_log = attempt.get("stderr_log_path")
+    if stderr_log:
+        candidates.append(Path(str(stderr_log)))
+    for cand in candidates:
+        try:
+            if cand.is_file():
+                return cand
+        except OSError:
+            continue
+    return None
+
+
 def _build_failure_summary(
-    session_dir: Path, state: SharedState,
+    state: SharedState, session_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     """Surface the real terminal error on ``baseline_failed`` (issue #465).
 
-    Reads the most recent ``runs/baseline/<task_id>/result.json`` whose
-    ``status == "failed"`` and lifts its ``error`` / ``error_class`` into a
-    compact ``failure_summary`` block. When that error is missing or matches a
-    benign WARN, falls back to scanning the attempt's ``server.log`` for the
-    terminal engine/worker marker via :func:`server_log_death_excerpt`.
+    Sources the last *failed* baseline attempt from ``SharedState`` (see
+    :func:`_last_failed_baseline_attempt`) and lifts its ``error_excerpt`` /
+    ``error_class`` into a compact ``failure_summary``. Only benign upstream
+    WARN *lines* are stripped (the real error text is kept); when nothing
+    actionable remains, falls back to the attempt workspace's ``server.log``
+    terminal marker via :func:`server_log_death_excerpt`.
 
     Best-effort: only fires for ``baseline_failed`` and returns ``None`` on any
-    error so the report still writes.
+    error so the report still writes. ``session_dir`` is used only to render a
+    session-relative ``server_log`` path.
     """
     if str(getattr(state, "stop_reason", "") or "") != "baseline_failed":
         return None
     try:
-        from ...session_paths import runs_root as _runs_root
-        baseline_root = _runs_root(session_dir) / "baseline"
-        if not baseline_root.is_dir():
+        attempt = _last_failed_baseline_attempt(state)
+        if attempt is None:
             return None
-        attempts: list[tuple[float, Path, dict[str, Any]]] = []
-        for task_dir in baseline_root.iterdir():
-            if not task_dir.is_dir():
-                continue
-            result_path = task_dir / "result.json"
-            if not result_path.is_file():
-                continue
+
+        error_class = str(attempt.get("error_class") or "unknown")
+        raw_error = str(attempt.get("error_excerpt") or "")
+        kept_lines, suppressed = _partition_benign_lines(raw_error)
+        error_text = "\n".join(kept_lines).strip()
+
+        server_log_abs = _resolve_attempt_server_log(attempt)
+        # Only the benign WARN (or nothing) survived → dig the real terminal
+        # marker out of server.log when one is available.
+        if not error_text and server_log_abs is not None:
             try:
-                payload = json.loads(result_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            if str(payload.get("status")) != "failed":
-                continue
-            try:
-                mtime = result_path.stat().st_mtime
-            except OSError:
-                mtime = 0.0
-            attempts.append((mtime, task_dir, payload))
-        if not attempts:
-            return None
-        attempts.sort(key=lambda item: item[0])
-        _, last_dir, payload = attempts[-1]
+                from ._subprocess_kill import server_log_death_excerpt
+                excerpt = server_log_death_excerpt(str(server_log_abs))
+            except Exception:  # noqa: BLE001
+                excerpt = None
+            if excerpt:
+                error_text = excerpt.strip()
+                if error_class in ("", "unknown"):
+                    error_class = "server_init_dead"
+        if not error_text:
+            error_text = "(no terminal error captured; see logs)"
+
+        root_cause = _pick_failure_headline(error_text)
+        server_log_rel: str | None = None
+        if server_log_abs is not None:
+            if session_dir is not None:
+                try:
+                    server_log_rel = server_log_abs.relative_to(
+                        session_dir
+                    ).as_posix()
+                except ValueError:
+                    server_log_rel = str(server_log_abs)
+            else:
+                server_log_rel = str(server_log_abs)
+
+        summary: dict[str, Any] = {
+            "root_cause": root_cause[:500],
+            "root_cause_type": _classify_root_cause_type(
+                error_class, error_text
+            ),
+            "error_class": error_class,
+            "last_attempt_id": str(attempt.get("task_id") or ""),
+            "server_log": server_log_rel,
+        }
+        if suppressed:
+            summary["suppressed_benign"] = suppressed[:5]
+        return summary
     except Exception:  # noqa: BLE001 — report must never crash on the summary
         log.warning(
             "report_executor: failed to build failure_summary", exc_info=True,
         )
         return None
-
-    error_class = str(payload.get("error_class") or "unknown")
-    error_text = str(payload.get("error") or "").strip()
-    suppressed: list[str] = []
-    if error_text and _is_benign_failure_text(error_text):
-        suppressed.append(error_text.splitlines()[0][:200])
-        error_text = ""  # force fallback to the server.log terminal marker
-
-    # Locate this attempt's server.log (written at ``output_dir/server.log``).
-    server_log_abs: Path | None = None
-    out_dir = payload.get("output_dir")
-    candidates = [last_dir / "server.log"]
-    if out_dir:
-        candidates.insert(0, Path(str(out_dir)) / "server.log")
-    for cand in candidates:
-        try:
-            if cand.is_file():
-                server_log_abs = cand
-                break
-        except OSError:
-            continue
-
-    # Fallback / enrichment: pull the terminal marker from server.log when the
-    # result carried no error or only the benign WARN.
-    if not error_text and server_log_abs is not None:
-        try:
-            from ._subprocess_kill import server_log_death_excerpt
-            excerpt = server_log_death_excerpt(str(server_log_abs))
-        except Exception:  # noqa: BLE001
-            excerpt = None
-        if excerpt:
-            error_text = excerpt.strip()
-            if error_class == "unknown":
-                error_class = "server_init_dead"
-
-    root_cause = _pick_failure_headline(error_text) or (
-        "(no terminal error captured; see server.log)"
-    )
-    server_log_rel: str | None = None
-    if server_log_abs is not None:
-        try:
-            server_log_rel = server_log_abs.relative_to(session_dir).as_posix()
-        except ValueError:
-            server_log_rel = str(server_log_abs)
-
-    summary: dict[str, Any] = {
-        "root_cause": root_cause[:500],
-        "root_cause_type": _classify_root_cause_type(error_class, error_text),
-        "error_class": error_class,
-        "last_attempt_id": last_dir.name,
-        "server_log": server_log_rel,
-    }
-    if suppressed:
-        summary["suppressed_benign"] = suppressed
-    return summary
 
 
 def _build_summary_dict(
@@ -298,10 +330,11 @@ def _build_summary_dict(
         summary["roofline_comparison"] = cmp
     # Real terminal root cause on baseline_failed (#465): promote the last
     # failed baseline attempt's engine/worker fault over benign upstream WARNs.
-    if session_dir is not None:
-        failure_summary = _build_failure_summary(session_dir, state)
-        if failure_summary:
-            summary["failure_summary"] = failure_summary
+    # Sourced from SharedState (not the filesystem); session_dir only renders a
+    # relative server.log path.
+    failure_summary = _build_failure_summary(state, session_dir)
+    if failure_summary:
+        summary["failure_summary"] = failure_summary
     return summary
 
 
@@ -932,6 +965,11 @@ class ReportExecutor:
         )
 
         state = SharedState.load_or_init(session_dir)
+        # Only demote benign upstream WARNs from highlights on a baseline
+        # failure (#465); other runs keep every highlight untouched.
+        suppress_benign_highlights = (
+            str(getattr(state, "stop_reason", "") or "") == "baseline_failed"
+        )
 
         # Pull bus stats over a fresh connection (SQLite WAL shares cleanly).
         db = SqliteConnection(db_path_for(session_dir))
@@ -943,10 +981,10 @@ class ReportExecutor:
             for m in ev_rows:
                 if m.topic in highlight_topics:
                     h = _highlight(m.payload or {}, m.topic, m.from_agent)
-                    # Suppress benign upstream WARNs so they never become the
-                    # top-level highlight on a failure (#465); the full text
-                    # still lives in the per-attempt logs.
-                    if _highlight_is_benign(h):
+                    # On baseline_failed, suppress benign upstream WARN
+                    # headlines so they never become the top-level highlight
+                    # (#465); the full text still lives in the per-attempt logs.
+                    if suppress_benign_highlights and _highlight_is_benign(h):
                         continue
                     highlights.append(h)
         finally:
