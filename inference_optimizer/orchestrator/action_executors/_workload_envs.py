@@ -29,6 +29,7 @@ import yaml
 
 from ...paths import asset_root
 from ._grid_runner import (
+    dedup_vllm_server_args,
     inject_sglang_attention_backend,
     inject_sglang_context_length,
     inject_sglang_moe_runner_backend,
@@ -518,6 +519,14 @@ def materialize_config_with_envs(
     resolved_server_args = inject_sglang_moe_runner_backend(
         resolved_server_args, bench.get("framework"), bench.get("model"),
         gpu_type=gpu_type or bench.get("runner_type"),
+    )
+    # 5. vLLM/atom argparse dedup (#520): the YAML EXTRA_VLLM_ARGS base and a
+    #    sweep/kernel variant can each inject --attention-backend, and
+    #    merge_server_args keeps both. vLLM v0.21.0 crashes EngineCoreProc on a
+    #    duplicate. Collapse repeated single-value flags to last-wins (so the
+    #    variant override survives); no-op for sglang.
+    resolved_server_args = dedup_vllm_server_args(
+        resolved_server_args, bench.get("framework"),
     )
     if resolved_server_args:
         envs[framework_env] = resolved_server_args
