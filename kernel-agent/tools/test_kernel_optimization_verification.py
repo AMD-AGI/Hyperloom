@@ -688,6 +688,32 @@ def test_geak_prompt_patcher_refuses_to_guess_on_drift(tmp_path, monkeypatch):
     assert "different_runner.py" in yaml.read_text(encoding="utf-8")
 
 
+def test_geak_prompt_patcher_recognises_upstream_already_fixed(tmp_path, monkeypatch):
+    """When upstream YAML already uses generic <your-test-command> placeholders
+    (GEAK ec61bdb+), the patcher should return ok without modifying the file."""
+    import geak_prompt_patcher as gpp
+
+    yaml = tmp_path / "config" / "mini_kernel_strategy_list.yaml"
+    yaml.parent.mkdir(parents=True)
+    yaml.write_text(
+        "system_prompt: |\n"
+        "    profile_kernel:\n"
+        "    - Forbidden in `command`: `&&`, `cd`\n"
+        '    - Good example: `command="<your-test-command>", workdir="/path/to/project"`\n'
+        '    - Bad example: `command="cd /path/to/project && <your-test-command>"`\n'
+        "    other_tool:\n"
+        "    - keep\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HYPERLOOM_GEAK_PROMPT_YAML", str(yaml))
+
+    ok, msg = gpp.ensure_geak_prompt_patched()
+    assert ok is True
+    assert "upstream" in msg.lower() or "already" in msg.lower()
+    # File must not be modified.
+    assert "<your-test-command>" in yaml.read_text(encoding="utf-8")
+
+
 def test_benchmark_files_list_counts_as_benchmark(tmp_path):
     bench = tmp_path / "bench.py"
     bench.write_text("print('ok')\n", encoding="utf-8")
