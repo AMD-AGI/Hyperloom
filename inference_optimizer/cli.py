@@ -159,6 +159,8 @@ def _build_orchestration_prompt(
     framework: str,
     objective: Objective,
     max_minutes: int,
+    no_explore: bool = False,
+    no_framework: bool = False,
     action_registry: ActionRegistry | None = None,
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
@@ -170,6 +172,8 @@ def _build_orchestration_prompt(
         enabled_actions=enabled,
         framework=framework,
         kernel_enabled=not no_kernel,
+        explore_enabled=not no_explore,
+        framework_phase_enabled=not no_framework,
         objective_kind=kind,
         objective_value=value,
         max_minutes=int(max_minutes),
@@ -4161,6 +4165,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     prompts: dict[str, str] = {
         "orchestration": args.orch_prompt or _build_orchestration_prompt(
             no_kernel=no_kernel,
+            no_explore=no_explore,
+            no_framework=bool(getattr(args, "no_framework", False)),
             framework=framework_for_prompt,
             objective=objective,
             max_minutes=max_minutes_for_prompt,

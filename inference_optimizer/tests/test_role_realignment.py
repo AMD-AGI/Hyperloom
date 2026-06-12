@@ -57,7 +57,7 @@ def test_orchestration_prompt_no_kernel_marks_kernel_skipped(registry):
         framework="sglang",
         max_minutes=120,
     )
-    assert "(skipped in --no-kernel runs)" in text
+    assert "(DISABLED: --no-kernel — phase skipped)" in text
 
 
 def test_critic_prompt_includes_phase_review_contract(registry):
