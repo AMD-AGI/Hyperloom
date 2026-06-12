@@ -182,30 +182,28 @@ def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
     assert "ROCM_AITER_FA" in args, "last-wins should keep variant value"
 
 
-def test_build_variant_yaml_preserves_json_arg(tmp_path: Path) -> None:
-    """Dedupe must not break JSON-valued args like --json-model-override-args."""
-    base = tmp_path / "base.yaml"
-    base.write_text(
-        yaml.safe_dump({
-            "benchmark": {
-                "framework": "sglang",
-                "envs": {
-                    "EXTRA_SGLANG_ARGS": (
-                        '--json-model-override-args \'{"rope_scaling":null}\''
-                        " --context-length 8192"
-                    ),
-                },
-            },
-        }),
-        encoding="utf-8",
+def test_shell_safe_dedupe_leaves_json_arg_untouched() -> None:
+    """When a space/JSON-valued flag is present, dedupe must leave the whole
+    string untouched (the unquoted $EXTRA_*_ARGS expansion downstream cannot
+    round-trip a quoted value anyway, so mangling it is worse than skipping)."""
+    args = (
+        '--json-model-override-args {"rope_scaling":null} '
+        "--context-length 8192 --context-length 4096"
     )
-    variant = _variant("v1", "--context-length 4096")
-    out = gr._build_variant_yaml(
-        base, "", variant, output_subdir=tmp_path / "v1",
+    out = gr._shell_safe_dedupe(args)
+    assert out == args, f"JSON-bearing string must be left as-is: {out}"
+
+
+def test_shell_safe_dedupe_normalizes_equals_form() -> None:
+    """#520: --flag=value and --flag value must dedupe to one (last wins)."""
+    out = gr._shell_safe_dedupe(
+        "--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA"
     )
-    cfg = yaml.safe_load(out.read_text(encoding="utf-8"))
-    args = cfg["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
-    assert "--json-model-override-args" in args
-    assert "rope_scaling" in args, f"JSON value mangled: {args}"
-    assert args.count("--context-length") == 1, f"duplicate flag: {args}"
-    assert "4096" in args, "last-wins should keep variant value"
+    assert out.count("--attention-backend") == 1, out
+    assert "ROCM_AITER_FA" in out, "last-wins should keep the later value"
+    assert "ROCM_ATTN" not in out
+
+
+def test_shell_safe_dedupe_simple_last_wins() -> None:
+    out = gr._shell_safe_dedupe("--tp 1 --tp 8 --mem-fraction-static 0.9")
+    assert out == "--tp 8 --mem-fraction-static 0.9"

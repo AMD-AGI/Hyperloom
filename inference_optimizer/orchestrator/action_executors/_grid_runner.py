@@ -739,31 +739,50 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
-def _shell_safe_dedupe(args: str) -> str:
-    """Last-wins dedupe that preserves quoted/JSON values via shlex.
+# Flags whose value can contain spaces / JSON; never tokenize-dedupe these
+# because the downstream Magpie scripts expand $EXTRA_*_ARGS unquoted and the
+# value would be split anyway. Leave the whole arg string untouched if present.
+_SPACE_VALUE_FLAGS = (
+    "--json-model-override-args",
+    "--override-generation-config",
+    "--tool-call-parser",
+)
 
-    Unlike _dedupe_extra_server_args (which uses str.split and can break
-    JSON args), this uses shlex.split to tokenize, keeping quoted values
-    intact. Each ``--flag value`` pair keeps its last occurrence.
+
+def _shell_safe_dedupe(args: str) -> str:
+    """Last-wins dedupe for single-token-valued flags only.
+
+    Targeted and conservative: collapses repeated ``--flag value`` (or
+    ``--flag=value``) pairs whose value is a single whitespace-free token,
+    keeping the last occurrence. If the string contains a flag known to carry
+    a space/JSON value (which the unquoted ``$EXTRA_*_ARGS`` expansion in the
+    Magpie scripts cannot safely round-trip anyway), the string is returned
+    unchanged to avoid mangling it.
     """
-    import shlex
-    try:
-        tokens = shlex.split(args)
-    except ValueError:
+    if not args.strip():
+        return ""
+    if any(f in args for f in _SPACE_VALUE_FLAGS):
         return args
+    tokens = args.split()
     pairs: dict[str, list[str]] = {}
     order: list[str] = []
     i = 0
     while i < len(tokens):
         t = tokens[i]
         if t.startswith("--"):
-            flag = t
-            i += 1
-            vals: list[str] = []
-            if i < len(tokens) and not tokens[i].startswith("--"):
-                vals = [tokens[i]]
+            if "=" in t:
+                # Normalize ``--flag=value`` so it dedupes against ``--flag value``.
+                flag, _, val = t.partition("=")
+                pair = [flag, val]
                 i += 1
-            pair = [flag, *vals] if vals else [flag]
+            else:
+                flag = t
+                i += 1
+                if i < len(tokens) and not tokens[i].startswith("--"):
+                    pair = [flag, tokens[i]]
+                    i += 1
+                else:
+                    pair = [flag]
             if flag not in pairs:
                 order.append(flag)
             pairs[flag] = pair
@@ -774,11 +793,7 @@ def _shell_safe_dedupe(args: str) -> str:
             i += 1
     out: list[str] = []
     for k in order:
-        for v in pairs[k]:
-            if " " in v or "{" in v:
-                out.append(shlex.quote(v))
-            else:
-                out.append(v)
+        out.extend(pairs[k])
     return " ".join(out)
 
 
