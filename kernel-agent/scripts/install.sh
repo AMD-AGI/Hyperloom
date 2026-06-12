@@ -126,15 +126,11 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR
 fi
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
-# Pin GEAK to the save-and-test-diff-fallthrough fix tip
-# (https://github.com/AMD-AGI/GEAK/pull/244, not yet released as a tag).
-# We pin to the *commit SHA* of the branch tip, NOT the branch name, so a
-# future force-push / rebase upstream cannot silently change what every
-# fresh install gets.
-# TODO(post-GEAK-PR-244): once PR #244 lands and ships in a new GEAK tag,
-# revert this pin to the tag (e.g. v3.2.1) for stronger discoverability.
-# Operators can override with GEAK_REF=<tag|branch|sha>.
-GEAK_REF="${GEAK_REF:-ec61bdbdb151904ec187a8d89518afb969c53737}"
+# Track the GEAK `main` branch so fresh installs pick up the latest upstream
+# tip at install time. Note: tracking a branch (rather than a pinned commit
+# SHA) is not reproducible -- a force-push / rebase upstream changes what an
+# install gets. Operators can pin a specific ref with GEAK_REF=<tag|branch|sha>.
+GEAK_REF="${GEAK_REF:-main}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 OOB_ROOT="${OOB_ROOT:-${OOB_CLI_ROOT:-${_open_source_root}/OOB}}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"

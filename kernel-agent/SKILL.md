@@ -78,7 +78,7 @@ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
   `TraceLens_generate_perf_report_pytorch_inference --help`
   (Hyperloom is inference-only since v0.4; the training-mode CLI is no
   longer accepted)
-- GEAK CLI from `GEAK_REF` (default `v3.2.0`) +
+- GEAK CLI from `GEAK_REF` (default `main`) +
   `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` (model resolution:
   `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL` from env, default
   `claude-opus-4-7`). Run-mode default for the generated yaml is
