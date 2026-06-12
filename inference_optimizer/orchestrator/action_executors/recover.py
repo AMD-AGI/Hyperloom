@@ -94,24 +94,29 @@ def _env_gate_allows_gpureset() -> bool:
     return os.getenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "").strip() == "1"
 
 
-def _is_dynamo_cpu_only_sandbox() -> bool:
-    """True on the Dynamo multi-node sandbox, which is CPU-only by design.
+def _is_multi_node_sandbox() -> bool:
+    """True when running in multi-node mode (nodes >= 2).
 
-    On the ``--mn-backend dynamo`` path the optimizer runs in a CPU-only
-    sandbox and the GPUs live on remote Dynamo pods reached over SSH. The
-    sandbox still ships a ``rocm-smi`` on PATH, but its kfd ioctl blocks for
-    seconds (no local KFD device) and ``_probe_gpu_free_mb`` returns ``[]`` ->
-    ``_all_recovered([])`` is False -> the orchestration LLM sees "GPU
-    unhealthy" and proposes ``recover`` forever. Detected via the multi_node
-    state file (``backend == "dynamo"``), the same isolation seam used by
-    ``dynamo_ssh_env_from_state`` — so RayJob and single-node (where recover's
-    local rocm-smi is meaningful) are untouched. Best-effort: any failure
-    returns False and preserves the original GPU-probe behaviour.
+    In multi-node mode (both Dynamo and RayJob), the optimizer sandbox does
+    NOT own the inference server GPUs — those live in remote pods (Dynamo
+    worker pods or RayJob head/worker pods). The sandbox may be scheduled on
+    a GPU node and see local ``/dev/kfd`` + ``rocm-smi``, but:
+      - The local GPUs run OTHER workloads (not ours).
+      - ``rocm-smi --showmeminfo`` reports those workloads' VRAM usage.
+      - ``_all_recovered`` sees low free_mb and returns False.
+      - The orchestration LLM then proposes ``recover`` every tick forever.
+
+    The fix: skip the local GPU probe entirely in multi-node mode. Remote
+    GPU health is handled by the Dynamo restart-server / kill-inference
+    path (SSH to the actual pods).
+
+    Single-node (``is_multi_node() == False``) is unaffected — the sandbox
+    IS the GPU pod, so local rocm-smi / gpureset are meaningful.
     """
     try:
-        from ._multi_node_env import dynamo_ssh_env_from_state
-        return bool(dynamo_ssh_env_from_state())
-    except Exception:  # noqa: BLE001 - never block recovery on a probe error
+        from ._multi_node_env import is_multi_node
+        return is_multi_node()
+    except Exception:  # noqa: BLE001 - never block recovery on import error
         return False
 
 
@@ -151,7 +156,7 @@ class RecoverExecutor:
         # ioctl and makes recover loop. Short-circuit to success so the
         # orchestrator stops proposing recover; remote VRAM cleanup, when
         # needed, is handled by the dynamo restart-server / kill-inference path.
-        if _is_dynamo_cpu_only_sandbox():
+        if _is_multi_node_sandbox():
             log.info(
                 "recover_executor: dynamo CPU-only sandbox detected; skipping "
                 "local rocm-smi probe + gpureset (GPUs are on remote pods)."
