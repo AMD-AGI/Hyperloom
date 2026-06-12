@@ -3835,8 +3835,10 @@ class Coordinator:
         This is the L2 supervisor escalation the long-run coverage lower-bound
         relies on — a real scheduling event (a normal domain delegate routed
         through PolicyGate + warmup + the GPU specialist pool), not an advisory
-        nudge. Idempotent per ``(anchor, round)`` so it can't spam the bus, and
-        it self-throttles by zeroing the per-anchor counter on dispatch. Routes
+        nudge. Idempotent per ``(anchor, round, macro_cycle)`` so it can't spam
+        the bus yet still re-fires in a later cycle (the cycle suffix keeps a new
+        macro-cycle from dedup-matching a prior cycle's forced task), and it
+        self-throttles by zeroing the per-anchor counter on dispatch. Routes
         through ``_handle_intent`` exactly as an LLM delegate would; at most one
         forced dispatch per tick.
         """
@@ -3889,6 +3891,7 @@ class Coordinator:
                     "params": params,
                     "idempotency_key": (
                         f"forced-stalled-{anchor}-round{round_id}"
+                        f"{self._cycle_idem_suffix()}"
                     ),
                 },
             )

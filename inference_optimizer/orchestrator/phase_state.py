@@ -186,6 +186,9 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     "framework_pr_phase_done",          # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
     "framework_pr_plateau",             # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
     "framework_pr_force_exit_low_budget",  # FRAMEWORK_PR → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
+    # R1/R7 cyclic phase machine back-edge reasons (written by compute_next_phase).
+    "cycle_reloop",                     # SWEEP → FRAMEWORK_PR/EXPLORE; opens a new macro-cycle while budget + leverage remain
+    "global_converged",                 # SWEEP → CLOSE; cyclic leverage exhausted across macro-cycles (also a terminal stop_reason)
 
     # Terminal exits (any phase → CLOSE)
     "robustness_escalated",

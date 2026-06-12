@@ -66,7 +66,7 @@ from typing import Any
 
 from ...session_paths import runs_dir
 from ..framework_paths import resolve_source_file_allowlist
-from ..specialist_patch_safety import patch_targets_missing
+from ..specialist_patch_safety import patch_file_targets, patch_targets_missing
 from ._accuracy_gate import accuracy_passed, parse_eval_results
 from ._grid_runner import (
     GridVariant,
@@ -275,18 +275,97 @@ def _git_checkout_clean(framework_root: Path) -> tuple[bool, str]:
     return cp.returncode == 0, cp.stderr.strip()
 
 
-def _git_commit_kept(framework_root: Path, message: str) -> tuple[bool, str]:
-    """Commit the current working tree to git (R1 cross-cycle durability).
+_PATCH_DEV_NULL = "/dev/null"
+
+
+def _strip_path_prefix(path: str, level: int) -> str:
+    """Drop ``level`` leading path components (mimics ``git apply -p<level>``)."""
+    if level <= 0:
+        return path
+    parts = path.split("/")
+    return "/".join(parts[level:]) if len(parts) > level else parts[-1]
+
+
+def _commit_strip_level(
+    framework_root: Path, pairs: list[tuple[str, str]],
+) -> int:
+    """Pick the ``-p`` strip level resolving the most targets to existing files.
+
+    The patch has already been applied, so modify/create targets exist in the
+    tree; the level that maximises those hits is the one the forward apply used.
+    """
+    best_lvl, best_hits = 1, -1
+    for lvl in _P_LEVELS:
+        hits = 0
+        for old, new in pairs:
+            for raw in (new, old):
+                if not raw or raw == _PATCH_DEV_NULL:
+                    continue
+                try:
+                    if (framework_root / _strip_path_prefix(raw, lvl)).exists():
+                        hits += 1
+                except OSError:
+                    continue
+        if hits > best_hits:
+            best_hits, best_lvl = hits, lvl
+    return best_lvl
+
+
+def _patch_touched_paths(
+    framework_root: Path, patches: list[Path],
+) -> list[str]:
+    """Repo-relative paths the applied ``patches`` modified/created.
+
+    Used to scope the commit-on-KEEP to *only* the files this patch touched, so
+    an unrelated dirty working tree under ``framework_root`` (generated files,
+    manual edits, stray artifacts) is never swept into the ``hyperloom KEEP``
+    commit. Only paths that exist post-apply are emitted (pure deletions, the
+    rare KEEP shape, are skipped) so the subsequent ``git add`` pathspec can
+    never miss and silently stage nothing for the whole set.
+    """
+    out: list[str] = []
+    for patch in patches:
+        try:
+            text = patch.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        pairs = patch_file_targets(text)
+        if not pairs:
+            continue
+        lvl = _commit_strip_level(framework_root, pairs)
+        for old, new in pairs:
+            for raw in (new, old):
+                if not raw or raw == _PATCH_DEV_NULL:
+                    continue
+                rel = _strip_path_prefix(raw, lvl)
+                try:
+                    exists = (framework_root / rel).exists()
+                except OSError:
+                    exists = False
+                if exists and rel not in out:
+                    out.append(rel)
+                    break  # one resolved path per header pair
+    return out
+
+
+def _git_commit_kept(
+    framework_root: Path, message: str, paths: list[str],
+) -> tuple[bool, str]:
+    """Commit only the patch-touched ``paths`` to git (R1 cross-cycle durability).
 
     In the cyclic phase machine, KEEP patches accumulate across macro-cycles as
     *uncommitted* working-tree edits. A later cycle's REVERT may fall back to
     ``git checkout -- .`` (discards ALL uncommitted changes), which would wipe
     every prior cycle's win. Committing each KEEP makes those wins survive the
-    checkout fallback (it only clears uncommitted state). Best-effort: a commit
-    failure (e.g. nothing staged) is non-fatal — the KEEP still stands in the
-    working tree exactly as before.
+    checkout fallback (it only clears uncommitted state). The commit is scoped
+    to the exact paths the patch touched (never ``git add -A``) so an unrelated
+    dirty framework tree is not folded into the win commit. Best-effort: a
+    commit failure (e.g. nothing staged) is non-fatal — the KEEP still stands in
+    the working tree exactly as before.
     """
-    add = ["git", "-C", str(framework_root), "add", "-A"]
+    if not paths:
+        return True, "no patch-touched paths to commit"
+    add = ["git", "-C", str(framework_root), "add", "-A", "--", *paths]
     commit = [
         "git", "-C", str(framework_root),
         "-c", "user.email=hyperloom@local",
@@ -735,9 +814,11 @@ class IntegratePatchExecutor:
         try:
             from ..phase_state import is_cyclic_phases_enabled
             if is_cyclic_phases_enabled():
+                touched = _patch_touched_paths(framework_root, applied)
                 ok, note = _git_commit_kept(
                     framework_root,
                     f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)",
+                    touched,
                 )
                 if not ok:
                     log.warning(

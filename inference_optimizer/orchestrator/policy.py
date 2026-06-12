@@ -418,6 +418,18 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "phase_started_unix",
     "phase_history",
     "phase_budget_pct",
+    # R1/R2/R7 cyclic phase-machine state (Coordinator-only writers:
+    # ``_apply_macro_cycle_reloop`` + ``should_reloop_to_explore`` accounting).
+    # Locked so an LLM ``update_state`` cannot forge the macro-cycle counter,
+    # the per-cycle budget window, the per-cycle gain anchor / no-gain streak
+    # (which drive global-convergence + the decaying acceptance curve), or the
+    # cross-cycle bottleneck-switch handoff.
+    "macro_cycle",
+    "cycle_minutes",
+    "gain_at_cycle_start",
+    "no_gain_cycle_streak",
+    "pending_bottleneck_switch",
+    "last_cycle_bottleneck",
     # operator-facing lifecycle event log (#266). Coordinator-only writer
     # (SharedState.record_lifecycle_event); LLM update_state must not be
     # able to forge "phase X finished, outputs at <path>" events.

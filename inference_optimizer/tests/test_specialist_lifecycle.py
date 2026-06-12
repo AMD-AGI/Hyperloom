@@ -527,8 +527,29 @@ async def test_force_stalled_domain_dispatches_when_gap_pending(force_coord):
     assert params["gap_canonical_id"] == "gap.framework.scheduler.s1"
     assert params["scope"] == "domain"
     assert "forced-stalled-framework" in intent.payload["idempotency_key"]
+    # Cycle 0 → no cycle suffix (legacy monotonic key is byte-for-byte unchanged).
+    assert not intent.payload["idempotency_key"].endswith("-c0")
     # Counter is zeroed up-front so it can't re-fire next tick.
     assert state.rounds_since_last_specialist["framework"] == 0
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_idempotency_key_is_cycle_scoped(force_coord):
+    # In a later macro-cycle the forced-specialist key must carry the cycle
+    # suffix so it does not dedup-match the prior cycle's task.
+    state = force_coord.shared_state
+    state.macro_cycle = 2
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    state.upsert_gap({
+        "canonical_id": "gap.framework.scheduler.s1",
+        "domain_hint": "serving_specialist", "severity": "high",
+    })
+
+    await force_coord._maybe_force_stalled_domain_specialist()
+
+    _, intent = force_coord._handle_intent.call_args.args
+    assert intent.payload["idempotency_key"].endswith("-c2")
 
 
 @pytest.mark.asyncio
