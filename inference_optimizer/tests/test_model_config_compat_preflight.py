@@ -129,6 +129,119 @@ def test_detect_rope_in_nested_text_config(tmp_path):
     assert reason is not None
 
 
+def test_detect_dual_chunk_blocks_on_amd(tmp_path):
+    m = tmp_path / "dual_chunk_amd"
+    _write_config(
+        m,
+        model_type="qwen2",
+        max_position_embeddings=1010000,
+        dual_chunk_attention_config={"chunk_size": 262144},
+    )
+    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    assert reason is not None
+    assert "dual_chunk" in reason
+
+
+def test_detect_dual_chunk_not_blocked_off_amd(tmp_path):
+    m = tmp_path / "dual_chunk_non_amd"
+    _write_config(
+        m,
+        model_type="qwen2",
+        max_position_embeddings=1010000,
+        dual_chunk_attention_config={"chunk_size": 262144},
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def _write_quant_config(model_dir: Path, payload: dict) -> None:
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "hf_quant_config.json").write_text(
+        json.dumps(payload), encoding="utf-8",
+    )
+
+
+def test_detect_modelopt_fp8_blocks_on_amd(tmp_path):
+    """ModelOpt FP8 (declared in hf_quant_config.json) has no ROCm loader."""
+    m = tmp_path / "modelopt_fp8"
+    _write_config(m, model_type="llama", max_position_embeddings=8192)
+    _write_quant_config(m, {
+        "producer": {"name": "modelopt"},
+        "quantization": {"quant_algo": "FP8", "kv_cache_quant_algo": "FP8"},
+    })
+    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    assert reason is not None
+    assert "modelopt" in reason.lower() or "FP8" in reason
+
+
+def test_detect_nvfp4_blocks_on_amd(tmp_path):
+    m = tmp_path / "nvfp4"
+    _write_config(m, model_type="llama", max_position_embeddings=8192)
+    _write_quant_config(m, {
+        "producer": {"name": "modelopt"},
+        "quantization": {"quant_algo": "NVFP4"},
+    })
+    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    assert reason is not None
+    assert "NVFP4" in reason or "nvfp4" in reason.lower()
+
+
+def test_detect_bitsandbytes_blocks_on_amd(tmp_path):
+    """bitsandbytes declared in config.json.quantization_config; CUDA-only kernels."""
+    m = tmp_path / "bnb"
+    _write_config(
+        m, model_type="llama", max_position_embeddings=8192,
+        quantization_config={"quant_method": "bitsandbytes"},
+    )
+    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    assert reason is not None
+    assert "bitsandbytes" in reason.lower()
+
+
+def test_detect_modelopt_fp8_not_blocked_off_amd(tmp_path):
+    """The same checkpoint can still run on a vendor (NVIDIA) engine."""
+    m = tmp_path / "modelopt_fp8_nv"
+    _write_config(m, model_type="llama", max_position_embeddings=8192)
+    _write_quant_config(m, {
+        "producer": {"name": "modelopt"},
+        "quantization": {"quant_algo": "FP8"},
+    })
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_amd_native_fp8_not_blocked(tmp_path):
+    """AMD Quark / compressed-tensors FP8 is ROCm-native; must NOT be blocked."""
+    m = tmp_path / "quark_fp8"
+    _write_config(
+        m, model_type="llama", max_position_embeddings=8192,
+        quantization_config={"quant_method": "fp8"},
+    )
+    assert cli._detect_incompatible_model_config(str(m), gpu_type="mi300x") is None
+
+
+def test_detect_unregistered_custom_config_blocks(tmp_path):
+    m = tmp_path / "kimi_k2"
+    _write_config(
+        m,
+        model_type="kimi_k2",
+        max_position_embeddings=131072,
+        auto_map={"AutoConfig": "configuration_deepseek.DeepseekV3Config"},
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None
+    assert "kimi_k2" in reason
+
+
+def test_detect_custom_automap_known_type_not_blocked(tmp_path):
+    m = tmp_path / "known_automap"
+    _write_config(
+        m,
+        model_type="llama",
+        max_position_embeddings=8192,
+        auto_map={"AutoConfig": "configuration_custom.CustomConfig"},
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
 # ---------------------------------------------------------------------------
 # _preflight_model_config_compat — persistence + return contract
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -69,9 +70,8 @@ def coord(tmp_path: Path) -> Coordinator:
     return c
 
 
-@pytest.mark.asyncio
-async def test_prelude_initial_roofline_task_contract(coord: Coordinator):
-    """The PRELUDE-bootstrap enqueue produces a ``roofline`` task carrying the baseline's benchmark-script + current_best args."""
+def test_prelude_initial_roofline_task_contract(coord: Coordinator):
+    """The PRELUDE-bootstrap roofline represents baseline, not current_best."""
     coord.shared_state.current_best = {
         "extra_server_args": "--tp 8 --enable-mla",
     }
@@ -79,14 +79,38 @@ async def test_prelude_initial_roofline_task_contract(coord: Coordinator):
         "benchmark_script": "magpie_serving_bench.sh",
     }
 
-    task = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
+    task = asyncio.run(
+        coord._enqueue_internal_analysis_task(reason="prelude_initial"),
+    )
 
     assert task.kind == "roofline"
     assert task.idempotency_key == "internal-analysis-prelude_initial"
     assert task.params["reason"] == "prelude_initial"
     assert task.params["source"] == "coordinator_internal"
-    assert task.params["base_extra_args"] == "--tp 8 --enable-mla"
+    assert "base_extra_args" not in task.params
     assert task.params["benchmark_script"] == "magpie_serving_bench.sh"
+
+
+def test_prelude_initial_roofline_uses_baseline_server_args(
+    coord: Coordinator, monkeypatch,
+):
+    """PRELUDE roofline injects baseline's own server args, never current_best's."""
+    coord.shared_state.current_best = {
+        "extra_server_args": "--enable-torch-compile --quantization fp8",
+    }
+    import inference_optimizer.orchestrator.roofline_ceiling as rc
+    monkeypatch.setattr(
+        rc, "_read_baseline_yaml_server_args",
+        lambda _state: "--attention-backend AITER",
+    )
+
+    task = asyncio.run(
+        coord._enqueue_internal_analysis_task(reason="prelude_initial"),
+    )
+
+    assert task.params["base_extra_args"] == "--attention-backend AITER"
+    assert "--enable-torch-compile" not in task.params["base_extra_args"]
+    assert "fp8" not in task.params["base_extra_args"]
 
 
 @pytest.mark.asyncio
@@ -110,6 +134,20 @@ async def test_distinct_reasons_produce_distinct_tasks(coord: Coordinator):
     assert prelude.task_id != watermark.task_id
     assert "internal-analysis-prelude_initial" in coord.tasks._by_idem
     assert "internal-analysis-explore_keep_watermark" in coord.tasks._by_idem
+
+
+def test_watermark_roofline_inherits_current_best_args(coord: Coordinator):
+    """Watermark roofline still profiles the optimized current_best config."""
+    coord.shared_state.current_best = {
+        "extra_server_args": "--tp 8 --enable-mla",
+    }
+
+    task = asyncio.run(
+        coord._enqueue_internal_analysis_task(reason="explore_keep_watermark"),
+    )
+
+    assert task.params["reason"] == "explore_keep_watermark"
+    assert task.params["base_extra_args"] == "--tp 8 --enable-mla"
 
 
 @pytest.mark.asyncio

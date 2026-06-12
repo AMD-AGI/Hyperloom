@@ -15,15 +15,19 @@ Robustness RCA later (P1-7).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
+import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import yaml
 
@@ -33,11 +37,14 @@ from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
 from ._grid_runner import sanitize_result_dir, sanitize_script_name
 from ._subprocess_kill import (
+    SERVER_DEAD_RETURNCODE,
     _process_group_alive,
     _signal_group,
     run_with_session_kill,
+    server_log_death_excerpt,
 )
 from ._workload_envs import (
+    FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
 )
@@ -105,6 +112,210 @@ AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
 # names live in `_workload_envs`.
 _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
+
+
+# #523: filesystem types that can be revoked / unmounted mid-run (e.g. a
+# wekafs/NFS mount flap). A process whose cwd lives on such a mount sees its
+# working directory "vanish underneath it" and any RELATIVE-path write hits
+# ``FileNotFoundError``. SGLang's cuda-graph profiling
+# (``--enable-profile-cuda-graph``, injected by profile_sglang.yaml) dumps
+# ``cuda_graph_runner_memory_usage.pickle`` to a bare relative path, and
+# Magpie launches the server via ``cd <inferencex> && bash <script>`` — so
+# the server's cwd IS the InferenceX checkout. When that checkout is on
+# wekafs and the mount flaps, the dump ENOENTs and the scheduler sigquits
+# before any ``.trace.json.gz`` is produced (issue #523).
+_NETWORK_FS_TYPES = frozenset(
+    {
+        "nfs", "nfs4", "cifs", "smb3", "lustre", "glusterfs", "ceph",
+        "fuse.weka", "wekafs", "wekafsgw", "fuse.juicefs", "fuse.s3fs",
+        "fuse.sshfs", "9p",
+    }
+)
+
+
+def _path_fstype(path: str) -> str:
+    """Return the filesystem type backing ``path`` per ``/proc/mounts``.
+
+    Picks the longest mountpoint that is a prefix of the resolved path.
+    Returns ``""`` when it cannot be determined (non-Linux, unreadable
+    ``/proc/mounts``, ...), which callers treat as "assume local".
+    """
+    try:
+        rp = os.path.realpath(path)
+    except OSError:
+        return ""
+    best_mp = ""
+    best_type = ""
+    try:
+        with open("/proc/mounts", encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                # /proc/mounts octal-escapes spaces etc. in the mountpoint.
+                try:
+                    mp = parts[1].encode("latin-1").decode("unicode_escape")
+                except (UnicodeDecodeError, UnicodeEncodeError):
+                    mp = parts[1]
+                fstype = parts[2]
+                norm = mp.rstrip("/") or "/"
+                if norm == "/":
+                    is_under = True  # root matches everything (lowest priority)
+                else:
+                    is_under = rp == norm or rp.startswith(norm + "/")
+                if is_under and len(norm) >= len(best_mp):
+                    best_mp = norm
+                    best_type = fstype
+    except OSError:
+        return ""
+    return best_type
+
+
+def _is_network_fs(path: str) -> bool:
+    """True when ``path`` is backed by a revocable network filesystem."""
+    return _path_fstype(path).lower() in _NETWORK_FS_TYPES
+
+
+@contextmanager
+def _mirror_lock(lock_path: str) -> Iterator[None]:
+    """Best-effort cross-process exclusive lock around the InferenceX mirror
+    copy+swap (#523).
+
+    Two tasks (or two sandbox processes) that resolve the SAME network-mount
+    source to the same hash-keyed ``dest`` would otherwise ``rmtree`` /
+    ``os.replace`` the mirror under each other — corrupting a tree another
+    run's server may be ``cd``-ed into. Serializing the swap makes the loser
+    wait for the winner and then overwrite a consistent tree. Degrades to no
+    exclusion when ``fcntl`` is unavailable (non-Linux) or the lock file
+    cannot be opened — the unique staging dir still prevents torn copies.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    try:
+        fp = open(lock_path, "w")
+    except OSError as exc:
+        log.warning(
+            "baseline_executor: cannot open InferenceX mirror lock %s (%s); "
+            "proceeding without cross-process exclusion", lock_path, exc,
+        )
+        yield
+        return
+    try:
+        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+        finally:
+            fp.close()
+
+
+def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
+    """Mirror an InferenceX checkout onto stable local disk.
+
+    #523: returns a local-disk path Magpie can ``cd`` into so the sglang
+    server's relative-path cuda-graph snapshot dump survives a network-mount
+    (wekafs/NFS) flap. No-op (returns ``src`` unchanged) when:
+
+    * relocation is disabled via
+      ``INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX=1``,
+    * ``src`` already lives on a local filesystem, or
+    * the copy fails for any reason.
+
+    Best-effort — never raises; on failure it falls back to ``src`` so the
+    run proceeds (degraded to the pre-fix behaviour) rather than aborting.
+    ``mirror_key`` lets callers isolate long-running tasks that share the same
+    source checkout: Baseline/Profile pass their task output dir, so a later
+    overlapping task cannot ``rmtree`` a mirror another server is still
+    ``cd``-ed into.
+
+    Ordering: the caller relocates BEFORE config materialization and passes
+    the returned path explicitly into materialization, so the subsequent
+    ProfileExecutor patch step (``_after_materialize_config`` reads the
+    materialized YAML first) patches the LOCAL mirror in place — the mirror
+    therefore ends up carrying the NUM_PROMPTS / PROFILE_EXTRA_BODY patches,
+    and Magpie ``cd``-s into the patched local copy.
+    """
+    src = str(src)
+    if os.environ.get(
+        "INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "",
+    ).strip() == "1":
+        return src
+    try:
+        if not _is_network_fs(src):
+            return src
+    except Exception:  # noqa: BLE001 — detection is best-effort
+        return src
+
+    real_src = os.path.realpath(src)
+    local_root = Path(
+        os.environ.get("INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", "")
+        or os.path.join(
+            os.path.expanduser("~"), ".cache", "hyperloom", "inferencex_local",
+        )
+    )
+    src_hash = hashlib.sha1(real_src.encode("utf-8")).hexdigest()[:16]
+    key_hash = hashlib.sha1(
+        str(mirror_key or "").encode("utf-8")
+    ).hexdigest()[:16]
+    dest_name = src_hash if not mirror_key else f"{src_hash}-{key_hash}"
+    dest = local_root / dest_name
+    try:
+        local_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log.warning(
+            "baseline_executor: could not create local InferenceX root %s "
+            "(%s); using the network-mount checkout.", local_root, exc,
+        )
+        return src
+    # Lock keyed on dest so concurrent tasks mirroring the same source
+    # serialize their rmtree/replace instead of racing (see _mirror_lock).
+    lock_path = str(local_root / f".{dest.name}.lock")
+    staging: Path | None = None
+    try:
+        with _mirror_lock(lock_path):
+            staging = Path(tempfile.mkdtemp(dir=str(local_root)))
+            staged_ix = staging / "InferenceX"
+            # Copy the tree fresh; re-copy every run because the per-task
+            # patch step (_after_materialize_config) rewrites the mirror in
+            # place. 8-9 MB onto local disk is sub-second. Holding the lock
+            # across rmtree+replace stops a concurrent task swapping ``dest``
+            # out from under this copy.
+            shutil.copytree(real_src, staged_ix, symlinks=True)
+            if dest.exists():
+                shutil.rmtree(dest, ignore_errors=True)
+            os.replace(staged_ix, dest)
+    except OSError as exc:
+        log.warning(
+            "baseline_executor: could not mirror InferenceX %s to local disk "
+            "(%s); using the network-mount checkout. The #523 cuda-graph "
+            "pickle dump may ENOENT if the mount flaps mid-run.",
+            real_src, exc,
+        )
+        return src
+    finally:
+        # Always clear the staging dir: empty after a successful os.replace,
+        # or holding a half-finished copy after a failure. Either way it must
+        # not accumulate under local_root across runs.
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    if not (dest / "benchmarks" / "benchmark_lib.sh").is_file():
+        log.warning(
+            "baseline_executor: local InferenceX mirror at %s is incomplete; "
+            "using original %s", dest, real_src,
+        )
+        shutil.rmtree(dest, ignore_errors=True)
+        return src
+    log.info(
+        "baseline_executor: #523 — mirrored InferenceX from network mount %s "
+        "to local disk %s so the server cwd (cuda-graph pickle dump target) "
+        "survives a wekafs/NFS flap.", real_src, dest,
+    )
+    return str(dest)
 
 
 def _resolve_aiter_jit_dir_dynamic() -> list[str]:
@@ -351,6 +562,27 @@ class BaselineExecutor:
         output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)
 
+        # #523: keep the InferenceX checkout Magpie will ``cd`` into on stable
+        # local disk. Magpie launches the server via ``cd <inferencex> && bash
+        # <script>`` (see Magpie ``_build_local_command``), so that checkout is
+        # the server's cwd — and SGLang's cuda-graph profiling dumps
+        # ``cuda_graph_runner_memory_usage.pickle`` there via a RELATIVE path.
+        # On wekafs/NFS a mid-run mount flap makes the cwd vanish and the dump
+        # ENOENTs (scheduler sigquit, no trace). Relocate BEFORE materialize so
+        # the rendered ``benchmark.inferencex_path`` (which Magpie actually
+        # honours — the MAGPIE_INFERENCEX_PATH env is only a fallback), the
+        # ProfileExecutor patch step, and Magpie all use the local mirror.
+        #
+        # Keep this value task-local. Mutating process-wide $INFERENCEX_PATH
+        # would let two overlapping asyncio tasks race between relocation,
+        # materialization and Magpie env export. Passing the same explicit path
+        # through all three call sites also documents the invariant directly.
+        ix_env = os.environ.get("INFERENCEX_PATH", "").strip()
+        effective_inferencex_path = (
+            _ensure_local_inferencex(ix_env, mirror_key=str(output_dir))
+            if ix_env else ""
+        )
+
         timeout_sec = self._resolve_timeout(params)
         # Model path: task.params['model_path'] > $MODEL_PATH; if neither,
         # leave the YAML's hardcoded `model:` for fixture-based tests.
@@ -376,15 +608,26 @@ class BaselineExecutor:
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
-        config_path = materialize_config_with_envs(
-            config_path,
-            output_dir,
-            extra_server_args=read_extra_server_args(params),
-            extra_envs=dict(params.get("extra_envs") or {}),
-            model_path=resolved_model,
-            gpu_type=resolved_gpu,
-            benchmark_script=override_script,
-        )
+        try:
+            config_path = materialize_config_with_envs(
+                config_path,
+                output_dir,
+                extra_server_args=read_extra_server_args(params),
+                extra_envs=dict(params.get("extra_envs") or {}),
+                model_path=resolved_model,
+                gpu_type=resolved_gpu,
+                inferencex_path=effective_inferencex_path,
+                benchmark_script=override_script,
+            )
+        except FrameworkScriptMismatchError as exc:
+            # Cross-framework script override (e.g. sglang_*.sh on a vllm run):
+            # return a structured failure instead of bubbling to coordinator.
+            return {
+                "status": "failed",
+                "error_class": "framework_script_mismatch",
+                "error": str(exc),
+                "output_dir": str(output_dir),
+            }
         # Stash for the result so Coordinator can reuse it downstream
         # (workload-contract reuse).
         materialized_config_path = config_path
@@ -411,6 +654,7 @@ class BaselineExecutor:
             "override_result_dir": override_result_dir,
             "resolved_model": resolved_model,
             "materialized_config_path": materialized_config_path,
+            "inferencex_path": effective_inferencex_path,
             "params": params,
             "ctx": ctx,
         }
@@ -515,6 +759,13 @@ class BaselineExecutor:
 
     @staticmethod
     def _double_run_enabled() -> bool:
+        """Whether baseline double-run is enabled.
+
+        Controlled by ``INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN``.
+
+        Returns:
+            ``True`` unless the env var is set to a falsey value.
+        """
         return os.environ.get(
             "INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1",
         ).strip().lower() not in ("0", "false", "no", "")
@@ -664,6 +915,7 @@ class BaselineExecutor:
         override_result_dir: str | None,
         resolved_model: str,
         materialized_config_path: Path,
+        inferencex_path: str,
         params: dict[str, Any],
         ctx: RunnerContext,
     ) -> dict[str, Any]:
@@ -682,11 +934,10 @@ class BaselineExecutor:
         # Put the venv first in PATH so the benchmark script's `python3`
         # resolves to one with torch+rocm (defense in depth vs Magpie YAML).
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        # #210: pin Magpie's InferenceX resolution to ``$INFERENCEX_PATH``
-        # via highest-precedence ``MAGPIE_INFERENCEX_PATH`` so Magpie loads
-        # the SAME checkout ``_inferencex_patcher`` patched (else it falls
-        # through to a separate, unpatched checkout).
-        inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+        # #210/#523: pin Magpie's InferenceX resolution to the same per-task
+        # checkout rendered into benchmark.inferencex_path and patched by
+        # ProfileExecutor. Do not re-read process env here; the task-local
+        # explicit value avoids cross-task races on $INFERENCEX_PATH.
         if inferencex_path:
             env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
         # Always-on ``$RESULT_DIR`` default for scripts that respect it
@@ -745,10 +996,38 @@ class BaselineExecutor:
         # root cause of the bash-source race in §C #1). See
         # ``_subprocess_kill.py``.
         subprocess_started_unix = time.time()
+        # Anchor the Magpie *parent* process cwd to the stable per-task
+        # output_dir instead of the default ``/tmp`` (defence-in-depth for any
+        # relative-path writes Magpie itself makes). NOTE: this does NOT fix
+        # #523 on its own — Magpie re-roots the actual server via
+        # ``cd <inferencex>`` (see ``_build_local_command`` in Magpie), so the
+        # server's cwd (where SGLang dumps the cuda-graph pickle) is the
+        # InferenceX checkout, not this output_dir. The #523 fix is
+        # ``_ensure_local_inferencex`` above, which keeps that checkout on
+        # stable local disk.
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # #524 hardening: a reused output_dir (explicit ``params['output_dir']``
+        # on a retry, or a re-run of the same task slot) may still hold a
+        # PRIOR attempt's server.log. Its terminal engine/worker-init markers
+        # would otherwise misclassify THIS attempt as ``server_init_dead`` even
+        # when the current server booted fine — the post-run scan
+        # (``server_log_death_excerpt`` below) can't tell a stale marker from a
+        # fresh one. Clear it so classification only sees this attempt's log.
+        stale_server_log = output_dir / "server.log"
+        try:
+            stale_server_log.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.warning(
+                "baseline_executor: could not clear stale server.log %s (%s); "
+                "a prior attempt's markers may bias failure classification.",
+                stale_server_log, exc,
+            )
         try:
             proc = await asyncio.to_thread(
                 run_with_session_kill, cmd,
-                env=env, cwd=str(self.cwd), timeout=timeout_sec,
+                env=env, cwd=str(output_dir), timeout=timeout_sec,
                 server_log_path=str(output_dir / "server.log"),
             )
             subprocess_runtime_sec = max(
@@ -777,6 +1056,28 @@ class BaselineExecutor:
         proc_returncode = proc.returncode
         proc_stdout = proc.stdout
         proc_stderr = proc.stderr
+
+        # #524: when the inference server's engine/worker bootstrap dies (e.g.
+        # vLLM ``RuntimeError: Engine core initialization failed``), the real
+        # root cause is in server.log, not in Magpie's stdout/stderr tail — and
+        # the liveness watchdog may have reaped the hung parent with
+        # ``SERVER_DEAD_RETURNCODE``. Detect that once here and reuse it across
+        # the failure branches below so the failure is classified
+        # ``server_init_dead`` (parity with the explore/grid path) and the
+        # operator sees the actual server fault instead of a generic
+        # ``subprocess_nonzero``. Backend-agnostic: the markers cover both
+        # vLLM and SGLang engine/worker init failures.
+        server_death_excerpt = server_log_death_excerpt(
+            str(output_dir / "server.log")
+        )
+        server_init_dead = (
+            server_death_excerpt is not None
+            or proc_returncode == SERVER_DEAD_RETURNCODE
+        )
+        server_init_dead_error = server_death_excerpt or (
+            "server engine/worker init failed (reaped by liveness watchdog); "
+            "see server.log"
+        )
 
         # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
         candidates = sorted(output_dir.glob("benchmark_*"))
@@ -819,6 +1120,14 @@ class BaselineExecutor:
                     )
             if stderr_log_path:
                 failure_extras["stderr_log_path"] = stderr_log_path
+            if server_init_dead:
+                return {
+                    "status": "failed",
+                    "error_class": "server_init_dead",
+                    "returncode": proc_returncode,
+                    "error": server_init_dead_error,
+                    **failure_extras,
+                }
             if proc_returncode != 0:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
                 return {
@@ -857,7 +1166,10 @@ class BaselineExecutor:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
         if not measurement.get("valid_measurement"):
-            if proc_returncode != 0:
+            if server_init_dead:
+                error_class = "server_init_dead"
+                error = server_init_dead_error
+            elif proc_returncode != 0:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
                 error_class = "subprocess_nonzero"
                 error = tail

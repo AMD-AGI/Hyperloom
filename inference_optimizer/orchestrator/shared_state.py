@@ -35,12 +35,16 @@ Fields::
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
+
 
 def _now_iso() -> str:
     """Return the current UTC time as a microsecond-precision ISO 8601 string.
@@ -100,6 +104,12 @@ _DEFAULT_LAST_FAILURES = 10
 
 # phase_history cap (record_phase_transition).
 _PHASE_HISTORY_CAP = 100
+
+# Lifecycle-event log cap (#266). Unlike phase_history (≤6 transitions),
+# lifecycle events fire at every step boundary (trace_analyze /
+# run_optimization / integrate / report, ×N kernels ×M rounds), so the cap
+# is generous but still bounds state.json growth on a long run.
+_LIFECYCLE_CAP = 500
 
 # roofline_snapshots history cap (record_trace_analyze).
 _ROOFLINE_SNAPSHOTS_CAP = 50
@@ -227,6 +237,13 @@ class SharedState:
     model_class: str = ""
     # Advisory architecture profile; prompt-context only, no deterministic gating (those stay on ``model_class``).
     model_arch: dict = field(default_factory=dict)
+    # Degraded-mode advisory: True when the run is knowingly running a
+    # multimodal checkpoint on the text-only path (--allow-mm-text-fallback).
+    # Advisory only — never a stop_reason, never gates Objective/scoring.
+    degraded_mode: bool = False
+    # Structured degraded-mode / model-compat warnings (e.g. multimodal text
+    # fallback). Surfaced verbatim in reports/final.{json,md}.
+    model_warnings: list[dict[str, Any]] = field(default_factory=list)
     # KB tags from config.json (``architectures`` + ``model_type``); stamped into recipe-snapshot ``extras`` so fine-tuned models carry base arch identity.
     model_architectures: list[str] = field(default_factory=list)
     model_type: str = ""
@@ -471,6 +488,13 @@ class SharedState:
     phase_started_unix: float = 0.0
     # Append-only log of phase transitions (rows from phase_state.make_history_row; reason in PHASE_EXIT_REASONS). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
+    # Append-only operator-facing lifecycle log (#266). Each row is built
+    # by :func:`phase_state.make_lifecycle_event` and records a phase/step
+    # boundary (START / END / ERROR) plus the artifact paths it produced,
+    # so a launcher can surface "phase X ran, outputs at <path>" in chat.
+    # Coordinator-only writer (PolicyGate adds it to ``CORE_STATE_FIELDS``);
+    # capped at ``_LIFECYCLE_CAP``.
+    lifecycle: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget percentages per phase (from CLI flags/defaults); persisted for resume. Empty => library defaults.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
 
@@ -541,6 +565,19 @@ class SharedState:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
+        """Construct a :class:`SharedState` from a raw mapping, migrating it.
+
+        Acts as the unified migration entry point: an absent
+        ``schema_version`` is treated as 1, legacy keys are renamed to
+        their canonical form, and unknown keys are dropped. The operation
+        is idempotent and short-circuits when already at the latest schema.
+
+        Args:
+            raw: Decoded state mapping (e.g. from JSON on disk).
+
+        Returns:
+            A fully-populated, migrated :class:`SharedState` instance.
+        """
         # Unified migration entry point; absent schema_version treated as 1. Idempotent (latest version short-circuits).
         incoming_version = int(raw.get("schema_version") or 1)
         needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
@@ -985,6 +1022,62 @@ class SharedState:
         self.phase_started_ts = now_ts
         self.phase_started_unix = now_unix
         return row
+
+    def record_lifecycle_event(
+        self,
+        *,
+        step: str,
+        status: str,
+        phase: str | None = None,
+        label: str | None = None,
+        artifacts: dict[str, str] | None = None,
+        detail: str = "",
+        duration_s: float | None = None,
+        ts: str | None = None,
+    ) -> dict[str, Any]:
+        """Append a structured lifecycle event (#266, method 1).
+
+        Each event marks a phase/step boundary so operators can see — in
+        state.json, and via the launcher in chat — that a phase ran, where
+        its outputs went, and which artifact feeds the next phase.
+
+        ``step`` is the machine step/handler name (e.g. ``trace_analyze``);
+        ``label`` defaults to the human-friendly name from
+        :data:`phase_state.LIFECYCLE_STEP_LABELS` so both naming dimensions
+        are carried. ``phase`` defaults to the current coordinator phase.
+        ``seq`` is monotonic across the cap so consumers can order events
+        even after the oldest rows are trimmed.
+
+        Coordinator-only writer (``policy.CORE_STATE_FIELDS`` guards
+        ``lifecycle`` so an LLM ``update_state`` cannot forge events).
+        Returns the inserted row.
+        """
+        # Lazy import to avoid an import-time cycle with the orchestrator
+        # package (phase_state imports nothing from SharedState).
+        from .phase_state import make_lifecycle_event
+
+        events = self.lifecycle
+        if events is None:
+            events = self.lifecycle = []
+        next_seq = (int(events[-1].get("seq", -1)) + 1) if events else 0
+        event = make_lifecycle_event(
+            step=step,
+            status=status,
+            phase=(phase if phase is not None else (self.phase or "")),
+            label=label,
+            artifacts=artifacts,
+            detail=detail,
+            duration_s=duration_s,
+            seq=next_seq,
+            ts=ts or _now_iso(),
+        )
+        # Append in place and trim only when over the cap, so the common
+        # per-step-boundary path is an O(1) append rather than copying the
+        # whole list on every call.
+        events.append(event)
+        if len(events) > _LIFECYCLE_CAP:
+            del events[: -_LIFECYCLE_CAP]
+        return event
 
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
         """Render the most recent PolicyGate denials for prompt injection.
@@ -1797,6 +1890,36 @@ class SharedState:
         self.last_action_failures = history
         return entry
 
+    def _resolve_baseline_achieved_tput(self) -> float:
+        """Baseline throughput for a baseline-arm roofline snapshot.
+
+        Prefers ``baseline_tput``; falls back to ``last_baseline``'s
+        ``tput``/``output_throughput`` so a state that lost ``baseline_tput``
+        still stamps an achieved value (avoids an empty within/gap pct).
+        """
+        if isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
+            return float(self.baseline_tput)
+        last_bl = self.last_baseline if isinstance(self.last_baseline, dict) else {}
+        for key in ("tput", "output_throughput"):
+            val = last_bl.get(key)
+            if isinstance(val, (int, float)) and val > 0:
+                return float(val)
+        return 0.0
+
+    def _resolve_current_best_achieved_tput(self) -> float:
+        """Optimized-arm throughput for a current_best roofline snapshot.
+
+        Reads ``current_best``'s ``tput``/``output_throughput`` so a
+        current_best-tagged snapshot keeps its arm even when ``tput`` is
+        momentarily absent (avoids silently downgrading to the baseline arm).
+        """
+        cb = self.current_best if isinstance(self.current_best, dict) else {}
+        for key in ("tput", "output_throughput"):
+            val = cb.get(key)
+            if isinstance(val, (int, float)) and val > 0:
+                return float(val)
+        return 0.0
+
     def record_trace_analyze(
         self,
         payload: dict[str, Any],
@@ -1967,20 +2090,50 @@ class SharedState:
                 compute_roofline_from_perfmodel,
                 load_model_meta,
             )
-            # Primary decode ceiling plus memory/compute sides; PerfModel bottom-up formula, legacy is fallback only.
-            breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
-            try:
-                breakdown = compute_roofline_breakdown_from_state(self)
-            except Exception:  # noqa: BLE001 — ceiling is best-effort
-                pass
-            peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
+            # Resolve which arm this snapshot measures FIRST so the ceiling's
+            # precision is anchored to the SAME arm as achieved: a baseline
+            # snapshot keeps its dtype on baseline even after current_best is
+            # promoted (else a later fp8 best would retro-inflate the ceiling).
+            # An explicit ``roofline_arm`` on the payload wins — a delayed
+            # PRELUDE roofline must record as baseline even though current_best
+            # has already been promoted by warm-replay. Absent it, fall back to
+            # inferring the arm from current_best.tput.
+            forced_arm = str((payload or {}).get("roofline_arm") or "").strip()
+            # Unknown arm values fall through to current_best inference; warn so
+            # a typo'd payload tag is visible instead of silently mis-anchored.
+            if forced_arm and forced_arm not in ("baseline", "current_best"):
+                log.warning(
+                    "record_trace_analyze: ignoring unknown roofline_arm=%r; "
+                    "falling back to current_best inference", forced_arm,
+                )
+                forced_arm = ""
             achieved_tput = 0.0
             cb = self.current_best if isinstance(self.current_best, dict) else {}
             cb_tput = cb.get("tput")
-            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+            if forced_arm == "baseline":
+                snapshot_arm = "baseline"
+                achieved_tput = self._resolve_baseline_achieved_tput()
+            elif forced_arm == "current_best":
+                # Explicit tag wins: keep the optimized arm even if tput is
+                # momentarily absent, never downgrade to baseline (the profile
+                # actually ran current_best params, so the ceiling must match).
+                snapshot_arm = "current_best"
+                achieved_tput = self._resolve_current_best_achieved_tput()
+            elif isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                snapshot_arm = "current_best"
                 achieved_tput = float(cb_tput)
-            elif isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
-                achieved_tput = float(self.baseline_tput)
+            else:
+                snapshot_arm = "baseline"
+                achieved_tput = self._resolve_baseline_achieved_tput()
+            # Primary decode ceiling plus memory/compute sides; PerfModel bottom-up formula, legacy is fallback only.
+            breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
+            try:
+                breakdown = compute_roofline_breakdown_from_state(
+                    self, arm=snapshot_arm,
+                )
+            except Exception:  # noqa: BLE001 — ceiling is best-effort
+                pass
+            peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
             history_entry = build_roofline_snapshot(
                 snapshot_id=snapshot_id,
                 ts=ts_iso,
@@ -1994,7 +2147,7 @@ class SharedState:
             # Per-op PerfModel breakdown for dashboard visualization.
             try:
                 from .roofline_ceiling import resolve_runtime_workload
-                runtime = resolve_runtime_workload(self)
+                runtime = resolve_runtime_workload(self, arm=snapshot_arm)
                 meta = load_model_meta(
                     runtime.model_path,
                     precision_hint=runtime.precision,
@@ -2006,8 +2159,9 @@ class SharedState:
                     )
                     eff_conc = runtime.concurrency
                     # Use the dtype the run actually read (e.g. fp8 over a
-                    # float32 checkpoint), not the on-disk torch_dtype.
-                    rt = resolve_runtime_dtype(self, meta)
+                    # float32 checkpoint), not the on-disk torch_dtype; pinned
+                    # to this snapshot's arm so baseline keeps baseline dtype.
+                    rt = resolve_runtime_dtype(self, meta, arm=snapshot_arm)
                     meta = apply_runtime_dtype(meta, rt)
                     pm_bd = compute_roofline_from_perfmodel(
                         meta=meta,
@@ -2307,6 +2461,14 @@ class SharedState:
         ledger = [e for e in (self.intervention_mix or []) if isinstance(e, dict)]
 
         def _ct(entry: dict[str, Any]) -> str:
+            """Return an entry's normalized ``change_type`` string.
+
+            Args:
+                entry: A single intervention-mix ledger entry.
+
+            Returns:
+                The lowercased, stripped change type (empty if absent).
+            """
             return str(entry.get("change_type") or "").strip().lower()
 
         total_config = sum(1 for e in ledger if _ct(e) == "config")
@@ -3390,6 +3552,11 @@ class SharedState:
         )
 
     def _format_last_trace_analyze(self) -> str:
+        """Render the most recent trace-analyze blob for the prompt.
+
+        Returns:
+            A formatted summary of ``last_trace_analyze``.
+        """
         return self._format_trace_analyze_blob(self.last_trace_analyze)
 
     def _format_trace_analyze_blob(self, blob: dict[str, Any] | None) -> str:

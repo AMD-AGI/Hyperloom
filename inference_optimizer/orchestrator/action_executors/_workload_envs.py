@@ -31,6 +31,7 @@ from ...paths import asset_root
 from ._grid_runner import (
     inject_sglang_attention_backend,
     inject_sglang_context_length,
+    inject_sglang_moe_runner_backend,
     inject_sglang_watchdog_timeout,
     server_args_env_name,
 )
@@ -44,6 +45,14 @@ log = logging.getLogger(__name__)
 # Emit the RUN_EVAL=false default warning once per process to keep logs
 # readable.
 _RUN_EVAL_DEFAULT_WARN_EMITTED = False
+
+
+class FrameworkScriptMismatchError(ValueError):
+    """Raised when benchmark_script targets a different framework than the run.
+
+    Subclasses ValueError so callers can catch it specifically and turn it
+    into a structured action failure instead of an uncaught exception.
+    """
 
 
 def _visible_gpu_count() -> int:
@@ -129,6 +138,7 @@ def materialize_config_with_envs(
     extra_envs: dict[str, Any] | None = None,
     model_path: str | None = None,
     gpu_type: str | None = None,
+    inferencex_path: str | None = None,
     benchmark_script: str | None = None,
     out_name: str = "baseline_config.with_envs.yaml",
 ) -> Path:
@@ -141,8 +151,10 @@ def materialize_config_with_envs(
     after that; ``PRECISION`` → ``precision``; ``CONC/ISL/OSL/MAX_MODEL_LEN/TP/
     RANDOM_RANGE_RATIO`` → ``benchmark.envs``; ``ROCR_VISIBLE_DEVICES``
     reconciled against TP; ``RUN_EVAL`` defaulted; ``NUM_PROMPTS`` /
-    ``NUM_WARMUPS`` computed adaptively. ``extra_server_args`` routes into the
-    framework env; ``extra_envs`` overrides any of the above.
+    ``NUM_WARMUPS`` computed adaptively. ``inferencex_path`` explicitly pins
+    ``benchmark.inferencex_path`` for one task (falling back to
+    ``$INFERENCEX_PATH`` for existing callers). ``extra_server_args`` routes
+    into the framework env; ``extra_envs`` overrides any of the above.
 
     Returns the materialized YAML path (stable file name across calls).
     """
@@ -164,11 +176,32 @@ def materialize_config_with_envs(
             bench.pop("benchmark_script", None)
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
-    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
-    if inferencex_path:
-        # Persist $INFERENCEX_PATH into the YAML so Magpie's runtime checkout
-        # matches Hyperloom's patch target.
-        bench["inferencex_path"] = inferencex_path
+    # Fail fast on framework/script mismatch (e.g. vllm image + sglang script):
+    # guards the QRWKV-72B bug where $FRAMEWORK fell back to sglang and booted
+    # `sglang.launch_server` in a vllm-only image -> ModuleNotFoundError. Only
+    # trip when the script carries a DIFFERENT known framework's prefix, so
+    # custom/non-prefixed scripts are not falsely rejected.
+    _script = str(bench.get("benchmark_script") or "").lower()
+    _fw = str(bench.get("framework") or "").lower()
+    _known_fw = ("sglang", "vllm", "atom")
+    if _script and _fw in _known_fw:
+        _other = [k for k in _known_fw if k != _fw and _script.startswith(f"{k}_")]
+        if _other:
+            raise FrameworkScriptMismatchError(
+                f"framework/script mismatch: framework={_fw!r} but "
+                f"benchmark_script={_script!r} targets {_other[0]!r}; refusing "
+                f"to boot server (would launch the wrong framework's entrypoint)"
+            )
+    effective_inferencex_path = (
+        str(inferencex_path or "").strip()
+        or os.environ.get("INFERENCEX_PATH", "").strip()
+    )
+    if effective_inferencex_path:
+        # Persist the resolved InferenceX checkout into the YAML so Magpie's
+        # runtime checkout matches Hyperloom's patch target. Baseline/Profile
+        # pass the per-task local mirror explicitly to avoid process-wide env
+        # races; legacy callers still fall back to $INFERENCEX_PATH.
+        bench["inferencex_path"] = effective_inferencex_path
     envs = bench.setdefault("envs", {})
     for env_key in (
         "CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP",
@@ -400,6 +433,26 @@ def materialize_config_with_envs(
         # pipeline keeps the configured tp8 + the clean aiter MLA path.
         # Verified on MI300X: capture passes, decode correct.
         envs.setdefault("SGLANG_ROCM_FUSED_DECODE_MLA", "0")
+        # Kimi's client-side tokenizer lives behind custom model code. The
+        # server path already passes --trust-remote-code; mirror that on
+        # Magpie's remote benchmark client without changing other models.
+        envs.setdefault("MAGPIE_TRUST_REMOTE_CODE", "1")
+    if "qwen3.6-35b-a3b" in _model_basename or (
+        "qwen3-6-35b-a3b" in _model_basename
+    ):
+        # Qwen3.6 MoE also uses a custom text-generation implementation behind
+        # a config that advertises vision_config. Keep trust scoped to this
+        # exact daily candidate family instead of enabling it globally.
+        envs.setdefault("MAGPIE_TRUST_REMOTE_CODE", "1")
+        _qwen_fw_env = server_args_env_name(bench.get("framework"))
+        _qwen_existing = str(envs.get(_qwen_fw_env, "")).strip()
+        if "trust-remote-code" not in _qwen_existing:
+            from ._grid_runner import merge_server_args
+            envs[_qwen_fw_env] = (
+                merge_server_args(_qwen_existing, "--trust-remote-code")
+                if _qwen_existing
+                else "--trust-remote-code"
+            )
     if "mimo-v2" in _model_basename:
         # MiMo-V2.x (moe_swa) loads MiMoV2ForCausalLM fine but its DEFAULT
         # aiter attention backend SIGABRTs during CUDA-graph capture on
@@ -454,6 +507,15 @@ def materialize_config_with_envs(
     #    backend for them and demands dual_chunk_flash_attn. Inject it
     #    unless the operator already pinned --attention-backend.
     resolved_server_args = inject_sglang_attention_backend(
+        resolved_server_args, bench.get("framework"), bench.get("model"),
+        gpu_type=gpu_type or bench.get("runner_type"),
+    )
+    # 4. MoE runner backend: MoE models on ROCm route through aiter's CK
+    #    2-stage fused-MoE kernel, whose first-request JIT build is broken in
+    #    some images (missing cub header -> hipcc fail -> stale lock -> 600s
+    #    warmup timeout). Inject the ROCm-capable triton MoE runner unless the
+    #    operator already pinned --moe-runner-backend.
+    resolved_server_args = inject_sglang_moe_runner_backend(
         resolved_server_args, bench.get("framework"), bench.get("model"),
         gpu_type=gpu_type or bench.get("runner_type"),
     )

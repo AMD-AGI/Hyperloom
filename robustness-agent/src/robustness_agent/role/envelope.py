@@ -165,6 +165,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "phase_started_unix",
     "phase_history",
     "phase_budget_pct",
+    # operator-facing lifecycle event log (#266); Coordinator-only writer.
+    "lifecycle",
     # specialist sub-agent ledger.
     "specialist_rounds",
     "specialist_domain_empty_streak",
@@ -191,6 +193,10 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # Architecture-identity tags from config.json; mirrors upstream.
     "model_architectures",
     "model_type",
+    # Multimodal text-fallback degraded-run markers (preflight-authored);
+    # locked so an LLM update_state can't forge/clear the degraded verdict.
+    "degraded_mode",
+    "model_warnings",
 })
 
 

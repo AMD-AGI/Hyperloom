@@ -427,6 +427,32 @@ def test_cli_correctness_override(tmp_path):
     assert ko.make_proposal(verification)["decision"] == "KEEP"
 
 
+def test_speedup_just_above_gate_keeps(tmp_path):
+    """A 1.07x speedup clears the 1.05x KEEP gate (issue #442: was rejected by the old higher gate)."""
+    artifact = tmp_path / "optimized.hip"
+    verification = ko.build_verification(
+        _args(correctness_passed=True, micro_speedup=1.07,
+              e2e_gain_pct=0.5, accuracy_passed=True),
+        [_attempt(artifact=artifact)],
+        benchmark_available=False,
+    )
+    assert ko.make_proposal(verification)["decision"] == "KEEP"
+
+
+def test_speedup_below_gate_needs_review(tmp_path):
+    """A 1.03x speedup (improvement but under the 1.05x gate) routes to NEEDS_REVIEW, not KEEP."""
+    artifact = tmp_path / "optimized.hip"
+    verification = ko.build_verification(
+        _args(correctness_passed=True, micro_speedup=1.03,
+              e2e_gain_pct=0.5, accuracy_passed=True),
+        [_attempt(artifact=artifact)],
+        benchmark_available=False,
+    )
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "NEEDS_REVIEW"
+    assert any("below KEEP" in r for r in proposal["reasons"])
+
+
 # GEAK worktree artifact recovery: rewritten source lives in the worktree slot dir, not the binary-laden .patch.
 
 

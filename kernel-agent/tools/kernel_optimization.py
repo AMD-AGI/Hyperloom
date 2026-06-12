@@ -2047,11 +2047,22 @@ def _try_generate_harness(
 
 
 def _rocprof_roofline_enabled() -> bool:
+    """Return whether rocprof roofline profiling is enabled.
+
+    Returns:
+        ``True`` unless ``HYPERLOOM_ROCPROF_ROOFLINE`` is set to a falsy value.
+    """
     value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE", "1").strip().lower()
     return value not in {"0", "false", "no", "off"}
 
 
 def _rocprof_timeout_sec() -> int:
+    """Return the per-kernel rocprof roofline timeout in seconds.
+
+    Returns:
+        The value from ``HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC`` (floored at
+        60s), or ``1800`` when unset or invalid.
+    """
     try:
         return max(60, int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800")))
     except ValueError:
@@ -2059,6 +2070,17 @@ def _rocprof_timeout_sec() -> int:
 
 
 def _rocprof_workdir(candidate: dict[str, Any], source_file: str, out_dir: Path) -> Path:
+    """Choose a working directory for the rocprof profiling run.
+
+    Args:
+        candidate: Candidate metadata containing ``kernel_repo``.
+        source_file: Path to the kernel source file.
+        out_dir: Fallback directory when no candidate path resolves.
+
+    Returns:
+        The first existing directory derived from the candidate/source paths,
+        else ``out_dir``.
+    """
     for raw in (candidate.get("kernel_repo"), source_file):
         if not raw:
             continue
@@ -2071,6 +2093,15 @@ def _rocprof_workdir(candidate: dict[str, Any], source_file: str, out_dir: Path)
 
 
 def _rocprof_profile_command(test_command: str) -> str:
+    """Convert a harness correctness command into a profiling command.
+
+    Args:
+        test_command: Original harness test command.
+
+    Returns:
+        The command with a single ``--correctness`` swapped for ``--profile``
+        when it targets a generated harness; otherwise the command unchanged.
+    """
     if "--correctness" not in test_command:
         return test_command
     if "/unittest/harness_" not in test_command and " harness_" not in test_command:
@@ -2079,6 +2110,15 @@ def _rocprof_profile_command(test_command: str) -> str:
 
 
 def _compact_rocprof_prompt(payload: dict[str, Any]) -> str:
+    """Render a compact roofline-evidence addendum for the agent prompt.
+
+    Args:
+        payload: Structured rocprof roofline payload.
+
+    Returns:
+        A Markdown snippet summarizing up to three kernels' roofline signals,
+        or an empty string when there are no results.
+    """
     rows = payload.get("results") if isinstance(payload, dict) else []
     if not isinstance(rows, list) or not rows:
         return ""
@@ -2114,6 +2154,23 @@ def _run_rocprof_roofline(
     prompt_file: Path,
     log_path: Path | None,
 ) -> dict[str, Any]:
+    """Run rocprof roofline before GEAK and append evidence to the prompt.
+
+    Profiles the kernel via the ``rocprof_roofline.py`` helper, writes the
+    JSON/text artifacts, and appends a compact evidence section to the prompt.
+
+    Args:
+        test_command: Harness command used to exercise the kernel.
+        candidate: Candidate kernel metadata.
+        source_file: Path to the kernel source file.
+        out_dir: Output directory for this attempt.
+        prompt_file: Prompt file to append roofline evidence to.
+        log_path: Optional log file for progress messages.
+
+    Returns:
+        A status dict with the run outcome and artifact paths (``status`` is
+        ``skipped``/``failed``/``ok``).
+    """
     roof_dir = out_dir / "rocprof_roofline"
     roof_dir.mkdir(parents=True, exist_ok=True)
     out_json = roof_dir / "before.json"
@@ -2177,6 +2234,15 @@ def _run_rocprof_roofline(
 
 
 def _rocprof_kernel_matches(row: dict[str, Any], target_kernel: str) -> bool:
+    """Return whether a roofline result row matches the target kernel.
+
+    Args:
+        row: Result row with ``matched_kernel_name`` / ``name`` fields.
+        target_kernel: Kernel name to match; empty matches any row.
+
+    Returns:
+        ``True`` if the row corresponds to ``target_kernel``.
+    """
     if not target_kernel:
         return True
     target = target_kernel.strip()
@@ -2188,6 +2254,17 @@ def _rocprof_kernel_matches(row: dict[str, Any], target_kernel: str) -> bool:
 
 
 def _rocprof_sidecar_from_payload(payload: dict[str, Any], txt_path: str, json_path: str) -> dict[str, Any]:
+    """Project a roofline payload into a sidecar record for one kernel.
+
+    Args:
+        payload: Structured rocprof roofline payload.
+        txt_path: Path to the text report, recorded on the result.
+        json_path: Path to the JSON report, recorded on the result.
+
+    Returns:
+        A roofline record for the matched (or first) kernel, or a
+        skipped/failed status record when no match is found.
+    """
     rows = payload.get("results") if isinstance(payload, dict) else []
     if not isinstance(rows, list) or not rows:
         return {
@@ -2229,6 +2306,15 @@ def _rocprof_sidecar_from_payload(payload: dict[str, Any], txt_path: str, json_p
 
 
 def _rocprof_phase_has_measurement(phase_data: dict[str, Any]) -> bool:
+    """Return whether a roofline phase contains real numeric measurements.
+
+    Args:
+        phase_data: A before/after roofline phase record.
+
+    Returns:
+        ``True`` only when the phase did not fail/skip and carries at least one
+        numeric roofline metric (metadata alone does not count).
+    """
     status = str(phase_data.get("status") or "").lower()
     if status in {"failed", "skipped"}:
         return False
@@ -2394,6 +2480,15 @@ def _restore_env(previous: dict[str, str | None]) -> None:
 
 
 def _oob_output_dir(session_id: str, prompt_file: Path) -> Path:
+    """Return the per-attempt output directory for an OOB run.
+
+    Args:
+        session_id: Session identifier for the run.
+        prompt_file: Prompt file whose stem scopes the attempt directory.
+
+    Returns:
+        The created ``.../oob/<session_id>/<prompt_stem>`` directory.
+    """
     # Per-attempt, mirroring _geak_output_dir. A session-level dir would let
     # concurrent OOB attempts share artifacts AND the per-attempt compile
     # caches (isolated_compile_cache_env keys off output_dir), reintroducing
@@ -3380,6 +3475,20 @@ def _select_source_artifact(
 
 
 def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]], benchmark_available: bool) -> dict[str, Any]:
+    """Summarize attempt results into a verification record.
+
+    Selects the best usable attempt (by extracted speedup, falling back to the
+    first usable one) and reports whether a real speedup was measured.
+
+    Args:
+        args: Parsed CLI arguments for the run.
+        attempts: Per-attempt result records.
+        benchmark_available: Whether a benchmark/harness was available to
+            measure speedups.
+
+    Returns:
+        A verification dict describing the best attempt and measured speedup.
+    """
     # Usable = completed cleanly OR killed-but-left-artifacts (status=partial).
     usable = [a for a in attempts if a.get("status") in {"completed", "partial"}]
     best = None
@@ -3549,8 +3658,8 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         return {"decision": "PARTIAL", "reasons": reasons}
     if verification["micro_speedup"] <= 1.0:
         return {"decision": "REVERT", "reasons": ["microbench did not improve"]}
-    # 1.10x KEEP threshold; below is treated as noise and routed to NEEDS_REVIEW.
-    KEEP_THRESHOLD = 1.10
+    # 1.05x KEEP threshold (issue #442); below is routed to NEEDS_REVIEW.
+    KEEP_THRESHOLD = 1.05
     if verification["micro_speedup"] < KEEP_THRESHOLD:
         reasons.append(
             f"speedup {verification['micro_speedup']:.3f}x below KEEP "

@@ -22,11 +22,17 @@ Design constraints (§4/§6):
 
 from __future__ import annotations
 
+import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..sub_agent_runner import RunnerContext
+
+log = logging.getLogger(__name__)
+
+_PROFILE_MAX_ATTEMPTS = 3
 
 
 def _now_iso() -> str:
@@ -160,6 +166,17 @@ class RooflineExecutor:
         self.shared_state = shared_state
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Run the roofline action for the given context.
+
+        Performs a profile sub-step and feeds the resulting trace into
+        TraceLens analysis to produce a roofline characterization.
+
+        Args:
+            ctx: Runner context carrying the task and session metadata.
+
+        Returns:
+            A result dict describing the roofline outcome and artifacts.
+        """
         # atom: the profile sub-step produces *.pt.trace.json.gz that
         # TraceLens consumes unchanged, so this falls through to the
         # sglang/vllm path. Lazy imports keep shell-out/yaml off module load.
@@ -167,30 +184,96 @@ class RooflineExecutor:
         from .profile import profile_executor
 
         session_dir = self._resolve_session_dir(ctx)
+        # #266: time the composite so the END lifecycle event reports how
+        # long the auto-roofline TraceLens run took.
+        _lc_t0 = time.monotonic()
 
-        # ---- Step 1: profile ------------------------------------------------
-        profile_ctx = self._wrap_profile_ctx(ctx)
+        # #266: emit a paired START so the auto-roofline path (which bypasses
+        # Coordinator._handle_request) does not show a lone END. Without it the
+        # operator sees nothing for the whole profile-retry + TraceLens run —
+        # potentially minutes — then a sudden END. Best-effort, never blocks the
+        # run; the END below carries the produced artifact paths + duration.
         try:
-            profile_result = await profile_executor(profile_ctx)
-        except Exception as exc:  # noqa: BLE001 — surface sub-step errors
-            return _failed("profile", f"profile_executor raised: {exc!r}")
-        if not isinstance(profile_result, dict):
-            return _failed(
-                "profile",
-                f"profile_executor returned non-dict: {type(profile_result).__name__}",
+            self.shared_state.record_lifecycle_event(
+                step="roofline",
+                status="START",
+                detail="auto-roofline: profile + TraceLens",
             )
-        if profile_result.get("status") != "succeeded":
+            _sd0 = Path(session_dir)
+            if _sd0.name and _sd0.is_dir() and (_sd0 / "state.json").exists():
+                self.shared_state.save(_sd0)
+        except Exception:  # noqa: BLE001 — defensive
+            log.debug("roofline: lifecycle START emit failed", exc_info=True)
+
+        # ---- Step 1: profile (with retry) ------------------------------------
+        # sglang's torch profiler on MI300X/ROCm is unstable: ~86% per-attempt
+        # failure rate (SIGQUIT / "Profiling is not in progress" / engine init
+        # crash). Retry up to _PROFILE_MAX_ATTEMPTS times; each call to
+        # profile_executor manages its own server lifecycle, so a fresh attempt
+        # starts with a clean profiling state.
+        profile_result: dict[str, Any] | None = None
+        trace_path = ""
+        last_error = ""
+        # Track the last failure kind so the no-trace contract is preserved
+        # (profile_no_trace_failed) instead of collapsing into profile_failed.
+        last_phase = "profile"
+        for attempt in range(1, _PROFILE_MAX_ATTEMPTS + 1):
+            profile_ctx = self._wrap_profile_ctx(ctx)
+            try:
+                profile_result = await profile_executor(profile_ctx)
+            except Exception as exc:  # noqa: BLE001
+                last_phase = "profile"
+                last_error = f"profile_executor raised: {exc!r}"
+                log.warning(
+                    "roofline profile attempt %d/%d failed (exception): %s",
+                    attempt, _PROFILE_MAX_ATTEMPTS, last_error,
+                )
+                continue
+            if not isinstance(profile_result, dict):
+                last_phase = "profile"
+                last_error = (
+                    f"profile_executor returned non-dict: "
+                    f"{type(profile_result).__name__}"
+                )
+                log.warning(
+                    "roofline profile attempt %d/%d failed (bad return): %s",
+                    attempt, _PROFILE_MAX_ATTEMPTS, last_error,
+                )
+                continue
+            if profile_result.get("status") != "succeeded":
+                last_phase = "profile"
+                last_error = str(
+                    profile_result.get("error") or "profile sub-step failed"
+                )
+                log.warning(
+                    "roofline profile attempt %d/%d failed: %s",
+                    attempt, _PROFILE_MAX_ATTEMPTS, last_error,
+                )
+                continue
+            trace_path = _extract_trace_path(profile_result)
+            if not trace_path:
+                last_phase = "profile_no_trace"
+                last_error = (
+                    "profile succeeded but no trace_path in result "
+                    "(missing both main_trace_path and trace_files[0])"
+                )
+                log.warning(
+                    "roofline profile attempt %d/%d: no trace path",
+                    attempt, _PROFILE_MAX_ATTEMPTS,
+                )
+                continue
+            # Success
+            if attempt > 1:
+                log.info(
+                    "roofline profile succeeded on attempt %d/%d",
+                    attempt, _PROFILE_MAX_ATTEMPTS,
+                )
+            break
+        else:
             return _failed(
-                "profile",
-                str(profile_result.get("error") or "profile sub-step failed"),
-                sub_result=profile_result,
-            )
-        trace_path = _extract_trace_path(profile_result)
-        if not trace_path:
-            return _failed(
-                "profile_no_trace",
-                "profile succeeded but no trace_path in result "
-                "(missing both main_trace_path and trace_files[0])",
+                last_phase,
+                f"all {_PROFILE_MAX_ATTEMPTS} profile attempts failed; "
+                f"last: {last_error}",
                 sub_result=profile_result,
             )
 
@@ -206,7 +289,22 @@ class RooflineExecutor:
         )
 
         # ---- Step 2: trace_analyze ----------------------------------------
+        # Pin the snapshot's arm so the ceiling's precision is anchored to the
+        # arm this roofline actually profiled. A PRELUDE roofline measures the
+        # baseline arm; without this the recorder would infer "current_best"
+        # from a warm-replay-promoted state and retro-inflate the ceiling.
+        _task_params = ctx.task.params or {}
+        # Pin every roofline's arm explicitly so the ceiling precision never
+        # relies on a transient current_best inference: PRELUDE measures the
+        # baseline arm; all other reasons (watermark etc.) measure current_best.
+        roofline_arm = (
+            "baseline"
+            if str(_task_params.get("reason") or "") == "prelude_initial"
+            else "current_best"
+        )
         ta_payload: dict[str, Any] = {"trace_input": str(trace_path)}
+        if roofline_arm:
+            ta_payload["roofline_arm"] = roofline_arm
         try:
             ta_result = await trace_analyze_handler(
                 ta_payload,
@@ -244,6 +342,8 @@ class RooflineExecutor:
                     source_warning.get("requested_mode") or ""
                 ),
             }
+            if roofline_arm:
+                ta_payload_retry["roofline_arm"] = roofline_arm
             try:
                 ta_result = await trace_analyze_handler(
                     ta_payload_retry,
@@ -322,6 +422,37 @@ class RooflineExecutor:
         # Cache via the C1 recorder (bumps roofline_snapshot_id by one, writes analysis_md_text / analysis_md_path).
         self.shared_state.record_trace_analyze(ta_payload, ta_result)
         cached = self.shared_state.last_trace_analyze or {}
+
+        # #266: the auto-roofline TraceLens run does NOT pass through
+        # Coordinator._handle_request, so emit its lifecycle event here so
+        # operators still see "TraceLens finished -> analysis at <path>".
+        # Best-effort. The event is recorded into the coordinator's shared
+        # SharedState object, so it is durable as soon as ANY later
+        # coordinator save runs; the explicit save below is only a fast-path
+        # to flush it immediately when a real session dir already exists
+        # (tests may resolve session_dir to "."). Note: if auto-roofline ever
+        # became the very first writer of state.json, this in-memory event
+        # would rely on that later coordinator save to reach disk.
+        try:
+            self.shared_state.record_lifecycle_event(
+                step="roofline",
+                status="END",
+                artifacts={
+                    "trace_input": str(trace_path),
+                    "analysis_md_path": str(cached.get("analysis_md_path") or ""),
+                    "candidates_path": str(cached.get("candidates_path") or ""),
+                    "kernel_roofline_path": str(
+                        cached.get("kernel_roofline_path") or ""
+                    ),
+                },
+                detail=f"hot_kernels={len(hot)}",
+                duration_s=time.monotonic() - _lc_t0,
+            )
+            sd = Path(session_dir)
+            if sd.name and sd.is_dir() and (sd / "state.json").exists():
+                self.shared_state.save(sd)
+        except Exception:  # noqa: BLE001 — defensive
+            log.debug("roofline: lifecycle emit failed", exc_info=True)
 
         return {
             "status": "succeeded",

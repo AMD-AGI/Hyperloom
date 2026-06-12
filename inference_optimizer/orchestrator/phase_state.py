@@ -855,6 +855,19 @@ def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
 
 
 def abort_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
+    """Detect a PRELUDE-aborting stop reason on the state.
+
+    Recognizes terminal stop reasons (e.g. ``cortex_t0_failed``,
+    ``time_exhausted_during_prelude``) so phase history captures the
+    boundary.
+
+    Args:
+        state: Object exposing a ``stop_reason`` attribute.
+
+    Returns:
+        A ``(reason, metadata)`` tuple when an abort reason is present,
+        otherwise ``None``.
+    """
     # Treat cortex_t0_failed / time_exhausted_during_prelude etc. as a PRELUDE
     # abort so phase_history captures the boundary.
     sr = (getattr(state, "stop_reason", "") or "").strip()
@@ -1267,6 +1280,129 @@ def make_history_row(
     }
 
 
+# ---------------------------------------------------------------------------
+# Lifecycle events (#266) — operator-facing phase/step boundary log
+# ---------------------------------------------------------------------------
+#
+# The coordinator's internal phase vocabulary (PRELUDE…CLOSE) and step /
+# handler names (trace_analyze / run_optimization / integrate / report) are
+# precise but unfamiliar to operators reading chat. Issue #266 asks that
+# every phase/step boundary be visible together with where its artifacts
+# landed, so a phase can no longer "run silently".
+#
+# A lifecycle event therefore carries BOTH naming dimensions in parallel
+# (the user asked for both): ``phase`` is the real coordinator phase active
+# when the event fired, ``step`` is the machine step/handler name, and
+# ``label`` is the human-friendly name used in #266 / user-facing docs.
+#
+# ``make_lifecycle_event`` is a pure builder mirroring ``make_history_row``;
+# ``SharedState.record_lifecycle_event`` is the single stateful writer
+# (``policy.CORE_STATE_FIELDS`` guards the ``lifecycle`` field).
+LIFECYCLE_STATUS_START = "START"
+LIFECYCLE_STATUS_END = "END"
+LIFECYCLE_STATUS_ERROR = "ERROR"
+# Phase-boundary marker. Unlike START (which pairs with a later END for the
+# same step), ENTER is a point-in-time "entered <phase>" mark: the next
+# phase's ENTER implies the previous one finished, so phase rows are never
+# expected to have a matching END (see SKILL.md reading tip).
+LIFECYCLE_STATUS_ENTER = "ENTER"
+LIFECYCLE_STATUSES: frozenset[str] = frozenset({
+    LIFECYCLE_STATUS_START,
+    LIFECYCLE_STATUS_END,
+    LIFECYCLE_STATUS_ERROR,
+    LIFECYCLE_STATUS_ENTER,
+})
+
+# Human-friendly labels for the six coordinator phases.
+PHASE_HUMAN_LABELS: dict[str, str] = {
+    PHASE_PRELUDE:      "Prelude (baseline + roofline)",
+    PHASE_FRAMEWORK_PR: "Framework PR",
+    PHASE_EXPLORE:      "Explore (params / backends)",
+    PHASE_KERNEL:       "Kernel optimization",
+    PHASE_SWEEP:        "Concurrency sweep",
+    PHASE_CLOSE:        "Close (report)",
+}
+
+# Human-friendly labels for the lifecycle *steps* surfaced to operators,
+# mirroring the names used in issue #266 (TraceLens / GEAK / Integrate /
+# Validate / Report). Keys are the coordinator's machine step / handler
+# names; several map to the same label because the simplified #266 pipeline
+# collapses multiple internal steps.
+LIFECYCLE_STEP_LABELS: dict[str, str] = {
+    "roofline":          "TraceLens",
+    "trace_analyze":     "TraceLens",
+    "run_gemm_tuning":   "GEMM tuning",
+    "run_optimization":  "GEAK",
+    "integrate":         "Integrate",
+    "apply_patch":       "Integrate",
+    "explore":           "Validate (stack rebench)",
+    "sweep":             "Concurrency sweep",
+    "report":            "Report",
+    "session_breakdown": "Report (session breakdown)",
+}
+
+
+def lifecycle_label(name: str) -> str:
+    """Resolve a human-friendly label for a step or phase name (#266).
+
+    Falls back to the phase-label table, then to the verbatim name, so an
+    unmapped step still produces a sensible event rather than an empty
+    label.
+    """
+    key = (name or "").strip()
+    if key in LIFECYCLE_STEP_LABELS:
+        return LIFECYCLE_STEP_LABELS[key]
+    upper = key.upper()
+    if upper in PHASE_HUMAN_LABELS:
+        return PHASE_HUMAN_LABELS[upper]
+    return key
+
+
+def make_lifecycle_event(
+    *,
+    step: str,
+    status: str,
+    phase: str,
+    label: str | None,
+    artifacts: dict[str, str] | None,
+    detail: str,
+    duration_s: float | None,
+    seq: int,
+    ts: str,
+) -> dict[str, Any]:
+    """Construct a canonical lifecycle event row (#266).
+
+    ``status`` is not hard-validated here (mirroring ``make_history_row``'s
+    lenience) so recovery / resume tools can emit synthetic rows; callers
+    that want the strict check go through :data:`LIFECYCLE_STATUSES`.
+    Empty / ``None`` artifact values are dropped so the rendered event only
+    advertises paths that actually exist.
+    """
+    event: dict[str, Any] = {
+        "seq":    int(seq),
+        "ts":     ts,
+        "phase":  (phase or "").strip().upper(),
+        "step":   (step or "").strip(),
+        "label":  (label or lifecycle_label(step)),
+        "status": (status or "").strip().upper(),
+        "detail": (detail or "").strip(),
+        "artifacts": {
+            str(k): str(v)
+            for k, v in (artifacts or {}).items()
+            if v not in (None, "")
+        },
+    }
+    if duration_s is not None:
+        try:
+            event["duration_s"] = round(float(duration_s), 3)
+        except (TypeError, ValueError):
+            # A malformed duration_s is intentionally omitted rather than
+            # failing event creation: lifecycle logging is operator-facing
+            # diagnostics and must never break the orchestration loop.
+            pass
+    return event
+
+
 __all__ = [
     "DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT",
     "DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE",
@@ -1288,6 +1424,12 @@ __all__ = [
     "ESCALATE_HINT_SKIP_TO_KERNEL",
     "ESCALATE_HINT_SKIP_TO_SWEEP",
     "ESCALATE_HINT_VOCAB",
+    "LIFECYCLE_STATUSES",
+    "LIFECYCLE_STATUS_END",
+    "LIFECYCLE_STATUS_ENTER",
+    "LIFECYCLE_STATUS_ERROR",
+    "LIFECYCLE_STATUS_START",
+    "LIFECYCLE_STEP_LABELS",
     "PHASE_ALLOWED_ACTIONS",
     "PHASE_INTERLEAVE_ENV",
     "PHASE_LLM_PROPOSABLE_ACTIONS",
@@ -1295,12 +1437,15 @@ __all__ = [
     "PHASE_EXIT_REASONS",
     "PHASE_EXPLORE",
     "PHASE_FRAMEWORK_PR",
+    "PHASE_HUMAN_LABELS",
     "PHASE_INDEX",
     "PHASE_KERNEL",
     "PHASE_NAMES",
     "PHASE_PRELUDE",
     "PHASE_SWEEP",
     "STOP_REASON_VOCAB",
+    "lifecycle_label",
+    "make_lifecycle_event",
     "DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK",
     "DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT",
     "DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO",

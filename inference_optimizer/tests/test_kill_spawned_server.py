@@ -24,6 +24,7 @@ from inference_optimizer.orchestrator.action_executors._subprocess_kill import (
     kill_my_spawned_server,
     new_session_kwargs,
     run_with_session_kill,
+    server_log_death_excerpt,
 )
 
 
@@ -255,6 +256,23 @@ def test_run_with_session_kill_soft_deadline_does_not_fire_for_quick_child():
     assert "hi" in (cp.stdout or "")
 
 
+def test_run_with_session_kill_streams_child_output_to_parent(capsys):
+    """Captured child output is also mirrored immediately to parent streams."""
+    code = (
+        "import sys\n"
+        "print('child-out', flush=True)\n"
+        "print('child-err', file=sys.stderr, flush=True)\n"
+    )
+    cp = run_with_session_kill([sys.executable, "-c", code], timeout=10)
+
+    captured = capsys.readouterr()
+    assert cp.returncode == 0
+    assert "child-out" in (cp.stdout or "")
+    assert "child-err" in (cp.stderr or "")
+    assert "child-out" in captured.out
+    assert "child-err" in captured.err
+
+
 def test_run_with_session_kill_legacy_timeout_still_raises():
     """With ``soft_deadline_sec`` None, a child exceeding the hard ``timeout`` still raises ``TimeoutExpired``."""
     with pytest.raises(subprocess.TimeoutExpired):
@@ -278,6 +296,41 @@ def test_server_log_shows_death_detects_marker(tmp_path):
         "exception in a background process.\n"
     )
     assert _server_log_shows_death(str(log_path)) is True
+
+
+def test_server_log_shows_death_detects_vllm_engine_core(tmp_path):
+    """#524: the vLLM v1 engine-core bootstrap tail must read as dead. The
+    ``RuntimeError: Engine core initialization failed`` line and the
+    ``Failed core proc(s)`` anchor both trip the watchdog."""
+    log_path = tmp_path / "server.log"
+    log_path.write_text(
+        "(APIServer pid=16160)   File '.../vllm/v1/engine/utils.py', line 1057, "
+        "in wait_for_engine_startup\n"
+        "(APIServer pid=16160) RuntimeError: Engine core initialization failed. "
+        "See root cause above. Failed core proc(s): {}\n"
+    )
+    assert _server_log_shows_death(str(log_path)) is True
+
+
+def test_server_log_death_excerpt_surfaces_root_cause(tmp_path):
+    """#524: the excerpt helper returns the engine/worker-init root-cause line
+    (with a little context) so the failure classifier can put the real server
+    fault in the operator-facing ``error`` field; a healthy / missing log
+    returns ``None``."""
+    log_path = tmp_path / "server.log"
+    assert server_log_death_excerpt(str(log_path)) is None  # missing → None
+    log_path.write_text("INFO loading shards 50%\nINFO graph capture\n")
+    assert server_log_death_excerpt(str(log_path)) is None  # healthy → None
+    log_path.write_text(
+        "(APIServer pid=16160)   File '.../vllm/v1/engine/utils.py', line 1057, "
+        "in wait_for_engine_startup\n"
+        "(APIServer pid=16160)     raise RuntimeError(\n"
+        "(APIServer pid=16160) RuntimeError: Engine core initialization failed. "
+        "See root cause above. Failed core proc(s): {}\n"
+    )
+    excerpt = server_log_death_excerpt(str(log_path))
+    assert excerpt is not None
+    assert "Engine core initialization failed" in excerpt
 
 
 def test_run_with_session_kill_watchdog_reaps_hung_server(tmp_path):
