@@ -3126,10 +3126,17 @@ class Coordinator:
         # No-op unless live push is enabled; idempotent (a later cli.finally
         # flush only re-writes the receipt). Best-effort.
         try:
-            from .trace.langfuse_emitter import flush_session
+            from .trace.langfuse_emitter import (
+                flush_session,
+                record_session_breakdown,
+            )
             flush_session(self.session_dir)
             from ..breakdown import patch_breakdown_langfuse
             patch_breakdown_langfuse(self.session_dir)
+            # After the breakdown file is in its final (post-flush) form, attach
+            # the complete JSON to the trace as a ``session_breakdown``
+            # observation. Best-effort; no-op when live push is disabled.
+            record_session_breakdown(self.session_dir)
         except Exception as exc:  # noqa: BLE001 — defensive
             log.debug("CLOSE step 2.5 (langfuse flush) failed", exc_info=True)
             await self._record_close_step(
