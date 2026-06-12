@@ -82,6 +82,7 @@ async def test_no_stale_owners_returns_succeeded(tmp_path, monkeypatch):
     """Healthy GPUs + no stale owners -> state=succeeded, no kills."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
+    monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "0")
     exe = RecoverExecutor()
 
     monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: _healthy_probe())
@@ -204,10 +205,10 @@ async def test_sigkill_fallthrough_when_pid_still_alive(tmp_path, monkeypatch):
 
 # gpureset env-gate (the "soft_then_hard_gated" choice)
 @pytest.mark.asyncio
-async def test_env_gate_blocks_gpureset_by_default(tmp_path, monkeypatch):
+async def test_env_gate_blocks_gpureset_when_disabled(tmp_path, monkeypatch):
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    monkeypatch.delenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", raising=False)
+    monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "0")
     exe = RecoverExecutor()
 
     monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: _leaked_probe())
@@ -457,8 +458,12 @@ class _ProcResult:
 # ---------------------------------------------------------------------------
 
 class TestEnvGate:
-    def test_default_off(self, monkeypatch):
+    def test_default_on(self, monkeypatch):
         monkeypatch.delenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", raising=False)
+        assert _env_gate_allows_gpureset() is True
+
+    def test_explicit_zero_disables(self, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "0")
         assert _env_gate_allows_gpureset() is False
 
     def test_explicit_one_enables(self, monkeypatch):

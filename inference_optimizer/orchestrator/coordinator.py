@@ -45,6 +45,9 @@ MAINTENANCE_EVERY_TICKS: int = 50
 # phase's budget fraction (DEFAULT_PHASE_BUDGET_PCT) applies to this window
 # rather than the whole run. Env override: INFERENCE_OPTIMIZER_CYCLE_HOURS.
 DEFAULT_CYCLE_HOURS: float = 6.0
+# Trailing window for the crash-rate emergency stop: the threshold counts only
+# crashes within this many seconds so old crashes age out on long runs/resume.
+_CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 from . import phase_state as _phase_state
 from .optimization_journal import (
     Journal,
@@ -659,7 +662,86 @@ class Coordinator:
             summary["tasks_pruned"] = res.tasks_deleted
         except Exception:  # noqa: BLE001
             log.exception("maintenance: DB retention failed")
+        try:
+            disk = self._maybe_prune_runs_for_disk()
+            if disk is not None:
+                summary["disk"] = disk
+        except Exception:  # noqa: BLE001
+            log.exception("maintenance: disk monitor failed")
         log.info("maintenance tick %d: %s", tick, summary)
+        return summary
+
+    # Advisory disk guard: when the session partition runs low, LRU-trim the
+    # bulkiest churn (per-task runs/ workspaces) while never touching durable
+    # optimization state. Optimization wins live in state.json / journal /
+    # reports, none of which this method removes.
+    _DISK_FREE_MIN_GB: float = 20.0
+    _DISK_USED_MAX_FRAC: float = 0.85
+    _DISK_RUNS_KEEP_PER_ACTION: int = 50
+    _STATE_JSON_WARN_BYTES: int = 50 * 1024 * 1024
+
+    def _maybe_prune_runs_for_disk(self) -> dict[str, Any] | None:
+        """LRU-trim per-task ``runs/`` workspaces when disk is low.
+
+        No-op unless the session partition is below the free-space floor or
+        above the used-fraction ceiling. When triggered, keeps only the most
+        recently modified N task dirs per action and deletes the rest. Also
+        warns (only) when ``state.json`` grows past a soft size cap.
+
+        Returns:
+            dict | None: A summary when the check ran, else ``None``.
+        """
+        import shutil
+
+        from ..session_paths import runs_root as _runs_root
+
+        try:
+            usage = shutil.disk_usage(str(self.session_dir))
+        except OSError:
+            return None
+        free_gb = usage.free / (1024.0 ** 3)
+        used_frac = usage.used / usage.total if usage.total else 0.0
+        summary: dict[str, Any] = {
+            "free_gb": round(free_gb, 2),
+            "used_frac": round(used_frac, 4),
+        }
+        try:
+            state_path = SharedState.state_path(self.session_dir)
+            if state_path.is_file() and state_path.stat().st_size > self._STATE_JSON_WARN_BYTES:
+                log.warning(
+                    "maintenance: state.json is %.1f MB (soft cap %.0f MB)",
+                    state_path.stat().st_size / (1024.0 ** 2),
+                    self._STATE_JSON_WARN_BYTES / (1024.0 ** 2),
+                )
+        except OSError:
+            pass
+
+        if free_gb >= self._DISK_FREE_MIN_GB and used_frac <= self._DISK_USED_MAX_FRAC:
+            return summary
+
+        runs_root = _runs_root(self.session_dir)
+        if not runs_root.is_dir():
+            return summary
+        removed = 0
+        for action_dir in runs_root.iterdir():
+            if not action_dir.is_dir():
+                continue
+            task_dirs = [p for p in action_dir.iterdir() if p.is_dir()]
+            if len(task_dirs) <= self._DISK_RUNS_KEEP_PER_ACTION:
+                continue
+            task_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            for stale in task_dirs[self._DISK_RUNS_KEEP_PER_ACTION:]:
+                try:
+                    shutil.rmtree(stale, ignore_errors=True)
+                    removed += 1
+                except OSError:
+                    log.warning("maintenance: failed to prune %s", stale)
+        summary["runs_pruned"] = removed
+        if removed:
+            log.info(
+                "maintenance: low disk (free=%.1fGB used=%.0f%%) pruned %d run dirs",
+                free_gb, used_frac * 100.0, removed,
+            )
         return summary
 
     async def _maybe_checkpoint_orchestration(
@@ -4192,7 +4274,9 @@ class Coordinator:
                             )
                         stop_reason = "time_exhausted"
                         break
-                if self.shared_state.crash_count >= crash_emergency_threshold:
+                if self.shared_state.recent_crash_count(
+                    window_sec=_CRASH_EMERGENCY_WINDOW_SEC,
+                ) >= crash_emergency_threshold:
                     stop_reason = "emergency"
                     break
                 if max_ticks is not None and tick_n >= max_ticks:

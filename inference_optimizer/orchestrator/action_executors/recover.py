@@ -68,12 +68,17 @@ _OWNER_PATTERNS: tuple[str, ...] = (
 
 
 def _env_gate_allows_gpureset() -> bool:
-    """``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1`` opt-in for hard recovery.
+    """Whether hard GPU reset is permitted during recovery.
+
+    Enabled by default (exclusive-node assumption); set
+    ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=0`` to disable on shared nodes.
 
     Returns:
-        bool: ``True`` when the env gate is explicitly set to ``"1"``.
+        bool: ``True`` unless the env gate is explicitly disabled.
     """
-    return os.getenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "").strip() == "1"
+    return os.getenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
 
 
 class RecoverExecutor:

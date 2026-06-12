@@ -37,10 +37,15 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# Upper bound on retained crash timestamps (trailing-window rate needs only the
+# recent tail; older entries age out of any sane emergency window anyway).
+_CRASH_TIMESTAMP_CAP: int = 200
 
 def _now_iso() -> str:
     """Return the current UTC time as a microsecond-precision ISO 8601 string.
@@ -385,6 +390,9 @@ class SharedState:
     auto_roofline_pending_task_id: str = ""
     current_action: str = ""
     crash_count: int = 0
+    # Unix timestamps of recent crashes (bounded), used for the trailing-window
+    # emergency-stop rate so old crashes age out instead of accumulating forever.
+    crash_timestamps: list[float] = field(default_factory=list)
     # Last Coordinator-side exception caught by the tick-loop guard (gives postmortems a traceback).
     last_tick_exception: dict[str, Any] = field(default_factory=dict)
     pruned_families: list[str] = field(default_factory=list)
@@ -1223,7 +1231,12 @@ class SharedState:
         return "\n".join(lines)
 
     def increment_crash_count(self, by: int = 1) -> int:
-        """Increment the cumulative crash counter.
+        """Increment the cumulative crash counter and record crash times.
+
+        ``crash_count`` stays a monotonic telemetry total; each crash also
+        appends the current time to :attr:`crash_timestamps` (bounded to the
+        most recent entries) so the emergency stop can use a trailing-window
+        rate instead of the never-decaying total.
 
         Args:
             by (int): Amount to add to :attr:`crash_count` (default 1).
@@ -1232,7 +1245,26 @@ class SharedState:
             int: The post-increment crash count.
         """
         self.crash_count += by
+        now = time.time()
+        for _ in range(max(1, int(by))):
+            self.crash_timestamps.append(now)
+        if len(self.crash_timestamps) > _CRASH_TIMESTAMP_CAP:
+            del self.crash_timestamps[:-_CRASH_TIMESTAMP_CAP]
         return self.crash_count
+
+    def recent_crash_count(self, *, window_sec: float, now: float | None = None) -> int:
+        """Count crashes recorded within the trailing ``window_sec`` seconds.
+
+        Args:
+            window_sec (float): Trailing window width in seconds.
+            now (float | None): Reference time; defaults to ``time.time()``.
+
+        Returns:
+            int: Number of crash timestamps newer than ``now - window_sec``.
+        """
+        ref = time.time() if now is None else now
+        cutoff = ref - float(window_sec)
+        return sum(1 for t in self.crash_timestamps if t >= cutoff)
 
     def record_tick_exception(
         self,
