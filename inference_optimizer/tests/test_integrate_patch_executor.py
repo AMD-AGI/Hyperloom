@@ -350,6 +350,80 @@ async def test_executor_missing_target_preflight_short_circuits(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_executor_multi_node_skips_neutrally(tmp_path: Path, monkeypatch):
+    """Multi-node: the executor must SKIP neutrally (status='skipped', NOT
+    'failed') without applying to the sandbox — a sandbox-only apply would not
+    affect pod-side serving. A neutral skip lets the session keep running
+    every other action (the Coordinator only records integrate_patch results
+    whose status == 'kept', so a skip rolls no failure tally)."""
+    from inference_optimizer.orchestrator.action_executors import (
+        _multi_node_env as mne,
+    )
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: True)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    _write_specialist_workspace(
+        session_dir, "t-spec-mn", patch_contents=[_VALID_PATCH],
+    )
+
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    ctx = _make_ctx("t-int-mn", {
+        "specialist_task_id": "t-spec-mn",
+        "framework_source_root": str(repo),
+        "apply_only": True,
+    })
+    result = await executor(ctx)
+
+    # Neutral skip — explicitly NOT a failure (no error_class), and NOT a KEEP
+    # (so the Coordinator records nothing and the session continues).
+    assert result["status"] == "skipped"
+    assert result["status"] != "failed"
+    assert result["status"] != "kept"
+    assert "error_class" not in result
+    assert result["skipped_reason"] == "multi_node_unsupported"
+    assert result["patches_applied"] == []
+    # The sandbox framework tree must be untouched — no silent apply.
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_executor_single_node_guard_not_triggered(tmp_path: Path, monkeypatch):
+    """Single-node (is_multi_node False): the guard must NOT fire — the
+    executor proceeds to the normal apply path bit-for-bit. This is the
+    regression lock for the 'never affect single-node' hard requirement."""
+    from inference_optimizer.orchestrator.action_executors import (
+        _multi_node_env as mne,
+    )
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    _init_git_repo(repo)
+    _write_specialist_workspace(
+        session_dir, "t-spec-sn", patch_contents=[_VALID_PATCH],
+    )
+
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    ctx = _make_ctx("t-int-sn", {
+        "specialist_task_id": "t-spec-sn",
+        "framework_source_root": str(repo),
+        "apply_only": True,
+    })
+    result = await executor(ctx)
+
+    # Normal apply path reached (guard skipped); patch applied.
+    assert result["status"] == "applied_no_bench"
+    assert result.get("error_class") != "multi_node_unsupported"
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
 async def test_executor_missing_specialist_workspace_fails_cleanly(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()

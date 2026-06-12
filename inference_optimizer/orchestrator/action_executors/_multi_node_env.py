@@ -96,6 +96,36 @@ def ray_gcs_address_from_state() -> str:
     return ""
 
 
+def dynamo_ssh_env_from_state() -> dict[str, str]:
+    """Env that routes kernel-agent GEAK GPU work to a Dynamo pod over SSH.
+
+    Returns ``{KERNEL_AGENT_GPU_PLACEMENT=ssh, MN_SSH_HOST/PORT/KEY}`` ONLY when
+    the multi_node backend is Dynamo and a GPU pod IP + ssh key are known.
+    Returns ``{}`` for the RayJob backend and single-node so the Ray placement
+    path (``ray_gcs_address_from_state`` / ``RAY_ADDRESS``) is left untouched —
+    this is the isolation seam that keeps the SSH path Dynamo-only.
+    """
+    state = _read_state()
+    if state.get("backend") != "dynamo":
+        return {}
+    if (state.get("pd_mode") or "").lower() == "disaggregated":
+        gpu_ips = (
+            list(state.get("prefill_pod_ips") or [])
+            + list(state.get("decode_pod_ips") or [])
+        )
+    else:
+        gpu_ips = list(state.get("worker_pod_ips") or [])
+    key = str(state.get("ssh_key_path") or "").strip()
+    if not gpu_ips or not key:
+        return {}
+    return {
+        "KERNEL_AGENT_GPU_PLACEMENT": "ssh",
+        "MN_SSH_HOST": str(gpu_ips[0]),
+        "MN_SSH_PORT": str(state.get("ssh_port") or 2222),
+        "MN_SSH_KEY": key,
+    }
+
+
 def rayjob_id_from_state() -> str:
     """Return the SaFE-allocated RayJob workload id, or ``""`` if absent.
 

@@ -245,6 +245,119 @@ def annotate_multi_node_cuda_graph_max_bs(
     return notes
 
 
+# ---------------------------------------------------------------------------
+# Multi-node grid prioritisation + invalid-variant filtering
+# ---------------------------------------------------------------------------
+#
+# In multi-node mode a ``--max-hours`` cut may stop the explore loop before the
+# whole grid is benched, so we (a) drop variants that are known regressions on
+# multi-node fabrics and (b) reorder the survivors so the strongest candidates
+# run first. Both are STRICT no-ops outside multi-node mode (single-node grid
+# order is a hard "never alter" invariant).
+#
+# ``priority_tags`` is an ordered list of category tags; a variant's priority is
+# the index of the first tag that appears (as a substring) in its ``note`` (or,
+# when ``note`` is empty, its ``name``). Lower index == higher priority; an
+# untagged variant sinks to the end. ``_MN_PARAMS_PRIORITY`` is concatenated
+# ahead of ``_MN_BACKENDS_PRIORITY`` by callers, so param-tuning variants
+# (cheap, high-yield) are surfaced before heavier comm/backend variants.
+_MN_PARAMS_PRIORITY: tuple[str, ...] = (
+    "cuda_graph_max_bs",
+    "max_running_requests",
+    "chunked_prefill",
+    "schedule",
+    "decode_steps",
+    "torch_compile",
+    "mem_fraction",
+)
+_MN_BACKENDS_PRIORITY: tuple[str, ...] = (
+    "tier1",
+    "tier2",
+    "tier3",
+    "tier4",
+    "tier5_comm",
+    "tier5",
+    "comm_custom_ar",
+)
+
+
+def _mn_priority_index(
+    variant: "GridVariant", priority_tags: "tuple[str, ...] | list[str]"
+) -> int:
+    """Return the rank of ``variant`` against ``priority_tags`` (lower = first).
+
+    Matches the first ``priority_tags`` entry that is a substring of the
+    variant's ``note`` (falling back to ``name`` when ``note`` is empty).
+    Untagged variants return ``len(priority_tags)`` so a stable sort sinks them
+    to the end while preserving their relative order.
+    """
+    haystack = (variant.note or variant.name or "")
+    for idx, tag in enumerate(priority_tags):
+        if tag and tag in haystack:
+            return idx
+    return len(priority_tags)
+
+
+def reorder_grid_for_multi_node(
+    grid: list["GridVariant"],
+    *,
+    priority_tags: "tuple[str, ...] | list[str]",
+) -> list["GridVariant"]:
+    """Stable-sort ``grid`` so likely multi-node winners run first.
+
+    Single-node mode (``is_multi_node()`` False) returns ``grid`` unchanged,
+    bit-for-bit (hard requirement: never alter single-node grid order). In
+    multi-node mode variants are stably sorted by ``_mn_priority_index`` so
+    tagged variants surface ahead of untagged ones and a ``--max-hours`` cut
+    still benches the strong candidates.
+    """
+    from ._multi_node_env import is_multi_node
+    if not is_multi_node():
+        return grid
+    # ``sorted`` is stable, so ties (same priority index) keep input order.
+    return sorted(grid, key=lambda v: _mn_priority_index(v, priority_tags))
+
+
+def apply_multi_node_invalid_variants(
+    grid: list["GridVariant"],
+) -> tuple[list["GridVariant"], list[dict]]:
+    """Drop variants that are known regressions/invalid on multi-node fabrics.
+
+    Returns ``(kept, dropped)``. ``dropped`` entries carry ``name`` / ``source``
+    / ``reason`` keys (matching the explore-loop ``skipped_dup`` shape). A
+    STRICT no-op outside multi-node mode: returns ``(grid, [])`` so single-node
+    behaviour is never altered.
+
+    Current rule: ``--cuda-graph-max-bs N`` with ``N < $CONC`` regresses ~50%
+    in multi-node mode (cuda-graph cache misses every cross-node decode tick),
+    so it is dropped from the explore grid here (the advisory-only counterpart
+    is ``annotate_multi_node_cuda_graph_max_bs``).
+    """
+    from ._multi_node_env import is_multi_node
+    if not is_multi_node():
+        return grid, []
+    try:
+        conc = int(os.environ.get("CONC", "64") or 64)
+    except ValueError:
+        conc = 64
+    kept: list["GridVariant"] = []
+    dropped: list[dict] = []
+    for v in grid:
+        m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_server_args or "")
+        if conc > 0 and m and int(m.group(1)) < conc:
+            dropped.append({
+                "name": v.name,
+                "source": "multi_node_invalid",
+                "reason": (
+                    f"cuda_graph_max_bs={m.group(1)} < CONC={conc} "
+                    "(multi-node graph-cache miss is a known ~50% regression)"
+                ),
+            })
+            continue
+        kept.append(v)
+    return kept, dropped
+
+
 # Framework / hardware compatibility filter: drops variants whose flag literals
 # are unsupported by the live framework + model class (real incompatibility,
 # not a strategy gate). Each entry maps an ``extra_server_args`` substring to a
@@ -1337,7 +1450,7 @@ def _run_magpie(
 
     env = os.environ.copy()
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-    magpie_dir = os.environ.get("MAGPIE_DIR", "")
+    magpie_dir = os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR") or ""
     if magpie_dir:
         env["PYTHONPATH"] = f"{magpie_dir}:{env.get('PYTHONPATH', '')}"
 
@@ -1485,6 +1598,11 @@ async def run_grid(
                 extra_server_args=_shell_safe_dedupe(merge_server_args(
                     base_extra_args, variant.extra_server_args,
                 )),
+                # Per-variant env overrides (e.g. MORI_* MoE-dispatch
+                # tuning) so server-side env knobs proposed by specialists
+                # actually take effect on the restarted sglang. Empty dict
+                # for arg-only variants → forwarded as a no-op.
+                extra_env=dict(variant.extra_envs),
                 model_path=model_path,
                 ep=int(os.environ.get("EP") or 0) or None,
             )
@@ -1885,7 +2003,9 @@ __all__ = [
     "SGLANG_WATCHDOG_TIMEOUT_ENV",
     "SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "VariantResult",
+    "apply_multi_node_invalid_variants",
     "apply_runtime_benchmark_overrides",
+    "reorder_grid_for_multi_node",
     "inject_sglang_attention_backend",
     "inject_sglang_context_length",
     "inject_sglang_watchdog_timeout",

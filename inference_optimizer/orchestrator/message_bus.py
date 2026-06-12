@@ -31,6 +31,8 @@ TOPIC_ALLOWLIST = frozenset({
     "review_verdict", "advice", "strategy_change",
     # Robustness scheduling-police mirror (audit trail).
     "kill",
+    # Dynamic specialist dispatch observation (coordinator.py _handle_dynamic_specialist_dispatch).
+    "dynamic_specialist_dispatched",
 })
 
 
