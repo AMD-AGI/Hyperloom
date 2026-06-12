@@ -1095,6 +1095,7 @@ def _build_variant_yaml(
     model_path: str | None = None,
     gpu_type: str | None = None,
     benchmark_script: str | None = None,
+    server_lifecycle: dict[str, Any] | None = None,
 ) -> Path:
     """Materialize a per-variant Magpie YAML on disk.
 
@@ -1102,6 +1103,8 @@ def _build_variant_yaml(
     overrides the legacy hardcoded ``benchmark.model``; ``gpu_type`` pins the
     generic ``{framework}_{gpu_type}.sh``; ``benchmark_script`` (pre-sanitized)
     force-pins a script, applied last so the operator pick wins.
+    ``server_lifecycle`` (``{cleanup, pid_dir, port}``) enables Magpie's
+    persistent-server reuse so a paired round can re-attach to a hot server.
     """
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -1121,6 +1124,15 @@ def _build_variant_yaml(
         envs[extra_args_env] = combined
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
+
+    if server_lifecycle is not None:
+        from ._server_lifecycle import inject_lifecycle
+        inject_lifecycle(
+            bench,
+            cleanup=bool(server_lifecycle.get("cleanup", True)),
+            pid_dir=server_lifecycle["pid_dir"],
+            port=int(server_lifecycle["port"]),
+        )
 
     output_subdir.mkdir(parents=True, exist_ok=True)
     out_path = output_subdir / "config.yaml"
@@ -1344,6 +1356,7 @@ async def run_grid(
     benchmark_script: str | None = None,
     result_dir: str | None = None,
     soft_deadline_sec: float | None = None,
+    server_lifecycle: dict[str, Any] | None = None,
 ) -> list[VariantResult]:
     """Execute every variant in ``grid`` once, in order.
 
@@ -1356,6 +1369,9 @@ async def run_grid(
     that hardcode ``--result-dir /workspace/`` (see SKILL.md "Magpie leak-path
     salvage"). ``soft_deadline_sec`` (Fix E): reap a variant once wall-clock
     exceeds it, marking it ``killed_overtime=True``; None/0 disables (legacy).
+    ``server_lifecycle`` (``{cleanup, pid_dir, port}``) enables Magpie's
+    persistent-server reuse so a paired warm round can re-attach to a hot
+    server; None keeps the legacy boot-per-variant behaviour.
     """
     if not magpie_python:
         magpie_python = _resolve_magpie_python()
@@ -1386,6 +1402,7 @@ async def run_grid(
                 model_path=model_path,
                 gpu_type=gpu_type,
                 benchmark_script=benchmark_script,
+                server_lifecycle=server_lifecycle,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning(
