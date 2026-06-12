@@ -204,9 +204,20 @@ def test_stop_reason_vocab_includes_v06_and_v08():
         # v0.8 additions
         "crash_threshold_exceeded", "user_stop_requested",
         "cortex_drain_failed", "plateau_explore",
+        # #522: fast baseline arg-error stop reason
+        "baseline_arg_error",
     ):
         assert phase_state.is_valid_stop_reason(reason), reason
     assert not phase_state.is_valid_stop_reason("totally_invented")
+
+
+def test_set_stop_reason_keeps_baseline_arg_error(tmp_path):
+    """#522: baseline_arg_error must survive set_stop_reason (not map to unknown)."""
+    from inference_optimizer.orchestrator.shared_state import SharedState
+    state = SharedState(session_id="t", model_name="m", model_path="m")
+    written = state.set_stop_reason("baseline_arg_error")
+    assert written == "baseline_arg_error"
+    assert state.stop_reason == "baseline_arg_error"
 
 
 def test_normalize_budget_pct_falls_back_to_defaults():

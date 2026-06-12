@@ -29,8 +29,6 @@ TOPIC_ALLOWLIST = frozenset({
     "request", "response",
     # Critic Review Protocol verdict broadcast.
     "review_verdict", "advice", "strategy_change",
-    # Robustness scheduling-police mirror (audit trail).
-    "kill",
     # Dynamic-specialist dispatch audit trail (free-form CPU-only
     # specialist dispatch via dynamic_dispatch_tools). These are
     # write-only observation-style records the Coordinator emits so the

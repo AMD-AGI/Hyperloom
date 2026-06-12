@@ -1198,6 +1198,20 @@ _AMD_UNSUPPORTED_ARCHITECTURES = frozenset({"deepseekv32forcausallm"})
 # causing AttributeError deep in engine init.
 _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 
+# Phi-3 su/longrope rope_scaling: Phi3Config._rope_scaling_validation() requires
+# rope_scaling to be a dict of EXACTLY 3 keys (type/short_factor/long_factor).
+# These 128k checkpoints ship a top-level rope_theta that transformers folds
+# into the rope_scaling dict during config load, so the validator sees 4 keys
+# and raises ValueError at AutoConfig.from_pretrained() — before SGLang's
+# --json-model-override-args can apply, so the override cannot recover the run.
+_PHI3_ROPE_TYPES = frozenset({"su", "longrope"})
+
+# Gemma2 missing hidden_act: sglang's gemma2 runtime reads config.hidden_act
+# unconditionally. Some checkpoints ship only hidden_activation (the HF field
+# name), so config.hidden_act is absent and the model crashes with
+# AttributeError in engine init. Hardware-agnostic.
+_GEMMA2_ARCHITECTURES = frozenset({"gemma2forcausallm"})
+
 # Quantization formats with no ROCm/AMD runtime path. NVIDIA ModelOpt FP8/NVFP4
 # use vendor-specific scale packing (no sglang ROCm loader); bitsandbytes ships
 # CUDA-only kernels; NVFP4/FP4 need Blackwell hardware. AMD-native fp8 (Quark /
@@ -1252,6 +1266,64 @@ def _detect_amd_unsupported_quant(model_path: str) -> str | None:
                     f"hardware; no AMD/ROCm runtime path exists."
                 )
     return None
+
+
+def _detect_phi3_rope_scaling_incompatible(data: dict) -> str | None:
+    """Return a reason when a Phi-3 su/longrope config crashes Phi3Config validation.
+
+    Phi3Config._rope_scaling_validation() requires rope_scaling to be a 3-key
+    dict, but transformers folds the top-level rope_theta into rope_scaling at
+    load, yielding 4 keys and a ValueError. This is hardware-agnostic and the
+    su/longrope type triggers it; yarn (the non-longrope path) is left alone.
+    """
+    model_type = str(data.get("model_type") or "").strip().lower()
+    arches = {a.lower() for a in _config_architectures(data)}
+    if model_type != "phi3" and "phi3forcausallm" not in arches:
+        return None
+    rope = data.get("rope_scaling")
+    if not isinstance(rope, dict):
+        return None
+    rope_type = str(rope.get("type") or "").strip().lower()
+    if rope_type not in _PHI3_ROPE_TYPES:
+        return None
+    # The crash only triggers when a top-level rope_theta exists: transformers
+    # folds it into rope_scaling, giving 4 keys instead of the required 3.
+    # Without rope_theta the 3-key dict passes validation fine.
+    if data.get("rope_theta") is None:
+        return None
+    return (
+        f"config.json is a Phi-3 model with rope_scaling.type='{rope_type}' "
+        f"and a top-level rope_theta={data['rope_theta']}; "
+        "Phi3Config._rope_scaling_validation requires a 3-key rope_scaling, but "
+        "transformers folds the top-level rope_theta into it at load, so the "
+        "validator sees 4 keys and raises ValueError at "
+        "AutoConfig.from_pretrained — before --json-model-override-args can "
+        "apply, so the engine crashes in init."
+    )
+
+
+def _detect_gemma2_missing_hidden_act(data: dict) -> str | None:
+    """Return a reason when a Gemma2 config omits hidden_act.
+
+    sglang's gemma2 runtime reads config.hidden_act unconditionally; configs
+    that only ship hidden_activation crash with AttributeError in engine init.
+    """
+    model_type = str(data.get("model_type") or "").strip().lower()
+    arches = {a.lower() for a in _config_architectures(data)}
+    if model_type != "gemma2" and not (arches & _GEMMA2_ARCHITECTURES):
+        return None
+    scopes = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        scopes.append(nested)
+    if any(s.get("hidden_act") for s in scopes):
+        return None
+    return (
+        "config.json is a Gemma2 model but lacks hidden_act (only "
+        "hidden_activation may be present); sglang's gemma2 runtime reads "
+        "config.hidden_act unconditionally and crashes with AttributeError "
+        "in engine init."
+    )
 
 
 def _detect_incompatible_model_config(
@@ -1325,6 +1397,15 @@ def _detect_incompatible_model_config(
             "init dereferences a missing max_position_embeddings and crashes "
             "in engine init (DeepSeek-V3.2-Exp class)."
         )
+    # Phi-3 longrope/su rope_scaling with non-canonical keys: hardware-agnostic
+    # (it is a transformers-layer Phi3Config validation, not a ROCm gap).
+    phi3_reason = _detect_phi3_rope_scaling_incompatible(data)
+    if phi3_reason is not None:
+        return phi3_reason
+    # Gemma2 missing hidden_act: also hardware-agnostic.
+    gemma2_reason = _detect_gemma2_missing_hidden_act(data)
+    if gemma2_reason is not None:
+        return gemma2_reason
     # Custom AutoConfig with unregistered model_type: sglang/vLLM fall
     # back to PreTrainedConfig (no max_position_embeddings attr) → crash.
     auto_map = data.get("auto_map")
@@ -1940,6 +2021,65 @@ def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
     return None
 
 
+# Legacy local auth-proxy endpoint. The component was removed; any leftover
+# URL pinned at this host:port is stale and must be force-rewritten to the
+# upstream gateway even when an operator value is otherwise preserved (#521).
+_STALE_PROXY_HOSTPORT = "127.0.0.1:4002"
+
+
+def _is_stale_proxy_url(url: str | None) -> bool:
+    """Return True for a leftover legacy auth-proxy URL (``127.0.0.1:4002``)."""
+    return _STALE_PROXY_HOSTPORT in str(url or "")
+
+
+# Matches the ``base_url:`` line in the GEAK litellm yaml (two-space indent
+# written by kernel-agent/scripts/install.sh, but tolerant of any indent).
+_GEAK_BASE_URL_RE = re.compile(r"(?m)^([ \t]*base_url[ \t]*:[ \t]*).*$")
+
+
+def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
+    """Rewrite ``base_url:`` in the GEAK litellm config to match ``base_url`` (#521).
+
+    GEAK reads its endpoint from ``--config $GEAK_CONFIG`` — a yaml written
+    once at install time — not from ``$GEAK_BASE_URL`` at runtime. So when an
+    operator points ``GEAK_BASE_URL`` at a reachable endpoint (e.g. a
+    host-local reverse tunnel) AFTER install, the env override alone is not
+    enough: the stale yaml still sends GEAK at the unreachable gateway and the
+    KERNEL phase burns budget on connection-error retries. Syncing the yaml in
+    place closes that gap so the kernel agent actually dials the operator's
+    endpoint.
+
+    Best-effort: returns ``False`` (never raises) when the path is empty, the
+    file is missing/unreadable/unwritable, it has no ``base_url:`` line, or it
+    is already in sync. Returns ``True`` only when a rewrite was applied.
+    """
+    if not geak_config_path or not base_url:
+        return False
+    path = Path(geak_config_path)
+    try:
+        if not path.is_file():
+            return False
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    match = _GEAK_BASE_URL_RE.search(text)
+    if match is None:
+        return False
+    current = match.group(0)[len(match.group(1)):].strip()
+    if current == base_url:
+        return False
+    # Use a function replacement so a URL containing regex backreference
+    # characters (e.g. ``\g``) cannot corrupt the rewrite.
+    new_text = _GEAK_BASE_URL_RE.sub(
+        lambda m: m.group(1) + base_url, text, count=1,
+    )
+    try:
+        path.write_text(new_text, encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
 def _derive_anthropic_base_url(openai_base_url: str) -> str:
     """Derive ``ANTHROPIC_BASE_URL`` from ``OPENAI_BASE_URL`` by stripping a trailing ``/v1`` (SDK re-appends it)."""
     from urllib.parse import urlparse, urlunparse
@@ -2538,12 +2678,32 @@ def _validate_and_resolve_claude_model(
     catalog id set on success (reused by the codex smoke-test).
     """
     chosen = (args.claude_model or "").strip()
-    if chosen not in _CLAUDE_ALLOWED_MODELS:
+    # #340: non-AMD deployments (Vultr / TensorWave / self-hosted gateways)
+    # may not serve the AMD-blessed opus-4-7/4-6 ids. The static allowlist is
+    # an AMD-network safety default; an operator can opt out via
+    # INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1, after which the gateway
+    # catalog probe below is the sole gate (a typo still fails because the id
+    # won't be in the catalog). Default behavior is unchanged.
+    allow_custom = os.environ.get(
+        "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "",
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
             f"Orchestration model must be one of {list(_CLAUDE_ALLOWED_MODELS)} "
             f"(preferred: {_CLAUDE_PREFERRED_MODEL}, "
-            f"fallback: {_CLAUDE_FALLBACK_MODEL}). Refusing to start.",
+            f"fallback: {_CLAUDE_FALLBACK_MODEL}). Refusing to start. "
+            f"For a non-AMD gateway, set "
+            f"INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1 to use a custom "
+            f"orchestration model validated against your gateway catalog.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if allow_custom and not chosen:
+        print(
+            "ERROR: --claude-model is empty but "
+            "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1; pass an explicit "
+            "orchestration model id. Refusing to start.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -2574,6 +2734,19 @@ def _validate_and_resolve_claude_model(
     if chosen in catalog_ids:
         print(f"Preflight: Claude model {chosen!r} confirmed in gateway catalog")
         return catalog_ids
+
+    # #340: under the custom-model opt-out the AMD opus-4-6 fallback is
+    # meaningless (a non-AMD catalog won't carry it); fail clearly on a
+    # catalog miss so the operator fixes the id rather than silently running a
+    # model their gateway doesn't serve.
+    if allow_custom:
+        print(
+            f"ERROR: --claude-model={chosen!r} not present in gateway catalog "
+            f"(INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1; catalog has "
+            f"{sorted(catalog_ids)[:20]}). Refusing to start.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     if _CLAUDE_FALLBACK_MODEL in catalog_ids:
         print(
@@ -2706,16 +2879,45 @@ def _preflight(
             if os.environ.get(alias) != safe_key:
                 os.environ[alias] = safe_key
                 print(f"Preflight: refreshed {alias} from SAFE_API_KEY")
-    # OOB / GEAK / LLM_API_BASE inherit the upstream URL verbatim.
+    # OOB / GEAK / LLM_API_BASE default to the upstream gateway URL, but an
+    # INTENTIONAL operator override is preserved. This matters for #521: GEAK
+    # runs in a separate network namespace that frequently cannot route to the
+    # gateway directly, while the orchestrator reaches it via a host-local
+    # reverse tunnel. Pointing GEAK_BASE_URL (or OOB_BASE_URL) at that tunnel
+    # only works if preflight does NOT clobber the operator's value back to the
+    # direct gateway URL. We still force-rewrite the known-stale legacy
+    # auth-proxy URL (127.0.0.1:4002) so leftovers from a removed component
+    # can never reach the CLIs.
     if base_url:
         for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
+            current = os.environ.get(alias, "").strip()
+            if current and current != base_url and not _is_stale_proxy_url(current):
+                # Operator pinned a distinct, non-stale endpoint (e.g. a tunnel
+                # at 127.0.0.1:18444 for #521); respect it.
+                print(
+                    f"Preflight: {alias} kept at {current} "
+                    f"(operator override; not forced to gateway)"
+                )
+                continue
             if os.environ.get(alias) != base_url:
                 prev = os.environ.get(alias, "")
                 os.environ[alias] = base_url
+                why = "stale-proxy rewrite" if _is_stale_proxy_url(prev) else "direct to gateway"
                 print(
                     f"Preflight: {alias} {prev or '<unset>'} -> {base_url} "
-                    f"(direct to gateway)"
+                    f"({why})"
                 )
+
+    # #521: GEAK reads its endpoint from $GEAK_CONFIG (written at install
+    # time), not from $GEAK_BASE_URL at runtime. Sync the yaml so the resolved
+    # GEAK_BASE_URL above (operator tunnel override, or the gateway default)
+    # actually reaches the kernel agent instead of a stale install-time URL.
+    geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
+    geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
+    if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
+        print(
+            f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})"
+        )
 
     # --- Resolve install interpreters ---
     from .orchestrator.action_executors._grid_runner import _resolve_magpie_python
@@ -2778,7 +2980,9 @@ def _preflight(
         capture_output=True,
     )
     if check.returncode != 0:
-        magpie_env = os.environ.get("MAGPIE_DIR")
+        # MAGPIE_PATH is the preferred override; MAGPIE_DIR stays honoured as
+        # a backward-compatible fallback.
+        magpie_env = os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR")
         magpie_env_explicit = bool(magpie_env)
         if magpie_env:
             magpie_dir = Path(magpie_env)
@@ -2822,9 +3026,10 @@ def _preflight(
             open_source_root as _open_source_default,
         )
         open_source_root = _open_source_default()
+        _magpie_env = os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR")
         magpie_root = (
-            Path(os.environ["MAGPIE_DIR"])
-            if os.environ.get("MAGPIE_DIR")
+            Path(_magpie_env)
+            if _magpie_env
             else _magpie_default(_session_dir_resolve())
         )
         # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone pod-local checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
@@ -3125,10 +3330,134 @@ def _gc_old_profile_traces(
         )
 
 
-def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
-    """Create/reuse the SaFE RayJob stack for a multi-node run.
+def _resolve_mn_backend(args: argparse.Namespace) -> str:
+    """Multi-node backend selector: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob."""
+    backend = (
+        (getattr(args, "mn_backend", None) or "").strip()
+        or os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip()
+        or os.environ.get("MN_BACKEND", "").strip()
+        or "rayjob"
+    ).lower()
+    if backend not in ("rayjob", "dynamo"):
+        print(
+            f"ERROR: --mn-backend must be 'rayjob' or 'dynamo', got {backend!r}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return backend
 
-    No-op when ``--nodes < 2``. Otherwise resolves the RayJob container image
+
+def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
+    """When ``--nodes >= 2`` and ``--mn-backend dynamo``, create an idle
+    DynamoDeployment and export the frontend service_url for benchmarks.
+
+    No Ray head / bootstrap / RAY_ADDRESS: the worker pods are idle (sshd),
+    and ``restart-server`` (routed by ``state.backend == 'dynamo'``) SSHes in
+    to launch ``dynamo.sglang``/``dynamo.vllm``. Benchmarks target the Dynamo
+    frontend (:8000) via ``state.service_url`` — picked up automatically by
+    ``_multi_node_env.benchmark_env_for_subprocess``.
+    """
+    nodes = max(1, int(args.nodes))
+    from .multi_node.cli import cmd_create_dynamo, _load_state
+
+    state_path = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))
+    image = (
+        (getattr(args, "rayjob_image", None) or "").strip()
+        or os.environ.get("INFERENCE_OPTIMIZER_RAYJOB_IMAGE", "").strip()
+    )
+    if not image and state_path.is_file():
+        try:
+            prior = json.loads(state_path.read_text(encoding="utf-8"))
+            image = str((prior.get("last_create_request") or {}).get("image") or "").strip()
+        except (OSError, json.JSONDecodeError, TypeError):
+            image = ""
+    if not image:
+        print(
+            "ERROR: --nodes >= 2 --mn-backend dynamo requires a Dynamo image "
+            "WITH the sshd layer (mn-idle.sh). Pass --rayjob-image <harbor/...> "
+            "or set INFERENCE_OPTIMIZER_RAYJOB_IMAGE.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    gpn = getattr(args, "rayjob_gpus_per_node", None)
+    if gpn is None:
+        try:
+            gpn = int(os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8)
+        except ValueError:
+            gpn = 8
+
+    poll_timeout = int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "110") or 110)
+    # Hyperloom patch (operator-local): forward --pd-* flags so the auto-created
+    # DGD honours the operator's PD topology AND so cmd_create_dynamo's reuse
+    # path classifies pods under the correct prefill/decode roles when writing
+    # /tmp/multi_node_state.json. Without these forwards the helper defaults
+    # pd_mode to 'aggregated' regardless of the optimize CLI, and downstream
+    # restart_server_for_round finds zero prefill/decode pods → no SSH launch →
+    # baseline gets 0 completed requests → baseline_failed after 3 attempts.
+    _pd_kv_backend = (
+        (getattr(args, "pd_transfer_backend", "") or "").strip()
+        or os.environ.get("INFERENCE_OPTIMIZER_DYNAMO_KV_BACKEND", "nixl")
+    )
+    ns_create = argparse.Namespace(
+        workspace=None,
+        image=image,
+        nodes=nodes,
+        gpus_per_node=int(gpn),
+        cpus_per_node=96,
+        mem_per_node=1024,
+        ephemeral_per_node=400,
+        shared_mem_per_node=200,
+        backend_framework=(getattr(args, "framework", None) or "sglang"),
+        kv_transfer_backend=_pd_kv_backend,
+        ssh_port=int(os.environ.get("MN_SSH_PORT", "2222") or 2222),
+        display_name=None,
+        description=None,
+        owner_id=None,
+        extra_env=list(getattr(args, "rayjob_extra_env", None) or []),
+        extra_label=[],
+        no_wait=False,
+        recreate=False,
+        poll_interval=6,
+        poll_timeout=poll_timeout,
+        # PD topology forward (missing in upstream; see comment above).
+        pd_mode=(getattr(args, "pd_mode", "") or "aggregated"),
+        pd_prefill_nodes=int(getattr(args, "pd_prefill_nodes", 0) or 0),
+        pd_decode_nodes=int(getattr(args, "pd_decode_nodes", 0) or 0),
+        pd_prefill_tp=int(getattr(args, "pd_prefill_tp", 0) or 0),
+        pd_decode_tp=int(getattr(args, "pd_decode_tp", 0) or 0),
+    )
+    rc = cmd_create_dynamo(ns_create)
+    if rc != 0:
+        sys.exit(rc)
+
+    state = _load_state()
+    su = str(state.get("service_url") or "").strip()
+    if su:
+        # Belt-and-suspenders: benchmark_env_for_subprocess also reads
+        # state.service_url, but exporting here makes the frontend URL
+        # visible to any early shell-level Magpie call too.
+        os.environ["BENCHMARK_BASE_URL"] = su
+        os.environ["MAGPIE_RUN_PHASE"] = "client"
+        print(f"multi-node(dynamo): BENCHMARK_BASE_URL={su} (frontend :8000)")
+
+    # Install GEAK on the GPU pods over SSH (one-time, idempotent) so the
+    # kernel-agent SSH placement finds `geak` on PATH. Skipped when the run
+    # opted out of the kernel phase. Best-effort: a failure here surfaces
+    # later as a clear pod-side "geak CLI not found" rather than aborting
+    # provisioning. Dynamo-only (the helper no-ops for other backends).
+    if not getattr(args, "no_kernel", False):
+        from .multi_node.cli import install_kernel_tools_on_pods_best_effort
+        install_kernel_tools_on_pods_best_effort()
+
+
+def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
+    """When ``--nodes >= 2``, create/reuse SaFE RayJob, bootstrap once, export RAY_ADDRESS.
+
+    For ``--mn-backend dynamo`` this delegates to
+    :func:`_provision_multi_node_dynamo_stack` (idle DynamoDeployment + SSH).
+
+    No-op when ``--nodes < 2``. The RayJob path resolves the container image
     (CLI flag → env → prior state file), creates or reuses the RayJob, runs the
     one-time bootstrap if it hasn't run yet, exports ``RAY_ADDRESS`` for
     kernel-agent Ray tasks, sets ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` to a
@@ -3136,17 +3465,16 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
     sibling dirs), and replays previously-applied kernel patches onto the
     (possibly fresh) pods.
 
-    Args:
-        args (argparse.Namespace): Parsed ``optimize`` arguments (reads
-            ``nodes``, ``rayjob_image``, ``rayjob_gpus_per_node``,
-            ``rayjob_extra_env``).
-
     Raises:
         SystemExit: With code 2 when ``--nodes >= 2`` but no RayJob image is
             configured, or with the create/bootstrap return code on failure.
     """
     nodes = max(1, int(args.nodes))
     if nodes < 2:
+        return
+
+    if _resolve_mn_backend(args) == "dynamo":
+        _provision_multi_node_dynamo_stack(args)
         return
 
     from .multi_node.cli import cmd_bootstrap, cmd_create_rayjob, _load_state
@@ -4266,10 +4594,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             # receipt if it already ran), so a step-2.5 failure still gets a
             # final receipt spliced in.
             try:
-                from .orchestrator.trace.langfuse_emitter import flush_session
+                from .orchestrator.trace.langfuse_emitter import (
+                    flush_session,
+                    record_session_breakdown,
+                )
                 flush_session(session_dir)
                 from .breakdown import patch_breakdown_langfuse
                 patch_breakdown_langfuse(session_dir)
+                record_session_breakdown(session_dir)
             except Exception:  # noqa: BLE001
                 log.debug("langfuse flush_session (post-sequencer) failed", exc_info=True)
         else:
@@ -4299,10 +4631,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             # HYPERLOOM_LANGFUSE_ENABLE + LANGFUSE_* are set; idempotent if the
             # CLOSE sequencer already flushed (re-writes the receipt only).
             try:
-                from .orchestrator.trace.langfuse_emitter import flush_session
+                from .orchestrator.trace.langfuse_emitter import (
+                    flush_session,
+                    record_session_breakdown,
+                )
                 flush_session(session_dir)
                 from .breakdown import patch_breakdown_langfuse
                 patch_breakdown_langfuse(session_dir)
+                record_session_breakdown(session_dir)
             except Exception:  # noqa: BLE001
                 log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
 
@@ -4431,6 +4767,15 @@ def _build_parser() -> argparse.ArgumentParser:
              "stop-rayjob` when you want to release it. Requires "
              "--rayjob-image or INFERENCE_OPTIMIZER_RAYJOB_IMAGE. "
              "Resolution: --nodes > $INFERENCE_OPTIMIZER_NODES > $NODES > 1.",
+    )
+    opt.add_argument(
+        "--mn-backend",
+        choices=("rayjob", "dynamo"),
+        default=None,
+        help="Multi-node backend when --nodes>=2: 'rayjob' (default, Ray "
+             "head+workers) or 'dynamo' (idle DynamoDeployment + SSH control "
+             "plane). Resolution: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND "
+             "> rayjob. Single-node runs ignore this flag.",
     )
     opt.add_argument(
         "--rayjob-image",
@@ -5540,7 +5885,141 @@ def _build_parser() -> argparse.ArgumentParser:
              "back-compat smoke tests; production should stay strict.",
     )
 
+    rec = sub.add_parser(
+        "recover-session",
+        help="Rebuild + push the session_breakdown for a session that exited "
+             "abnormally (crash / SIGKILL) so its breakdown lands on Langfuse.",
+    )
+    rec.add_argument(
+        "--session-dir", type=Path, required=True,
+        help="Session directory of the crashed run (contains state.json / "
+             "reports/trace/ and the recorder fragments).",
+    )
+    rec.add_argument(
+        "--force", action="store_true",
+        help="Re-run even when the session already looks complete "
+             "(close_sequence_done / breakdown already recorded).",
+    )
+    rec.add_argument(
+        "--backfill-trace", action="store_true",
+        help="Also replay reports/trace/llm_calls.jsonl as Langfuse "
+             "generations. Use ONLY when the live emitter never ran for this "
+             "session (e.g. it was disabled during the run); otherwise it "
+             "duplicates generations already pushed live.",
+    )
+
     return p
+
+
+def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
+    """Inspect on-disk artifacts to judge whether a session finished cleanly.
+
+    Pure read of state.json / session_breakdown.json / langfuse_receipt.json.
+    Returns flags used by :func:`_run_recover_session` to decide whether the
+    session still needs a (re)build + Langfuse push.
+    """
+    import json
+
+    from .breakdown import BREAKDOWN_FILENAME
+
+    state_path = session_dir / "state.json"
+    close_done = False
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            close_done = bool((state or {}).get("close_sequence_done"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    breakdown_exists = (session_dir / BREAKDOWN_FILENAME).exists()
+
+    from .orchestrator.trace.langfuse_emitter import read_receipt
+    receipt = read_receipt(session_dir) or {}
+    counts = receipt.get("counts") or {}
+    breakdown_recorded = bool(counts.get("breakdown_recorded"))
+    counts_final = bool(receipt.get("counts_final"))
+
+    return {
+        "close_done": close_done,
+        "breakdown_exists": breakdown_exists,
+        "breakdown_recorded": breakdown_recorded,
+        "counts_final": counts_final,
+        "looks_complete": close_done and breakdown_recorded,
+    }
+
+
+def _run_recover_session(args: argparse.Namespace) -> int:
+    """Offline recovery for a session that exited abnormally.
+
+    Rebuilds ``session_breakdown.json`` from the crash-time recorder fragments
+    (the merge step), reconciles + flushes Langfuse, splices the post-flush
+    receipt into the breakdown, and attaches the full breakdown JSON to the
+    session's trace. Idempotent across processes (guarded by the persisted
+    Langfuse receipt), so re-running is safe.
+    """
+    session_dir = args.session_dir.resolve()
+    if not session_dir.is_dir():
+        print(f"ERROR: session dir not found: {session_dir}", file=sys.stderr)
+        return 2
+
+    status = _session_recovery_status(session_dir)
+    print(
+        f"recover-session   : {session_dir}\n"
+        f"  close_sequence_done={status['close_done']} "
+        f"breakdown_exists={status['breakdown_exists']} "
+        f"breakdown_recorded={status['breakdown_recorded']} "
+        f"counts_final={status['counts_final']}"
+    )
+    if status["looks_complete"] and not args.force:
+        print(
+            "  -> already complete (breakdown built and recorded to Langfuse); "
+            "pass --force to rebuild anyway."
+        )
+        return 0
+
+    # 1) Rebuild/merge the breakdown from whatever fragments survived the crash.
+    try:
+        from .breakdown import write_breakdown_json
+        breakdown_path = write_breakdown_json(session_dir)
+        print(f"  rebuilt breakdown : {breakdown_path}")
+    except Exception:  # noqa: BLE001
+        log.exception("recover-session: breakdown rebuild failed")
+        return 1
+
+    # 2) Reconcile + flush Langfuse, splice the final receipt, attach the SBD.
+    try:
+        from .breakdown import patch_breakdown_langfuse
+        from .orchestrator.trace.langfuse_emitter import (
+            flush_session,
+            record_session_breakdown,
+        )
+        flush_session(session_dir)
+        patch_breakdown_langfuse(session_dir)
+        record_session_breakdown(session_dir)
+        print("  langfuse          : flushed + breakdown attached")
+    except Exception:  # noqa: BLE001
+        log.exception("recover-session: langfuse push failed (non-fatal)")
+
+    # 3) Optional full generation replay (off by default; duplicates if the
+    #    live emitter already ran for this session).
+    if args.backfill_trace:
+        try:
+            from .scripts.backfill_langfuse import build_plan, ingest
+            rc = ingest(build_plan(session_dir))
+            print(f"  trace backfill    : rc={rc}")
+        except Exception:  # noqa: BLE001
+            log.exception("recover-session: trace backfill failed (non-fatal)")
+
+    # 4) Re-package the artifact bundle so /workspace carries the recovered SBD.
+    try:
+        from .breakdown import package_session_artifacts
+        pkg_path = package_session_artifacts(session_dir)
+        if pkg_path is not None:
+            print(f"  artifact package  : {pkg_path}")
+    except Exception:  # noqa: BLE001
+        log.exception("recover-session: artifact package failed (non-fatal)")
+
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -5584,6 +6063,8 @@ def main(argv: list[str] | None = None) -> int:
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))
         return asyncio.run(_run_optimize(args))
+    if args.command == "recover-session":
+        return _run_recover_session(args)
     parser.print_help()
     return 2
 

@@ -260,6 +260,10 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset({
     # "'PreTrainedConfig' object has no attribute 'max_position_embeddings'").
     # Fail fast instead of booting a server that dies in engine init.
     "model_config_incompatible",
+    # Baseline arg-validation fast-exit (#522): >=2 consecutive baseline
+    # attempts exited <30s on a bad CLI arg (e.g. invalid --attention-backend);
+    # deterministic, so stop instead of burning the slow-baseline retry budget.
+    "baseline_arg_error",
 })
 
 

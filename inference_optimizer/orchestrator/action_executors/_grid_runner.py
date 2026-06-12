@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -227,6 +228,119 @@ def annotate_multi_node_cuda_graph_max_bs(
                 ),
             })
     return notes
+
+
+# ---------------------------------------------------------------------------
+# Multi-node grid prioritisation + invalid-variant filtering
+# ---------------------------------------------------------------------------
+#
+# In multi-node mode a ``--max-hours`` cut may stop the explore loop before the
+# whole grid is benched, so we (a) drop variants that are known regressions on
+# multi-node fabrics and (b) reorder the survivors so the strongest candidates
+# run first. Both are STRICT no-ops outside multi-node mode (single-node grid
+# order is a hard "never alter" invariant).
+#
+# ``priority_tags`` is an ordered list of category tags; a variant's priority is
+# the index of the first tag that appears (as a substring) in its ``note`` (or,
+# when ``note`` is empty, its ``name``). Lower index == higher priority; an
+# untagged variant sinks to the end. ``_MN_PARAMS_PRIORITY`` is concatenated
+# ahead of ``_MN_BACKENDS_PRIORITY`` by callers, so param-tuning variants
+# (cheap, high-yield) are surfaced before heavier comm/backend variants.
+_MN_PARAMS_PRIORITY: tuple[str, ...] = (
+    "cuda_graph_max_bs",
+    "max_running_requests",
+    "chunked_prefill",
+    "schedule",
+    "decode_steps",
+    "torch_compile",
+    "mem_fraction",
+)
+_MN_BACKENDS_PRIORITY: tuple[str, ...] = (
+    "tier1",
+    "tier2",
+    "tier3",
+    "tier4",
+    "tier5_comm",
+    "tier5",
+    "comm_custom_ar",
+)
+
+
+def _mn_priority_index(
+    variant: "GridVariant", priority_tags: "tuple[str, ...] | list[str]"
+) -> int:
+    """Return the rank of ``variant`` against ``priority_tags`` (lower = first).
+
+    Matches the first ``priority_tags`` entry that is a substring of the
+    variant's ``note`` (falling back to ``name`` when ``note`` is empty).
+    Untagged variants return ``len(priority_tags)`` so a stable sort sinks them
+    to the end while preserving their relative order.
+    """
+    haystack = (variant.note or variant.name or "")
+    for idx, tag in enumerate(priority_tags):
+        if tag and tag in haystack:
+            return idx
+    return len(priority_tags)
+
+
+def reorder_grid_for_multi_node(
+    grid: list["GridVariant"],
+    *,
+    priority_tags: "tuple[str, ...] | list[str]",
+) -> list["GridVariant"]:
+    """Stable-sort ``grid`` so likely multi-node winners run first.
+
+    Single-node mode (``is_multi_node()`` False) returns ``grid`` unchanged,
+    bit-for-bit (hard requirement: never alter single-node grid order). In
+    multi-node mode variants are stably sorted by ``_mn_priority_index`` so
+    tagged variants surface ahead of untagged ones and a ``--max-hours`` cut
+    still benches the strong candidates.
+    """
+    from ._multi_node_env import is_multi_node
+    if not is_multi_node():
+        return grid
+    # ``sorted`` is stable, so ties (same priority index) keep input order.
+    return sorted(grid, key=lambda v: _mn_priority_index(v, priority_tags))
+
+
+def apply_multi_node_invalid_variants(
+    grid: list["GridVariant"],
+) -> tuple[list["GridVariant"], list[dict]]:
+    """Drop variants that are known regressions/invalid on multi-node fabrics.
+
+    Returns ``(kept, dropped)``. ``dropped`` entries carry ``name`` / ``source``
+    / ``reason`` keys (matching the explore-loop ``skipped_dup`` shape). A
+    STRICT no-op outside multi-node mode: returns ``(grid, [])`` so single-node
+    behaviour is never altered.
+
+    Current rule: ``--cuda-graph-max-bs N`` with ``N < $CONC`` regresses ~50%
+    in multi-node mode (cuda-graph cache misses every cross-node decode tick),
+    so it is dropped from the explore grid here (the advisory-only counterpart
+    is ``annotate_multi_node_cuda_graph_max_bs``).
+    """
+    from ._multi_node_env import is_multi_node
+    if not is_multi_node():
+        return grid, []
+    try:
+        conc = int(os.environ.get("CONC", "64") or 64)
+    except ValueError:
+        conc = 64
+    kept: list["GridVariant"] = []
+    dropped: list[dict] = []
+    for v in grid:
+        m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_server_args or "")
+        if conc > 0 and m and int(m.group(1)) < conc:
+            dropped.append({
+                "name": v.name,
+                "source": "multi_node_invalid",
+                "reason": (
+                    f"cuda_graph_max_bs={m.group(1)} < CONC={conc} "
+                    "(multi-node graph-cache miss is a known ~50% regression)"
+                ),
+            })
+            continue
+        kept.append(v)
+    return kept, dropped
 
 
 # Framework / hardware compatibility filter: drops variants whose flag literals
@@ -723,6 +837,169 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
+# Flags whose value can contain spaces / JSON; never tokenize-dedupe these
+# because the downstream Magpie scripts expand $EXTRA_*_ARGS unquoted and the
+# value would be word-split anyway. If any is present, the dedup helpers leave
+# the WHOLE arg string untouched (the only behaviour that round-trips safely).
+_SPACE_VALUE_FLAGS = (
+    "--json-model-override-args",
+    "--override-generation-config",
+    "--tool-call-parser",
+)
+_MULTI_VALUE_FLAGS = (
+    "--cuda-graph-bs",
+    "--cuda-graph-max-bs",
+)
+
+
+# vLLM / atom expose argparse-style single-value options. Unlike sglang
+# (where a repeated flag is harmless last-wins), vLLM v0.21.0 hard-errors on a
+# duplicate / conflicting ``--attention-backend`` — the crash propagates
+# through ``EngineCoreClient`` -> ``wait_for_engine_startup`` -> RuntimeError,
+# then NCCL ``Broken pipe`` on every rank (#520). The duplication arises when
+# the operator's YAML ``EXTRA_VLLM_ARGS`` already pins a flag and a sweep /
+# kernel variant appends the same flag via ``extra_server_args``; ``merge_
+# server_args`` keeps BOTH tokens by design. This set lists the single-value
+# flags safe to collapse to last-wins so the variant override survives.
+_VLLM_SINGLE_VALUE_FLAGS = frozenset({
+    "--attention-backend",
+    "--gpu-memory-utilization",
+    "--max-model-len",
+    "--max-num-seqs",
+    "--max-num-batched-tokens",
+    "--block-size",
+    "--kv-cache-dtype",
+    "--quantization",
+    "--dtype",
+    "--swap-space",
+    "--tensor-parallel-size",
+    "--pipeline-parallel-size",
+})
+
+
+def dedup_vllm_server_args(
+    server_args: str | None,
+    framework: str | None,
+) -> str:
+    """Collapse repeated vLLM/atom single-value flags to last-wins (#520).
+
+    vLLM v0.21.0 crashes ``EngineCoreProc`` on a duplicated
+    ``--attention-backend`` (and conflicting copies of other single-value
+    flags); sglang tolerates repeats. So this is scoped to the vllm/atom
+    framework envs and is a no-op for sglang. Only the flags in
+    :data:`_VLLM_SINGLE_VALUE_FLAGS` are touched; every other token (unknown
+    flags, store-true switches, positional values) is preserved verbatim and
+    in order. For each affected flag the LAST occurrence wins, matching the
+    left-to-right override intent of :func:`merge_server_args` (so a
+    sweep/kernel ``extra_args`` value overrides the YAML base).
+
+    Returns ``server_args`` unchanged when the framework is sglang, the string
+    is empty, it carries a space/JSON-valued flag (see
+    :data:`_SPACE_VALUE_FLAGS` / :data:`_MULTI_VALUE_FLAGS`), or it cannot be
+    shell-parsed.
+    """
+    args = str(server_args or "").strip()
+    if not args:
+        return args
+    if server_args_env_name(framework) == "EXTRA_SGLANG_ARGS":
+        return args
+    # Never tokenize a string carrying a space/JSON-valued (or multi-value)
+    # flag: the unquoted ``$EXTRA_*_ARGS`` expansion in Magpie's scripts cannot
+    # round-trip a value with embedded spaces, so re-joining ``shlex`` tokens
+    # would corrupt it (e.g. ``--override-generation-config '{"temperature":
+    # 0.7}'`` would be split into separate words). Mirrors the guard in
+    # :func:`_shell_safe_dedupe`; leave the whole string untouched.
+    if any(f in args for f in _SPACE_VALUE_FLAGS + _MULTI_VALUE_FLAGS):
+        return args
+    try:
+        tokens = shlex.split(args)
+    except ValueError:
+        # Unparseable: leave it to vLLM to report rather than mangling it.
+        return args
+    # Collect the token span of every recognized single-value flag.
+    spans: list[tuple[str, int, int]] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        name = tok.split("=", 1)[0] if tok.startswith("--") else None
+        if name in _VLLM_SINGLE_VALUE_FLAGS:
+            if "=" in tok:
+                # ``--flag=value`` is self-contained.
+                spans.append((name, i, i))
+                i += 1
+            elif i + 1 < n and not tokens[i + 1].startswith("-"):
+                # ``--flag value`` consumes the following token.
+                spans.append((name, i, i + 1))
+                i += 2
+            else:
+                # Bare ``--flag`` with no value: treat as a single token.
+                spans.append((name, i, i))
+                i += 1
+        else:
+            i += 1
+    drop: set[int] = set()
+    by_name: dict[str, list[tuple[str, int, int]]] = {}
+    for span in spans:
+        by_name.setdefault(span[0], []).append(span)
+    for occurrences in by_name.values():
+        # Keep only the last occurrence; drop the token span of the earlier ones.
+        for _name, start, end in occurrences[:-1]:
+            drop.update(range(start, end + 1))
+    if not drop:
+        return args
+    kept = [tok for idx, tok in enumerate(tokens) if idx not in drop]
+    return " ".join(kept)
+
+
+def _shell_safe_dedupe(args: str) -> str:
+    """Last-wins dedupe for single-token-valued flags only.
+
+    Targeted and conservative: collapses repeated ``--flag value`` (or
+    ``--flag=value``) pairs whose value is a single whitespace-free token,
+    keeping the last occurrence. If the string contains a flag known to carry
+    a space/JSON value (which the unquoted ``$EXTRA_*_ARGS`` expansion in the
+    Magpie scripts cannot safely round-trip anyway), the string is returned
+    unchanged to avoid mangling it.
+    """
+    if not args.strip():
+        return ""
+    if any(f in args for f in _SPACE_VALUE_FLAGS + _MULTI_VALUE_FLAGS):
+        return args
+    tokens = args.split()
+    pairs: dict[str, list[str]] = {}
+    order: list[str] = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t.startswith("--"):
+            if "=" in t:
+                # Normalize ``--flag=value`` so it dedupes against ``--flag value``.
+                flag, _, val = t.partition("=")
+                pair = [flag, val]
+                i += 1
+            else:
+                flag = t
+                i += 1
+                if i < len(tokens) and not tokens[i].startswith("--"):
+                    pair = [flag, tokens[i]]
+                    i += 1
+                else:
+                    pair = [flag]
+            if flag not in pairs:
+                order.append(flag)
+            pairs[flag] = pair
+        else:
+            key = f"__pos_{len(order)}__"
+            order.append(key)
+            pairs[key] = [t]
+            i += 1
+    out: list[str] = []
+    for k in order:
+        out.extend(pairs[k])
+    return " ".join(out)
+
+
 # sglang scheduler watchdog timeout injection: on MI300X with aiter, the first
 # request's ``mha_batch_prefill`` JIT compile can exceed sglang's 300s default
 # watchdog, firing SIGQUIT mid-warmup -> baseline_failed. Inject a longer
@@ -1090,7 +1367,7 @@ def _build_variant_yaml(
         variant.extra_server_args,
     )
     if combined:
-        envs[extra_args_env] = combined
+        envs[extra_args_env] = _shell_safe_dedupe(combined)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
 
@@ -1259,7 +1536,7 @@ def _run_magpie(
 
     env = os.environ.copy()
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-    magpie_dir = os.environ.get("MAGPIE_DIR", "")
+    magpie_dir = os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR") or ""
     if magpie_dir:
         env["PYTHONPATH"] = f"{magpie_dir}:{env.get('PYTHONPATH', '')}"
 
@@ -1404,9 +1681,14 @@ async def run_grid(
             # PD knobs auto-resolved from $PD_* env; PD config stays constant
             # across variants within one run.
             await restart_server_for_round(
-                extra_server_args=merge_server_args(
+                extra_server_args=_shell_safe_dedupe(merge_server_args(
                     base_extra_args, variant.extra_server_args,
-                ),
+                )),
+                # Per-variant env overrides (e.g. MORI_* MoE-dispatch
+                # tuning) so server-side env knobs proposed by specialists
+                # actually take effect on the restarted sglang. Empty dict
+                # for arg-only variants → forwarded as a no-op.
+                extra_env=dict(variant.extra_envs),
                 model_path=model_path,
                 ep=int(os.environ.get("EP") or 0) or None,
             )
@@ -1807,7 +2089,9 @@ __all__ = [
     "SGLANG_WATCHDOG_TIMEOUT_ENV",
     "SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "VariantResult",
+    "apply_multi_node_invalid_variants",
     "apply_runtime_benchmark_overrides",
+    "reorder_grid_for_multi_node",
     "inject_sglang_attention_backend",
     "inject_sglang_context_length",
     "inject_sglang_watchdog_timeout",

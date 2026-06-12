@@ -18,6 +18,8 @@ import yaml
 from inference_optimizer.orchestrator.action_executors import _grid_runner
 from inference_optimizer.orchestrator.action_executors import _grid_runner as gr
 from inference_optimizer.orchestrator.action_executors._grid_runner import (
+    _MN_BACKENDS_PRIORITY,
+    _MN_PARAMS_PRIORITY,
     GridVariant,
     VariantResult,
     _build_variant_yaml,
@@ -27,6 +29,7 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
     apply_runtime_benchmark_overrides,
     apply_user_skip_list,
     coerce_extra_envs,
+    reorder_grid_for_multi_node,
     resolve_skip_spec,
     run_grid,
 )
@@ -215,6 +218,51 @@ class TestMultiNodeCudaGraphMaxBsAdvisory:
         assert "CONC=64" in notes[0]["reason"]
         # Grid itself is unchanged: nothing is dropped.
         assert [v.name for v in grid] == ["bad", "ok"]
+
+
+class TestReorderGridForMultiNode:
+    """reorder is wired into explore/sweep; single-node MUST be a no-op."""
+
+    def _grid(self):
+        # Deliberately ordered so a real reorder would change it: a
+        # low-priority backend variant first, a high-priority param variant
+        # last, and an untagged variant in the middle.
+        return [
+            GridVariant(name="tier5_comm_custom_ar", note="tier5_comm"),
+            GridVariant(name="untagged_misc"),
+            GridVariant(name="cuda_graph_max_bs_64", note="cuda_graph_max_bs"),
+        ]
+
+    def test_single_node_preserves_order_bit_for_bit(self, monkeypatch):
+        # Hard requirement: single-node grid order is never altered.
+        from inference_optimizer.orchestrator.action_executors import (
+            _multi_node_env as mne,
+        )
+
+        monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+        grid = self._grid()
+        out = reorder_grid_for_multi_node(
+            grid, priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
+        )
+        assert [v.name for v in out] == [v.name for v in grid]
+
+    def test_multi_node_surfaces_likely_winners_first(self, monkeypatch):
+        from inference_optimizer.orchestrator.action_executors import (
+            _multi_node_env as mne,
+        )
+
+        monkeypatch.setattr(mne, "is_multi_node", lambda: True)
+        grid = self._grid()
+        out = reorder_grid_for_multi_node(
+            grid, priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
+        )
+        # cuda_graph_max_bs (params tier-1) sorts ahead of tier5_comm; the
+        # untagged variant sinks to the end. Stable sort keeps ties in order.
+        assert [v.name for v in out] == [
+            "cuda_graph_max_bs_64",
+            "tier5_comm_custom_ar",
+            "untagged_misc",
+        ]
 
 
 class TestApplyUserSkipList:
@@ -928,3 +976,112 @@ def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
         f"reason must mention `atom --help` so log readers can tell "
         f"which framework rejected the variant: {dropped[0]['reason']!r}"
     )
+
+
+# Section: dedup_vllm_server_args (#520) — vLLM/atom single-value flag collapse
+
+
+class TestDedupVllmServerArgs:
+    """``dedup_vllm_server_args`` collapses repeated vLLM single-value flags."""
+
+    def test_duplicate_attention_backend_keeps_last(self):
+        # The exact #520 repro: YAML base + variant both inject the flag.
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend ROCM_AITER_FA --attention-backend ROCM_FLASH",
+            "vllm",
+        )
+        assert out == "--attention-backend ROCM_FLASH"
+        assert out.count("--attention-backend") == 1
+
+    def test_identical_duplicate_collapses_to_single(self):
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend ROCM_AITER_FA --attention-backend ROCM_AITER_FA",
+            "vllm",
+        )
+        assert out == "--attention-backend ROCM_AITER_FA"
+
+    def test_preserves_surrounding_and_unknown_flags_in_order(self):
+        out = _grid_runner.dedup_vllm_server_args(
+            "--enforce-eager --attention-backend A --max-model-len 4096 "
+            "--attention-backend B --trust-remote-code",
+            "vllm",
+        )
+        # Earlier --attention-backend span removed; everything else stays ordered.
+        assert out == (
+            "--enforce-eager --max-model-len 4096 "
+            "--attention-backend B --trust-remote-code"
+        )
+
+    def test_equals_form_is_deduped(self):
+        out = _grid_runner.dedup_vllm_server_args(
+            "--gpu-memory-utilization=0.9 --gpu-memory-utilization=0.85",
+            "vllm",
+        )
+        assert out == "--gpu-memory-utilization=0.85"
+
+    def test_atom_framework_also_deduped(self):
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend A --attention-backend B", "atom",
+        )
+        assert out == "--attention-backend B"
+
+    def test_sglang_is_noop_repeats_preserved(self):
+        # sglang tolerates repeats (last-wins at the server); do not mangle.
+        raw = "--attention-backend aiter --attention-backend triton"
+        assert _grid_runner.dedup_vllm_server_args(raw, "sglang") == raw
+
+    def test_no_duplicates_returns_unchanged(self):
+        raw = "--attention-backend ROCM_AITER_FA --max-model-len 8192"
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+
+    def test_empty_and_none_safe(self):
+        assert _grid_runner.dedup_vllm_server_args("", "vllm") == ""
+        assert _grid_runner.dedup_vllm_server_args(None, "vllm") == ""
+
+    def test_unparseable_string_returned_as_is(self):
+        # Unbalanced quote: leave it for vLLM to report rather than mangling.
+        raw = "--attention-backend 'unterminated"
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw.strip()
+
+    def test_distinct_single_value_flags_untouched(self):
+        raw = "--max-num-seqs 256 --block-size 16 --kv-cache-dtype fp8"
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+
+    def test_mixed_equals_and_space_forms_dedup_last_wins(self):
+        # `--flag value` (YAML base) then `--flag=value` (variant): last wins.
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend ROCM_AITER_FA --attention-backend=ROCM_FLASH",
+            "vllm",
+        )
+        assert out == "--attention-backend=ROCM_FLASH"
+
+    def test_mixed_equals_then_space_form_dedup_last_wins(self):
+        # Reverse order: `--flag=value` then `--flag value`.
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend=ROCM_AITER_FA --attention-backend ROCM_FLASH",
+            "vllm",
+        )
+        assert out == "--attention-backend ROCM_FLASH"
+
+    def test_three_occurrences_keep_only_last(self):
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend A --attention-backend B --attention-backend C",
+            "vllm",
+        )
+        assert out == "--attention-backend C"
+
+    def test_json_space_value_flag_left_untouched(self):
+        # #520 review: a flag carrying a JSON/space value must NOT be tokenized
+        # and re-joined (would drop quotes -> {temperature: 0.7}). Leave the
+        # whole string verbatim, even with a duplicate single-value flag also
+        # present (the unquoted $EXTRA_*_ARGS expansion can't round-trip it).
+        raw = (
+            "--attention-backend A --attention-backend B "
+            "--override-generation-config '{\"temperature\": 0.7}'"
+        )
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+
+    def test_multi_value_flag_left_untouched(self):
+        # cuda-graph-bs takes a list; never collapse a string that carries one.
+        raw = "--attention-backend A --cuda-graph-bs 1 2 4 8 --attention-backend B"
+        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw

@@ -81,6 +81,32 @@ def _env_gate_allows_gpureset() -> bool:
     }
 
 
+def _is_multi_node_sandbox() -> bool:
+    """True when running in multi-node mode (nodes >= 2).
+
+    In multi-node mode (both Dynamo and RayJob), the optimizer sandbox does
+    NOT own the inference server GPUs — those live in remote pods (Dynamo
+    worker pods or RayJob head/worker pods). The sandbox may be scheduled on
+    a GPU node and see local ``/dev/kfd`` + ``rocm-smi``, but:
+      - The local GPUs run OTHER workloads (not ours).
+      - ``rocm-smi --showmeminfo`` reports those workloads' VRAM usage.
+      - ``_all_recovered`` sees low free_mb and returns False.
+      - The orchestration LLM then proposes ``recover`` every tick forever.
+
+    The fix: skip the local GPU probe entirely in multi-node mode. Remote
+    GPU health is handled by the Dynamo restart-server / kill-inference
+    path (SSH to the actual pods).
+
+    Single-node (``is_multi_node() == False``) is unaffected — the sandbox
+    IS the GPU pod, so local rocm-smi / gpureset are meaningful.
+    """
+    try:
+        from ._multi_node_env import is_multi_node
+        return is_multi_node()
+    except Exception:  # noqa: BLE001 - never block recovery on import error
+        return False
+
+
 class RecoverExecutor:
     """Executable form of the ``recover`` action.
 
@@ -125,6 +151,36 @@ class RecoverExecutor:
             "recover_executor: start reason=%r force=%s allow_reset_env=%s",
             reason, force_cleanup, allow_reset,
         )
+
+        # Dynamo CPU-only sandbox: no local GPUs to reclaim (they live on remote
+        # pods reached over SSH). Calling rocm-smi here deadlocks on the kfd
+        # ioctl and makes recover loop. Short-circuit to success so the
+        # orchestrator stops proposing recover; remote VRAM cleanup, when
+        # needed, is handled by the dynamo restart-server / kill-inference path.
+        if _is_multi_node_sandbox():
+            log.info(
+                "recover_executor: dynamo CPU-only sandbox detected; skipping "
+                "local rocm-smi probe + gpureset (GPUs are on remote pods)."
+            )
+            result = {
+                "state": "succeeded",
+                "reason": reason,
+                "force_gpu_cleanup": force_cleanup,
+                "allow_reset_env": allow_reset,
+                "cpu_only_sandbox": True,
+                "killed_pids": [],
+                "pre_free_mb_per_gpu": [],
+                "mid_free_mb_per_gpu": [],
+                "post_free_mb_per_gpu": [],
+                "gpureset_attempted": False,
+                "gpureset_result": {},
+            }
+            if workspace is not None:
+                await asyncio.to_thread(self._write_result_json, workspace, result)
+                result["workspace"] = str(workspace)
+                result["result_path"] = str(workspace / "result.json")
+            log.info("recover_executor: succeeded (cpu_only_sandbox; no-op)")
+            return result
 
         # 1) Probe pre-cleanup memory.
         pre = await asyncio.to_thread(self._probe_gpu_free_mb)

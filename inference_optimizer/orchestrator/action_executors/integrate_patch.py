@@ -516,6 +516,41 @@ class IntegratePatchExecutor:
             dict on error.
         """
         params = dict(ctx.task.params or {})
+
+        # Multi-node guard. This executor git-applies the specialist patch
+        # ONLY to the sandbox framework_source_roots; in multi-node mode the
+        # live sglang/vllm runs on RayJob pods, not the sandbox, so a
+        # sandbox-only apply would silently NOT affect pod-side serving — the
+        # bench would measure the unpatched pod and the KEEP/REVERT verdict
+        # would be meaningless. Until a git-diff pod fan-out exists, return a
+        # NEUTRAL "skipped" result (no patch touched, no error). This is NOT a
+        # failure: the Coordinator only records integrate_patch results whose
+        # ``status == "kept"`` (coordinator.py: "any other status → NOT
+        # recorded"), so a skip rolls no failure tally and the session keeps
+        # running every other action (baseline/profile/explore/sweep/
+        # roofline). ``is_multi_node()`` is False single-node, so the normal
+        # path below is reached bit-for-bit unchanged.
+        from ._multi_node_env import is_multi_node
+        if is_multi_node():
+            return {
+                "status": "skipped",
+                "skipped_reason": "multi_node_unsupported",
+                "specialist_task_id": str(
+                    params.get("specialist_task_id") or ""
+                ).strip(),
+                "patches_applied": [],
+                "patches_reverted": [],
+                "config_changes_applied": {},
+                "reason": (
+                    "specialist integrate_patch is not supported in "
+                    "multi-node mode (no git-diff pod fan-out); skipped "
+                    "without applying any patch. Other actions "
+                    "(baseline/profile/explore/sweep/roofline) continue "
+                    "normally. Use the kernel-agent integrate path (which "
+                    "fans out via `multi_node apply-patch`) or run single-node."
+                ),
+            }
+
         specialist_task_id = str(params.get("specialist_task_id") or "").strip()
         if not specialist_task_id:
             return {

@@ -196,6 +196,85 @@ def test_qwen36_materialize_enables_client_and_server_trust(tmp_path):
     assert "--trust-remote-code" in envs["EXTRA_VLLM_ARGS"]
 
 
+def _write_yaml_with_server_args(
+    path: Path, *, framework: str, env_key: str, server_args: str,
+) -> None:
+    """Like ``_write_yaml`` but seeds a framework server-args env in the YAML."""
+    cfg: dict = {
+        "benchmark": {
+            "framework": framework,
+            "model": "/wekafs/models/Qwen-Qwen3-8B",
+            "precision": "bf16",
+            "run_mode": "local",
+            "envs": {
+                "TP": 1, "CONC": 8, "ISL": 256, "OSL": 256,
+                env_key: server_args,
+            },
+            "timeout_seconds": 600,
+            "profiler": {
+                "torch_profiler": {"enabled": False},
+                "system_profiler": {"enabled": False},
+                "tracelens": {"enabled": False},
+            },
+            "gpu_selection": {"auto": False},
+        }
+    }
+    with path.open("w") as f:
+        yaml.safe_dump(cfg, f)
+
+
+def test_materialize_dedups_duplicate_vllm_attention_backend(tmp_path):
+    """#520 end-to-end: a YAML EXTRA_VLLM_ARGS base + a variant's
+    extra_server_args must not yield a duplicate --attention-backend in the
+    materialized config (vLLM v0.21.0 crashes EngineCoreProc on a duplicate)."""
+    base = tmp_path / "base.yaml"
+    _write_yaml_with_server_args(
+        base, framework="vllm", env_key="EXTRA_VLLM_ARGS",
+        server_args="--attention-backend ROCM_AITER_FA",
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+
+    materialized = materialize_config_with_envs(
+        base, out,
+        model_path="/wekafs/models/Qwen-Qwen3-8B",
+        gpu_type="mi300x",
+        extra_server_args="--attention-backend ROCM_FLASH",
+    )
+    vllm_args = yaml.safe_load(
+        materialized.read_text()
+    )["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+
+    assert vllm_args.count("--attention-backend") == 1, vllm_args
+    # last-wins: the variant override survives, the YAML base is dropped.
+    assert "ROCM_FLASH" in vllm_args
+    assert "ROCM_AITER_FA" not in vllm_args
+
+
+def test_materialize_keeps_sglang_repeated_attention_backend(tmp_path):
+    """#520 no-op for sglang: it tolerates a repeated flag (last-wins at the
+    server), so materialize must NOT dedup it."""
+    base = tmp_path / "base.yaml"
+    _write_yaml_with_server_args(
+        base, framework="sglang", env_key="EXTRA_SGLANG_ARGS",
+        server_args="--attention-backend aiter",
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+
+    materialized = materialize_config_with_envs(
+        base, out,
+        model_path="/wekafs/models/Qwen-Qwen3-8B",
+        gpu_type="mi300x",
+        extra_server_args="--attention-backend triton",
+    )
+    sglang_args = yaml.safe_load(
+        materialized.read_text()
+    )["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+
+    assert sglang_args.count("--attention-backend") == 2, sglang_args
+
+
 # TP auto-clamp against visible GPU count (real Qwen3-8B failure regression)
 def _write_yaml_with_tp(path: Path, tp: int) -> None:
     """Like ``_write_yaml`` but lets the test pin the YAML's default TP."""
@@ -405,11 +484,15 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
 
 
 def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
-    """#210 fix: the baseline executor's Magpie subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH`` so Magpie loads the patched checkout."""
-    # Disable the #523 local-disk mirror so the effective InferenceX path is
-    # ``$INFERENCEX_PATH`` verbatim; otherwise the assertion is host-dependent
-    # (relocation triggers whenever the test runs on a network FS such as
-    # wekafs/NFS, where ``_is_network_fs`` resolves the path to a mounted type).
+    """#210 fix: the baseline executor's Magpie subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH`` so Magpie loads the patched checkout.
+
+    #536 added a layer on top: by default the executor mirrors a network-mount
+    InferenceX checkout to local disk and pins MAGPIE_INFERENCEX_PATH at that
+    mirror. That mirror behaviour has its own coverage
+    (test_baseline_warmup_double_run.py). Here we isolate the #210 env-inheritance
+    contract by disabling the mirror, so the asserted path is exactly the
+    configured ``$INFERENCEX_PATH`` rather than a hash-named local mirror dir.
+    """
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "1")
     monkeypatch.setenv("INFERENCEX_PATH", "/wekafs/hyperloom/InferenceX")
     base = tmp_path / "base.yaml"
