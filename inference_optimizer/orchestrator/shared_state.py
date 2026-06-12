@@ -286,6 +286,7 @@ class SharedState:
     baseline_hot_tput: float = 0.0
     baseline_accuracy: float = 0.0
     baseline_failure_streak: int = 0
+    baseline_arg_error_streak: int = 0
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.
     baseline_config_path: str = ""
     # Runtime component versions for recipe writes (framework/runtime/ROCm/aiter/image digest); empty values stripped.

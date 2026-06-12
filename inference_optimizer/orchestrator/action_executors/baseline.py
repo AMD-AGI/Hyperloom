@@ -82,6 +82,30 @@ MAGPIE_BUILTIN_SCRIPTS = frozenset(
 # Magpie's reuse keying and our teardown agree.
 BASELINE_REUSE_PORT_DEFAULT = 8888
 
+# #522: fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args)
+# should not consume the slow-baseline retry budget.
+FAST_EXIT_THRESHOLD_SEC = 30.0
+_ARG_ERROR_PATTERNS = (
+    "unrecognized arguments",
+    "invalid choice",
+    "Unknown attention backend",
+    "ValueError:",
+    "argparse",
+    "not a valid",
+)
+
+
+def _classify_subprocess_error(
+    elapsed_sec: float, stderr_tail: str,
+) -> str:
+    """Return 'fast_exit_arg_error' when the subprocess died fast on an arg
+    validation error, else 'subprocess_nonzero'."""
+    if elapsed_sec < FAST_EXIT_THRESHOLD_SEC and any(
+        p in stderr_tail for p in _ARG_ERROR_PATTERNS
+    ):
+        return "fast_exit_arg_error"
+    return "subprocess_nonzero"
+
 # Server-boot budget for the persistent server phase (server_lifecycle).
 # Override via ``INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC``.
 BASELINE_SERVER_READY_TIMEOUT_SEC = 2700
@@ -1190,8 +1214,11 @@ class BaselineExecutor:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
                 return {
                     "status": "failed",
-                    "error_class": "subprocess_nonzero",
+                    "error_class": _classify_subprocess_error(
+                        subprocess_runtime_sec, tail,
+                    ),
                     "returncode": proc_returncode,
+                    "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
                     "error": tail,
                     **failure_extras,
                 }
@@ -1229,7 +1256,9 @@ class BaselineExecutor:
                 error = server_init_dead_error
             elif proc_returncode != 0:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
-                error_class = "subprocess_nonzero"
+                error_class = _classify_subprocess_error(
+                    subprocess_runtime_sec, tail,
+                )
                 error = tail
             elif not report_path.exists():
                 error_class = "no_report"

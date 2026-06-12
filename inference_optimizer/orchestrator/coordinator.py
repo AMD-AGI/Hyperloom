@@ -7039,19 +7039,30 @@ class Coordinator:
             result=result_payload,
         )
         any_changed = True
-        # Legacy baseline-specific gates (streak counter + baseline_failed stop reason + baseline_not_promoted event).
+        # Baseline-specific gates: streak counter + stop_reason + baseline_not_promoted event.
+        # #522: fast arg errors (fast_exit_arg_error) get their own streak so
+        # they don't burn the slow-baseline retry budget on deterministic
+        # failures that the same params will never fix.
         baseline_event_payload: dict[str, Any] | None = None
         if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
-            self.shared_state.baseline_failure_streak += 1
-            if self.shared_state.baseline_failure_streak >= 3:
-                self.shared_state.set_stop_reason("baseline_failed")
+            err_class = result_payload.get("error_class", "")
+            if err_class == "fast_exit_arg_error":
+                self.shared_state.baseline_arg_error_streak += 1
+                if self.shared_state.baseline_arg_error_streak >= 2:
+                    self.shared_state.set_stop_reason("baseline_arg_error")
+            else:
+                self.shared_state.baseline_failure_streak += 1
+                self.shared_state.baseline_arg_error_streak = 0
+                if self.shared_state.baseline_failure_streak >= 3:
+                    self.shared_state.set_stop_reason("baseline_failed")
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
                 "failure_streak": self.shared_state.baseline_failure_streak,
+                "arg_error_streak": self.shared_state.baseline_arg_error_streak,
                 "stop_reason": self.shared_state.stop_reason,
                 "result_status": result_payload.get("status"),
-                "error_class": result_payload.get("error_class"),
+                "error_class": err_class,
             }
             any_changed = True
         # Mirror the promote-path roofline failure handling: bump streak, clear auto-roofline gate, emit operator warning.
