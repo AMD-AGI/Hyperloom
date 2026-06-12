@@ -322,6 +322,95 @@ def test_flush_closes_all_spans(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# record_session_breakdown: full SBD JSON attached to the trace
+# ---------------------------------------------------------------------------
+def test_record_session_breakdown_attaches_full_json(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd, claw_session_id="claw-XYZ")
+    em = lfe.LangfuseEmitter(sd)
+
+    breakdown = {
+        "schema_version": "hyperloom.session_breakdown.v3.0",
+        "exporter_version": "session-breakdown-1.0.0",
+        "session": {"stop_reason": "budget_exhausted"},
+        "kernel_journey": {"kernels": []},
+    }
+    em.record_session_breakdown(breakdown)
+
+    span = client.span_named("session_breakdown")
+    assert span is not None
+    assert span.kwargs["output"] == breakdown
+    assert span.kwargs["trace_context"] == {"trace_id": em._trace_id}
+    assert span.kwargs["metadata"]["schema_version"] == breakdown["schema_version"]
+    assert span.ended is True
+    assert client.flushed >= 1
+    assert em._counts["breakdown_recorded"] == 1
+
+
+def test_record_session_breakdown_is_idempotent(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em = lfe.LangfuseEmitter(sd)
+    em.record_session_breakdown({"schema_version": "v3.0"})
+    em.record_session_breakdown({"schema_version": "v3.0"})
+    spans = [s for s in client.spans if s.kwargs.get("name") == "session_breakdown"]
+    assert len(spans) == 1
+
+
+def test_record_session_breakdown_cross_process_idempotent(tmp_path, monkeypatch):
+    # A second, fresh emitter (simulating an offline `recover-session` process)
+    # must skip re-attaching the document because the persisted receipt records
+    # breakdown_recorded=1.
+    _enable_env(monkeypatch)
+    client1 = _FakeClient()
+    _install_fake_sdk(monkeypatch, client1)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em1 = lfe.LangfuseEmitter(sd)
+    em1.record_session_breakdown({"schema_version": "v3.0"})
+    assert em1._counts["breakdown_recorded"] == 1
+    # Receipt persisted on disk with the flag set.
+    assert (lfe.read_receipt(sd) or {}).get("counts", {}).get("breakdown_recorded")
+
+    client2 = _FakeClient()
+    _install_fake_sdk(monkeypatch, client2)
+    em2 = lfe.LangfuseEmitter(sd)
+    em2.record_session_breakdown({"schema_version": "v3.0"})
+    assert [s for s in client2.spans if s.kwargs.get("name") == "session_breakdown"] == []
+    assert em2._counts["breakdown_recorded"] == 1
+
+
+def test_record_session_breakdown_disabled_is_noop(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
+    em = lfe.LangfuseEmitter(tmp_path)
+    # No client built; must not raise.
+    em.record_session_breakdown({"schema_version": "v3.0"})
+    assert em._counts["breakdown_recorded"] == 0
+
+
+def test_module_record_session_breakdown_reads_file(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    (sd / "session_breakdown.json").write_text(
+        json.dumps({"schema_version": "v3.0", "session": {"stop_reason": "ok"}}),
+        encoding="utf-8",
+    )
+    lfe.record_session_breakdown(sd)
+    span = client.span_named("session_breakdown")
+    assert span is not None
+    assert span.kwargs["output"]["schema_version"] == "v3.0"
+
+
+# ---------------------------------------------------------------------------
 # flush_session: leftovers + ext shards + decision scores
 # ---------------------------------------------------------------------------
 def _seed_trace_dir(tmp_path: Path) -> Path:

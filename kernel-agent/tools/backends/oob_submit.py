@@ -409,6 +409,21 @@ def submit(agent: str, prompt_file: Path, output_dir: Path, source_file: str = "
         dict: The result mapping from the chosen submission path.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Placement precedence: ssh (Dynamo multi-node, env-gated) > ray > cli.
+    # ssh_placement_active() is True ONLY when the orchestrator set
+    # KERNEL_AGENT_GPU_PLACEMENT=ssh (Dynamo backend); ray/cli paths below are
+    # byte-for-byte unchanged otherwise.
+    try:
+        from ssh_runtime import ssh_placement_active, run_oob_over_ssh
+    except Exception:  # noqa: BLE001 — ssh_runtime optional; never block ray/cli
+        ssh_placement_active = lambda: False  # noqa: E731
+    if ssh_placement_active():
+        return run_oob_over_ssh(
+            agent, prompt_file, output_dir, source_file, max_turns, num_gpus,
+            timeout_s, extra_files=extra_files, kernel_repo=kernel_repo,
+            system_prompt_text=_safety_system_prompt(
+                kernel_repo, budget_minutes=timeout_s / 60.0, num_gpus=num_gpus),
+        )
     if prefer_ray:
         try:
             import ray  # noqa: F401
