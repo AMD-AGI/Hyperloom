@@ -3,3 +3,5 @@ requests>=2.34.2
 sseclient-py>=1.9.0
 certifi
 urllib3>=2.7.0
+# Pin transitive dep above CVE-2026-45409 (affects idna 3.9.0).
+idna>=3.10
