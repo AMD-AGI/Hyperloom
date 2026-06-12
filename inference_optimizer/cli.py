@@ -2015,6 +2015,65 @@ def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
     return None
 
 
+# Legacy local auth-proxy endpoint. The component was removed; any leftover
+# URL pinned at this host:port is stale and must be force-rewritten to the
+# upstream gateway even when an operator value is otherwise preserved (#521).
+_STALE_PROXY_HOSTPORT = "127.0.0.1:4002"
+
+
+def _is_stale_proxy_url(url: str | None) -> bool:
+    """Return True for a leftover legacy auth-proxy URL (``127.0.0.1:4002``)."""
+    return _STALE_PROXY_HOSTPORT in str(url or "")
+
+
+# Matches the ``base_url:`` line in the GEAK litellm yaml (two-space indent
+# written by kernel-agent/scripts/install.sh, but tolerant of any indent).
+_GEAK_BASE_URL_RE = re.compile(r"(?m)^([ \t]*base_url[ \t]*:[ \t]*).*$")
+
+
+def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
+    """Rewrite ``base_url:`` in the GEAK litellm config to match ``base_url`` (#521).
+
+    GEAK reads its endpoint from ``--config $GEAK_CONFIG`` — a yaml written
+    once at install time — not from ``$GEAK_BASE_URL`` at runtime. So when an
+    operator points ``GEAK_BASE_URL`` at a reachable endpoint (e.g. a
+    host-local reverse tunnel) AFTER install, the env override alone is not
+    enough: the stale yaml still sends GEAK at the unreachable gateway and the
+    KERNEL phase burns budget on connection-error retries. Syncing the yaml in
+    place closes that gap so the kernel agent actually dials the operator's
+    endpoint.
+
+    Best-effort: returns ``False`` (never raises) when the path is empty, the
+    file is missing/unreadable/unwritable, it has no ``base_url:`` line, or it
+    is already in sync. Returns ``True`` only when a rewrite was applied.
+    """
+    if not geak_config_path or not base_url:
+        return False
+    path = Path(geak_config_path)
+    try:
+        if not path.is_file():
+            return False
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    match = _GEAK_BASE_URL_RE.search(text)
+    if match is None:
+        return False
+    current = match.group(0)[len(match.group(1)):].strip()
+    if current == base_url:
+        return False
+    # Use a function replacement so a URL containing regex backreference
+    # characters (e.g. ``\g``) cannot corrupt the rewrite.
+    new_text = _GEAK_BASE_URL_RE.sub(
+        lambda m: m.group(1) + base_url, text, count=1,
+    )
+    try:
+        path.write_text(new_text, encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
 def _derive_anthropic_base_url(openai_base_url: str) -> str:
     """Derive ``ANTHROPIC_BASE_URL`` from ``OPENAI_BASE_URL`` by stripping a trailing ``/v1`` (SDK re-appends it)."""
     from urllib.parse import urlparse, urlunparse
@@ -2613,12 +2672,32 @@ def _validate_and_resolve_claude_model(
     catalog id set on success (reused by the codex smoke-test).
     """
     chosen = (args.claude_model or "").strip()
-    if chosen not in _CLAUDE_ALLOWED_MODELS:
+    # #340: non-AMD deployments (Vultr / TensorWave / self-hosted gateways)
+    # may not serve the AMD-blessed opus-4-7/4-6 ids. The static allowlist is
+    # an AMD-network safety default; an operator can opt out via
+    # INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1, after which the gateway
+    # catalog probe below is the sole gate (a typo still fails because the id
+    # won't be in the catalog). Default behavior is unchanged.
+    allow_custom = os.environ.get(
+        "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "",
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
             f"Orchestration model must be one of {list(_CLAUDE_ALLOWED_MODELS)} "
             f"(preferred: {_CLAUDE_PREFERRED_MODEL}, "
-            f"fallback: {_CLAUDE_FALLBACK_MODEL}). Refusing to start.",
+            f"fallback: {_CLAUDE_FALLBACK_MODEL}). Refusing to start. "
+            f"For a non-AMD gateway, set "
+            f"INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1 to use a custom "
+            f"orchestration model validated against your gateway catalog.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if allow_custom and not chosen:
+        print(
+            "ERROR: --claude-model is empty but "
+            "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1; pass an explicit "
+            "orchestration model id. Refusing to start.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -2649,6 +2728,19 @@ def _validate_and_resolve_claude_model(
     if chosen in catalog_ids:
         print(f"Preflight: Claude model {chosen!r} confirmed in gateway catalog")
         return catalog_ids
+
+    # #340: under the custom-model opt-out the AMD opus-4-6 fallback is
+    # meaningless (a non-AMD catalog won't carry it); fail clearly on a
+    # catalog miss so the operator fixes the id rather than silently running a
+    # model their gateway doesn't serve.
+    if allow_custom:
+        print(
+            f"ERROR: --claude-model={chosen!r} not present in gateway catalog "
+            f"(INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1; catalog has "
+            f"{sorted(catalog_ids)[:20]}). Refusing to start.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     if _CLAUDE_FALLBACK_MODEL in catalog_ids:
         print(
@@ -2781,16 +2873,45 @@ def _preflight(
             if os.environ.get(alias) != safe_key:
                 os.environ[alias] = safe_key
                 print(f"Preflight: refreshed {alias} from SAFE_API_KEY")
-    # OOB / GEAK / LLM_API_BASE inherit the upstream URL verbatim.
+    # OOB / GEAK / LLM_API_BASE default to the upstream gateway URL, but an
+    # INTENTIONAL operator override is preserved. This matters for #521: GEAK
+    # runs in a separate network namespace that frequently cannot route to the
+    # gateway directly, while the orchestrator reaches it via a host-local
+    # reverse tunnel. Pointing GEAK_BASE_URL (or OOB_BASE_URL) at that tunnel
+    # only works if preflight does NOT clobber the operator's value back to the
+    # direct gateway URL. We still force-rewrite the known-stale legacy
+    # auth-proxy URL (127.0.0.1:4002) so leftovers from a removed component
+    # can never reach the CLIs.
     if base_url:
         for alias in ("OOB_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
+            current = os.environ.get(alias, "").strip()
+            if current and current != base_url and not _is_stale_proxy_url(current):
+                # Operator pinned a distinct, non-stale endpoint (e.g. a tunnel
+                # at 127.0.0.1:18444 for #521); respect it.
+                print(
+                    f"Preflight: {alias} kept at {current} "
+                    f"(operator override; not forced to gateway)"
+                )
+                continue
             if os.environ.get(alias) != base_url:
                 prev = os.environ.get(alias, "")
                 os.environ[alias] = base_url
+                why = "stale-proxy rewrite" if _is_stale_proxy_url(prev) else "direct to gateway"
                 print(
                     f"Preflight: {alias} {prev or '<unset>'} -> {base_url} "
-                    f"(direct to gateway)"
+                    f"({why})"
                 )
+
+    # #521: GEAK reads its endpoint from $GEAK_CONFIG (written at install
+    # time), not from $GEAK_BASE_URL at runtime. Sync the yaml so the resolved
+    # GEAK_BASE_URL above (operator tunnel override, or the gateway default)
+    # actually reaches the kernel agent instead of a stale install-time URL.
+    geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
+    geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
+    if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
+        print(
+            f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})"
+        )
 
     # --- Resolve install interpreters ---
     from .orchestrator.action_executors._grid_runner import _resolve_magpie_python

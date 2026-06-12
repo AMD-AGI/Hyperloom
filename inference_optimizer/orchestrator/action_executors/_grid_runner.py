@@ -854,7 +854,8 @@ def merge_server_args(*parts: str | None) -> str:
 
 # Flags whose value can contain spaces / JSON; never tokenize-dedupe these
 # because the downstream Magpie scripts expand $EXTRA_*_ARGS unquoted and the
-# value would be split anyway. Leave the whole arg string untouched if present.
+# value would be word-split anyway. If any is present, the dedup helpers leave
+# the WHOLE arg string untouched (the only behaviour that round-trips safely).
 _SPACE_VALUE_FLAGS = (
     "--json-model-override-args",
     "--override-generation-config",
@@ -864,6 +865,106 @@ _MULTI_VALUE_FLAGS = (
     "--cuda-graph-bs",
     "--cuda-graph-max-bs",
 )
+
+
+# vLLM / atom expose argparse-style single-value options. Unlike sglang
+# (where a repeated flag is harmless last-wins), vLLM v0.21.0 hard-errors on a
+# duplicate / conflicting ``--attention-backend`` — the crash propagates
+# through ``EngineCoreClient`` -> ``wait_for_engine_startup`` -> RuntimeError,
+# then NCCL ``Broken pipe`` on every rank (#520). The duplication arises when
+# the operator's YAML ``EXTRA_VLLM_ARGS`` already pins a flag and a sweep /
+# kernel variant appends the same flag via ``extra_server_args``; ``merge_
+# server_args`` keeps BOTH tokens by design. This set lists the single-value
+# flags safe to collapse to last-wins so the variant override survives.
+_VLLM_SINGLE_VALUE_FLAGS = frozenset({
+    "--attention-backend",
+    "--gpu-memory-utilization",
+    "--max-model-len",
+    "--max-num-seqs",
+    "--max-num-batched-tokens",
+    "--block-size",
+    "--kv-cache-dtype",
+    "--quantization",
+    "--dtype",
+    "--swap-space",
+    "--tensor-parallel-size",
+    "--pipeline-parallel-size",
+})
+
+
+def dedup_vllm_server_args(
+    server_args: str | None,
+    framework: str | None,
+) -> str:
+    """Collapse repeated vLLM/atom single-value flags to last-wins (#520).
+
+    vLLM v0.21.0 crashes ``EngineCoreProc`` on a duplicated
+    ``--attention-backend`` (and conflicting copies of other single-value
+    flags); sglang tolerates repeats. So this is scoped to the vllm/atom
+    framework envs and is a no-op for sglang. Only the flags in
+    :data:`_VLLM_SINGLE_VALUE_FLAGS` are touched; every other token (unknown
+    flags, store-true switches, positional values) is preserved verbatim and
+    in order. For each affected flag the LAST occurrence wins, matching the
+    left-to-right override intent of :func:`merge_server_args` (so a
+    sweep/kernel ``extra_args`` value overrides the YAML base).
+
+    Returns ``server_args`` unchanged when the framework is sglang, the string
+    is empty, it carries a space/JSON-valued flag (see
+    :data:`_SPACE_VALUE_FLAGS` / :data:`_MULTI_VALUE_FLAGS`), or it cannot be
+    shell-parsed.
+    """
+    args = str(server_args or "").strip()
+    if not args:
+        return args
+    if server_args_env_name(framework) == "EXTRA_SGLANG_ARGS":
+        return args
+    # Never tokenize a string carrying a space/JSON-valued (or multi-value)
+    # flag: the unquoted ``$EXTRA_*_ARGS`` expansion in Magpie's scripts cannot
+    # round-trip a value with embedded spaces, so re-joining ``shlex`` tokens
+    # would corrupt it (e.g. ``--override-generation-config '{"temperature":
+    # 0.7}'`` would be split into separate words). Mirrors the guard in
+    # :func:`_shell_safe_dedupe`; leave the whole string untouched.
+    if any(f in args for f in _SPACE_VALUE_FLAGS + _MULTI_VALUE_FLAGS):
+        return args
+    try:
+        tokens = shlex.split(args)
+    except ValueError:
+        # Unparseable: leave it to vLLM to report rather than mangling it.
+        return args
+    # Collect the token span of every recognized single-value flag.
+    spans: list[tuple[str, int, int]] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        name = tok.split("=", 1)[0] if tok.startswith("--") else None
+        if name in _VLLM_SINGLE_VALUE_FLAGS:
+            if "=" in tok:
+                # ``--flag=value`` is self-contained.
+                spans.append((name, i, i))
+                i += 1
+            elif i + 1 < n and not tokens[i + 1].startswith("-"):
+                # ``--flag value`` consumes the following token.
+                spans.append((name, i, i + 1))
+                i += 2
+            else:
+                # Bare ``--flag`` with no value: treat as a single token.
+                spans.append((name, i, i))
+                i += 1
+        else:
+            i += 1
+    drop: set[int] = set()
+    by_name: dict[str, list[tuple[str, int, int]]] = {}
+    for span in spans:
+        by_name.setdefault(span[0], []).append(span)
+    for occurrences in by_name.values():
+        # Keep only the last occurrence; drop the token span of the earlier ones.
+        for _name, start, end in occurrences[:-1]:
+            drop.update(range(start, end + 1))
+    if not drop:
+        return args
+    kept = [tok for idx, tok in enumerate(tokens) if idx not in drop]
+    return " ".join(kept)
 
 
 def _shell_safe_dedupe(args: str) -> str:

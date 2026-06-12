@@ -11,8 +11,10 @@
     "matrix; the workflow forwards them to optimize_submit.py as",
     "--manual --framework --precision --tp --concurrency so per-model config",
     "is FIXED (no auto-detect). Precision is per-model NATIVE because MI300X",
-    "(gfx942) has no native FP4: FP8 for R1/Qwen3-Next/MiMo, INT4 for Kimi,",
-    "FP4 only for MXFP4-native gpt-oss & Qwen3.6. tp8 everywhere except",
+    "(gfx942) has no native FP4: FP8 for R1/Qwen3-Next/Qwen3.6/MiMo, INT4 for",
+    "Kimi, FP4 only for MXFP4-native gpt-oss. Qwen3.6 weights are BF16 (~67G, no",
+    "quantization_config); FP4 was a no-op — run dynamic FP8 on MI300X instead.",
+    "tp8 everywhere except",
     "MiniMax M2.5/M2.7 (tp4 - their FP8 block-128 weights are not divisible",
     "by 8: 1536/8=192 is not a multiple of 128). Kimi & MiMo run on sglang",
     "(vLLM tp8 MLA assert / missing arch respectively).",
@@ -112,11 +114,11 @@
       "label": "Qwen 3.6",
       "repo_id": "Qwen/Qwen3.6-35B-A3B",
       "framework": "vllm",
-      "precision": "FP4",
+      "precision": "FP8",
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "Ready (local /wekafs/models/Qwen-Qwen3.6-35B-A3B, id qwen3-6-35b-a3b-8h5dl). Downloaded 2026-06-05. Note: official repo has NO -Instruct suffix."
+      "note": "Ready (local /wekafs/models/Qwen-Qwen3.6-35B-A3B, id qwen3-6-35b-a3b-8h5dl). Weights are BF16 (~67G, no quantization_config); original FP4 was a no-op on MI300X. Run dynamic FP8 instead — tp8 ~8.4G/GPU, huge headroom. Official repo has NO -Instruct suffix."
     },
     {
       "pool_id": "inferencex-daily-fixed",
