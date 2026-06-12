@@ -1,37 +1,14 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""ProposalScorer — advisory multi-model scorer for specialist proposals.
+"""ProposalScorer — purely advisory multi-model scorer for specialist proposals.
 
-This component is **purely advisory**. It scores each variant in a
-specialist's ``proposal_set`` with one or more LLM models on the AMD
-gateway, then hands the scores to the Coordinator which surfaces them
-to Orchestration as *one reference among many* (parallel to gaps / KB /
-``analysis.md`` priority markers). It NEVER:
-
-* touches the Critic (no ``verdict`` / ``verdict_map``),
-* touches PolicyGate / the phase machine / the intent schema,
-* sorts, ranks, or auto-selects proposals.
-
-Design parallels :class:`CodexBackend`: every model is just a ``model=``
-string on the *same* OpenAI-style gateway client (``OPENAI_BASE_URL`` +
-``ANTHROPIC_AUTH_TOKEN`` / ``OPENAI_API_KEY``). Adding a model = adding
-a slug to ``models``. Each model is scored independently and concurrently
-via ``asyncio.gather`` so one model's failure / missing-slug / timeout
-never blocks the others.
+Scores each variant with one or more LLM models (advisory only; never
+sorts/ranks/auto-selects, never touches Critic/PolicyGate). Each model scored
+independently via ``asyncio.gather``.
 
 Output schema (``score`` return value)::
 
-    {
-        "scale": "0-10",
-        "models": {
-            "<model_slug>": {
-                "<proposal_name>": {"score": <float 0-10>, "reason": "<str>"},
-                ...
-            },
-            ...
-        },
-        "errors": {"<model_slug>": "<reason>", ...},
-    }
+    {"scale": "0-10", "models": {"<slug>": {"<name>": {"score": <0-10>, "reason": "<str>"}}}, "errors": {...}}
 
 Test seam: pass ``client_factory`` to bypass real client construction.
 """
@@ -41,12 +18,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from .backends.base import parse_call_timeout_env
+from .trace.conversation_trace import ConversationRecord, append_conversation
+from .trace.llm_trace import LLMCallRecord, append_llm_call
 
 log = logging.getLogger(__name__)
 
@@ -54,22 +35,13 @@ log = logging.getLogger(__name__)
 DEFAULT_SCORER_MODELS: tuple[str, ...] = (
     "claude-opus-4-8",
     "gpt-5.5",
-    # Kimi K2.6 and Gemini 3.1 Pro are reasoning models: they spend
-    # completion tokens on internal reasoning before emitting the JSON,
-    # so they need the larger ``max_completion_tokens`` default below
-    # (4096) — at 1200 Kimi returns finish_reason=length with empty
-    # content. Gemini MUST carry the ``gemini/`` provider prefix: the
-    # bare ``gemini-3.1-pro-preview`` slug routes to a broken Vertex ADC
-    # path on the gateway (APIConnectionError), while ``gemini/…`` routes
-    # to a working backend.
+    # Kimi K2.6 / Gemini 3.1 Pro are reasoning models needing the larger 4096 token cap; Gemini MUST carry the ``gemini/`` prefix (bare slug routes to a broken Vertex ADC path).
     "dvue-aoai-005-Kimi-K2.6",
     "gemini/gemini-3.1-pro-preview",
 )
 
-# Soft cap on what we feed each model so a pathological proposal_set
-# can't blow up the scoring prompt. proposal_set is already capped
-# upstream (DEFAULT_SPECIALIST_MAX_PROPOSALS), this is defense-in-depth.
-_MAX_PROPOSALS_SCORED: int = 12
+# Soft cap on proposals fed to each model so a pathological set can't blow up the prompt.
+_MAX_PROPOSALS_SCORED: int = 16
 _MAX_FIELD_CHARS: int = 600
 
 
@@ -93,8 +65,7 @@ Rules:
 """.strip()
 
 
-# Match a fenced ```json ... ``` block (preferred) then a bare top-level
-# object containing "scores". Mirrors CodexBackend._extract_envelope.
+# Match a fenced ```json``` block (preferred) then a bare top-level "scores" object.
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _BARE_JSON_RE = re.compile(r"(\{.*?\"scores\".*\})", re.DOTALL)
 
@@ -124,6 +95,15 @@ def _extract_scores_json(text: str) -> dict[str, Any] | None:
 
 
 def _clip(value: Any, *, limit: int = _MAX_FIELD_CHARS) -> str:
+    """Stringify a value and truncate it to a maximum length.
+
+    Args:
+        value: Value to stringify (``None`` becomes an empty string).
+        limit: Maximum number of characters to keep.
+
+    Returns:
+        The string, suffixed with an ellipsis if it was truncated.
+    """
     s = "" if value is None else str(value)
     return s if len(s) <= limit else (s[:limit] + "…")
 
@@ -134,7 +114,7 @@ def _coerce_score(raw: Any) -> float | None:
         val = float(raw)
     except (TypeError, ValueError):
         return None
-    if val != val:  # NaN
+    if math.isnan(val):
         return None
     return max(0.0, min(10.0, val))
 
@@ -142,12 +122,7 @@ def _coerce_score(raw: Any) -> float | None:
 def _normalise_model_scores(
     parsed: dict[str, Any], *, proposal_names: list[str],
 ) -> dict[str, dict[str, Any]]:
-    """Project a model's parsed ``{"scores": {...}}`` onto known names.
-
-    Drops unknown names, clamps scores to [0, 10], truncates reasons.
-    Proposals the model omitted simply don't appear (the renderer shows
-    a placeholder).
-    """
+    """Project parsed ``{"scores": {...}}`` onto known names (drop unknowns, clamp [0,10], truncate reasons)."""
     out: dict[str, dict[str, Any]] = {}
     scores = parsed.get("scores")
     if not isinstance(scores, dict):
@@ -174,9 +149,7 @@ class ProposalScorer:
     models: tuple[str, ...] = DEFAULT_SCORER_MODELS
     api_key_env: str = "ANTHROPIC_AUTH_TOKEN"  # AMD proxy; accepts OPENAI too
     base_url_env: str = "OPENAI_BASE_URL"
-    # 4096 (not 1200) so reasoning raters (e.g. Kimi K2.6) have room to
-    # finish their internal reasoning AND still emit the scores JSON;
-    # non-reasoning models stop early and never approach the cap.
+    # 4096 so reasoning raters (e.g. Kimi K2.6) can finish reasoning and still emit the scores JSON.
     max_completion_tokens: int = 4096
     call_timeout_s: float = field(
         default_factory=lambda: parse_call_timeout_env(
@@ -188,21 +161,41 @@ class ProposalScorer:
     # Test seam — set to bypass real OpenAI client construction.
     client_factory: Callable[[], Any] | None = None
 
+    # Full-trace A6: when set, each model-scoring call appends its token
+    # usage to ``<session_dir>/reports/trace/llm_calls.jsonl`` under
+    # ``component=proposal_scorer``. ``None`` (the default, and the case
+    # in unit tests) disables trace writes entirely.
+    session_dir: Path | None = None
+
     _client: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Normalize the model list and optionally eager-build the client.
+
+        Strips and de-blanks the configured model names. If a
+        ``client_factory`` is provided the client is built immediately;
+        otherwise it is constructed lazily on first use so an
+        unconfigured environment degrades per-call rather than at boot.
+        """
         self.models = tuple(
             m for m in (str(x).strip() for x in (self.models or ())) if m
         )
         if self.client_factory is not None:
             self._client = self.client_factory()
             return
-        # Lazy: construct the gateway client on first use so an
-        # unconfigured environment fails per-call (degrade) rather than
-        # at Coordinator boot. Mirrors CodexBackend env resolution.
+        # Lazy: construct on first use so an unconfigured env degrades per-call, not at boot.
         self._client = None
 
     def _ensure_client(self) -> Any:
+        """Return the cached client, constructing one on first use.
+
+        Returns:
+            The OpenAI-compatible async client.
+
+        Raises:
+            RuntimeError: If the ``openai`` SDK is missing or no API key
+                is configured in the environment.
+        """
         if self._client is not None:
             return self._client
         try:
@@ -269,9 +262,7 @@ class ProposalScorer:
     async def _score_one_model(
         self, model: str, prompt: str, proposal_names: list[str],
     ) -> dict[str, dict[str, Any]]:
-        """Score every proposal with a single model. Raises on failure;
-        the caller (``score``) catches and records the error per-model.
-        """
+        """Score every proposal with a single model (raises on failure; caller records the per-model error)."""
         client = self._ensure_client()
         full_prompt = f"{prompt}\n\n{_SCORING_INSTRUCTIONS}"
         messages = [{"role": "user", "content": full_prompt}]
@@ -288,7 +279,13 @@ class ProposalScorer:
             raise RuntimeError(
                 f"timed out after {self.call_timeout_s:.0f}s"
             ) from exc
+        # Full-trace A6: record this model's token spend before parsing.
+        # Best-effort + a no-op when ``session_dir`` is unset (tests).
+        self._trace_scorer_llm_call(model, getattr(resp, "usage", None))
         text = (resp.choices[0].message.content or "")
+        # Full-trace: persist the full (redacted) prompt + reply so the
+        # scorer's conversation lines up with its token row.
+        self._record_scorer_conversation(model, full_prompt, text)
         parsed = _extract_scores_json(text)
         if parsed is None:
             raise RuntimeError(
@@ -296,16 +293,77 @@ class ProposalScorer:
             )
         return _normalise_model_scores(parsed, proposal_names=proposal_names)
 
+    def _trace_scorer_llm_call(self, model: str, usage: Any) -> None:
+        """Append one ``llm_calls.jsonl`` row for a proposal-scoring call.
+
+        No-op when ``session_dir`` is unset. OpenAI usage carries
+        ``prompt_tokens`` / ``completion_tokens`` (no cache split). tick /
+        phase are unknown here (the scorer runs off the dispatch path) — the
+        collector backfills phase from the ts window. Best-effort: never
+        raises into the scoring path.
+        """
+        if self.session_dir is None:
+            return
+        try:
+            input_tokens = None
+            output_tokens = None
+            if usage is not None:
+                pt = getattr(usage, "prompt_tokens", None)
+                ct = getattr(usage, "completion_tokens", None)
+                input_tokens = int(pt) if pt is not None else None
+                output_tokens = int(ct) if ct is not None else None
+            record = LLMCallRecord(
+                session_id=self.session_dir.name,
+                component="proposal_scorer",
+                role="proposal_scorer",  # must match the conversation row's
+                model=str(model),        # role for Langfuse token<->text pairing
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break scoring
+            log.debug(
+                "full-trace: proposal_scorer llm_call append failed for "
+                "model=%s", model, exc_info=True,
+            )
+
+    def _record_scorer_conversation(
+        self, model: str, prompt: str, response: str,
+    ) -> None:
+        """Append one ``conversations.jsonl`` row for a proposal-scoring call.
+
+        Persists the full (redacted) scoring prompt + model reply under
+        ``component=proposal_scorer``, mirroring the per-call token row from
+        :meth:`_trace_scorer_llm_call`. No-op when ``session_dir`` is unset
+        (tests) or when both prompt and reply are empty. tick/phase are
+        unknown here (the scorer runs off the dispatch path); the collector
+        backfills phase from the ts window. Best-effort: never raises into
+        the scoring path.
+        """
+        if self.session_dir is None:
+            return
+        if not prompt and not response:
+            return
+        try:
+            record = ConversationRecord(
+                session_id=self.session_dir.name,
+                component="proposal_scorer",
+                role="proposal_scorer",
+                model=str(model),
+                prompt=prompt or "",
+                response=response or "",
+            )
+            append_conversation(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break scoring
+            log.debug(
+                "full-trace: proposal_scorer conversation append failed for "
+                "model=%s", model, exc_info=True,
+            )
+
     async def score(
         self, *, gap: dict[str, Any], proposals: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Score ``proposals`` against ``gap`` with every configured model.
-
-        Returns the advisory envelope (see module docstring). Never
-        raises for per-model failures — they land in ``errors``. Returns
-        an empty ``models`` dict (with ``errors``) if everything failed,
-        so the caller can still attach it (and the renderer omits it).
-        """
+        """Score ``proposals`` against ``gap`` with every configured model (per-model failures land in ``errors``, never raised)."""
         proposals = [p for p in (proposals or []) if isinstance(p, dict)]
         if not proposals or not self.models:
             return {"scale": "0-10", "models": {}, "errors": {}}

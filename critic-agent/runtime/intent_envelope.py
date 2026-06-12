@@ -8,21 +8,12 @@ The Coordinator () accepts intent envelopes of the form
 {"intents": [{"intent_type": "<type>", "payload": {...}}, ...]}
 ```
 
-The Critic agent only ever produces three intent types in normal operation:
-
-* ``review_verdict`` — primary output for any ``proposal`` it sees.
-* ``send_message`` — heartbeat (no proposal in inbox) or devil's advocate
-  ``advice`` topic.
-* ``update_persona`` — append-only persona update (Critic role permission).
-
-We deliberately mirror the schema and verdict vocabulary from
-``inference_optimizer/protocol/intent.py`` and
-``inference_optimizer/orchestrator/policy.py`` rather than importing them, so
-the Critic skill stays usable as a standalone package (no Hyperloom-wide
-runtime dependency at install time).
-
-If the Coordinator ever extends the envelope schema, update this file and
-the ``ENVELOPE_SCHEMA_VERSION`` constant.
+The Critic normally produces three intent types: ``review_verdict``
+(per proposal), ``send_message`` (heartbeat / ``advice``), and
+``update_persona``. Schema and verdict vocabulary are mirrored from
+``inference_optimizer/protocol/intent.py`` and ``.../policy.py`` rather than
+imported, so the skill stays a standalone package. Bump
+``ENVELOPE_SCHEMA_VERSION`` if the Coordinator extends the envelope schema.
 """
 
 from __future__ import annotations
@@ -95,6 +86,12 @@ class Intent:
     payload: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the intent as a plain JSON-serialisable dict.
+
+        Returns:
+            dict[str, Any]: ``{"intent_type": ..., "payload": ...}`` with the
+            payload copied.
+        """
         return {"intent_type": self.intent_type, "payload": dict(self.payload)}
 
 
@@ -105,14 +102,38 @@ class IntentEnvelope:
     intents: list[Intent] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the envelope as the Coordinator-compatible dict form.
+
+        Returns:
+            dict[str, Any]: ``{"intents": [...]}`` with each intent converted
+            via :meth:`Intent.to_dict`.
+        """
         return {"intents": [i.to_dict() for i in self.intents]}
 
     def append(self, intent: Intent) -> None:
+        """Append one intent to the envelope.
+
+        Args:
+            intent (Intent): The intent to add.
+        """
         self.intents.append(intent)
 
 
 # ---------------------------------------------------------------------------
 def _validate_payload(intent_type: str, payload: dict[str, Any]) -> None:
+    """Validate a single intent payload against the per-type requirements.
+
+    Enforces required keys for each intent type and, for ``review_verdict``,
+    the allowed verdict / source vocabulary and a non-empty target msg id.
+
+    Args:
+        intent_type (str): The intent type whose rules apply.
+        payload (dict[str, Any]): The payload to validate.
+
+    Raises:
+        IntentEnvelopeValidationError: If the payload is not a dict, is
+            missing a required key, or violates the ``review_verdict`` rules.
+    """
     if not isinstance(payload, dict):
         raise IntentEnvelopeValidationError(
             f"intent {intent_type!r}: payload must be an object, "
@@ -150,6 +171,17 @@ def validate_envelope(envelope: dict[str, Any]) -> IntentEnvelope:
     The function is the inverse of :meth:`IntentEnvelope.to_dict` — it's the
     only place we accept envelopes constructed by hand (e.g. when reading
     a Skill-produced ``review.json``).
+
+    Args:
+        envelope (dict[str, Any]): The raw envelope dict to validate.
+
+    Returns:
+        IntentEnvelope: The validated, typed envelope.
+
+    Raises:
+        IntentEnvelopeValidationError: If the envelope shape is invalid, an
+            intent type is not Critic-permitted, or a payload fails
+            validation.
     """
     if not isinstance(envelope, dict):
         raise IntentEnvelopeValidationError(
@@ -204,6 +236,31 @@ def build_review_verdict_intent(
     advice_text: str = "",
     notes: Iterable[str] | None = None,
 ) -> Intent:
+    """Build a validated ``review_verdict`` intent.
+
+    Args:
+        target_proposal_msg_id (str): The proposal ``msg_id`` being reviewed.
+        verdict (str): One of :data:`ALLOWED_VERDICTS`.
+        reasoning (str): Free-text justification for the verdict.
+        source (str): Verdict source; one of :data:`ALLOWED_VERDICT_SOURCES`.
+        confidence (str | None): Optional confidence label; omitted when
+            ``None``.
+        predicted_gain_pct (float | None): Optional predicted gain percent.
+        kb_evidence (Iterable[str] | None): KB evidence references.
+        packet_evidence (Iterable[str] | None): Packet evidence references.
+        risks (list[dict[str, Any]] | None): Structured risk entries.
+        required_evidence (Iterable[str] | None): Evidence still required.
+        alternative_action (str | None): Suggested alternative action.
+        advice_text (str): Devil's-advocate advice text.
+        notes (Iterable[str] | None): Additional free-text notes.
+
+    Returns:
+        Intent: The constructed ``review_verdict`` intent.
+
+    Raises:
+        IntentEnvelopeValidationError: If ``verdict`` or ``source`` is not in
+            the allowed set, or ``target_proposal_msg_id`` is empty.
+    """
     if verdict not in ALLOWED_VERDICTS:
         raise IntentEnvelopeValidationError(
             f"verdict {verdict!r} not in {sorted(ALLOWED_VERDICTS)!r}"
@@ -236,6 +293,14 @@ def build_review_verdict_intent(
 
 
 def build_heartbeat_intent(body_md: str = DEFAULT_HEARTBEAT_BODY) -> Intent:
+    """Build the heartbeat ``send_message`` intent.
+
+    Args:
+        body_md (str): Message body; defaults to :data:`DEFAULT_HEARTBEAT_BODY`.
+
+    Returns:
+        Intent: A ``send_message`` intent on the heartbeat topic.
+    """
     return Intent(
         intent_type="send_message",
         payload={"topic": DEFAULT_HEARTBEAT_TOPIC, "body_md": body_md},
@@ -243,6 +308,16 @@ def build_heartbeat_intent(body_md: str = DEFAULT_HEARTBEAT_BODY) -> Intent:
 
 
 def build_advice_intent(body_md: str, *, target_proposal_msg_id: str | None = None) -> Intent:
+    """Build a devil's-advocate ``advice`` ``send_message`` intent.
+
+    Args:
+        body_md (str): The advice message body.
+        target_proposal_msg_id (str | None): Optional proposal the advice is
+            about; added as ``about_proposal_msg_id`` when provided.
+
+    Returns:
+        Intent: A ``send_message`` intent on the advice topic.
+    """
     payload: dict[str, Any] = {"topic": DEFAULT_ADVICE_TOPIC, "body_md": body_md}
     if target_proposal_msg_id:
         payload["about_proposal_msg_id"] = target_proposal_msg_id
@@ -254,6 +329,17 @@ def build_envelope(intents: Iterable[Intent]) -> IntentEnvelope:
 
     Empty input falls back to a single heartbeat so the Coordinator never
     times out on an empty envelope; this matches MockCriticBackend.
+
+    Args:
+        intents (Iterable[Intent]): The intents to wrap.
+
+    Returns:
+        IntentEnvelope: The validated envelope (heartbeat-only if ``intents``
+        was empty).
+
+    Raises:
+        IntentEnvelopeValidationError: If the resulting envelope fails the
+            self-check in :func:`validate_envelope`.
     """
     materialised = list(intents)
     if not materialised:
@@ -261,8 +347,7 @@ def build_envelope(intents: Iterable[Intent]) -> IntentEnvelope:
     env = IntentEnvelope()
     for intent in materialised:
         env.append(intent)
-    # Self-check by routing through validate_envelope so we surface bugs at
-    # build time rather than after the LLM has already produced a response.
+    # Self-check at build time rather than after the LLM responds.
     validate_envelope(env.to_dict())
     return env
 

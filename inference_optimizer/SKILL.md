@@ -215,11 +215,12 @@ brief:
   research-backed variants when available, but `llm_direct`,
   `default_grid`, `specialist:<domain-or-tag>`, and `dynamic` provenance
   values are all accepted audit labels when phase and sequence gates pass.
-  Specialist-sourced variants are capped by `research_lane_capacity`
-  (clamped to the `2 × visible GPU count` ceiling); dynamic variants use
-  their own per-round cap. Specialists author patches into an isolated
-  worktree; `integrate_patch` does the actual `git apply` +
-  throughput/accuracy gate after Critic review.
+  Specialist- and dynamic-sourced variants are not grid-size capped;
+  per-round breadth is bounded by the `research_lane` / GPU pool leases
+  (the `research_lane` scales with the `2 × visible GPU count` ceiling).
+  Specialists author patches into an isolated worktree; `integrate_patch`
+  does the actual `git apply` + throughput/accuracy gate after Critic
+  review.
   Optional GPU specialists are off by default: launch with
   `--gpu-specialist-capacity N` (or
   `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=N`) before Orchestration may
@@ -230,10 +231,12 @@ brief:
   < `--explore-force-exit-hours-remaining` (default 3.0 h) OR phase
   budget < `--explore-force-exit-budget-pct` (default 20%). Non-negotiable
   — leaves buffer for KERNEL → SWEEP → CLOSE + report.
-- **IR-7 honest self-stop**: on EXPLORE plateau a
-  `session_steward_specialist` recommends `stop_session` /
-  `advance_to_kernel` / `continue_explore` (at most one continuation per
-  session). Disable with `--steward-disabled`. IR-6 always overrides it.
+- **Plateau advisory**: EXPLORE / KERNEL / FRAMEWORK_PR plateau signals
+  are computed every tick and rendered as advisory in the orchestration
+  prompt. They do NOT drive phase advance — the LLM may emit
+  `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
+  when it judges further effort unproductive. IR-6 force-exit and the
+  per-phase budget remain the only hard advance gates.
 
 ### FRAMEWORK_PR phase (Coordinator-internal)
 
@@ -272,13 +275,17 @@ Rules that look reasonable but break the current flow:
   specialist-informed flow.
   Framework-agent runs in the dedicated **FRAMEWORK_PR** phase
   before EXPLORE; the LLM never proposes the `framework_pr`
-  action (PolicyGate denies it via
-  `framework_pr_action_not_llm_proposable`). Use `--no-framework`
-  to skip the phase entirely.
-- **`kernel_opt` sequencing** is gated by
-  `explore_attempts_minimum_before_kernel_opt`, which reads
-  `gain_per_stack_entry` (at least one successful explore round on
-  record) rather than any per-action attempt counter.
+  action — it is Coordinator-managed and absent from
+  `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 denies any
+  LLM-side propose / delegate with `rule='phase_incompatible'`.
+  Use `--no-framework` to skip the phase entirely.
+- **`kernel_opt` sequencing** is no longer gated by an
+  explore-minimum check (the
+  `explore_attempts_minimum_before_kernel_opt` rule was retired
+  in loosen_plan P1_06). KERNEL phase may propose `kernel_opt`
+  directly; the `trace_analyze → run_optimization` data
+  dependency (P2_11 handler-level check) and the reusable
+  `kernel_id` validation still keep the inputs valid.
 
 ## Setup
 
@@ -321,7 +328,7 @@ remember). Direct steps in `inference_optimizer/scripts/install.sh`:
 |---|---|
 | `inference_optimizer` pkg + `claude_agent_sdk` extras (`pip install -e .[test]`) | `ensure_inference_optimizer` |
 | **Magpie** (`git clone --depth 1 $MAGPIE_REPO $MAGPIE_DIR` + `pip install -e`; default `$MAGPIE_DIR=$HYPERLOOM_RUNTIME_DIR/Magpie`) | `ensure_magpie` |
-| `INFERENCEX_PATH` auto-detection (scans `$MAGPIE_DIR/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX` → WekaFS fallbacks) | `ensure_inferencex` |
+| `INFERENCEX_PATH` resolution (scans `$MAGPIE_DIR/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX`, else clones a fresh writable checkout; read-only host mounts are no longer used) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 
 Chained from `kernel-agent/scripts/install.sh` (single chain at the end
@@ -440,6 +447,57 @@ supply session metadata directly via CLI flags / env vars:
 | GPU type | `--gpu-type` | `GPU_TYPE` | rocm-smi auto-detect when unset |
 | Model class | `--model-class` | `MODEL_CLASS` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); defaults to `moe_mla` when unset. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | External reference GPU | `--compare-against-gpu` | — | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
+| Quantization prelude | `--quantize` | — | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Ignored on `--resume`. |
+
+### Step 2b — Optional quantization prelude (`--quantize`)
+
+When the user asks to **quantize the model before optimizing** (e.g. "quantize
+to FP8 then optimize", "run this in MX-FP4"), pass `--quantize "<scheme prompt>"`
+to the same `optimize` command. This runs the **quantization-agent once as a
+prelude**, before any baseline/session work: it drives AMD Quark PTQ from the
+prompt, then rewrites `--model` to the exported quantized model so the entire
+optimization loop runs on the quantized model.
+
+```bash
+inference_optimizer optimize \
+  --model "$MODEL_PATH" \
+  --framework vllm \
+  --quantize "fp8 global scheme, fp8 kv_cache, exclude lm_head; accept up to 5% relative eval gap" \
+  --max-hours 2
+```
+
+- The `--quantize` text is the quantization request only (scheme / kv-cache /
+  excluded layers / acceptable eval gap). **Do not** repeat the model path or
+  export dir — the adapter folds `--model` + a per-model export dir under the
+  workspace root (`<workspace_root>/quantization/<model>/quantized`) into the
+  prompt automatically.
+- **Structured path for UI/backends**: instead of free text, pass
+  `--quantize-scheme <enum>` (one of `none` / `fp8` / `ptpc_fp8` / `mxfp4` /
+  `mxfp4_fp8`); `mxfp4` / `mxfp4_fp8` are **MI355X-only**. It resolves to a
+  curated prompt internally (`orchestrator/quantization_schemes.py`). `none` or
+  omit = no quantization. Free-text `--quantize` takes priority when both given.
+- **Keep `--precision` consistent with the quantization.** When a quantization
+  scheme is requested, also set `--precision`/`PRECISION` to that scheme (e.g.
+  `--quantize-scheme fp8` → `--precision fp8`). Otherwise the
+  benchmark configs, display names, and the optimization report carry the stale
+  operator-supplied precision label (e.g. `fp8`/`bf16`) and **mislabel** an
+  actually-quantized model. Never leave a conflicting precision when quantizing.
+- Behavior: one-shot, **skipped on `--resume`**. On a failed/unusable
+  quantization the run **hard-stops (`SystemExit(3)`)** — it never silently
+  optimizes the un-quantized source after an explicit `--quantize`.
+  The one exception is a **pre-flight scheme/GPU mismatch** via
+  `--quantize-scheme` (e.g. `mxfp4` on a non-MI355X target): this is **skipped**
+  (not a hard stop) and continues on the un-quantized model, emitting a
+  `QUANTIZATION_SKIPPED:` line on stdout and setting
+  `$HYPERLOOM_QUANTIZATION_SKIPPED` so the caller can detect it.
+- Prerequisites (in addition to the normal Setup): `$QUARK_ROOT` must point at
+  a Quark checkout containing `.claude/skills/quark-torch-*`, and the installed
+  `amd-quark` package version must match that checkout (install editable from
+  `$QUARK_ROOT` to keep them consistent). Claude SDK auth is the same
+  `ANTHROPIC_*` env the rest of the loop uses.
+- After it finishes, the `Quantization prelude: model -> <dir>` line on stdout
+  shows the quantized model path that the rest of the run will use; include it
+  in status reports.
 
 A user request to optimize a model is approval to run Step 1 on a fresh
 node; do not stop for an extra confirmation. After IR-2, smoke-test the
@@ -897,8 +955,43 @@ for k in ("stop_reason", "baseline_tput", "cumulative_gain", "current_best",
     print(f"{k}: {s.get(k)}")
 print("explore_last_round:", s.get("explore_search", {}).get("last_round"))
 print("phase:", s.get("phase"))
+
+# #266 lifecycle: a structured, append-only log of every phase/step
+# boundary. Each entry says which step ran (human label + real phase),
+# whether it STARTed / ENDed / errored, how long it took, and WHERE its
+# artifacts landed on disk. Surface these lines in chat verbatim so the
+# operator can tell — without reading the run log — that a phase ran, where
+# its outputs went, and which artifact feeds the next phase.
+#
+# Reading tip: step-level events pair up. A START with no matching END for
+# the same step means that step is still running (or died without
+# finishing); an ERROR means the handler raised. Two rows intentionally do
+# NOT pair: (a) phase-boundary rows use status ENTER (step == the phase
+# name) and are point-in-time "entered <phase>" markers — the next phase's
+# ENTER implies the previous one finished, so they never get an END; and
+# (b) a lone END with no START is a step that produced a response without
+# running its handler (detail=cache_hit when served from the trace_analyze
+# cache, detail=rejected when an integrate hit an already-exhausted patch).
+# Follow the printed artifact paths to inspect intermediates during
+# execution (e.g. the TraceLens run dir that contains analysis.md /
+# kernel_candidates.json / agent_transcript.jsonl).
+events = s.get("lifecycle") or []
+print(f"\n--- lifecycle (last 12 of {len(events)}) ---")
+for e in events[-12:]:
+    dur = f" {e['duration_s']}s" if e.get("duration_s") is not None else ""
+    detail = f" [{e['detail']}]" if e.get("detail") else ""
+    arts = " ".join(f"{k}={v}" for k, v in (e.get("artifacts") or {}).items())
+    line = (f"#{e.get('seq')} {e.get('label')} [{e.get('phase')}] "
+            f"{e.get('status')}{dur}{detail}")
+    if arts:
+        line += f" -> {arts}"
+    print(line)
 PY
 ```
+
+The `label` column uses the simplified pipeline names from #266 (TraceLens /
+GEAK / Integrate / Validate / Report); the `[phase]` column carries the exact
+coordinator phase (`PRELUDE` … `CLOSE`) so both naming dimensions are visible.
 
 Recent action counts from SQLite (last 500 events grouped by category):
 
@@ -915,9 +1008,12 @@ The optimizer should:
   PRELUDE (after baseline) and at each validated-tput watermark
   (`current_tput / last_roofline_tput >= 1.10`; compound). Default is
   `roofline` (profile + trace_analyze + analysis.md); `--no-enable-roofline`
-  switches to plain `profile`. The LLM cannot propose either
-  (`analysis_action_not_llm_proposable`), and while one is in flight all
-  explore / kernel dispatches are deferred (`wait_for_auto_roofline`).
+  switches to plain `profile`. The LLM cannot propose either —
+  both names are Coordinator-managed and absent from
+  `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 returns
+  `rule='phase_incompatible'`. Concurrent GPU work is
+  serialised by the lane / GPU lease rather than a policy deny, so
+  explore / kernel dispatches keep flowing while analysis refreshes.
   Each analysis also stamps a decode roofline ceiling
   (`orchestrator/roofline_ceiling.py`) for the report's
   `## Roofline Comparison` section.

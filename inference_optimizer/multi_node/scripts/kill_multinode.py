@@ -1,29 +1,12 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Multi-node sglang / vllm server killer.
+"""Multi-node sglang / vllm server killer (counterpart to ``launch_multinode.py``).
 
-Counterpart to ``launch_multinode.py``. Submitted via Ray Dashboard REST
-by ``inference_optimizer.multi_node restart-server`` (during the kill
-phase) and by ``inference_optimizer.multi_node stop-rayjob`` (when the
-caller wants a clean shutdown).
-
-Algorithm:
-
-  1. ``ray.init()`` (no address; in-pod).
-  2. Enumerate all alive nodes.
-  3. For each node, spawn a ``@ray.remote`` actor pinned via
-     ``NodeAffinitySchedulingStrategy(node_id, soft=False)``.
-  4. Inside each actor: read every ``rank_*.pid`` file under
-     ``--pid-dir`` (the same dir launch_multinode wrote), SIGTERM the
-     process group, sleep ``GRACE``, SIGKILL if still alive, remove
-     stale PID files.
-
-Idempotent: missing ``pid_dir`` / missing ``rank_*.pid`` / dead PID is
-treated as "nothing to kill, success". Only kills processes whose PID
-files are inside ``--pid-dir`` (NEVER ``pkill -f sglang`` per IR-5).
-
-Returns 0 on success even if some nodes had nothing to kill.
+Per alive node, a node-pinned actor SIGTERMs each ``rank_*.pid`` process
+group under ``--pid-dir``, waits ``GRACE``, then SIGKILLs. Idempotent
+(missing/dead PIDs = success). Only kills PIDs from ``--pid-dir``, never
+``pkill -f sglang`` (IR-5). Returns 0 on success.
 """
 
 from __future__ import annotations
@@ -41,24 +24,21 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
 def _log(msg: str) -> None:
+    """Write a timestamped progress line to stderr and flush it.
+
+    Args:
+        msg (str): The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[kill_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
-    """Kill every process referenced by rank_*.pid / prefill_*.pid /
-    decode_*.pid / router*.pid under ``pid_dir`` on THIS pod (the
-    actor's host). Returns a per-PID summary.
+    """Kill the rank_*/prefill_*/decode_*/router* PID-file processes under ``pid_dir`` on this pod; returns a per-PID summary.
 
-    Glob patterns:
-      * ``rank_*.pid``     — colocated mode (one server group, all ranks)
-      * ``prefill_*.pid``  — PD disaggregated, prefill group ranks
-      * ``decode_*.pid``   — PD disaggregated, decode group ranks
-      * ``router*.pid``    — PD disaggregated router (only present on head)
-
-    A single sweep covers both modes; pid files only exist for the
-    mode that was actually launched, so unused patterns are no-ops.
+    One sweep covers both colocated and PD-disaggregated modes (unused
+    patterns are no-ops).
     """
     summary: dict[str, list] = {"killed": [], "stale": [], "missing": []}
     p = Path(pid_dir)
@@ -86,11 +66,7 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
             continue
 
         pid = int(text)
-        # Sentinel value 0 means "no real process" (e.g. vllm worker
-        # ranks where KubeRay's own ``ray start`` is the actual worker
-        # process and we have nothing of our own to kill). Treat as
-        # stale, NOT as ``os.kill(0, 0)`` which would target our own
-        # process group on Linux.
+        # Sentinel 0 = "no real process"; treat as stale (os.kill(0,...) would hit our own pg).
         if pid <= 0:
             summary["stale"].append(f"{pid_file.name}:{pid}")
             try:
@@ -108,8 +84,7 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
                 pass
             continue
 
-        # SIGTERM the entire process group (``setsid`` in the bash detach
-        # path in launch_multinode.py makes each launcher its own pg leader).
+        # SIGTERM the whole process group (each launcher is its own pg leader via setsid).
         try:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
@@ -139,10 +114,7 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
         except OSError:
             pass
 
-    # Also clean up the rayjoin pid files written by vllm worker actors
-    # in earlier versions. Current launch_multinode.py no longer creates
-    # these (KubeRay manages worker ray start) but old state can leave
-    # orphan files behind; remove them if found.
+    # Clean up legacy rayjoin pid files (current launch no longer creates these).
     for pid_file in sorted(p.glob("rank_*_rayjoin.pid")):
         try:
             text = pid_file.read_text(encoding="utf-8").strip()
@@ -164,6 +136,16 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
 
 
 def main() -> int:
+    """Parse CLI arguments and fan out kill actors across all alive nodes.
+
+    Connects to the in-pod Ray cluster, schedules one pinned kill actor per
+    alive node, collects each node's kill summary, and prints the aggregate
+    as JSON to stdout.
+
+    Returns:
+        int: Process exit code; ``0`` on success even when some nodes had
+        nothing to kill.
+    """
     p = argparse.ArgumentParser(
         prog="kill_multinode.py",
         description="Kill every multi-node server process spawned by launch_multinode.py.",

@@ -2,9 +2,7 @@
 
 """Pure, self-contained helpers used by the Coordinator.
 
-These functions have no dependency on Coordinator state; they are kept
-out of ``coordinator.py`` so the control-plane module stays focused on
-the runtime loop. This module must not import ``coordinator`` (one-way
+No dependency on Coordinator state; must not import ``coordinator`` (one-way
 dependency).
 """
 
@@ -46,6 +44,16 @@ def _infer_model_class_from_config(model_path: str) -> str:
     text = " ".join(text_parts)
 
     def _positive_int(*keys: str) -> bool:
+        """Whether any of the given payload keys holds a positive integer.
+
+        Booleans are explicitly ignored (they are not treated as ints).
+
+        Args:
+            *keys: Payload keys to check.
+
+        Returns:
+            ``True`` if at least one key parses to an integer > 0.
+        """
         for key in keys:
             val = payload.get(key)
             if isinstance(val, bool):
@@ -84,10 +92,8 @@ def _infer_model_class_from_config(model_path: str) -> str:
     return "dense"
 
 
-# Eight task.params fields that determine baseline (Magpie) behavior
-# end-to-end; the self-loop guard fingerprints these to detect a proposal
-# repeating the same params after the same failure mode fired N times.
-# Tests override the threshold constant directly.
+# task.params fields fingerprinted by the self-loop guard to detect a
+# proposal repeating the same params after the same failure mode.
 _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
     "benchmark_script",
     "result_dir",
@@ -147,9 +153,7 @@ def _summarize_failed_variants(
     """Project ``status=='failed'`` grid_runner rows into a compact list.
 
     Returns ``[{name, error_class, error_excerpt, extra_server_args}, ...]``
-    (excerpt capped at 400 chars, at most ``max_entries`` rows) so the
-    audit trail carries per-variant failure context the LLM can read
-    before re-proposing the same variant.
+    (excerpt capped at 400 chars, at most ``max_entries`` rows).
     """
     if not isinstance(all_results, list):
         return []
@@ -174,12 +178,9 @@ def _summarize_failed_variants(
 def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
     """Extract KB workload-tag fields from a baseline-materialized Magpie YAML.
 
-    Reads workload-shape fields that affect ``best_config`` but live
-    outside ``_collect_workload_tags`` (max_running_requests / max_num_seqs
-    / chunked_prefill_enabled / enable_torch_compile / quant_scheme /
-    workload_mode), parsed from ``benchmark.envs`` extra-args blobs and
-    top-level ``benchmark`` fields. Read defensively — parse errors return
-    ``{}`` and missing fields are simply absent.
+    Reads workload-shape fields outside ``_collect_workload_tags`` from
+    ``benchmark.envs`` extra-args blobs and top-level ``benchmark`` fields.
+    Defensive — parse errors return ``{}``.
     """
     import yaml as _yaml
     try:
@@ -191,7 +192,6 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
     bm = cfg.get("benchmark") if isinstance(cfg, dict) else None
     if not isinstance(bm, dict):
         return out
-    # Direct fields on benchmark — only present when operator added them.
     for src, dst in (
         ("workload_mode", "workload_mode"),
         ("quant_scheme",  "quant_scheme"),
@@ -200,7 +200,6 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
         if v not in (None, "", 0):
             out[dst] = v
     envs = bm.get("envs") if isinstance(bm.get("envs"), dict) else {}
-    # Pick the framework-appropriate extra args blob.
     extra_args_str = ""
     for env_key in ("EXTRA_SGLANG_ARGS", "EXTRA_VLLM_ARGS"):
         v = envs.get(env_key)
@@ -225,7 +224,7 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
             out["chunked_prefill_enabled"] = False
         elif tok == "--enable-torch-compile":
             out["enable_torch_compile"] = True
-    # Torch compile env can also live as a separate env var.
+    # Torch compile may also be a separate env var.
     if "enable_torch_compile" not in out:
         tc_env = envs.get("ENABLE_TORCH_COMPILE")
         if isinstance(tc_env, str):
@@ -238,10 +237,9 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
 def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any]:
     """Project ``params`` to the keys that determine baseline behavior.
 
-    Missing keys are recorded as ``None`` (absent vs explicit-null are
-    indistinguishable, matching what the prompt sees). ``extra_envs`` is
-    normalized to a sorted list of ``[key, value]`` pairs; all values are
-    stringified so ordering doesn't affect equality.
+    Missing keys recorded as ``None``; ``extra_envs`` normalized to a sorted
+    list of stringified ``[key, value]`` pairs so ordering doesn't affect
+    equality.
     """
     params = params or {}
     out: dict[str, Any] = {}
@@ -261,11 +259,7 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
 
 
 def _resolve_roofline_watermark_ratio() -> float:
-    """Resolve the roofline watermark ratio (env-tunable, safe default).
-
-    Reads ``$HYPERLOOM_ROOFLINE_WATERMARK_RATIO``; any unparseable or
-    unsafe value (``<= 1.0`` would re-fire every tick) falls back to 1.10.
-    """
+    """Resolve the roofline watermark ratio from ``$HYPERLOOM_ROOFLINE_WATERMARK_RATIO`` (fallback 1.10)."""
     raw = (os.environ.get(_ROOFLINE_WATERMARK_RATIO_ENV) or "").strip()
     if not raw:
         return _DEFAULT_ROOFLINE_WATERMARK_RATIO
@@ -285,9 +279,8 @@ def _merge_cumulative_extra_sglang_args(
 ) -> str:
     """Build cumulative launch args for a KEEP without double-stacking.
 
-    Explore variants usually record the *full* cumulative args for the
-    kept stack layer; joining ``base + candidate`` when both are full
-    stacks duplicates flags, so prefer the full stack and dedupe.
+    Prefer the full stack and dedupe, since joining ``base + candidate``
+    when both are full stacks duplicates flags.
     """
     base = str(base_args or "").strip()
     candidate = str(candidate_args or "").strip()
@@ -307,17 +300,13 @@ def _merge_cumulative_extra_sglang_args(
 def _dedupe_extra_server_args(args_str: str) -> str:
     """Collapse repeated ``--flag value`` pairs into a unique launch string.
 
-    SGLang/vLLM argparse is ``action="store"`` for almost every knob, so a
-    repeated flag only honors its last value; ``final.extra_server_args``
-    exists for dashboard/replay and should not show the same flag N times.
-    Keep each flag once with its last value (first-seen order preserved).
-    Flags in ``_MULTI_VALUE_SGLANG_FLAGS`` keep their multi-value runs; bare
-    flags are deduped too.
+    Keep each flag once with its last value (first-seen order preserved),
+    since argparse ``action="store"`` only honors the last value. Flags in
+    ``_MULTI_VALUE_SGLANG_FLAGS`` keep their multi-value runs.
     """
     if not args_str:
         return ""
     tokens = args_str.split()
-    # last-wins-for-value, first-wins-for-order.
     pair_by_flag: dict[str, list[str]] = {}
     order: list[str] = []
     i = 0
@@ -339,7 +328,7 @@ def _dedupe_extra_server_args(args_str: str) -> str:
                 order.append(flag)
             pair_by_flag[flag] = pair
         else:
-            # Stray positional token; preserve as-is, in order.
+            # Stray positional token; preserve as-is.
             key = f"__positional_{len(order)}__"
             order.append(key)
             pair_by_flag[key] = [t]

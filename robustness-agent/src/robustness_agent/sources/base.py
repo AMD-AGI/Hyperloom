@@ -2,27 +2,16 @@
 
 """Source protocol + DegradeRouter.
 
-The reactor pulls a single :class:`SourceData` snapshot per tick. The
-DegradeRouter routes to a primary source (typically
-``robustness-server``) and falls back to a secondary (typically
-``local_probe``) when the primary fails repeatedly. State transitions
-emit one WARN log; in-state retries are silent so we do not flood the
-log stream.
-
-State machine
-~~~~~~~~~~~~~
-
-::
+DegradeRouter routes to a primary source and falls back to a secondary
+on repeated failure. State transitions emit one WARN log; in-state
+retries are silent. State machine::
 
     HEALTHY  --(fail_streak >= fail_threshold)-->  DEGRADED
     DEGRADED --(success after recheck_interval_s)--> HEALTHY
     DEGRADED --(consecutive failures still over budget)--> FAILED  (M2+)
 
-For M1 we use only the HEALTHY/DEGRADED two-state form: DEGRADED simply
-means "use the fallback for this tick"; the next tick re-probes after
-``recheck_interval_s`` has elapsed. FAILED is reserved for cases where
-the fallback itself is unhealthy and the reactor should report a
-degraded heartbeat (M2 wires this up).
+M1 uses only HEALTHY/DEGRADED: DEGRADED means "use the fallback this
+tick"; the next tick re-probes after ``recheck_interval_s``.
 """
 
 from __future__ import annotations
@@ -39,6 +28,17 @@ log = logging.getLogger(__name__)
 
 
 class HealthState(str, Enum):
+    """Routing state of a single source inside the DegradeRouter.
+
+    Attributes:
+        HEALTHY (str): Source is being consulted normally.
+        DEGRADED (str): Source failed enough times to be skipped; it is
+            reprobed periodically.
+        FAILED (str): Reserved for when the fallback itself is
+            unhealthy and the reactor should report a degraded
+            heartbeat.
+    """
+
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     FAILED = "failed"
@@ -47,9 +47,8 @@ class HealthState(str, Enum):
 class SourceUnavailable(RuntimeError):
     """Raised by a :class:`Source` when its backing service is not reachable.
 
-    DegradeRouter catches this exception type and treats it as a
-    countable failure. Other exceptions propagate so genuine bugs are
-    not masked.
+    DegradeRouter treats it as a countable failure; other exceptions
+    propagate so genuine bugs are not masked.
     """
 
 
@@ -57,10 +56,9 @@ class SourceUnavailable(RuntimeError):
 class SourceData:
     """Per-tick snapshot the reactor consumes.
 
-    Every field defaults to an empty container so downstream signals can
+    Every field defaults to an empty container so downstream signals
     treat "no data" uniformly. ``sources_used`` records which source
-    produced each tick's data; ``degraded_reason`` is set when the
-    primary was skipped or failed and the fallback served the request.
+    produced each tick; ``degraded_reason`` is set on fallback.
     """
 
     session_pods: list[dict[str, Any]] = field(default_factory=list)
@@ -74,82 +72,32 @@ class SourceData:
     local_log_tail: list[str] = field(default_factory=list)
     local_log_errors: list[dict[str, Any]] = field(default_factory=list)
     local_server_health: list[dict[str, Any]] = field(default_factory=list)
-    # 2026-05-18 LocalProbe extras (A5 / A6 / A7).
-    # ``local_ray`` carries ``{"healthy": bool, "reason": str, "stderr": str,
-    # "returncode": int}`` from :func:`local_probe._probe_ray_head`.
-    # ``local_fd`` carries ``{"pid": int, "used": int, "limit": int,
-    # "used_pct": float}`` from :func:`local_probe._sample_fd_usage`.
-    # ``local_aiter_jit`` carries ``{"jit_dir": str, "so_count": int,
-    # "build_count": int}`` from :func:`local_probe._sample_aiter_jit`;
-    # the cross-tick regression detector reads it.
+    # LocalProbe extras: local_ray ``{healthy, reason, stderr, returncode}``;
+    # local_fd ``{pid, used, limit, used_pct}``; local_aiter_jit ``{jit_dir, so_count, build_count}``.
     local_ray: dict[str, Any] = field(default_factory=dict)
     local_fd: dict[str, Any] = field(default_factory=dict)
     local_aiter_jit: dict[str, Any] = field(default_factory=dict)
-    # G-section decision-audit probe (2026-05-18). Carries persisted
-    # decision artefacts:
-    #   ``recent_integrate`` — last N integrate result.json entries
-    #     (decision/gain_pct/patch_path/patch_size_bytes/base_tput/new_tput/
-    #      kernel_id/dispatched_count/ts).
-    #   ``ci_metrics`` — most recent ci_metrics{,_final}.json content as-is
-    #     (or ``{}`` when absent — the file is produced by an external
-    #     report_back system, not Hyperloom proper).
-    #   ``oob_attempts`` — tail of optimization_attempts.jsonl entries
-    #     (kernel_id / backend / report_text / microbench_speedup).
+    # Decision-audit: ``recent_integrate``, ``ci_metrics`` ({} if absent), ``oob_attempts``.
     local_decision_audit: dict[str, Any] = field(default_factory=dict)
-    # C-section preflight inputs (2026-05-19). The two slots are read by
-    # ``signals/preflight.py`` to detect impossible model-GPU configs,
-    # low Amdahl ceilings for kernel optimization, and cold-start vs
-    # remaining-budget mismatches.
-    #
-    # ``local_manifest`` is the raw ``manifest.json`` dict written by
-    # ``inference_optimizer/manifest.py`` at session boot — empty when
-    # absent (resume from broken session, or non-Hyperloom host).
-    #
-    # ``local_kernel_breakdown`` aggregates
-    # ``<session>/profiles/kernel_breakdown.json`` into the projection
-    # ``{tier_pcts: {T1_TRITON, T2_AITER_CK, ...}, total_kernels,
-    # total_gpu_pct, mtime}``. Empty when the profile action has not
-    # produced a breakdown yet.
+    # Preflight inputs (signals/preflight.py): ``local_manifest`` raw manifest.json;
+    # ``local_kernel_breakdown`` ``{tier_pcts, total_kernels, total_gpu_pct, mtime}``.
     local_manifest: dict[str, Any] = field(default_factory=dict)
     local_kernel_breakdown: dict[str, Any] = field(default_factory=dict)
-    # E-section critic health (2026-05-19). Carries:
-    #   ``recent_judges`` — last N ``critic-workdir/<turn>/judge_bundle.json``
-    #     entries projected to ``{turn_dir, kb_read_skipped_reason,
-    #     proposal_count, mtime}``.
-    #   ``workdir_count`` — total ``<turn>/`` subdirs under ``critic-workdir/``
-    #     (used by E4 ``critic_prune_stuck``).
+    # Critic health: ``recent_judges`` + ``workdir_count`` (subdirs under critic-workdir/, E4).
     local_critic_health: dict[str, Any] = field(default_factory=dict)
-    # I-section state-integrity probe (2026-05-19). Aggregates the
-    # five C-side state slots into one payload so a single LocalProbe
-    # tick scans them all without re-doing IO per signal:
-    #   ``state_json`` — ``{valid, size_bytes, mtime, error}`` for state.json.
-    #   ``wal``        — ``{wal_bytes, db_bytes, db_path}`` for coordinator.db-wal.
-    #   ``leases``     — list of ``{task_id, holder_pid, alive, ts}`` rows
-    #                    (cross-referenced against ``os.kill(pid, 0)``).
-    #   ``agents``     — ``{<role>: {inbox_bytes, outbox_bytes}}``.
-    #   ``coordinator``— ``{recorded_pid, alive, pid_file}`` (from
-    #                    ``optimizer_runs/run_*.pid``).
+    # State-integrity slots: ``state_json``, ``wal`` {wal_bytes, db_bytes, db_path},
+    # ``leases`` (pid liveness), ``agents`` {<role>: {inbox_bytes, outbox_bytes}},
+    # ``coordinator`` {recorded_pid, alive, pid_file}.
     local_state_integrity: dict[str, Any] = field(default_factory=dict)
-    # J-section external-deps probe (2026-05-19). Carries:
-    #   ``gateway``    — ``{url, reachable, status_code, error}`` for
-    #                    ``OPENAI_BASE_URL/models``.
-    #   ``mounts``     — list of ``{path, latency_ms, ok, error}`` for
-    #                    ``$TRACELENS_ROOT`` / ``$TRACELENS_INTERNAL_ROOT`` /
-    #                    ``$INFERENCEX_PATH`` / ``$OOB_SRC``.
-    #   ``tracelens_cli`` — ``{cli_names, found, any_present}`` — whether
-    #                    each CLI name is found via ``shutil.which``.
+    # External-deps: ``gateway`` (OPENAI_BASE_URL/models), ``mounts`` (stat latency for
+    # TRACELENS_ROOT / TRACELENS_INTERNAL_ROOT / INFERENCEX_PATH / OOB_SRC), ``tracelens_cli``.
     local_external_deps: dict[str, Any] = field(default_factory=dict)
     coordinator_events: list[dict[str, Any]] = field(default_factory=list)
     sources_used: list[str] = field(default_factory=list)
     degraded_reason: str | None = None
 
     def merge_from(self, other: "SourceData") -> None:
-        """Merge another snapshot in, preserving non-empty existing fields.
-
-        Used by callers that want to enrich a primary result with extra
-        fallback data; M1 does not exercise this path but keeps the
-        helper available for M2 ``signals/*`` evolution.
-        """
+        """Merge another snapshot in, preserving non-empty existing fields."""
         for slot in (
             "session_pods",
             "session_events",
@@ -193,12 +141,32 @@ class Source(Protocol):
     name: str
 
     async def fetch(self, ctx: Any) -> SourceData:
-        """Return a snapshot or raise :class:`SourceUnavailable`."""
-        ...
+        """Return a snapshot or raise :class:`SourceUnavailable`.
+
+        Args:
+            ctx (Any): The per-tick reactor context (clock, shared
+                state, session id, etc.).
+
+        Returns:
+            SourceData: The snapshot collected for this tick.
+
+        Raises:
+            SourceUnavailable: When the backing service is unreachable.
+        """
 
 
 @dataclass
 class _SourceState:
+    """Mutable per-source bookkeeping tracked by the DegradeRouter.
+
+    Attributes:
+        name (str): The source's name (used in transition logs).
+        state (HealthState): Current routing state of the source.
+        fail_streak (int): Consecutive failure count; reset on success.
+        last_recheck (float): Clock value at the last fetch attempt,
+            used to space out reprobes while DEGRADED.
+    """
+
     name: str
     state: HealthState = HealthState.HEALTHY
     fail_streak: int = 0
@@ -234,6 +202,19 @@ class DegradeRouter:
         recheck_interval_s: float = 30.0,
         clock: Callable[[], float] | None = None,
     ) -> None:
+        """Initialise the router with its primary and fallback sources.
+
+        Args:
+            primary (Source): Source consulted first each tick.
+            fallback (Source): Source used while the primary is
+                DEGRADED.
+            fail_threshold (int): Consecutive primary failures required
+                to mark it DEGRADED; clamped to at least 1.
+            recheck_interval_s (float): Seconds between primary reprobes
+                once DEGRADED; clamped to at least 0.
+            clock (Callable[[], float] | None): Optional time source;
+                defaults to :func:`time.monotonic`.
+        """
         self._primary = primary
         self._fallback = fallback
         self._fail_threshold = max(1, int(fail_threshold))
@@ -246,10 +227,28 @@ class DegradeRouter:
 
     @property
     def primary_state(self) -> HealthState:
+        """Current routing state of the primary source.
+
+        Returns:
+            HealthState: The primary source's :class:`HealthState`.
+        """
         return self._states[self._primary.name].state
 
     async def collect(self, ctx: Any) -> SourceData:
-        """Fetch one tick of source data, with degrade routing."""
+        """Fetch one tick of source data, with degrade routing.
+
+        Tries the primary source when it is HEALTHY (or due for a
+        reprobe) and falls back to the secondary source otherwise or on
+        failure. Records success/failure to drive the state machine.
+
+        Args:
+            ctx (Any): The per-tick reactor context passed to each
+                source's ``fetch``.
+
+        Returns:
+            SourceData: The snapshot from whichever source served the
+            tick, with ``sources_used`` annotated.
+        """
         primary_state = self._states[self._primary.name]
         if self._should_try_primary(primary_state):
             try:
@@ -257,10 +256,7 @@ class DegradeRouter:
             except SourceUnavailable as exc:
                 self._record_failure(primary_state, str(exc))
             except Exception:
-                # Treat unexpected errors as failures too, but re-raise
-                # if the source is supposed to never raise: per Source
-                # contract, unexpected exceptions go through but still
-                # count as failures so we eventually degrade.
+                # Count unexpected errors as failures so we eventually degrade.
                 self._record_failure(primary_state, "unexpected_exception")
                 log.exception("primary source %s raised unexpectedly", self._primary.name)
             else:
@@ -273,6 +269,22 @@ class DegradeRouter:
         return fallback_data
 
     async def _fetch_fallback(self, ctx: Any) -> SourceData:
+        """Fetch from the fallback source and update its state.
+
+        On :class:`SourceUnavailable` the fallback is marked FAILED and
+        a "both sources unavailable" snapshot is returned; on any other
+        exception an empty degraded snapshot is returned. On success the
+        snapshot is annotated with a degraded reason when the primary is
+        still DEGRADED.
+
+        Args:
+            ctx (Any): The per-tick reactor context passed to the
+                fallback's ``fetch``.
+
+        Returns:
+            SourceData: The fallback snapshot, or a degraded placeholder
+            snapshot when the fallback also fails.
+        """
         fallback_state = self._states[self._fallback.name]
         try:
             data = await self._fallback.fetch(ctx)
@@ -309,6 +321,18 @@ class DegradeRouter:
     # -- state machine helpers ------------------------------------------
 
     def _should_try_primary(self, state: _SourceState) -> bool:
+        """Decide whether the primary should be attempted this tick.
+
+        A HEALTHY source is always tried; a DEGRADED one is only tried
+        once ``recheck_interval_s`` has elapsed since the last attempt
+        (and the recheck clock is advanced when it is).
+
+        Args:
+            state (_SourceState): The primary source's tracked state.
+
+        Returns:
+            bool: ``True`` if the primary should be fetched now.
+        """
         if state.state is HealthState.HEALTHY:
             return True
         now = self._clock()
@@ -318,6 +342,14 @@ class DegradeRouter:
         return False
 
     def _record_success(self, state: _SourceState) -> None:
+        """Mark a source healthy after a successful fetch.
+
+        Resets the failure streak, logs a recovery transition when the
+        source was not already HEALTHY, and advances the recheck clock.
+
+        Args:
+            state (_SourceState): The source state to update in place.
+        """
         if state.state is not HealthState.HEALTHY:
             self._maybe_log_transition(state, HealthState.HEALTHY, "recovered")
             state.state = HealthState.HEALTHY
@@ -325,6 +357,16 @@ class DegradeRouter:
         state.last_recheck = self._clock()
 
     def _record_failure(self, state: _SourceState, reason: str) -> None:
+        """Record a failed fetch and degrade the source past threshold.
+
+        Increments the failure streak and advances the recheck clock;
+        when a HEALTHY source crosses ``fail_threshold`` it transitions
+        to DEGRADED (logged once).
+
+        Args:
+            state (_SourceState): The source state to update in place.
+            reason (str): Human-readable failure reason for the log.
+        """
         state.fail_streak += 1
         state.last_recheck = self._clock()
         if (
@@ -340,6 +382,16 @@ class DegradeRouter:
         target: HealthState,
         reason: str,
     ) -> None:
+        """Emit a single WARN log for a state transition.
+
+        No log is emitted when the source is already in ``target``; the
+        caller is responsible for actually mutating ``state.state``.
+
+        Args:
+            state (_SourceState): The source whose state is changing.
+            target (HealthState): The state being transitioned to.
+            reason (str): Human-readable reason recorded in the log.
+        """
         if state.state is target:
             return
         log.warning(
@@ -367,6 +419,18 @@ async def call_with_timeout(
     Translates :class:`asyncio.TimeoutError` to :class:`SourceUnavailable`
     so DegradeRouter treats it as a counted failure. Other exceptions
     propagate.
+
+    Args:
+        coro_factory (Callable[[], Awaitable[Any]]): Zero-arg callable
+            returning the awaitable to run.
+        timeout_s (float): Maximum seconds to await before timing out.
+        label (str): Label used in the raised error message.
+
+    Returns:
+        Any: The result of awaiting ``coro_factory()``.
+
+    Raises:
+        SourceUnavailable: When the awaited coroutine times out.
     """
     try:
         return await asyncio.wait_for(coro_factory(), timeout=timeout_s)

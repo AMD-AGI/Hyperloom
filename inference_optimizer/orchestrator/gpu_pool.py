@@ -2,9 +2,8 @@
 
 """SQLite-backed GPU pool for specialist sub-agents.
 
-The serving lanes continue to protect benchmark/profile/server lifecycle
-work. This pool is separate: it only constrains specialists that explicitly
-request ``needs_gpu=true`` for short GPU experiments or microbenchmarks.
+Separate from the serving lanes: only constrains specialists that request
+``needs_gpu=true`` for short GPU experiments or microbenchmarks.
 """
 
 from __future__ import annotations
@@ -21,10 +20,20 @@ DEFAULT_GPU_LEASE_TTL_SEC = 1800
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond ISO-8601 string."""
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _parse_gpu_list(raw: str) -> list[int]:
+    """Parse a comma/semicolon-separated GPU id list.
+
+    Args:
+        raw: Raw string of GPU ids (``,`` or ``;`` separated).
+
+    Returns:
+        Unique non-negative GPU ids in first-seen order; malformed entries are
+        skipped.
+    """
     out: list[int] = []
     for part in (raw or "").replace(";", ",").split(","):
         p = part.strip()
@@ -42,9 +51,8 @@ def _parse_gpu_list(raw: str) -> list[int]:
 def resolve_gpu_specialist_devices(capacity: int) -> list[int]:
     """Resolve the GPU ids available to GPU specialists.
 
-    ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES`` may name an explicit
-    comma-separated pool. When absent, we use ``range(capacity)``. Capacity
-    zero disables GPU specialist dispatch.
+    ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES`` may name an explicit pool;
+    absent → ``range(capacity)``. Capacity zero disables dispatch.
     """
     cap = max(0, int(capacity or 0))
     if cap <= 0:
@@ -75,11 +83,19 @@ class SpecialistGpuPool:
         *,
         gpu_ids: list[int] | tuple[int, ...],
     ):
+        """Initialize the pool over a fixed set of GPU ids.
+
+        Args:
+            db: SQLite connection backing the lease table.
+            gpu_ids: GPU ids managed by this pool; duplicates and negatives are
+                dropped.
+        """
         self.db = db
         self.gpu_ids = tuple(dict.fromkeys(int(g) for g in gpu_ids if int(g) >= 0))
 
     @property
     def capacity(self) -> int:
+        """Return the number of GPUs the pool manages."""
         return len(self.gpu_ids)
 
     async def try_acquire(
@@ -135,6 +151,11 @@ class SpecialistGpuPool:
         )
 
     async def release(self, lease: GpuLease | None) -> None:
+        """Release the GPUs held by a lease.
+
+        Args:
+            lease: The lease to release; ``None`` or an empty lease is a no-op.
+        """
         if lease is None or not lease.gpu_ids:
             return
         placeholders = ",".join("?" * len(lease.gpu_ids))
@@ -147,6 +168,11 @@ class SpecialistGpuPool:
             )
 
     async def heartbeat(self, lease: GpuLease | None) -> None:
+        """Refresh the heartbeat timestamp for a lease's GPUs.
+
+        Args:
+            lease: The lease to refresh; ``None`` or an empty lease is a no-op.
+        """
         if lease is None or not lease.gpu_ids:
             return
         now_iso = _now_iso()

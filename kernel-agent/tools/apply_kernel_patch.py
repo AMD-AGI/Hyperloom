@@ -45,7 +45,16 @@ _CACHED_KNOWN_TARGET_ROOTS: tuple[str, ...] | None = None
 
 
 def known_target_roots() -> tuple[str, ...]:
-    """Resolved framework roots (importlib/glob when orchestrator is importable)."""
+    """Resolved framework roots (importlib/glob when orchestrator is importable).
+
+    Resolves once and caches the result. Falls back to
+    :data:`_FALLBACK_KNOWN_TARGET_ROOTS` when the orchestrator package is
+    not importable (standalone CLI use).
+
+    Returns:
+        tuple[str, ...]: Absolute path-prefix strings for the recognised
+            reusable framework source roots (aiter / sglang / vllm).
+    """
     global _CACHED_KNOWN_TARGET_ROOTS
     if _CACHED_KNOWN_TARGET_ROOTS is not None:
         return _CACHED_KNOWN_TARGET_ROOTS
@@ -64,52 +73,33 @@ def known_target_roots() -> tuple[str, ...]:
 KNOWN_TARGET_ROOTS = _FALLBACK_KNOWN_TARGET_ROOTS
 
 
-# Default location of the multi-node patch backup directory on the
-# RayJob pod. Mirrors the apply_kernel_patch.backup_root convention
-# (per-target subdir) but lives on the pod's local fs, not the
-# sandbox's, so it survives sglang restarts without depending on
-# wekafs. Overridable via $HYPERLOOM_MN_KERNEL_BACKUP_DIR for tests.
+# Pod-local multi-node backup dir; survives sglang restarts.
+# Overridable via $HYPERLOOM_MN_KERNEL_BACKUP_DIR for tests.
 _MN_POD_BACKUP_DIR_DEFAULT = "/var/kernel_patch_backups"
 
-# State file written by ``inference_optimizer.multi_node create-rayjob``.
-# Presence of ``nodes >= 2`` is the multi-node signal used to decide
-# whether apply_kernel_patch.py should fan-out the patch to RayJob pods
-# via the multi_node CLI in addition to writing the sandbox-local copy.
-#
-# Resolution mirrors ``inference_optimizer.orchestrator.action_executors
-# ._multi_node_env._state_path``: ``$MULTI_NODE_STATE_FILE`` wins,
-# default ``/tmp/multi_node_state.json``. Honouring the env var keeps
-# test runs isolated — pytest can point this at a non-existent path
-# so the fan-out branch is never taken, even on a sandbox whose
-# hardcoded ``/tmp`` file is left over from a prior real multi-node
-# session (without this override, an active inference_optimizer's
-# ``/tmp/multi_node_state.json`` would silently turn ``test_p2_4``
-# integrate fixtures into multi-node fan-out attempts that
-# mock-mismatch ``subprocess.run``).
+# Multi-node signal file (nodes >= 2) written by multi_node create-rayjob.
+# $MULTI_NODE_STATE_FILE wins; env override keeps test runs isolated.
 _MN_STATE_FILE_DEFAULT = "/tmp/multi_node_state.json"
 
 
 def _mn_state_path() -> Path:
-    """Resolve where ``inference_optimizer.multi_node`` dropped its state."""
+    """Resolve where ``inference_optimizer.multi_node`` dropped its state.
+
+    Honours the ``$MULTI_NODE_STATE_FILE`` override and falls back to
+    ``/tmp/multi_node_state.json``.
+
+    Returns:
+        Path: The resolved multi-node state-file path.
+    """
     return Path(os.environ.get("MULTI_NODE_STATE_FILE", _MN_STATE_FILE_DEFAULT))
 
 
-# Legacy module attribute. Kept for any caller / test that imports
-# ``_MN_STATE_FILE`` directly; runtime checks go through
-# :func:`_mn_state_path` so each call re-resolves the env override.
+# Legacy module attribute kept for direct importers; runtime uses _mn_state_path.
 _MN_STATE_FILE = Path(_MN_STATE_FILE_DEFAULT)
 
 
 def _is_multi_node() -> bool:
-    """True iff a multi-node RayJob is active (nodes >= 2).
-
-    Reads ``$MULTI_NODE_STATE_FILE`` (default
-    ``/tmp/multi_node_state.json``) — the same checkpoint
-    ``inference_optimizer.multi_node.cli`` writes after
-    ``create-rayjob``. Missing file / unreadable / ``nodes < 2`` →
-    ``False``, so single-node and standalone CLI use of this tool
-    keep their pre-multinode behaviour bit-for-bit.
-    """
+    """True iff a multi-node RayJob is active (nodes >= 2); missing/unreadable → False."""
     state_path = _mn_state_path()
     try:
         if not state_path.is_file():
@@ -128,17 +118,10 @@ def _dispatch_multinode_apply(
     backup_dir_on_pod: str,
     timeout_sec: int = 180,
 ) -> dict[str, Any]:
-    """Run ``python3 -m inference_optimizer.multi_node apply-patch`` to
-    fan the same patch out to every pod (head + workers).
+    """Fan the patch out to every pod (head + workers); return parsed JSON.
 
-    Returns the parsed JSON document produced by
-    kernel_patch_multinode.py — caller checks ``status == "ok"`` and
-    persists ``per_node`` (host → backup_path map) into the
-    apply-kernel-patch manifest so revert can reach the same pods.
-
-    Raises RuntimeError on subprocess failure / non-JSON output / pod
-    status != ok so the apply_kernel_patch caller can roll back the
-    sandbox-local copy.
+    Raises RuntimeError on subprocess failure / non-JSON / pod status != ok so
+    the caller can roll back the sandbox-local copy.
     """
     cmd = [
         sys.executable, "-m", "inference_optimizer.multi_node",
@@ -179,13 +162,7 @@ def _dispatch_multinode_revert(
     backup_map: dict[str, str],
     timeout_sec: int = 120,
 ) -> dict[str, Any]:
-    """Run ``python3 -m inference_optimizer.multi_node revert-patch`` to
-    restore the original file on every pod that received the apply.
-
-    Best-effort: a partial revert is logged but not raised — the
-    caller (revert_kernel_patch) has already restored the sandbox
-    copy, and re-running revert is idempotent on noop_missing_backup.
-    """
+    """Restore the original file on every pod that received the apply (best-effort)."""
     cmd = [
         sys.executable, "-m", "inference_optimizer.multi_node",
         "revert-patch",
@@ -201,8 +178,7 @@ def _dispatch_multinode_revert(
     except json.JSONDecodeError:
         parsed = {}
     if proc.returncode != 0 or str(parsed.get("status", "")).lower() != "ok":
-        # Don't raise — sandbox revert already won; warn-only so caller
-        # can mark the manifest reverted regardless.
+        # Warn-only: sandbox revert already won.
         sys.stderr.write(
             f"WARN multi-node revert-patch rc={proc.returncode} "
             f"status={parsed.get('status')!r} "
@@ -217,23 +193,54 @@ def _dispatch_multinode_revert(
 
 
 def _now() -> str:
-    """Return the current UTC timestamp as an ISO8601 string."""
+    """Return the current UTC timestamp as an ISO8601 string.
+
+    Returns:
+        str: The current UTC time formatted as an ISO8601 string.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
 def _safe_name(value: str) -> str:
-    """Sanitize a filename component to a safe, short identifier."""
+    """Sanitize a filename component to a safe, short identifier.
+
+    Non-alphanumeric characters (other than ``._-``) become underscores and the
+    result is truncated to 80 characters.
+
+    Args:
+        value (str): The raw string to sanitize.
+
+    Returns:
+        str: A filesystem-safe identifier, or ``"kernel"`` when empty.
+    """
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
     return cleaned[:80] or "kernel"
 
 
 def _path_hash(path: Path) -> str:
-    """Return a short, stable hash for ``path`` to disambiguate backups."""
+    """Return a short, stable hash for ``path`` to disambiguate backups.
+
+    Args:
+        path (Path): The path to hash.
+
+    Returns:
+        str: The first 16 hex characters of the SHA-256 of the path string.
+    """
     return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
 
 
 def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
-    """Copy a file into the backup tree and return the manifest entry."""
+    """Copy a file into the backup tree and return the manifest entry.
+
+    Args:
+        path (Path): The file to back up.
+        backup_dir (Path): Root of the backup tree.
+        group (str): Sub-directory grouping (e.g. ``"source"`` / ``"artifacts"``).
+
+    Returns:
+        dict[str, str]: A manifest entry with ``path`` (original) and
+            ``backup_path`` (backup copy) keys.
+    """
     dst = backup_dir / group / f"{_path_hash(path)}_{path.name}"
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, dst)
@@ -241,7 +248,19 @@ def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
 
 
 def _source_text_looks_complete(text: str, suffix: str) -> bool:
-    """Heuristically check that the patch text is a full source file."""
+    """Heuristically check that the patch text is a full source file.
+
+    For Python, requires the text to compile and contain a recognisable
+    top-level marker; for compiled sources, requires a C/C++/HIP marker.
+
+    Args:
+        text (str): The candidate source text.
+        suffix (str): The lower-cased target file suffix (e.g. ``.py``).
+
+    Returns:
+        bool: ``True`` when the text looks like a complete source file of the
+            given suffix, else ``False``.
+    """
     stripped = text.strip()
     if not stripped or "```" in stripped:
         return False
@@ -266,6 +285,22 @@ def _source_text_looks_complete(text: str, suffix: str) -> bool:
 
 
 def _validate_patch_source(patch: Path, target: Path) -> None:
+    """Validate that ``patch`` is a complete drop-in replacement for ``target``.
+
+    Checks that the patch is not a text artifact, that its suffix matches the
+    target's, that it reads as text and looks like a complete source file, that
+    it is compatible with the target (see
+    :func:`_validate_replacement_compatibility`), and that Python patches
+    compile.
+
+    Args:
+        patch (Path): The candidate replacement source file.
+        target (Path): The file that would be replaced.
+
+    Raises:
+        ValueError: If the patch is incompatible, not a complete source file,
+            or not decodable as text.
+    """
     patch_suffix = patch.suffix.lower()
     target_suffix = target.suffix.lower()
     if patch_suffix in TEXT_ARTIFACT_SUFFIXES:
@@ -288,6 +323,17 @@ def _validate_patch_source(patch: Path, target: Path) -> None:
 
 
 def _host_entry_functions(source_text: str) -> set[str]:
+    """Extract public host (non-``__global__``) entry function names.
+
+    Scans for C/C++ free-function definitions with common return types,
+    excluding ``__global__`` kernels, leading-underscore helpers, and ``main``.
+
+    Args:
+        source_text (str): The C/C++/HIP source text to scan.
+
+    Returns:
+        set[str]: The set of discovered host entry-function names.
+    """
     names: set[str] = set()
     pattern = re.compile(
         r"(?m)^\s*(?!__global__)(?:template\s*<[^>]+>\s*)?"
@@ -303,6 +349,20 @@ def _host_entry_functions(source_text: str) -> set[str]:
 
 
 def _validate_replacement_compatibility(patch_text: str, target_text: str, target: Path) -> None:
+    """Guard against patches that break the target's integration contract.
+
+    Rejects patches that introduce standalone PYBIND11/TORCH_LIBRARY
+    registrations absent from the target, drop a required ``namespace aiter``,
+    or omit any host entry function the target exposes.
+
+    Args:
+        patch_text (str): The candidate replacement source text.
+        target_text (str): The current target source text.
+        target (Path): The target path (used in error messages).
+
+    Raises:
+        ValueError: If the patch is incompatible with the target's contract.
+    """
     if "PYBIND11_MODULE" in patch_text and "PYBIND11_MODULE" not in target_text:
         raise ValueError(
             "patch creates a standalone PYBIND11 module but target is a framework source file"
@@ -326,9 +386,27 @@ def _validate_replacement_compatibility(patch_text: str, target_text: str, targe
 
 
 def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
+    """Clear Python / Triton / Inductor caches around a Python patch.
+
+    Removes ``__pycache__`` dirs near the target plus the well-known Triton and
+    torch-inductor cache directories so a re-import recompiles the patched
+    kernel.
+
+    Args:
+        target (Path): The patched Python source file.
+
+    Returns:
+        dict[str, Any]: ``{"status": "ok", "removed": [...]}`` listing the
+            paths that were removed.
+    """
     removed: list[str] = []
 
     def remove_path(path: Path) -> None:
+        """Remove a file or directory, recording success and ignoring errors.
+
+        Args:
+            path (Path): The file or directory to remove.
+        """
         try:
             if path.is_dir():
                 shutil.rmtree(path)
@@ -356,55 +434,17 @@ def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
     return {"status": "ok", "removed": removed}
 
 
-# ---------------------------------------------------------------------------
-# PR-K: aiter JIT cache invalidation around compiled-source rebuilds.
-#
-# aiter ships ``@compile_ops("module_<name>", gen_func=...)`` decorators that
-# JIT-codegen + hipcc-compile per-instance ``.so`` files into
-# ``<aiter>/jit/build/module_<name>_<sig>/``. ``setup.py develop`` rebuilds the
-# python package + statically-compiled ``.so`` but does NOT invalidate the
-# jit/build entries: a patch under ``aiter/csrc/ck_gemm_moe_2stages_codegen/``
-# would rebuild the wheel yet the next ``import aiter.ops.moe_op`` would still
-# pick up the pre-patch ``module_moe_ck2stages_*.so`` from jit/build/, leaving
-# the integrate benchmark to measure unchanged performance and emit REVERT.
-#
-# We move (NOT copy) the entire jit/build/ directory aside before the rebuild
-# step so the post-rebuild first-import re-codegens + re-compiles every module
-# from clean state. ``shutil.move`` is atomic on the same filesystem and zero-
-# copy. Revert moves the backup back, removing any regenerated jit/build/ dir
-# first so the pre-patch state is restored bit-for-bit.
-#
-# Scope: ONLY aiter is affected. sglang's sgl-kernel and vllm have no JIT
-# codegen layer — their ``.so`` are produced by setup.py at install time, so
-# the standard ``setup.py develop`` rebuild + cache_clear is sufficient and
-# this invalidation step is a no-op for those targets.
-# ---------------------------------------------------------------------------
+# PR-K: aiter JIT cache invalidation around rebuilds (setup.py develop won't invalidate jit/build/ .so).
 _AITER_CSRC_MARKER = "/aiter/csrc/"
 
 
 def _target_is_in_aiter_csrc(target_file: Path) -> bool:
-    """Return True iff ``target_file`` resides under any ``aiter/csrc/`` tree.
-
-    Matches both the editable checkout (``/sgl-workspace/aiter/csrc/...``) and
-    the dist-packages layout (``/usr/local/lib/python3.10/dist-packages/aiter/
-    csrc/...``) — in both cases the relative segment ``aiter/csrc/`` appears
-    verbatim in the absolute path.
-    """
+    """Return True iff ``target_file`` resides under any ``aiter/csrc/`` tree."""
     return _AITER_CSRC_MARKER in str(target_file).replace(os.sep, "/")
 
 
 def _aiter_jit_build_dir() -> Path | None:
-    """Return ``<aiter>/jit/build`` for the importable aiter, or ``None``.
-
-    Resolved via ``importlib.util.find_spec("aiter")`` so editable installs
-    (``/sgl-workspace/aiter/aiter/__init__.py``), wheel installs
-    (``/usr/local/lib/python3.12/dist-packages/aiter/__init__.py``) and any
-    other layout on ``sys.path`` resolve correctly without hardcoding.
-
-    Returns ``None`` when aiter is not importable in the current interpreter
-    (the kernel-agent sandbox container always has aiter available; this
-    fallback exists so unit tests on a host without aiter still pass).
-    """
+    """Return ``<aiter>/jit/build`` for the importable aiter, or ``None`` if absent."""
     try:
         spec = importlib.util.find_spec("aiter")
     except (ImportError, ValueError):
@@ -423,21 +463,7 @@ def _invalidate_aiter_jit_build(
 ) -> dict[str, Any]:
     """Move aiter ``jit/build/`` aside so a post-rebuild first import re-JITs.
 
-    No-op for targets outside ``aiter/csrc/`` and for sandboxes where the
-    aiter package isn't importable / hasn't populated its jit/build/ yet.
-    Returns one of:
-
-      * ``{"status": "ok", "src": ..., "backup_path": ..., "moved_at": ...}``
-        — backup written; caller must persist this in the manifest before
-        rebuild so revert can find it.
-      * ``{"status": "skipped", "reason": ...}`` — non-aiter target, aiter
-        not importable, or jit/build already absent/empty.
-      * ``{"status": "failed", "error": ...}`` — backup path collision; the
-        caller is expected to abort apply rather than rebuild against an
-        inconsistent jit cache.
-
-    ``jit_build_dir_override`` is a test-only escape hatch so unit tests can
-    point at a synthetic jit/build/ tree without an importable aiter package.
+    Returns status ok / skipped / failed; ``jit_build_dir_override`` is test-only.
     """
     if not _target_is_in_aiter_csrc(target_file):
         return {"status": "skipped", "reason": "target not under aiter/csrc/"}
@@ -482,12 +508,7 @@ def _invalidate_aiter_jit_build(
 
 
 def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]:
-    """Reverse of :func:`_invalidate_aiter_jit_build`.
-
-    Moves the backup back to its original location. If the post-rebuild first
-    import already regenerated a fresh jit/build/, that fresh dir is removed
-    first so the pre-patch state is restored bit-for-bit (revert semantics).
-    """
+    """Reverse of :func:`_invalidate_aiter_jit_build`: restore the backup, removing any regenerated dir first."""
     if not isinstance(jit_build_backup, dict) or jit_build_backup.get("status") != "ok":
         return {"status": "skipped", "reason": "no backup recorded"}
     src = Path(jit_build_backup.get("src", ""))
@@ -796,6 +817,27 @@ def verify_cpp_itfs_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:
 
 
 def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[str, Any]:
+    """Determine the rebuild strategy for a patch target.
+
+    Matches the target against the known framework roots (aiter / sglang /
+    vllm) to pick the rebuild command and artifact roots, and decides whether
+    the target is a compiled source. Python targets never rebuild.
+
+    Args:
+        target_file (Path): The file being patched.
+        allow_unknown_target (bool): When ``True``, targets outside the known
+            roots are accepted (rooted at the target's parent) instead of
+            raising.
+
+    Returns:
+        dict[str, Any]: A strategy dict with ``compiled`` (bool), ``root``
+            (str), ``rebuild_command`` (list[str]) and ``artifact_roots``
+            (list[Path]).
+
+    Raises:
+        ValueError: When the target is outside the known roots and
+            ``allow_unknown_target`` is ``False``.
+    """
     target = str(target_file)
     lower = target.lower()
     roots = known_target_roots()
@@ -846,6 +888,20 @@ def _discover_artifacts(
     *,
     max_artifacts: int = 400,
 ) -> list[Path]:
+    """Collect compiled-artifact files to back up before a rebuild.
+
+    Includes any explicitly provided artifact paths, then walks each root for
+    files with a compiled-artifact suffix, deduplicating and capping the total.
+
+    Args:
+        roots (Iterable[Path]): Directories to scan recursively for artifacts.
+        explicit_artifact_paths (Iterable[str] | None): Caller-specified
+            artifact files to always include.
+        max_artifacts (int): Maximum number of artifacts to collect.
+
+    Returns:
+        list[Path]: The discovered artifact file paths.
+    """
     seen: set[Path] = set()
     artifacts: list[Path] = []
     for raw in explicit_artifact_paths or []:
@@ -866,6 +922,20 @@ def _discover_artifacts(
 
 
 def _run_rebuild(command: list[str], cwd: Path, timeout_sec: int) -> dict[str, Any]:
+    """Run a rebuild command and capture its result.
+
+    The subprocess runs with ``/opt/venv/bin`` prepended to ``PATH``.
+
+    Args:
+        command (list[str]): The rebuild command argv; empty means skip.
+        cwd (Path): Working directory for the rebuild.
+        timeout_sec (int): Subprocess timeout in seconds.
+
+    Returns:
+        dict[str, Any]: A result dict with ``status`` (``ok`` / ``failed`` /
+            ``skipped``), ``returncode``, captured ``stdout_tail`` /
+            ``stderr_tail``, and the ``command`` / ``cwd`` used.
+    """
     if not command:
         return {"status": "skipped", "reason": "no rebuild command"}
     proc = subprocess.run(
@@ -887,6 +957,21 @@ def _run_rebuild(command: list[str], cwd: Path, timeout_sec: int) -> dict[str, A
 
 
 def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
+    """Revert a previously applied kernel patch from its manifest.
+
+    Restores backed-up artifacts and source, clears Python caches when the
+    target is Python, restores any aiter ``jit/build`` backup, and fans out a
+    best-effort revert to multi-node pods. The manifest is updated in place
+    with the reverted status.
+
+    Args:
+        manifest_path (str | Path): Path to the apply manifest JSON file.
+
+    Returns:
+        dict[str, Any]: A result dict with ``status``, ``manifest_path``,
+            ``restored_paths``, ``reverted_at`` and, when fan-out ran, a
+            ``multinode_revert`` block.
+    """
     manifest_file = Path(manifest_path)
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
     restored: list[str] = []
@@ -908,13 +993,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
             if dst.suffix.lower() in PYTHON_SOURCE_SUFFIXES:
                 manifest["revert_cache_clear"] = _clear_python_kernel_caches(dst)
 
-    # PR-K: restore aiter jit/build/ if it was moved aside during apply.
-    # Done after source/artifact restore but before multi-node fan-out so
-    # the host-local jit cache is back in place even if pod-side revert
-    # subsequently fails. Manifest's ``jit_build_backup`` carries ``src``
-    # and ``backup_path`` set by :func:`_invalidate_aiter_jit_build` and
-    # is only present (with status=ok) when the apply actually moved the
-    # dir aside.
+    # PR-K: restore aiter jit/build/ (before multi-node fan-out) if apply moved it aside.
     jit_build_backup = manifest.get("jit_build_backup") or {}
     if jit_build_backup.get("status") == "ok":
         jit_build_restore = _restore_aiter_jit_build(jit_build_backup)
@@ -922,11 +1001,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
         if jit_build_restore.get("status") == "ok" and jit_build_restore.get("restored_to"):
             restored.append(str(jit_build_restore["restored_to"]))
 
-    # PR-K2: restore the aiter cpp_itfs runtime cache if it was moved aside
-    # during apply, so a non-KEEP decision puts the pristine params-hashed
-    # ``<build_dir>/<md_name>_*`` dirs back and the next server serves v0
-    # (removing any patched dir the re-baseline regenerated first). Only
-    # present (status=ok) when the apply actually moved cpp_itfs cache dirs.
+    # PR-K2: restore the aiter cpp_itfs runtime cache moved aside during apply so a non-KEEP decision serves v0 (only present when apply moved cpp_itfs cache dirs).
     cpp_itfs_cache_backup = manifest.get("cpp_itfs_cache_backup") or {}
     if cpp_itfs_cache_backup.get("status") == "ok":
         cpp_itfs_cache_restore = _restore_aiter_cpp_itfs_cache(cpp_itfs_cache_backup)
@@ -934,11 +1009,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
         if cpp_itfs_cache_restore.get("status") == "ok":
             restored.extend(cpp_itfs_cache_restore.get("restored", []))
 
-    # Multi-node: also fan-out a revert to every pod that received the
-    # corresponding apply. Best-effort; sandbox revert above already
-    # restored the LLM-visible source, but we still want pod-side
-    # sglang to load v0 on the next restart so the integrate
-    # baseline rerun measures the right thing.
+    # Multi-node: fan-out a revert to every pod that received the apply (best-effort) so pod-side sglang loads v0 on next restart.
     multinode_info = manifest.get("multinode") or {}
     mn_revert: dict[str, Any] = {}
     if multinode_info and multinode_info.get("host_backup_map"):
@@ -968,8 +1039,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
         "restored_paths": restored,
         "reverted_at": reverted_at,
     }
-    # Only attach multinode_revert when fan-out actually ran. Preserves
-    # single-node revert return shape bit-for-bit.
+    # Only attach multinode_revert when fan-out actually ran.
     if mn_revert:
         result["multinode_revert"] = mn_revert
     return result
@@ -988,6 +1058,33 @@ def apply_kernel_patch(
     allow_unknown_target: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
+    """Apply an optimized kernel file with backup, rebuild, and fan-out.
+
+    Validates the patch against the target, backs up the source (and compiled
+    artifacts), writes a manifest, copies the patch into place, clears caches,
+    fans the patch out to multi-node pods when active, and rebuilds compiled
+    targets — reverting automatically on rebuild failure.
+
+    Args:
+        patch_path (str | Path): The replacement source file.
+        target_file (str | Path): The file to replace.
+        backup_root (str | Path): Root directory for backups and the manifest.
+        kernel_id (str): Identifier for the kernel being patched.
+        artifact_paths (Iterable[str] | None): Explicit compiled artifacts to
+            back up in addition to discovered ones.
+        rebuild_command (list[str] | str | None): Override rebuild command; a
+            string is run via ``bash -lc``.
+        rebuild_timeout_sec (int): Rebuild subprocess timeout in seconds.
+        skip_rebuild (bool): When ``True``, skip the rebuild step.
+        allow_unknown_target (bool): Allow targets outside the known roots.
+        dry_run (bool): Prepare backups/manifest only, without applying.
+
+    Returns:
+        dict[str, Any]: A result dict with ``status`` and, on success, the
+            manifest path, target, backup dir, compiled flag, artifact count,
+            cache-clear / rebuild / jit-build records, and an optional
+            ``multinode`` block.
+    """
     patch = Path(patch_path).resolve()
     target = Path(target_file).resolve()
     if not patch.is_file():
@@ -1034,14 +1131,7 @@ def apply_kernel_patch(
         {"status": "skipped", "reason": "not a python source target"}
     )
 
-    # Multi-node: fan-out the SAME patch to every RayJob pod so head +
-    # workers see identical source. Sandbox-local write above already
-    # succeeded, so the apply is in a "sandbox-applied, pod-pending"
-    # state; the dispatch either promotes it to a fully-applied state
-    # across all three (sandbox + head + workers) or we hard-revert the
-    # sandbox copy to avoid a partial multinode state where LLM would
-    # next round see v1 source locally but pod-side sglang still runs
-    # v0.
+    # Multi-node: fan-out the patch to every RayJob pod, else hard-revert the sandbox copy.
     multinode_info: dict[str, Any] = {}
     if _is_multi_node():
         pod_backup_dir = os.environ.get(
@@ -1055,8 +1145,7 @@ def apply_kernel_patch(
                 backup_dir_on_pod=pod_backup_dir,
             )
         except Exception as exc:  # noqa: BLE001
-            # Pod fan-out failed: revert sandbox copy from the source
-            # backup so the three sides agree on v0 again.
+            # Pod fan-out failed: revert sandbox copy to v0.
             try:
                 shutil.copy2(source_backup["backup_path"], target)
             except OSError:
@@ -1069,8 +1158,7 @@ def apply_kernel_patch(
                 ),
                 "manifest_path": str(manifest_path),
             }
-        # Persist per-host backups into the manifest so revert can find
-        # them. Map shape: {hostname: backup_path}.
+        # Persist per-host backups {hostname: backup_path} so revert can find them.
         backup_map: dict[str, str] = {}
         for entry in mn_apply.get("per_node", []) or []:
             host = (entry.get("host") or "").strip()
@@ -1084,11 +1172,7 @@ def apply_kernel_patch(
             "host_backup_map": backup_map,
             "per_node": mn_apply.get("per_node", []),
         }
-        # CRITICAL: persist multinode info to the manifest NOW (not at
-        # the end with status=applied) so a later rebuild failure
-        # triggers revert_kernel_patch with the multinode block still
-        # visible — without this, rebuild failure would revert only
-        # the sandbox copy and leave pod-side patches stranded.
+        # Persist multinode info now so a later rebuild failure reverts pod-side patches too.
         manifest["multinode"] = multinode_info
         manifest_path.write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -1111,19 +1195,10 @@ def apply_kernel_patch(
         "status": "skipped", "reason": "rebuild not run", "is_cpp_itfs": False,
     }
     if strategy["compiled"] and not skip_rebuild:
-        # PR-K: aiter @compile_ops modules cache JIT-built .so under
-        # <aiter>/jit/build/module_*/. setup.py develop rebuilds the
-        # python package + statically-linked .so but does NOT touch
-        # jit/build/, so a patched .cu under aiter/csrc/ would rebuild
-        # yet the next import would still load the pre-patch .so. Move
-        # jit/build/ aside before rebuild so the post-rebuild first
-        # import re-codegens + re-compiles cleanly. No-op for sglang/
-        # vllm targets (they have no JIT codegen layer).
+        # PR-K: move aiter jit/build/ aside so post-rebuild import re-JITs cleanly.
         jit_build_backup = _invalidate_aiter_jit_build(target, backup_dir)
         if jit_build_backup.get("status") == "failed":
-            # Refuse to rebuild against an inconsistent jit cache state:
-            # restore source from backup so the on-disk file matches v0
-            # again, then bail out.
+            # Refuse to rebuild against an inconsistent jit cache: restore v0 and bail.
             try:
                 shutil.copy2(source_backup["backup_path"], target)
             except OSError:
@@ -1139,9 +1214,7 @@ def apply_kernel_patch(
                 "jit_build_backup": jit_build_backup,
             }
         if jit_build_backup.get("status") == "ok":
-            # Persist the backup record into the manifest BEFORE rebuild
-            # so a rebuild failure can still trigger restore via
-            # revert_kernel_patch (which reads the manifest).
+            # Persist the backup record before rebuild so a failure can still restore.
             manifest["jit_build_backup"] = jit_build_backup
             manifest_path.write_text(
                 json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -1202,18 +1275,12 @@ def apply_kernel_patch(
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
     if jit_build_backup.get("status") in {"ok", "skipped"}:
-        # Surface skipped reason too so manifest readers can audit why
-        # invalidation didn't run on a particular apply (e.g. non-aiter
-        # target, aiter not importable in this sandbox).
+        # Surface skipped reason too so manifest readers can audit it.
         manifest["jit_build_backup"] = jit_build_backup
     if cpp_itfs_cache_backup.get("status") in {"ok", "skipped"}:
-        # Surface the cpp_itfs record (incl. is_cpp_itfs + build_dir +
-        # module_names + invalidated_unix) so integrate can verify a fresh
-        # rebuild landed and revert can restore the runtime cache.
+        # Surface the cpp_itfs record (is_cpp_itfs + build_dir + module_names + invalidated_unix) so integrate can verify a rebuild and revert can restore the runtime cache.
         manifest["cpp_itfs_cache_backup"] = cpp_itfs_cache_backup
-    # multinode block (when present) is already persisted at fan-out
-    # time above; we don't rewrite it here to avoid clobbering the
-    # per-host backup map.
+    # multinode block already persisted at fan-out time; don't rewrite it here.
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     result: dict[str, Any] = {
         "status": "ok",
@@ -1227,15 +1294,22 @@ def apply_kernel_patch(
         "jit_build_backup": jit_build_backup,
         "cpp_itfs_cache_backup": cpp_itfs_cache_backup,
     }
-    # Only attach the multinode key when fan-out actually ran. Keeps
-    # single-node callers' return shape bit-for-bit identical to
-    # pre-multinode behaviour.
+    # Only attach the multinode key when fan-out actually ran.
     if multinode_info:
         result["multinode"] = multinode_info
     return result
 
 
 def main() -> int:
+    """Run the apply/revert CLI and print the JSON result.
+
+    Parses ``apply`` / ``revert`` subcommands, dispatches to
+    :func:`apply_kernel_patch` or :func:`revert_kernel_patch`, and prints the
+    result document.
+
+    Returns:
+        int: ``0`` when the result status is ``"ok"``, otherwise ``1``.
+    """
     parser = argparse.ArgumentParser(description="Apply or revert a kernel patch")
     sub = parser.add_subparsers(dest="command", required=True)
     apply_p = sub.add_parser("apply")

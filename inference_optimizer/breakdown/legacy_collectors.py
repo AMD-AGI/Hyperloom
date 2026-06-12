@@ -29,9 +29,7 @@ from typing import Any
 
 from .collectors import _iso_z, _parse_iso_unix, _to_float
 
-# Old v0.6 action vocabulary -> canonical v2 phase. ``validate_stack`` is
-# a checkpoint that runs *inside* whatever phase is active, so it never
-# starts a phase of its own (see ``_PHASE_NEUTRAL``).
+# Old v0.6 action vocabulary -> canonical v2 phase (``validate_stack`` is phase-neutral; see ``_PHASE_NEUTRAL``).
 _ACTION_PHASE: dict[str, str] = {
     "baseline":       "PRELUDE",
     "profile":        "PRELUDE",
@@ -44,31 +42,43 @@ _ACTION_PHASE: dict[str, str] = {
     "integrate":      "KERNEL",
 }
 
-# Actions that should inherit the currently-active phase rather than open
-# a new segment (validation checkpoints fire between real phase steps).
+# Actions that inherit the active phase rather than open a new segment.
 _PHASE_NEUTRAL = frozenset({"validate_stack"})
 
 _DEFAULT_PHASE = "EXPLORE"
 
 
 def is_legacy_session(state: dict[str, Any]) -> bool:
-    """A session is *legacy* when it never recorded ``phase_history``.
-
-    The v2 :func:`collectors.collect_phase_segments` keys entirely off
-    ``phase_history``; its absence is the exact and only condition under
-    which it yields ``[]`` and this module's reconstruction is needed.
-    """
+    """A session is *legacy* when it never recorded ``phase_history``."""
     history = state.get("phase_history")
     return not (isinstance(history, list) and history)
 
 
 def _phase_for_event(action: str, prev_phase: str) -> str:
+    """Determine the phase associated with an action event.
+
+    Args:
+        action: The action name from the event.
+        prev_phase: The phase carried over from the previous event.
+
+    Returns:
+        The mapped phase, the previous phase for phase-neutral actions,
+        or the default phase as a fallback.
+    """
     if action in _PHASE_NEUTRAL:
         return prev_phase or _DEFAULT_PHASE
     return _ACTION_PHASE.get(action, _DEFAULT_PHASE)
 
 
 def _stack_adoptions(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract timestamped optimization-stack adoption entries.
+
+    Args:
+        state: Session state mapping holding ``optimization_stack``.
+
+    Returns:
+        The stack entries that are dicts carrying a ``ts`` timestamp.
+    """
     stack = state.get("optimization_stack") or []
     out: list[dict[str, Any]] = []
     if isinstance(stack, list):
@@ -85,25 +95,16 @@ def collect_phase_segments(
 ) -> list[dict[str, Any]]:
     """Reconstruct ``phase_segments`` for a legacy session.
 
-    Walks the (already chronologically-sorted) ``phase_timeline`` events,
-    maps each to a canonical phase, and collapses consecutive same-phase
-    events into one segment. Each segment carries the same wire shape as
-    :func:`collectors.collect_phase_segments` (``phase`` / ``from_phase``
-    / ``entered_ts`` / ``entered_unix`` / ``exit_ts`` / ``exit_unix`` /
-    ``exit_reason`` / ``evidence`` / ``events`` / ``actions`` /
-    ``elapsed_seconds``) so the frontend renders it identically. The
-    segment exit is the *next* segment's entry (the last segment stays
-    open with ``exit_ts == ""``), matching the v2 collector convention.
-
-    ``evidence.reconstructed_from == "legacy_audit_lists"`` flags every
-    segment as a derived (not natively-recorded) view.
+    Maps ``phase_timeline`` events to canonical phases and collapses
+    consecutive same-phase events into segments matching the v2 collector
+    wire shape; ``evidence.reconstructed_from == "legacy_audit_lists"``
+    flags each as a derived view.
     """
     events = [e for e in (phase_timeline or []) if isinstance(e, dict) and e.get("ts")]
     events.sort(key=lambda e: str(e.get("ts") or ""))
     if not events:
         return []
 
-    # Group consecutive events sharing a canonical phase.
     groups: list[dict[str, Any]] = []
     prev_phase = ""
     for ev in events:
@@ -131,14 +132,11 @@ def collect_phase_segments(
         if entered_unix is not None and exit_unix is not None:
             elapsed = max(0.0, float(exit_unix) - float(entered_unix))
 
-        # Per-segment evidence mined from the contained action events +
-        # the adoptions whose ts falls in this window.
         best_gain: float | None = None
         for ev in acts:
             ex = ev.get("extras") or {}
-            # Only treat ``key_metric`` as a gain when its kind says so --
-            # baseline/profile carry it as raw output_throughput, which
-            # must NOT be misread as a percentage gain.
+            # Only treat ``key_metric`` as a gain when its kind says so;
+            # baseline/profile carry raw output_throughput, not a gain pct.
             g_pct = (
                 _to_float(ev.get("key_metric"))
                 if ev.get("key_metric_kind") in ("gain_pct", "validated_gain_pct")
@@ -155,11 +153,8 @@ def collect_phase_segments(
             {
                 "action": a.get("action"),
                 "variant_name": a.get("variant_name"),
-                # Emit the canonical ``extra_server_args`` field. v0.6 raw
-                # state (loaded without the SharedState key migration) only
-                # carries the pre-rename ``candidate_extra_sglang_args``, so
-                # read that with a canonical fallback for forward-migrated
-                # snapshots.
+                # Canonical field; v0.6 raw state only has the pre-rename
+                # ``candidate_extra_sglang_args``, so fall back to it.
                 "extra_server_args": (
                     a.get("candidate_extra_server_args")
                     or a.get("candidate_extra_sglang_args")

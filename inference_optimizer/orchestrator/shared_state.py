@@ -1,16 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""SharedState
+"""SharedState — single-writer (Coordinator) persisted session state, backed by atomic JSON at ``$SESSION_DIR/state.json``; enforces CORE_STATE_FIELDS guards.
 
-Persistent session-level state that all reactors read (via prompt injection)
-and that PolicyGate uses to enforce CORE_STATE_FIELDS guards.
-
-Backed by JSON at ``$SESSION_DIR/state.json``. The file write is atomic
-(``tmp`` + ``os.replace``) so concurrent readers never see a partial blob.
-The Coordinator is the **only** writer; LLM agents go through
-``UPDATE_STATE`` intents which the Coordinator validates + persists.
-
-fields:
+Fields::
 
     session_id          str   — set by Coordinator at session creation
     model_name          str   — e.g. "meta-llama/Llama-3.1-8B-Instruct"
@@ -43,6 +35,7 @@ fields:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -50,19 +43,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# The LLM decides by reading facts (phase / gaps / KB), not by
-# consuming a system-side priority ranking (there is no scoring
-# module). See ``Coordinator._compose_prompt`` for the fact set.
+log = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond-precision ISO 8601 string.
+
+    Returns:
+        str: The current UTC timestamp formatted via ``datetime.isoformat``
+            with ``timespec="microseconds"`` (e.g. ``"2026-06-02T18:29:00.123456+00:00"``).
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
-# Ordered (key, label) projection for the advisory ``model_arch`` profile.
-# ``notes`` is rendered last as a free-text trailer. Keys absent / empty /
-# ``None`` are dropped so the rendered block stays compact and only
-# surfaces fields the launcher actually populated.
+# Ordered (key, label) projection for advisory ``model_arch``; empty/None keys dropped.
 _MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
     ("decoder_type", "decoder"),
     ("attention", "attention"),
@@ -78,15 +72,7 @@ _MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
 
 
 def render_model_arch_compact(arch: dict | None) -> str:
-    """Render the advisory ``model_arch`` profile as a single compact line.
-
-    Returns ``""`` when ``arch`` is empty / not a dict so callers can omit
-    the prompt block entirely. Structured fields render as
-    ``decoder=Sparse MoE; attention=MLA; ...`` followed by an optional
-    ``notes=<free text>`` trailer. Empty / ``None`` field values are
-    dropped. This is the single source of truth shared by the
-    orchestration prompt summary and the specialist ``arch_notes`` carrier.
-    """
+    """Render the advisory ``model_arch`` profile as a single compact line (``""`` when empty/not a dict)."""
     if not isinstance(arch, dict) or not arch:
         return ""
     parts: list[str] = []
@@ -101,105 +87,60 @@ def render_model_arch_compact(arch: dict | None) -> str:
     return "; ".join(parts)
 
 
-# Default partial-attempt cap for run_optimization. kernel_opt is an
-# expensive action (60–120 min p75); 2 attempts already burns 2–4 h of
-# budget on a single kernel, so retiring the kernel after the second
-# PARTIAL is the right balance between giving the LLM a second swing and
-# bailing out before a deterministic dead-end (auth-loop / unsupported
-# backend) consumes the whole run. Override via the matching env var
-# named in ``record_kernel_opt`` (1 disables the second-chance entirely).
+# Default partial-attempt cap for run_optimization; override via env in ``record_kernel_opt`` (1 disables second chance).
 _DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
-# A completed backend ladder (GEAK -> Claude -> Codex) without a KEEP
-# retires that kernel for the rest of the session. Override via
-# ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` (>=1).
+# Backend ladder without a KEEP retires the kernel; override via ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` (>=1).
 _DEFAULT_KERNEL_OPT_MAX_FAILURES = 1
-# Hot-kernel report gate threshold. Reusable hot kernels at or above this
-# GPU share need at least one kernel_opt attempt or explicit rejection
-# before ``report`` can fire.
+# Hot-kernel report gate: reusable hot kernels >= this GPU share need a kernel_opt attempt/rejection before ``report``.
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 3.0
-# Only the top-N reusable hot kernels are enforced, keeping noisy traces
-# from stalling the run on dozens of tiny kernels.
+# Only the top-N reusable hot kernels are enforced.
 _DEFAULT_HOT_KERNEL_GATE_TOP_N = 5
 
-# Per-action audit history cap. ``<action>_attempts`` lists keep the most
-# recent N entries (full audit trail — both successes and failures) so
-# the Orchestration prompt has a bounded but informative view of each
-# action's history. 20 is large enough to span a few rounds of a grid
-# action without unbounded growth.
+# Per-action audit history cap (``<action>_attempts`` lists keep most recent N).
 _DEFAULT_ATTEMPTS_HISTORY = 20
 
-# Global ``last_action_failures`` rolling-log cap. 10 entries covers the
-# typical "what blew up in the last few ticks" view without bloating the
-# prompt; older failures stay in the event log but drop from the prompt.
+# Global ``last_action_failures`` rolling-log cap.
 _DEFAULT_LAST_FAILURES = 10
 
-# phase_history cap. There are only 6 phases in the line
-# (PRELUDE/FRAMEWORK_PR/EXPLORE/KERNEL/SWEEP/CLOSE) so 100 rows is wildly generous;
-# the only realistic path to hitting it is repeated escalate/recover
-# loops, which we'd want surfaced as a warning anyway. Cap is enforced
-# in :meth:`SharedState.record_phase_transition`.
+# phase_history cap (record_phase_transition).
 _PHASE_HISTORY_CAP = 100
 
-# roofline_snapshots history cap. PRELUDE bootstrap writes #1; every
-# +10% watermark crossing writes a refresh. Even a pathological run
-# with 50 watermark crossings would stay well under this cap; the
-# limit only exists to prevent unbounded state.json growth if the
-# refresh policy ever loosens. Cap is enforced in
-# :meth:`SharedState.record_trace_analyze`.
+# Lifecycle-event log cap (#266). Unlike phase_history (≤6 transitions),
+# lifecycle events fire at every step boundary (trace_analyze /
+# run_optimization / integrate / report, ×N kernels ×M rounds), so the cap
+# is generous but still bounds state.json growth on a long run.
+_LIFECYCLE_CAP = 500
+
+# roofline_snapshots history cap (record_trace_analyze).
 _ROOFLINE_SNAPSHOTS_CAP = 50
 
-# gap ledger caps. ``_GAPS_MAX_ENTRIES`` bounds the
-# total list so a pathological session can't blow up state.json;
-# ``_GAPS_ATTEMPTS_HISTORY`` bounds the per-gap ``attempts`` list so even
-# a hot gap with 200 KEEP/REVERT events stays cheap to render. Both caps
-# are enforced inside :meth:`SharedState.upsert_gap`.
+# gap ledger caps; both enforced in upsert_gap.
 _GAPS_MAX_ENTRIES = 50
 _GAPS_ATTEMPTS_HISTORY = 20
 
-# Set of action kinds that participate in the kernel-equivalent per-action
-# audit trail (Plan: SharedState audit-trail). Kernel-owned actions are
-# intentionally excluded — they already have richer dedicated structures
-# (last_kernel_opt / kernel_opt_attempts / kernel_integrate_attempts /
-# rejected_kernel_*). Membership is consulted by Coordinator and renderer
-# helpers so adding a new audit action is a one-line change.
+# Per-action audit trail kinds; kernel-owned actions excluded (dedicated structures).
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "baseline", "profile", "sweep", "explore",
-    # ``roofline`` runs profile + trace_analyze atomically; audit it so
-    # prompts can see the produced snapshot id / analysis path or failure.
+    # ``roofline`` runs profile + trace_analyze atomically; audited for snapshot id/path visibility.
     "roofline",
 })
 
-# Mapping from audit-action name to (result-dict key, prompt-display label).
-# ``key`` is what we read out of the executor result dict; ``label`` is the
-# ``key_metric_kind`` written into each attempt entry so prompt readers
-# know how to interpret the number (e.g. ``output_throughput`` vs raw
-# ``gain_pct`` vs ``validated_gain_pct``).
+# audit-action name -> (result-dict key, prompt-display label / key_metric_kind).
 _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
     "baseline": ("output_throughput", "output_throughput"),
     "profile":  ("output_throughput", "output_throughput"),
     "sweep":    ("output_throughput", "output_throughput"),
     "explore":  ("best_gain_pct",     "gain_pct"),
-    # ``roofline`` is an analysis composite, so its key metric is the
-    # monotonic snapshot id rather than throughput.
+    # ``roofline`` key metric is the monotonic snapshot id.
     "roofline": ("snapshot_id",       "snapshot_id"),
 }
 
 
-#: top-level state.json schema version. An absent key (older
-#: state.json) is treated as ``schema_version=1`` and migrated,
-#: bumping to ``LATEST_STATE_SCHEMA_VERSION`` on the first save.
+#: top-level state.json schema version; absent key treated as v1 and migrated to LATEST_STATE_SCHEMA_VERSION on first save.
 LATEST_STATE_SCHEMA_VERSION: int = 2
 
 
-# The payload-surface field was renamed from ``extra_sglang_args``
-# (sglang-era name) to ``extra_server_args`` (framework-neutral).
-# The on-disk state.json may carry the legacy key in any of several
-# deeply-nested ledgers, so a one-shot walk-and-rewrite on load is
-# the cleanest migration — the next save then emits canonical only
-# and a re-load is a no-op.
-#
-# Compat (read-only): remove this rename map and the walker below once
-# old-session resume of pre-rename state.json is no longer supported.
+# Phase4 compat (read-only): rename ``extra_sglang_args`` -> ``extra_server_args`` one-shot on load.
 _PHASE4_LEGACY_KEY_RENAMES: dict[str, str] = {
     "extra_sglang_args":           "extra_server_args",
     "candidate_extra_sglang_args": "candidate_extra_server_args",
@@ -207,18 +148,7 @@ _PHASE4_LEGACY_KEY_RENAMES: dict[str, str] = {
 
 
 def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
-    """Recursively rewrite legacy ``extra_sglang_args`` field names in-place.
-
-    Walks every dict and list reachable from ``obj`` and renames keys
-    listed in :data:`_PHASE4_LEGACY_KEY_RENAMES` to their canonical
-    counterparts. When both names are present on the same dict the
-    canonical value is kept (writer migration is considered done as
-    soon as the new key appears); otherwise the legacy value is
-    copied over.
-
-    Returns the total number of keys rewritten so the caller can log
-    a single info-level migration event.
-    """
+    """Recursively rewrite legacy ``extra_sglang_args`` field names in-place; returns count rewritten (canonical kept when both present)."""
     migrated = 0
     if isinstance(obj, dict):
         for legacy_key, canonical_key in _PHASE4_LEGACY_KEY_RENAMES.items():
@@ -238,16 +168,7 @@ def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
 
 @dataclass
 class TraceAnalyzeSnapshot:
-    """Reference shape for ``SharedState.last_trace_analyze``.
-
-    placeholder added by ``F0_pre_merge.MD`` §9.
-    F1 will populate the canonical 11-field dict via
-    ``SharedState.record_trace_analyze`` (ported from main); this dataclass
-    serves as a typed reader on the consumer side via :meth:`from_dict`.
-
-    The on-disk shape stays a plain ``dict`` so the legacy ``state.json``
-    round-trip (Inv-10.1 fact-layer compatibility) keeps working.
-    """
+    """Reference shape for ``SharedState.last_trace_analyze`` (``F0_pre_merge.MD`` §9); on-disk shape stays a plain dict for Inv-10.1."""
 
     trace_input: str = ""
     candidates_path: str = ""
@@ -265,6 +186,21 @@ class TraceAnalyzeSnapshot:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "TraceAnalyzeSnapshot":
+        """Build a typed snapshot from the on-disk ``last_trace_analyze`` dict.
+
+        Each field is coerced to its declared type with a safe default so a
+        partial / legacy blob never raises. Used as a typed reader on the
+        consumer side; the canonical writer remains
+        :meth:`SharedState.record_trace_analyze`.
+
+        Args:
+            d (dict[str, Any] | None): The raw snapshot dict (e.g. from
+                ``state.json``), or ``None`` to build an all-defaults instance.
+
+        Returns:
+            TraceAnalyzeSnapshot: A populated snapshot with every field
+                normalized to its declared type.
+        """
         d = d or {}
         return cls(
             trace_input=str(d.get("trace_input") or ""),
@@ -289,241 +225,112 @@ class TraceAnalyzeSnapshot:
 
 @dataclass
 class SharedState:
-    # versioned state.json schema. Bumped by the
-    # migration step in :meth:`from_dict` whenever a payload is
-    # loaded. Fresh sessions are born at the latest version.
+    # versioned state.json schema; bumped by from_dict migration. Fresh sessions born at latest.
     schema_version: int = LATEST_STATE_SCHEMA_VERSION
     session_id: str = ""
-    # Primus-Claw session UUID (when Hyperloom runs inside the claw
-    # sandbox); empty when running standalone. Wired into the manifest +
-    # session_breakdown.json so downstream dashboards can join Hyperloom
-    # sessions back to claw sessions without an env-var lookup.
+    # Primus-Claw session UUID (empty standalone); joins Hyperloom to claw sessions in manifest/breakdown.
     claw_session_id: str = ""
-    # Primus-Claw sandbox user id (string). Same provenance as
-    # ``claw_session_id``; empty when running standalone.
+    # Primus-Claw sandbox user id (empty standalone).
     sandbox_user_id: str = ""
     model_name: str = ""
     model_path: str = ""
     model_class: str = ""
-    # Advisory architecture profile (hybrid: a few structured fields +
-    # free-text ``notes``). Produced pre-launch by the SKILL launcher
-    # (LLM Architecture Gallery lookup, else a lightweight classify) and
-    # loaded from ``$USER_DATA_PATH/model_arch.json``. Prompt-context only
-    # — no deterministic gating consumes it (atom seed grid / compat
-    # filter / framework gap token / recipe key stay on ``model_class``).
-    # Empty dict means "no profile available"; renderers omit the block.
+    # Advisory architecture profile; prompt-context only, no deterministic gating (those stay on ``model_class``).
     model_arch: dict = field(default_factory=dict)
-    # KB tags lifted verbatim from the model weights' ``config.json``
-    # (``architectures`` list + ``model_type`` string). Populated at
-    # fresh-launch by ``cli._load_model_config_tags``; resume rehydrates
-    # the persisted values from state.json. Stamped into the recipe-snapshot
-    # ``extras`` on every KB write (T0 anchor + KEEP/REVERT/CLOSE amend) so a
-    # fine-tuned model carries the same architecture identity as the base
-    # model it derives from. Empty (``[]`` / ``""``) means "config.json
-    # absent or unreadable".
+    # Degraded-mode advisory: True when the run is knowingly running a
+    # multimodal checkpoint on the text-only path (--allow-mm-text-fallback).
+    # Advisory only — never a stop_reason, never gates Objective/scoring.
+    degraded_mode: bool = False
+    # Structured degraded-mode / model-compat warnings (e.g. multimodal text
+    # fallback). Surfaced verbatim in reports/final.{json,md}.
+    model_warnings: list[dict[str, Any]] = field(default_factory=list)
+    # KB tags from config.json (``architectures`` + ``model_type``); stamped into recipe-snapshot ``extras`` so fine-tuned models carry base arch identity.
     model_architectures: list[str] = field(default_factory=list)
     model_type: str = ""
     framework: str = ""
     gpu_type: str = ""
-    # Workload metadata mirrored from manifest.json at session start
-    #. Used by:
-    #   * Coordinator._warm_specialist_params to populate
-    #     specialist task params so SpecialistPromptInputs renders
-    #     real hardware context in "## 2. HARDWARE CONTEXT" instead
-    #     of the dataclass defaults (which silently render TP=1 and
-    #     make comm_specialist self-veto with "TP=1 → cross-GPU
-    #     collectives non-actionable" even on TP=8 sessions).
-    #   * the per-tick orchestration prompt's SESSION CONTEXT block.
-    # Populated by ``cli._init_fresh_session`` from CLI flags / env;
-    # resumed sessions read them back from state.json verbatim and
-    # cli.py re-exports the env vars (TP/CONC/ISL/OSL/MAX_MODEL_LEN/
-    # PRECISION) so downstream executors see the same values the
-    # original run used. Zero / empty means "unspecified".
+    # Workload metadata mirrored from manifest.json at session start; resume re-exports env vars. Avoids TP=1 default self-veto in _warm_specialist_params.
     tp: int = 0
-    # Expert-parallel size for MoE inference. Mirror of the ``EP`` env
-    # var (cli writes both at boot). Stored on SharedState so resume in
-    # a fresh shell that hasn't ``export EP`` still recovers the
-    # original value — without this, KB warm-start queries would lose
-    # the EP filter on resume and the recipe anchor's ``ep`` tag would
-    # become unreliable. Multi-node lifecycle scripts still read the
-    # env var; this field is the resume-safe authority.
+    # Expert-parallel size for MoE; mirror of ``EP`` env var. Resume-safe so KB warm-start/recipe ``ep`` tag survive a fresh shell.
     ep: int = 0
     precision: str = ""
-    # Recipe-snapshot v2 canonical id is a five-tuple
-    # ``model + hardware + framework + framework_version + precision``;
-    # ``framework_version`` is the only one not derivable from existing
-    # SharedState fields, so it lives here. Populated by ``cli`` from
-    # ``--framework-version`` (operator override) or, when omitted,
-    # auto-detected via :func:`recipe_snapshot_constants.detect_framework_version`
-    # (best-effort: imports the framework's top-level package and reads
-    # ``__version__``). Mirrored to env ``FRAMEWORK_VERSION`` on resume so
-    # downstream executors see the same value the original run used.
-    # Empty string means "unknown" — the recipe canonical_id falls back
-    # to ``unknown_version`` and KB lookups for this dimension lose
-    # specificity (rows still write under that slug).
+    # ``framework_version`` — only recipe-snapshot v2 canonical-id member not derivable from other fields; empty => ``unknown_version``.
     framework_version: str = ""
     conc: int = 0
     isl: int = 0
     osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
-    # When False (CLI ``--no-explore``) the EXPLORE phase is skipped:
-    # PRELUDE / FRAMEWORK_PR route straight to KERNEL (or SWEEP when
-    # kernel is also disabled). Mirrors the ``kernel_enabled`` /
-    # ``framework_phase_enabled`` opt-out pattern.
+    # When False (``--no-explore``) EXPLORE is skipped: PRELUDE/FRAMEWORK_PR route to KERNEL (or SWEEP).
     explore_enabled: bool = True
-    # After deterministic FP8 GEMM tuning succeeds, continue into source-level
-    # kernel_opt by default. Operators can disable this for a GEMM-only run.
+    # After FP8 GEMM tuning succeeds, continue into source-level kernel_opt by default.
     continue_kernel_after_gemm: bool = True
-    # SWEEP-phase post-sweep concurrency sweep. On by default;
-    # operator opts out via ``--no-enable-conc-sweep`` /
-    # ``INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0``. When True, the
-    # Coordinator auto-enqueues a ``conc_sweep`` task right after the
-    # SWEEP-entry sweep task lands (see ``_on_sweep_task_completed``);
-    # the executor runs baseline + current_best across the
-    # ``conc_sweep_concs`` ladder bounded by
-    # ``conc_sweep_total_budget_sec`` total wall-clock.
+    # SWEEP-phase post-sweep concurrency sweep; opt out via ``--no-enable-conc-sweep``.
     conc_sweep_enabled: bool = True
-    # CONC ladder used by the conc_sweep action. Default mirrors
-    # ``orchestrator.conc_sweep.DEFAULT_CONCS``. Empty list short-
-    # circuits the executor with skip_reason=empty_conc_list.
+    # CONC ladder for conc_sweep (mirrors conc_sweep.DEFAULT_CONCS). Empty => skip_reason=empty_conc_list.
     conc_sweep_concs: list[int] = field(
         default_factory=lambda: [1, 2, 4, 8, 16, 32, 64, 128],
     )
-    # Total wall-clock budget (seconds) for the whole conc_sweep
-    # action. Default 9000 (~2.5h). 0 disables the gate so the
-    # executor runs every variant until the per-variant timeout
-    # alone caps it.
+    # Total wall-clock budget (s) for conc_sweep. 0 disables the gate.
     conc_sweep_total_budget_sec: int = 9000
-    # Per-variant Magpie subprocess timeout (seconds). Default 1800
-    # (~30 min). Effective timeout is clamped to the remaining total
-    # budget so the last variant cannot overshoot the deadline.
+    # Per-variant Magpie subprocess timeout (s), clamped to remaining total budget.
     conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
+    # Hot-server measure-round tput from the baseline cold-start double-run
+    # (kept for reporting only). ``baseline_tput`` is the single-fresh-server
+    # warmup-round number used as the fair comparison ANCHOR for explore /
+    # sweep variants (which each restart the server + run one round). When
+    # the double-run is disabled / ineligible, this stays 0.0 and
+    # ``baseline_tput`` carries the only measured number.
+    baseline_hot_tput: float = 0.0
     baseline_accuracy: float = 0.0
     baseline_failure_streak: int = 0
-    # Path to the YAML the baseline executor materialized with the operator's
-    # workload envs (CONC/ISL/OSL/TP/MAX_MODEL_LEN/PRECISION/RUN_EVAL/...).
-    # Coordinator injects this into params/backends/sweep tasks as
-    # ``task.params["config_path"]`` so downstream variants inherit the same
-    # workload contract baseline ran. Empty before the first baseline result;
-    # downstream executors fall back to materializing the shipped YAML
-    # against current process env when this is empty.
+    # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.
     baseline_config_path: str = ""
-    # Runtime component versions populated at boot and reused for recipe
-    # writes. Optional keys include framework/runtime versions, ROCm,
-    # aiter, and image digest; empty / unknown values are stripped.
+    # Runtime component versions for recipe writes (framework/runtime/ROCm/aiter/image digest); empty values stripped.
     stack_fingerprint_meta: dict = field(default_factory=dict)
-    # Extra workload-shape fields parsed from the materialized baseline
-    # YAML. They are filters for warm-start and lesson lookup, not part of
-    # the recipe canonical id.
+    # Extra workload-shape fields from baseline YAML; warm-start/lesson filters, not part of recipe canonical id.
     baseline_workload_extra: dict = field(default_factory=dict)
-    # One-shot guard for PRELUDE warm-recipe replay. Persisted so resume
-    # cannot enqueue the same replay task twice.
+    # One-shot guard for PRELUDE warm-recipe replay (resume can't re-enqueue).
     warm_replay_attempted: bool = False
-    # One-shot guard for injecting warm-recipe history into the explore
-    # ledger, independent of whether replay itself is enabled.
+    # One-shot guard for injecting warm-recipe history into explore ledger.
     warm_history_injected: bool = False
-    # Structured warm-replay outcome for reports and prompts. Shape::
-    #
-    #   {
-    #     "status":            "reproduced" | "drift" | "failed" | "skipped",
-    #     "expected_gain_pct": 25.0,
-    #     "actual_gain_pct":   23.5,
-    #     "warm_recipe_tier":  "exact",
-    #     "warm_recipe_conf":  1.0,
-    #     "replay_task_id":    "task-uuid",
-    #     "reason":            "..."        # only on failed / skipped / drift
-    #   }
-    #
-    # Empty dict before the replay completes or when ``--no-warm-replay``
-    # is in effect. Persisted into state.json so resume + breakdown
-    # collectors see it.
+    # Structured warm-replay outcome for reports/prompts (status reproduced|drift|failed|skipped, etc.).
     warm_replay_outcome: dict = field(default_factory=dict)
-    # Wall-clock seconds the baseline Magpie subprocess took to
-    # finish (success path only). Populated by Coordinator from the
-    # baseline executor's ``subprocess_runtime_sec`` and read by the
-    # ExploreExecutor to derive a per-variant overtime-kill deadline
-    # (``baseline_runtime_sec * SharedState.explore_overtime_kill_ratio``).
-    # Zero = "unset" → overtime kill is a no-op (variant uses the
-    # legacy timeout). Resume restores the value verbatim.
+    # Baseline Magpie runtime (s, success path); ExploreExecutor derives overtime-kill deadline. Zero => no-op.
     baseline_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
-    # Full accepted configuration stack across action families. Each entry
-    # records the incremental candidate that was accepted; current_best keeps
-    # the materialized full args/env for execution.
+    # Full accepted configuration stack across action families; current_best keeps the materialized full args/env.
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
-    # Parallel to ``optimization_stack``: per-entry incremental gain in
-    # percent (current_best vs. baseline at the moment that stack entry
-    # was promoted). Index ``i`` here aligns with index ``i`` in
-    # ``optimization_stack``. session_breakdown's capability_summary uses
-    # this to attribute "how much of the validated cumulative gain came
-    # from this action / capability" without re-walking the event log.
-    # Coordinator appends to this list at the same time it appends to
-    # ``optimization_stack`` (see ``_lift_to_current_best``); missing
-    # entries (e.g. on resumed sessions) are treated as ``None``.
+    # Index-aligned with ``optimization_stack``: per-entry incremental gain pct; missing => None.
     gain_per_stack_entry: list[float | None] = field(default_factory=list)
     cumulative_gain: float = 0.0
-    # Cumulative gain measured by re-baselining a fresh server with
-    # EVERY KEEP'd entry of ``optimization_stack`` applied end-to-end.
-    # The plain ``cumulative_gain`` field only sums per-round gains
-    # (which do not compose linearly), so the validated number is
-    # what the final report quotes. the
-    # rebench runs inline inside the merged ``explore`` action's
-    # per-KEEP loop; the standalone ``validate_stack`` action
-    # is denied by PolicyGate. Stays 0.0 until the first KEEP
-    # cleared its inline rebench.
+    # Validated cumulative gain: re-baselined fresh server with every KEEP (per-round gains don't compose linearly); standalone validate_stack denied by PolicyGate.
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
-    # Length of ``optimization_stack`` at the last successful inline stack
-    # rebench. A longer current stack means new KEEPs need validation.
+    # ``optimization_stack`` length at last successful inline rebench; longer => new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
-    # Tput (tok/s/GPU) measured at the most recent successful roofline
-    # task; serves as the watermark for the gain-driven roofline refresh
-    # policy. Coordinator enqueues a fresh roofline task whenever
-    # ``baseline_tput * (1 + cumulative_gain_validated/100) /
-    # last_roofline_tput >= 1.10`` (a 10% step over the last
-    # measurement, compound). Initialised from the PRELUDE roofline.
+    # Tput watermark for gain-driven roofline refresh; Coordinator re-enqueues at a compound 10% step.
     last_roofline_tput: float = 0.0
     stop_reason: str = ""
-    # Closing phase — set when the wall-clock deadline fires. While True,
-    # Coordinator skips reactor passes and only pumps the dispatcher to
-    # drain a Coordinator-enqueued ``report`` task. Cleared on resume.
+    # Closing phase — set when wall-clock deadline fires; Coordinator only drains a ``report`` task. Cleared on resume.
     closing_phase: bool = False
     closing_started_unix: float = 0.0
     closing_report_task_id: str = ""
-    # set to True at the END of the
-    # CLOSE phase 5-step sequencer (after step 5). cli.finally reads
-    # this to short-circuit its emergency ``session_breakdown.json``
-    # write so the sequencer's artifact isn't overwritten by a
-    # duplicate post-stop() pass. Resume clears it back to False so
-    # a subsequent resumed CLOSE can re-run the sequence (idempotent
-    # by design — every step uses fixed idempotency keys / set-once
-    # writes).
+    # True at END of CLOSE 5-step sequencer; cli.finally short-circuits emergency breakdown write. Resume clears it (idempotent).
     close_sequence_done: bool = False
-    # Auto-roofline gate (EXPLORE-entry): set to the task_id of the
-    # Coordinator-enqueued ``roofline`` task while it is pending. The
-    # field is read by ``_handle_delegate`` to block first-round
-    # specialist dispatches until the snapshot lands (so specialists
-    # have ``analysis.md`` ground truth to reason against), and is
-    # cleared by ``_promote_to_shared_state`` when that roofline task
-    # reaches a terminal state. Always defaults to "" on a fresh
-    # session; resume readers tolerate the field being absent.
+    # Auto-roofline gate (EXPLORE-entry): pending roofline task_id; blocks first-round specialist dispatch until snapshot lands.
     auto_roofline_pending_task_id: str = ""
     current_action: str = ""
     crash_count: int = 0
-    # Last Coordinator-side exception caught by the tick-loop resilience
-    # guard. Coordinator-only; gives postmortems a traceback without relying
-    # on harness stdout.
+    # Last Coordinator-side exception caught by the tick-loop guard (gives postmortems a traceback).
     last_tick_exception: dict[str, Any] = field(default_factory=dict)
     pruned_families: list[str] = field(default_factory=list)
     start_ts: str = field(default_factory=_now_iso)
     max_minutes: int = 0
     last_profile_trace: str = ""
-    # ``succeeded`` / ``failed`` for the most recent profile attempt. When
-    # ``failed`` (e.g. ``no_trace_files``), Orchestration may re-run profile
-    # even though ``last_profile_trace`` is non-empty from a prior bad run.
+    # ``succeeded``/``failed`` for most recent profile; failed allows re-run even when last_profile_trace is non-empty.
     last_profile_status: str = ""
     # Rolling log of PolicyGate denials (newest last, cap 50).
     policy_denial_history: list[dict[str, Any]] = field(default_factory=list)
@@ -531,184 +338,60 @@ class SharedState:
     policy_denial_streak: dict[str, int] = field(default_factory=dict)
     # Set when AST flag discovery cannot locate framework source files.
     discovered_flags_error: str = ""
-    # Server EXTRA_SGLANG_ARGS in effect when last_profile_trace was captured.
-    # Orchestration uses this to decide whether re-profiling would change the
-    # hot-kernel distribution; identical args means the same trace.
+    # Server EXTRA_SGLANG_ARGS in effect when last_profile_trace was captured; identical args means the same trace.
     last_profile_args: str = ""
 
-    # ------------------------------------------------------------------
-    # Roofline-v2 trace-analyze cache.
-    #
-    # ``last_trace_analyze`` is the canonical 11-field dict written by
-    # :meth:`record_trace_analyze` after a successful ``trace_analyze``
-    # sub-step (typically driven by ``RooflineExecutor``). Coordinator
-    # short-circuits subsequent identical ``trace_analyze`` requests off
-    # this cache so Orchestration does not waste budget re-analysing the
-    # same trace.
-    #
-    # ``roofline_snapshot_id`` mirrors ``last_trace_analyze['roofline_snapshot_id']``
-    # at the top level for fast PolicyGate / Coordinator access (avoids the
-    # nested-dict lookup on hot paths).
-    # ------------------------------------------------------------------
+    # Roofline-v2 trace-analyze cache; ``last_trace_analyze`` canonical 11-field dict from record_trace_analyze; ``roofline_snapshot_id`` mirrors nested value for hot-path access.
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     roofline_snapshot_id: int = 0
-    # Append-only compact roofline snapshots used by ``report.py``.
-    # Keeping the first baseline snapshot preserves before/after reporting
-    # even when later +10% refreshes overwrite ``last_trace_analyze``.
-    #
-    # Each entry matches the shape returned by
-    # :func:`orchestrator.roofline_snapshot.build_roofline_snapshot`
-    # (snapshot_id / ts / compute_pct / idle_pct / comm_pct /
-    # top_bottleneck / top_kernel) plus ``analysis_md_path`` and
-    # ``trace_input`` for downstream re-extraction. Capped at
-    # ``MAX_ROOFLINE_SNAPSHOTS`` to bound on-disk state.json size.
+    # Append-only compact roofline snapshots for report.py (first baseline kept for before/after); capped at MAX_ROOFLINE_SNAPSHOTS.
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
-    # Outer roofline failure counter. Coordinator bumps it on failed
-    # roofline tasks and resets it on success; prompts use it for
-    # visibility while phase-specific fallbacks decide behavior.
+    # Outer roofline failure counter; bumped on fail, reset on success.
     roofline_failure_streak: int = 0
 
-    # ------------------------------------------------------------------
     # Feature toggles (mirrored from ``cli.py`` flags at session start).
-    # ------------------------------------------------------------------
-    # FRAMEWORK_PR phase toggle. When True (the default) the Coordinator
-    # routes PRELUDE → FRAMEWORK_PR → EXPLORE; the FRAMEWORK_PR phase
-    # batches ``fa phase-discover`` candidates, runs each through the
-    # standard Critic-gated ``integrate_patch``-style benchmark, and
-    # KEEPs winners to ``optimization_stack``. Operators opt out via
-    # ``--no-framework`` (PRELUDE → EXPLORE directly, ``prelude_done``
-    # reason preserved). PolicyGate's
-    # ``framework_pr_action_not_llm_proposable`` rule keeps the LLM
-    # from proposing the action itself.
+    # FRAMEWORK_PR phase toggle (PRELUDE → FRAMEWORK_PR → EXPLORE); ``--no-framework`` opts out. Absent from PHASE_LLM_PROPOSABLE_ACTIONS so PolicyGate R1 blocks LLM proposal.
     framework_phase_enabled: bool = True
-    # FRAMEWORK_PR phase progress tracker. One entry per candidate
-    # benchmark, written by the FrameworkPrExecutor: ``{candidate_id,
-    # pr_url, batch_id, status, pre_tput, post_tput, gain_pct, kept,
-    # ts}``. Used by the breakdown collector + the phase exit logic's
-    # plateau judgment (lookback over the per-batch max gain).
+    # FRAMEWORK_PR progress: one entry per candidate benchmark; used by breakdown + plateau exit judgment.
     framework_pr_phase_progress: list[dict[str, Any]] = field(
         default_factory=list,
     )
-    # One row per ``fa phase-discover`` batch: ``{batch_id, ts,
-    # candidate_count, max_gain_pct_observed_in_batch}``. Read by
-    # ``exit_normal_framework_pr`` for the plateau gate (default: 3
-    # consecutive batches with max gain < 1% → exit).
+    # One row per phase-discover batch; read by exit_normal_framework_pr plateau gate (3 batches <1% => exit).
     framework_pr_batches: list[dict[str, Any]] = field(
         default_factory=list,
     )
-    # Coordinator sets this to True when the FRAMEWORK_PR loop has no
-    # more candidates to run (``fa phase-discover`` returned 0 or every
-    # candidate in the latest batch has been tried). ``compute_next_phase``
-    # consults this for the ``framework_pr_phase_done`` exit reason.
+    # True when FRAMEWORK_PR loop has no more candidates; compute_next_phase uses it for framework_pr_phase_done exit.
     framework_pr_phase_done: bool = False
-    # Consecutive ``fa phase-discover`` failures (timeout / non-zero
-    # exit / parse error). The Coordinator's discover loop bumps this
-    # on each failure and resets to 0 on a successful batch. Phase is
-    # only marked done after ``DISCOVER_FAILURE_RETRY_LIMIT`` (default
-    # 3) consecutive failures, so a transient network blip or a slow
-    # PR scan no longer collapses the whole FRAMEWORK_PR phase
-    # silently.
+    # Consecutive ``fa phase-discover`` failures; phase marked done only after DISCOVER_FAILURE_RETRY_LIMIT (default 3).
     framework_pr_discover_failures: int = 0
-    # Per-repo candidate cap passed to ``fa phase-discover`` during the
-    # FRAMEWORK_PR phase. 0 / unset → the Coordinator falls back to
-    # ``DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES``. Bumping this makes each
-    # batch probe deeper (more PRs per repo per batch). Round-trips via
-    # the dataclass asdict/from_dict path like every other field.
+    # Per-repo candidate cap for ``fa phase-discover``; 0 => DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES.
     framework_pr_max_candidates: int = 0
-    # FRAMEWORK_PR Critic-gate decisions, one row per reviewed candidate:
-    # ``{candidate_id, batch_id, verdict, rationale, ts}``. The
-    # Coordinator's pump calls the Critic backend before each
-    # ``_enqueue_framework_pr_task``; ``approve`` proceeds, ``reject``
-    # records a ``critic_denied`` progress row instead. The cache lets a
-    # resume avoid double-calling the Critic on candidates the prior run
-    # already reviewed.
+    # FRAMEWORK_PR Critic-gate decisions; cache lets resume avoid re-calling the Critic.
     framework_pr_critic_decisions: list[dict[str, Any]] = field(
         default_factory=list,
     )
-    # When True (the default) the Coordinator's auto-managed analysis
-    # action — at PRELUDE bootstrap and on every +10% watermark
-    # crossing — is ``roofline`` (composite: profile + trace_analyze +
-    # analysis.md snapshot). When False the same trigger paths enqueue
-    # plain ``profile`` instead (no trace_analyze, no analysis.md);
-    # behaviour is otherwise identical (same idempotency keys, same
-    # pending-task gate, same watermark anchor update). Both kinds
-    # remain Coordinator-internal and are denied by PolicyGate when
-    # proposed by the LLM (``analysis_action_not_llm_proposable``).
+    # Default True: FRAMEWORK_PR pump dispatches a write-capable serving_specialist per candidate alongside diff-only track. False restores diff-only.
+    framework_pr_authoring_enabled: bool = True
+    # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``. Absent from PHASE_LLM_PROPOSABLE_ACTIONS (PolicyGate R1 denies LLM proposal).
     enable_roofline: bool = True
-    # Per-variant overtime kill multiplier for ExploreExecutor: when
-    # > 0 AND ``baseline_runtime_sec`` > 0, single-variant Magpie runs
-    # in the explore loop are killed once their wall-clock exceeds
-    # ``baseline_runtime_sec * explore_overtime_kill_ratio``. The
-    # variant is recorded with ``outcome='KILLED_OVERTIME'`` +
-    # ``runtime_sec`` + ``wall_clock_ratio_vs_baseline`` (no tput) so
-    # the orchestration LLM can distinguish "ran too slow → early
-    # kill" from "benchmark crashed / timed out at the hard cap".
-    # Mirrored from ``--explore-overtime-kill-ratio`` at session
-    # start. The stack-rebench step does NOT use this gate — only the
-    # initial single-variant run (kernel rationale: a stack already
-    # carrying multiple winners can legitimately take longer than the
-    # bare baseline, and rebench is small enough that the hard
-    # ``variant_timeout_sec`` is a sufficient backstop). Default 1.10
-    # (kill at +10 % over baseline wall-clock).
+    # ExploreExecutor per-variant overtime kill multiplier; >0 and baseline_runtime_sec>0 kills past baseline_runtime_sec*ratio (outcome='KILLED_OVERTIME'). Stack-rebench exempt. Default +10%.
     explore_overtime_kill_ratio: float = 1.10
-    # Per-variant hard timeout override for ExploreExecutor. Mirrored from
-    # ``--explore-variant-timeout-sec`` (CLI) /
-    # ``INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SEC`` (env) at session
-    # start. ``0`` means "auto-derive from baseline_runtime_sec * (kill_ratio
-    # + safety_margin)" — see ``explore._compute_explore_variant_timeout``.
-    # An explicit positive value pins the cap (e.g. CI smoke runs that want
-    # a tight bound regardless of baseline). The Coordinator injects this
-    # into every explore task's params so the executor's call site honors
-    # it without each LLM proposal having to re-emit it.
+    # ExploreExecutor per-variant hard timeout override; 0 => auto-derive from baseline_runtime_sec*(kill_ratio+safety_margin).
     explore_variant_timeout_sec_override: int = 0
-    # Headroom on top of the soft kill ratio when the executor auto-derives
-    # the per-variant hard cap: ``timeout = baseline_runtime_sec *
-    # (kill_ratio + safety_margin)``. Default 0.5 (≈ 50 % of baseline as
-    # buffer for one-off variant cold starts: torch.compile AOTI compile,
-    # fresh aiter shapes, spec-decoding draft load). Mirrored from
-    # ``--explore-variant-timeout-safety-margin`` (CLI) /
-    # ``INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SAFETY_MARGIN`` (env).
-    # Has no effect when ``explore_variant_timeout_sec_override > 0``
-    # (operator-pinned timeout bypasses the auto-derive).
+    # Headroom added to kill_ratio for auto-derived hard cap (default 0.5); no effect when override > 0.
     explore_variant_timeout_safety_margin: float = 0.5
-    # Opt-in hard filter: when True AND the latest
-    # ``roofline_saturation_history`` snapshot has at least one direction
-    # crossing the saturation threshold, ExploreExecutor drops every
-    # variant whose flags target ONLY saturated directions before running
-    # the grid. Variants targeting at least one non-saturated direction
-    # (or that don't match the categorization table) are kept. The
-    # existing ``roofline_saturation_advisory`` (soft prompt hint) stays
-    # unchanged. Mirrored from ``--explore-roofline-hard-gate`` (CLI).
-    explore_roofline_hard_gate: bool = False
-    # Most recent workload sweep; used to reason about gains beyond the
-    # smoke workload (CONC/ISL/OSL frontier).
+    # Most recent workload sweep (CONC/ISL/OSL frontier).
     last_sweep: dict[str, Any] = field(default_factory=dict)
-    # Mirrors last_sweep for the conc_sweep post-hook so SWEEP→CLOSE can
-    # exit on conc_sweep completion (not only sweep completion). Carries
-    # status / skip_reason / summary so phase_state.exit_normal_sweep
-    # treats succeeded / partial / completed / skipped as terminal.
+    # Mirrors last_sweep for the conc_sweep post-hook so SWEEP→CLOSE exits on conc_sweep completion.
     last_conc_sweep: dict[str, Any] = field(default_factory=dict)
-    # Kernel-opt response tracking — Coordinator records the most recent
-    # `run_optimization_done` so Orch sees what's been tried and doesn't
-    # re-dispatch the same kernel_id every tick.
+    # Most recent run_optimization_done so Orch doesn't re-dispatch the same kernel_id every tick.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
-    # ---------------------------------------------------------------
-    # Per-action audit (kernel parity for non-kernel actions). Each
-    # ``last_<action>`` mirrors :attr:`last_kernel_opt`: a single snapshot
-    # dict of the most recent attempt (success or failure). The matching
-    # ``<action>_attempts`` is a flat capped list (newest last) with one
-    # entry per attempt — the uniform schema is documented on
-    # :meth:`record_action_attempt`. ``last_sweep`` already exists above
-    # and acts as sweep's snapshot; ``sweep_attempts`` is added here for
-    # symmetry.
+    # Per-action audit (kernel parity): each ``last_<action>`` is the most recent attempt snapshot; ``<action>_attempts`` is a capped list.
     last_baseline: dict[str, Any] = field(default_factory=dict)
     last_profile: dict[str, Any] = field(default_factory=dict)
-    # GEAK FP8 GEMM tuning snapshot. This is kernel-owned but not a
-    # source-level kernel rewrite: it produces an aiter A8W8 block-scale
-    # tuned CSV and (for SGLang) a dispatch patch before kernel_opt runs.
+    # GEAK FP8 GEMM tuning snapshot (kernel-owned): aiter A8W8 tuned CSV + SGLang dispatch patch before kernel_opt.
     last_gemm_tuning: dict[str, Any] = field(default_factory=dict)
-    # merged explore action snapshot. Same
-    # schema as the other ``last_<action>`` mirrors.
+    # merged explore action snapshot (same schema as other ``last_<action>`` mirrors).
     last_explore: dict[str, Any] = field(default_factory=dict)
     # Composite roofline action audit snapshot plus capped history.
     last_roofline: dict[str, Any] = field(default_factory=dict)
@@ -716,341 +399,112 @@ class SharedState:
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
     gemm_tuning_attempts: list[dict[str, Any]] = field(default_factory=list)
     sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
-    # explore audit log. Capped per _DEFAULT_ATTEMPTS_HISTORY.
+    # explore audit log (capped per _DEFAULT_ATTEMPTS_HISTORY).
     explore_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Capped roofline audit log with snapshot ids and analysis paths.
     roofline_attempts: list[dict[str, Any]] = field(default_factory=list)
-    # Global rolling log of unpromotable task results, capped at
-    # ``_DEFAULT_LAST_FAILURES``. Carries the rich failure context
-    # (error_class / error_excerpt / stderr_tail / workspace /
-    # raw_result_path / reported_success) so Orchestration sees enough
-    # context to self-correct even when the inbox has rotated past the
-    # original ``delegated_result`` event. Populated by
-    # :meth:`Coordinator._handle_unpromotable_result`. Covers every task
-    # kind (including kernel-owned actions), not just the audit set.
+    # Global rolling log of unpromotable task results (cap _DEFAULT_LAST_FAILURES); rich failure context for self-correction. Covers every task kind.
     last_action_failures: list[dict[str, Any]] = field(default_factory=list)
-    # Per-kernel run_optimization attempt history keyed by kernel_id.
-    # Each entry: {"attempts": int, "partial_count": int, "last_decision": str,
-    #              "last_ts": str, "history": [{"decision","ts"}...max 10],
-    #              "rejected_reason": str (only when retired)}.
-    # `record_kernel_opt` retires kernels whose run_optimization keeps
-    # returning PARTIAL (no measurable speedup) — the prior policy only
-    # retired on REVERT, so a kernel stuck in PARTIAL/PARTIAL/... burned
-    # the whole wall-clock budget on the same dead-end (e.g. the r24
-    # custom_allreduce loop with inner GEAK 401-retry that prompted this
-    # field). Threshold defaults to 2 PARTIAL outcomes; override via
-    # ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL``.
+    # Per-kernel run_optimization history by kernel_id; record_kernel_opt retires kernels stuck in PARTIAL (default 2; override via INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL).
     kernel_opt_attempts: dict[str, Any] = field(default_factory=dict)
-    # Cross-round params/backends/sweep aggregation. Each entry is
-    # {action, variant_name, tput, gain_pct, ts}; we cap the list at 10
-    # rows so the prompt summary stays bounded. Used by
-    # `_promote_to_shared_state` to detect a "consistent winner that's
-    # below the 1-shot threshold but consistent across rounds" pattern
-    # the resume5 9h run hit (best variant +0.5–0.8% across 38 rounds,
-    # but never promoted because each single run sat under the 1.0% bar).
+    # Cross-round params/backends/sweep aggregation (cap 10); _promote_to_shared_state detects a consistent sub-1%-per-shot winner across rounds.
     params_winner_history: list[dict[str, Any]] = field(default_factory=list)
-    # How many CONSECUTIVE grid-runner (params/backends/sweep) tasks
-    # finished without producing a new current_best. Robustness uses
-    # this to nudge Orch off the params plateau. Reset to 0 whenever
-    # current_best advances.
+    # Consecutive grid-runner tasks with no new current_best; Robustness nudges Orch off the plateau. Reset on advance.
     params_no_promote_streak: int = 0
-    # Unified explore ledger ("single ledger"). Persistent DFS state for
-    # the merged ``explore`` action. ``tested`` is keyed by
-    # canonical_fingerprint (content-based, see
-    # ``action_executors._canonical_fingerprint``), same hashing as
-    # ``variant_fingerprint`` so the ledgers migrate losslessly.
-    #
-    # Schema (may grow with specialist provenance):
-    #
-    #   {
-    #     "schema_version": 1,
-    #     "tested": {
-    #       fingerprint: {name, extra_server_args, extra_envs, outcome,
-    #                     round_id, ts, gain_pct, tput, provenance,
-    #                     workload_signature}
-    #     },
-    #     "accepted": [
-    #       {fingerprint, name, extra_server_args, extra_envs,
-    #        gain_pct, stack_index, accepted_at_round, ts}
-    #     ],
-    #     "rejected": [
-    #       {fingerprint, name, extra_server_args, extra_envs,
-    #        reason, gain_pct, tput, round_id, ts}
-    #     ],
-    #     "winners_history": [
-    #       {round_id, variant_name, fingerprint, gain_pct,
-    #        extra_args, extra_envs}
-    #     ],
-    #     "discovered_flags": [
-    #       {flag, source, first_seen_round}
-    #     ],
-    #     "synergy_attempted": [["name1", "name2"], ...],
-    #     "domains_round_summary": [...],
-    #     "name_index": {name: fingerprint},
-    #     "cursor": int,
-    #     "last_round": {...},
-    #   }
-    #
-    # ``accepted`` outcomes include the inlined stack-rebench result —
-    # entries that landed in optimization_stack and survived the
-    # subsequent stack rebench. Items the rebench evicted live in
-    # ``rejected`` with ``reason='stack_unstable'``.
+    # Unified explore ledger — persistent DFS state for merged ``explore``; ``tested`` keyed by canonical_fingerprint. ``accepted`` includes inlined stack-rebench survivors; rebench-evicted entries live in rejected with reason='stack_unstable'.
     explore_search: dict[str, Any] = field(default_factory=dict)
-    # specialist sub-agent rolling state. Each entry summarises one
-    # EXPLORE round of specialist dispatch (one entry per round; grows
-    # to N when multiple domains run concurrently). Schema (per round):
-    #
-    #   {
-    #     "round_id": str,                 # explore-round-N
-    #     "dispatched_at": iso,
-    #     "completed_at": iso,
-    #     "domains": [domain_key, ...],
-    #     "parallelism": int,              # actual concurrent specialists
-    #     "tasks": [{task_id, domain, status, gap_canonical_id,
-    #                turns_used, workspace, transcript_path, done_path,
-    #                proposals_count, confidence}],
-    #     "proposals_total": int,
-    #     "proposals_kept": int,           # filled by Coordinator after
-    #                                      # explore round finishes
-    #     "proposals_rejected": int,
-    #     "proposals_skipped": int,
-    #     "confidence_avg": float | None,
-    #     "domain_breakdown": {domain_key: {...}},
-    #     "notes": [str, ...],
-    #   }
+    # specialist sub-agent rolling state; one entry per EXPLORE round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
-    # Per-domain "empty proposal_set" streak. Reset on a non-empty
-    # specialist_done; Robustness reads this to escalate when a
-    # specialist domain consistently fails to produce ideas
-    #.
+    # Per-domain "empty proposal_set" streak; reset on non-empty specialist_done. Robustness escalates on persistent emptiness.
     specialist_domain_empty_streak: dict[str, int] = field(default_factory=dict)
-    # session_steward_specialist assessment. Coordinator dispatches this
-    # domain on EXPLORE plateau and routes the recommendation:
-    #   * ``continue_explore``    — inject ``next_gap_canonical_id`` into
-    #                               gaps[], reset plateau counters once;
-    #                               sets ``steward_continuation_used``.
-    #   * ``advance_to_kernel``   — set pending_escalate_hint='skip_to_kernel'.
-    #   * ``stop_session``        — set_stop_reason('no_more_leverage').
+    # Legacy session_steward slots (steward removed in P3_17); kept only for resume + report.py back-compat, never written.
     last_remaining_gaps_assessment: dict[str, Any] = field(default_factory=dict)
     remaining_gaps_assessments: list[dict[str, Any]] = field(default_factory=list)
     steward_continuation_used: bool = False
-    # Per EXPLORE-round count of steward subprocess/transport failures
-    # (used to mint retry idempotency keys; not a plateau signal).
     steward_infra_failures_by_round: dict[str, int] = field(
         default_factory=dict,
     )
-    # last specialist task snapshot (parity with other
-    # ``last_<action>`` mirrors; useful for the orchestration prompt
-    # to surface "last round's specialist outcome").
+    # last specialist task snapshot (parity with other ``last_<action>`` mirrors).
     last_specialist: dict[str, Any] = field(default_factory=dict)
-    # Per-specialist patch verdict ledger keyed by specialist task_id.
-    # Critic must approve or advise before PolicyGate allows the related
-    # ``integrate_patch`` delegate; reject / needs_review / redirect block
-    # it unless an operator explicitly bypasses review.
+    # Per-specialist patch verdict ledger by task_id; Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
     specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
-    # Intervention-mix ledger used by Robustness to detect config-only
-    # exploration loops and recommend patch-authoring specialists.
-    # Each entry: ``{change_type, action, task_id, ts, delta_pct}``.
-    # ``change_type`` ∈ {"config", "code_patch"}:
-    #   * "config"     — env-var / CLI-flag tweaks via ``explore``.
-    #   * "code_patch" — specialist-authored source patch promoted via
-    #                    ``integrate_patch``.
+    # Intervention-mix ledger ({change_type∈{config,code_patch}, action, task_id, ts, delta_pct}); Robustness detects config-only loops.
     intervention_mix: list[dict[str, Any]] = field(default_factory=list)
-    # Current run of contiguous config KEEPs. Resets when a code_patch
-    # KEEP lands; Robustness reads this via the per-tick prompt.
+    # Current run of contiguous config KEEPs; resets when a code_patch KEEP lands.
     consecutive_config_only_rounds: int = 0
-    # Research scout bookkeeping.
-    #   * ``research_scout_enabled`` — master switch (``--no-research-scout``
-    #     turns the whole feature off).
-    #   * ``research_scout_runs`` — number of scout dispatches so far;
-    #     feeds exploration-depth tracking.
-    #   * ``research_scout_seen_pr_ids`` — PR ids already surfaced by the
-    #     scout or the FRAMEWORK_PR phase, shared so the two never re-mine
-    #     the same PR.
+    # Research scout bookkeeping; master switch ``--no-research-scout``; seen_pr_ids shared with FRAMEWORK_PR to avoid re-mining.
     research_scout_enabled: bool = True
     research_scout_interval: int = 3
-    # Master switch for the advisory "External target gap" prompt block
-    # (``--no-target-advisory`` turns it off). Advisory only — never gates
-    # Objective / scoring.
+    # Master switch for advisory "External target gap" prompt block (``--no-target-advisory``); never gates Objective.
     target_advisory_enabled: bool = True
-    # Master switch for sedimenting KEEP/REVERT provenance (research-hint
-    # source + measured gain) into the persistent recipe. When off the
-    # recipe stays purely ephemeral (existing behaviour).
+    # Master switch for sedimenting KEEP/REVERT provenance into the persistent recipe; off => recipe stays ephemeral.
     recipe_sediment_enabled: bool = True
     research_scout_runs: int = 0
     research_scout_seen_pr_ids: list[str] = field(default_factory=list)
-    # Round id at which the scout was last dispatched, so the K-round
-    # re-dispatch fires at most once per qualifying round.
+    # Round id of last scout dispatch so K-round re-dispatch fires once per qualifying round.
     research_scout_last_round: int = -1
-    # Exploration-depth counters consumed by the depth gate. Counters are
-    # deterministic (config/code patches, reverts); the id sets are
-    # supplied by specialist research evidence. ``enabled`` mirrors the
-    # ``--depth-gate`` switch. Stored as a dict so old state.json shapes
-    # round-trip with a defaulted sub-structure.
-    depth_tracker: dict[str, Any] = field(default_factory=lambda: {
-        "enabled": True,
-        "prs_fetched": [],
-        "pr_diffs_read": [],
-        "nvidia_refs_compared": [],
-        "code_patches_attempted": 0,
-        "config_changes_attempted": 0,
-        "consecutive_reverts": 0,
-    })
-    # Optional CLI overrides for the depth-gate thresholds; unset keys
-    # fall back to the phase_state defaults.
-    depth_gate_thresholds: dict[str, int] = field(default_factory=dict)
-    # Total specialist dispatches in the current EXPLORE entry. Reset on
-    # fresh EXPLORE entry; Robustness uses it to detect specialist storms.
+    # Total specialist dispatches in current EXPLORE entry; reset on fresh entry. Robustness detects specialist storms.
     explore_specialist_dispatched_count: int = 0
-    # Aggregate view of dynamic_action dispatches keyed by ``dyn_id``;
-    # Coordinator-only writer (``CORE_STATE_FIELDS`` blocks LLM
-    # ``UPDATE_STATE``). Each value is the lifecycle summary dict
-    # (status / last_outcome / cumulative_gain / …).
-    dynamic_actions: dict[str, dict[str, Any]] = field(default_factory=dict)
-    # Per-EXPLORE-round counter of *successful* dynamic_action
-    # dispatches (PolicyGate denials do not increment). Reset on
-    # every fresh EXPLORE entry; read by
-    # ``PolicyGate._validate_dynamic_action_dispatch`` for the
-    # ``MAX_DYNAMIC_PER_ROUND`` cap; Coordinator is the sole writer.
-    dynamic_action_round_count: int = 0
-    # Research-lane capacity locked at session start. PolicyGate denies
-    # mid-session mutation because this is a core state field.
+    # Research-lane capacity locked at session start (core field; PolicyGate denies mid-session mutation).
     research_lane_capacity: int = 1
-    # Separate GPU pool capacity for specialists that explicitly request
-    # ``needs_gpu=true``. Zero disables GPU specialists. Locked at session
-    # start so LLM roles cannot inflate GPU access mid-run.
+    # GPU pool capacity for needs_gpu specialists (0 disables); locked at session start.
     gpu_specialist_capacity: int = 0
-    # escalate_strategy_change carry-over field
-    #. The Coordinator's
-    # ``_handle_escalate_strategy_change`` writes the validated
-    # ``next_action_hint`` here so the phase_state machine can see it
-    # on the next ``compute_next_phase`` pass; the field is cleared
-    # by the Coordinator once the hint has been acted on (so the
-    # phase machine doesn't re-trigger on the same hint).
+    # escalate_strategy_change carry-over: Coordinator writes validated next_action_hint here for compute_next_phase, then clears it once acted on.
     pending_escalate_hint: str = ""
-    # last cleared escalate hint (audit only). Useful for
-    # the breakdown to surface "we honored a llm_escalation here".
+    # last cleared escalate hint (audit only) for the breakdown.
     last_consumed_escalate_hint: str = ""
     last_consumed_escalate_hint_ts: str = ""
-    # per-phase plateau threshold overrides locked at session start
-    # (CLI flags). Empty dict means "use library defaults"; phase_state
-    # reads these fields for the dispatcher's phase-decision call.
+    # per-phase plateau threshold overrides locked at session start (CLI flags); empty => library defaults.
     plateau_overrides: dict[str, Any] = field(default_factory=dict)
-    # E2E integrate bookkeeping keyed by kernel_id + patch_path + args. This
-    # prevents Orchestration from spending hours re-validating the same patch
-    # after repeated NEEDS_REVIEW/REVERT outcomes.
+    # E2E integrate bookkeeping keyed by kernel_id+patch_path+args; prevents re-validating the same patch after NEEDS_REVIEW/REVERT.
     kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
     rejected_kernel_patches: list[dict[str, Any]] = field(default_factory=list)
-    # Kernel ids with no remaining automated path. This is fed by
-    # run_optimization REVERTs and exhausted integrate attempts.
+    # Kernel ids with no remaining automated path (from REVERTs + exhausted integrate attempts).
     rejected_kernel_ids: list[str] = field(default_factory=list)
 
-    # Search-space expansion ledger surfaced in the Orchestration
-    # prompt so the LLM sees the live framework's full flag namespace
-    # rather than the shipped seed grid. Schema:
-    # ``{framework: {"backend_flags": [...], "param_flags": [...],
-    # "ts": iso, "source_path": str}}``.
+    # Search-space expansion ledger surfaced in the Orchestration prompt.
     discovered_flags: dict[str, Any] = field(default_factory=dict)
-    # Rolling per-action winners log (cap 20) used for dynamic idea
-    # generation. Schema: ``{action, round_id, base_tput,
-    # winners: [{name, tput, gain_pct, extra_server_args, extra_envs}],
-    # best: {...}, ts}``.
+    # Rolling per-action winners log (cap 20) for dynamic idea generation.
     backend_winners_history: list[dict[str, Any]] = field(default_factory=list)
-    # Synergy combo keys (``"name1+name2+..."``) already tested this
-    # session — prevents re-running the same combination after each
-    # new explore round.
+    # Synergy combo keys already tested this session; prevents re-running combinations.
     synergy_attempted: list[str] = field(default_factory=list)
 
-    # ---------------------------------------------------------------
-    # The Coordinator maintains no per-action numeric priority; the
-    # Orchestration prompt surfaces facts (phase / gaps / KB sub-graphs
-    # / specialist proposal_set) and the LLM decides. No system-side
-    # priority value is allowed. ``action_scores`` is dropped from the
-    # dataclass (resume migration logs + discards);
-    # ``params_no_promote_streak`` is kept as a read-only resume hint
-    # (not written by Coordinator).
-    #
-    # Monotonic Coordinator tick counter. Bumped once per
-    # ``Coordinator.run()`` / ``Coordinator.tick(n)`` iteration; kept
-    # so plateau / phase budget math has a stable monotonic anchor.
+    # Monotonic Coordinator tick counter; stable anchor for plateau/phase budget math.
     tick: int = 0
-    # Remaining gain-pct target gap (0.0 means "no target"). Coordinator
-    # refreshes this when the run objective is ``gain_pct=N``. Kept
-    # because the prompt builder + breakdown rely on it for the
-    # "Mission progress" line (NOT a priority — pure fact).
+    # Remaining gain-pct target gap (0.0 => no target); fact for the "Mission progress" line, not a priority.
     target_gap_pct: float = 0.0
 
-    # ------------------------------------------------------------------
     # Phase state machine fields
-    # ------------------------------------------------------------------
-    # ``phase`` is the run-level pipeline phase (PRELUDE / FRAMEWORK_PR /
-    # EXPLORE / KERNEL / SWEEP / CLOSE). Coordinator is the only writer
-    # (PolicyGate adds it to CORE_STATE_FIELDS); LLM agents can read
-    # via prompt injection but cannot update_state. Empty string
-    # signals "phase machine not yet initialised" — Coordinator
-    # initialises on construction.
+    # ``phase`` — run-level pipeline phase (PRELUDE/FRAMEWORK_PR/EXPLORE/KERNEL/SWEEP/CLOSE); Coordinator-only (CORE_STATE_FIELDS). Empty => not yet initialised.
     phase: str = ""
-    # ISO UTC timestamp the current phase was entered. Used by
-    # observability (breakdown.phase_segments) and the budget judge.
+    # ISO UTC timestamp the current phase was entered (breakdown.phase_segments + budget judge).
     phase_started_ts: str = ""
-    # Monotonic-ish unix epoch matching ``phase_started_ts`` so the
-    # phase budget judge can compute elapsed seconds without
-    # re-parsing ISO strings every tick.
+    # Unix epoch matching ``phase_started_ts`` so the budget judge skips ISO re-parsing.
     phase_started_unix: float = 0.0
-    # Append-only log of phase transitions; each row is built by
-    # :func:`phase_state.make_history_row` (reason must be in
-    # ``PHASE_EXIT_REASONS``).  Capped at
-    # ``_PHASE_HISTORY_CAP`` so a runaway transition never bloats
-    # state.json (unlikely — at most ~6 phases in the chain — but defensive).
+    # Append-only log of phase transitions (rows from phase_state.make_history_row; reason in PHASE_EXIT_REASONS). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
-    # Wall-clock budget percentages per phase.
-    # Coordinator populates from CLI flags / defaults at construction
-    # time; persisted so resume picks up the exact split the original
-    # run used. Empty dict means "use library defaults".
+    # Append-only operator-facing lifecycle log (#266). Each row is built
+    # by :func:`phase_state.make_lifecycle_event` and records a phase/step
+    # boundary (START / END / ERROR) plus the artifact paths it produced,
+    # so a launcher can surface "phase X ran, outputs at <path>" in chat.
+    # Coordinator-only writer (PolicyGate adds it to ``CORE_STATE_FIELDS``);
+    # capped at ``_LIFECYCLE_CAP``.
+    lifecycle: list[dict[str, Any]] = field(default_factory=list)
+    # Wall-clock budget percentages per phase (from CLI flags/defaults); persisted for resume. Empty => library defaults.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
 
-    # ------------------------------------------------------------------
-    # Cortex KB integration fields
-    # ------------------------------------------------------------------
-    # Coordinator-only writers. Listed in PolicyGate.CORE_STATE_FIELDS so
-    # any LLM ``update_state`` intent that touches these is denied
-    # (single writer). LLM consumers read them indirectly via
-    # prompt injection.
-    #
-    # ``cortex_session_id`` is the hyperloom-local session identifier
-    # carried into KB fact-write attrs (``source_session_id``) for
-    # cross-session traceability. It is **not** a KB-side session id
-    # (no KB session begin/commit protocol); defaults to
-    # ``session_dir.name`` when minted.
+    # Cortex KB integration fields — Coordinator-only writers (CORE_STATE_FIELDS; LLM update_state denied).
+    # ``cortex_session_id`` — hyperloom-local id carried into KB fact-write attrs (source_session_id); defaults to session_dir.name.
     cortex_session_id: str = ""
-    # Kept (always ``{}``) for state.json resume back-compat: the next
-    # ``state.save`` writes an empty dict and the breakdown collector
-    # tolerates a missing summary. ``breakdown.kb_provenance.commit`` is
-    # derived from ``drain_pending`` results instead.
+    # Kept (always ``{}``) for resume back-compat; breakdown.kb_provenance.commit derived from drain_pending instead.
     cortex_session_summary: dict[str, Any] = field(default_factory=dict)
-    # Snapshot of ``find-recipe`` raw output (CLI ``--format text``, one
-    # entry per recipe row). Kept as parsed ``dict`` so specialist
-    # assembly can read without re-parsing. Empty dict on first-ever
-    # session for a (workload, hw) pair.
+    # Snapshot of ``find-recipe`` output (parsed dict); empty on first session for a (workload, hw) pair.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
-    # Snapshot of ``pitfalls`` output (negative priors from prior
-    # REVERT / crash / OOM decisions on this (model, hardware),
-    # optionally filtered by framework). List of KB point dicts
-    # (each with ``{canonical_id, kind, attrs, confidence, ...}``),
-    # mirroring ``warm_start_lessons``. Consumed by the specialist
-    # prompt's "§ 5c. KNOWN PITFALLS" section. Resume tolerates older
-    # snapshots (the prompt section filters out rows without
-    # ``attrs.description``).
+    # Snapshot of ``pitfalls`` output (negative priors), list of KB point dicts; consumed by specialist prompt § 5c. Resume tolerates older snapshots.
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
-    # T0 snapshot of ``lessons`` output (positive priors from prior
-    # KEEPs on this (model, hardware), optionally filtered by
-    # framework). Symmetric with ``warm_start_pitfalls``; consumed
-    # by the specialist prompt's "§ 5b. RELATED LESSONS" section.
-    # Empty when Cortex was bypassed (``--degraded-kb``) or T0
-    # failed.
+    # T0 snapshot of ``lessons`` output (positive priors), symmetric with warm_start_pitfalls; consumed by specialist prompt § 5b. Empty under --degraded-kb or T0 failure.
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
-    # Iso UTC timestamp of the T0 snapshot. Empty when Cortex was
-    # bypassed (``--degraded-kb``) or T0 failed.
+    # ISO UTC timestamp of the T0 snapshot; empty under --degraded-kb or T0 failure.
     warm_start_ts: str = ""
     # Model-facing WarmStartContext built by ``cortex_t0`` from the KB
     # recipe row. PARALLEL to ``warm_start_recipe`` (which stays the raw
@@ -1062,52 +516,41 @@ class SharedState:
     # T0 was bypassed or failed.
     warm_start_context: dict[str, Any] = field(default_factory=dict)
 
-    # ------------------------------------------------------------------
-    # structured gaps ledger: a dedup'd list of unresolved bottlenecks
-    # (replacing the older proxy derived from ``last_action_failures`` +
-    # ``explore_search.winners_history``). Coordinator is the sole writer
-    # (:meth:`Coordinator._refresh_gaps`); LLM agents read via
-    # prompt injection. Listed in :data:`policy.CORE_STATE_FIELDS` so
-    # any LLM ``update_state{changes={gaps: ...}}`` intent is denied.
-    #
-    # Refresh entry points:
-    #   1. baseline completion           — initial gap extraction
-    #   2. EXPLORE round KEEP/REVERT     — append to gap.attempts
-    #   3. Cortex traverse(issue_node)   — merge cross-session priors
-    #   4. specialist_done bookkeeping   — gap.attempts ← specialist
-    #
-    # Schema (per entry):
-    #
-    #   {
-    #     "canonical_id": str,        # issue_node canonical from Cortex
-    #     "symptom":      str,        # human-readable: "MoE comm overhead"
-    #     "layer":        str,        # comm / kernel / framework / param
-    #     "severity":     str,        # high / medium / low
-    #     "domain_hint":  str,        # which specialist domain best fits
-    #     "source":       str,        # baseline / attempts / cortex
-    #     "first_seen_ts":     iso,
-    #     "last_updated_ts":   iso,
-    #     "attempts": [
-    #       {action, variant_name, outcome, gain_pct?, ts},
-    #       ...
-    #     ],
-    #   }
-    #
-    # ``attempts`` is capped at the most recent 20 per gap; the whole
-    # list is capped at :data:`_GAPS_MAX_ENTRIES` so a long session
-    # can't blow up state.json. Dedup is keyed by ``canonical_id``.
+    # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only _refresh_gaps; CORE_STATE_FIELDS); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
     gaps: list[dict[str, Any]] = field(default_factory=list)
 
-    # ------------------------------------------------------------------
+    # Orchestration working memory — durable compacted reasoning snapshot for compaction + crash-recovery rebuild; Coordinator-only writer, not in session_breakdown.
+    orchestration_memory: dict[str, Any] = field(default_factory=dict)
+
     # Persistence
-    # ------------------------------------------------------------------
     @classmethod
     def state_path(cls, session_dir: Path) -> Path:
+        """Return the canonical ``state.json`` path for a session directory.
+
+        Args:
+            session_dir (Path): The session root directory.
+
+        Returns:
+            Path: ``session_dir / "state.json"``.
+        """
         return Path(session_dir) / "state.json"
 
     @classmethod
     def load_or_init(cls, session_dir: Path) -> "SharedState":
-        """Load existing ``state.json`` or return a fresh blank instance."""
+        """Load existing ``state.json`` or return a fresh blank instance.
+
+        Reads and migrates the persisted state via :meth:`from_dict` when
+        the file exists; otherwise constructs a default instance for a
+        brand-new session.
+
+        Args:
+            session_dir (Path): The session root directory containing (or
+                that will contain) ``state.json``.
+
+        Returns:
+            SharedState: The loaded-and-migrated state, or a fresh default
+                instance when no ``state.json`` exists yet.
+        """
         path = cls.state_path(session_dir)
         if not path.exists():
             return cls()
@@ -1117,24 +560,25 @@ class SharedState:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
-        # Unified migration entry point. An older state.json has no
-        # top-level ``schema_version`` field; treat the absence as
-        # ``schema_version=1`` and run the field-mapping step. The
-        # function is idempotent: re-loading a current
-        # state.json (``schema_version == LATEST_STATE_SCHEMA_VERSION``)
-        # short-circuits the migration logging without touching the
-        # fact-layer payload.
+        """Construct a :class:`SharedState` from a raw mapping, migrating it.
+
+        Acts as the unified migration entry point: an absent
+        ``schema_version`` is treated as 1, legacy keys are renamed to
+        their canonical form, and unknown keys are dropped. The operation
+        is idempotent and short-circuits when already at the latest schema.
+
+        Args:
+            raw: Decoded state mapping (e.g. from JSON on disk).
+
+        Returns:
+            A fully-populated, migrated :class:`SharedState` instance.
+        """
+        # Unified migration entry point; absent schema_version treated as 1. Idempotent (latest version short-circuits).
         incoming_version = int(raw.get("schema_version") or 1)
         needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
         migration_events: list[str] = []
 
-        # Migrate the ``extra_sglang_args`` -> ``extra_server_args`` rename
-        # (same for ``candidate_extra_sglang_args``). The on-disk shape
-        # stays a plain dict, so the legacy key may appear in any of the
-        # many nested ledgers (winners, baseline_artifacts, action_attempts,
-        # explore_search, etc.). Walk the entire payload once at load time
-        # and rewrite the legacy keys in place — the next save will then
-        # emit canonical only and a future load of the same file is a no-op.
+        # Migrate ``extra_sglang_args`` -> ``extra_server_args`` (+ candidate_) across all nested ledgers; next save emits canonical only.
         legacy_migrations = _migrate_legacy_extra_sglang_args_keys(raw)
         if legacy_migrations:
             migration_events.append(
@@ -1143,17 +587,10 @@ class SharedState:
                 f"to extra_server_args / candidate_extra_server_args"
             )
 
-        # Filter to known fields so older / newer state.json shapes don't
-        # crash. Unknown keys are dropped; missing keys fall back to defaults.
+        # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f for f in cls.__dataclass_fields__}
         filtered = {k: v for k, v in raw.items() if k in known}
-        # The dataclass no longer carries the legacy scoreboard fields,
-        # so the ``known`` filter above already drops them; this explicit
-        # list only exists to count/log them in ``warn`` mode.
-        #
-        # Compat (read-only): remove this drop list once old-session
-        # resume of scoreboard / select_kernels state.json is no
-        # longer supported.
+        # Legacy scoreboard fields (read-only compat); already dropped by the filter, listed only to count/log in ``warn`` mode.
         _legacy_drop_fields = (
             "action_scores",
             "score_violation",
@@ -1198,10 +635,7 @@ class SharedState:
                     "v0.8 §3.9: dropped legacy scoreboard fields from "
                     "state.json (%s).", summary,
                 )
-        # Normalize the unified ``explore_search`` ledger at the load
-        # boundary so the executor and Coordinator paths can assume the
-        # shaped schema and never need a fallback branch. Winners /
-        # synergy history are folded in from the live history fields.
+        # Normalize the unified ``explore_search`` ledger at load; winners/synergy history folded in.
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
             backend_winners_history=filtered.get("backend_winners_history"),
@@ -1209,12 +643,7 @@ class SharedState:
             synergy_attempted=filtered.get("synergy_attempted"),
         )
 
-        # fact-layer integrity check. ``strict``
-        # (the default) aborts when a fact-layer key was present in a
-        # *non-empty* legacy state.json but couldn't be loaded into
-        # the dataclass (caller dropped it / type mismatch). ``lenient``
-        # downgrades to WARNING and continues. Fresh sessions
-        # (``raw == {}``) skip the check entirely.
+        # fact-layer integrity check (Inv-10.1): strict (default) aborts when a fact-layer key was present but didn't load; lenient warns.
         if needs_migration and raw:
             mode = os.environ.get(
                 "INFERENCE_OPTIMIZER_MIGRATION_MODE", "strict",
@@ -1223,8 +652,7 @@ class SharedState:
                 "baseline_tput", "baseline_accuracy", "current_best",
                 "cumulative_gain", "cumulative_gain_validated",
                 "optimization_stack",
-                # Steward fields are safe to default on old state.json:
-                # missing assessment means "no priors".
+                # Steward fields safe to default (missing => no priors).
                 "last_remaining_gaps_assessment",
                 "remaining_gaps_assessments",
             )
@@ -1253,17 +681,9 @@ class SharedState:
                         f"--migration-mode=lenient to continue."
                     )
 
-        # bump schema_version once migrations finish.
-        # Idempotent: a payload already at the latest version
-        # short-circuits the helper at the top of this function.
         filtered["schema_version"] = LATEST_STATE_SCHEMA_VERSION
 
-        # operator-visible migration log. ``strict``
-        # (default) is silent on info-level events but surfaces fatal
-        # fact-layer errors elsewhere (e.g. CLI bootstrap); ``lenient``
-        # downgrades any fact-layer error logged downstream. Here we
-        # only emit the migration summary so resume traces are
-        # self-describing.
+        # operator-visible migration summary so resume traces are self-describing.
         if needs_migration:
             import logging as _logging
             log = _logging.getLogger(__name__)
@@ -1283,15 +703,7 @@ class SharedState:
         params_winner_history: Any,
         synergy_attempted: Any,
     ) -> dict[str, Any]:
-        """Shape the unified ``explore_search`` ledger at load time.
-
-        The ExploreExecutor owns ``explore_search`` at runtime; this
-        load-boundary normalizer only fills the defensive defaults and
-        folds the live ``*_winner_history`` / ``synergy_attempted``
-        history fields into ``winners_history`` / ``synergy_attempted``
-        so a resume preserves the cross-round aggregation the prompt
-        summary and plateau proxy read.
-        """
+        """Shape the unified ``explore_search`` ledger at load time; folds live history so resume preserves cross-round aggregation."""
         from .action_executors._grid_runner import variant_fingerprint as _fp
 
         existing = existing if isinstance(existing, dict) else {}
@@ -1306,8 +718,7 @@ class SharedState:
         out.setdefault("cursor", len(out.get("tested") or {}))
         out.setdefault("last_round", {})
 
-        # winners_history: fold the live history fields + preserve any
-        # prior explore-side rows, then sort by (round_id, ts).
+        # winners_history: fold live history + prior rows, sorted by (round_id, ts).
         wh: list[dict[str, Any]] = []
         for source_list in (
             backend_winners_history,
@@ -1338,11 +749,20 @@ class SharedState:
         wh.sort(key=lambda r: (str(r.get("round_id") or ""), str(r.get("ts") or "")))
         out["winners_history"] = wh
 
-        # synergy_attempted: fold the live field + preserve any
-        # ExploreExecutor-side additions, deduped.
+        # synergy_attempted: fold live field + executor-side additions, deduped.
         sa_set: set[tuple[str, ...]] = set()
 
         def _normalize_combo(c: Any) -> tuple[str, ...] | None:
+            """Normalize a synergy combo to a sorted tuple of flag names.
+
+            Args:
+                c (Any): A list of flag-name strings or a ``"+"``-joined
+                    combo string.
+
+            Returns:
+                tuple[str, ...] | None: The sorted flag-name tuple, or
+                    ``None`` when the input yields no usable names.
+            """
             if isinstance(c, list):
                 items = tuple(sorted(str(x) for x in c if isinstance(x, str)))
                 return items if items else None
@@ -1362,10 +782,25 @@ class SharedState:
         return out
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize this state to a plain JSON-compatible dict.
+
+        Returns:
+            dict[str, Any]: A deep ``dataclasses.asdict`` copy suitable for
+                JSON serialization.
+        """
         return asdict(self)
 
     def save(self, session_dir: Path) -> None:
-        """Atomically write state.json (tmp + os.replace)."""
+        """Atomically write ``state.json`` (tmp file + ``os.replace``).
+
+        Serializes via :meth:`to_dict` and writes to a temp file in the
+        same directory before an atomic rename, so concurrent readers never
+        observe a partial blob. The temp file is cleaned up on failure.
+
+        Args:
+            session_dir (Path): The session root directory; created if it
+                does not already exist.
+        """
         path = self.state_path(session_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".state-", suffix=".json", dir=str(path.parent))
@@ -1380,21 +815,42 @@ class SharedState:
                 pass
             raise
 
-    # ------------------------------------------------------------------
-    # Mutators (used by the Coordinator only — LLM agents go via intents)
-    # ------------------------------------------------------------------
+    # Mutators (Coordinator only — LLM agents go via intents)
     def add_pruned_family(self, family: str) -> bool:
-        """Idempotent add. Returns True iff the family was newly added."""
+        """Idempotently mark an action family as pruned.
+
+        Args:
+            family (str): The action family identifier to prune.
+
+        Returns:
+            bool: ``True`` iff the family was newly added; ``False`` when it
+                was already present.
+        """
         if family in self.pruned_families:
             return False
         self.pruned_families.append(family)
         return True
 
     def is_pruned(self, family: str) -> bool:
+        """Report whether an action family has been pruned.
+
+        Args:
+            family (str): The action family identifier to check.
+
+        Returns:
+            bool: ``True`` when ``family`` is in :attr:`pruned_families`.
+        """
         return family in self.pruned_families
 
     def prune_family(self, family: str) -> bool:
-        """Alias for :meth:`add_pruned_family` (policy-loop stop-loss)."""
+        """Alias for :meth:`add_pruned_family` (policy-loop stop-loss).
+
+        Args:
+            family (str): The action family identifier to prune.
+
+        Returns:
+            bool: ``True`` iff the family was newly added.
+        """
         return self.add_pruned_family(family)
 
     _POLICY_DENIAL_HISTORY_CAP = 50
@@ -1409,7 +865,25 @@ class SharedState:
         tick: int,
         intent_payload: dict[str, Any] | None = None,
     ) -> int:
-        """Append a denial row and bump per-(action,rule) streak."""
+        """Append a PolicyGate denial row and bump the per-(action, rule) streak.
+
+        Records a capped rolling history entry and increments the
+        consecutive-denial counter keyed by ``"<action_name>:<rule>"``.
+
+        Args:
+            action_name (str): The action the denied intent targeted (empty
+                is normalized to ``"*"`` in the streak key).
+            rule (str): The PolicyGate rule id that fired.
+            hint (str): Human-readable remediation hint surfaced to the LLM.
+            intent_type (str): The denied intent's type.
+            tick (int): The Coordinator tick at which the denial occurred.
+            intent_payload (dict[str, Any] | None): Optional intent payload;
+                when present, its sorted keys are recorded for context.
+
+        Returns:
+            int: The new consecutive-denial streak value for this
+                (action, rule) pair.
+        """
         key = f"{action_name or '*'}:{rule}"
         streak = int(self.policy_denial_streak.get(key, 0)) + 1
         self.policy_denial_streak[key] = streak
@@ -1432,6 +906,16 @@ class SharedState:
         return streak
 
     def reset_policy_denial_streak(self, action_name: str) -> None:
+        """Clear all consecutive-denial streaks for a given action.
+
+        Drops every ``policy_denial_streak`` entry whose key begins with
+        ``"<action_name>:"`` — called when the action finally succeeds so a
+        later denial starts a fresh streak.
+
+        Args:
+            action_name (str): The action whose streaks should be reset; a
+                falsy value is a no-op.
+        """
         if not action_name:
             return
         prefix = f"{action_name}:"
@@ -1441,32 +925,14 @@ class SharedState:
             if not k.startswith(prefix)
         }
 
-    # ------------------------------------------------------------------
     # stop_reason ENUM validator
-    # ------------------------------------------------------------------
     def set_stop_reason(
         self,
         value: str,
         *,
         strict: bool | None = None,
     ) -> str:
-        """Validated writer for :attr:`stop_reason`.
-
-        Inv-8.3 (stop_reason vocab closed): anything outside the
-        ``STOP_REASON_VOCAB`` in ``phase_state`` is mapped to
-        ``"unknown"`` in lenient mode (default) and emits a warning
-        so the breakdown can surface the migration. ``strict=True``
-        raises ``ValueError`` instead — used by the test path that
-        wants fail-fast behaviour.
-
-        ``strict`` defaults to the
-        ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON`` env var (``"1"`` /
-        ``"true"`` enables strict). The CLI flips the env on for
-        production runs once the vocab has been dogfooded.
-
-        Returns the value actually written (normalised + clipped to
-        the vocab).
-        """
+        """Validated writer for :attr:`stop_reason` (Inv-8.3 closed vocab): values outside ``STOP_REASON_VOCAB`` map to ``"unknown"`` (lenient) or raise (``strict=True``, default env ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON``). Returns value written."""
         from .phase_state import STOP_REASON_VOCAB, is_valid_stop_reason
         text = str(value or "").strip()
         if not text:
@@ -1485,8 +951,7 @@ class SharedState:
                 f"stop_reason={text!r} not in STOP_REASON_VOCAB "
                 f"({sorted(STOP_REASON_VOCAB)!r})"
             )
-        # Lenient: map to "unknown" and surface a warning. Callers can
-        # still observe the original via the warnings log.
+        # Lenient: map to "unknown" and warn (original observable via warnings log).
         import logging as _logging
         _logging.getLogger(__name__).warning(
             "stop_reason=%r not in STOP_REASON_VOCAB; mapped to 'unknown' "
@@ -1497,63 +962,9 @@ class SharedState:
         self.stop_reason = "unknown"
         return "unknown"
 
-    # ------------------------------------------------------------------
-    # Session steward assessment writer.
-    # ------------------------------------------------------------------
-    _STEWARD_ASSESSMENT_HISTORY_CAP = 10
-
-    def record_steward_assessment(
-        self,
-        *,
-        recommendation: str,
-        next_gap_canonical_id: str,
-        remaining_potential_pct_estimate: float,
-        rationale: str,
-        task_id: str,
-        round_at_assessment: int,
-        source_payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Stash a session_steward_specialist verdict on SharedState.
-
-        Returns the row that landed in ``last_remaining_gaps_assessment``
-        so the Coordinator can route on it immediately without
-        re-reading state. History capped at
-        :attr:`_STEWARD_ASSESSMENT_HISTORY_CAP` (drops oldest).
-        """
-        row = {
-            "ts": _now_iso(),
-            "recommendation": str(recommendation),
-            "next_gap_canonical_id": str(next_gap_canonical_id or ""),
-            "remaining_potential_pct_estimate": float(
-                remaining_potential_pct_estimate or 0.0
-            ),
-            "rationale": str(rationale or "")[:2000],
-            "task_id": str(task_id or ""),
-            "round_at_assessment": int(round_at_assessment or 0),
-        }
-        if source_payload is not None:
-            # Preserve the full payload (truncated to a manageable size)
-            # so the breakdown collector can dig deeper if needed.
-            row["source_payload_keys"] = sorted(source_payload.keys())
-        self.last_remaining_gaps_assessment = row
-        history = list(self.remaining_gaps_assessments or [])
-        history.append(row)
-        if len(history) > self._STEWARD_ASSESSMENT_HISTORY_CAP:
-            history = history[-self._STEWARD_ASSESSMENT_HISTORY_CAP:]
-        self.remaining_gaps_assessments = history
-        return row
-
-    # ------------------------------------------------------------------
     # escalate hint plumbing
-    # ------------------------------------------------------------------
     def set_pending_escalate_hint(self, hint: str) -> str:
-        """Stash the LLM-supplied hint for the next phase compute pass.
-
-        Returns the value actually written. Unknown hints are
-        silently dropped (Inv-8.2 — phase decisions only react to a
-        closed vocabulary; arbitrary robustness payloads should not
-        steer the state machine).
-        """
+        """Stash the LLM-supplied hint for the next phase compute pass; unknown hints dropped (Inv-8.2: closed vocab). Returns value written."""
         from .phase_state import is_valid_escalate_hint
         text = str(hint or "").strip()
         if text and not is_valid_escalate_hint(text):
@@ -1562,13 +973,7 @@ class SharedState:
         return text
 
     def consume_pending_escalate_hint(self) -> str:
-        """Pop the pending hint, recording the consumption in audit fields.
-
-        The phase machine calls this *after* it acted on the hint so
-        the next tick doesn't re-trigger the same transition. Returns
-        the hint that was cleared (empty string when nothing was
-        pending).
-        """
+        """Pop the pending hint (recording consumption in audit fields) so the next tick doesn't re-trigger; returns cleared hint."""
         hint = (self.pending_escalate_hint or "").strip()
         if not hint:
             return ""
@@ -1577,9 +982,7 @@ class SharedState:
         self.last_consumed_escalate_hint_ts = _now_iso()
         return hint
 
-    # ------------------------------------------------------------------
     # phase machine writer (Coordinator-only, single writer)
-    # ------------------------------------------------------------------
     def record_phase_transition(
         self,
         *,
@@ -1589,22 +992,10 @@ class SharedState:
         ts: str | None = None,
         ts_unix: float | None = None,
     ) -> dict[str, Any]:
-        """Append a phase_history row and atomically update ``phase`` fields.
-
-        The Coordinator calls this from ``_advance_phase_if_needed`` at
-        the end of each tick (also once during ``__init__`` for the
-        initial "phase_entered" row). LLM roles cannot reach this code
-        path — PolicyGate adds ``phase`` / ``phase_history`` to
-        :data:`policy.CORE_STATE_FIELDS`, so any ``update_state`` intent
-        touching them is rejected first.
-
-        Returns the inserted row (so callers don't have to re-read the
-        list to log it).
-        """
+        """Append a phase_history row and atomically update ``phase`` fields; ``phase``/``phase_history`` are CORE_STATE_FIELDS so LLM update_state is rejected. Returns the inserted row."""
         from datetime import datetime as _dt, timezone as _tz
         import time as _time
-        # Lazy import to avoid an import-time cycle with the orchestrator
-        # package (phase_state itself imports nothing from SharedState).
+        # Lazy import to avoid an import-time cycle.
         from .phase_state import make_history_row
 
         now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
@@ -1627,7 +1018,72 @@ class SharedState:
         self.phase_started_unix = now_unix
         return row
 
+    def record_lifecycle_event(
+        self,
+        *,
+        step: str,
+        status: str,
+        phase: str | None = None,
+        label: str | None = None,
+        artifacts: dict[str, str] | None = None,
+        detail: str = "",
+        duration_s: float | None = None,
+        ts: str | None = None,
+    ) -> dict[str, Any]:
+        """Append a structured lifecycle event (#266, method 1).
+
+        Each event marks a phase/step boundary so operators can see — in
+        state.json, and via the launcher in chat — that a phase ran, where
+        its outputs went, and which artifact feeds the next phase.
+
+        ``step`` is the machine step/handler name (e.g. ``trace_analyze``);
+        ``label`` defaults to the human-friendly name from
+        :data:`phase_state.LIFECYCLE_STEP_LABELS` so both naming dimensions
+        are carried. ``phase`` defaults to the current coordinator phase.
+        ``seq`` is monotonic across the cap so consumers can order events
+        even after the oldest rows are trimmed.
+
+        Coordinator-only writer (``policy.CORE_STATE_FIELDS`` guards
+        ``lifecycle`` so an LLM ``update_state`` cannot forge events).
+        Returns the inserted row.
+        """
+        # Lazy import to avoid an import-time cycle with the orchestrator
+        # package (phase_state imports nothing from SharedState).
+        from .phase_state import make_lifecycle_event
+
+        events = self.lifecycle
+        if events is None:
+            events = self.lifecycle = []
+        next_seq = (int(events[-1].get("seq", -1)) + 1) if events else 0
+        event = make_lifecycle_event(
+            step=step,
+            status=status,
+            phase=(phase if phase is not None else (self.phase or "")),
+            label=label,
+            artifacts=artifacts,
+            detail=detail,
+            duration_s=duration_s,
+            seq=next_seq,
+            ts=ts or _now_iso(),
+        )
+        # Append in place and trim only when over the cap, so the common
+        # per-step-boundary path is an O(1) append rather than copying the
+        # whole list on every call.
+        events.append(event)
+        if len(events) > _LIFECYCLE_CAP:
+            del events[: -_LIFECYCLE_CAP]
+        return event
+
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
+        """Render the most recent PolicyGate denials for prompt injection.
+
+        Args:
+            top_k (int): Maximum number of newest denial rows to render.
+
+        Returns:
+            str: A ``=== Recent policy denials ===`` block, or ``""`` when
+                no denials have been recorded.
+        """
         if not self.policy_denial_history:
             return ""
         rows = list(self.policy_denial_history)[-top_k:]
@@ -1644,6 +1100,14 @@ class SharedState:
         return "\n".join(lines)
 
     def increment_crash_count(self, by: int = 1) -> int:
+        """Increment the cumulative crash counter.
+
+        Args:
+            by (int): Amount to add to :attr:`crash_count` (default 1).
+
+        Returns:
+            int: The post-increment crash count.
+        """
         self.crash_count += by
         return self.crash_count
 
@@ -1671,17 +1135,7 @@ class SharedState:
         return entry
 
     def apply_changes(self, changes: dict[str, Any], *, allow_core: bool) -> dict[str, Any]:
-        """Merge a non-empty changes dict into this state.
-
-        ``allow_core=True`` is reserved for Coordinator-internal callers that
-        update fields in :data:`policy.CORE_STATE_FIELDS` (current_best,
-        baseline_tput, etc.). LLM-driven UPDATE_STATE intents pass
-        ``allow_core=False`` and PolicyGate already filtered them upstream
-        — this method does *not* re-validate the role/source allowlist.
-
-        Returns the dict of fields that were actually written (may be a
-        subset of input if unknown keys are passed).
-        """
+        """Merge a non-empty changes dict into this state; does NOT re-validate the role/source allowlist (PolicyGate filters upstream). Returns fields actually written."""
         if not changes:
             return {}
         applied: dict[str, Any] = {}
@@ -1693,7 +1147,13 @@ class SharedState:
         return applied
 
     def _format_last_kernel_opt(self) -> str:
-        """Single-line repr of last kernel-opt outcome for prompt injection."""
+        """Single-line repr of last kernel-opt outcome for prompt injection.
+
+        Returns:
+            str: A compact ``kernel_id=... decision=... speedup=...`` line
+                (with optional per-kernel attempts/retired history), or
+                ``"(none)"`` when no kernel_opt has run.
+        """
         if not self.last_kernel_opt:
             return "(none)"
         ko = self.last_kernel_opt
@@ -1718,6 +1178,23 @@ class SharedState:
     def _resolve_kernel_patch_identity(
         self, payload: dict[str, Any] | None,
     ) -> tuple[str, str, str, str]:
+        """Resolve a kernel patch's identity tuple from a result/intent payload.
+
+        Pulls ``kernel_id`` / patch path / target file / extra server args
+        from the envelope, back-filling the patch path from
+        :attr:`last_kernel_opt` when the payload omits it but names a
+        matching kernel. The legacy ``extra_sglang_args`` alias is resolved
+        through the compat helper.
+
+        Args:
+            payload (dict[str, Any] | None): The kernel_opt result or LLM
+                intent envelope (``None`` treated as empty).
+
+        Returns:
+            tuple[str, str, str, str]: ``(kernel_id, patch_path,
+                target_file, extra_args)``; any unresolved component is an
+                empty string.
+        """
         payload = payload or {}
         kernel_id = str(payload.get("kernel_id") or "")
         patch_path = str(
@@ -1740,15 +1217,22 @@ class SharedState:
             or payload.get("source_file")
             or ""
         )
-        # ``payload`` is an external envelope (LLM intent or sub-agent
-        # kernel_opt result); route through the compat helper so a legacy
-        # ``extra_sglang_args`` key still resolves with a single
-        # DeprecationWarning logged via stacklevel=3.
+        # External envelope; route through compat helper so legacy ``extra_sglang_args`` still resolves.
         from ..compat.payload_aliases import read_extra_server_args
         extra_args = read_extra_server_args(payload).strip()
         return kernel_id, patch_path, target_file, extra_args
 
     def kernel_patch_key(self, payload: dict[str, Any] | None) -> str:
+        """Compute the dedup key for a kernel patch.
+
+        Args:
+            payload (dict[str, Any] | None): The kernel_opt result or intent
+                envelope.
+
+        Returns:
+            str: ``"<kernel_id>|<patch_path>|<extra_args>"``, or ``""`` when
+                either ``kernel_id`` or ``patch_path`` cannot be resolved.
+        """
         kernel_id, patch_path, _target_file, extra_args = (
             self._resolve_kernel_patch_identity(payload)
         )
@@ -1760,6 +1244,16 @@ class SharedState:
         self,
         payload: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
+        """Look up a previously-rejected patch matching ``payload``.
+
+        Args:
+            payload (dict[str, Any] | None): The kernel_opt result or intent
+                envelope identifying the patch.
+
+        Returns:
+            dict[str, Any] | None: The matching rejected-patch entry, or
+                ``None`` when the key is unresolvable or not on record.
+        """
         key = self.kernel_patch_key(payload)
         if not key:
             return None
@@ -1775,7 +1269,25 @@ class SharedState:
         max_attempts: int = 3,
         keep_threshold_pct: float = 1.0,
     ) -> dict[str, Any] | None:
-        """Persist one integrate E2E result and reject exhausted patch attempts."""
+        """Persist one integrate E2E result and reject exhausted patch attempts.
+
+        Appends the attempt to the per-key ``kernel_integrate_attempts``
+        ledger and, on a REVERT decision or once ``max_attempts`` is hit
+        without a KEEP, moves the patch into ``rejected_kernel_patches`` and
+        records its ``kernel_id`` in ``rejected_kernel_ids``.
+
+        Args:
+            result (dict[str, Any]): The integrate E2E result envelope.
+            max_attempts (int): Max attempts before rejecting a non-KEEP
+                patch (default 3).
+            keep_threshold_pct (float): The gain threshold recorded on the
+                rejection row for context (default 1.0).
+
+        Returns:
+            dict[str, Any] | None: The updated attempts entry (carrying a
+                ``rejected`` sub-dict when rejection fired), or ``None`` when
+                ``result`` is not a dict or its patch key is unresolvable.
+        """
         if not isinstance(result, dict):
             return None
         key = self.kernel_patch_key(result)
@@ -1859,44 +1371,12 @@ class SharedState:
         return entry
 
     def record_kernel_opt(self, result: dict[str, Any]) -> None:
-        """Capture the result returned by kernel_optimization_handler so the
-        next Orch turn knows what's already been tried (and the outcome).
-
-        Two overwrite invariants protect the multi-KEEP integrate queue:
-
-        * **Empty kernel_id is a no-op.** A metadata-less failure result
-          (e.g. ``{"status":"failed", "error":"TimeoutExpired"}`` wrapped
-          by the Coordinator's batch handler exception path) must NOT
-          clobber a previously-recorded KEEP. Otherwise streaming
-          ``record_partial`` writes from a batch's fast KEEPs would be
-          erased the moment one slow sibling times out, and Orchestration
-          would never see the pending KEEP that opens integrate.
-
-        * **Non-KEEP cannot overwrite a pending KEEP.** During a
-          ``_run_optimization_batch`` fan-out, sub-results land in
-          completion order, not micro_speedup order. A late-arriving
-          REVERT / PARTIAL must not displace an earlier KEEP that hasn't
-          been integrated yet. We keep the strongest unresolved KEEP in
-          ``last_kernel_opt`` and let the integrate queue
-          (``next_pending_keep_kernel_id``) drain via the per-kernel
-          ``kernel_opt_attempts`` ledger.
-
-        Retires ``kernel_id`` into ``rejected_kernel_ids`` when the same
-        kernel has accumulated >= ``max_partial`` PARTIAL outcomes (no
-        measurable speedup), not just on REVERT. Without this guard, an
-        inner-tool auth failure that surfaces as PARTIAL keeps the kernel
-        in ``applicable_kernel_set`` forever and Orch re-dispatches it
-        every tick (the r24 custom_allreduce dead-end). Threshold defaults
-        to 2 attempts; override via
-        ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL`` (>=1).
-        """
+        """Capture kernel_optimization_handler result for the next Orch turn; empty kernel_id no-op, non-KEEP can't overwrite a pending KEEP, retires kernel_id (r24 guard) after >= max_partial PARTIALs (INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL)."""
         if not isinstance(result, dict):
             return
         kernel_id = str(result.get("kernel_id") or "")
         if not kernel_id:
-            # Metadata-less failure (batch handler exception, programmatic
-            # rejection, ...). Preserve last_kernel_opt + attempts so a
-            # prior streaming-record KEEP survives.
+            # Metadata-less failure: preserve prior streaming-record KEEP.
             return
 
         verification = result.get("verification") or {}
@@ -1924,10 +1404,7 @@ class SharedState:
                     break
         status = str(result.get("status") or "").lower()
         err_class = str(result.get("error_class") or "")
-        # A pure infra failure is a backend ladder that produced no
-        # verdict at all: timeout, handler exception, non-zero backend
-        # exit, missing inputs, etc. Keep it distinct from REVERT and
-        # PARTIAL so the retirement counters do not double-count.
+        # Pure infra failure = backend ladder with no verdict; kept distinct from REVERT/PARTIAL so retirement counters don't double-count.
         is_infra_failure = (
             decision == ""
             and (
@@ -1951,10 +1428,7 @@ class SharedState:
         })
         history = history[-10:]
         entry["attempts"] = int(entry.get("attempts", 0)) + 1
-        # Per-source attempts prevent a Python wrapper and the underlying
-        # device file from sharing the same retry quota. Empty source_file
-        # keeps old state.json rows valid while preserving the cumulative
-        # attempts count above.
+        # Per-source attempts so a Python wrapper and its device file don't share a retry quota.
         per_source = dict(entry.get("attempts_per_source") or {})
         src_key = source_file or ""
         per_source[src_key] = int(per_source.get(src_key, 0)) + 1
@@ -1962,8 +1436,7 @@ class SharedState:
         if decision == "PARTIAL":
             entry["partial_count"] = int(entry.get("partial_count", 0)) + 1
         elif decision == "KEEP":
-            # A successful attempt resets streaks; a future regression
-            # should not be auto-retired on stale history.
+            # Success resets streaks so a future regression isn't auto-retired on stale history.
             entry["partial_count"] = 0
             entry["failure_count"] = 0
         if is_infra_failure:
@@ -1978,9 +1451,7 @@ class SharedState:
         if test_command:
             entry["test_command"] = test_command
 
-        # Overwrite policy for last_kernel_opt:
-        #   * KEEP always wins (highest micro bubbles up).
-        #   * Non-KEEP only writes when there's no pending KEEP to protect.
+        # last_kernel_opt overwrite policy: KEEP always wins; non-KEEP writes only when no pending KEEP to protect.
         prev = self.last_kernel_opt or {}
         prev_decision = str(prev.get("decision", "")).upper()
         prev_kid = str(prev.get("kernel_id", ""))
@@ -2010,12 +1481,9 @@ class SharedState:
             try:
                 max_partial = max(1, int(env_v))
             except (TypeError, ValueError):
-                # Invalid env override; keep _DEFAULT_KERNEL_OPT_MAX_PARTIAL
-                # (already assigned above) instead of failing.
                 pass
 
-        # One completed backend ladder without a KEEP retires the kernel
-        # by default; operators can raise the threshold for flaky backends.
+        # One backend ladder without a KEEP retires the kernel by default; raise threshold for flaky backends.
         max_failures = _DEFAULT_KERNEL_OPT_MAX_FAILURES
         env_f = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES")
         if env_f:
@@ -2045,7 +1513,15 @@ class SharedState:
         self.kernel_opt_attempts[kernel_id] = entry
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
-        """Capture the GEAK GEMM tuning result for sequencing and prompts."""
+        """Capture the GEAK GEMM tuning result for sequencing and prompts.
+
+        Snapshots the result into ``last_gemm_tuning`` and appends it to the
+        capped ``gemm_tuning_attempts`` history. A non-dict result is
+        normalized into a failure record.
+
+        Args:
+            result (dict[str, Any]): The GEMM tuning result envelope.
+        """
         if not isinstance(result, dict):
             result = {"status": "failed", "error": "non-dict gemm tuning result"}
         entry = dict(result)
@@ -2055,11 +1531,14 @@ class SharedState:
         attempts.append(entry)
         self.gemm_tuning_attempts = attempts[-_DEFAULT_ATTEMPTS_HISTORY:]
 
-    # ------------------------------------------------------------------
     # Multi-KEEP integrate queue helpers.
-    # ------------------------------------------------------------------
     def _kernel_ids_in_optimization_stack(self) -> set[str]:
-        """kernel_ids already absorbed into optimization_stack as integrate entries."""
+        """kernel_ids already absorbed into optimization_stack as integrate entries.
+
+        Returns:
+            set[str]: The set of ``kernel_id`` values that appear on an
+                ``integrate`` entry of :attr:`optimization_stack`.
+        """
         return {
             str(e.get("kernel_id"))
             for e in (self.optimization_stack or [])
@@ -2069,13 +1548,7 @@ class SharedState:
         }
 
     def _source_files_in_optimization_stack(self) -> set[str]:
-        """source_file paths already touched by an integrate entry on the stack.
-
-        Used to enforce "same source_file, only the strongest KEEP gets
-        integrated" -- ``apply_kernel_patch`` is a ``shutil.copy2`` whole-
-        file overwrite, so two patches on the same file would silently
-        clobber each other.
-        """
+        """source_file paths already touched by an integrate entry; enforces "same source_file, only strongest KEEP integrated" (apply_kernel_patch is a whole-file overwrite)."""
         sources: set[str] = set()
         for e in (self.optimization_stack or []):
             if not isinstance(e, dict) or e.get("action") != "integrate":
@@ -2086,18 +1559,7 @@ class SharedState:
         return sources
 
     def next_pending_keep_kernel_id(self) -> str:
-        """Return next KEEP kernel_id awaiting integrate, or "" if drained.
-
-        Ordering:
-          1. Exclude already-integrated (in optimization_stack), rejected
-             kernels, and any KEEP whose source_file is already covered
-             by an earlier integrate (same-file conflict guard).
-          2. Among the remaining KEEPs, pick the highest
-             ``last_micro_speedup`` so the strongest lever lands first.
-
-        Consumers: Coordinator's ``_kernel_opt_keep_pending`` integrate
-        gate and prompt rendering for queued KEEP visibility.
-        """
+        """Return next KEEP kernel_id awaiting integrate ("" if drained); excludes integrated/rejected/same-file-conflict KEEPs, picks highest ``last_micro_speedup`` first."""
         integrated_ids = self._kernel_ids_in_optimization_stack()
         integrated_sources = self._source_files_in_optimization_stack()
         rejected = set(self.rejected_kernel_ids or [])
@@ -2113,8 +1575,7 @@ class SharedState:
                 continue
             src = str(entry.get("last_source_file") or "")
             if src and src in integrated_sources:
-                # Same-file conflict: a stronger KEEP on this file was
-                # already integrated (or this KEEP came after one did).
+                # Same-file conflict: a stronger KEEP on this file was already integrated.
                 continue
             try:
                 micro = float(entry.get("last_micro_speedup") or 0.0)
@@ -2126,18 +1587,11 @@ class SharedState:
         return best_kid
 
     def pending_keep_kernel_ids(self) -> list[str]:
-        """All KEEP kernel_ids awaiting integrate, sorted strongest-first.
-
-        Used by the Orchestration prompt so the LLM sees how many
-        integrate cycles are queued and does NOT propose ``report``
-        before draining them.
-        """
+        """All KEEP kernel_ids awaiting integrate, sorted strongest-first; surfaced in the prompt so the LLM doesn't propose ``report`` before draining them."""
         integrated_ids = self._kernel_ids_in_optimization_stack()
         integrated_sources = self._source_files_in_optimization_stack()
         rejected = set(self.rejected_kernel_ids or [])
-        # Track which source_files we've already counted so the queue
-        # mirrors ``next_pending_keep_kernel_id``'s same-file conflict
-        # guard (only the strongest KEEP per source_file is queueable).
+        # Mirror next_pending_keep_kernel_id same-file guard: only strongest KEEP per source_file is queueable.
         claimed_sources: set[str] = set()
         ranked: list[tuple[float, str, str]] = []
         for kid, entry in (self.kernel_opt_attempts or {}).items():
@@ -2167,46 +1621,31 @@ class SharedState:
 
     @property
     def has_keep_pending_integrate(self) -> bool:
+        """Whether any KEEP kernel is still awaiting integrate.
+
+        Returns:
+            bool: ``True`` when :meth:`next_pending_keep_kernel_id` is
+                non-empty.
+        """
         return bool(self.next_pending_keep_kernel_id())
 
     @property
     def kernel_opt_attempts_count(self) -> int:
+        """Number of distinct kernels with recorded kernel_opt attempts.
+
+        Returns:
+            int: The size of the ``kernel_opt_attempts`` ledger.
+        """
         return len(self.kernel_opt_attempts or {})
 
-    # ------------------------------------------------------------------
-    # Hot-kernel report gate: report cannot fire until meaningful
-    # reusable hot kernels have been attempted or explicitly rejected.
-    # ------------------------------------------------------------------
+    # Hot-kernel report gate: report blocked until meaningful reusable hot kernels are attempted/rejected.
     def untried_hot_reusable_kernels(
         self,
         *,
         min_gpu_pct: float | None = None,
         top_n: int | None = None,
     ) -> list[str]:
-        """Hot kernels still owing at least one ``kernel_opt`` attempt.
-
-        A kernel qualifies when it satisfies ALL of:
-          * ``reusable_native_kernel is True`` in ``last_trace_analyze``
-          * ``gpu_pct >= min_gpu_pct`` (default 3.0; override via
-            ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT``)
-          * no member of its ``task_group`` is already on
-            ``optimization_stack`` (i.e. nothing from this AST function
-            has been integrated)
-          * no member of its ``task_group`` appears in
-            ``rejected_kernel_ids`` (the whole group is "live")
-          * no member of its ``task_group`` has any
-            ``kernel_opt_attempts`` entry (zero attempts so far)
-          * its ``source_file`` has not been touched by any prior
-            ``integrate`` on the stack (same-file conflict guard)
-
-        The candidate set is capped to ``top_n`` (default 5; override
-        via ``HYPERLOOM_KERNEL_OPT_GATE_TOP_N``) by ``gpu_pct`` desc so
-        the gate cannot demand 15 tiny rmsnorms.
-
-        Each task_group contributes at most one kernel_id (the highest
-        ``gpu_pct`` member that satisfies the filters), matching what
-        ``_batch_kernel_candidates`` would actually dispatch.
-        """
+        """Hot kernels still owing a ``kernel_opt`` attempt (reusable, gpu_pct >= min_gpu_pct, untouched); capped to top_n by gpu_pct, one kernel_id per task_group."""
         info = self.last_trace_analyze or {}
         hot = info.get("hot_kernels_top15") or info.get("hot_kernels") or []
         task_groups = info.get("task_groups") or []
@@ -2244,11 +1683,7 @@ class SharedState:
         rejected = set(self.rejected_kernel_ids or [])
         attempts = self.kernel_opt_attempts or {}
 
-        # Collect every reusable hot row above threshold, then sort by
-        # gpu_pct desc so dedup picks the STRONGEST member of each
-        # task_group (otherwise prompt order would arbitrarily make the
-        # 24% kernel represent a group whose 37% sibling exists -- bad
-        # signal for the LLM).
+        # Sort by gpu_pct desc so dedup picks the strongest member of each task_group.
         rows: list[tuple[float, str, str, list[str]]] = []
         for k in hot:
             if not isinstance(k, dict):
@@ -2281,32 +1716,22 @@ class SharedState:
 
         untried: list[str] = []
         for _pct, kid, src, members in ranked:
-            # Whole task_group rejected -> skip
             if members and all(m in rejected for m in members):
                 continue
-            # Any member already integrated -> skip
             if any(m in integrated_ids for m in members):
                 continue
-            # Source already covered by a stack integrate -> skip
             if src and src in integrated_sources:
                 continue
-            # Any member has been tried -> skip
             if any(int((attempts.get(m) or {}).get("attempts", 0)) > 0
                    for m in members):
                 continue
             untried.append(kid)
         return untried
 
-    # ------------------------------------------------------------------
     # Per-action audit (kernel parity for non-kernel actions)
-    # ------------------------------------------------------------------
     @staticmethod
     def _truncate_excerpt(value: Any, *, limit: int = 800) -> str | None:
-        """Coerce ``value`` to str and trim to ``limit`` characters.
-
-        Returns None for falsy inputs so the prompt renderer can show
-        ``err=(none)`` instead of a quoted empty string.
-        """
+        """Coerce ``value`` to str and trim to ``limit`` chars; None for falsy inputs (renderer shows ``err=(none)``)."""
         if value is None:
             return None
         text = str(value)
@@ -2318,13 +1743,7 @@ class SharedState:
 
     @staticmethod
     def _stderr_tail(value: Any, *, limit: int = 1000) -> str | None:
-        """Pull the last ``limit`` characters from a subprocess error blob.
-
-        Distinct helper from :meth:`_truncate_excerpt` because subprocess
-        stderr usually has the actionable signal at the *end* (traceback,
-        last log line), while a free-form error message is informative
-        from the start.
-        """
+        """Pull the last ``limit`` chars from a subprocess error blob (stderr's actionable signal is at the end)."""
         if value is None:
             return None
         text = str(value)
@@ -2343,28 +1762,7 @@ class SharedState:
         extras: dict[str, Any] | None = None,
         max_history: int = _DEFAULT_ATTEMPTS_HISTORY,
     ) -> dict[str, Any] | None:
-        """Append one attempt to ``<action>_attempts`` and refresh ``last_<action>``.
-
-        Uniform entry schema (see audit-trail plan):
-
-            {ts, task_id, status, decision, key_metric, key_metric_kind,
-             workspace, error_class, error_excerpt, raw_result_path,
-             reported_success, extras}
-
-        ``status`` is ``"succeeded"`` or ``"failed"``; ``decision`` is the
-        Coordinator's interpretation of what it did with the result
-        (``"promoted"`` / ``"discarded"`` / ``"salvaged"`` /
-        ``"no_promote"`` / ``"error"``). ``extras`` is appended verbatim
-        for action-specific context (round_id, trace_path, etc.).
-
-        Returns the new entry dict (so callers can attach it to the event
-        log if useful), or ``None`` when ``action`` is not in the audit
-        set — kernel-owned actions go through their own bespoke recorders
-        and intentionally skip this surface.
-
-        Pure persistence helper: does NOT call :meth:`save`. The
-        Coordinator batches a single ``save()`` per dispatcher pass.
-        """
+        """Append one attempt to ``<action>_attempts`` and refresh ``last_<action>``. Entry schema {ts, task_id, status, decision, key_metric, key_metric_kind, workspace, error_class, error_excerpt, stderr_tail, raw_result_path, reported_success, extras}. Returns the entry, or None when ``action`` not in the audit set (kernel-owned actions use bespoke recorders). Does NOT call :meth:`save`."""
         if action not in _AUDIT_ACTIONS:
             return None
         attempts_attr = f"{action}_attempts"
@@ -2399,6 +1797,18 @@ class SharedState:
                 if result.get("error_class") else None
             ),
             "error_excerpt": self._truncate_excerpt(result.get("error")),
+            # stderr_tail mirrors record_action_failure: only for subprocess
+            # failures, so the breakdown exporter can surface the raw crash.
+            "stderr_tail": (
+                self._stderr_tail(result.get("error"))
+                if str(result.get("error_class") or "")
+                in {"subprocess_nonzero", "timeout"}
+                else None
+            ),
+            "stderr_log_path": (
+                str(result.get("stderr_log_path"))
+                if result.get("stderr_log_path") else None
+            ),
             "raw_result_path": (
                 str(result.get("raw_result_path"))
                 if result.get("raw_result_path") else None
@@ -2422,32 +1832,7 @@ class SharedState:
         result: dict[str, Any] | None,
         max_history: int = _DEFAULT_LAST_FAILURES,
     ) -> dict[str, Any]:
-        """Append one rich failure record to :attr:`last_action_failures`.
-
-        Carries the failure context Orchestration needs to self-correct
-        even after the inbox has rotated past the matching
-        ``delegated_result`` event:
-
-        * ``error_class``        — short tag from the executor (e.g.
-          ``"no_report"`` / ``"invalid_measurement"`` /
-          ``"subprocess_nonzero"`` / ``"timeout"``).
-        * ``error_excerpt``      — first 800 chars of ``result['error']``.
-        * ``stderr_tail``        — last 1000 chars of ``result['error']``
-          when ``error_class`` looks like a subprocess failure
-          (``subprocess_nonzero`` / ``timeout``).
-        * ``workspace``          — per-task workspace path the executor
-          materialized (the place the operator would dig into next).
-        * ``raw_result_path``    — set by
-          :func:`extract_benchmark_measurement` when it salvaged a raw
-          inferencex_result.json (so Orchestration can see *where* the
-          rescue came from).
-        * ``reported_success``   — what the wrapper claimed
-          (``benchmark_report.json:success``).
-
-        Unlike :meth:`record_action_attempt` this is invoked for **every**
-        unpromotable task kind — kernel-owned actions land here too so
-        the global failure tail is comprehensive.
-        """
+        """Append one rich failure record to :attr:`last_action_failures` for self-correction; invoked for EVERY unpromotable task kind, unlike :meth:`record_action_attempt`."""
         result = result or {}
         error_class = result.get("error_class")
         error_class_str = str(error_class) if error_class else None
@@ -2461,6 +1846,10 @@ class SharedState:
                 self._stderr_tail(result.get("error"))
                 if error_class_str in {"subprocess_nonzero", "timeout"}
                 else None
+            ),
+            "stderr_log_path": (
+                str(result.get("stderr_log_path"))
+                if result.get("stderr_log_path") else None
             ),
             "workspace": (
                 str(result.get("workspace"))
@@ -2479,38 +1868,42 @@ class SharedState:
         self.last_action_failures = history
         return entry
 
+    def _resolve_baseline_achieved_tput(self) -> float:
+        """Baseline throughput for a baseline-arm roofline snapshot.
+
+        Prefers ``baseline_tput``; falls back to ``last_baseline``'s
+        ``tput``/``output_throughput`` so a state that lost ``baseline_tput``
+        still stamps an achieved value (avoids an empty within/gap pct).
+        """
+        if isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
+            return float(self.baseline_tput)
+        last_bl = self.last_baseline if isinstance(self.last_baseline, dict) else {}
+        for key in ("tput", "output_throughput"):
+            val = last_bl.get(key)
+            if isinstance(val, (int, float)) and val > 0:
+                return float(val)
+        return 0.0
+
+    def _resolve_current_best_achieved_tput(self) -> float:
+        """Optimized-arm throughput for a current_best roofline snapshot.
+
+        Reads ``current_best``'s ``tput``/``output_throughput`` so a
+        current_best-tagged snapshot keeps its arm even when ``tput`` is
+        momentarily absent (avoids silently downgrading to the baseline arm).
+        """
+        cb = self.current_best if isinstance(self.current_best, dict) else {}
+        for key in ("tput", "output_throughput"):
+            val = cb.get(key)
+            if isinstance(val, (int, float)) and val > 0:
+                return float(val)
+        return 0.0
+
     def record_trace_analyze(
         self,
         payload: dict[str, Any],
         result: dict[str, Any],
     ) -> None:
-        """write the canonical 11-field ``last_trace_analyze`` dict.
-
-        Called by :class:`RooflineExecutor` after a successful
-        ``trace_analyze`` sub-step, and by the inline programmatic
-        handler path in :meth:`Coordinator._handle_request` when an LLM
-        emits a ``trace_analyze`` request directly. Single canonical
-        writer for this cache.
-
-        On every successful call, ``roofline_snapshot_id`` is read from the
-        previous ``last_trace_analyze`` and incremented by one — giving a
-        monotonic counter the orchestration prompt + the watermark-driven
-        freshness gate (:meth:`Coordinator._needs_roofline_for_watermark`)
-        both rely on. ``roofline_baseline_gain_at_snapshot`` captures
-        ``cumulative_gain_validated`` at write time so the prompt can
-        surface the gain delta since the report was taken.
-
-        A compact copy is also appended to
-        :attr:`roofline_snapshots` (PR #321 retired the legacy
-        ``last_trace_analyze_baseline`` field; the history list is the
-        new source for ``report.py``'s ``## Roofline Comparison``
-        before/after view).
-
-        ``analysis_md_text`` is read verbatim from
-        ``result['trace_report_path']``; OSErrors degrade silently to
-        empty text (the ``analysis_md_path`` field still lets a future
-        ``read_artifact`` intent re-fetch it on demand).
-        """
+        """Write the canonical 11-field ``last_trace_analyze`` dict (single writer). ``roofline_snapshot_id`` increments monotonically; PR #321 retired ``last_trace_analyze_baseline`` (roofline_snapshots feeds report.py Roofline Comparison)."""
         if not isinstance(result, dict):
             return
         trace_input = (
@@ -2559,9 +1952,7 @@ class SharedState:
             summary_entry = {
                 "kernel_id": kid,
                 "name": entry.get("name"),
-                # TraceLens derive_kernel_category bucket (MoE / LayerNorm /
-                # GEMM / ...). Without this passthrough downstream consumers
-                # (kernel_attempt_summary by_kernel rows) get an empty string.
+                # TraceLens kernel_category bucket; passthrough or downstream by_kernel rows get empty string.
                 "kernel_category": entry.get("kernel_category") or "",
                 "gpu_pct": entry.get("gpu_pct"),
                 "bottleneck": entry.get("bottleneck"),
@@ -2598,15 +1989,7 @@ class SharedState:
             if reusable and kid:
                 reusable_ids.append(str(kid))
 
-        # Project the skipped (non-routable) candidates so the prompt can
-        # show the LLM that these operators were *seen* but cannot be
-        # optimized (e.g. "source file not resolved"). Without this the
-        # structured block renders an empty candidate list whenever
-        # hot_kernels is empty, leaving analysis.md's operator names as the
-        # only kernel identifiers in the prompt -- which the LLM then echoes
-        # as a hallucinated kernel_id (operator names are also non-unique,
-        # e.g. several k00x all named ``aten::mm``). Surfacing (id, name,
-        # reason) lets the LLM avoid re-requesting them by id.
+        # Project skipped (non-routable) candidates so the LLM sees unoptimizable operators and doesn't hallucinate kernel_ids.
         skipped = result.get("skipped_kernels") or []
         skipped_summary: list[dict[str, Any]] = []
         if isinstance(skipped, list):
@@ -2642,13 +2025,7 @@ class SharedState:
         analysis_md_text = ""
         if analysis_md_path:
             try:
-                # Stored verbatim, but the prompt path strips embedded
-                # base64 data-URLs before injection (see
-                # ``_format_analysis_md_full`` /
-                # ``strip_base64_data_urls``). A raw analysis.md can be
-                # ~120K tokens of base64 images; post-strip it is ~6K
-                # tokens of actual report text. NEVER inject this field
-                # raw — always go through the strip helper.
+                # Stored verbatim; prompt path strips base64 data-URLs via strip_base64_data_urls.
                 analysis_md_text = Path(analysis_md_path).read_text(
                     encoding="utf-8", errors="replace",
                 )
@@ -2678,44 +2055,63 @@ class SharedState:
             ),
             "ts": ts_iso,
         }
-        # Mirror the snapshot id at the top level so PolicyGate /
-        # Coordinator can read it without the nested-dict lookup.
+        # Top-level mirror so PolicyGate/Coordinator skip the nested-dict lookup.
         self.roofline_snapshot_id = snapshot_id
 
-        # Append a compact history entry for the report-side Roofline
-        # Comparison renderer. Parses analysis.md once at write time so
-        # the renderer never has to (and the snapshot survives even if
-        # the on-disk file is later deleted). Best-effort: parsing
-        # errors degrade silently to None fields.
+        # Append compact history for report-side Roofline Comparison; best-effort, parse errors degrade to None.
         try:
             from .roofline_snapshot import build_roofline_snapshot
-            # Stamp decode-roofline ceiling + measured throughput so
-            # the dashboard can surface "% within roofline" without
-            # re-reading model files. Ceiling is a session-level
-            # constant (hardware + model + isl/osl don't change),
-            # achieved tput is current_best.tput if optimization has
-            # produced a winner, else baseline_tput.
+            # Stamp decode-roofline ceiling (session constant) + measured tput (current_best.tput else baseline_tput).
             from .roofline_ceiling import (
                 RooflineBreakdown,
                 compute_roofline_breakdown_from_state,
                 compute_roofline_from_perfmodel,
                 load_model_meta,
             )
-            # Primary decode ceiling plus matching memory/compute sides.
-            # PerfModel uses one bottom-up formula; legacy is fallback only.
-            breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
-            try:
-                breakdown = compute_roofline_breakdown_from_state(self)
-            except Exception:  # noqa: BLE001 — ceiling is best-effort
-                pass
-            peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
+            # Resolve which arm this snapshot measures FIRST so the ceiling's
+            # precision is anchored to the SAME arm as achieved: a baseline
+            # snapshot keeps its dtype on baseline even after current_best is
+            # promoted (else a later fp8 best would retro-inflate the ceiling).
+            # An explicit ``roofline_arm`` on the payload wins — a delayed
+            # PRELUDE roofline must record as baseline even though current_best
+            # has already been promoted by warm-replay. Absent it, fall back to
+            # inferring the arm from current_best.tput.
+            forced_arm = str((payload or {}).get("roofline_arm") or "").strip()
+            # Unknown arm values fall through to current_best inference; warn so
+            # a typo'd payload tag is visible instead of silently mis-anchored.
+            if forced_arm and forced_arm not in ("baseline", "current_best"):
+                log.warning(
+                    "record_trace_analyze: ignoring unknown roofline_arm=%r; "
+                    "falling back to current_best inference", forced_arm,
+                )
+                forced_arm = ""
             achieved_tput = 0.0
             cb = self.current_best if isinstance(self.current_best, dict) else {}
             cb_tput = cb.get("tput")
-            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+            if forced_arm == "baseline":
+                snapshot_arm = "baseline"
+                achieved_tput = self._resolve_baseline_achieved_tput()
+            elif forced_arm == "current_best":
+                # Explicit tag wins: keep the optimized arm even if tput is
+                # momentarily absent, never downgrade to baseline (the profile
+                # actually ran current_best params, so the ceiling must match).
+                snapshot_arm = "current_best"
+                achieved_tput = self._resolve_current_best_achieved_tput()
+            elif isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                snapshot_arm = "current_best"
                 achieved_tput = float(cb_tput)
-            elif isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
-                achieved_tput = float(self.baseline_tput)
+            else:
+                snapshot_arm = "baseline"
+                achieved_tput = self._resolve_baseline_achieved_tput()
+            # Primary decode ceiling plus memory/compute sides; PerfModel bottom-up formula, legacy is fallback only.
+            breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
+            try:
+                breakdown = compute_roofline_breakdown_from_state(
+                    self, arm=snapshot_arm,
+                )
+            except Exception:  # noqa: BLE001 — ceiling is best-effort
+                pass
+            peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
             history_entry = build_roofline_snapshot(
                 snapshot_id=snapshot_id,
                 ts=ts_iso,
@@ -2728,25 +2124,58 @@ class SharedState:
             )
             # Per-op PerfModel breakdown for dashboard visualization.
             try:
+                from .roofline_ceiling import resolve_runtime_workload
+                runtime = resolve_runtime_workload(self, arm=snapshot_arm)
                 meta = load_model_meta(
-                    getattr(self, "model_path", ""),
-                    precision_hint=str(getattr(self, "precision", "") or ""),
+                    runtime.model_path,
+                    precision_hint=runtime.precision,
                 )
                 if meta is not None:
-                    from .roofline_ceiling import _resolve_effective_concurrency
+                    from .roofline_ceiling import (
+                        apply_runtime_dtype,
+                        resolve_runtime_dtype,
+                    )
+                    eff_conc = runtime.concurrency
+                    # Use the dtype the run actually read (e.g. fp8 over a
+                    # float32 checkpoint), not the on-disk torch_dtype; pinned
+                    # to this snapshot's arm so baseline keeps baseline dtype.
+                    rt = resolve_runtime_dtype(self, meta, arm=snapshot_arm)
+                    meta = apply_runtime_dtype(meta, rt)
                     pm_bd = compute_roofline_from_perfmodel(
                         meta=meta,
-                        gpu_type=str(getattr(self, "gpu_type", "") or ""),
-                        concurrency=_resolve_effective_concurrency(self),
-                        isl=int(getattr(self, "isl", 0) or 0),
-                        osl=int(getattr(self, "osl", 0) or 0),
-                        num_gpus=int(getattr(self, "tp", 0) or 0),
-                        precision_tag=str(getattr(self, "precision", "") or "bf16") or "bf16",
+                        gpu_type=runtime.gpu_type,
+                        concurrency=eff_conc,
+                        isl=runtime.isl,
+                        osl=runtime.osl,
+                        num_gpus=runtime.tp,
+                        precision_tag=rt.compute_precision_tag
+                        or runtime.precision
+                        or "bf16",
                     )
+                    # Tag the formula by what actually produced the ceiling:
+                    # ``perfmodel`` only when the bottom-up model succeeded,
+                    # else ``legacy`` (fallback aggregate in the breakdown).
+                    history_entry["roofline_provenance"] = {
+                        "formula": "perfmodel" if pm_bd is not None else "legacy",
+                        "runtime_weight_dtype": rt.weight_dtype_tag,
+                        "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
+                        "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,
+                        "quantization": rt.quantization,
+                        "dtype_source": rt.source,
+                        "effective_concurrency": eff_conc,
+                        "runtime_tp": runtime.tp,
+                        "runtime_isl": runtime.isl,
+                        "runtime_osl": runtime.osl,
+                        "runtime_precision": runtime.precision,
+                        "runtime_framework": runtime.framework,
+                    }
                     if pm_bd is not None:
                         history_entry["perfmodel_breakdown"] = {
                             "decode_tok_per_s": pm_bd.decode_tok_per_s,
                             "prefill_tok_per_s": pm_bd.prefill_tok_per_s,
+                            "decode_mem_tok_per_s": pm_bd.decode_mem_tok_per_s,
+                            "decode_cmp_tok_per_s": pm_bd.decode_cmp_tok_per_s,
+                            "bound_kind": pm_bd.bound_kind,
                             "hbm_bw_gbps": pm_bd.hbm_bw_gbps,
                             "peak_achievable_tflops": pm_bd.peak_achievable_tflops,
                             "ops": [
@@ -2766,17 +2195,13 @@ class SharedState:
                 pass
             history_entry["trace_input"] = str(trace_input)
             history_entry["analysis_md_path"] = str(analysis_md_path)
-            # 9fe4609 sidecar artifact pointer: dashboards read this
-            # path to surface per-kernel roofline data from the
-            # tracelens-written ``reports/kernel_roofline.json``.
+            # 9fe4609 sidecar artifact pointer for per-kernel roofline data.
             history_entry["kernel_roofline_path"] = str(kernel_roofline_path)
             if not isinstance(self.roofline_snapshots, list):
                 self.roofline_snapshots = []
             self.roofline_snapshots.append(history_entry)
             if len(self.roofline_snapshots) > _ROOFLINE_SNAPSHOTS_CAP:
-                # Drop oldest non-baseline entries; always keep
-                # snapshot #1 so the report's "baseline" anchor never
-                # rotates away.
+                # Always keep snapshot #1 so the report's baseline anchor never rotates away.
                 base = self.roofline_snapshots[0]
                 tail = self.roofline_snapshots[-(_ROOFLINE_SNAPSHOTS_CAP - 1):]
                 self.roofline_snapshots = [base, *tail]
@@ -2784,6 +2209,16 @@ class SharedState:
             pass
 
     def record_sweep(self, result: dict[str, Any]) -> None:
+        """Snapshot the most recent workload sweep into ``last_sweep``.
+
+        Selects the best succeeded grid entry by ``output_throughput`` and
+        records grid size, per-concurrency bests, the Pareto front, and the
+        workspace path.
+
+        Args:
+            result (dict[str, Any]): The sweep executor result envelope. A
+                non-dict result is a no-op.
+        """
         if not isinstance(result, dict):
             return
         grid = result.get("sweep_grid") or []
@@ -2809,18 +2244,7 @@ class SharedState:
         }
 
     def record_conc_sweep(self, result: dict[str, Any]) -> None:
-        """Record conc_sweep task completion (mirrors record_sweep).
-
-        Bug #12 fix: ``phase_state.exit_normal_sweep`` previously only
-        looked at ``last_sweep.status`` to fire ``sweep_done``. When the
-        SWEEP phase reaches its terminal state via conc_sweep alone (e.g.
-        sweep was singleton-blocked or completed in a prior session and
-        only conc_sweep runs in this resume), the phase had no exit
-        signal and idled until ``sweep_budget_exhausted``. Writing
-        ``last_conc_sweep.status`` lets ``exit_normal_sweep`` return
-        ``conc_sweep_done`` and the SWEEP→CLOSE transition fires
-        immediately after conc_sweep settles.
-        """
+        """Record conc_sweep task completion (mirrors record_sweep). Bug #12: status lets exit_normal_sweep return conc_sweep_done so SWEEP→CLOSE fires on conc_sweep alone."""
         if not isinstance(result, dict):
             return
         self.last_conc_sweep = {
@@ -2833,17 +2257,9 @@ class SharedState:
             "workspace":        str(result.get("workspace") or ""),
         }
 
-    # ------------------------------------------------------------------
     # specialist round bookkeeping
-    # ------------------------------------------------------------------
     def record_specialist_round(self, entry: dict[str, Any]) -> None:
-        """Append one round summary to ``specialist_rounds``.
-
-        Coordinator calls this once all dispatched specialists in a
-        round have terminated (either via specialist_done or empty
-        synthesise). Idempotent on ``round_id``: a re-record with the
-        same id overwrites the latest entry rather than duplicating.
-        """
+        """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites)."""
         if not isinstance(entry, dict) or not entry:
             return
         round_id = str(entry.get("round_id") or "").strip()
@@ -2860,12 +2276,7 @@ class SharedState:
     def bump_specialist_domain_empty_streak(
         self, domain: str, *, empty: bool,
     ) -> int:
-        """Increment / reset the per-domain empty-proposal streak.
-
-        Returns the new streak value (0 when reset). The streak
-        threshold for escalation is read by Robustness from
-        ``KB_design §3.9`` and is not encoded here.
-        """
+        """Increment/reset the per-domain empty-proposal streak; returns new value (escalation threshold lives in ``KB_design §3.9``, not here)."""
         d = str(domain or "").strip() or "unknown"
         if empty:
             self.specialist_domain_empty_streak[d] = int(
@@ -2875,16 +2286,9 @@ class SharedState:
             self.specialist_domain_empty_streak[d] = 0
         return self.specialist_domain_empty_streak[d]
 
-    # ------------------------------------------------------------------
     # gaps ledger helpers
-    # ------------------------------------------------------------------
     def find_gap(self, canonical_id: str) -> dict[str, Any] | None:
-        """Return the gap entry matching ``canonical_id`` (or ``None``).
-
-        Coordinator's :meth:`_warm_specialist_params` calls this to
-        attach ``gap_symptom`` / ``gap_layer`` / ``gap_attempts`` onto
-        a specialist task before dispatch.
-        """
+        """Return the gap entry matching ``canonical_id`` (or ``None``)."""
         if not canonical_id:
             return None
         cid = str(canonical_id)
@@ -2894,17 +2298,7 @@ class SharedState:
         return None
 
     def upsert_gap(self, entry: dict[str, Any]) -> dict[str, Any]:
-        """Insert or update one gap row, keyed by ``canonical_id``.
-
-        Merges ``attempts`` (existing + incoming, capped at the most
-        recent :data:`_GAPS_ATTEMPTS_HISTORY` rows by ``ts``). Updates
-        ``last_updated_ts`` to ``now``; preserves the original
-        ``first_seen_ts`` when present.
-
-        Coordinator-only writer (Inv-1 single-writer + PolicyGate
-        ``CORE_STATE_FIELDS`` lock). Returns the merged entry so the
-        caller can keep working with the canonical row.
-        """
+        """Insert or update one gap row, keyed by ``canonical_id``. Coordinator-only writer (Inv-1 single-writer + CORE_STATE_FIELDS lock). Returns the merged entry."""
         if not isinstance(entry, dict):
             return {}
         cid = str(entry.get("canonical_id") or "").strip()
@@ -2920,22 +2314,17 @@ class SharedState:
                 "severity":        str(entry.get("severity") or "medium"),
                 "domain_hint":     str(entry.get("domain_hint") or ""),
                 "source":          str(entry.get("source") or ""),
-                # Origin reference (e.g. a research-hint PR/blog URL) that
-                # outlives the session so KEEP/REVERT outcomes can be
-                # sedimented into the recipe with provenance. Optional;
-                # absent on gaps without an external origin.
+                # Optional origin reference (PR/blog URL) sedimented into the recipe with KEEP/REVERT provenance.
                 "provenance":      str(entry.get("provenance") or ""),
                 "first_seen_ts":   str(entry.get("first_seen_ts") or now),
                 "last_updated_ts": now,
                 "attempts":        list(entry.get("attempts") or []),
             }
-            # Trim attempts to the cap to be safe.
             if len(merged["attempts"]) > _GAPS_ATTEMPTS_HISTORY:
                 merged["attempts"] = merged["attempts"][-_GAPS_ATTEMPTS_HISTORY:]
             self.gaps.append(merged)
         else:
-            # Field-wise merge: incoming non-empty values win except
-            # for ``first_seen_ts`` (preserve oldest).
+            # Field-wise merge: incoming non-empty values win except ``first_seen_ts`` (preserve oldest).
             for key in ("symptom", "layer", "severity", "domain_hint",
                         "source", "provenance"):
                 incoming = entry.get(key)
@@ -2946,21 +2335,26 @@ class SharedState:
             incoming_attempts = list(entry.get("attempts") or [])
             if incoming_attempts:
                 merged_attempts = list(existing.get("attempts") or []) + incoming_attempts
-                # Capped tail; the cap dominates ordering — callers
-                # supply newest-last lists which is the convention used
-                # everywhere else (e.g. ``last_action_failures``).
+                # Capped tail; callers supply newest-last lists (convention).
                 if len(merged_attempts) > _GAPS_ATTEMPTS_HISTORY:
                     merged_attempts = merged_attempts[-_GAPS_ATTEMPTS_HISTORY:]
                 existing["attempts"] = merged_attempts
             merged = existing
-        # Enforce the global cap. We trim oldest (by last_updated_ts when
-        # available, falling back to insertion order). Trimming runs after
-        # the upsert so the just-touched gap is always retained.
+        # Enforce global cap, trimming oldest after the upsert so the just-touched gap is retained.
         if len(self.gaps) > _GAPS_MAX_ENTRIES:
             keep_cid = cid
             others = [g for g in self.gaps if g is not merged]
 
             def _sort_key(g: dict[str, Any]) -> str:
+                """Sort key for gap trimming: newest-updated timestamp.
+
+                Args:
+                    g (dict[str, Any]): A gap row.
+
+                Returns:
+                    str: ``last_updated_ts`` (falling back to
+                        ``first_seen_ts`` then ``""``) for chronological sort.
+                """
                 return str(g.get("last_updated_ts") or g.get("first_seen_ts") or "")
 
             others.sort(key=_sort_key)
@@ -2975,12 +2369,7 @@ class SharedState:
         canonical_id: str,
         attempt: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Append one attempt row to an existing gap.
-
-        Returns the updated gap entry or ``None`` when the gap is not
-        known yet (caller may decide to ``upsert_gap`` with a freshly
-        synthesised symptom in that case).
-        """
+        """Append one attempt row to an existing gap; returns the gap or ``None`` when unknown (caller may ``upsert_gap`` instead)."""
         gap = self.find_gap(canonical_id)
         if gap is None:
             return None
@@ -2993,12 +2382,7 @@ class SharedState:
         return gap
 
     def replace_gaps(self, entries: list[dict[str, Any]]) -> None:
-        """Bulk-replace ``gaps`` with a fresh dedup'd list.
-
-        Used by :meth:`Coordinator._refresh_gaps` when the rebuild
-        wants to discard stale rows wholesale (e.g. after a Cortex
-        traverse returned a new canonical set). Idempotent.
-        """
+        """Bulk-replace ``gaps`` with a fresh dedup'd list (discards stale rows wholesale); idempotent."""
         if not isinstance(entries, list):
             return
         dedup: dict[str, dict[str, Any]] = {}
@@ -3033,15 +2417,7 @@ class SharedState:
         task_id: str = "",
         delta_pct: float | None = None,
     ) -> None:
-        """Append one intervention entry and update config-only counters.
-
-        ``change_type`` is normalised to lowercase. Unknown values
-        ("kernel", "noop", ...) are still appended (the ledger is
-        descriptive); the consecutive-config counter only advances on
-        explicit ``"config"`` values and resets on ``"code_patch"``.
-        ``"code_patch_attempt"`` satisfies exploration-depth accounting
-        without counting as a kept code patch.
-        """
+        """Append one intervention entry and update config-only counters. consecutive-config counter advances on ``"config"``, resets on ``"code_patch"``; ``"code_patch_attempt"`` is telemetry-only."""
         ct = str(change_type or "").strip().lower()
         entry = {
             "change_type": ct,
@@ -3057,24 +2433,20 @@ class SharedState:
             )
         elif ct == "code_patch":
             self.consecutive_config_only_rounds = 0
-        self.bump_depth_patch(ct)
 
     def get_intervention_mix(self, *, recent_window: int = 5) -> dict[str, Any]:
-        """Summarise the intervention-mix ledger as derived counts.
-
-        Returns config vs code_patch totals over the whole ledger and
-        the most recent ``recent_window`` entries, plus
-        ``consecutive_config_only`` (length of the trailing config-only
-        run) and ``config_heavy`` (config has dominated and no code
-        patch has landed). Read-only; never raises.
-
-        Entries with an unknown ``change_type`` (e.g. analysis-only
-        rounds) are ignored for the config/code tallies but still break
-        the trailing config-only run.
-        """
+        """Summarise the intervention-mix ledger as derived counts (config vs code_patch totals, recent window, consecutive_config_only, config_heavy). Read-only; unknown change_types ignored in tallies but break the trailing config-only run."""
         ledger = [e for e in (self.intervention_mix or []) if isinstance(e, dict)]
 
         def _ct(entry: dict[str, Any]) -> str:
+            """Return an entry's normalized ``change_type`` string.
+
+            Args:
+                entry: A single intervention-mix ledger entry.
+
+            Returns:
+                The lowercased, stripped change type (empty if absent).
+            """
             return str(entry.get("change_type") or "").strip().lower()
 
         total_config = sum(1 for e in ledger if _ct(e) == "config")
@@ -3111,22 +2483,14 @@ class SharedState:
         }
 
     def bump_specialist_dispatched(self, n: int = 1) -> int:
-        """Increment the per-EXPLORE specialist dispatch counter.
-
-        Returns the post-increment value so callers can act on it
-        inline (e.g. a robustness storm threshold).
-        """
+        """Increment the per-EXPLORE specialist dispatch counter; returns post-increment value."""
         self.explore_specialist_dispatched_count = (
             int(self.explore_specialist_dispatched_count or 0) + int(n)
         )
         return self.explore_specialist_dispatched_count
 
     def reset_specialist_dispatched(self) -> None:
-        """Zero the per-EXPLORE specialist dispatch counter.
-
-        Called by Coordinator on phase transition into a fresh
-        EXPLORE entry.
-        """
+        """Zero the per-EXPLORE specialist dispatch counter (on fresh EXPLORE entry)."""
         self.explore_specialist_dispatched_count = 0
 
     def bump_research_scout_runs(self, n: int = 1) -> int:
@@ -3135,11 +2499,7 @@ class SharedState:
         return self.research_scout_runs
 
     def register_seen_pr_ids(self, pr_ids: Any) -> int:
-        """Add PR ids to the shared seen-set (scout + FRAMEWORK_PR dedup).
-
-        Ids are normalised to strings; duplicates and blanks are ignored.
-        Returns the number of newly-added ids.
-        """
+        """Add PR ids to the shared seen-set (scout + FRAMEWORK_PR dedup); returns count newly added."""
         seen = set(self.research_scout_seen_pr_ids or [])
         added = 0
         for raw in pr_ids or []:
@@ -3156,136 +2516,23 @@ class SharedState:
         pid = str(pr_id or "").strip()
         return bool(pid) and pid in set(self.research_scout_seen_pr_ids or [])
 
-    # ------------------------------------------------------------------
-    # Exploration-depth tracker
-    # ------------------------------------------------------------------
-    def _depth(self) -> dict[str, Any]:
-        """Return the depth_tracker sub-dict, repairing a missing / stale
-        shape so old state.json loads degrade to defaults."""
-        dt = self.depth_tracker
-        if not isinstance(dt, dict):
-            dt = {}
-            self.depth_tracker = dt
-        dt.setdefault("enabled", True)
-        for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs_compared"):
-            if not isinstance(dt.get(key), list):
-                dt[key] = []
-        for key in ("code_patches_attempted", "config_changes_attempted",
-                    "consecutive_reverts"):
-            try:
-                dt[key] = int(dt.get(key) or 0)
-            except (TypeError, ValueError):
-                dt[key] = 0
-        return dt
-
-    def set_depth_gate_enabled(self, enabled: bool) -> None:
-        self._depth()["enabled"] = bool(enabled)
-
-    def depth_gate_enabled(self) -> bool:
-        return bool(self._depth().get("enabled", True))
-
-    def _depth_register_ids(self, key: str, ids: Any) -> int:
-        dt = self._depth()
-        seen = set(dt.get(key) or [])
-        added = 0
-        for raw in ids or []:
-            val = str(raw or "").strip()
-            if not val or val in seen:
-                continue
-            seen.add(val)
-            dt[key].append(val)
-            added += 1
-        return added
-
-    def register_research_evidence(
-        self,
-        *,
-        prs_fetched: Any = None,
-        pr_diffs_read: Any = None,
-        nvidia_refs_compared: Any = None,
-    ) -> dict[str, int]:
-        """De-dup research evidence into the depth tracker; return per-key
-        added counts. Used when aggregating ``specialist_done.research``."""
-        return {
-            "prs_fetched": self._depth_register_ids("prs_fetched", prs_fetched),
-            "pr_diffs_read": self._depth_register_ids(
-                "pr_diffs_read", pr_diffs_read,
-            ),
-            "nvidia_refs_compared": self._depth_register_ids(
-                "nvidia_refs_compared", nvidia_refs_compared,
-            ),
-        }
-
-    def bump_depth_patch(self, change_type: str) -> None:
-        """Advance the code/config patch-attempt counters from a KEEP."""
-        dt = self._depth()
-        ct = str(change_type or "").strip().lower()
-        if ct in ("code_patch", "code_patch_attempt"):
-            dt["code_patches_attempted"] = int(
-                dt.get("code_patches_attempted") or 0
-            ) + 1
-        elif ct == "config":
-            dt["config_changes_attempted"] = int(
-                dt.get("config_changes_attempted") or 0
-            ) + 1
-
+    # Explore plateau proxy
     def reset_explore_plateau_proxy(self) -> None:
-        """Reset the retained legacy explore plateau proxy."""
+        """Reset the legacy explore plateau proxy counter."""
         self.params_no_promote_streak = 0
 
-    def note_explore_outcome(self, *, promoted: bool) -> int:
-        """Update explore outcome counters after one explore task.
-
-        A promoted KEEP resets both the depth gate's revert streak and the
-        retained legacy plateau proxy. A no-promote round increments both.
-        Returns the post-update depth-gate revert streak.
-        """
-        dt = self._depth()
+    def note_explore_outcome(self, *, promoted: bool) -> None:
+        """Update the legacy plateau proxy after one explore task (KEEP resets, no-promote increments)."""
         if promoted:
-            dt["consecutive_reverts"] = 0
             self.reset_explore_plateau_proxy()
         else:
-            dt["consecutive_reverts"] = int(
-                dt.get("consecutive_reverts") or 0
-            ) + 1
             self.params_no_promote_streak += 1
-        return int(dt["consecutive_reverts"])
-
-    def depth_snapshot(self) -> dict[str, Any]:
-        """Read-only normalised view of the depth tracker for the gate /
-        prompt (sets rendered as counts + the underlying id lists)."""
-        dt = self._depth()
-        return {
-            "enabled": bool(dt.get("enabled", True)),
-            "research_scout_runs": int(self.research_scout_runs or 0),
-            "prs_fetched": list(dt.get("prs_fetched") or []),
-            "pr_diffs_read": list(dt.get("pr_diffs_read") or []),
-            "nvidia_refs_compared": list(dt.get("nvidia_refs_compared") or []),
-            "code_patches_attempted": int(dt.get("code_patches_attempted") or 0),
-            "config_changes_attempted": int(
-                dt.get("config_changes_attempted") or 0
-            ),
-            "consecutive_reverts": int(dt.get("consecutive_reverts") or 0),
-        }
 
     def to_intervention_mix_summary(self) -> str:
-        """Render the intervention ledger for the Orchestration prompt.
-
-        Returns ``""`` when the ledger is empty (nothing recorded yet — no
-        escalation possible). Otherwise returns a one-line counts summary,
-        plus an ``ESCALATION`` directive when the session has been
-        config-only for too long, nudging Orchestration to dispatch a
-        code-patch ``serving_specialist`` next. ``record_intervention``
-        maintains the ledger; this is its sole consumer.
-
-        Escalate when ``consecutive_config_only_rounds >= 2`` OR the ledger
-        is config-heavy (>= 5 config keeps) with zero code_patch keeps.
-        """
+        """Render the intervention ledger as neutral telemetry (one-line counts summary; ``""`` when empty). No directive emitted — config-vs-patch is the LLM's choice."""
         mix = self.intervention_mix or []
         if not mix:
             return ""
-        escalate_at = 2
-        config_heavy_at = 5
         n_config = sum(
             1 for m in mix if (m or {}).get("change_type") == "config"
         )
@@ -3298,230 +2545,20 @@ class SharedState:
                 "code_patch", "code_patch_attempt",
             )
         )
-        # Config explore rounds that measured but kept nothing still count
-        # toward escalation, so repeated fruitless tuning can hand off to a
-        # code-patch path even without a config KEEP.
         n_config_attempt = sum(
             1 for m in mix if (m or {}).get("change_type") == "config_attempt"
         )
         consec = int(self.consecutive_config_only_rounds or 0)
-        config_pressure = n_config + n_config_attempt
-        lines = [
+        return (
             f"config_keeps={n_config} config_attempts={n_config_attempt} "
             f"code_patch_keeps={n_patch} code_patch_attempts={n_patch_attempt} "
             f"consecutive_config_only_rounds={consec}"
-        ]
-        if (
-            consec >= escalate_at
-            or (n_config >= config_heavy_at and n_patch == 0)
-            or (config_pressure >= escalate_at and n_patch == 0)
-        ):
-            lines.append(
-                "ESCALATION: config-only for too long. Config tuning has a "
-                "low ceiling — your NEXT EXPLORE dispatch SHOULD delegate a "
-                "`serving_specialist` to author a framework SOURCE patch "
-                "(scheduler / kv_cache / chunked-prefill), integrated via "
-                "`integrate_patch`, rather than another config-only "
-                "`params` / `explore` round."
-            )
-        return "\n".join(lines)
-
-    def record_dynamic_action_dispatch(
-        self, dyn_id: str, summary: dict[str, Any],
-    ) -> int:
-        """Register a freshly-dispatched ``dynamic_action`` + bump the
-        per-round counter atomically.
-
-        Coordinator-only writer (CORE_STATE_FIELDS protects it from
-        LLM ``UPDATE_STATE``). Idempotent on ``dyn_id``: a re-record
-        overwrites the summary but does not double-bump the counter.
-        Returns the post-increment round counter value.
-        """
-        key = str(dyn_id or "").strip()
-        if not key:
-            return self.dynamic_action_round_count
-        was_new = key not in self.dynamic_actions
-        self.dynamic_actions[key] = dict(summary or {})
-        if was_new:
-            self.dynamic_action_round_count = int(
-                self.dynamic_action_round_count or 0
-            ) + 1
-        return self.dynamic_action_round_count
-
-    def reset_dynamic_action_round_count(self) -> None:
-        """Clear the per-EXPLORE round cap counter; the cumulative
-        ``dynamic_actions`` ledger is preserved across rounds."""
-        self.dynamic_action_round_count = 0
-
-    def record_dynamic_action_outcome(
-        self,
-        dyn_id: str,
-        *,
-        status: str,
-        last_outcome: str | None = None,
-        cumulative_gain: float | None = None,
-        extra: dict[str, Any] | None = None,
-    ) -> None:
-        """Transition-validated update of the summary row keyed by
-        ``dyn_id``.
-
-        Coordinator-only writer (``CORE_STATE_FIELDS`` guards it from
-        LLM ``UPDATE_STATE``). Only keys passed in are touched;
-        ``last_outcome`` defaults to the prompt-friendly label for
-        ``status``; ``last_updated_at`` is always refreshed. Illegal
-        transitions are logged and skipped so a buggy hook cannot
-        corrupt the audit trail.
-        """
-        # Local import avoids the cycle with
-        # :mod:`dynamic_action_proposal`.
-        from .dynamic_action_proposal import (
-            DynamicActionStatus,
-            LAST_OUTCOME_BY_STATUS,
-            can_transition,
         )
-
-        key = str(dyn_id or "").strip()
-        if not key:
-            return
-        import logging as _logging
-        _log = _logging.getLogger(__name__)
-        try:
-            target_status = DynamicActionStatus(
-                str(status or "").strip(),
-            )
-        except ValueError:
-            _log.warning(
-                "record_dynamic_action_outcome: unknown status=%r for "
-                "dyn_id=%s; dropping write",
-                status, key,
-            )
-            return
-        existing = dict(self.dynamic_actions.get(key) or {})
-        current_status_raw = existing.get("status")
-        current_status: DynamicActionStatus | None
-        if current_status_raw:
-            try:
-                current_status = DynamicActionStatus(str(current_status_raw))
-            except ValueError:
-                current_status = None
-        else:
-            current_status = None
-        if not can_transition(current_status, target_status):
-            _log.warning(
-                "record_dynamic_action_outcome: illegal transition "
-                "%s → %s for dyn_id=%s; preserving prior state",
-                current_status_raw or "(none)", target_status.value, key,
-            )
-            return
-        existing.setdefault("dyn_id", key)
-        existing["status"] = target_status.value
-        existing["last_outcome"] = str(
-            last_outcome
-            if last_outcome is not None
-            else LAST_OUTCOME_BY_STATUS.get(target_status, target_status.value.lower()),
-        )
-        if cumulative_gain is not None:
-            existing["cumulative_gain"] = float(cumulative_gain)
-        if extra:
-            for k, v in extra.items():
-                existing[k] = v
-        existing["last_updated_at"] = _now_iso()
-        self.dynamic_actions[key] = existing
-
-    def to_dynamic_actions_prompt_section(
-        self,
-        *,
-        max_entries: int = 5,
-        title: str = "Dynamic Action History",
-    ) -> str:
-        """Compact ``=== <title> ===`` block for orchestration prompt
-        injection.
-
-        Renders the most recent ``max_entries`` summaries sorted by
-        ``last_updated_at`` descending (stable tiebreak on
-        ``dyn_id``). Older rows are collapsed into an elision marker
-        pointing at the on-disk artefact dir. Returns the empty
-        string when no rows exist so callers can skip the section.
-        """
-        summaries = self.dynamic_actions or {}
-        if not summaries:
-            return ""
-        from .dynamic_action_proposal import (
-            DynamicActionStatus,
-            LAST_OUTCOME_BY_STATUS,
-        )
-
-        ordered = sorted(
-            summaries.items(),
-            key=lambda kv: (
-                str(kv[1].get("last_updated_at") or ""),
-                str(kv[0]),
-            ),
-            reverse=True,
-        )
-        recent = ordered[: max(0, int(max_entries))]
-        older = ordered[max(0, int(max_entries)):]
-        lines: list[str] = [f"=== {title} ==="]
-        for _dyn_id, summary in recent:
-            lines.append(self._format_dynamic_action_summary_row(
-                summary,
-                _last_outcome_lookup=LAST_OUTCOME_BY_STATUS,
-                _status_enum=DynamicActionStatus,
-            ))
-        if older:
-            lines.append(
-                f"... ({len(older)} more older entries; full list in "
-                f"$SESSION_DIR/agents/orchestration/dynamic_actions/)"
-            )
-        return "\n".join(lines)
-
-    @staticmethod
-    def _format_dynamic_action_summary_row(
-        summary: dict[str, Any],
-        *,
-        _last_outcome_lookup: dict | None = None,
-        _status_enum: Any | None = None,
-    ) -> str:
-        """Render one compact summary row (~50 tokens):
-
-            - <dyn_id> [<STATUS>, gain=<delta>%] scope=[d1,d2]
-              motivation: "<motivation_gap_short>"
-              artifact: <artifact_path>
-        """
-        dyn_id = str(summary.get("dyn_id") or "(unknown)")
-        status = str(summary.get("status") or "(unknown)")
-        scope = list(summary.get("scope_domains") or ())
-        motivation = str(summary.get("motivation_gap_short") or "").strip()
-        if not motivation:
-            motivation = "(no motivation summary)"
-        gain = summary.get("cumulative_gain")
-        gain_text = (
-            f"gain={gain:+.2f}%" if isinstance(gain, (int, float)) else "gain=n/a"
-        )
-        artifact = str(summary.get("artifact_path") or "(missing)")
-        last_outcome = str(summary.get("last_outcome") or "")
-        last_outcome_suffix = (
-            f" outcome={last_outcome}" if last_outcome else ""
-        )
-        head = (
-            f"- {dyn_id} [{status}, {gain_text}{last_outcome_suffix}] "
-            f"scope={scope!r}"
-        )
-        body = f'  motivation: "{motivation}"'
-        tail = f"  artifact: {artifact}"
-        return "\n".join((head, body, tail))
 
     def record_specialist_patch_verdict(
         self, specialist_task_id: str, verdict: str,
     ) -> None:
-        """Record the Critic verdict for a specialist worktree patch.
-
-        Idempotent: a later verdict overwrites an earlier one (the
-        Critic may produce a revised verdict after a needs_review
-        round-trip). Empty / falsy ``verdict`` clears the entry; this
-        is how an operator forces a re-review by deleting the prior
-        decision.
-        """
+        """Record the Critic verdict for a specialist worktree patch; idempotent (later verdict overwrites), empty ``verdict`` clears the entry to force re-review."""
         sid = str(specialist_task_id or "").strip()
         if not sid:
             return
@@ -3541,21 +2578,17 @@ class SharedState:
         return self.specialist_patch_verdicts.get(sid, "") or ""
 
     def update_last_specialist(self, snapshot: dict[str, Any]) -> None:
-        """Snapshot the most recent specialist task (parity with last_*)."""
+        """Snapshot the most recent specialist task (parity with last_*).
+
+        Args:
+            snapshot (dict[str, Any]): The specialist task snapshot to copy
+                into ``last_specialist``. A non-dict value is ignored.
+        """
         if isinstance(snapshot, dict):
             self.last_specialist = dict(snapshot)
 
     def apply_explore_search_update(self, update: dict[str, Any]) -> None:
-        """Merge an ExploreExecutor search update into persistent state.
-
-        v0.8 M3. The executor returns a ledger
-        increment containing ``tested`` (full fingerprint-keyed map),
-        ``rejected`` (list), ``winners_history`` increment,
-        ``synergy_attempted`` increment, ``last_round``, etc. The
-        executor never writes ``accepted`` directly —
-        :meth:`record_explore_accepted` is the single writer for that
-        bucket (Coordinator calls it on promote).
-        """
+        """Merge an ExploreExecutor search update into persistent state (v0.8 M3); executor never writes ``accepted`` directly — :meth:`record_explore_accepted` is the single writer for that bucket."""
         if not isinstance(update, dict):
             return
         prior = self.explore_search if isinstance(self.explore_search, dict) else {}
@@ -3593,26 +2626,14 @@ class SharedState:
             update.get("domains_round_summary")
             or prior.get("domains_round_summary") or []
         )
-        # Preserve any accepted bucket from prior runs; executor never
-        # writes accepted directly (record_explore_accepted does).
+        # Preserve accepted bucket from prior runs (record_explore_accepted is its writer).
         merged["accepted"] = list(prior.get("accepted") or [])
-        # Drop the merged_from_legacy_sig sentinel on each update so a
-        # subsequent SharedState load re-runs the legacy union (defensive
-        # against an interleaved fallback session writing into the
-        # old ledgers between save/load cycles).
+        # Drop merged_from_legacy_sig so a later load re-runs the legacy union (defensive vs interleaved fallback session).
         merged.pop("merged_from_legacy_sig", None)
         self.explore_search = merged
 
     def record_explore_accepted(self, variant: dict[str, Any]) -> None:
-        """Append one promoted variant to ``explore_search.accepted``.
-
-        Called by Coordinator after an explore winner survives both the
-        per-variant KEEP gate and the inlined stack rebench. Dedupes by
-        ``fingerprint`` so repeated promotes of the same content don't
-        bloat the list; also removes a matching entry from
-        ``rejected`` so a previously-rejected variant that later
-        promotes doesn't appear in both buckets.
-        """
+        """Append one promoted variant to ``explore_search.accepted``; dedupes by ``fingerprint`` and removes any matching ``rejected`` entry so a variant isn't in both buckets."""
         if not isinstance(variant, dict) or not variant:
             return
         from .action_executors._canonical_fingerprint import canonical_fingerprint
@@ -3651,8 +2672,7 @@ class SharedState:
         if entry["name"]:
             name_index[entry["name"]] = fp
         search["name_index"] = name_index
-        # Append a winners_history row so plateau judges can read this
-        # without crawling the optimization_stack.
+        # Append a winners_history row so plateau judges needn't crawl optimization_stack.
         wh = list(search.get("winners_history") or [])
         wh.append({
             "round_id": entry["accepted_at_round"],
@@ -3667,9 +2687,7 @@ class SharedState:
         search["winners_history"] = wh
         self.explore_search = search
 
-    # ------------------------------------------------------------------
     # search-space expansion bookkeeping
-    # ------------------------------------------------------------------
     def record_discovered_flags(
         self,
         *,
@@ -3678,17 +2696,7 @@ class SharedState:
         param_flags: list[str] | None = None,
         source_path: str = "",
     ) -> None:
-        """Persist the AST-discovered flag list for a framework.
-
-        Called by ExploreExecutor (and historically by the legacy
-        BackendsExecutor / ParamsExecutor) when they first run
-        ``discover_*_flags()`` on a fresh session. The Orchestration prompt
-        surfaces the union so the LLM can synthesize new GridVariant
-        candidates that the shipped DEFAULT_*_GRID may not cover.
-
-        Idempotent: re-recording overwrites the per-framework entry but
-        leaves other frameworks untouched.
-        """
+        """Persist the AST-discovered flag list for a framework; the prompt surfaces the union so the LLM synthesizes new GridVariants beyond DEFAULT_*_GRID. Idempotent per-framework."""
         fw = (framework or "").strip().lower() or "unknown"
         entry = dict(self.discovered_flags.get(fw) or {})
         if backend_flags is not None:
@@ -3700,20 +2708,15 @@ class SharedState:
         entry["ts"] = _now_iso()
         self.discovered_flags[fw] = entry
 
-    # ------------------------------------------------------------------
-    # scoring helpers removed
-    # ------------------------------------------------------------------
-    # There is no action-score API: the LLM consumes no system-side
-    # priority; decisions are based on facts (phase / gaps / KB /
-    # specialist rounds). ``increment_tick`` is a pure monotonic
-    # counter used by plateau / phase budget math.
+    # No action-score API; ``increment_tick`` is a pure monotonic counter for plateau/phase budget math.
     def increment_tick(self) -> int:
-        """Bump the Coordinator tick counter and return the new value."""
+        """Bump the Coordinator tick counter.
+
+        Returns:
+            int: The post-increment monotonic tick value.
+        """
         self.tick = int(self.tick or 0) + 1
         return self.tick
-
-    # Legacy action-score rendering is intentionally omitted: prompts now
-    # use factual state summaries instead of system-side numeric priority.
 
     def append_stack_gain_entry(
         self,
@@ -3724,23 +2727,7 @@ class SharedState:
         extra_server_args: str = "",
         ts: str | None = None,
     ) -> float | None:
-        """Mirror an optimization_stack append into gain_per_stack_entry.
-
-        Computes ``(new_tput - baseline_tput) / baseline_tput * 100``
-        and appends. Returns the computed gain_pct (None when
-        baseline_tput is 0 or new_tput is non-positive). Callers don't
-        usually consume the return value -- the list is the persisted
-        side-effect.
-
-        This method was a missing piece between main's
-        ``_lift_to_current_best`` (which calls it) and SharedState
-        (which previously only carried the ``gain_per_stack_entry``
-        field without an explicit mutator). Without this method, every
-        params/backends/integrate KEEP that promotes a winner crashes
-        with ``AttributeError``. Filling it in is a no-design-change
-        fix: the math + list append were already implied by the
-        adjacent comments on the call sites.
-        """
+        """Mirror an optimization_stack append into gain_per_stack_entry; computes ``(new_tput-baseline_tput)/baseline_tput*100`` and appends. Returns gain_pct (None when baseline_tput is 0 or new_tput non-positive)."""
         try:
             base = float(self.baseline_tput or 0.0)
         except (TypeError, ValueError):
@@ -3774,22 +2761,15 @@ class SharedState:
             "workspace": self.current_best.get("workspace"),
             "source": "seeded_from_current_best",
         }]
-        # Keep ``gain_per_stack_entry`` aligned with ``optimization_stack``
-        # (None == we don't know the per-entry gain for seeded entries).
+        # Keep gain_per_stack_entry aligned with optimization_stack (None == unknown gain for seeded entries).
         if len(self.gain_per_stack_entry) < len(self.optimization_stack):
             self.gain_per_stack_entry.extend(
                 [None] * (len(self.optimization_stack) - len(self.gain_per_stack_entry))
             )
 
-    # ------------------------------------------------------------------
     # Time-budget helpers (consumed by Coordinator._compose_prompt)
-    # ------------------------------------------------------------------
     def elapsed_minutes(self, *, now: datetime | None = None) -> float:
-        """Wall-clock minutes since ``start_ts``.
-
-        Returns 0.0 when ``start_ts`` is empty / unparseable so callers can
-        treat the value as "no time consumed yet" without a try/except.
-        """
+        """Wall-clock minutes since ``start_ts`` (0.0 when empty/unparseable)."""
         if not self.start_ts:
             return 0.0
         try:
@@ -3805,36 +2785,17 @@ class SharedState:
         return max(0.0, delta)
 
     def remaining_minutes(self, *, now: datetime | None = None) -> float | None:
-        """Minutes left in the wall-clock budget.
-
-        Returns ``None`` when ``max_minutes`` is 0 / unset — i.e. the run
-        has no upper bound. Otherwise the result is clamped at 0 so the
-        prompt never advertises negative time.
-        """
+        """Minutes left in the wall-clock budget; ``None`` when ``max_minutes`` unset (unbounded), else clamped at 0."""
         if not self.max_minutes:
             return None
         return max(0.0, float(self.max_minutes) - self.elapsed_minutes(now=now))
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
-        """True iff a new KEEP has landed since the last inline stack rebench.
-
-        Used by Coordinator to surface the ``stack rebench required``
-        guard in the per-tick checklist. The check is purely on stack
-        length: every successful inline rebench records
-        ``cumulative_gain_validated_stack_len``, so a longer stack means
-        at least one new KEEP (e.g. from ``integrate``) came in without
-        an end-to-end revalidation.
-        """
+        """True iff a new KEEP landed since the last inline stack rebench (purely a stack-length check vs ``cumulative_gain_validated_stack_len``)."""
         return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len)
 
     def to_mission_summary(self, *, now: datetime | None = None) -> str:
-        """Mission-progress block printed at the very top of every tick.
-
-        Distinct from :meth:`to_prompt_summary` because we want the LLM to
-        see the *outcome-shaped* state (raw gain, validated gain, time
-        spent vs budget, validated-stack staleness) before drowning in
-        verbose execution detail.
-        """
+        """Mission-progress block printed at the top of every tick (outcome-shaped state: raw/validated gain, time vs budget, stack staleness); distinct from :meth:`to_prompt_summary`."""
         elapsed = self.elapsed_minutes(now=now)
         remaining = self.remaining_minutes(now=now)
         budget_line = (
@@ -3853,18 +2814,31 @@ class SharedState:
             "(per-KEEP stack rebench is inlined)"
             if unvalidated else ""
         )
-        return (
-            f"baseline  : {self.baseline_tput} tok/s/GPU\n"
-            f"current   : {self._format_current_best_for_mission()}\n"
+        lines = [
+            f"baseline  : {self.baseline_tput} tok/s/GPU",
+            f"current   : {self._format_current_best_for_mission()}",
             f"gain      : per-round-sum={self.cumulative_gain:.2f}% "
-            f"validated={self.cumulative_gain_validated:.2f}%{validated_age}\n"
+            f"validated={self.cumulative_gain_validated:.2f}%{validated_age}",
             f"stack     : {len(self.optimization_stack)} entries "
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
-            f"{unvalidated_tag}\n"
-            f"{budget_line}"
-        )
+            f"{unvalidated_tag}",
+        ]
+        # Surface reusable hot kernels still owing a kernel_opt attempt (visible without a checklist).
+        untried_hot = self.untried_hot_reusable_kernels()
+        if untried_hot:
+            lines.append(
+                f"untried_hot_kernels: {', '.join(untried_hot)}"
+            )
+        lines.append(budget_line)
+        return "\n".join(lines)
 
     def _format_current_best_for_mission(self) -> str:
+        """Render the ``current_best`` one-liner for the mission summary.
+
+        Returns:
+            str: ``action=... tput=... variant=...``, or ``"(none)"`` when
+                no current best is set.
+        """
         if not isinstance(self.current_best, dict) or not self.current_best:
             return "(none)"
         return (
@@ -3879,22 +2853,12 @@ class SharedState:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-tick ``=== Phase ===`` block (v0.8 §3.3).
-
-        The Coordinator pipes this into every agent's per-tick prompt.
-        Output stays compact (≤ 5 lines) because every reactor reads
-        it; we keep the human-readable form here and let
-        :func:`phase_state.phase_budget_remaining_seconds` carry the
-        budget math.
-
-        When in EXPLORE, an extra ``force_exit`` line surfaces how much
-        runway is left before the hard force-exit gate fires.
-        """
+        """Render the per-tick ``=== Phase ===`` block (v0.8 §3.3); compact (≤5 lines). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate."""
         from .phase_state import (
             DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
             DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
             PHASE_EXPLORE,
-            allowed_actions_for,
+            llm_proposable_actions_for_with_interleave,
             normalize_budget_pct,
             phase_budget_remaining_seconds,
             phase_elapsed_seconds,
@@ -3919,9 +2883,11 @@ class SharedState:
                 f"budget    : pct={budget_pct_for_phase:.2f} "
                 f"elapsed_sec={elapsed} remaining_sec={int(remaining)}"
             )
-        allowed = allowed_actions_for(phase)
+        proposable = tuple(sorted(
+            llm_proposable_actions_for_with_interleave(phase)
+        ))
         allowed_line = (
-            f"allowed   : {', '.join(allowed) if allowed else '(none)'}"
+            f"allowed   : {', '.join(proposable) if proposable else '(none)'}"
         )
         lines = [
             f"phase     : {phase}",
@@ -3929,8 +2895,7 @@ class SharedState:
             budget_line,
             allowed_line,
         ]
-        # EXPLORE-only: show distance to hard force-exit alongside the
-        # soft budget.
+        # EXPLORE-only: distance to hard force-exit alongside the soft budget.
         if phase == PHASE_EXPLORE:
             overrides = self.plateau_overrides or {}
             hours_thresh = float(overrides.get(
@@ -3975,12 +2940,7 @@ class SharedState:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-phase budget telemetry block for Robustness.
-
-        Lists each phase that appears in ``phase_history`` plus the
-        current phase. Each line shows ``phase: elapsed=Xs cap=Ys (Z%)``
-        so Robustness can spot a phase that's blown past its budget.
-        """
+        """Render the per-phase budget telemetry block for Robustness (one ``phase: elapsed=Xs cap=Ys (Z%)`` line per phase) so it can spot budget overruns."""
         from .phase_state import (
             DEFAULT_PHASE_BUDGET_PCT,
             PHASE_NAMES,
@@ -4013,8 +2973,7 @@ class SharedState:
         mm = float(self.max_minutes or 0.0)
         total_budget_sec = mm * 60.0
         lines: list[str] = []
-        # Stable order — iterate ``PHASE_NAMES`` so any phase added to
-        # the chain (e.g. FRAMEWORK_PR) renders automatically.
+        # Stable order — iterate PHASE_NAMES so new phases render automatically.
         for phase in PHASE_NAMES:
             if phase not in elapsed_per_phase:
                 continue
@@ -4029,19 +2988,7 @@ class SharedState:
         return "\n".join(lines) or "(no phase history yet)"
 
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
-        """Render T0 warm-start snapshot for Orchestration prompt injection.
-
-        Produces a compact block fed into ``Coordinator._compose_prompt``'s
-        ``=== Warm start ===`` section (v0.8 §3.3 §4.1). Returns empty
-        string when both ``warm_start_recipe`` and ``warm_start_pitfalls``
-        are absent (M1 ``--degraded-kb`` mode / first-ever session for a
-        (workload, hw) pair).
-
-        Lines are capped so a recipe blob never bloats the prompt; the
-        full JSON snapshot lives at
-        ``runtime/cortex/.kb_warm.json`` / ``.kb_pitfalls.json`` for any
-        agent willing to Read it directly.
-        """
+        """Render T0 warm-start snapshot for the ``=== Warm start ===`` prompt section (v0.8 §3.3 §4.1); empty when no recipe/pitfalls. Capped; full JSON at runtime/cortex/.kb_warm.json / .kb_pitfalls.json."""
         recipe = self.warm_start_recipe or {}
         pitfalls = self.warm_start_pitfalls or []
         if not recipe and not pitfalls:
@@ -4084,27 +3031,10 @@ class SharedState:
         return "\n".join(out)
 
     def to_gaps_summary(self, *, max_entries: int = 10) -> str:
-        """Render :attr:`gaps` for Orchestration / specialist prompt injection.
-
-        KB_design §3.3 / §3.5: surfaces the structured gap list that
-        replaced the legacy ``last_action_failures`` proxy. Returns an
-        empty string when ``gaps`` is empty so callers can skip the
-        whole section header on cold-start sessions.
-
-        Format (per row):
-
-            - <canonical_id> [<layer>/<severity>] <symptom>
-                attempts=N last=<action:outcome>
-
-        Capped at ``max_entries`` newest rows (sorted by
-        ``last_updated_ts``) to keep the prompt section bounded —
-        long sessions occasionally accumulate dozens of gaps; the
-        full list still lives in ``state.json`` for resume.
-        """
+        """Render :attr:`gaps` for prompt injection (KB_design §3.3/§3.5); empty when no gaps. Capped at ``max_entries`` newest rows."""
         if not self.gaps:
             return ""
-        # Newest first by last_updated_ts (falling back to first_seen_ts
-        # / insertion order to keep deterministic for tests).
+        # Newest first by last_updated_ts (deterministic fallback to first_seen_ts/insertion).
         ordered = list(self.gaps)
         ordered.sort(
             key=lambda g: str(
@@ -4144,33 +3074,7 @@ class SharedState:
         return "\n".join(rows)
 
     def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:
-        """Render advisory multi-model proposal scores for Orchestration.
-
-        Reads the ``ensemble_scores`` blob attached to the most recent
-        :attr:`specialist_rounds` entries by the ProposalScorer (see
-        ``orchestrator/proposal_scorer.py``). Each line shows a variant's
-        per-rater ``score ("reason")`` side-by-side so Orchestration can
-        see agreement / disagreement. There is deliberately NO mean and
-        NO sorting — these are one reference among many (parallel to
-        gaps / KB / analysis.md), not a ranking directive (Inv-9.1: no
-        system-side scoreboard).
-
-        The rater identities are **anonymized** (``rater_1``, ``rater_2``,
-        …) so Orchestration weighs the scores on their merits and reasons
-        alone, free of any per-model prior / brand bias. The mapping is
-        *stable within a render* (the same model maps to the same
-        ``rater_N`` across every round shown) so cross-round agreement is
-        still legible, but the real model slugs never reach the prompt —
-        they stay in ``ensemble_scores`` (state.json) for debug / audit.
-
-        Returns ``""`` when no recent round carries scores so the caller
-        skips the whole section header.
-
-        Format::
-
-            round=<round_id> domain=<domain>
-              - <variant_name>: rater_1=8.0 ("..."), rater_2=6.5 ("...")
-        """
+        """Render advisory multi-model proposal scores for Orchestration. NO mean/sorting (Inv-9.1: no system-side scoreboard); rater identities anonymized to avoid brand bias. Empty when no recent round carries scores."""
         rounds = [
             r for r in (self.specialist_rounds or [])
             if isinstance(r, dict)
@@ -4180,12 +3084,7 @@ class SharedState:
         if not rounds:
             return ""
         shown = rounds[-max_rounds:]
-        # Stable, anonymized rater labels: collect every real model slug
-        # across the rounds being shown, sort for determinism, and map
-        # each to ``rater_N``. The same model gets the same label across
-        # rounds (cross-round agreement stays legible) while the real
-        # slug never reaches the prompt — Orchestration must weigh scores
-        # on merit, not on which brand emitted them (avoids model bias).
+        # Stable, anonymized rater labels: map each real slug to ``rater_N`` (slug never reaches the prompt).
         all_slugs: set[str] = set()
         for r in shown:
             models = r["ensemble_scores"].get("models") or {}
@@ -4209,8 +3108,7 @@ class SharedState:
             round_id = str(r.get("round_id") or "?")
             domain = str(r.get("domain") or "?")
             rows.append(f"round={round_id} domain={domain} scale={scale}")
-            # Collect every variant name seen across models, preserving
-            # the proposal_set order when available.
+            # Collect variant names across models, preserving proposal_set order when available.
             ordered_names: list[str] = []
             seen: set[str] = set()
             for variant in (r.get("proposal_set") or []):
@@ -4225,9 +3123,7 @@ class SharedState:
                         if nm not in seen:
                             ordered_names.append(nm)
                             seen.add(nm)
-            # Render raters in stable label order (rater_1, rater_2, …)
-            # so a given column means the same model across every round
-            # without ever printing the model slug.
+            # Render raters in stable label order so a column means the same model across rounds.
             ordered_slugs = sorted(
                 (s for s in models if s in rater_label),
                 key=lambda s: rater_label[s],
@@ -4263,15 +3159,18 @@ class SharedState:
         return "\n".join(rows)
 
     def to_prompt_summary(self) -> str:
-        """Compact, human-readable snapshot for prompt injection (DESIGN §8.3)."""
+        """Compact, human-readable snapshot for prompt injection (DESIGN §8.3).
+
+        Returns:
+            str: A multi-line dump of the session's key fact-layer and
+                audit fields (baseline / current best / gains / kernel-opt
+                queue / attempts history / failures / phase status).
+        """
         lines = [
             f"session_id={self.session_id or '(unset)'}",
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
         ]
-        # Advisory architecture profile (launcher-supplied). Prompt-context
-        # only; the live TraceLens ``analysis_md`` snapshot below remains the
-        # ground truth for bottleneck classification. Omit entirely when no
-        # profile was loaded so non-arch sessions render exactly as before.
+        # Advisory architecture profile; prompt-context only (TraceLens analysis_md is ground truth). Omitted when no profile.
         _arch_line = render_model_arch_compact(self.model_arch)
         if _arch_line:
             lines.append(
@@ -4297,24 +3196,16 @@ class SharedState:
             f"last_profile_args='{self.last_profile_args}'",
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
             f"last_trace_analyze={self._format_last_trace_analyze()}",
-            # Full TraceLens ``analysis.md`` (snapshot id + gain in the
-            # bookend header) so the orchestration LLM grounds
-            # propose_action decisions in the actual report.
+            # Full TraceLens analysis.md so the LLM grounds propose_action in the actual report.
             f"analysis_md={self._format_analysis_md_full()}",
-            # the streak counter is a *fact* the LLM may
-            # read (KEEP/REVERT counts are explicitly allowed);
-            # only system-side *priorities* (action_scores) were
-            # removed. The plateau judges also consume this on
-            # legacy resume sessions when ``explore_search`` is empty.
+            # Streak counter is a readable fact (KEEP/REVERT counts allowed); plateau judges also consume it on legacy resume.
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"explore_search={self._format_explore_search()}",
             f"discovered_flags={self._format_discovered_flags()}",
             f"backend_winners_history={self._format_backend_winners_history()}",
             f"synergy_attempted={len(self.synergy_attempted)} combos",
             f"last_kernel_opt={self._format_last_kernel_opt()}",
-            # Surface pending KEEPs the integrate gate will drain, plus
-            # the per-kernel attempt count used while batch kernel_opt is
-            # still in flight.
+            # Pending KEEPs the integrate gate will drain, plus per-kernel attempt count.
             (
                 "pending_keep_kernels="
                 f"{self.pending_keep_kernel_ids() or '(none)'}"
@@ -4342,13 +3233,18 @@ class SharedState:
         ]
         return "\n".join(lines)
 
-    # ------------------------------------------------------------------
-    # Audit-trail renderers (kernel-parity per-action attempts + global
-    # failure log). Compact one-liners so the prompt stays readable.
-    # ------------------------------------------------------------------
+    # Audit-trail renderers (per-action attempts + global failure log); compact one-liners.
     @staticmethod
     def _format_attempt(entry: dict[str, Any] | None) -> str:
-        """Render one ``last_<action>`` snapshot or attempts[-1] entry."""
+        """Render one ``last_<action>`` snapshot or ``attempts[-1]`` entry.
+
+        Args:
+            entry (dict[str, Any] | None): The attempt snapshot to render.
+
+        Returns:
+            str: A compact ``status=... decision=... <metric> err=... ws=...``
+                line, or ``"(none)"`` when the entry is empty.
+        """
         if not isinstance(entry, dict) or not entry:
             return "(none)"
         metric = entry.get("key_metric")
@@ -4367,12 +3263,7 @@ class SharedState:
         )
 
     def _format_attempts_history(self) -> str:
-        """One-line summary across the 6 audit actions.
-
-        Format: ``baseline:total(s<successes>,f<failures>) ...``. Helps
-        the LLM gauge per-action reliability without flooding the prompt
-        with up to 6x20 individual rows.
-        """
+        """One-line summary across the audit actions (``baseline:total(s<succ>,f<fail>) ...``) so the LLM gauges reliability without 6x20 rows."""
         parts: list[str] = []
         for action in sorted(_AUDIT_ACTIONS):
             attempts_attr = f"{action}_attempts"
@@ -4392,14 +3283,7 @@ class SharedState:
         return " ".join(parts) if parts else "(no attempts recorded)"
 
     def _format_last_action_failures(self) -> str:
-        """Render up to the 3 most-recent global failures.
-
-        ``last_action_failures`` is the rich-context companion to
-        ``crash_count`` / ``baseline_failure_streak``. We deliberately
-        truncate to 3 rows in the prompt so the LLM sees what blew up
-        most recently without re-reading 10 rows of stale subprocess
-        tails. The full list is still on disk in ``state.json``.
-        """
+        """Render up to the 3 most-recent global failures (rich-context companion to crash_count/baseline_failure_streak); full list on disk."""
         if not self.last_action_failures:
             return "(none)"
         rows: list[str] = []
@@ -4422,6 +3306,12 @@ class SharedState:
         return " | ".join(rows) + suffix if rows else "(none)"
 
     def _format_rejected_kernel_patches(self) -> str:
+        """Render the most recent rejected kernel patches for the prompt.
+
+        Returns:
+            str | list[str]: A list of compact per-patch lines (last 5), or
+                ``"(none)"`` when no patches have been rejected.
+        """
         if not self.rejected_kernel_patches:
             return "(none)"
         return [
@@ -4434,6 +3324,12 @@ class SharedState:
         ] or "(none)"
 
     def _format_discovered_flags(self) -> str:
+        """Render the per-framework discovered-flag counts for the prompt.
+
+        Returns:
+            str: ``<framework>:backend=N/param=M`` parts joined by commas,
+                or a hint string when no flags have been discovered yet.
+        """
         if not self.discovered_flags:
             return "(none — first backends/params round will populate)"
         parts: list[str] = []
@@ -4447,13 +3343,7 @@ class SharedState:
 
     @staticmethod
     def _format_variant_line(entry: dict[str, Any]) -> str:
-        """One-line render of a search variant for prompt blocks.
-
-        Format: ``{name:28s} {±gain%:>9} (tput=...) <flags> <K=V envs>``.
-        Used by :meth:`_format_backend_winners_history` and
-        :meth:`_format_search_state` so the LLM sees the same numerical
-        signal everywhere the explore ledger surfaces.
-        """
+        """One-line render of a search variant for prompt blocks."""
         name = str(entry.get("name") or "?")
         gain = entry.get("gain_pct")
         tput = entry.get("tput") or entry.get("output_throughput")
@@ -4480,13 +3370,7 @@ class SharedState:
     def _enrich_with_tested_gain(
         entry: dict[str, Any], tested: dict[str, Any],
     ) -> dict[str, Any]:
-        """Backfill ``gain_pct``/``tput`` from the matching ``tested[fp]``.
-
-        Some ``explore_search.accepted`` entries do NOT persist
-        ``gain_pct``; the matching ``tested[fingerprint]`` entry does.
-        Pulling the value across at render time keeps the renderer
-        symmetric and avoids a second writer for accepted entries.
-        """
+        """Backfill ``gain_pct``/``tput`` from the matching ``tested[fp]`` at render time (some accepted entries don't persist gain_pct; avoids a second writer)."""
         if (
             entry.get("gain_pct") is not None
             and entry.get("tput") is not None
@@ -4510,13 +3394,7 @@ class SharedState:
         return out
 
     def _format_backend_winners_history(self) -> str:
-        """Multi-line render of the explore-round winners history.
-
-        Surfaces per-winner ``gain_pct`` + ``tput`` + resolved flags/envs
-        for the last 5 rounds so the IDEA GENERATION step (SKILL.md) has
-        real signal to rank retries / synergy combos by, not just names.
-        Older rounds collapse to a ``[+N earlier rounds elided]`` line.
-        """
+        """Multi-line render of the explore-round winners history (last 5 rounds: per-winner gain_pct/tput/flags); older rounds collapse to an elision line."""
         if not self.backend_winners_history:
             return "(no explore rounds completed)"
         last = self.backend_winners_history[-5:]
@@ -4552,18 +3430,17 @@ class SharedState:
         return "\n".join(out)
 
     def _format_explore_search(self) -> str:
+        """Render the unified ``explore_search`` ledger for the prompt.
+
+        Returns:
+            str: The :meth:`_format_search_state` render of
+                :attr:`explore_search`.
+        """
         return self._format_search_state(self.explore_search)
 
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:
-        """Multi-line render of a ``*_search`` dedup ledger.
-
-        Each accepted/rejected entry surfaces its real ``gain_pct`` so the
-        LLM ranks retries by observed impact instead of guessing from
-        names alone. Counts go on the head line; bodies show only the
-        most recent 5 entries per bucket (older rows are still in the
-        ledger; only the prompt body is truncated).
-        """
+        """Multi-line render of a ``*_search`` dedup ledger; each entry surfaces real ``gain_pct``. Counts on the head line; bodies show last 5 per bucket (only the prompt body is truncated)."""
         if not search:
             return "(none)"
         accepted = list(search.get("accepted") or [])
@@ -4594,6 +3471,12 @@ class SharedState:
         return "\n".join(out)
 
     def _format_optimization_stack(self) -> str:
+        """Render the optimization stack as ``action:variant`` parts.
+
+        Returns:
+            str | list[str]: A list of ``action:variant_name`` strings, or
+                ``"(none)"`` when the stack is empty.
+        """
         if not self.optimization_stack:
             return "(none)"
         parts = []
@@ -4607,42 +3490,14 @@ class SharedState:
 
     @staticmethod
     def _strip_base64_data_urls(text: str) -> str:
-        """Drop base64 image payloads before prompt injection.
-
-        TraceLens ``analysis.md`` embeds charts as
-        ``![alt](data:image/png;base64,...)`` data URLs that can balloon
-        the section to hundreds of KB of opaque noise. Stripping is
-        in-memory only; the on-disk file stays intact for operators.
-
-        The helper lives in ``inference_optimizer.tracelens_md`` so this
-        method stays focused on prompt formatting.
-        """
+        """Drop base64 image payloads before prompt injection (in-memory only; on-disk file intact). Delegates to ``inference_optimizer.tracelens_md``."""
         if not text:
             return text or ""
         from inference_optimizer.tracelens_md import strip_base64_data_urls
         return strip_base64_data_urls(text)
 
     def _format_analysis_md_full(self) -> str:
-        """Inject TraceLens analysis.md verbatim.
-
-        Roofline composite design §6.1 mandates that analysis.md is
-        handed to the orchestration LLM verbatim — no truncation, no
-        sub-agent interpretation layer. The full report renders between
-        ``=== TraceLens Analysis ... ===`` bookends so the LLM can
-        syntactically distinguish report content from surrounding
-        SharedState dump lines.
-
-        Header carries ``snapshot=N`` + ``gain at snapshot=X.XX%`` so
-        prompts can detect stale analysis without parsing the body.
-
-        Render modes:
-          * cache empty / ``analysis_md_text`` missing → one-line hint
-            asking the LLM to propose ``roofline``.
-          * cache populated → full report between bookends.
-
-        When no report is cached, return a short hint instead of
-        fabricating analysis content.
-        """
+        """Inject TraceLens analysis.md verbatim (Roofline composite design §6.1: no truncation/interpretation) between ``=== TraceLens Analysis ... ===`` bookends; header carries snapshot id + gain. Empty cache → one-line hint to propose ``roofline``."""
         cached = self.last_trace_analyze or {}
         md_text = cached.get("analysis_md_text") or ""
         if not md_text:
@@ -4651,10 +3506,11 @@ class SharedState:
                 "by the Coordinator at the end of PRELUDE and on every "
                 "+10% validated-gain crossing; wait for the pending "
                 "task to land, or continue with specialist / explore "
-                "work that does not need analysis.md. PolicyGate denies "
-                "any LLM-emitted propose_action/delegate against "
-                "`roofline` or `profile` with rule "
-                "`analysis_action_not_llm_proposable`.)"
+                "work that does not need analysis.md. `roofline` and "
+                "`profile` are Coordinator-managed and absent from "
+                "`PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 "
+                "denies any LLM-emitted propose_action/delegate "
+                "against either name with rule `phase_incompatible`.)"
             )
         md_text = self._strip_base64_data_urls(md_text)
         snap = cached.get("roofline_snapshot_id", "?")
@@ -4671,9 +3527,27 @@ class SharedState:
         )
 
     def _format_last_trace_analyze(self) -> str:
+        """Render the most recent trace-analyze blob for the prompt.
+
+        Returns:
+            A formatted summary of ``last_trace_analyze``.
+        """
         return self._format_trace_analyze_blob(self.last_trace_analyze)
 
     def _format_trace_analyze_blob(self, blob: dict[str, Any] | None) -> str:
+        """Render a trace-analyze cache blob as a compact prompt line.
+
+        Surfaces the trace input, candidates path, top kernel ids, reusable
+        native kernel ids, and any trace-health routing warnings.
+
+        Args:
+            blob (dict[str, Any] | None): A ``last_trace_analyze``-shaped
+                dict to render.
+
+        Returns:
+            str: The compact one-line render, or ``"(none)"`` when the blob
+                is empty.
+        """
         if not blob:
             return "(none)"
         ids = [
@@ -4687,12 +3561,7 @@ class SharedState:
             f"candidates_path={blob.get('candidates_path','?')} "
             f"top={ids or []} reusable_native={reusable or []}"
         )
-        # When there are no routable candidates, surface the skipped
-        # operators (id:name:reason) so the LLM sees they were detected but
-        # cannot be rewritten -- rather than an empty list that pushes it to
-        # echo analysis.md operator names as a (non-unique, invalid)
-        # kernel_id. Suppressed when candidates exist to keep the
-        # steady-state prompt format stable.
+        # With no routable candidates, surface skipped operators so the LLM doesn't echo invalid kernel_ids.
         skipped_suffix = ""
         if not ids:
             sk = blob.get("skipped_kernels_top") or []
@@ -4705,16 +3574,7 @@ class SharedState:
                 skipped_suffix = (
                     f" skipped_kernels_top=[{'; '.join(rendered_sk)}]"
                 )
-        # Finishing-touches: when TraceLens emitted a routing
-        # signal (high GPU idle → prefer params; permanent failure →
-        # don't keep waiting on kernel candidates), surface it inline
-        # so the Orchestration LLM grounds the next ACTION on this
-        # signal rather than re-trying TraceLens or guessing why
-        # ``top=[]``. We render compactly:
-        #   warnings=[high_gpu_idle_pct(idle=35.0%,threshold=20.0%); …]
-        # and omit the suffix entirely in the steady-state (no
-        # warnings) so existing prompt-format-stable tests don't see
-        # gratuitous additions.
+        # Surface TraceLens routing signals inline so the LLM grounds the next action; omitted in steady-state.
         warnings = blob.get("trace_health_warnings") or []
         if not warnings:
             return base + skipped_suffix
@@ -4736,6 +3596,12 @@ class SharedState:
         return f"{base}{skipped_suffix} warnings=[{'; '.join(rendered)}]"
 
     def _format_last_sweep(self) -> str:
+        """Render the last workload sweep result for the prompt.
+
+        Returns:
+            str: ``grid_size=... best=... tput=... conc/isl/osl=...``, or
+                ``"(none)"`` when no sweep has run.
+        """
         if not self.last_sweep:
             return "(none)"
         best = self.last_sweep.get("best_overall") or {}

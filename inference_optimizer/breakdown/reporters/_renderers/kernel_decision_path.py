@@ -1,14 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Kernel decision-path renderer — per-kid causal chain.
+"""Kernel decision-path renderer — per-kid causal chain grouped per kernel id.
 
-Surfaces ``trace_analyze → kernel_opt(GEAK|OOB) → integrate →
-validate_stack`` as a single grouped section per kernel id, so the
-reader can follow what the orchestrator did to one kernel without
-cross-referencing the global phase timeline + kernel_lifecycle tables.
-
-The renderer is fail-soft: when the breakdown lacks the
-``kernel_decision_path`` field (older JSONs) it skips silently.
+Fail-soft: skips silently when ``kernel_decision_path`` is absent (older JSONs).
 """
 
 from __future__ import annotations
@@ -22,6 +16,16 @@ _MAX_STEPS_PER_KID = 12
 
 
 def _fmt_duration(v: Any) -> str:
+    """Format a duration in seconds as a human-readable string.
+
+    Args:
+        v (Any): The duration in seconds; non-numeric or ``None`` yields an
+            em dash.
+
+    Returns:
+        str: ``"<n>s"`` for sub-minute durations, ``"<n>min"`` otherwise, or
+            ``"—"`` when the value is missing or non-numeric.
+    """
     if v is None:
         return "—"
     try:
@@ -35,10 +39,22 @@ def _fmt_duration(v: Any) -> str:
 
 @register_renderer("kernel_decision_path")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the per-kernel causal decision path as grouped blocks.
+
+    Each kernel id gets a block showing its ``trace_analyze →
+    kernel_opt → integrate → validate_stack`` step chain plus a funnel
+    summary fact. Skipped silently when the field is absent (older JSON).
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered section, or a skipped placeholder when
+            there is no decision-path data.
+    """
     raw = breakdown.get("kernel_decision_path")
     if raw is None:
-        # Field not present at all (old JSON) — render as skipped without
-        # a warning so the section silently disappears on legacy data.
+        # Field absent (old JSON): skip silently, no warning.
         return RenderedSection(
             section_id="kernel_decision_path",
             title="Kernel Decision Path",
@@ -57,7 +73,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     facts: list[str] = [
         f"Tracked {len(entries)} kernel(s) through the decision pipeline.",
     ]
-    # Funnel-style fact: how many of these reached integrate / validate.
     n_with_kopt = sum(1 for e in entries
                        if any((s or {}).get("step") == "kernel_opt" for s in e.get("steps") or []))
     n_with_integ = sum(1 for e in entries

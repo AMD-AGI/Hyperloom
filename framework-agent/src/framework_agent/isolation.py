@@ -2,23 +2,17 @@
 
 """Per-candidate isolation primitives — git worktree + venv lifecycle.
 
-Split out of ``explorer.py`` per merged-design §2.2 so the explorer
-keeps only the orchestration loop and the isolation logic can be unit
-tested in isolation. Public surface:
+Public surface:
 
-* :func:`prepare_repo_cache`       — mirror-clone (or fetch) the
-  upstream repo into ``work_dir/_repos/<slug>``.
-* :func:`prepare_candidate_workspace` — create per-candidate dir +
-  detached worktree + venv. Returns the resolved paths so callers can
-  thread them into ``render_template`` variable bags.
-* :func:`cleanup_workspace`        — remove a candidate's worktree /
-  venv on completion. Respects ``keep_winner_only``.
-* :func:`disk_preflight`           — refuse to start an N-candidate run
-  when the work_dir mount has < ``min_free_gb`` (default 20 GB,
-  overridable via ``FRAMEWORK_EXPLORER_DISK_MIN_GB``).
-
-Subprocess wrappers (``_run_subprocess`` / ``_run_git``) are also
-re-exported here so explorer.py can import them from one place.
+* :func:`prepare_repo_cache`       — mirror-clone (or fetch) the upstream
+  repo into ``work_dir/_repos/<slug>``.
+* :func:`prepare_candidate_workspace` — create per-candidate dir + detached
+  worktree + venv; returns the resolved paths.
+* :func:`cleanup_workspace`        — remove a candidate's worktree / venv;
+  respects ``keep_winner_only``.
+* :func:`disk_preflight`           — refuse to start an N-candidate run when
+  the work_dir mount has < ``min_free_gb`` (default 20 GB, overridable via
+  ``FRAMEWORK_EXPLORER_DISK_MIN_GB``).
 """
 
 from __future__ import annotations
@@ -36,12 +30,10 @@ from .models import Candidate, ExploreRequest
 log = get_logger(__name__)
 
 
-# Threshold env var per merged-design §14.3.
 _DISK_MIN_GB_ENV = "FRAMEWORK_EXPLORER_DISK_MIN_GB"
 _DEFAULT_DISK_MIN_GB = 20.0
-# Per-candidate disk budget (worktree + venv + audit material). Tuned
-# from observed sglang/vllm worktrees (~700MB) + venv with --system-
-# site-packages (~50MB) + headroom for build artefacts.
+# Per-candidate disk budget: sglang/vllm worktree (~700MB) + venv with
+# --system-site-packages (~50MB) + build-artefact headroom.
 PER_CANDIDATE_GB = 1.5
 
 
@@ -59,26 +51,54 @@ class WorkspacePaths:
 
 
 # ---------------------------------------------------------------------------
-# Subprocess helpers (verbatim from explorer.py — single source of truth here)
+# Subprocess helpers
 # ---------------------------------------------------------------------------
 def _run_subprocess(
     args: list[str], *, cwd: Path | None = None, timeout_sec: int = 1800
 ) -> None:
-    """Run a subprocess with a timeout; raise CalledProcessError on non-zero."""
+    """Run a subprocess with a timeout; raise CalledProcessError on non-zero.
+
+    Args:
+        args (list[str]): Argument vector passed to :func:`subprocess.run`.
+        cwd (Path | None): Working directory, or ``None`` for the current one.
+        timeout_sec (int): Hard timeout in seconds. Defaults to 1800.
+
+    Raises:
+        subprocess.CalledProcessError: If the process exits non-zero.
+        subprocess.TimeoutExpired: If the process exceeds ``timeout_sec``.
+    """
     log.debug("subprocess %s cwd=%s timeout=%ds", " ".join(args[:4]), cwd, timeout_sec)
     subprocess.run(args, cwd=str(cwd) if cwd else None, check=True, timeout=timeout_sec)
 
 
 def _run_git(args: list[str], *, cwd: Path | None = None, timeout_sec: int = 1800) -> None:
-    """Run a git command with a timeout; thin wrapper over :func:`_run_subprocess`."""
+    """Run a git command with a timeout; thin wrapper over :func:`_run_subprocess`.
+
+    Args:
+        args (list[str]): Full git argument vector (including ``"git"``).
+        cwd (Path | None): Working directory, or ``None`` for the current one.
+        timeout_sec (int): Hard timeout in seconds. Defaults to 1800.
+
+    Raises:
+        subprocess.CalledProcessError: If git exits non-zero.
+        subprocess.TimeoutExpired: If git exceeds ``timeout_sec``.
+    """
     _run_subprocess(args, cwd=cwd, timeout_sec=timeout_sec)
 
 
 # ---------------------------------------------------------------------------
-# Disk preflight (merged-design §4.5)
+# Disk preflight
 # ---------------------------------------------------------------------------
 def _resolve_min_free_gb(explicit: float | None) -> float:
-    """Pick the threshold (explicit > env > default 20 GB)."""
+    """Pick the threshold (explicit > env > default 20 GB).
+
+    Args:
+        explicit (float | None): Explicit minimum free GB; ``None`` defers to
+            the ``FRAMEWORK_EXPLORER_DISK_MIN_GB`` env var then the default.
+
+    Returns:
+        float: The resolved minimum-free-GB threshold.
+    """
     if explicit is not None:
         return float(explicit)
     raw = os.environ.get(_DISK_MIN_GB_ENV)
@@ -102,13 +122,9 @@ def disk_preflight(
 ) -> None:
     """Refuse to start if the work_dir mount lacks enough free space.
 
-    Required = ``max(min_free_gb, n_candidates * per_candidate_gb)`` so a
-    large N candidate run never sneaks under the floor.
-
-    The work_dir is created when missing so :func:`shutil.disk_usage` does
-    not fail when the parent dir exists but the target one doesn't yet.
-    Raises :class:`DiskPreflightError` on failure with a human-readable
-    message that includes the actual / required GB.
+    Required = ``max(min_free_gb, n_candidates * per_candidate_gb)``. The
+    work_dir is created when missing so :func:`shutil.disk_usage` doesn't
+    fail. Raises :class:`DiskPreflightError` on failure.
     """
     floor_gb = _resolve_min_free_gb(min_free_gb)
     required_gb = max(floor_gb, float(n_candidates) * per_candidate_gb)
@@ -135,13 +151,31 @@ def disk_preflight(
 # Repo cache (mirror clone)
 # ---------------------------------------------------------------------------
 def _repo_cache_dir(req: ExploreRequest) -> Path:
-    """Stable per-repo cache directory under work_dir/_repos."""
+    """Stable per-repo cache directory under work_dir/_repos.
+
+    Args:
+        req (ExploreRequest): Request supplying ``repo_url`` and ``work_dir``.
+
+    Returns:
+        Path: A deterministic cache directory derived from the sanitized repo
+            URL.
+    """
     safe = "".join(ch if ch.isalnum() else "-" for ch in req.repo_url.lower()).strip("-")
     return req.work_dir / "_repos" / (safe or "repo")
 
 
 def prepare_repo_cache(req: ExploreRequest) -> Path:
-    """Mirror-clone the repo into the cache dir; fetch when already present."""
+    """Mirror-clone the repo into the cache dir; fetch when already present.
+
+    Args:
+        req (ExploreRequest): Request supplying ``repo_url`` and ``work_dir``.
+
+    Returns:
+        Path: The mirror cache directory (freshly cloned or fetched).
+
+    Raises:
+        subprocess.CalledProcessError: If the underlying git command fails.
+    """
     repo_dir = _repo_cache_dir(req)
     if repo_dir.exists():
         log.debug("prepare_repo_cache: fetching existing mirror at %s", repo_dir)
@@ -154,7 +188,16 @@ def prepare_repo_cache(req: ExploreRequest) -> Path:
 
 
 def _worktree_ref(candidate: Candidate) -> str:
-    """Choose the ref to materialise in a detached worktree."""
+    """Choose the ref to materialise in a detached worktree.
+
+    Args:
+        candidate (Candidate): Candidate whose ``head_sha`` or ``ref`` decides
+            the worktree ref.
+
+    Returns:
+        str: The explicit head SHA, a ``refs/pull/<n>/head`` ref for PR refs, or
+            the candidate ref verbatim.
+    """
     if candidate.head_sha:
         return candidate.head_sha
     if candidate.ref.startswith("PR:"):
@@ -164,7 +207,17 @@ def _worktree_ref(candidate: Candidate) -> str:
 
 
 def fetch_candidate_ref(repo_dir: Path, candidate: Candidate) -> None:
-    """Pre-fetch the candidate's ref into the cache mirror."""
+    """Pre-fetch the candidate's ref into the cache mirror.
+
+    No-op for candidates that are neither a head SHA nor a ``PR:`` ref.
+
+    Args:
+        repo_dir (Path): Mirror cache directory to fetch into.
+        candidate (Candidate): Candidate whose ref/SHA is fetched.
+
+    Raises:
+        subprocess.CalledProcessError: If the underlying git fetch fails.
+    """
     if candidate.head_sha:
         _run_git(["git", "fetch", "origin", candidate.head_sha], cwd=repo_dir)
         return
@@ -194,10 +247,9 @@ def prepare_candidate_workspace(
 ) -> WorkspacePaths:
     """Materialise ``candidate_dir`` + (when execute) worktree + venv.
 
-    Returns :class:`WorkspacePaths` instead of an ad-hoc tuple so callers
-    don't have to remember the field order. ``execute=False`` /
-    ``prepare_candidate_env=False`` short-circuits before the git
-    worktree and venv steps so plan mode stays cheap.
+    Returns :class:`WorkspacePaths`. ``execute=False`` /
+    ``prepare_candidate_env=False`` short-circuits before the git worktree
+    and venv steps so plan mode stays cheap.
     """
     candidate_dir = req.work_dir / "candidates" / f"{index:02d}_{candidate.slug}"
     worktree_dir = candidate_dir / "worktree"
@@ -253,24 +305,17 @@ def cleanup_workspace(
 ) -> None:
     """Drop worktree + venv from disk when policy says so.
 
-    Policy matrix:
-
-    * ``keep_winner_only=False`` (default) — keep everything (legacy behaviour
-      to preserve audit material on disk).
-    * ``keep_winner_only=True`` and ``is_winner=True``  — keep this candidate.
-    * ``keep_winner_only=True`` and ``is_winner=False`` — remove worktree +
-      venv so an N-candidate run doesn't waste N×1.5GB of disk on losers.
-      The ``candidate_dir`` itself (and ``pr.patches`` / ``pr_files.json``
-      audit artefacts inside it) are kept so reviewers can still diff.
-
-    Best-effort: any cleanup error is logged but never re-raised so a
-    cleanup failure does not mask the underlying explore result.
+    With ``keep_winner_only=False`` (default) keep everything. Otherwise keep
+    only winners; losers' worktree + venv are removed to reclaim ~1.5GB each,
+    but ``candidate_dir`` (and its ``pr.patches`` / ``pr_files.json`` audit
+    artefacts) is kept so reviewers can still diff. Best-effort: cleanup
+    errors are logged, never re-raised.
     """
     if not keep_winner_only or is_winner:
         return
     if repo_dir is not None:
-        # Detach the worktree from the mirror first so `git worktree list`
-        # in the repo cache does not point at a now-missing directory.
+        # Detach the worktree from the mirror so `git worktree list` in the
+        # repo cache does not point at a now-missing directory.
         try:
             _run_git(
                 ["git", "worktree", "remove", "--force", str(workspace.worktree_dir)],

@@ -23,6 +23,14 @@ def strip_base64_data_urls(text: str | None) -> str:
 
     Preserves alt-text in a short marker so downstream agents know a chart
     was present without receiving the binary payload.
+
+    Args:
+        text (str | None): Markdown text to sanitize; ``None`` is treated as
+            empty.
+
+    Returns:
+        str: Markdown with base64 image data URLs replaced by alt-text
+        placeholders, or the original text when no such images are present.
     """
     if not text:
         return text or ""
@@ -30,6 +38,15 @@ def strip_base64_data_urls(text: str | None) -> str:
         return text
 
     def _sub(match: re.Match[str]) -> str:
+        """Build the placeholder replacement for one matched data-URL image.
+
+        Args:
+            match (re.Match[str]): Regex match with a named ``alt`` group.
+
+        Returns:
+            str: Markdown image whose URL is a stripped-base64 marker carrying
+            the original alt-text.
+        """
         alt = match.group("alt") or "image"
         return f"![{alt}](<<stripped: base64 image — {alt}>>)"
 

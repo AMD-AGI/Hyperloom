@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P1-2 full action catalogue tests.
-
-Asserts the v0.6 OptimizationAction catalogue is complete and that
-families/owners line up with DESIGN §16.1.
-"""
+"""P1-2 full action catalogue tests."""
 
 from __future__ import annotations
 
@@ -27,65 +23,29 @@ from inference_optimizer.protocol.action_surfaces import (
 )
 
 
-# DESIGN §16.1 + v0.8 KB_design §3.4 (merged ``explore``).
-# PR-A1 (Arbor-into-Hyperloom): added ``specialist`` (creative) and
-# ``integrate_patch`` (shallow). ``specialist`` had previously been a
-# *synthetic* action with no yaml meta (parameterised by ``params.domain``);
-# the missing yaml made it invisible to ``prompt_builder._section_action_catalogue``,
-# so the Orchestration LLM never emitted ``delegate{action='specialist'}``.
-# ``integrate_patch`` is the new orchestrator-side apply+restart+gate
-# step that consumes specialist worktree patches.
+# DESIGN §16.1 + v0.8 KB_design §3.4. PR-A1: added ``specialist`` and
+# ``integrate_patch``.
 EXPECTED_ACTIONS_V06: dict[str, str] = {
     # prep (3)
     "target_analysis":      "prep",
     "baseline":             "prep",
     # GAP 1 — Coordinator-internal one-shot warm-recipe replay.
-    # Same prep family as ``baseline`` (it is essentially a re-baseline
-    # with the KB best_config applied). PolicyGate denies LLM
-    # propose_action / delegate via ``analysis_action_not_llm_proposable``.
     "replay_warm_recipe":   "prep",
-    # analysis (2) — Coordinator-internal analysis actions, selected
-    # at runtime by ``shared_state.enable_roofline`` (``--enable-roofline``
-    # / ``--no-enable-roofline``, default on):
-    #   * ``roofline`` — composite (profile + trace_analyze +
-    #     analysis.md snapshot);
-    #   * ``profile`` — lightweight trace-only fallback.
-    # Both are registered so the Coordinator-internal task path can
-    # dispatch them through SubAgentRunner. PolicyGate denies LLM
-    # propose_action / delegate for either name
-    # (``analysis_action_not_llm_proposable``).
+    # analysis (2) — Coordinator-internal, selected by enable_roofline.
     "roofline":             "analysis",
     "profile":              "analysis",
-    # shallow (9) — ``explore`` is the merged grid-runner entry.
-    # PR-A1: ``integrate_patch`` joins the shallow family as the
-    # EXPLORE-phase serving-lane-locked patch integration step.
+    # shallow (5) — ``explore`` is the merged grid-runner entry.
     "explore":              "shallow",
     "integrate_patch":      "shallow",
     # FRAMEWORK_PR phase: per-candidate Coordinator-internal executor.
-    # Mirrors integrate_patch's role for the new phase; LLM may not
-    # propose it (framework_pr_action_not_llm_proposable, Stage 3).
     "framework_pr":         "shallow",
     "sweep":                "shallow",
-    # SWEEP-phase post-sweep concurrency comparison (Coordinator-
-    # internal auto-enqueue after sweep, on by default; disable via
-    # ``--no-enable-conc-sweep``). Same family as ``sweep`` — discovery
-    # action that benchmarks both arms across a CONC ladder and writes
-    # ``reports/conc_sweep_summary.json``; never promotes.
+    # SWEEP-phase post-sweep concurrency comparison.
     "conc_sweep":           "shallow",
     "report":               "shallow",
     "session_breakdown":    "shallow",
-    "dynamic_specialist_check": "shallow",
-    "dynamic_specialist_collect": "shallow",
-    # creative (4) — PR-A1: specialist LLM sub-agent dispatch;
-    # IR-7 (Saturday May 2026): assess_remaining_gaps is a thin
-    # wrapper that dispatches the session_steward_specialist domain;
-    # dynamic_action.MD P1: cross-domain multi-turn ReAct sub-agent
-    # dispatch (supplementary EXPLORE channel); dynamic_specialist:
-    # free-form CPU-only specialist wave dispatch.
+    # creative (1) — unified specialist dispatch (scope: domain/domains/freeform).
     "specialist":           "creative",
-    "assess_remaining_gaps": "creative",
-    "dynamic_action":        "creative",
-    "dynamic_specialist":    "creative",
     # deep_kernel (6)
     "kernel_opt":           "deep_kernel",
     "integrate":            "deep_kernel",
@@ -216,10 +176,7 @@ def test_every_action_has_valid_family(registry):
 
 def test_every_action_uses_only_known_lanes(registry):
     # v0.8 M5 (KB_design §3.7) introduced ``research_lane`` for the
-    # LLM specialist sub-agent (capacity-N, no conflict with serving
-    # lanes). PR-A1 (Arbor-into-Hyperloom) registers the first action
-    # that actually declares ``research_lane`` in its yaml meta —
-    # ``specialist`` — so the known-lanes set must include it.
+    # LLM specialist sub-agent; known-lanes set must include it.
     known = {
         "server_lifecycle", "workspace_mutation",
         "benchmark_lane", "profile_lane",
@@ -239,8 +196,7 @@ def test_every_action_has_emit_intent_tool(registry):
 
 
 def test_actions_with_workspace_lane_have_edit_tool(registry):
-    """Anything that mutates the workspace must declare Edit (or otherwise
-    document that it goes through a sub-agent)."""
+    """Anything that mutates the workspace must declare Edit."""
     for m in registry.all():
         if "workspace_mutation" in m.requires_lanes:
             assert "Edit" in m.allowed_tools, (
@@ -260,11 +216,7 @@ def test_lease_ttl_sec_consistent_with_cost(registry):
         )
 
 
-# ---------------------------------------------------------------------------
-# Drift guards: keep action metadata, session paths, and CLI executor wiring
-# aligned so every executor-backed action gets a runs/<kind>/<task_id>
-# workspace.
-# ---------------------------------------------------------------------------
+# Drift guards: keep action metadata, session paths, and CLI executor wiring aligned.
 def test_runs_actions_match_pipeline_phases(registry):
     """``_runs_actions()`` must follow registry pipeline phases."""
     from inference_optimizer.session_paths import (
@@ -285,19 +237,14 @@ def test_runs_actions_match_pipeline_phases(registry):
 
 
 def test_explore_in_runs_actions():
-    """v0.8 M3 + KB_gaps/Dead-A — ``explore`` succeeded the retired
-    ``validate_stack`` as the per-action runs/<kind>/ owner that
-    originally triggered the drift bug this guard exists for."""
+    """v0.8 M3 + KB_gaps/Dead-A — ``explore`` is the per-action runs/<kind>/ owner."""
     from inference_optimizer.session_paths import _runs_actions
 
     assert "explore" in _runs_actions()
 
 
 def test_runs_actions_fallback_matches_registry(registry):
-    """The hardcoded ``_RUNS_ACTIONS_FALLBACK`` (used only when the
-    registry can't be loaded) must stay aligned with the registry-derived
-    set.
-    """
+    """``_RUNS_ACTIONS_FALLBACK`` must stay aligned with the registry-derived set."""
     from inference_optimizer.session_paths import (
         _RUNS_ACTIONS_FALLBACK,
         _RUNS_WORKSPACE_PHASES,
@@ -315,16 +262,8 @@ def test_runs_actions_fallback_matches_registry(registry):
 
 
 def test_cli_real_executors_consistent_with_runs_actions():
-    """Every action wired with a real executor in
-    ``cli._register_executors`` must either be in ``_runs_actions()``
-    (writes per-task artefacts under ``runs/<kind>/<task_id>/``) or be one
-    of the special session-root writers (``report`` → ``reports/``,
-    ``session_breakdown`` → ``session_breakdown.json`` at the session root).
-
-    This is the primary cli ↔ session_paths drift guard: if someone adds
-    a real executor without giving its yaml a ``pipeline_phase`` that
-    falls in ``_RUNS_WORKSPACE_PHASES``, this test fires.
-    """
+    """Every real-executor action must be in ``_runs_actions()`` or be a
+    special session-root writer (``report``, ``session_breakdown``)."""
     from inference_optimizer.cli import _REAL_EXECUTORS_FULL
     from inference_optimizer.session_paths import _runs_actions
 
@@ -351,14 +290,10 @@ def test_cli_real_executors_consistent_with_runs_actions():
     )
 
 
-# ---------------------------------------------------------------------------
-# Phase 1 prompt-builder fields — see ActionMetadata docstring
-# ---------------------------------------------------------------------------
+# Phase 1 prompt-builder fields — see ActionMetadata docstring.
 def test_every_action_has_non_empty_description(registry):
     for m in registry.all():
         assert m.description, f"{m.name}: description must be non-empty"
-        # Sanity: descriptions are 1-line and reasonably brief so the
-        # builder doesn't blow up the prompt size.
         assert "\n" not in m.description, (
             f"{m.name}: description must be a single line, got "
             f"{m.description!r}"
@@ -388,9 +323,7 @@ def test_typical_runtime_min_positive_for_active_actions(registry):
 
 
 def test_explore_action_metadata(registry):
-    """v0.8 M3 + KB_gaps/Dead-A — ``explore`` is the canonical merged
-    grid runner; verify it owns the explore pipeline_phase + grid
-    lanes the dispatcher expects."""
+    """v0.8 M3 + KB_gaps/Dead-A — ``explore`` is the canonical merged grid runner."""
     m = registry.get("explore")
     assert m is not None, "explore action missing from registry"
     assert m.family == "shallow"
@@ -401,14 +334,11 @@ def test_explore_action_metadata(registry):
 
 
 def test_kernel_owned_actions_in_deep_pipeline_phase(registry):
-    """Kernel-owned actions must declare pipeline_phase=='deep' so the
-    builder groups them under the kernel section."""
+    """Kernel-owned actions must declare pipeline_phase=='deep'."""
     for name in KERNEL_OWNED_ACTIONS:
         m = registry.get(name)
         assert m is not None
         if name == "deep_kernel_analysis":
-            # Analysis-only step that PRECEDES kernel_opt — phase=analysis
-            # is the right slot.
             assert m.pipeline_phase == "analysis"
         else:
             assert m.pipeline_phase == "deep", (

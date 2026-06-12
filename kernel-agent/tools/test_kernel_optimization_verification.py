@@ -61,13 +61,7 @@ def test_benchmark_available_alone_does_not_pass_correctness(tmp_path):
 
 
 def test_report_correctness_passes_when_explicit(tmp_path):
-    """Report-scan correctness must light up on its own — without relying
-    on the CLI `accuracy_passed` flag — so the report's own "Correctness
-    passed" prose is recognised as evidence. We deliberately do NOT pass
-    `accuracy_passed=True` here: that would short-circuit to
-    `accuracy_override` (which is the higher-precedence path tested
-    separately in `test_cli_correctness_override`) and mask whether the
-    report scanner itself is wired up."""
+    """Report-scan correctness lights up on its own (no `accuracy_passed`, which would mask the report scanner via accuracy_override)."""
     report = tmp_path / "optimization_report.md"
     report.write_text(
         "Correctness passed\nSpeedup: 1.32x\n",
@@ -127,13 +121,7 @@ def _geak_attempt(tmp_path: Path, *, status: str = "complete", speedup: float = 
 
 
 def test_geak_correctness_trusted_by_default(tmp_path):
-    """PR-E default ON: GEAK status=complete + measured-speedup is
-    auto-promoted to KEEP. The integrate stage's E2E magpie benchmark
-    remains the ground-truth functional check; this default short-
-    circuits the missing correctness gate so GEAK patches actually
-    reach integrate (without this trust default, historical Qwen3-30B-
-    A3B-Base sessions ran GEAK 0/4 KEEP and dropped real 1.3x patches
-    like ck_moe_stage1)."""
+    """PR-E default ON: GEAK status=complete + measured-speedup auto-promotes to KEEP (Qwen3-30B-A3B-Base ran GEAK 0/4 KEEP without it)."""
     verification = ko.build_verification(
         _args(source_file="/tmp/moe_op.py"),
         [_geak_attempt(tmp_path, status="complete", speedup=1.3)],
@@ -147,9 +135,7 @@ def test_geak_correctness_trusted_by_default(tmp_path):
 
 
 def test_geak_correctness_can_be_disabled_via_env(tmp_path, monkeypatch):
-    """Operators that want human review can opt out via
-    HYPERLOOM_TRUST_GEAK_CORRECTNESS=0 -- restores the pre-PR-E
-    conservative behaviour (NEEDS_REVIEW because correctness missing)."""
+    """HYPERLOOM_TRUST_GEAK_CORRECTNESS=0 restores pre-PR-E conservative NEEDS_REVIEW behaviour."""
     monkeypatch.setenv("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "0")
     verification = ko.build_verification(
         _args(source_file="/tmp/moe_op.py"),
@@ -164,28 +150,20 @@ def test_geak_correctness_can_be_disabled_via_env(tmp_path, monkeypatch):
 
 
 def test_geak_correctness_trust_requires_nonzero_speedup(tmp_path):
-    """Trust default must not promote a 0.0/1.0 'unmeasured' result.
-    The geak_per_task_best_speedup must be > 0 for the trust gate to
-    fire, otherwise we'd silently KEEP a no-op patch."""
-    # speedup=0 simulates GEAK status=complete but no per-task best
+    """Trust gate requires geak_per_task_best_speedup > 0, else a no-op patch would be silently KEPT."""
     attempt = _geak_attempt(tmp_path, status="complete", speedup=0.0)
-    # Wipe the per-task speedup so build_verification's measured branch
-    # cannot rescue it.
     attempt["backend_paths"]["geak_per_task_best_speedup"] = "0"
     verification = ko.build_verification(
         _args(),
         [attempt],
         benchmark_available=True,
     )
-    # No measured speedup -> trust gate does not fire even with default trust.
     assert verification["correctness_passed"] is False
     assert verification["correctness_source"] == "missing"
 
 
 def test_geak_correctness_trust_requires_complete_status(tmp_path):
-    """Trust default must not promote status=failed / no-patch attempts.
-    GEAK reports status='complete_no_patch' when select_patch found
-    nothing worth keeping; that must NOT be auto-promoted to KEEP."""
+    """Trust default must not promote status='complete_no_patch' (select_patch found nothing) to KEEP."""
     verification = ko.build_verification(
         _args(),
         [_geak_attempt(tmp_path, status="complete_no_patch", speedup=1.3)],
@@ -254,11 +232,7 @@ def test_complete_kernel_artifact_can_integrate_without_e2e_yet(tmp_path):
 
 
 def test_report_correctness_failure_blocks_keep(tmp_path):
-    """Explicit "Correctness failed" in the report must block KEEP. We
-    intentionally omit `accuracy_passed=True` here — that flag forces
-    `correctness_source=accuracy_override` and would mask the
-    report-level failure (a real safety regression). The CLI override
-    path is exercised separately in `test_cli_correctness_override`."""
+    """Explicit "Correctness failed" in the report must block KEEP (no `accuracy_passed`, which would mask it via accuracy_override)."""
     report = tmp_path / "optimization_report.md"
     report.write_text(
         "Correctness failed: assert_close failed\nSpeedup: 2.0x\n",
@@ -287,29 +261,37 @@ def test_cli_correctness_override(tmp_path):
     assert ko.make_proposal(verification)["decision"] == "KEEP"
 
 
-# ---------------------------------------------------------------------------
-# GEAK worktree artifact recovery (TraceLens-resolver follow-up).
-#
-# Background: GEAK's homogeneous orchestrator lays out per-sub-agent
-# artifacts as
-#
-#   <patch_output_dir>/results/round_<R>/parallel_<M>/patch_<N>.patch
-#   <patch_output_dir>/results/round_<R>/worktrees/slot_<M>/<repo files>
-#
-# The ``.patch`` file is a unified diff that frequently includes
-# multi-MB binary deltas from the aiter JIT cache, so the existing
-# fence-extraction fallback in ``_select_source_artifact`` cannot
-# recover a real ``.py``. The actual rewritten source lives in the
-# worktree slot directory; this set of tests pins the path-mapping
-# helper, the worktree-aware candidate collector, and the end-to-end
-# ``build_verification`` path so future GEAK reorgs surface as a
-# concrete unit-test failure.
-# ---------------------------------------------------------------------------
+def test_speedup_just_above_gate_keeps(tmp_path):
+    """A 1.07x speedup clears the 1.05x KEEP gate (issue #442: was rejected by the old higher gate)."""
+    artifact = tmp_path / "optimized.hip"
+    verification = ko.build_verification(
+        _args(correctness_passed=True, micro_speedup=1.07,
+              e2e_gain_pct=0.5, accuracy_passed=True),
+        [_attempt(artifact=artifact)],
+        benchmark_available=False,
+    )
+    assert ko.make_proposal(verification)["decision"] == "KEEP"
+
+
+def test_speedup_below_gate_needs_review(tmp_path):
+    """A 1.03x speedup (improvement but under the 1.05x gate) routes to NEEDS_REVIEW, not KEEP."""
+    artifact = tmp_path / "optimized.hip"
+    verification = ko.build_verification(
+        _args(correctness_passed=True, micro_speedup=1.03,
+              e2e_gain_pct=0.5, accuracy_passed=True),
+        [_attempt(artifact=artifact)],
+        benchmark_available=False,
+    )
+    proposal = ko.make_proposal(verification)
+    assert proposal["decision"] == "NEEDS_REVIEW"
+    assert any("below KEEP" in r for r in proposal["reasons"])
+
+
+# GEAK worktree artifact recovery: rewritten source lives in the worktree slot dir, not the binary-laden .patch.
 
 
 def test_geak_best_worktree_maps_parallel_slot(tmp_path):
-    """``parallel_<M>/patch.patch`` MUST resolve to
-    ``worktrees/slot_<M>/`` under the same round dir."""
+    """``parallel_<M>/patch.patch`` resolves to ``worktrees/slot_<M>/`` under the same round dir."""
     round_dir = tmp_path / "results" / "round_1"
     slot_dir = round_dir / "worktrees" / "slot_3"
     slot_dir.mkdir(parents=True)
@@ -321,9 +303,7 @@ def test_geak_best_worktree_maps_parallel_slot(tmp_path):
 
 
 def test_geak_best_worktree_returns_none_for_unexpected_layout(tmp_path):
-    """Layouts that don't match the ``parallel_<M>`` convention must
-    fail soft so the caller falls back to ``.patch``-based recovery
-    instead of fabricating a worktree path."""
+    """Non-``parallel_<M>`` layouts fail soft so the caller falls back to ``.patch``-based recovery."""
     other = tmp_path / "results" / "round_1" / "weird_dir" / "patch.patch"
     other.parent.mkdir(parents=True)
     other.write_text("", encoding="utf-8")
@@ -332,10 +312,7 @@ def test_geak_best_worktree_returns_none_for_unexpected_layout(tmp_path):
 
 
 def test_geak_best_worktree_returns_none_when_slot_dir_missing(tmp_path):
-    """Even with a correct ``parallel_<M>`` parent, when the matching
-    ``worktrees/slot_<M>/`` doesn't exist on disk the helper refuses to
-    return a non-existent path (avoids handing GEAK an invalid dir to
-    rglob into)."""
+    """Missing ``worktrees/slot_<M>/`` on disk → helper refuses to return a non-existent path."""
     parallel = tmp_path / "results" / "round_1" / "parallel_0"
     parallel.mkdir(parents=True)
     patch = parallel / "patch_0.patch"
@@ -344,12 +321,7 @@ def test_geak_best_worktree_returns_none_when_slot_dir_missing(tmp_path):
 
 
 def test_worktree_source_paths_prefers_repo_relative_join(tmp_path):
-    """When ``kernel_repo`` is set, the helper MUST resolve via
-    ``source_file - kernel_repo`` first (the canonical mapping for
-    TraceLens-resolved candidates) before falling back to basename
-    rglob. This guards against an editable checkout shipping a
-    same-named stub at multiple paths (e.g. aiter's ``ops/rmsnorm.py``
-    vs ``ops/triton/normalization/rmsnorm.py``)."""
+    """With ``kernel_repo`` set, resolve via ``source_file - kernel_repo`` first (before basename rglob) to avoid same-named stub collisions."""
     repo = tmp_path / "repo"
     src = repo / "aiter" / "ops" / "rmsnorm.py"
     src.parent.mkdir(parents=True)
@@ -367,17 +339,12 @@ def test_worktree_source_paths_prefers_repo_relative_join(tmp_path):
         worktree, source_file=str(src), kernel_repo=str(repo),
     )
     assert paths
-    # Canonical mapping fires first; the decoy is also collected (for
-    # broader retrieval) but never as the primary candidate.
+    # Canonical mapping fires first; decoy collected but never primary.
     assert paths[0] == canonical
 
 
 def test_worktree_source_paths_falls_back_to_basename_when_no_repo(tmp_path):
-    """When ``kernel_repo`` is empty the canonical join can't fire;
-    the helper must still return matching files via bounded
-    ``worktree.rglob(basename)`` so the recovery path still works in
-    legacy CSV-only fixtures that don't carry ``kernel_repo`` on the
-    candidate."""
+    """Empty ``kernel_repo`` → fall back to bounded ``worktree.rglob(basename)`` for legacy CSV-only fixtures."""
     worktree = tmp_path / "worktree"
     hit = worktree / "deep" / "nested" / "rmsnorm.py"
     hit.parent.mkdir(parents=True)
@@ -390,12 +357,7 @@ def test_worktree_source_paths_falls_back_to_basename_when_no_repo(tmp_path):
 
 
 def test_candidate_artifact_paths_prefers_worktree_over_patch(tmp_path):
-    """When both a worktree ``.py`` AND a ``.patch`` are advertised,
-    the worktree file MUST appear first in the candidate list so
-    ``_select_source_artifact``'s first-pass suffix check picks it up
-    instead of falling back to fence extraction on a unified diff
-    (the regression this PR is fixing — GEAK ``.patch`` files routinely
-    embed binary JIT-cache deltas, so the fallback fails)."""
+    """Worktree ``.py`` must precede ``.patch`` so suffix check picks it up before fence extraction on a binary-laden diff."""
     repo = tmp_path / "repo"
     src = repo / "aiter" / "ops" / "rmsnorm.py"
     src.parent.mkdir(parents=True)
@@ -427,17 +389,12 @@ def test_candidate_artifact_paths_prefers_worktree_over_patch(tmp_path):
     )
     assert paths
     assert paths[0] == wt_file
-    # The patch is still in the candidate list as a defense-in-depth
-    # fallback — just not first.
+    # Patch stays in the list as a fallback, just not first.
     assert any(p == patch for p in paths)
 
 
 def test_build_verification_recovers_py_from_worktree(tmp_path):
-    """Pin the end-to-end fix: a GEAK attempt that left ``.patch`` +
-    a worktree slot containing a real ``.py`` must produce
-    ``artifact_valid=True`` with ``artifact_source='source_file'`` —
-    not the historical ``artifact_source='missing'`` that resulted
-    from only seeing the patch."""
+    """End-to-end: GEAK ``.patch`` + worktree ``.py`` yields artifact_valid=True, artifact_source='source_file' (not 'missing')."""
     repo = tmp_path / "repo"
     src = repo / "aiter" / "ops" / "rmsnorm.py"
     src.parent.mkdir(parents=True)
@@ -477,25 +434,11 @@ def test_build_verification_recovers_py_from_worktree(tmp_path):
     assert verification["best_artifact_path"] == str(wt_file)
 
 
-# ---------------------------------------------------------------------------
-# GEAK prompt yaml patcher.
-#
-# Hyperloom installs GEAK (which carries the bundled ``minisweagent``
-# package). One of the system-prompt YAMLs ships a hard-coded
-# ``task_runner.py performance`` example that mislead the sub-agent
-# LLM into running ``find /`` for a non-existent file (burning the
-# entire kernel-opt budget on WekaFS scans). The patcher rewrites
-# those three lines to abstract placeholders. Pin the idempotency +
-# fail-soft behaviour so a GEAK upstream wording change shows up as a
-# real test failure instead of silently mis-patching the YAML.
-# ---------------------------------------------------------------------------
+# GEAK prompt yaml patcher: rewrites a misleading task_runner.py example to placeholders; pin idempotency + fail-soft.
 
 
 def _seed_yaml(tmp_path):
-    """Create a minimal copy of the relevant block from the real
-    upstream YAML so the patcher has something concrete to work on
-    even when the test interpreter doesn't have minisweagent
-    installed."""
+    """Minimal copy of the relevant upstream YAML block (works without minisweagent installed)."""
     yaml = tmp_path / "config" / "mini_kernel_strategy_list.yaml"
     yaml.parent.mkdir(parents=True)
     yaml.write_text(
@@ -527,7 +470,6 @@ def test_geak_prompt_patcher_replaces_misleading_example(tmp_path, monkeypatch):
     text = yaml.read_text(encoding="utf-8")
     assert "task_runner.py performance" not in text
     assert "<your_benchmark.py>" in text
-    # Forbidden-rules / other tool sections must not be touched.
     assert "Forbidden in `command`" in text
     assert "other_tool" in text
 
@@ -546,18 +488,11 @@ def test_geak_prompt_patcher_idempotent(tmp_path, monkeypatch):
     text2 = yaml.read_text(encoding="utf-8")
     assert ok2 is True
     assert "already patched" in msg2
-    # Bit-for-bit identical: idempotent rerun must not touch the file.
     assert text1 == text2
 
 
 def test_geak_prompt_patcher_fails_soft_when_yaml_missing(tmp_path, monkeypatch):
-    """The patcher is a UX hardening, not a correctness gate; when
-    the YAML is missing (e.g. install ran with check-only and skipped
-    the GEAK pip install) ``ensure_geak_prompt_patched`` returns
-    ``(False, …)`` so the install script can continue. The
-    ``HYPERLOOM_GEAK_PROMPT_PATCH_REQUIRED`` knob is the operator's
-    opt-in for treating this as fatal — covered separately in the CLI
-    entrypoint test."""
+    """Missing YAML → ``ensure_geak_prompt_patched`` returns ``(False, …)`` (UX hardening, not a correctness gate)."""
     import geak_prompt_patcher as gpp
 
     monkeypatch.setenv(
@@ -569,10 +504,7 @@ def test_geak_prompt_patcher_fails_soft_when_yaml_missing(tmp_path, monkeypatch)
 
 
 def test_geak_prompt_patcher_refuses_to_guess_on_drift(tmp_path, monkeypatch):
-    """When upstream changes the example wording the patcher MUST
-    refuse rather than partially-match and garble the YAML. Pin this
-    so a GEAK upgrade that renames the example surfaces as a clear
-    failure, not a half-patched file."""
+    """Upstream wording drift → patcher refuses rather than half-patching the YAML."""
     import geak_prompt_patcher as gpp
 
     yaml = tmp_path / "drifted.yaml"
@@ -587,7 +519,6 @@ def test_geak_prompt_patcher_refuses_to_guess_on_drift(tmp_path, monkeypatch):
     ok, msg = gpp.ensure_geak_prompt_patched()
     assert ok is False
     assert "upstream example block changed" in msg
-    # File was NOT touched.
     assert "different_runner.py" in yaml.read_text(encoding="utf-8")
 
 
@@ -600,43 +531,16 @@ def test_benchmark_files_list_counts_as_benchmark(tmp_path):
     assert ko.has_benchmark(args, {"benchmark_files": [str(bench)]}) is True
 
 
-# ---------------------------------------------------------------------------
-# Regression: backend stdout must never be promoted to `source_file` artifact.
-#
-# Before the fix, `run_attempt` wrote the raw subprocess stdout to a
-# `<attempt_id>_optimized<source_suffix>` file (e.g. `.cu` / `.py`). The
-# mini-swe-agent / OOB log emitted by GEAK / claude / codex routinely
-# contains generic English words like "void ", "int ", "float ", or
-# fragments of the optimization-trajectory transcript that include patch
-# excerpts. `_source_text_looks_complete` only checks for the presence of
-# those markers (it does not parse C++), so it false-positive matched the
-# log as a real CUDA source file. The verification block then reported
-# `artifact_source: source_file` and pointed `best_artifact_path` at a
-# transcript log — observed on Qwen3-8B k007 rmsnorm_quant (2026-05-20),
-# where `geak-b9e23625_optimized.cu` was a 55-line minisweagent log with
-# 3 generic-marker hits, but was still reported as a valid source artifact.
-#
-# After the fix, stdout is written to `<attempt_id>_stdout.log` instead.
-# The `.log` suffix routes the file through the fenced-code-block
-# extraction path in `_select_source_artifact` (where it belongs — Claude
-# / Codex sometimes emit the full optimized CU inside a fenced block),
-# but never lets a raw log impersonate a real source artifact.
-# ---------------------------------------------------------------------------
+# Regression: backend stdout must never be promoted to `source_file` artifact (Qwen3-8B k007 2026-05-20); stdout now goes to `_stdout.log` and only the fenced-block extraction path may surface it.
 
 
 def test_geak_stdout_log_must_not_false_positive_as_source_file(tmp_path):
-    """If the only artifact a backend produced is its own stdout log
-    (no patch_*.patch, no optimized_versions/*.cu, no extractable code
-    fence), verification must report ``artifact_source == "missing"``
-    — NOT pretend the log is the optimized source. This is the exact
-    failure mode observed on Qwen3-8B k007 (2026-05-20)."""
+    """Stdout-log-only artifact (no patch, no .cu, no code fence) → artifact_source == "missing" (Qwen3-8B k007 2026-05-20)."""
     log_path = tmp_path / "geak-deadbeef_stdout.log"
     log_path.write_text(
         "minisweagent.agents.parallel_agent: INFO: [running 12.0min] Sub-agents working\n"
         "2 total patches (task_0: 2)\n"
-        # The next line embeds words like "void", "int", "float" that the
-        # pre-fix `_source_text_looks_complete` heuristic would happily
-        # accept as a complete CUDA source.
+        # Embeds void/int/float markers the pre-fix heuristic accepted as CUDA source.
         "Trajectory note: convert the int loop, drop the void wrapper, use float.\n"
         "Best patch: patch_1 (agent 0)\n",
         encoding="utf-8",
@@ -661,11 +565,7 @@ def test_geak_stdout_log_must_not_false_positive_as_source_file(tmp_path):
 
 
 def test_geak_stdout_log_with_fenced_cuda_block_is_extracted(tmp_path):
-    """If the backend stdout *does* embed the full optimized CU inside a
-    fenced code block (the Claude / Codex happy path), the `.log` route
-    must still surface it — labelled ``extracted_code_block``, not
-    ``source_file`` (so consumers know it came from a transcript, not a
-    first-class artifact)."""
+    """Fenced CU in stdout log is surfaced via the `.log` route, labelled ``extracted_code_block`` (not ``source_file``)."""
     log_path = tmp_path / "claude-c0ffee_stdout.log"
     log_path.write_text(
         "Here is the final optimized kernel:\n"
@@ -698,19 +598,12 @@ def test_geak_stdout_log_with_fenced_cuda_block_is_extracted(tmp_path):
     assert artifact_path.endswith("_extracted.cu")
     body = Path(artifact_path).read_text(encoding="utf-8")
     assert "extern \"C\" __global__ void optimized_kernel" in body
-    # The extraction must drop the surrounding prose / fence markers.
     assert "```" not in body
     assert "Here is the final" not in body
 
 
 def test_geak_patch_is_preferred_over_stdout_log(tmp_path):
-    """When both a real GEAK patch AND a stdout log are present, the
-    patch wins. The log is only a fallback for the all-else-failed
-    case. The patch itself isn't a `.cu`, so it goes through fenced
-    extraction — but that fails (a unified diff has no fenced code
-    blocks), so we correctly return `missing` rather than promoting
-    the stdout log. Documents the precedence order in
-    `_candidate_artifact_paths`."""
+    """Patch wins over stdout log; a diff has no fenced block so we return `missing` rather than promoting the log (`_candidate_artifact_paths` precedence)."""
     patch_path = tmp_path / "patch_1.patch"
     patch_path.write_text(
         "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -1,1 +1,1 @@\n-old\n+new\n",
@@ -738,37 +631,16 @@ def test_geak_patch_is_preferred_over_stdout_log(tmp_path):
         run_dir=tmp_path,
     )
 
-    # Neither path yields a complete CU: patch is a diff (no fenced
-    # block), log is just marker-noise (no fenced block either). The
-    # crucial assertion is that the log is NOT silently promoted to
-    # `source_file` — that was the pre-fix bug.
+    # Crucial: the marker-noise log is NOT silently promoted to source_file (the pre-fix bug).
     assert source == "missing"
     assert artifact_path == ""
 
 
-# ---------------------------------------------------------------------------
-# Downstream-consumer contract for the optimized/ directory naming.
-#
-# `run_attempt` writes one file per attempt under `runs/<sid>/optimized/`:
-#   * real backend runs:  `<attempt_id>_stdout.log`
-#   * dry-run smoke tests: `<attempt_id>_optimized<source_suffix>`
-#
-# The breakdown collector (`inference_optimizer/breakdown/collectors.py`)
-# discovers these via `glob(f"{attempt_id}*")`, which by design picks up
-# BOTH the legacy name (older sessions on disk) and the new name. The
-# regression below pins that contract so anyone tightening the glob to
-# a fixed suffix breaks the test (and re-introduces the historical
-# `geak-b9e23625_optimized.cu == 55-line minisweagent log` false-positive
-# documented in `test_geak_stdout_log_must_not_false_positive_as_source_file`
-# above — see also `kernel-agent/SKILL.md` § *Per-attempt stdout file naming*).
-# ---------------------------------------------------------------------------
+# Downstream-consumer contract: breakdown collector's `glob("{attempt_id}*")` must keep matching both legacy `_optimized.<suffix>` and new `_stdout.log` names (kernel-agent/SKILL.md § Per-attempt stdout file naming).
 
 
 def test_optimized_dir_glob_picks_up_both_legacy_and_new_attempt_files(tmp_path):
-    """Lock the `glob("{attempt_id}*")` contract that the breakdown
-    collector relies on. Both names must surface for the same attempt id
-    so downstream consumers transparently work across old + new sessions.
-    """
+    """Lock the `glob("{attempt_id}*")` contract: both names surface for the same attempt id across old + new sessions."""
     opt_dir = tmp_path / "optimized"
     opt_dir.mkdir()
 
@@ -795,11 +667,7 @@ def test_optimized_dir_glob_picks_up_both_legacy_and_new_attempt_files(tmp_path)
 
 
 def test_run_attempt_dry_run_emits_optimized_suffix_file(tmp_path):
-    """Dry-run mode is a public smoke-test surface: it must keep the
-    historical `<attempt_id>_optimized<source_suffix>` filename so existing
-    smoke scripts and dry-run CI shards keep working unchanged. (Real
-    backend runs deliberately diverged to `_stdout.log` — see the comment
-    block above.)"""
+    """Dry-run keeps the historical `<attempt_id>_optimized<source_suffix>` filename for smoke-test back-compat."""
     import argparse
 
     run_dir = tmp_path / "runs" / "sess001"
@@ -1113,13 +981,9 @@ def test_build_prompt_strips_base64_images_from_tracelens_context(tmp_path):
     assert "P2: rmsnorm tuning" in prompt
 
 
-# ============================================================================
 # PR-A §4: TraceLens hypothesis block in build_prompt
-# ============================================================================
 def test_build_hypothesis_block_returns_empty_when_no_prose_fields():
-    """Candidates from non-TraceLens-v0.3 paths (raw trace, csv fallback,
-    legacy priority_data) lack the prose fields. The block must be a no-op
-    in that case so the prompt body is byte-identical to pre-PR."""
+    """Candidates lacking prose fields → no-op block (prompt byte-identical to pre-PR)."""
     block = ko._build_hypothesis_block(
         {"name": "kernel_no_prose", "source_type": "triton"},
     )
@@ -1139,11 +1003,9 @@ def test_build_hypothesis_block_renders_reasoning_and_resolution():
     assert "## TraceLens Hypothesis [validate before acting]" in block
     assert "Memory-bound kernel saturating HBM bandwidth." in block
     assert "Fuse RMSNorm with the following GEMM" in block
-    # Hypothesis framing must always be present so GEAK doesn't take
-    # TraceLens's guess as ground truth.
+    # Hypothesis framing always present so GEAK doesn't treat the guess as ground truth.
     assert "verify the reasoning" in block
     assert "(hypothesis)" in block
-    # Empty impact range must not be rendered.
     assert "Estimated impact range" not in block
 
 
@@ -1162,20 +1024,14 @@ def test_build_hypothesis_block_renders_impact_range_when_set():
     assert "3.20% E2E" in block
     assert "40.00 ms" in block
     assert "10.40% E2E" in block
-    # Numbers are TraceLens roofline estimates — the framing must say so
-    # so GEAK doesn't treat them as measured speedups.
+    # Numbers are TraceLens roofline estimates, framed as such so GEAK doesn't treat them as measured.
     assert "roofline" in block
     assert "Reasoning for slowdown" not in block
     assert "Recommended direction" not in block
 
 
 def test_build_hypothesis_block_renders_identification_when_present():
-    """The Identification line carries per-rank context + the source
-    metrics-file reference (e.g. ``gemm_metrics.json → operations[].
-    efficiency.efficiency_percent``). Surfacing it lets GEAK trace any
-    hypothesis back to the raw TraceLens data when it needs to
-    disagree. Must be labelled distinctly from Reasoning so the agent
-    doesn't conflate "what was flagged" with "why it's slow"."""
+    """Identification line carries per-rank context + source metrics-file ref, labelled distinctly from Reasoning."""
     block = ko._build_hypothesis_block({
         "name": "rms_norm",
         "identification": (
@@ -1188,17 +1044,14 @@ def test_build_hypothesis_block_renders_identification_when_present():
     assert "Identification (TraceLens context):" in block
     assert "Four `aiter::rmsnorm_quant`" in block
     assert "rmsnorm_metrics.json" in block
-    # Identification appears BEFORE Reasoning so the agent reads the
-    # "what" before the "why" — matches the template's section order.
+    # Identification appears before Reasoning (what before why).
     id_pos = block.index("Identification (TraceLens context):")
     reason_pos = block.index("Reasoning for slowdown (hypothesis):")
     assert id_pos < reason_pos
 
 
 def test_build_hypothesis_block_renders_when_only_identification_present():
-    """A P-item with only Identification (no Reasoning/Resolution/Impact)
-    must still produce a block — GEAK needs the source pointer even
-    when the analysis-orchestrator didn't synthesise downstream prose."""
+    """A P-item with only Identification still produces a block (GEAK needs the source pointer)."""
     block = ko._build_hypothesis_block({
         "name": "kernel",
         "identification": "Three ops flagged. (source: gemm_metrics.json)",
@@ -1208,18 +1061,10 @@ def test_build_hypothesis_block_renders_when_only_identification_present():
 
 
 def test_build_hypothesis_block_renders_all_pitem_prose_when_function_spans_pitems():
-    """Q2: when ``task_group.all_pitem_prose`` carries multiple distinct
-    entries (same source function flagged in multiple TraceLens
-    P-items), every P-item's prose is rendered with a ``### P{rank}``
-    header. GEAK sees both framings, not just the primary's. Order
-    follows the input list (already rank-sorted by
-    ``aggregate_by_source_function``)."""
+    """Q2: multi-entry ``task_group.all_pitem_prose`` renders every P-item with a ``### P{rank}`` header, rank-sorted."""
     candidate = {
         "name": "aiter::rms_norm",
-        # Primary's own prose fields are intentionally divergent /
-        # absent so the test confirms the renderer reads from
-        # ``all_pitem_prose`` (not from candidate's flat prose) when
-        # the multi-P-item path is taken.
+        # Primary's flat prose intentionally divergent so the test confirms the renderer reads from all_pitem_prose.
         "identification": "<should not appear in multi-pitem render>",
         "reasoning_for_slowdown": "<should not appear>",
         "task_group": {
@@ -1250,32 +1095,25 @@ def test_build_hypothesis_block_renders_all_pitem_prose_when_function_spans_pite
         },
     }
     block = ko._build_hypothesis_block(candidate)
-    # Multi-P-item header copy:
     assert "appears across MULTIPLE TraceLens P-items" in block
-    # Each P-item gets its own subheader + prose:
     assert "### P2 — Memory-Bound at decode shapes" in block
     assert "### P5 — Compute-Bound at prefill shapes" in block
     assert "Decode rows: 2.0% of HBM peak" in block
     assert "Prefill rows: 95% of compute peak" in block
     assert "Increase batch upstream" in block
     assert "Tile-size tuning" in block
-    # P2 must appear before P5 (rank-ascending order):
+    # P2 before P5 (rank-ascending).
     p2_pos = block.index("### P2")
     p5_pos = block.index("### P5")
     assert p2_pos < p5_pos
-    # Per-P-item impact ranges are rendered, BOTH variants:
     assert "5.00 ms" in block and "10.00 ms" in block
     assert "1.00 ms" in block and "3.00 ms" in block
-    # Candidate's flat prose fields must NOT leak into the multi-pitem
-    # render — that would conflate which P-item the prose came from.
+    # Candidate's flat prose must not leak into the multi-pitem render.
     assert "<should not appear>" not in block
 
 
 def test_build_hypothesis_block_falls_back_to_flat_prose_for_single_pitem():
-    """When ``all_pitem_prose`` has exactly one entry, the legacy flat
-    layout fires (reads from candidate's prose fields). This is the
-    common case — the multi-P-item layout would add unhelpful header
-    noise for single-finding kernels."""
+    """Single-entry ``all_pitem_prose`` → legacy flat layout (common case, avoids header noise)."""
     candidate = {
         "name": "kernel",
         "reasoning_for_slowdown": "Memory-bound.",
@@ -1292,16 +1130,13 @@ def test_build_hypothesis_block_falls_back_to_flat_prose_for_single_pitem():
         },
     }
     block = ko._build_hypothesis_block(candidate)
-    # Legacy flat header (no "MULTIPLE TraceLens P-items" prose):
     assert "appears across MULTIPLE" not in block
     assert "**Reasoning for slowdown (hypothesis):**" in block
     assert "Memory-bound." in block
 
 
 def test_build_prompt_omits_hypothesis_block_when_no_prose():
-    """Backward compat: candidates without prose fields produce the same
-    prompt shape as before — no surprise section, no extra blank lines
-    that change downstream token counts."""
+    """Backward compat: candidates without prose fields produce the same prompt shape (no extra section/blank lines)."""
     prompt = ko.build_prompt(
         {"name": "legacy_kernel", "source_type": "triton"},
         _prompt_args("mi300x"),
@@ -1330,12 +1165,9 @@ def test_build_prompt_includes_hypothesis_block_when_prose_present():
     assert "20.00 ms" in prompt
 
 
-# ============================================================================
 # PR-B §2: benchmark-cases block in build_prompt
-# ============================================================================
 def test_build_benchmark_cases_block_returns_empty_without_task_group():
-    """Legacy per-kernel dispatch (no task_group attached) must produce
-    byte-identical output to PR-A."""
+    """Legacy dispatch (no task_group) → byte-identical output to PR-A."""
     block = ko._build_benchmark_cases_block(
         {"name": "rms_norm", "source_type": "triton"},
     )
@@ -1353,7 +1185,7 @@ def test_build_benchmark_cases_block_renders_single_row():
             "rows": [{
                 "name": "rms_norm",
                 "shapes": ["(8,4096) bf16"],
-                "duration_us": 100_000.0,  # 100 ms aggregate
+                "duration_us": 100_000.0,
                 "call_count": 100,
                 "percent_of_total": 4.2,
                 "flops_per_byte": 0.5,
@@ -1369,16 +1201,13 @@ def test_build_benchmark_cases_block_renders_single_row():
     assert "rms_norm" in block
     assert "/sgl-workspace/aiter/rmsnorm.py:42" in block
     assert "Case 1: operation=rms_norm" in block
-    # 100 ms / 100 calls = 1.000000 ms per call.
     assert "per_call_ms=1.000000" in block
     assert "bound=memory-bound" in block
     assert "30.00% of 5.3 TB/s" in block
 
 
 def test_build_benchmark_cases_block_renders_multiple_rows_sorted_by_time():
-    """Multi-row groups must explicitly say 'optimize once, applies to all'
-    and render rows in aggregate-time-descending order from build_prompt's
-    perspective (the test_group_rows arrive pre-sorted from aggregate)."""
+    """Multi-row groups render rows aggregate-time-descending and say 'optimize once, applies to all'."""
     block = ko._build_benchmark_cases_block({
         "name": "rms_norm",
         "task_group": {
@@ -1411,8 +1240,7 @@ def test_build_benchmark_cases_block_renders_multiple_rows_sorted_by_time():
 
 
 def test_build_prompt_includes_benchmark_cases_when_task_group_present():
-    """End-to-end: build_prompt threads the new block in when the
-    candidate carries a task_group."""
+    """End-to-end: build_prompt threads the block in when the candidate carries a task_group."""
     prompt = ko.build_prompt(
         {
             "name": "rms_norm",
@@ -1444,9 +1272,7 @@ def test_build_prompt_omits_benchmark_cases_for_legacy_candidates():
     assert "## Benchmark cases" not in prompt
 
 
-# ============================================================================
 # PR-B §3: bound-keyed optimization priority block in build_prompt
-# ============================================================================
 def test_build_priority_block_empty_when_no_bound_info():
     block = ko._build_priority_block({"name": "kernel", "source_type": "triton"})
     assert block == ""
@@ -1459,7 +1285,6 @@ def test_build_priority_block_memory_bound_leads_with_memory_traffic():
     })
     assert "Optimization priorities" in block
     assert "memory-bound" in block
-    # Lever 1 must be memory traffic; lever 2 must be shape-aware.
     lev1 = block.index("1. **Memory traffic reduction**")
     lev2 = block.index("2. **Shape-aware tuning**")
     assert lev1 < lev2
@@ -1483,9 +1308,9 @@ def test_build_priority_block_unknown_bound_uses_default_order():
     assert "1. **Structural simplification**" in block
 
 
+
 def test_build_priority_block_reads_bound_from_task_group_primary_row():
-    """When candidate has no top-level bound_type, fall back to the
-    first task_group row's bound_type."""
+    """No top-level bound_type → fall back to the first task_group row's bound_type."""
     block = ko._build_priority_block({
         "name": "rms_norm",
         "task_group": {
@@ -1512,18 +1337,9 @@ def test_build_prompt_omits_priority_block_for_legacy_candidates():
     assert "## Optimization priorities" not in prompt
 
 
-# ============================================================================
-# Defect 1 regression: make_proposal must surface ``artifact_error`` instead of
-# the misleading "compile failed" string when zero backend attempts ever
-# produced a usable result (e.g. wedged Ray cluster -> ConnectionError on every
-# submit). Without this, an infra failure looks like a real compile regression
-# in state.json:last_kernel_opt.reasons. See:
-#   /home/sapmajum/hyperloom_work/logs/geak_dispatch_audit.md Defect 1
-# ============================================================================
+# Defect 1 regression: make_proposal must surface ``artifact_error`` (not "compile failed") when zero backend attempts produced a usable result (geak_dispatch_audit.md Defect 1).
 def test_make_proposal_surfaces_backend_dispatch_failure():
-    """When every backend dispatch failed and ``best`` is None, the REVERT
-    reason must call out the real cause (no usable backend attempt) so
-    operators don't chase a phantom compile regression."""
+    """All dispatch failed (``best`` None) → REVERT reason names the real cause (no usable backend attempt), not compile."""
     verification = {
         "compile_passed": False,
         "correctness_passed": False,
@@ -1545,11 +1361,7 @@ def test_make_proposal_surfaces_backend_dispatch_failure():
 
 
 def test_make_proposal_keeps_legacy_compile_failed_when_artifact_lookup_failed():
-    """Real compile-side regression path: an attempt produced output but the
-    artifact resolution failed (best_attempt_id non-empty, artifact_error
-    describes the lookup failure). Decision must still be REVERT with the
-    legacy 'compile failed' reason — only the *dispatch-side* path is rewritten.
-    """
+    """Compile-side regression: attempt produced output but artifact resolution failed → REVERT with legacy 'compile failed'."""
     verification = {
         "compile_passed": False,
         "correctness_passed": False,
@@ -1567,9 +1379,7 @@ def test_make_proposal_keeps_legacy_compile_failed_when_artifact_lookup_failed()
 
 
 def test_make_proposal_empty_artifact_error_falls_back_to_compile_failed():
-    """Belt-and-braces: if compile_passed=False and artifact_error is empty
-    (shouldn't happen given build_verification's default, but guard against
-    future refactors), we must not crash and must keep the legacy reason."""
+    """Belt-and-braces: compile_passed=False with empty artifact_error must not crash and keeps the legacy reason."""
     verification = {
         "compile_passed": False,
         "correctness_passed": False,

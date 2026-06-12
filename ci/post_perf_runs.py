@@ -74,11 +74,9 @@ DEFAULT_WORKERS = 5
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_RETRIES = 4
 
-# stop_reason values that indicate the session truly crashed. We DO NOT reject
-# 'signal' / 'time_exhausted' / 'killed' / 'aborted' / 'timeout' because those
-# are graceful shutdown paths (Robust budget runner sends SIGTERM when the
-# time budget elapses; the optimisation loop has already produced valid
-# baseline + final metrics). Only crashes / hard failures land here.
+# stop_reason values for true crashes only. 'signal'/'time_exhausted'/'killed'/
+# 'timeout' are NOT rejected — they're graceful budget-elapsed shutdowns with
+# valid baseline + final metrics.
 _CRASH_STOP_REASONS = {
     "exception", "error", "failed", "baseline_failed",
     "oom_killed", "oom", "segfault",
@@ -86,20 +84,10 @@ _CRASH_STOP_REASONS = {
 
 
 def is_complete_session(data: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
-    """
-    Reject incomplete or crashed sessions.
+    """Reject incomplete or crashed sessions; returns (ok, reason_if_rejected).
 
-    Required for a 'good' session:
-      * baseline.throughput_tok_s_per_gpu > 0   (baseline phase succeeded)
-      * final.throughput_tok_s_per_gpu    > 0   (optimisation produced a candidate)
-      * session.stop_reason not in _CRASH_STOP_REASONS
-
-    Note: 'signal' and 'time_exhausted' are NOT rejected -- they're the
-    expected graceful shutdown path when the agent's time budget elapses.
-    The 935-file d2d10ce6 import already accepted 319 such sessions and they
-    are fully valid leaderboard entries.
-
-    Returns (ok, reason_if_rejected).
+    A 'good' session needs baseline + final throughput_tok_s_per_gpu > 0 and a
+    stop_reason not in _CRASH_STOP_REASONS ('signal'/'time_exhausted' are kept).
     """
     baseline = data.get("baseline") or {}
     final = data.get("final") or {}
@@ -125,11 +113,9 @@ def is_complete_session(data: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
 # ---------------------------------------------------------------------------
 
 def build_body(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """
-    Returns (body, error_msg). On error, body is None.
+    """Returns (body, error_msg); body is None on error.
 
-    `body` is exactly the JSON document we POST. Keys match the perf_runs
-    DTO 1:1 so the server can persist them verbatim.
+    `body` is the JSON we POST, with keys matching the perf_runs DTO 1:1.
     """
     try:
         with path.open("r", encoding="utf-8") as f:
@@ -137,13 +123,8 @@ def build_body(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     except Exception as e:
         return None, f"parse_failed:{e}"
 
-    # Accept four layouts (in this priority order to keep the strictest path
-    # first):
-    #   1. bare V2 session breakdown    {workload, baseline, final, session, ...}
-    #   2. V2 wrapper                   {source, data: <V2 breakdown>, ...}
-    #   3. legacy V1 flat schema        {model, framework, baseline_tput, best_tput, ...}
-    #   4. universal fallback           any dict with a recoverable
-    #                                   (model + framework + baseline-per-gpu)
+    # Accept four layouts, strictest first: bare V2 breakdown, V2 wrapper
+    # ({source, data}), legacy V1 flat schema, universal fallback.
     if looks_like_session_breakdown(data):
         pass
     elif isinstance(data, dict) and isinstance(data.get("data"), dict) and \
@@ -159,34 +140,20 @@ def build_body(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     else:
         return None, "not_a_session_breakdown"
 
-    # Reject incomplete or error-aborted runs (user request: 不完整的报错的 都不要上传).
     ok, reason = is_complete_session(data)
     if not ok:
         return None, reason
 
-    # Step 2: V2 backfill (baseline.extra_*, capability_summary.*.best_gain_pct,
-    # phase_timeline best_extra_server_args, detected[].geak/.oob)
     wrapped = transform(data)
     enriched = wrapped["data"]
 
-    # Step 3: extract the perf_runs row from the enriched breakdown
     try:
         row = extract_row(enriched)
     except Exception as e:
         return None, f"extract_row_failed:{e}"
 
-    # raw_data already includes ._enrichment AND ._v2_patches inside it from
-    # the transform step. Verify required fields are present before posting.
-    #
-    # Strict client-side validation: every leaderboard column the user wants
-    # to see populated MUST be present in `row`. Anything missing here would
-    # land in DB as NULL/empty and require a follow-up patch step, which we
-    # are explicitly preventing per user request.
-    #   - string fields: reject NULL or empty/whitespace
-    #   - numeric/int fields: reject NULL (0 is allowed for gain since a
-    #       no-op optimisation is a legitimate result)
-    #   - baseline_tok_per_s_per_gpu > 0 already enforced upstream by
-    #       is_complete_session, and opt_tok_per_s_per_gpu > 0 too.
+    # Strict client-side validation so no leaderboard column lands NULL/empty:
+    # reject blank strings and null numerics (0 gain is a valid no-op result).
     required_nonblank = ("model_name", "framework", "image", "prec", "category",
                          "unique_key", "claw_session_id", "status")
     blank = [k for k in required_nonblank
@@ -201,9 +168,8 @@ def build_body(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     if null_num:
         return None, f"null_numeric:{','.join(null_num)}"
 
-    # Sanity: raw_data.session.image MUST be populated. enrich_raw_data is
-    # responsible for backfilling this from row['image'] -- if it is still
-    # missing we have a bug, not a data issue.
+    # raw_data.session.image must be backfilled by enrich_raw_data; if still
+    # missing it's a bug, not a data issue.
     raw_session_image = (row.get("raw_data") or {}).get("session", {}).get("image")
     if not raw_session_image:
         return None, "raw_data.session.image_missing"
@@ -215,15 +181,26 @@ def build_body(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
 # HTTP
 # ---------------------------------------------------------------------------
 
-# 500 is excluded on purpose: the perf-leaderboard server returns 500 for
-# deterministic business errors (e.g. duplicate unique_key SQLSTATE 23505),
-# not for transient upstream issues -- retrying it would waste 30-100s per
-# duplicate. Genuine transient outages surface as 502/503/504.
+# 500 excluded on purpose: the server returns it for deterministic business
+# errors (e.g. duplicate unique_key); transient outages surface as 502/503/504.
 _RETRIABLE_STATUS = {408, 425, 429, 502, 503, 504}
 
 
 def post_once(endpoint: str, token: str, body: Dict[str, Any], timeout: float) -> Tuple[int, str]:
-    """Single POST. Returns (status_code, response_text)."""
+    """Issue a single POST request to the perf-leaderboard API.
+
+    Low-level connection errors are mapped to status ``599`` so the retry loop
+    can decide whether to retry.
+
+    Args:
+        endpoint (str): Full URL to POST to.
+        token (str): Value for the ``Authorization`` header.
+        body (Dict[str, Any]): JSON-serializable request body.
+        timeout (float): Request timeout in seconds.
+
+    Returns:
+        Tuple[int, str]: The HTTP status code and response text.
+    """
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         endpoint,
@@ -245,13 +222,28 @@ def post_once(endpoint: str, token: str, body: Dict[str, Any], timeout: float) -
             text = ""
         return e.code, text
     except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
-        # Treat low-level connection errors as 599 so retry-loop can decide.
+        # 599 = low-level connection error, for the retry loop to decide.
         return 599, f"{type(e).__name__}: {e}"
 
 
 def post_with_retry(endpoint: str, token: str, body: Dict[str, Any],
                     timeout: float, max_retries: int) -> Tuple[int, str, int]:
-    """Returns (final_status, body_text, attempts)."""
+    """POST with exponential backoff and full jitter on retriable failures.
+
+    Only statuses in ``_RETRIABLE_STATUS`` (plus the synthetic ``599``) are
+    retried; ``429`` uses a heavier base backoff.
+
+    Args:
+        endpoint (str): Full URL to POST to.
+        token (str): Value for the ``Authorization`` header.
+        body (Dict[str, Any]): JSON-serializable request body.
+        timeout (float): Per-request timeout in seconds.
+        max_retries (int): Maximum number of retries after the first attempt.
+
+    Returns:
+        Tuple[int, str, int]: The final status code, response text, and the
+        number of attempts made.
+    """
     attempt = 0
     while True:
         attempt += 1
@@ -261,7 +253,7 @@ def post_with_retry(endpoint: str, token: str, body: Dict[str, Any],
         retriable = status in _RETRIABLE_STATUS or status == 599
         if not retriable or attempt > max_retries:
             return status, text, attempt
-        # Exponential backoff w/ full jitter. Heavier wait for 429.
+        # Exponential backoff with full jitter; heavier wait for 429.
         base = 5.0 if status == 429 else 1.0
         sleep_s = base * (2 ** (attempt - 1))
         sleep_s = random.uniform(0.5 * sleep_s, sleep_s)
@@ -273,6 +265,18 @@ def post_with_retry(endpoint: str, token: str, body: Dict[str, Any],
 # ---------------------------------------------------------------------------
 
 def iter_files(paths: List[str], scan_dir: Optional[str]) -> List[Path]:
+    """Collect unique ``session_breakdown.json`` paths from inputs.
+
+    Directories are scanned recursively; explicit file paths are included
+    as-is. Duplicates (by resolved path) are removed while preserving order.
+
+    Args:
+        paths (List[str]): File or directory paths supplied on the CLI.
+        scan_dir (Optional[str]): Additional directory to scan recursively.
+
+    Returns:
+        List[Path]: De-duplicated list of session breakdown file paths.
+    """
     files: List[Path] = []
     for p in paths:
         pp = Path(p)
@@ -294,6 +298,20 @@ def iter_files(paths: List[str], scan_dir: Optional[str]) -> List[Path]:
 
 def process_file(path: Path, endpoint: str, token: str, timeout: float,
                  max_retries: int, dry_run: bool) -> Dict[str, Any]:
+    """Build, validate, and (optionally) POST a single breakdown file.
+
+    Args:
+        path (Path): Path to a ``session_breakdown.json`` file.
+        endpoint (str): Full URL to POST to.
+        token (str): Value for the ``Authorization`` header.
+        timeout (float): Per-request timeout in seconds.
+        max_retries (int): Maximum number of retries after the first attempt.
+        dry_run (bool): When True, build and validate the body but skip the POST.
+
+    Returns:
+        Dict[str, Any]: A ledger record describing the outcome, including
+        ``ok``, ``status``, and identifying fields or an ``error``.
+    """
     body, err = build_body(path)
     base_record = {
         "path":      str(path),
@@ -324,6 +342,15 @@ def process_file(path: Path, endpoint: str, token: str, timeout: float,
 
 
 def main() -> int:
+    """Parse CLI arguments and upload session breakdown files concurrently.
+
+    Discovers input files, dispatches uploads across a thread pool, appends
+    per-file outcomes to a JSONL ledger, and prints a summary with a status
+    breakdown.
+
+    Returns:
+        int: ``0`` if every file succeeded, otherwise ``1``.
+    """
     ap = argparse.ArgumentParser(
         description="Upload session_breakdown.json files to the perf-leaderboard API.",
         formatter_class=argparse.RawDescriptionHelpFormatter,

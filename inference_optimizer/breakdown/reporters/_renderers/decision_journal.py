@@ -22,6 +22,15 @@ _MAX_ROUNDS_STANDARD = 20
 
 
 def _variant_rows(variants: list[dict[str, Any]]) -> list[list[Any]]:
+    """Build variant table rows for one decision-journal round.
+
+    Args:
+        variants (list[dict[str, Any]]): Variant records for the round.
+
+    Returns:
+        list[list[Any]]: Rows of ``[name, outcome, gain_vs_base, tput,
+            reject_reason, status]``.
+    """
     rows: list[list[Any]] = []
     for v in variants:
         rows.append([
@@ -37,6 +46,19 @@ def _variant_rows(variants: list[dict[str, Any]]) -> list[list[Any]]:
 
 @register_renderer("decision_journal")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the decision-journal section: one block per search round.
+
+    Each round shows its promotion verdict plus a variant table (gain,
+    outcome, reject reason), capping rounds at standard detail level.
+    Skipped when no params/backends rounds were recorded.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered section, or a skipped placeholder when
+            the journal is empty.
+    """
     journal = breakdown.get("decision_journal") or []
     detail_level = str(breakdown.get("detail_level") or "standard")
 

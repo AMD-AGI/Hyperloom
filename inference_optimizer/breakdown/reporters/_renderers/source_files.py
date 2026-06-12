@@ -13,6 +13,18 @@ from ..base import RenderedSection, md_table, register_renderer
 
 @register_renderer("source_files")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the source-files manifest section.
+
+    Lists, per file kind, how many artifacts the breakdown was built from
+    plus a short preview, so a session can be replayed or audited. Skipped
+    when no source-files manifest is present.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered source-files section.
+    """
     sf = breakdown.get("source_files") or {}
     if not sf:
         return RenderedSection(
@@ -29,8 +41,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             preview = ", ".join(str(x) for x in v[:3]) if v else "—"
             rows.append([k, len(v), preview])
         elif v in (None, "", []):
-            # Skip empty entries entirely rather than rendering ``—`` /
-            # ``—`` rows that add visual noise without information.
+            # Skip empty entries rather than render noisy ``—`` rows.
             continue
         else:
             rows.append([k, "1", str(v)])

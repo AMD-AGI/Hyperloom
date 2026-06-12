@@ -2,12 +2,10 @@
 
 """Shell helpers for trusted framework exploration commands.
 
-Pure subprocess + template rendering with no external deps. The
-template renderer accepts an optional ``shell_quote`` flag that
-wraps each substituted value in ``shlex.quote`` so an attacker who
-managed to seed a candidate ref or path with shell metacharacters
-cannot break out of the rendered command string. Callers that
-render *paths* (not shell commands) keep ``shell_quote=False``.
+Pure subprocess + template rendering, no external deps. The renderer's
+optional ``shell_quote`` flag wraps each substituted value in ``shlex.quote``
+so a candidate ref/path seeded with shell metacharacters can't break out of
+the command string. Callers rendering paths (not commands) keep it False.
 """
 
 from __future__ import annotations
@@ -27,7 +25,19 @@ def run_command(
     cwd: Path,
     timeout_sec: int,
 ) -> CommandResult:
-    """Run a shell command with timeout, capture stdout/stderr tails."""
+    """Run a shell command with timeout, capture stdout/stderr tails.
+
+    Args:
+        name (str): Logical name for the command, echoed back in the result.
+        command (str): The shell command line to execute.
+        cwd (Path): Working directory the command runs in.
+        timeout_sec (int): Hard timeout in seconds before the command is killed.
+
+    Returns:
+        CommandResult: Outcome holding the return code and the last 4000
+            characters of stdout/stderr. On timeout, ``returncode`` is 124 and
+            ``timed_out`` is True.
+    """
     try:
         proc = subprocess.run(
             command,
@@ -63,15 +73,9 @@ def render_template(
 ) -> str:
     """Render known ``{var}`` placeholders, raise on unknown placeholders.
 
-    Does not touch JSON-style ``{...}`` braces that don't match the
-    ``[A-Za-z_][A-Za-z0-9_]*`` identifier pattern.
-
-    When ``shell_quote=True`` each substituted value is wrapped with
-    :func:`shlex.quote`. Use this when the rendered string will be
-    handed to a shell (e.g. ``subprocess.run(shell=True)``); the
-    quoting is a no-op for plain alphanumeric / path-safe values
-    and transparently neutralises shell metacharacters in any
-    untrusted input.
+    Leaves JSON-style ``{...}`` braces that don't match the
+    ``[A-Za-z_][A-Za-z0-9_]*`` identifier pattern untouched. ``shell_quote=True``
+    wraps each value in :func:`shlex.quote` for shell-bound strings.
     """
     rendered = template
     for key, value in variables.items():

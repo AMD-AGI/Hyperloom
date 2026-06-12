@@ -58,11 +58,24 @@ def _coerce_str(value: Any) -> str:
     ``None`` collapses to the empty string so callers that immediately
     ``.strip()`` get the same result. Non-string, non-None values fall
     through ``str()``.
+
+    Args:
+        value (Any): Raw payload value loaded from JSON/YAML.
+
+    Returns:
+        str: ``""`` for ``None``, the value unchanged when already a string,
+        otherwise ``str(value)``.
     """
     if value is None:
         return ""
     if isinstance(value, str):
         return value
+    # The LLM occasionally emits server flags as a JSON list
+    # (``["--flag", "value"]``); space-join into shell tokens rather than
+    # emitting a Python repr that the Magpie wrapper would splice verbatim
+    # into ``vllm/sglang serve`` (rejected as "unrecognized arguments").
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(v).strip() for v in value if str(v).strip())
     return str(value)
 
 
@@ -90,17 +103,18 @@ def read_extra_server_args(payload: dict, *, default: str = "") -> str:
     missing-key and empty-value the same — the helper preserves the
     cumulative behaviour while pinning the canonical-vs-legacy split.
 
-    Parameters
-    ----------
-    payload:
-        Dict-like (typically ``Intent.payload`` /
-        ``Task.params`` / a JSON envelope body / a SharedState entry).
-        Other Mapping shapes (e.g. ``MappingProxy``) work as long as
-        ``__contains__`` and ``__getitem__`` are implemented.
-    default:
-        Returned when neither key is present. Defaults to the empty
-        string so the helper drops in for the legacy
-        ``str(payload.get(...) or "")`` idiom.
+    Args:
+        payload (dict): Dict-like payload (typically ``Intent.payload`` /
+            ``Task.params`` / a JSON envelope body / a SharedState entry).
+            Other Mapping shapes (e.g. ``MappingProxy``) work as long as
+            ``__contains__`` and ``__getitem__`` are implemented.
+        default (str): Returned when neither key is present. Defaults to the
+            empty string so the helper drops in for the legacy
+            ``str(payload.get(...) or "")`` idiom.
+
+    Returns:
+        str: The coerced canonical value, the coerced legacy value (with a
+        ``DeprecationWarning``), or ``default`` when neither key is present.
     """
     if CANONICAL_KEY in payload:
         return _coerce_str(payload[CANONICAL_KEY])
@@ -120,6 +134,15 @@ def read_extra_server_args_from_envs(envs: dict, *, default: str = "") -> str:
     wrapper looks up by name. This helper covers the *payload-surface*
     field that some materializer call-sites expose alongside the env
     map (the framework-neutral pre-routing slot).
+
+    Args:
+        envs (dict): Magpie ``envs`` mapping that may carry the canonical or
+            legacy payload-surface key.
+        default (str): Returned when neither key is present (default ``""``).
+
+    Returns:
+        str: The coerced canonical value, the coerced legacy value (with a
+        ``DeprecationWarning``), or ``default`` when neither key is present.
     """
     if CANONICAL_KEY in envs:
         return _coerce_str(envs[CANONICAL_KEY])
@@ -148,6 +171,13 @@ def migrate_legacy_key_in_place(payload: dict) -> bool:
     Does NOT emit a warning — this is the *persistence-side* migration
     path, run once at load. The read-side ``DeprecationWarning`` is
     the audit channel for in-flight payloads.
+
+    Args:
+        payload (dict): Mutable payload mapping to migrate in place.
+
+    Returns:
+        bool: ``True`` when the legacy key was copied to the canonical key and
+        removed; ``False`` otherwise (both present, or no legacy key).
     """
     if LEGACY_KEY in payload and CANONICAL_KEY not in payload:
         payload[CANONICAL_KEY] = payload.pop(LEGACY_KEY)

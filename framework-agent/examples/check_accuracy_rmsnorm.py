@@ -1,13 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Lightweight numerical-accuracy check for the explore --execute e2e path.
-
-Compares sglang's RMSNorm output against a reference torch implementation
-on the same input and emits accuracy.json compatible with
-framework_agent.explorer's ``_evaluate_candidate``. The reference is just
-a per-token L2 normalisation; we report the fraction of tokens whose
-relative error stays under 1e-2 as the ``accuracy`` field.
-"""
+"""Numerical-accuracy check for the explore --execute e2e path: compares sglang RMSNorm vs a reference torch impl and emits accuracy.json; ``accuracy`` is the fraction of tokens with relative error under rtol (default 1e-2)."""
 
 from __future__ import annotations
 
@@ -21,7 +14,12 @@ from sglang.srt.layers.layernorm import RMSNorm
 
 
 def main() -> int:
-    """Parse args, compare RMSNorm vs reference, write accuracy.json."""
+    """Parse args, compare RMSNorm vs reference, write accuracy.json.
+
+    Returns:
+        int: Process exit code: ``0`` on success, ``2`` when no CUDA/ROCm
+            device is available.
+    """
     parser = argparse.ArgumentParser(description="Tiny RMSNorm numerical-accuracy check")
     parser.add_argument("--out", required=True, help="Path to accuracy.json")
     parser.add_argument("--num-tokens", type=int, default=4096)

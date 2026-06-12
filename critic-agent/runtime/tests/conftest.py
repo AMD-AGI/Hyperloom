@@ -1,11 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Shared pytest fixtures for the Critic runtime tests.
-
-Keeping these tiny and orthogonal makes individual test files readable and
-prevents the runtime tests from depending on the wider Hyperloom test
-harness — the runtime is intended to be pip-installable on its own.
-"""
+"""Shared pytest fixtures for the Critic runtime tests."""
 
 from __future__ import annotations
 

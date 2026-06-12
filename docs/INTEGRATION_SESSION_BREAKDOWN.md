@@ -47,7 +47,7 @@ The `exporter_version` field carries the producing Hyperloom version
 
 ## 2. Top-level shape
 
-```jsonc
+```text
 {
   "schema_version": "hyperloom.session_breakdown.v2",
   "exported_at_utc": "2026-05-17T12:34:56.789Z",
@@ -272,7 +272,7 @@ investigation than the breakdown summarises.
 
 ## 18. Worked example
 
-```jsonc
+```text
 {
   "schema_version": "hyperloom.session_breakdown.v2",
   "exported_at_utc": "2026-05-17T14:02:15.001Z",

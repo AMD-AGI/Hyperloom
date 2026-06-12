@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Mapping
@@ -57,10 +58,12 @@ log = logging.getLogger(__name__)
 # consumable verbatim by warm-replay.
 _ENVS_KEY = "extra_envs"
 
-# Listing the whole recipe type is cheap (the corpus is small) but we
-# still cap the scan so a runaway corpus can never block the main loop.
-_RECIPE_SCAN_CAP = 500
+# Listing the whole recipe type is a fallback path; prefer exact slug reads for
+# get_recipe and cache broad scans so one warm-start tick does not issue
+# thousands of MCP get_page calls repeatedly.
+_RECIPE_SCAN_CAP = 5000
 _LIST_PAGE_SIZE = 100
+_SCAN_CACHE_TTL_SEC = 60.0
 
 
 class GbrainRemoteError(RemoteRecipeClientError):
@@ -75,6 +78,13 @@ class GbrainRemoteError(RemoteRecipeClientError):
     """
 
     def __init__(self, message: str, *, category: str = "transport", **kwargs: Any) -> None:
+        """Initialize the error.
+
+        Args:
+            message: Human-readable error message.
+            category: Error category (defaults to ``transport``).
+            **kwargs: Additional fields forwarded to the base exception.
+        """
         super().__init__(message, category=category, **kwargs)
 
 
@@ -82,11 +92,32 @@ class _GbrainMcp:
     """Minimal JSON-RPC-over-HTTP MCP client (list_pages / get_page)."""
 
     def __init__(self, base_url: str, token: str, timeout_sec: float) -> None:
+        """Initialize the MCP client.
+
+        Args:
+            base_url: Base URL of the gbrain MCP endpoint.
+            token: Bearer token for authorization.
+            timeout_sec: Per-request timeout in seconds (floored at 0.5).
+        """
         self._base = base_url.rstrip("/")
         self._token = token
         self._timeout = max(0.5, float(timeout_sec))
 
     def call(self, tool: str, arguments: dict[str, Any]) -> Any:
+        """Invoke an MCP tool over JSON-RPC and return its decoded result.
+
+        Args:
+            tool: MCP tool name to call.
+            arguments: Tool arguments.
+
+        Returns:
+            The decoded tool result: parsed JSON content when present, else the
+            raw content text, else the result object.
+
+        Raises:
+            GbrainRemoteError: On transport failures, malformed envelopes, or
+                JSON-RPC / tool-level errors.
+        """
         envelope = {
             "jsonrpc": "2.0", "id": "1", "method": "tools/call",
             "params": {"name": tool, "arguments": arguments},
@@ -137,6 +168,14 @@ class _GbrainMcp:
 
 
 def _as_float(value: Any) -> float:
+    """Coerce a value to float, defaulting to ``0.0`` on failure.
+
+    Args:
+        value: Value to convert.
+
+    Returns:
+        The parsed float, or ``0.0`` when conversion fails.
+    """
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -315,6 +354,15 @@ class GbrainRemoteRecipeClient:
         enabled: bool = True,
         timeout_sec: float | None = None,
     ) -> None:
+        """Initialize the gbrain-backed recipe client.
+
+        Args:
+            base_url: Base URL of the gbrain endpoint.
+            token: Bearer token for authorization.
+            enabled: Whether the client is active (also requires a URL/token).
+            timeout_sec: Per-request timeout; defaults to the foreground HTTP
+                budget when ``None``.
+        """
         self.base_url = (base_url or "").strip()
         self.token = (token or "").strip()
         # Foreground-friendly default: gbrain is a read side-channel, so
@@ -326,12 +374,21 @@ class GbrainRemoteRecipeClient:
         )
         self.enabled = bool(enabled and self.base_url and self.token)
         self._mcp = _GbrainMcp(self.base_url, self.token, self.timeout_sec) if self.enabled else None
+        self._scan_cache: list[dict[str, Any]] | None = None
+        self._scan_cache_ts = 0.0
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:  # symmetry with RemoteRecipeClient
+        """Release the underlying MCP client."""
         self._mcp = None
 
     def health(self) -> bool:
+        """Probe gbrain reachability with a tiny ``list_pages`` call.
+
+        Returns:
+            ``True`` if the probe succeeds; ``False`` when disabled or the
+            probe errors.
+        """
         if not self.enabled or self._mcp is None:
             return False
         try:
@@ -342,32 +399,69 @@ class GbrainRemoteRecipeClient:
             return False
 
     # -- internal scan -----------------------------------------------------
+    def _scan_cache_ttl(self) -> float:
+        """Return the recipe-scan cache TTL in seconds.
+
+        Returns:
+            The value from ``GBRAIN_RECIPE_SCAN_TTL_SEC`` when valid, otherwise
+            the default TTL.
+        """
+        raw = os.environ.get("GBRAIN_RECIPE_SCAN_TTL_SEC", "").strip()
+        if raw:
+            try:
+                return max(0.0, float(raw))
+            except ValueError:
+                log.warning("invalid GBRAIN_RECIPE_SCAN_TTL_SEC=%r; using default", raw)
+        return _SCAN_CACHE_TTL_SEC
+
+    def _get_page_recipe(self, slug: str) -> dict[str, Any] | None:
+        """Fetch one gbrain recipe page by slug and project it."""
+        if not self.enabled or self._mcp is None:
+            return None
+        page = self._mcp.call("get_page", {"slug": slug})
+        fm = page.get("frontmatter") if isinstance(page, dict) else None
+        if not isinstance(fm, Mapping):
+            return None
+        return _page_to_recipe(fm)
+
     def _scan_recipes(self, *, limit: int) -> list[dict[str, Any]]:
-        """List recipe pages (newest first) and project each to a Recipe dict."""
+        """List recipe pages and project each to a Recipe dict.
+
+        Use forward pagination (``updated_asc`` + ``updated_after``). The
+        reverse cursor (``updated_desc`` + ``updated_before``) can terminate
+        early when many pages share the same ``updated_at``, hiding older
+        recipes from client-side search. Dedup by slug across page boundaries
+        and return newest-first to preserve the previous caller contract.
+        """
         if not self.enabled or self._mcp is None:
             return []
+        now = time.monotonic()
+        ttl = self._scan_cache_ttl()
+        if self._scan_cache is not None and ttl > 0.0 and now - self._scan_cache_ts <= ttl:
+            return list(self._scan_cache[: int(limit) if limit and limit > 0 else len(self._scan_cache)])
         out: list[dict[str, Any]] = []
         cursor: str | None = None
+        seen_slugs: set[str] = set()
         cap = min(int(limit) if limit and limit > 0 else _RECIPE_SCAN_CAP, _RECIPE_SCAN_CAP)
         pages = 0
-        while len(out) < cap and pages < (_RECIPE_SCAN_CAP // _LIST_PAGE_SIZE + 2):
+        max_pages = max(1, (_RECIPE_SCAN_CAP // _LIST_PAGE_SIZE) + 3)
+        while len(out) < cap and pages < max_pages:
             params: dict[str, Any] = {
-                "type": "recipe", "limit": _LIST_PAGE_SIZE, "sort": "updated_desc",
+                "type": "recipe", "limit": _LIST_PAGE_SIZE, "sort": "updated_asc",
             }
             if cursor:
-                params["updated_before"] = cursor
+                params["updated_after"] = cursor
             batch = self._mcp.call("list_pages", params)
             if not isinstance(batch, list) or not batch:
                 break
+            new_slugs = 0
             for entry in batch:
                 slug = entry.get("slug") if isinstance(entry, dict) else None
-                if not slug:
+                if not slug or slug in seen_slugs:
                     continue
-                page = self._mcp.call("get_page", {"slug": slug})
-                fm = page.get("frontmatter") if isinstance(page, dict) else None
-                if not isinstance(fm, Mapping):
-                    continue
-                recipe = _page_to_recipe(fm)
+                seen_slugs.add(slug)
+                new_slugs += 1
+                recipe = self._get_page_recipe(str(slug))
                 if recipe is not None:
                     out.append(recipe)
                     if len(out) >= cap:
@@ -376,9 +470,12 @@ class GbrainRemoteRecipeClient:
             if len(batch) < _LIST_PAGE_SIZE:
                 break
             last = batch[-1].get("updated_at") if isinstance(batch[-1], dict) else None
-            if not last or last == cursor:
+            if not last or (last == cursor and new_slugs == 0):
                 break
             cursor = last
+        out.sort(key=lambda r: str(r.get("updated_at") or ""), reverse=True)
+        self._scan_cache = list(out)
+        self._scan_cache_ts = time.monotonic()
         return out
 
     # -- read surface (mirrors RemoteRecipeClient) -------------------------
@@ -409,14 +506,37 @@ class GbrainRemoteRecipeClient:
             C.F_LABEL_FRAMEWORK_VERSION: framework_version,
             C.F_LABEL_PRECISION: precision,
         }
+        # Fast path: gbrain recipe slugs are the canonical id with ':' as path
+        # separators, so exact 5-tuple reads do not need a full corpus scan.
+        direct = self._get_page_recipe("recipe-snapshot/" + canonical_id.replace(":", "/"))
+        if direct is not None and direct.get(C.F_CANONICAL_ID) == canonical_id:
+            return direct
         rows = self.search(label_match=label_match, limit=1)
         return rows[0] if rows else None
 
     def get_history(self, *, canonical_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Return the version history for a recipe.
+
+        Args:
+            canonical_id: Canonical recipe id.
+            limit: Maximum number of history entries.
+
+        Returns:
+            Always ``[]`` — gbrain does not retain a versioned recipe archive
+            (provided for interface parity).
+        """
         # gbrain does not retain a versioned recipe archive.
         return []
 
     def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Return the most recently updated recipes.
+
+        Args:
+            limit: Maximum number of recipes to return.
+
+        Returns:
+            Recent recipe rows, or ``[]`` when the client is disabled.
+        """
         if not self.enabled:
             return []
         return self._scan_recipes(limit=limit)
@@ -453,14 +573,41 @@ class GbrainRemoteRecipeClient:
         return rows[: int(limit)] if limit and limit > 0 else rows
 
     def list_attempts(self, *, canonical_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Return attempt rows for a recipe.
+
+        Args:
+            canonical_id: Canonical recipe id.
+            limit: Maximum number of attempts.
+
+        Returns:
+            Always ``[]`` — attempt rows live in the local store, so the
+            dispatcher falls through to local on gbrain absence.
+        """
         # Attempt rows live on local store under this design; gbrain
         # absence falls the dispatcher through to local.
         return []
 
     def list_session_attempts(self, *, session_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        """Return attempt rows for a session.
+
+        Args:
+            session_id: Session identifier.
+            limit: Maximum number of attempts.
+
+        Returns:
+            Always ``[]`` — session attempts are served from the local store.
+        """
         return []
 
     def session_summary(self, *, session_id: str) -> dict[str, Any] | None:
+        """Return a session summary.
+
+        Args:
+            session_id: Session identifier.
+
+        Returns:
+            Always ``None`` — gbrain does not serve session summaries.
+        """
         return None
 
 

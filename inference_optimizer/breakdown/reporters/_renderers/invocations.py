@@ -1,12 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""GEAK + OOB invocation renderer.
-
-Both capabilities share the same shape (attempts list keyed by kernel
-id, decisions per attempt), so this is one renderer producing TWO
-section ids — done with two thin wrappers, each delegating to a
-common ``_render_pair`` so future fields propagate to both.
-"""
+"""GEAK + OOB invocation renderer — one ``_render_pair`` feeding two section ids (geak/oob share the shape)."""
 
 from __future__ import annotations
 
@@ -25,21 +19,13 @@ def _render_pair(
     invocations_key: str,
     legacy_key: str,
 ) -> RenderedSection:
-    """Render either GEAK or OOB invocations.
-
-    Reads ``breakdown["invocations"][invocations_key]`` (new schema) or
-    falls back to ``breakdown[legacy_key]`` (old schema) so this also
-    works against breakdowns dumped from older exporter versions.
-    """
+    """Render either GEAK or OOB invocations (new ``invocations`` key, legacy fallback)."""
     raw = (
         (breakdown.get("invocations") or {}).get(invocations_key)
         or breakdown.get(legacy_key)
         or []
     )
-    # Defensive normalization: real wekafs sessions occasionally store
-    # plain strings (kernel ids) instead of dicts. Treat string entries
-    # as bare attempts with kernel_id=<string> so the rest of this
-    # renderer is uniform.
+    # Normalize stray string entries (kernel ids) into dicts.
     invs: list[dict[str, Any]] = []
     for v in raw:
         if isinstance(v, dict):
@@ -105,6 +91,14 @@ def _render_pair(
 
 @register_renderer("geak_invocations")
 def render_geak(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the GEAK invocations section.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered GEAK invocations section.
+    """
     return _render_pair(
         breakdown,
         section_id="geak_invocations",
@@ -116,6 +110,14 @@ def render_geak(breakdown: dict[str, Any]) -> RenderedSection:
 
 @register_renderer("oob_invocations")
 def render_oob(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the OOB (out-of-box) invocations section.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered OOB invocations section.
+    """
     return _render_pair(
         breakdown,
         section_id="oob_invocations",

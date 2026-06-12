@@ -146,6 +146,7 @@ except ImportError:
         "time_exhausted_during_prelude", "cortex_t0_failed",
         "cortex_drain_failed", "cortex_commit_failed",
         "model_context_window_too_small", "unsupported_model_arch",
+        "model_config_incompatible",
     })
 
 if stop and stop in STOP_REASON_VOCAB:

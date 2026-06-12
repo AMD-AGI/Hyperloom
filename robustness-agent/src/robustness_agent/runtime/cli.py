@@ -79,11 +79,30 @@ class RuntimeAdapterError(RuntimeError):
 
 
 def _read_json(path: str | Path) -> Any:
+    """Read and parse a JSON file.
+
+    Args:
+        path (str | Path): Path to the JSON file to read.
+
+    Returns:
+        Any: The parsed JSON value, or ``None`` if the file is empty or
+        contains only whitespace.
+    """
     text = Path(path).read_text(encoding="utf-8")
     return json.loads(text) if text.strip() else None
 
 
 def _emit_json(obj: Any, out: str | None) -> None:
+    """Serialise an object to JSON and emit it.
+
+    The serialised JSON is always written to stdout; when ``out`` is a
+    real path it is additionally written to that file.
+
+    Args:
+        obj (Any): JSON-serialisable object to emit.
+        out (str | None): Destination path, or ``"-"``/``None`` to write
+            only to stdout.
+    """
     serialised = json.dumps(obj, ensure_ascii=False, indent=2)
     if out and out != "-":
         Path(out).write_text(serialised + "\n", encoding="utf-8")
@@ -92,6 +111,23 @@ def _emit_json(obj: Any, out: str | None) -> None:
 
 
 def _coerce_request(raw: Any) -> dict[str, Any]:
+    """Validate and normalise a raw request payload.
+
+    Enforces the ``coordinator_inbox`` contract: the payload must be an
+    object with a recognised ``kind``, a non-empty ``session_id`` and
+    ``raw_prompt``, and optional object-typed ``context`` / ``options``.
+
+    Args:
+        raw (Any): The parsed request payload to validate.
+
+    Returns:
+        dict[str, Any]: The validated request dictionary (returned
+        unchanged).
+
+    Raises:
+        RuntimeAdapterError: If any required field is missing or has the
+            wrong type.
+    """
     if not isinstance(raw, dict):
         raise RuntimeAdapterError(
             f"request top-level must be an object, got {type(raw).__name__}"
@@ -125,7 +161,21 @@ def _coerce_request(raw: Any) -> dict[str, Any]:
 
 
 async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
-    """Drive a single reactor tick from a normalised ``request`` dict."""
+    """Drive a single reactor tick from a normalised ``request`` dict.
+
+    Discovers configuration, applies any host-supplied ``options``
+    overrides, builds the reactor components, runs one tick, and returns
+    the resulting emit payload.
+
+    Args:
+        request (dict[str, Any]): Validated request dict carrying
+            ``session_id``, ``raw_prompt``, and optional ``context`` /
+            ``options``.
+
+    Returns:
+        dict[str, Any]: Emit payload with ``intent_envelope``,
+        ``session_id``, ``tick_index``, and ``parse_warnings``.
+    """
     session_id = str(request["session_id"]).strip()
     raw_prompt = str(request["raw_prompt"])
     context = dict(request.get("context") or {})
@@ -163,37 +213,23 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
             config.nodes = max(1, int(options["nodes"]))
         except (TypeError, ValueError):
             pass
-    # Auto-probe knob lets hosts/tests opt out of the default
-    # inference-server health probe without having to configure
-    # ``health_probe_targets`` from scratch. Useful for the heartbeat
-    # tests (which run on hosts with no inference server) and for
-    # sandbox environments that audit health out-of-band.
+    # Opt out of the default inference-server health probe (heartbeat tests /
+    # sandboxes auditing health out-of-band) without reconfiguring targets.
     if "auto_probe_inference_server" in options:
         config.auto_probe_inference_server = bool(
             options["auto_probe_inference_server"]
         )
-    # The ``ray status`` probe was introduced in PR #239 and runs on
-    # every tick of the agent backend. Heartbeat tests (and any host
-    # without an in-sandbox Ray head) need to disable it to keep the
-    # default heartbeat envelope clean of false-positive
-    # ``ray_head_dead`` alerts. The Coordinator wiring mirrors
-    # ``auto_probe_*`` above.
+    # Disable the per-tick ``ray status`` probe on hosts without a Ray head to
+    # avoid false-positive ``ray_head_dead`` alerts.
     if "ray_probe_enabled" in options:
         config.ray_probe_enabled = bool(options["ray_probe_enabled"])
-    # Whole-probe disable for the J ``external_deps`` signal (TraceLens
-    # CLI / WekaFS mount). Heartbeat e2e tests run on inert CI hosts
-    # where neither dependency is provisioned, so the default probe
-    # fires ``tracelens_cli_missing`` + ``wekafs_degraded`` alerts that
-    # otherwise mask the expected ``send_message{heartbeat}`` envelope.
+    # Disable the ``external_deps`` probe (TraceLens CLI / WekaFS mount) on inert
+    # CI hosts that would otherwise fire ``tracelens_cli_missing`` / ``wekafs_degraded``.
     if "external_deps_enabled" in options:
         config.external_deps_enabled = bool(options["external_deps_enabled"])
-    # B3 ``no_levers_found`` floor knobs let hosts override the
-    # default 45 min / 8 tick observation window without forking the
-    # whole Config. Multi-node large-model setups need a longer floor
-    # because sglang cold start + baseline + profile + turnaround
-    # alone consume 35-50 min before any explore family runs;
-    # inference_optimizer's _build_robustness_options injects 60.0
-    # when args.nodes >= 2 (single-node defaults stay at 45.0).
+    # B3 ``no_levers_found`` floor knobs override the default 45 min / 8 tick window;
+    # multi-node setups inject 60.0 (single-node stays 45.0) since cold start +
+    # baseline + profile consume 35-50 min before any explore family runs.
     if "progress_no_levers_min_minutes" in options:
         config.progress_no_levers_min_minutes = float(
             options["progress_no_levers_min_minutes"]
@@ -203,10 +239,8 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
             options["progress_no_levers_min_ticks"]
         )
 
-    # L4 — advertise our session_dir to co-deployed Critic processes so
-    # their ``prepare-review`` can find ``agents/robustness/findings/
-    # <session>.jsonl`` without explicit configuration. Setdefault keeps
-    # an operator-supplied override intact.
+    # L4 — advertise session_dir so co-deployed Critic ``prepare-review`` finds
+    # the findings jsonl; setdefault keeps an operator override intact.
     os.environ.setdefault(
         "ROBUSTNESS_AGENT_SESSION_DIR", str(config.session_dir),
     )
@@ -255,6 +289,15 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cmd_tick(args: argparse.Namespace) -> None:
+    """Handle the ``tick`` subcommand.
+
+    Reads and validates the request file, runs a single reactor tick,
+    and emits the resulting envelope JSON.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments with ``request``
+            and ``out`` attributes.
+    """
     request = _coerce_request(_read_json(args.request))
     emit = asyncio.run(_run_tick(request))
     _emit_json(emit, args.out)
@@ -268,6 +311,15 @@ def _cmd_finalize(args: argparse.Namespace) -> None:
     intent landed). Idempotent — re-running has no effect once the
     ``.robustness_finalized`` marker exists, matching the in-reactor
     behaviour.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments with
+            ``session_dir``, ``session_id``, ``stop_reason``, and ``out``
+            attributes.
+
+    Raises:
+        RuntimeAdapterError: If ``--session-dir`` does not point to an
+            existing directory.
     """
     session_dir = Path(str(args.session_dir)).expanduser()
     if not session_dir.is_dir():
@@ -292,6 +344,14 @@ def _cmd_finalize(args: argparse.Namespace) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the runtime CLI argument parser.
+
+    Registers the ``tick`` and ``finalize`` subcommands with their
+    respective options and handler functions.
+
+    Returns:
+        argparse.ArgumentParser: The configured parser.
+    """
     parser = argparse.ArgumentParser(
         prog="robustness-agent-runtime",
         description="Robustness reactor runtime CLI (subprocess transport).",
@@ -347,6 +407,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Runtime CLI process entry point.
+
+    Configures logging, parses arguments, dispatches to the selected
+    subcommand handler, and maps failures to the contract exit codes.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse. Defaults to
+            ``None``, which uses ``sys.argv``.
+
+    Returns:
+        int: ``0`` on logical success, ``2`` on adapter/configuration
+        errors.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

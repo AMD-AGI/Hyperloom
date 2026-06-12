@@ -2,10 +2,8 @@
 
 """Backend protocol — what the Coordinator needs from any LLM provider.
 
-Concrete implementations (Claude SDK, Codex, multi-CLI bridge, mock)
-return a :class:`BackendTurnResult` carrying the intents emitted in this
-turn. The Coordinator handles validation, PolicyGate, and persistence —
-backends only need to produce intents.
+Concrete implementations return a :class:`BackendTurnResult` carrying the
+turn's intents; the Coordinator handles validation, PolicyGate, persistence.
 """
 
 from __future__ import annotations
@@ -24,15 +22,8 @@ log = logging.getLogger(__name__)
 def parse_call_timeout_env(env_name: str, *, default: float) -> float:
     """Read a per-call wall-clock timeout from ``env_name``, default on miss/error.
 
-    Operators bump ``call_timeout_s`` for the LLM backends when a heavy
-    orchestrator prompt + multi-turn agentic loop reproducibly exceeds the
-    120s default on the AMD gateway. Reading the env var lets them tune
-    without code changes / redeploys.
-
-    Returns ``default`` (not raising) when the env var is unset, empty, or
-    not a positive finite float — a malformed knob must not be a fatal
-    boot-time error for the orchestrator. Mis-parses are logged at WARNING
-    so the operator sees the fallback in the boot logs.
+    Returns ``default`` (logging a WARNING) when the env var is unset, empty,
+    or not a positive finite float — a malformed knob must not be fatal.
     """
     raw = os.environ.get(env_name)
     if raw is None or not raw.strip():
@@ -55,11 +46,7 @@ def parse_call_timeout_env(env_name: str, *, default: float) -> float:
 
 
 class BackendError(RuntimeError):
-    """Backend invocation failed (network, schema, etc.).
-
-    Coordinator catches this, surfaces a ``policy_denied``-style observation
-    so the next reactor turn sees the failure context.
-    """
+    """Backend invocation failed (network, schema, etc.)."""
 
 
 @dataclass
@@ -75,9 +62,7 @@ class BackendTurnResult:
 class Backend(Protocol):
     """Async LLM backend protocol used by the Coordinator reactor loop.
 
-    Backends are stateful (they hold conversation continuation, tool
-    config, etc.) but each ``run`` invocation is one logical turn — given
-    a prompt it produces a :class:`BackendTurnResult`.
+    Backends are stateful but each ``run`` invocation is one logical turn.
     """
 
     async def run(
@@ -87,7 +72,22 @@ class Backend(Protocol):
         system_prompt: str | None = None,
         tools: list[str] | None = None,
         max_turns: int = 1,
-    ) -> BackendTurnResult: ...
+    ) -> BackendTurnResult:
+        """Run one logical turn for the given prompt and return its intents.
+
+        Args:
+            prompt (str): The user/turn prompt to send to the backend.
+            system_prompt (str | None): Optional system prompt establishing the
+                backend's role and rules for this turn.
+            tools (list[str] | None): Optional list of tool names the backend is
+                allowed to use this turn.
+            max_turns (int): Maximum number of internal agentic sub-turns the
+                backend may take to produce its result.
+
+        Returns:
+            BackendTurnResult: The intents emitted this turn plus any raw text
+            and metadata.
+        """
 
 
 __all__ = ["Backend", "BackendError", "BackendTurnResult", "parse_call_timeout_env"]

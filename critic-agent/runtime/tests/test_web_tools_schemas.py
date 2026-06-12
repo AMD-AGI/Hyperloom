@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for :func:`runtime.web_tools.tool_schemas.build_tool_schemas`.
-
-Pure-function unit tests; covers gating, name + required fields, and
-mutual-exclusion fields.
-"""
+"""Tests for :func:`runtime.web_tools.tool_schemas.build_tool_schemas`: gating, names, required + mutual-exclusion fields."""
 
 from __future__ import annotations
 

@@ -2,23 +2,12 @@
 
 """Compose ``gap_description`` + ``keywords`` for the framework_pr arm.
 
-The fa pre-stage hook (legacy, scheduled for removal) took ``--framework-gap``
-as a raw command-line string and was easy to typo (a missing ``dense`` token
-caused session f219629b to pick a MoE PR for a dense workload). This module
-replaces that hand-typed string with a deterministic composer driven by the
-structured workload data that is already in ``SharedState`` + ``manifest.json``:
-
-* ``framework``       (sglang / vllm)
-* ``gpu_type``        (mi300x / mi355x / h100 / ...)
-* ``model_class``     (dense / moe_mla / moe_swa / ...)
-* ``precision``       (bf16 / fp8 / awq / ...)  — sourced from manifest.workload
-* ``profile_bottleneck`` (op name from latest profile kernel breakdown, if any)
-
-The composer is pure; the framework_pr executor handles all I/O (reading the
-profile breakdown JSON, building the manifest dict). Returning ``(gap, keywords)``
-lets the executor pick: pass both to fa for service-side AND-search, OR pass
-``keywords=[]`` to let fa extract from gap (current default for backward compat
-with explicit-keyword override path).
+Replaces the typo-prone hand-typed ``--framework-gap`` string (session
+f219629b once picked a MoE PR for a dense workload from a missing ``dense``
+token) with a deterministic composer driven by structured workload data
+(framework, gpu_type, model_class, precision, profile bottleneck). Pure;
+the executor handles I/O. Returns ``(gap, keywords)`` so the executor can
+pass both to fa or pass ``keywords=[]`` to let fa extract from gap.
 """
 
 from __future__ import annotations
@@ -32,11 +21,8 @@ from typing import Sequence
 log = logging.getLogger(__name__)
 
 
-# Op-name → canonical bottleneck keyword. Inputs are case-insensitive substrings
-# matched against the top-N kernel names from ``last_profile_kernel_breakdown``.
-# Keys are the substring (lowercase); values are the keyword fed to fa for the
-# rerank. Order matters: first match wins so we always emit one bottleneck
-# keyword (not several competing ones that water down the AND-query).
+# Op-name substring → canonical bottleneck keyword fed to fa. Order matters:
+# first match wins so we emit exactly one keyword (not competing ones).
 _OP_TO_KEYWORD: tuple[tuple[str, str], ...] = (
     ("attention",   "attention"),
     ("attn",        "attention"),
@@ -64,15 +50,10 @@ _OP_TO_KEYWORD: tuple[tuple[str, str], ...] = (
 def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str:
     """Read the kernel breakdown JSON and return one canonical bottleneck keyword.
 
-    ``breakdown_path`` is expected to be the value of
-    ``SharedState.last_profile_kernel_breakdown`` — the profile / roofline
-    executors write this as a sorted-by-time list (or dict with ``top_kernels``).
-    Returns "" when:
-      * path is empty / missing / unreadable / unparseable
-      * top kernel name does not match any of the substrings in :data:`_OP_TO_KEYWORD`
-
-    The function is best-effort: a malformed payload is logged and the caller
-    falls back to manifest-only gap composition.
+    ``breakdown_path`` is ``SharedState.last_profile_kernel_breakdown`` (a
+    sorted-by-time list or dict with ``top_kernels``). Best-effort: returns ""
+    when the path is empty/unreadable or no kernel matches
+    :data:`_OP_TO_KEYWORD`, and the caller falls back to manifest-only gap.
     """
     if not breakdown_path:
         return ""
@@ -118,9 +99,8 @@ def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str
 def _normalize_model_class(model_class: str) -> str:
     """Reduce moe_mla / moe-swa / Dense / "" to a canonical lowercase token.
 
-    Uses the same canonicalisation rule (basename + lowercase, with
-    -/+/space tolerated) that every other ``model_class`` consumer applies
-    so the gap search token stays grep-friendly across the codebase.
+    Same canonicalisation rule (lowercase, -/+/space → _) every other
+    ``model_class`` consumer uses, keeping the gap token grep-friendly.
     """
     raw = (model_class or "").strip().lower()
     if not raw:
@@ -131,9 +111,8 @@ def _normalize_model_class(model_class: str) -> str:
 def _model_class_to_search_token(model_class: str) -> str:
     """Map the IO model_class taxonomy to one fa-friendly architectural token.
 
-    fa's anti-correlation table activates on tokens like ``dense`` / ``moe``
-    so the gap MUST carry one of those, not the more granular IO labels
-    (``moe_mla`` / ``moe_swa`` / ...).
+    fa's anti-correlation table activates on ``dense`` / ``moe``, so the gap
+    must carry one of those rather than granular IO labels (``moe_mla`` ...).
     """
     mc = _normalize_model_class(model_class)
     if not mc:
@@ -156,37 +135,14 @@ def compose_gap(
 ) -> tuple[str, list[str]]:
     """Build ``(gap_description, keywords)`` for the framework_pr arm.
 
-    Parameters
-    ----------
-    framework, gpu_type, model_class
-        Lifted from :class:`SharedState` (already populated during
-        PRELUDE / baseline). All optional; missing fields are quietly
-        dropped from the composed gap so the executor still has
-        *something* to send to fa.
-    precision
-        Sourced from ``manifest.json``'s ``workload.precision`` because
-        SharedState does not surface it directly. Empty string is fine.
-    profile_kernel_breakdown_path
-        Path to the JSON dumped by the profile executor (sorted-by-time top
-        kernels). When present, the composer adds a bottleneck keyword like
-        ``attention`` / ``moe`` / ``gemm``. Missing / unreadable → silent
-        fallback to manifest-only gap.
-    tried_refs
-        Refs already tried this session (passed through; reserved for future
-        use to bias the gap away from previously-rejected PR categories).
-        Currently unused by the composer, but accepted now so callers stay
-        forward-compatible.
+    All workload fields are optional; missing pieces drop from the gap.
+    ``precision`` comes from ``manifest.json``'s ``workload.precision``.
+    ``profile_kernel_breakdown_path`` (when present) adds a bottleneck keyword.
+    ``tried_refs`` is accepted for forward-compat but currently unused.
 
-    Returns
-    -------
-    ``(gap_description, keywords)`` where:
-      * ``gap_description`` is a free-text phrase fa can pass to
-        primus-cortex /v1/search/prs (also fed to extract_keywords as the
-        fallback when explicit keywords are empty).
-      * ``keywords`` is the explicit keyword list (lowercased, deduped,
-        sorted for determinism) the executor passes to fa to bypass
-        extract_keywords entirely. Always non-empty when at least one
-        of (framework / gpu_type / model_class / bottleneck) is known.
+    Returns ``(gap_description, keywords)``: a free-text gap phrase for
+    fa's PR search, and a lowercased/deduped/sorted explicit keyword list
+    (non-empty when any of framework/gpu_type/model_class/bottleneck is known).
     """
     fw = (framework or "").strip().lower()
     gpu = (gpu_type or "").strip().lower()
@@ -194,11 +150,8 @@ def compose_gap(
     prec = (precision or "").strip().lower()
     bottleneck = _extract_bottleneck_from_breakdown(profile_kernel_breakdown_path)
 
-    # Gap text: human-readable phrasing identical to the SKILL.md default
-    # template ("improve {fw} {prec} {model_class} throughput on {gpu}") so
-    # operators can still cross-reference. Missing pieces drop silently;
-    # extra bottleneck appears as a parenthetical so anti-correlation in fa
-    # gets the hint without breaking the AND-search query.
+    # Gap text mirrors the SKILL.md template
+    # ("improve {fw} {prec} {model_class} throughput on {gpu}").
     parts: list[str] = ["improve"]
     if fw:
         parts.append(fw)
@@ -213,10 +166,8 @@ def compose_gap(
         parts.extend(["on", gpu])
     gap = " ".join(parts).strip()
 
-    # Keywords: dedup + sort, lowercase. Only include tokens fa's keyword
-    # whitelist would have kept anyway (the executor passes these as the
-    # ``keywords`` override so fa skips extract_keywords and uses them
-    # verbatim).
+    # Keywords: dedup + sort, lowercase; passed as the ``keywords`` override
+    # so fa skips extract_keywords and uses them verbatim.
     kw_pool: list[str] = []
     for tok in (fw, gpu, arch, prec, bottleneck):
         if tok and tok not in kw_pool:

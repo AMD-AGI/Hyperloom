@@ -3,10 +3,8 @@
 
 """Run GEAK's FP8 GEMM tuning workflow as a Hyperloom kernel-agent tool.
 
-This wrapper intentionally passes the long task via a file / in-memory Python
-string, never through argv. GEAK-generated cleanup commands commonly inspect
-``ps aux`` for strings such as ``sglang``; putting the task text in argv can
-make the GEAK driver match its own cleanup pattern and SIGKILL itself.
+Passes the task via file/string never argv, so GEAK's ``ps aux`` cleanup can't
+match the task text and SIGKILL itself.
 """
 
 from __future__ import annotations
@@ -20,10 +18,23 @@ from typing import Any
 
 
 def _json_line(payload: dict[str, Any]) -> None:
+    """Emit one JSON object as a single flushed line on stdout.
+
+    Args:
+        payload (dict[str, Any]): The structured result to serialize.
+            Keys are sorted for deterministic output.
+    """
     print(json.dumps(payload, sort_keys=True), flush=True)
 
 
 def _safe_cleanup_clause() -> str:
+    """Return the safety preamble forbidding global process cleanup.
+
+    Returns:
+        str: A task-prompt clause instructing the GEAK sub-agent not to
+            run ``ps aux | grep | kill``-style global cleanup that could
+            terminate a co-resident Hyperloom optimizer's server.
+    """
     return (
         "SAFETY: do NOT run global process cleanup. In particular, never run "
         "`ps aux | grep ... | xargs kill`, `pgrep -f ... | xargs kill`, "
@@ -37,6 +48,22 @@ def _safe_cleanup_clause() -> str:
 
 
 def _build_task(args: argparse.Namespace, workspace: Path) -> str:
+    """Render the full GEAK FP8 GEMM tuning task prompt.
+
+    Interpolates the workload knobs, model/benchmark paths, baseline
+    throughput, and safety clauses into the fixed PR #228 contract text.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args supplying knobs such
+            as ``benchmark_script``, ``tp``, ``conc``, ``isl``, ``osl``,
+            ``model_path``, ``framework``, ``gpu_type``, ``precision``,
+            and ``baseline_tput``.
+        workspace (Path): The session workspace root advertised to the
+            sub-agent as its working directory.
+
+    Returns:
+        str: The complete multi-line task prompt.
+    """
     baseline = (
         f"Baseline output_throughput is already known: {args.baseline_tput:g} tok/s."
         if args.baseline_tput and args.baseline_tput > 0
@@ -69,6 +96,17 @@ Hyperloom session workspace root for this action: {workspace}
 
 
 def _latest_gemm_workspace(cwd: Path) -> Path | None:
+    """Find the most recently modified GEAK GEMM-tuning workspace.
+
+    Args:
+        cwd (Path): Session root containing an ``optimization_logs``
+            directory with ``gemm_tuning_*`` subfolders.
+
+    Returns:
+        Path | None: The newest ``gemm_tuning_*`` directory by mtime, or
+            ``None`` if the logs directory or matching folders are
+            absent.
+    """
     base = cwd / "optimization_logs"
     if not base.is_dir():
         return None
@@ -79,6 +117,18 @@ def _latest_gemm_workspace(cwd: Path) -> Path | None:
 
 
 def _load_report(workspace: Path | None) -> dict[str, Any]:
+    """Load and validate ``final_report.json`` from a workspace.
+
+    Args:
+        workspace (Path | None): Directory expected to contain
+            ``final_report.json``. ``None`` short-circuits to ``{}``.
+
+    Returns:
+        dict[str, Any]: The parsed report dict with ``final_report_path``
+            added, or an empty dict when missing, or a dict carrying an
+            ``error`` key when the file is not valid JSON / not an
+            object.
+    """
     if workspace is None:
         return {}
     path = workspace / "final_report.json"
@@ -95,6 +145,15 @@ def _load_report(workspace: Path | None) -> dict[str, Any]:
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
+    """Parse the wrapper's command-line arguments.
+
+    Args:
+        argv (list[str]): Argument vector (without the program name).
+
+    Returns:
+        argparse.Namespace: The parsed options (workload knobs, paths,
+            ``--input-json``, ``--dry-run``, etc.).
+    """
     p = argparse.ArgumentParser(description="Hyperloom GEAK GEMM tuning wrapper")
     p.add_argument("--input-json", default="")
     p.add_argument("--config", default=os.environ.get("GEAK_CONFIG", ""))
@@ -114,6 +173,23 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _apply_input_json(args: argparse.Namespace) -> argparse.Namespace:
+    """Overlay values from ``--input-json`` onto parsed CLI args.
+
+    Reads the JSON file at ``args.input_json`` (if set) and, for each
+    key matching a known argument (hyphens normalised to underscores),
+    overrides the corresponding attribute on ``args``.
+
+    Args:
+        args (argparse.Namespace): The args returned by
+            :func:`_parse_args`.
+
+    Returns:
+        argparse.Namespace: The same namespace, mutated in place with
+            any overrides applied.
+
+    Raises:
+        ValueError: If the JSON file does not contain an object.
+    """
     if not args.input_json:
         return args
     path = Path(args.input_json)
@@ -128,6 +204,21 @@ def _apply_input_json(args: argparse.Namespace) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: drive the GEAK GEMM tuning run and report status.
+
+    Validates required inputs, writes the task prompt to a file (never
+    argv), invokes ``minisweagent.run.gemm_tuning.run`` unless
+    ``--dry-run``, then loads the resulting ``final_report.json`` and
+    emits a single JSON status line.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; defaults to
+            ``sys.argv[1:]`` when ``None``.
+
+    Returns:
+        int: Process exit code — 0 on success/dry-run, 1 on a tuning or
+            report failure, 2 on missing required inputs.
+    """
     args = _apply_input_json(_parse_args(list(argv or sys.argv[1:])))
     if not args.cwd:
         _json_line({"status": "failed", "error_class": "cwd_missing", "error": "cwd is required"})

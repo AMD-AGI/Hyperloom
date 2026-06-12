@@ -2,43 +2,23 @@
 
 """Collective-kernel name detection.
 
-Some hot-kernel candidates surfaced by TraceLens are multi-GPU
-collectives (`all_reduce` / `all_gather` / `reduce_scatter` /
-`broadcast` / etc.) but TraceLens occasionally fails to flag
-``is_multigpu=True`` or ``num_gpus_recommended >= 2`` for them — the r24
-``custom_allreduce`` regression hit this exact gap. When the upstream
-flag is missing, GEAK gets dispatched against a kernel that requires
-``torchrun --nproc>=2``, the GEAK sub-agent framework spawns nested
-``ray.remote(num_gpus=1)`` for patch validation, and every test inside
-fails with ``HIP error: invalid device ordinal``. The kernel then
-returns PARTIAL on every attempt (no measurable speedup) and the
-orchestrator never retires it.
-
-This module provides a name-pattern fallback. False positives only cost
-us GEAK on a single-GPU op; claude / codex still run, so the trade-off
-is asymmetric in our favour.
+Name-pattern fallback for multi-GPU collectives TraceLens missed (r24
+``custom_allreduce`` regression); false positives are cheap so we bias toward them.
 """
 
 from __future__ import annotations
 
 import re
 
-# Canonical collective op tokens. Each pattern checks for the full verb
-# (we reject substring matches of just "reduce", which would overmatch
-# unrelated kernels like ``reduce_sum`` / ``reduce_max``). Patterns are
-# applied to a normalised lowercase form of the kernel name where
-# camelCase / hyphens / dots are folded to underscores, so all of
-# ``custom_allreduce``, ``CustomAllReduce``, ``rccl.AllGather``,
-# ``triton-all-to-all-fwd`` resolve to the same token shape.
+# Canonical collective op tokens (full-verb match, rejecting bare "reduce"),
+# applied to the normalised lowercase kernel name.
 _COLLECTIVE_TOKEN_PATTERNS = [
     re.compile(r"(?:^|_)all_?reduce(?:_|$)"),
     re.compile(r"(?:^|_)all_?gather(?:_|$)"),
     re.compile(r"(?:^|_)reduce_?scatter(?:_|$)"),
     re.compile(r"(?:^|_)all_?to_?all(?:_|$)"),
     re.compile(r"(?:^|_)broadcast(?:_|$)"),
-    # Vendor collective libs: anything starting with nccl_ / rccl_ /
-    # ncclx_ is a comms primitive (NCCL/RCCL only ship collectives +
-    # send/recv). GEAK can't handle either class.
+    # Vendor comms libs (nccl_/rccl_/ncclx_) only ship collectives + send/recv.
     re.compile(r"(?:^|_)n?cc?lx?(?:_|$)"),
 ]
 
@@ -47,13 +27,7 @@ _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 
 def _normalise_kernel_name(name: str) -> str:
-    """Lowercase + underscore-delimit *name* so substring tests are stable.
-
-    Examples:
-      ``CustomAllReduce``  → ``custom_all_reduce``
-      ``rccl.AllGather``   → ``rccl_all_gather``
-      ``triton-all-to-all`` → ``triton_all_to_all``
-    """
+    """Lowercase + underscore-delimit *name* so substring tests are stable."""
     if not name:
         return ""
     s = _CAMEL_BOUNDARY.sub("_", str(name))
@@ -63,12 +37,7 @@ def _normalise_kernel_name(name: str) -> str:
 
 
 def kernel_name_implies_multigpu(name: str) -> bool:
-    """Return True iff *name* matches a known collective-op pattern.
-
-    Intended as a fallback for cases where TraceLens did not surface
-    ``is_multigpu=True`` / ``num_gpus_recommended >= 2``. The check is
-    leaf-name only — it does not chase dispatch wrappers.
-    """
+    """Return True iff *name* matches a known collective-op pattern (leaf-name only)."""
     norm = _normalise_kernel_name(name)
     if not norm:
         return False

@@ -25,19 +25,24 @@ regression — that path goes through `integrate` REVERT instead.
 
 ## Who delegates this action
 
-* **Robustness** — primary caller. When the `gpu_memory_leaked`
+* **Robustness** — the *only* caller. When the `gpu_memory_leaked`
   detector trips (all visible GPUs at >=99% memory + no live owner
   process for `min_consecutive_ticks` ticks), the ActionLadder emits
   `delegate{action_name="recover", params={force_gpu_cleanup: True,
   reason: "gpu_memory_leaked", evidence: {...}}}` with a tick-indexed
   `idempotency_key`. PolicyGate accepts it under
   `ROBUSTNESS_DELEGATE_ACTIONS`.
-* **Orchestration** — optional. The action is listed in
-  `FULL_ENABLED_ACTIONS` / `NO_KERNEL_ENABLED_ACTIONS` so the
-  Orchestration prompt can propose it after operator-visible crashes
-  (e.g. a `crash_count_high` alert from Robustness that did not auto-
-  delegate, or a manual escalation in the inbox). Orchestration may
-  also emit `delegate{action_name="recover", params={...}}` directly.
+
+  `recover` is a `ROBUSTNESS_DELEGATE_ONLY_ACTIONS` member
+  (see `protocol/action_surfaces.py`): it is **not** in
+  `FULL_ENABLED_ACTIONS` / `NO_KERNEL_ENABLED_ACTIONS`, is subtracted
+  from `PHASE_LLM_PROPOSABLE_ACTIONS`, and PolicyGate denies any
+  Orchestration `propose_action` (`rule="propose_action_source"`) or
+  `delegate` (`rule="delegate_action_source"`). Orchestration that
+  observes a crash must emit an ALERT and let the robustness
+  action-ladder escalate; it can no longer self-trigger `recover`.
+  (A force-`False` recover only probes GPUs and never kills anything,
+  so this removes no real remediation capability from Orchestration.)
 
 ## Inputs (task.params)
 

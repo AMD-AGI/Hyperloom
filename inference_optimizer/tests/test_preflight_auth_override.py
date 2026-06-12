@@ -2,16 +2,8 @@
 
 """Regression tests for direct-gateway auth setup in ``_preflight``.
 
-The failure mode that motivated these tests:
-
-* User has legacy ``ANTHROPIC_BASE_URL`` / auth aliases in env (shell rc,
-  ``.env``, k8s secret, container env) pointing at the retired local
-  ``127.0.0.1:4002`` auth-proxy or carrying an old key.
-* ``_preflight()`` must rewrite the URL and key aliases so Claude/Codex
-  talk directly to the upstream gateway with the current ``SAFE_API_KEY``.
-
-These tests pin the new contract: auth-proxy is retired; URL and key
-aliases are made consistent with ``OPENAI_BASE_URL`` / ``SAFE_API_KEY``.
+Pins the post-auth-proxy contract: legacy ``127.0.0.1:4002`` URLs and stale key
+aliases are rewritten to be consistent with ``OPENAI_BASE_URL`` / ``SAFE_API_KEY``.
 """
 
 from __future__ import annotations
@@ -27,23 +19,33 @@ import pytest
 from inference_optimizer import cli
 
 
-# ---------------------------------------------------------------------------
 # _preflight() override semantics
-# ---------------------------------------------------------------------------
 @pytest.fixture
-def stub_install_steps(monkeypatch):
+def stub_install_steps(monkeypatch, tmp_path):
     """Stub out heavyweight install steps so _preflight() is fast."""
     monkeypatch.setattr(cli, "_load_dotenv_fallback", lambda: None)
-    # N24: _load_kernel_agent_env_fallback now hard-fails (sys.exit 2)
-    # when $USER_DATA_PATH/runtime/kernel-agent.env.sh is missing. The
-    # auth override block under test runs after that fallback in
-    # _preflight() and is orthogonal to kernel-agent env, so
-    # stub it out alongside _load_dotenv_fallback. The real fail-loud
-    # behaviour is exercised by test_n24_kernel_agent_env_hardfail.
+    # N24: stub the kernel-agent env fallback (it hard-fails when missing);
+    # its fail-loud behaviour is covered by test_n24_kernel_agent_env_hardfail.
     monkeypatch.setattr(cli, "_load_kernel_agent_env_fallback", lambda: None)
 
+    # InferenceX setup is orthogonal to the auth block under test. On a CI
+    # runner the auto-detect finds no checkout and the clone path is a real
+    # ``git fetch`` against GitHub (no network / no writable runtime dir),
+    # so _preflight() would hit ``sys.exit(2)`` before reaching the auth
+    # logic. Point INFERENCEX_PATH at a writable dir so detection short-
+    # circuits, and stub the clone as a belt-and-braces fallback.
+    inferencex_dir = tmp_path / "InferenceX"
+    (inferencex_dir / "benchmarks").mkdir(parents=True)
+    (inferencex_dir / "benchmarks" / "benchmark_lib.sh").write_text(
+        "# stub", encoding="utf-8"
+    )
+    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex_dir))
+    monkeypatch.setattr(
+        cli, "_clone_inferencex", lambda dest: str(inferencex_dir)
+    )
+
     def _fake_which(name: str):
-        return f"/usr/bin/{name}"  # pretend ray + python3 are present
+        return f"/usr/bin/{name}"
 
     monkeypatch.setattr(cli.shutil, "which", _fake_which)
 
@@ -54,7 +56,6 @@ def stub_install_steps(monkeypatch):
             self.stderr = stderr
 
     def _fake_run(cmd, *args, **kwargs):
-        # Magpie import check; pretend it's already installed.
         return _FakeCompleted(returncode=0)
 
     monkeypatch.setattr(cli.subprocess, "run", _fake_run)
@@ -156,15 +157,11 @@ def test_preflight_rewrites_legacy_proxy_url_and_auth_aliases(
     assert '"customApiUrl": "https://gateway.example/api/v1/llm-proxy"' in config_text
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 # _ensure_python_sdks
-# ---------------------------------------------------------------------------
 class _RecordingRun:
     """Test double for subprocess.run that records calls and replays a script."""
 
     def __init__(self, script: list[Any]):
-        # script: list of either CompletedProcess-like objects or callables
         self.script = list(script)
         self.calls: list[list[str]] = []
 
@@ -188,9 +185,9 @@ class _Completed:
 def test_ensure_python_sdks_skips_when_all_present(monkeypatch, capsys):
     """All three import-checks return rc=0 → no pip install fires."""
     runner = _RecordingRun([
-        _Completed(returncode=0),  # import claude_agent_sdk
-        _Completed(returncode=0),  # import openai
-        _Completed(returncode=0),  # import httpx
+        _Completed(returncode=0),
+        _Completed(returncode=0),
+        _Completed(returncode=0),
     ])
     monkeypatch.setattr(cli.subprocess, "run", runner)
 
@@ -200,7 +197,6 @@ def test_ensure_python_sdks_skips_when_all_present(monkeypatch, capsys):
     for call in runner.calls:
         assert call[0] == "/opt/venv/bin/python"
         assert call[1] == "-c"
-        # Only the import-probe shape: ["python", "-c", "import X"]
         assert call[2].startswith("import ")
     captured = capsys.readouterr().out
     assert "claude_agent_sdk OK" in captured
@@ -209,22 +205,17 @@ def test_ensure_python_sdks_skips_when_all_present(monkeypatch, capsys):
 
 
 def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsys):
-    """When `import claude_agent_sdk` fails, pip install is invoked.
-
-    Pins the contract that the SAME interpreter (sys.executable in the
-    real preflight; here we pass /opt/venv/bin/python) is used for both
-    the probe and the install — cross-interpreter installs are the bug."""
+    """When `import claude_agent_sdk` fails, pip install runs with the SAME interpreter."""
     runner = _RecordingRun([
-        _Completed(returncode=1),  # import claude_agent_sdk fails
-        _Completed(returncode=0),  # pip install claude-agent-sdk
-        _Completed(returncode=0),  # import openai
-        _Completed(returncode=0),  # import httpx
+        _Completed(returncode=1),
+        _Completed(returncode=0),
+        _Completed(returncode=0),
+        _Completed(returncode=0),
     ])
     monkeypatch.setattr(cli.subprocess, "run", runner)
 
     cli._ensure_python_sdks("/opt/venv/bin/python", ["--break-system-packages"])
 
-    # Probe + install + 2 more probes
     assert len(runner.calls) == 4
     install_call = runner.calls[1]
     assert install_call[0] == "/opt/venv/bin/python"
@@ -236,9 +227,7 @@ def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsy
     assert "installed claude-agent-sdk" in captured
 
 
-# ---------------------------------------------------------------------------
 # _unset_hip_visible_devices
-# ---------------------------------------------------------------------------
 def test_unset_hip_visible_devices_pops_when_rocr_present(monkeypatch, capsys):
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2,3")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
@@ -258,20 +247,12 @@ def test_unset_hip_visible_devices_keeps_hip_when_rocr_unset(monkeypatch):
     cli._unset_hip_visible_devices()
 
     import os as _os
-    # Still present — we only unset HIP when ROCR is also there.
     assert _os.environ["HIP_VISIBLE_DEVICES"] == "0,1,2,3"
 
 
-# ---------------------------------------------------------------------------
 # _validate_and_resolve_claude_model — hard gate
-# ---------------------------------------------------------------------------
 def _make_args(**overrides) -> argparse.Namespace:
-    """Build a minimal Namespace for _validate_and_resolve_claude_model.
-
-    Tests historically passed ``critic_mock=True/False`` here; that flag was
-    folded into ``critic_backend`` (``mock`` / ``agent``). We translate
-    ``critic_mock`` into the new attribute for back-compat.
-    """
+    """Build a minimal Namespace; translates legacy ``critic_mock`` into ``critic_backend``."""
     base = dict(
         claude_model="claude-opus-4-7",
         codex_model="gpt-5.4",
@@ -285,9 +266,7 @@ def _make_args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
-# ---------------------------------------------------------------------------
 # _resolve_robustness_choice — default backend
-# ---------------------------------------------------------------------------
 def test_resolve_robustness_choice_defaults_to_agent():
     args = _make_args(robustness_backend=None)
 
@@ -317,7 +296,7 @@ def test_resolve_robustness_choice_env_override_still_works(monkeypatch):
 
 
 def test_validate_claude_model_rejects_unsupported_arg(monkeypatch, capsys):
-    """`--claude-model claude-opus-4-5` aborts BEFORE catalog probe."""
+    """`--claude-model claude-opus-4-5` aborts before the catalog probe."""
     probe_calls: list[str] = []
 
     def _no_probe(**kwargs):
@@ -351,7 +330,7 @@ def test_validate_claude_model_4_7_in_catalog_keeps_choice(monkeypatch, capsys):
 
 
 def test_validate_claude_model_4_7_missing_falls_back_to_4_6(monkeypatch, capsys):
-    """Catalog has 4-6 only → arg rewritten + WARN."""
+    """Catalog has 4-6 only → arg rewritten with a WARN."""
     monkeypatch.setattr(
         cli, "_probe_llm_catalog",
         lambda **kw: {"claude-opus-4-6", "claude-opus-4-5", "gpt-5.4"},
@@ -380,12 +359,11 @@ def test_validate_claude_model_neither_in_catalog_aborts(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "claude-opus-4-7" in err
     assert "claude-opus-4-6" in err
-    # The catalog enumeration in the error should list what WAS available.
     assert "claude-opus-4-5" in err
 
 
 def test_validate_claude_model_aborts_when_catalog_unreachable(monkeypatch, capsys):
-    """Catalog probe returned None (gateway unreachable) → sys.exit(2)."""
+    """Catalog probe returned None → sys.exit(2)."""
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: None)
     args = _make_args(claude_model="claude-opus-4-7")
 
@@ -397,9 +375,7 @@ def test_validate_claude_model_aborts_when_catalog_unreachable(monkeypatch, caps
     assert "Refusing to start" in err
 
 
-# ---------------------------------------------------------------------------
 # _probe_llm_catalog — retry behaviour
-# ---------------------------------------------------------------------------
 class _FakeResp:
     def __init__(self, status_code: int, payload: Any):
         self.status_code = status_code
@@ -432,13 +408,11 @@ def test_probe_llm_catalog_retries_on_transient_error_then_succeeds(monkeypatch)
     )
     assert ids == {"claude-opus-4-7"}
     assert attempt[0] == 3
-    # 3 attempts total: initial (0s sleep skipped) + 2 retry sleeps.
-    # _CATALOG_RETRY_DELAYS_SEC[:2] should have been waited.
     assert sleeps[:2] == list(cli._CATALOG_RETRY_DELAYS_SEC[:2])
 
 
 def test_probe_llm_catalog_returns_none_when_all_attempts_fail(monkeypatch, capsys):
-    """All 4 attempts fail → returns None (caller decides to abort)."""
+    """All 4 attempts fail → returns None."""
     monkeypatch.setattr("time.sleep", lambda s: None)
 
     def _always_500(url, **kwargs):
@@ -452,7 +426,6 @@ def test_probe_llm_catalog_returns_none_when_all_attempts_fail(monkeypatch, caps
     )
     assert ids is None
     out = capsys.readouterr().out
-    # Each attempt should log; total = 1 initial + len(_CATALOG_RETRY_DELAYS_SEC).
     expected_attempts = 1 + len(cli._CATALOG_RETRY_DELAYS_SEC)
     assert out.count("catalog probe attempt") == expected_attempts
     assert "exhausted" in out
@@ -463,28 +436,25 @@ def test_probe_llm_catalog_returns_none_for_empty_base_url(monkeypatch):
     assert cli._probe_llm_catalog(base_url="", api_key="sk-test") is None
 
 
-# ---------------------------------------------------------------------------
 # _smoke_test_codex_model — WARN-only
-# ---------------------------------------------------------------------------
 def test_smoke_test_codex_model_warns_when_missing(monkeypatch, capsys):
-    args = _make_args(codex_model="gpt-99.9")  # not in catalog
+    args = _make_args(codex_model="gpt-99.9")
     catalog = {"claude-opus-4-7", "gpt-5.4", "gpt-4.1"}
     cli._smoke_test_codex_model(args, catalog)
     out = capsys.readouterr().out
     assert "WARNING" in out
     assert "gpt-99.9" in out
-    # The catalog snippet should list available gpt models.
     assert "gpt-5.4" in out
 
 
 def test_smoke_test_codex_model_skipped_when_unused(monkeypatch, capsys):
-    """--critic-mock + --kernel-claude (kernel_codex=False) → no probe / no warn."""
+    """--critic-mock + --kernel-claude → no probe / no warn."""
     args = _make_args(
         codex_model="gpt-totally-fake",
         critic_mock=True,
         kernel_codex=False,
     )
-    catalog = {"claude-opus-4-7"}  # no gpt
+    catalog = {"claude-opus-4-7"}
     cli._smoke_test_codex_model(args, catalog)
     out = capsys.readouterr().out
     assert "WARNING" not in out
@@ -515,33 +485,15 @@ def test_smoke_test_codex_model_confirms_when_present(capsys):
 
 
 def test_smoke_test_codex_model_no_op_on_probe_failure(capsys):
-    """If catalog_ids is None (probe failed earlier — Claude already aborted),
-    we silently skip; no spurious WARNs."""
+    """If catalog_ids is None we silently skip; no spurious WARNs."""
     args = _make_args(codex_model="gpt-5.4", critic_mock=False)
     cli._smoke_test_codex_model(args, None)
     assert capsys.readouterr().out == ""
 
 
-# ============================================================================
 # Merged from test_v08_ir3_preflight.py
-# ============================================================================
 
-"""KB_design_continue §3.3 / IR-3 — preflight soft-degrade tests.
-
-7 cases (per the implementation plan):
-1. KB ok + PR ok → both reachable, reasons ``None``.
-2. KB 5xx + no flag → ``cortex_enabled=False``, ``kb_degraded_reason="ir3_auto"``;
-   **cli does not abort** (soft degrade).
-3. KB 5xx + ``--degraded-kb`` → script invoked with ``SKIP_KB_PROBE=1``,
-   ``kb_degraded_reason="explicit_flag"``.
-4. KB 401 + non-empty ``KB_SERVICE_TOKEN`` → kb reachable.
-5. KB 401 + empty token → soft degrade ``ir3_auto`` +
-   marker ``kb_failure_reason="missing_token"``.
-6. PR timeout + ``--degraded-pr`` → ``pr_degraded_reason="explicit_flag"``,
-   KB still ok.
-7. Both flags → ``preflight_kb.sh`` is **not** invoked at all
-   (``subprocess.run.assert_not_called()``).
-"""
+"""KB_design_continue §3.3 / IR-3 — preflight soft-degrade tests."""
 
 
 import argparse
@@ -586,11 +538,9 @@ def _write_marker(
 
 
 def _fake_run_writes_marker(marker_path: Path, **marker_kwargs):
-    """Return a ``subprocess.run`` stub that writes ``marker_path``
-    with the given content + returns rc=0 / rc=1 as appropriate."""
+    """Return a ``subprocess.run`` stub that writes ``marker_path`` and returns an appropriate rc."""
     def _runner(cmd, env=None, check=False, timeout=None):
         _write_marker(marker_path, **marker_kwargs)
-        # Compute rc: 1 if any not-skipped branch is unreachable, else 0.
         kb_skipped = marker_kwargs.get("kb_skipped", False)
         pr_skipped = marker_kwargs.get("pr_skipped", False)
         kb_ok = marker_kwargs.get("kb_reachable", False)
@@ -611,9 +561,7 @@ def marker_path(tmp_path, monkeypatch) -> Path:
     return user_data / "runtime" / "cortex" / ".kb_preflight.json"
 
 
-# ---------------------------------------------------------------------------
 # 1. KB ok + PR ok → both reachable, reasons None.
-# ---------------------------------------------------------------------------
 def test_ir3_kb_ok_pr_ok(marker_path):
     args = _ns()
     with patch.object(
@@ -627,9 +575,7 @@ def test_ir3_kb_ok_pr_ok(marker_path):
     assert args.pr_degraded_reason is None
 
 
-# ---------------------------------------------------------------------------
 # 2. KB 5xx + no flag → soft degrade ir3_auto; cli does not abort.
-# ---------------------------------------------------------------------------
 def test_ir3_kb_5xx_auto_degrade(marker_path):
     args = _ns()
     with patch.object(
@@ -646,16 +592,13 @@ def test_ir3_kb_5xx_auto_degrade(marker_path):
     assert args.pr_degraded_reason is None
 
 
-# ---------------------------------------------------------------------------
 # 3. KB 5xx + --degraded-kb → script gets SKIP_KB_PROBE=1, reason=explicit.
-# ---------------------------------------------------------------------------
 def test_ir3_kb_explicit_flag(marker_path):
     args = _ns(degraded_kb=True)
     seen_env: dict = {}
 
     def _runner(cmd, env=None, check=False, timeout=None):
         seen_env.update(env or {})
-        # Write a marker as if the script ran with kb skipped.
         _write_marker(marker_path, kb_reachable=False, pr_reachable=True, kb_skipped=True)
         return subprocess.CompletedProcess(cmd, 0)
 
@@ -669,15 +612,10 @@ def test_ir3_kb_explicit_flag(marker_path):
     assert args.pr_degraded_reason is None
 
 
-# ---------------------------------------------------------------------------
 # 4. KB 401 + non-empty token → kb reachable (auth path).
-# ---------------------------------------------------------------------------
 def test_ir3_kb_401_with_token(marker_path, monkeypatch):
     monkeypatch.setenv("KB_SERVICE_TOKEN", "tok-abc")
     args = _ns()
-    # The actual probe semantics live in preflight_kb.sh; here we
-    # simulate "401 with token → kb_reachable=true" by writing the
-    # marker as reachable.
     with patch.object(
         cli_module.subprocess, "run",
         side_effect=_fake_run_writes_marker(marker_path, kb_reachable=True, pr_reachable=True),
@@ -687,9 +625,7 @@ def test_ir3_kb_401_with_token(marker_path, monkeypatch):
     assert args.kb_degraded_reason is None
 
 
-# ---------------------------------------------------------------------------
 # 5. KB 401 + empty token → soft degrade ir3_auto, marker missing_token.
-# ---------------------------------------------------------------------------
 def test_ir3_kb_401_missing_token(marker_path, monkeypatch):
     monkeypatch.delenv("KB_SERVICE_TOKEN", raising=False)
     args = _ns()
@@ -707,9 +643,7 @@ def test_ir3_kb_401_missing_token(marker_path, monkeypatch):
     assert marker["kb_failure_reason"] == "missing_token"
 
 
-# ---------------------------------------------------------------------------
 # 6. PR timeout + --degraded-pr → reason=explicit_flag, KB stays ok.
-# ---------------------------------------------------------------------------
 def test_ir3_pr_explicit_flag_kb_ok(marker_path):
     args = _ns(degraded_pr=True)
     seen_env: dict = {}
@@ -729,9 +663,7 @@ def test_ir3_pr_explicit_flag_kb_ok(marker_path):
     assert args.pr_degraded_reason == "explicit_flag"
 
 
-# ---------------------------------------------------------------------------
 # 7. Both flags → preflight_kb.sh NOT invoked.
-# ---------------------------------------------------------------------------
 def test_ir3_both_flags_short_circuit(marker_path):
     args = _ns(degraded_kb=True, degraded_pr=True)
     with patch.object(cli_module.subprocess, "run") as run_mock:
@@ -743,19 +675,14 @@ def test_ir3_both_flags_short_circuit(marker_path):
     assert args.pr_degraded_reason == "explicit_flag"
 
 
-# ---------------------------------------------------------------------------
-# 8. No --cortex-kb-url / no $CORTEX_KB_URL → KB probe skipped, stays
-#    local-only WITHOUT soft-degrading. The probe script is handed no
-#    CORTEX_KB_URL (the old hard-coded default was retired).
-# ---------------------------------------------------------------------------
+# 8. No cortex KB URL → KB probe skipped, stays local-only without soft-degrading.
 def test_ir3_no_kb_url_skips_probe_local_only(marker_path, monkeypatch):
     monkeypatch.delenv("CORTEX_KB_URL", raising=False)
-    args = _ns()  # no cortex_kb_url attribute → treated as unset
+    args = _ns()
     seen_env: dict = {}
 
     def _runner(cmd, env=None, check=False, timeout=None):
         seen_env.update(env or {})
-        # Mirror preflight_kb.sh's empty-URL behaviour: KB branch skipped.
         _write_marker(
             marker_path, kb_reachable=False, pr_reachable=True, kb_skipped=True,
         )
@@ -763,17 +690,12 @@ def test_ir3_no_kb_url_skips_probe_local_only(marker_path, monkeypatch):
 
     with patch.object(cli_module.subprocess, "run", side_effect=_runner):
         cli_module._run_ir3_preflight(args)
-    # No URL was injected into the probe environment.
     assert "CORTEX_KB_URL" not in seen_env
-    # Skipped (not unreachable) → no soft-degrade.
     assert args.cortex_enabled is True
     assert args.kb_degraded_reason is None
 
 
-# ---------------------------------------------------------------------------
-# 9. Explicit --cortex-kb-url → injected into the probe environment so
-#    only the operator-configured URL is probed.
-# ---------------------------------------------------------------------------
+# 9. Explicit --cortex-kb-url → injected into the probe environment.
 def test_ir3_explicit_kb_url_injected_into_probe_env(marker_path, monkeypatch):
     monkeypatch.delenv("CORTEX_KB_URL", raising=False)
     args = _ns(cortex_kb_url="http://my-kb.example")
@@ -791,9 +713,7 @@ def test_ir3_explicit_kb_url_injected_into_probe_env(marker_path, monkeypatch):
     assert args.kb_degraded_reason is None
 
 
-# ---------------------------------------------------------------------------
 # Bonus: CLI flag plumbing
-# ---------------------------------------------------------------------------
 def test_cli_parser_exposes_degraded_flags():
     parser = cli_module._build_parser()
     args = parser.parse_args(["optimize", "--model", "/x", "--degraded-kb"])

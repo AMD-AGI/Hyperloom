@@ -1,24 +1,15 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""PR/ref exploration engine.
-
-Adapted from zhenggong/framework-agent with two structural changes:
-
-* Imports are rerouted to ``sources.primus_cortex`` / ``sources.github`` /
-  ``sources._shared`` (Phase A reorg).
-* Candidate enumeration goes through ``sources.enumerate_candidates``
-  to honour ``ExploreRequest.search_modes``; enrichment + filtering
-  still happen in this module.
+"""PR/ref exploration engine; candidates come from ``sources.enumerate_candidates`` (honours ``search_modes``), enrichment + filtering happen here.
 
 Two run modes:
 
-* ``execute=False`` (plan)    - drop ``pr.patches`` + ``pr_files.json``
-  per PR candidate under ``candidate_dir`` and produce a planned
-  ``explore_summary.json``. **No** worktree / venv / build / bench.
-* ``execute=True``            - additionally create a detached git
-  worktree + per-candidate venv, then run the request's ``build`` /
-  ``benchmark`` / ``accuracy`` / ``cleanup`` commands. Promotion stays
-  manual (``promotion_policy=manual_only``).
+* ``execute=False`` (plan) - drop ``pr.patches`` + ``pr_files.json`` per PR
+  candidate and produce a planned ``explore_summary.json``; no worktree /
+  venv / build / bench.
+* ``execute=True`` - additionally create a detached git worktree +
+  per-candidate venv, then run the request's ``build`` / ``benchmark`` /
+  ``accuracy`` / ``cleanup`` commands. Promotion stays manual.
 """
 
 from __future__ import annotations
@@ -48,7 +39,15 @@ log = get_logger(__name__)
 
 
 def _coalesce_str(*values: Any) -> str:
-    """Return the first non-empty stripped string in ``values``; else ''."""
+    """Return the first non-empty stripped string in ``values``; else ''.
+
+    Args:
+        *values (Any): Candidate values; non-strings and blank strings are
+            skipped.
+
+    Returns:
+        str: The first stripped non-empty string, or ``""`` if none qualify.
+    """
     for value in values:
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -56,13 +55,30 @@ def _coalesce_str(*values: Any) -> str:
 
 
 def _summary_of(detail: dict[str, Any]) -> dict[str, Any]:
-    """primus-cortex wraps PR metadata under 'summary'; default to {} otherwise."""
+    """Return the nested ``summary`` mapping from a PR detail payload.
+
+    primus-cortex wraps PR metadata under a ``summary`` key; this defaults
+    to ``{}`` when it is absent or not a dict.
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload.
+
+    Returns:
+        dict[str, Any]: The nested summary dict, or ``{}`` when missing.
+    """
     summary = detail.get("summary")
     return summary if isinstance(summary, dict) else {}
 
 
 def _extract_head_sha(detail: dict[str, Any]) -> str:
-    """Pull head SHA out of any of the known keys in a PR detail payload."""
+    """Pull head SHA out of any of the known keys in a PR detail payload.
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload.
+
+    Returns:
+        str: The head commit SHA, or ``""`` when none of the keys carry it.
+    """
     summary = _summary_of(detail)
     sha = _coalesce_str(
         summary.get("head_sha"),
@@ -83,7 +99,14 @@ def _extract_head_sha(detail: dict[str, Any]) -> str:
 
 
 def _extract_labels(detail: dict[str, Any]) -> tuple[str, ...]:
-    """Pull labels out of a PR detail payload (handles dict and string items)."""
+    """Pull labels out of a PR detail payload (handles dict and string items).
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload.
+
+    Returns:
+        tuple[str, ...]: The label names, or an empty tuple when absent.
+    """
     summary = _summary_of(detail)
     raw = summary.get("labels") if "labels" in summary else detail.get("labels")
     if raw is None:
@@ -101,7 +124,14 @@ def _extract_labels(detail: dict[str, Any]) -> tuple[str, ...]:
 
 
 def _extract_author(detail: dict[str, Any]) -> str:
-    """Pull author login from any known key in a PR detail payload."""
+    """Pull author login from any known key in a PR detail payload.
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload.
+
+    Returns:
+        str: The author login/name, or ``""`` when none can be found.
+    """
     summary = _summary_of(detail)
     summary_login = _coalesce_str(summary.get("author_login"), summary.get("author"))
     if summary_login:
@@ -118,13 +148,27 @@ def _extract_author(detail: dict[str, Any]) -> str:
 
 
 def _extract_title(detail: dict[str, Any]) -> str:
-    """Pull title from a PR detail payload."""
+    """Pull title from a PR detail payload.
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload.
+
+    Returns:
+        str: The PR title, or ``""`` when absent.
+    """
     summary = _summary_of(detail)
     return _coalesce_str(summary.get("title"), detail.get("title"))
 
 
 def _extract_updated_at(detail: dict[str, Any]) -> str:
-    """Pull updated_at timestamp string."""
+    """Pull the ``updated_at`` timestamp string from a PR detail payload.
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload.
+
+    Returns:
+        str: The update timestamp string, or ``""`` when absent.
+    """
     summary = _summary_of(detail)
     return _coalesce_str(
         summary.get("pr_updated_at"),
@@ -136,7 +180,14 @@ def _extract_updated_at(detail: dict[str, Any]) -> str:
 
 
 def _extract_html_url(detail: dict[str, Any]) -> str:
-    """Pull html_url from a PR detail payload."""
+    """Pull html_url from a PR detail payload.
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload.
+
+    Returns:
+        str: The PR HTML URL, or ``""`` when absent.
+    """
     summary = _summary_of(detail)
     return _coalesce_str(summary.get("html_url"), detail.get("html_url"), detail.get("url"))
 
@@ -144,7 +195,17 @@ def _extract_html_url(detail: dict[str, Any]) -> str:
 def _extract_changed_files(
     detail: dict[str, Any], files_payload: list[dict[str, Any]]
 ) -> tuple[str, ...]:
-    """Pull changed-files list, preferring the dedicated files endpoint payload."""
+    """Pull changed-files list, preferring the dedicated files endpoint payload.
+
+    Args:
+        detail (dict[str, Any]): The PR detail payload (may embed a file list).
+        files_payload (list[dict[str, Any]]): The dedicated files-endpoint
+            payload, used in preference to the embedded list.
+
+    Returns:
+        tuple[str, ...]: The changed file paths, or an empty tuple when none
+            are present.
+    """
     out: list[str] = []
     for item in files_payload:
         path = _coalesce_str(item.get("path"), item.get("filename"), item.get("file_path"))
@@ -166,12 +227,7 @@ def _extract_changed_files(
 
 
 def _enrich_candidate_via_primus(req: ExploreRequest, candidate: Candidate) -> Candidate:
-    """Fetch pr_get + pr_files for PR-typed candidates; hard-fails on primus errors.
-
-    Branch / tag / commit refs are returned unchanged. Explicit refs that
-    look like ``PR:N`` are also enriched so the audit artifact dump can
-    target them.
-    """
+    """Fetch pr_get + pr_files for PR-typed candidates (hard-fails on primus errors); branch / tag / commit refs returned unchanged."""
     if req.primus_cortex is None:
         return candidate
     number = candidate.pr_number
@@ -207,12 +263,7 @@ def _enrich_candidate_via_primus(req: ExploreRequest, candidate: Candidate) -> C
 
 
 def _passes_filter(c: Candidate, f: PrFilter) -> tuple[bool, str]:
-    """Apply :class:`PrFilter` to a single candidate.
-
-    Returns ``(True, '')`` on empty filter or pass; ``(False, reason)``
-    otherwise. Path/label/author/date constraints that need metadata fail
-    when that metadata is missing (typically because enrichment skipped).
-    """
+    """Apply :class:`PrFilter` to one candidate: ``(True, '')`` on empty filter or pass, ``(False, reason)`` otherwise; metadata-dependent constraints fail when that metadata is missing (enrichment skipped)."""
     if f.is_empty:
         return True, ""
 
@@ -270,14 +321,7 @@ def _passes_filter(c: Candidate, f: PrFilter) -> tuple[bool, str]:
 def _enumerate_with_skipped(
     req: ExploreRequest,
 ) -> tuple[list[Candidate], list[dict[str, str]]]:
-    """Return ``(kept, skipped)`` after enrichment + filtering.
-
-    Uses :mod:`framework_agent.sources` to do the multi-source union
-    (primus_cortex + github + explicit), then enriches PR-typed
-    candidates via primus and applies ``req.pr_filter``. Explicit
-    candidates bypass the filter (operator intent wins) but are still
-    enriched.
-    """
+    """Return ``(kept, skipped)`` after enrichment + filtering: unions sources, enriches PR candidates via primus, then applies ``req.pr_filter``; explicit candidates bypass the filter (operator intent wins) but are still enriched."""
     from .sources import enumerate_candidates as _enum_raw
 
     raw = _enum_raw(req)
@@ -297,7 +341,15 @@ def _enumerate_with_skipped(
 
 
 def _load_json(path: Path) -> dict[str, Any]:
-    """Best-effort JSON loader; returns {} when missing or invalid."""
+    """Best-effort JSON loader; returns {} when missing or invalid.
+
+    Args:
+        path (Path): The JSON file to load.
+
+    Returns:
+        dict[str, Any]: The parsed object, or ``{}`` when the file is missing,
+            unreadable, malformed, or not a JSON object.
+    """
     if not path.is_file():
         return {}
     try:
@@ -308,7 +360,16 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 
 def _metric_float(data: dict[str, Any], *keys: str) -> float | None:
-    """Return the first int/float value among ``keys`` in ``data``."""
+    """Return the first int/float value among ``keys`` in ``data``.
+
+    Args:
+        data (dict[str, Any]): The metric mapping to read.
+        *keys (str): Candidate keys, probed in order.
+
+    Returns:
+        float | None: The first numeric value found as a float, or ``None``
+            when no key holds an int/float.
+    """
     for key in keys:
         value = data.get(key)
         if isinstance(value, (int, float)):
@@ -317,7 +378,16 @@ def _metric_float(data: dict[str, Any], *keys: str) -> float | None:
 
 
 def _resolve_output_path(template: str, variables: dict[str, str]) -> Path:
-    """Render a path template using the candidate's variable bag."""
+    """Render a path template using the candidate's variable bag.
+
+    Args:
+        template (str): The path template with ``{var}`` placeholders.
+        variables (dict[str, str]): The variable bag substituted into the
+            template.
+
+    Returns:
+        Path: The rendered, user-expanded filesystem path.
+    """
     return Path(render_template(template, variables)).expanduser()
 
 
@@ -328,13 +398,10 @@ def _prepare_candidate_workspace_with_artifacts(
     index: int,
     execute: bool,
 ) -> tuple[WorkspacePaths, dict[str, str]]:
-    """Thin adapter: isolation.prepare_candidate_workspace + audit drop.
-
-    Audit material (``pr.patches`` / ``pr_files.json``) is dropped per
-    candidate regardless of execute mode, then the heavy worktree + venv
-    step is delegated to :mod:`isolation` when execute is True. Returns
-    the resolved :class:`WorkspacePaths` and the artifact-path dict so
-    callers don't need to know two return tuples.
+    """Drop audit material (``pr.patches`` / ``pr_files.json``) per candidate
+    regardless of execute mode, then delegate the worktree + venv step to
+    :mod:`isolation` when execute is True. Returns ``(WorkspacePaths,
+    artifact_paths)``.
     """
     candidate_dir = req.work_dir / "candidates" / f"{index:02d}_{candidate.slug}"
     candidate_dir.mkdir(parents=True, exist_ok=True)
@@ -348,12 +415,9 @@ def _prepare_candidate_workspace_with_artifacts(
 def _write_pr_artifacts(
     req: ExploreRequest, candidate: Candidate, candidate_dir: Path
 ) -> dict[str, str]:
-    """Drop ``pr.patches`` + ``pr_files.json`` per PR candidate.
-
-    No-op (returns empty dict) when primus_cortex is unconfigured or when
-    the candidate is not a PR ref. Hard-fails on network errors via the
-    primus_cortex backend's policy; the CLI's outer ``except Exception``
-    converts this to exit code 2 with a clear message.
+    """Drop ``pr.patches`` + ``pr_files.json`` per PR candidate. No-op when
+    primus_cortex is unconfigured or the candidate is not a PR ref;
+    hard-fails on network errors (CLI converts to exit code 2).
     """
     if req.primus_cortex is None:
         return {}
@@ -406,7 +470,18 @@ def _variables(
     worktree_dir: Path,
     venv_dir: Path,
 ) -> dict[str, str]:
-    """Build the variable bag passed to render_template for command specs."""
+    """Build the variable bag passed to render_template for command specs.
+
+    Args:
+        req (ExploreRequest): The explore request (framework / repo / work dir).
+        candidate (Candidate): The candidate (ref / repo).
+        candidate_dir (Path): The candidate's working directory.
+        worktree_dir (Path): The candidate's git worktree directory.
+        venv_dir (Path): The candidate's virtualenv directory.
+
+    Returns:
+        dict[str, str]: The string-valued variable bag for template rendering.
+    """
     return {
         "candidate_ref": candidate.ref,
         "candidate_repo": candidate.repo,
@@ -423,7 +498,17 @@ def _variables(
 def _evaluate_candidate(
     req: ExploreRequest, variables: dict[str, str]
 ) -> tuple[float | None, float | None, str]:
-    """Load post-run benchmark.json + accuracy.json and pull the metrics."""
+    """Load post-run benchmark.json + accuracy.json and pull the metrics.
+
+    Args:
+        req (ExploreRequest): The explore request supplying output templates.
+        variables (dict[str, str]): The candidate variable bag used to resolve
+            the output paths.
+
+    Returns:
+        tuple[float | None, float | None, str]: ``(throughput, accuracy,
+            completed)`` with ``None`` for any metric that is absent.
+    """
     benchmark_template = req.outputs.get("benchmark_json", "{candidate_dir}/benchmark.json")
     accuracy_template = req.outputs.get("accuracy_json", "{candidate_dir}/accuracy.json")
     benchmark = _load_json(_resolve_output_path(benchmark_template, variables))
@@ -443,11 +528,10 @@ def _run_single_candidate(
 ) -> CandidateResult:
     """Run a single candidate end-to-end (workspace + commands + decision).
 
-    Synchronous helper used by both the serial path and the async
-    concurrent path. The function is intentionally side-effect free
-    beyond the workspace it owns: no shared state writes, no return
-    aggregation. Concurrency safety: callers must ensure two candidates
-    never share an ``index`` (slug collisions could overwrite material).
+    Synchronous helper used by both the serial and async paths; side-effect
+    free beyond the workspace it owns. Concurrency safety: callers must
+    ensure two candidates never share an ``index`` (slug collisions could
+    overwrite material).
     """
     workspace, artifact_paths = _prepare_candidate_workspace_with_artifacts(
         req, candidate, index=index, execute=execute,
@@ -526,19 +610,23 @@ async def _run_candidates_concurrent(
     *,
     execute: bool,
 ) -> list[CandidateResult]:
-    """Run candidates with ``asyncio.gather`` bounded by ``build_concurrency``.
-
-    Each task wraps :func:`_run_single_candidate` in :func:`asyncio.to_thread`
-    so the synchronous subprocess code path is unchanged. A semaphore caps
-    the number of build tasks in flight; benchmark + accuracy stay inside
-    the worker function so GPU-contended stages still run within a single
-    candidate task at a time (one candidate's bench cannot overlap another
-    candidate's bench unless concurrency > 1 — that is the explicit user
-    knob).
+    """Run candidates with ``asyncio.gather`` bounded by a ``build_concurrency``
+    semaphore. Each task wraps :func:`_run_single_candidate` in
+    :func:`asyncio.to_thread`; bench/accuracy stay inside the worker so two
+    candidates only overlap when concurrency > 1 (the explicit user knob).
     """
     semaphore = asyncio.Semaphore(max(1, req.build_concurrency))
 
     async def _bounded(idx: int, cand: Candidate) -> CandidateResult:
+        """Run one candidate under the concurrency semaphore.
+
+        Args:
+            idx (int): The unique 1-based candidate index.
+            cand (Candidate): The candidate to run.
+
+        Returns:
+            CandidateResult: The result of running the candidate in a thread.
+        """
         async with semaphore:
             return await asyncio.to_thread(
                 _run_single_candidate, req, cand, index=idx, execute=execute,
@@ -549,7 +637,14 @@ async def _run_candidates_concurrent(
 
 
 def _maybe_disk_preflight(req: ExploreRequest, n_candidates: int, *, execute: bool) -> None:
-    """Run disk_preflight when execute mode is on and threshold is not 0."""
+    """Run disk_preflight when execute mode is on and threshold is not 0.
+
+    Args:
+        req (ExploreRequest): The explore request (work dir + threshold).
+        n_candidates (int): The number of candidates to size the check by.
+        execute (bool): Whether the run is in execute mode; preflight is
+            skipped entirely in plan mode.
+    """
     if not execute or n_candidates <= 0:
         return
     if req.disk_min_free_gb == 0:
@@ -568,7 +663,14 @@ def _cleanup_losers(
     *,
     execute: bool,
 ) -> None:
-    """Apply keep_winner_only cleanup over all non-winner results."""
+    """Apply keep_winner_only cleanup over all non-winner results.
+
+    Args:
+        req (ExploreRequest): The explore request (supplies keep_winner_only).
+        results (list[CandidateResult]): The per-candidate results to clean up.
+        execute (bool): Whether the run is in execute mode; cleanup is skipped
+            in plan mode.
+    """
     if not execute or not req.keep_winner_only:
         return
     repo_dir: Path | None = None
@@ -596,26 +698,21 @@ def _cleanup_losers(
 def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
     """Main entry: enumerate, optionally build/bench, return summary dict.
 
-    Behaviour matrix (merged-design §4.4):
+    Behaviour matrix:
 
-    * ``execute=False``                          — plan mode. Drops audit
-      material, never builds, never touches GPU.
-    * ``execute=True`` + ``ranking_mode=False``  — run candidates serially
-      (or with ``build_concurrency`` async gather), **stop on first
-      winner**. Legacy zhenggong v0.2 behaviour.
-    * ``execute=True`` + ``ranking_mode=True``   — run every candidate,
-      then sort the result list by :func:`candidate_score` descending.
-      ``winner_ref`` is the top-scoring candidate that passed all gates.
-    * ``execute=True`` + ``keep_winner_only=True`` — after the run, drop
-      worktree+venv for every non-winner candidate to reclaim disk.
-    * ``execute=True`` + ``build_concurrency > 1`` — fan out build via
-      ``asyncio.gather``. Within one candidate task, bench/accuracy stay
-      strictly serial.
+    * ``execute=False`` — plan mode; drops audit material, never builds.
+    * ``execute=True`` + ``ranking_mode=False`` — run candidates serially
+      (or via ``build_concurrency`` async gather), stop on first winner.
+    * ``execute=True`` + ``ranking_mode=True`` — run every candidate, sort by
+      :func:`candidate_score` descending; ``winner_ref`` is the top scorer
+      that passed all gates.
+    * ``keep_winner_only=True`` — after the run, drop worktree+venv for every
+      non-winner candidate to reclaim disk.
+    * ``build_concurrency > 1`` — fan out build via ``asyncio.gather``;
+      bench/accuracy stay serial within a candidate task.
 
-    Disk preflight (when execute=True and ``disk_min_free_gb != 0``)
-    runs before any candidate work starts; failure raises
-    :class:`isolation.DiskPreflightError` which the CLI converts to a
-    fatal error.
+    Disk preflight (execute=True and ``disk_min_free_gb != 0``) runs first;
+    failure raises :class:`isolation.DiskPreflightError`.
     """
     log.info(
         "explore start framework=%s repo=%s work_dir=%s execute=%s "
@@ -633,7 +730,6 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
     _maybe_disk_preflight(req, len(candidates), execute=execute)
 
     if execute and req.ranking_mode and req.build_concurrency > 1:
-        # Full fan-out: every candidate runs, build stage capped by semaphore.
         log.info(
             "explore: ranking_mode + build_concurrency=%d -> asyncio.gather",
             req.build_concurrency,
@@ -642,7 +738,7 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
             _run_candidates_concurrent(req, candidates, execute=execute)
         )
     else:
-        # Serial path. Honours legacy early-stop unless ranking_mode is on.
+        # Serial path; early-stops on first winner unless ranking_mode is on.
         results = []
         for index, candidate in enumerate(candidates, start=1):
             result = _run_single_candidate(
@@ -656,10 +752,8 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
                 )
                 break
 
-    # Ranking mode: sort the result list so the highest-scoring candidate
-    # is first. Candidates that failed the build or bench stage score 0
-    # via candidate_score() and fall to the tail. The winner flag is
-    # still set per the gate logic; ranking only changes display order.
+    # Ranking mode only changes display order; the winner flag still comes
+    # from the gate logic. Failed candidates score 0 and fall to the tail.
     if execute and req.ranking_mode:
         results.sort(
             key=lambda r: candidate_score(req, r.throughput, r.accuracy),
@@ -723,16 +817,10 @@ def _contribute_findings_to_kb(
 ) -> dict[str, object]:
     """Append a Finding to ``${KB}/<domain>/empirical_kb.md`` when warranted.
 
-    Hook fires only when all of the following are true:
-
-    * ``execute=True`` (plan mode never writes anything outside work_dir);
-    * ``req.kb_domain`` is non-empty (explicit opt-in);
-    * a ``winner`` candidate exists.
-
-    The hook is best-effort - any KB write error is captured into the
-    returned dict so the explore summary stays usable even if the KB
-    directory is read-only. Returns a metadata dict that gets folded
-    into ``explore_summary.json`` under the ``kb_contribution`` key.
+    Fires only when ``execute=True``, ``req.kb_domain`` is non-empty, and a
+    ``winner`` exists. Best-effort: any KB write error is captured into the
+    returned ``kb_contribution`` metadata dict so the explore summary stays
+    usable even if the KB directory is read-only.
     """
     if not execute or not req.kb_domain or winner is None:
         return {"status": "skipped", "reason": "execute+kb_domain+winner required"}

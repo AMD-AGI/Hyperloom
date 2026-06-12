@@ -348,8 +348,7 @@ def test_idempotency_replay_silent_when_no_key():
 
 
 def test_recover_unsuccessful_detected_via_signature_when_kind_missing():
-    # Coordinator forwarded the executor result.json fields but elided
-    # the ``kind`` tag — we still recognise it as recover via the
+    # ``kind`` tag elided — still recognised as recover via the
     # ``force_gpu_cleanup`` + ``gpureset_attempted`` signature.
     coord_events = [
         {
