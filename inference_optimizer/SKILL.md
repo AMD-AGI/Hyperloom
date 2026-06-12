@@ -46,13 +46,14 @@ The **workspace root** is ``$USER_DATA_PATH`` (default
 
 ```text
 $USER_DATA_PATH/                          # workspace_root — set by operator / Claw / SaFE
-├── runtime/                              # workspace-shared (install.sh, Magpie, kernel-agent.env.sh)
+├── runtime/                              # workspace-shared (env files, config)
 │   ├── kernel-agent.env.sh
-│   ├── geak-config/local.yaml
-│   ├── Magpie/
-│   └── source-mirrors/{Primus-Claw,OOB,InferenceX,TraceLens[,TraceLens-internal]}/
-│       # TraceLens public is required; TraceLens-internal is optional and only
-│       # present when TRACELENS_INTERNAL_ROOT is set (open-source-only otherwise)
+│   └── geak-config/local.yaml
+# Open-source deps are cloned pod-local, NOT under runtime/:
+#   ${TMPDIR:-/tmp}/hyperloom/open-source-repos/{Magpie,TraceLens,GEAK,InferenceX}/
+#   TraceLens-internal is present only when TRACELENS_INTERNAL_ROOT is set
+#   OOB is NOT cloned: copied from $OOB_SRC (default $HYPERLOOM_BUNDLE/OOB)
+#   into open-source-repos/OOB/oob_cli
 ├── logs/                                 # workspace-shared launcher stdout
 └── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
     └── <UTC_YYYYMMDDTHHMMSSZ>/           # session_dir — manifest.json, state.json, runs/, …
@@ -93,13 +94,14 @@ the session dir printed by the CLI.
 | Workspace root | ``$USER_DATA_PATH`` → ``paths.workspace_root()`` | Shared ``runtime/`` + ``logs/`` and parent of all sessions |
 | Session dir | ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` → ``paths.session_dir()`` | Per-run directory containing ``manifest.json`` / ``state.json`` / ``storage/coordinator.db`` |
 
-**Launcher rule:** do not hand-build, create, delete, or repair paths
-under ``$USER_DATA_PATH/runtime/`` (especially ``source-mirrors/``).
-Those are workspace-shared assets owned by `install.sh`, including
-Magpie, GEAK, OOB, TraceLens mirrors, env files, and config. Manual edits
-there can corrupt another run's checkout. If install state looks wrong,
+**Launcher rule:** do not hand-build, create, delete, or repair the
+open-source checkouts under the pod-local root
+``${TMPDIR:-/tmp}/hyperloom/open-source-repos/`` (Magpie, GEAK, TraceLens,
+InferenceX; OOB is copied there from `$OOB_SRC`) or the env files / config
+under ``$USER_DATA_PATH/runtime/``. Those are assets owned by `install.sh`.
+Manual edits there can corrupt the checkout. If install state looks wrong,
 rerun `install.sh` or follow the Recovery section; do not clone or clean
-the mirrors by hand.
+them by hand.
 
 **Session rule:** never treat ``$USER_DATA_PATH`` as the session dir when
 ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` is set. Read
@@ -114,26 +116,22 @@ the latest ``*T*Z/`` timestamp dir — overlapping sessions on the same
 host make "latest" pick the wrong run.
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
-or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
-`$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`; when unset,
-`kernel-agent/scripts/install.sh` clones
-[AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins
-it to a fixed SHA. A pre-existing checkout you maintain is only used as
-an explicit operator override — export `TRACELENS_ROOT=<path>` to opt
-in, which skips both the clone and the SHA pin) with an **optional**
-internal
-extension at `$TRACELENS_INTERNAL_ROOT` (no default; internal users set
-it to their own existing checkout to opt in,
-otherwise open-source-only; rehydration module — Hyperloom keeps no internal
-URL/path). See README Local Mode step 1. The per-version
-`sglang_roofline_patches/sglang_<minor>_<patch>/` layout under
-TraceLens is required by `_server_patcher`),
-`$OOB_SRC` / `$HYPERLOOM_BUNDLE`,
-`/sgl-workspace/{aiter,sglang,vllm}/`, `~/.claude/config.json` +
-`~/.codex/auth.json`, `~/.cache/amd-ai-devtool/semantic-index/`
-(GEAK RAG embedding cache), `/wekafs/hyperloom/geak-memory/memory.db`
-(GEAK cross-session memory). Each is overridable via its own env if
-you want a fully self-contained session.
+or warm-start caches):
+
+- **TraceLens** — `install.sh` clones it (plus Magpie / GEAK / InferenceX)
+  into the pod-local open-source root
+  `${TMPDIR:-/tmp}/hyperloom/open-source-repos/`. The optional internal
+  extension `$TRACELENS_INTERNAL_ROOT` is set by internal users only
+  (otherwise open-source-only). The per-version
+  `sglang_roofline_patches/sglang_<minor>_<patch>/` layout under TraceLens
+  is required by `_server_patcher`.
+- **OOB** (not open-source) — provided via `$OOB_SRC` /
+  `$HYPERLOOM_BUNDLE`; keep these pointing at a valid OOB bundle.
+- `/sgl-workspace/{aiter,sglang,vllm}/`, `~/.claude/config.json` +
+  `~/.codex/auth.json`, `~/.cache/amd-ai-devtool/semantic-index/`
+  (GEAK RAG embedding cache), `/wekafs/hyperloom/geak-memory/memory.db`
+  (GEAK cross-session memory). Each is overridable via its own env if
+  you want a fully self-contained session.
 
 Paths emitted by agents must resolve under the **session dir** — PolicyGate
 enforces this (with a framework-source allowlist for `source_file`:
@@ -507,14 +505,6 @@ CLI:
 export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/kernel-agent"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
-# TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens
-# to $HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens and pin it to a
-# fixed SHA. Only export it as an operator override to point at a
-# pre-existing checkout you maintain; this skips both the clone and the
-# SHA pin.
-# export TRACELENS_ROOT=/path/to/your/TraceLens
-# Optional internal extension; export only to enable it (open-source-only if unset):
-# export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
@@ -564,15 +554,13 @@ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 ```
 
 If install repeatedly fails while building GEAK / `mini-swe-agent` with
-missing files such as `src/minisweagent/...`, the workspace-shared GEAK
-mirror may be half-created (`.git` exists but `src/` is incomplete) or
-the filesystem may be showing stale metadata. Do not manually clone GEAK,
-delete only `build/`, or edit `source-mirrors/` in place. Stop any other
-installer using the same `$USER_DATA_PATH`, remove the entire
-`${HYPERLOOM_ROOT:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/source-mirrors}/geak`
+missing files such as `src/minisweagent/...`, the GEAK checkout may be
+half-created (`.git` exists but `src/` is incomplete) or the filesystem
+may be showing stale metadata. Do not manually clone GEAK or edit the
+checkout in place. Remove the entire
+`${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/GEAK`
 directory, then rerun the full install so `install.sh` owns the fresh
-clone. Multiple concurrent installs sharing one `$USER_DATA_PATH` also
-share `source-mirrors/`; avoid running them at the same time.
+clone.
 
 In sandboxes where `/workspace/hyperloom` is unwritable, override the
 **workspace root** with `USER_DATA_PATH` (not the per-session subdir):

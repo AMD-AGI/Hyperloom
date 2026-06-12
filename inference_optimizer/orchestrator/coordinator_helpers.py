@@ -297,15 +297,26 @@ def _merge_cumulative_extra_sglang_args(
     return _dedupe_extra_server_args(merged)
 
 
+_SPACE_VALUE_FLAGS = (
+    "--json-model-override-args",
+    "--override-generation-config",
+    "--tool-call-parser",
+)
+
+
 def _dedupe_extra_server_args(args_str: str) -> str:
     """Collapse repeated ``--flag value`` pairs into a unique launch string.
 
     Keep each flag once with its last value (first-seen order preserved),
     since argparse ``action="store"`` only honors the last value. Flags in
-    ``_MULTI_VALUE_SGLANG_FLAGS`` keep their multi-value runs.
+    ``_MULTI_VALUE_SGLANG_FLAGS`` keep their multi-value runs. Args with
+    JSON/space-valued flags are left untouched because downstream launch
+    scripts expand them unquoted.
     """
     if not args_str:
         return ""
+    if any(flag in args_str for flag in _SPACE_VALUE_FLAGS):
+        return args_str
     tokens = args_str.split()
     pair_by_flag: dict[str, list[str]] = {}
     order: list[str] = []
@@ -313,16 +324,21 @@ def _dedupe_extra_server_args(args_str: str) -> str:
     while i < len(tokens):
         t = tokens[i]
         if t.startswith("--"):
-            flag = t
-            i += 1
-            values: list[str] = []
-            if flag in _MULTI_VALUE_SGLANG_FLAGS:
-                while i < len(tokens) and not tokens[i].startswith("--"):
-                    values.append(tokens[i])
-                    i += 1
-            elif i < len(tokens) and not tokens[i].startswith("--"):
-                values = [tokens[i]]
+            if "=" in t:
+                flag, _, value = t.partition("=")
+                values = [value] if value else []
                 i += 1
+            else:
+                flag = t
+                i += 1
+                values = []
+                if flag in _MULTI_VALUE_SGLANG_FLAGS:
+                    while i < len(tokens) and not tokens[i].startswith("--"):
+                        values.append(tokens[i])
+                        i += 1
+                elif i < len(tokens) and not tokens[i].startswith("--"):
+                    values = [tokens[i]]
+                    i += 1
             pair = [flag, *values] if values else [flag]
             if flag not in pair_by_flag:
                 order.append(flag)
