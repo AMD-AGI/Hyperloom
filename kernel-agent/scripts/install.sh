@@ -136,7 +136,7 @@ GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
 # Operators can override with GEAK_REF=<tag|branch|sha>.
 GEAK_REF="${GEAK_REF:-ec61bdbdb151904ec187a8d89518afb969c53737}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
-OOB_CLI_ROOT="${OOB_CLI_ROOT:-${_open_source_root}/OOB/oob_cli}"
+OOB_ROOT="${OOB_ROOT:-${OOB_CLI_ROOT:-${_open_source_root}/OOB}}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
 # GEAK talks to the AMD Primus-Safe LiteLLM-compatible /chat/completions
 # endpoint.  Force the LiteLLM provider prefix to `openai/` for bare Claude
@@ -796,7 +796,7 @@ ensure_tracelens() {
   # editable install in a subprocess on every trace_analyze request,
   # producing a tight failure loop. Detecting unwritable source up front
   # and mirroring to ${TRACELENS_MIRROR_DIR} (parallel to
-  # ${GEAK_ROOT} / ${OOB_CLI_ROOT}) lets both
+  # ${GEAK_ROOT} / ${OOB_ROOT}) lets both
   # the install-time and the runtime pip install land on a writable
   # filesystem. write_env_file() emits the resulting TRACELENS_INTERNAL_ROOT into
   # the pod-local kernel-agent env so subsequent CLI subprocesses inherit
@@ -1129,18 +1129,30 @@ ensure_rag_index() {
 
 ensure_oob() {
   log "ensuring OOB backend"
+  local oob_install_src=""
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    mkdir -p "$(dirname "${OOB_CLI_ROOT}")"
+    mkdir -p "$(dirname "${OOB_ROOT}")"
   fi
   if ! command -v oob >/dev/null 2>&1; then
     if [ -d "$OOB_SRC" ]; then
-      if [ ! -d "${OOB_CLI_ROOT}" ]; then
-        run cp -r "$OOB_SRC" "${OOB_CLI_ROOT}"
+      if [ -f "${OOB_SRC}/pyproject.toml" ]; then
+        oob_install_src="$OOB_SRC"
       fi
-      if [ -f "${OOB_CLI_ROOT}/requirements.txt" ]; then
-        run python3 -m pip install -q --no-cache-dir --break-system-packages -r "${OOB_CLI_ROOT}/requirements.txt"
+      if [ -z "$oob_install_src" ]; then
+        warn "OOB source has no pyproject.toml at $OOB_SRC"
+      else
+        if [ -d "${OOB_ROOT}" ] && [ ! -f "${OOB_ROOT}/pyproject.toml" ]; then
+          log "removing stale OOB install root without pyproject.toml: ${OOB_ROOT}"
+          run rm -rf "${OOB_ROOT}"
+        fi
+        if [ ! -d "${OOB_ROOT}" ]; then
+          run cp -r "$oob_install_src" "${OOB_ROOT}"
+        fi
+        if [ -f "${OOB_ROOT}/requirements.txt" ]; then
+          run python3 -m pip install -q --no-cache-dir --break-system-packages -r "${OOB_ROOT}/requirements.txt"
+        fi
+        run python3 -m pip install -q --no-cache-dir --break-system-packages "${OOB_ROOT}"
       fi
-      run python3 -m pip install -q --no-cache-dir --break-system-packages "${OOB_CLI_ROOT}"
     else
       warn "OOB source not found: $OOB_SRC"
     fi

@@ -86,6 +86,16 @@ def test_kill_remote_missing_pid_dir():
     assert out == {"killed": [], "stale": [], "missing": []}
 
 
+def test_install_oob_node_uses_flat_oob_src():
+    text = (
+        _repo_root() / "multi_node" / "scripts" / "install_oob_node.sh"
+    ).read_text(encoding="utf-8")
+    assert 'if [ -f "$OOB_SRC/pyproject.toml" ]; then' in text
+    assert 'OOB_INSTALL_SRC="$OOB_SRC"' in text
+    assert '$OOB_SRC/oob_cli/pyproject.toml' not in text
+    assert '$PIP install -q --no-cache-dir --break-system-packages "$OOB_INSTALL_SRC"' in text
+
+
 def test_kill_remote_non_digit_pid_file_removed(tmp_path):
     km = _load_script_module("km_test_nondigit", "kill_multinode.py")
     d = tmp_path / "pids"
