@@ -2,29 +2,18 @@
 
 """ActionRunner for the ``conc_sweep`` SWEEP-phase action.
 
-Thin shell around ``orchestrator.conc_sweep.run_conc_sweep`` -- the
-pure-Python aggregator + per-variant Magpie loop -- so the same
-SubAgentRunner dispatch path that handles ``sweep`` / ``baseline``
-can also drive the post-sweep concurrency comparison.
+Thin shell around ``orchestrator.conc_sweep.run_conc_sweep``. The
+Coordinator auto-enqueues one ``conc_sweep`` task per SWEEP phase via
+``_enqueue_internal_conc_sweep_task`` (when ``conc_sweep_enabled``,
+default since 2026-06; disable via ``--no-enable-conc-sweep``); a
+LLM-proposed ``conc_sweep`` delegate is denied by PolicyGate.
 
-The Coordinator auto-enqueues exactly one ``conc_sweep`` task per
-SWEEP phase via ``_enqueue_internal_conc_sweep_task`` right after
-the SWEEP-entry sweep task completes (and only when
-``shared_state.conc_sweep_enabled`` is True; this is the default
-since 2026-06, disable via ``--no-enable-conc-sweep``). LLM-proposed
-``delegate{action_name='conc_sweep'}`` is denied by PolicyGate.
+Inputs (``task.params``): ``concs`` (CONC ladder), ``variant_timeout_sec``,
+``total_budget_sec`` (0 disables the gate).
 
-Inputs (``task.params`` populated by the coordinator):
-
-* ``concs``                 list[int]   — CONC ladder
-* ``variant_timeout_sec``   int         — per-variant Magpie timeout
-* ``total_budget_sec``      int         — total wall-clock budget
-                                          (0 disables the gate)
-
-The executor reloads ``SharedState`` from ``ctx.extra['session_dir']``
-to pick up the live ``current_best`` / ``baseline_tput`` / ``isl`` /
-``osl`` / ``baseline_config_path`` etc. — these change every tick
-and would be stale if pinned at enqueue time.
+Reloads ``SharedState`` from ``ctx.extra['session_dir']`` to pick up the
+live current_best / baseline_tput / isl / osl / baseline_config_path,
+which would be stale if pinned at enqueue time.
 """
 
 from __future__ import annotations
@@ -44,6 +33,15 @@ class ConcSweepExecutor:
     """ActionRunner for ``conc_sweep``. See module docstring."""
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Run the concurrency sweep action for the given context.
+
+        Args:
+            ctx: Action context; ``ctx.extra['session_dir']`` is required.
+
+        Returns:
+            A result dict with a ``status`` field (and error metadata on
+            failure, such as a missing ``session_dir``).
+        """
         extra = getattr(ctx, "extra", None) or {}
         session_dir_str = str(extra.get("session_dir") or "").strip()
         if not session_dir_str:
@@ -63,9 +61,8 @@ class ConcSweepExecutor:
             }
 
         params = ctx.task.params or {}
-        # ``None`` lets run_conc_sweep fall back to its DEFAULT_CONCS.
-        # Empty list intentionally short-circuits via empty_conc_list
-        # so the operator's explicit "no concs" choice is respected.
+        # ``None`` falls back to run_conc_sweep's DEFAULT_CONCS; an empty
+        # list short-circuits (respects an explicit "no concs" choice).
         concs_raw = params.get("concs")
         if concs_raw is None:
             concs: list[int] | None = (
@@ -90,11 +87,9 @@ class ConcSweepExecutor:
             total_budget_sec=total_budget,
         )
         # Map run_conc_sweep's skip envelope onto the SubAgentRunner
-        # contract: skips are NOT executor failures (no benchmark
-        # crashed; the precondition simply wasn't met). The Coordinator
-        # records them via the standard ``record_action_attempt`` /
-        # decision='discarded' path the same way an empty sweep grid
-        # would be.
+        # contract: a skip is not an executor failure (precondition unmet),
+        # so surface as succeeded+was_skipped (Coordinator records it as
+        # decision='discarded').
         if payload.get("status") == "skipped":
             payload = dict(payload)
             payload["status"] = "succeeded"

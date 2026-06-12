@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the gbrain read-side recipe-snapshot client.
-
-Exercises the page->Recipe adaptation + the RemoteRecipeClient-compatible
-read surface against a fake MCP (no network).
-"""
+"""Unit tests for the gbrain read-side recipe-snapshot client (page->Recipe adaptation + read surface)."""
 from __future__ import annotations
 
 import json
@@ -102,6 +98,23 @@ def test_get_recipe_roundtrip() -> None:
     assert r is not None and r["canonical_id"] == cid
 
 
+def test_get_recipe_uses_direct_slug_fast_path() -> None:
+    slug = "recipe-snapshot/inference/qwen3-32b/mi300x/sglang/unknown_version/fp8"
+    c = _client({
+        slug: _recipe_page("Qwen3-32B", "mi300x", "sglang", "fp8"),
+        "recipe-snapshot/inference/other/mi300x/sglang/unknown_version/fp8": (
+            _recipe_page("Other", "mi300x", "sglang", "fp8")
+        ),
+    })
+    cid = "inference:qwen3-32b:mi300x:sglang:unknown_version:fp8"
+
+    r = c.get_recipe(canonical_id=cid)
+
+    assert r is not None and r["canonical_id"] == cid
+    # Exact gbrain slugs should avoid the expensive broad list_pages scan.
+    assert [tool for tool, _ in c._mcp.calls] == ["get_page"]  # type: ignore[union-attr]
+
+
 def test_get_recipe_miss_on_unknown() -> None:
     c = _client({"cortex/recipe/a/b": _recipe_page("modelA", "mi300x")})
     assert c.get_recipe(canonical_id="inference:other:mi355x:vllm:v1:fp16") is None
@@ -135,6 +148,22 @@ def test_search_filters_by_label_match() -> None:
     # framework filter
     rows = c.search(label_match={"framework": "vllm"})
     assert len(rows) == 1 and _model(rows[0]) == "llama-3-70b"
+
+
+def test_search_reuses_scan_cache() -> None:
+    c = _client({
+        "r1": _recipe_page("Qwen3-32B", "mi300x", "sglang"),
+        "r2": _recipe_page("Llama-3-70B", "mi300x", "vllm"),
+    })
+
+    assert len(c.search(label_match={"hardware": "mi300x"})) == 2
+    first_call_count = len(c._mcp.calls)  # type: ignore[union-attr]
+    assert any(tool == "list_pages" for tool, _ in c._mcp.calls)  # type: ignore[union-attr]
+
+    assert len(c.search(label_match={"framework": "vllm"})) == 1
+    # Second search should reuse the process-local scan cache; no extra MCP
+    # calls are needed.
+    assert len(c._mcp.calls) == first_call_count  # type: ignore[union-attr]
 
 
 def test_disabled_client_returns_empty() -> None:

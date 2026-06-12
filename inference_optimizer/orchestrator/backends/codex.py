@@ -1,32 +1,15 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""CodexBackend
+"""CodexBackend — GPT-style models via the OpenAI SDK.
 
-Codex roles talk to GPT-style models via the OpenAI SDK; they're
-**no-tools by default**, so the intent transport is JSON-in-text:
+No-tools by default, so the intent transport is a JSON-in-text envelope
+(``{"intents": [...]}``) validated with the same ``validate_envelope`` the
+Claude path uses. The AMD gateway serves both Claude and OpenAI models from
+one URL, so ``ANTHROPIC_*`` env vars are accepted alongside ``OPENAI_*``
+(``OPENAI_BASE_URL`` canonical; ``ANTHROPIC_BASE_URL`` legacy fallback).
 
-    {"intents": [{"intent_type": "...", "payload": {...}}]}
-
-    The model is told (via prompt suffix) to wrap its reply in a JSON
-    envelope. CodexBackend extracts the envelope (handles fenced
-    ``json`` blocks or bare JSON), validates with the same
-    ``validate_envelope`` the Claude path uses, and returns the same
-    :class:`BackendTurnResult` shape. The Coordinator never has to know
-    which backend produced the intents.
-
-Authentication:
-
-* `OPENAI_BASE_URL` (or `ANTHROPIC_BASE_URL`) — gateway endpoint
-* `ANTHROPIC_AUTH_TOKEN` (or `OPENAI_API_KEY`) — auth token
-  The AMD gateway serves both Claude AND OpenAI models from the same URL,
-  hence we accept the ANTHROPIC_* env vars too. OPENAI_BASE_URL is the
-  canonical (install.sh agrees); ANTHROPIC_BASE_URL is kept as a legacy
-  fallback.
-
-Test seam:
-
-* `client_factory: Callable[[], openai.AsyncOpenAI]` — replace the SDK
-  client so unit tests don't need real credentials or network.
+Test seam: ``client_factory`` replaces the SDK client so unit tests need no
+real credentials or network.
 """
 
 from __future__ import annotations
@@ -79,17 +62,27 @@ For Critic specifically: when reviewing a proposal, emit
 """.strip()
 
 
-# Match a fenced ```json ... ``` block (preferred), falling back to a bare
-# top-level {...}. We compile both up-front; runtime cost is negligible.
+# Prefer a fenced ```json block, falling back to a bare top-level {...}.
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _BARE_JSON_RE = re.compile(r"(\{.*?\"intents\".*\})", re.DOTALL)
 
 
 def _extract_envelope(text: str) -> dict | None:
-    """Pull the first valid JSON envelope out of a model reply."""
+    """Pull the first valid JSON envelope out of a model reply.
+
+    Prefers a fenced ```json block (least ambiguous), then falls back to a bare
+    top-level object containing ``"intents"``, progressively trimming trailing
+    prose until ``json.loads`` accepts the candidate.
+
+    Args:
+        text (str): The raw model reply that may contain a JSON envelope.
+
+    Returns:
+        dict | None: The first dict envelope containing an ``"intents"`` key, or
+        ``None`` when no parseable envelope is found.
+    """
     if not text:
         return None
-    # Prefer fenced — least ambiguous.
     for m in _FENCED_JSON_RE.finditer(text):
         try:
             data = json.loads(m.group(1))
@@ -97,9 +90,8 @@ def _extract_envelope(text: str) -> dict | None:
             continue
         if isinstance(data, dict) and "intents" in data:
             return data
-    # Fall back to bare JSON containing "intents". We try greedy and
-    # progressively shorten the string from the right until json.loads
-    # accepts it — handles trailing prose without a fence.
+    # Bare JSON fallback: shrink from the right until json.loads accepts it
+    # (handles trailing prose without a fence).
     for m in _BARE_JSON_RE.finditer(text):
         candidate = m.group(1)
         for end in range(len(candidate), 0, -1):
@@ -119,22 +111,11 @@ class CodexBackend:
 
     model: str = "gpt-5.4"
     api_key_env: str = "ANTHROPIC_AUTH_TOKEN"  # AMD proxy; accepts OPENAI too
-    # Canonical LiteLLM env (install.sh agrees). When two base-URL envs
-    # coexist, OPENAI_BASE_URL wins; ANTHROPIC_BASE_URL is the legacy
-    # fallback.
     base_url_env: str = "OPENAI_BASE_URL"
     max_completion_tokens: int = 2000
     name: str = "codex"
-    # Wall-clock cap for one ``run()`` call. Mirrors ClaudeBackend's
-    # ``call_timeout_s``: the AsyncOpenAI client honours per-request
-    # timeouts internally but a stalled gateway can still block the
-    # ``await create(...)`` for the full TCP timeout. Bounding it at
-    # asyncio level guarantees the orchestrator reactor never sits idle
-    # past this budget.
-    #
-    # Env-var override ``INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC`` mirrors
-    # the claude backend knob; same rationale (heavy critic / kernel prompts
-    # may exceed 120 s on the AMD gateway under load).
+    # Wall-clock cap for one ``run()`` call; bounds a stalled-gateway hang at
+    # asyncio level. Env override: ``INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC``.
     call_timeout_s: float = field(
         default_factory=lambda: parse_call_timeout_env(
             "INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC",
@@ -149,6 +130,17 @@ class CodexBackend:
     _client: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Construct the OpenAI client (or use the test factory).
+
+        When ``client_factory`` is set it builds the client directly (test
+        seam). Otherwise it imports the OpenAI SDK, resolves the API key and
+        base URL from the configured env vars (with legacy fallbacks), and
+        creates an :class:`AsyncOpenAI` client.
+
+        Raises:
+            BackendError: If the ``openai`` SDK is not installed or no API key
+                is found in the environment.
+        """
         if self.client_factory is not None:
             self._client = self.client_factory()
             return
@@ -186,6 +178,29 @@ class CodexBackend:
         tools: list[str] | None = None,
         max_turns: int = 1,  # ignored — single API call per turn
     ) -> BackendTurnResult:
+        """Run one turn via a single chat-completion call and parse intents.
+
+        Appends the JSON-envelope output instructions to ``prompt``, issues one
+        bounded chat-completion request, extracts and validates the returned
+        envelope, and records call telemetry.
+
+        Args:
+            prompt (str): The composed turn prompt.
+            system_prompt (str | None): Optional system prompt sent as the
+                leading system message.
+            tools (list[str] | None): Unused; Codex roles are no-tools by
+                default.
+            max_turns (int): Ignored; one API call is made per turn.
+
+        Returns:
+            BackendTurnResult: The validated intents plus raw reply text and
+            model/finish metadata.
+
+        Raises:
+            BackendError: If the API call times out or otherwise fails.
+            NoIntentEmitted: If the reply has no parseable envelope or the
+                envelope fails intent validation.
+        """
         full_prompt = f"{prompt}\n\n{_OUTPUT_INSTRUCTIONS}"
         messages: list[dict[str, Any]] = []
         if system_prompt:
@@ -212,11 +227,23 @@ class CodexBackend:
         choice = resp.choices[0]
         text = (choice.message.content or "")
         finish = getattr(choice, "finish_reason", None)
+        # Token usage: the OpenAI chat-completions response carries a
+        # ``usage`` object (prompt_tokens / completion_tokens). Map it
+        # onto the SAME metadata keys ClaudeBackend uses so
+        # Coordinator's accumulator stays backend-agnostic. OpenAI has
+        # no prompt-cache split, so the two cache_* counters are 0.
+        usage = getattr(resp, "usage", None)
+        input_tokens = self._safe_int(getattr(usage, "prompt_tokens", None))
+        output_tokens = self._safe_int(getattr(usage, "completion_tokens", None))
         self.calls.append({
             "prompt_chars": len(full_prompt),
             "reply_chars": len(text),
             "finish_reason": finish,
             "model": self.model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
         })
 
         envelope = _extract_envelope(text)
@@ -234,8 +261,34 @@ class CodexBackend:
         return BackendTurnResult(
             intents=intents,
             raw_text=text,
-            metadata={"model": self.model, "finish_reason": finish},
+            metadata={
+                "model": self.model,
+                "finish_reason": finish,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                # Full conversation text for conversations.jsonl — the
+                # stateless backend hands it up so the caller (which has
+                # the session_dir / component / tick context) can persist
+                # it. ``full_prompt`` is the user turn; the system prompt
+                # is snapshotted once under agents/<role>/.
+                "prompt": full_prompt,
+                "response": text,
+            },
         )
+
+    @staticmethod
+    def _safe_int(value: Any) -> int:
+        """Coerce a usage value to int, defaulting to 0 on None / bad type.
+
+        Mirrors ``ClaudeBackend._safe_int`` so both backends report
+        identically-shaped token counts on metadata.
+        """
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
 
 
 __all__ = ["CodexBackend", "_extract_envelope"]

@@ -110,8 +110,6 @@ class TestReusableSourceRoots(unittest.TestCase):
         }
 
     def test_flydsl_sgl_workspace_root_is_reusable(self) -> None:
-        # /sgl-workspace/flydsl/ is one of the FlyDSL roots injected by
-        # _flydsl_reusable_roots() into the dynamic _reusable_roots() set.
         roots = _reusable_roots()
         self.assertIn("/sgl-workspace/flydsl/", roots)
         cand = self._flydsl_candidate(
@@ -122,8 +120,7 @@ class TestReusableSourceRoots(unittest.TestCase):
         self.assertEqual(skip, "")
 
     def test_flydsl_default_wekafs_root_is_reusable(self) -> None:
-        # The WekaFS FlyDSL checkout used as $DSL2_ROOT on this stack is a
-        # default FlyDSL root, so its kernels reach GEAK (PR #668 contract).
+        # Default WekaFS FlyDSL checkout reaches GEAK (PR #668 contract).
         cand = self._flydsl_candidate(
             "/wekafs/yunkai/flydsl/kernels/moe_gemm_2stage.py",
         )
@@ -137,9 +134,7 @@ class TestReusableSourceRoots(unittest.TestCase):
         self.assertIn("reusable framework root", skip)
 
     def test_dsl2_root_env_injects_flydsl_root(self) -> None:
-        # $DSL2_ROOT (and $FLYDSL_ROOT) point at the live FlyDSL checkout;
-        # _flydsl_reusable_roots() must surface them (lower-cased, trailing
-        # slash) so a candidate under that checkout is patchable.
+        # $DSL2_ROOT/$FLYDSL_ROOT checkout must be surfaced (lower-cased, trailing slash).
         extra = "/wekafs/user-local/FlyDSL"
         with mock.patch.dict(os.environ, {"DSL2_ROOT": extra}):
             roots = _flydsl_reusable_roots()
@@ -151,7 +146,7 @@ class TestReusableSourceRoots(unittest.TestCase):
             self.assertTrue(reusable, msg=skip)
 
     def test_flydsl_roots_always_include_known_defaults(self) -> None:
-        # Even with no env override, the known FlyDSL checkouts are present.
+        # Known FlyDSL checkouts present even with no env override.
         env = dict(os.environ)
         env.pop("DSL2_ROOT", None)
         env.pop("FLYDSL_ROOT", None)
@@ -349,7 +344,6 @@ class TestFlyDSLKernelParams(unittest.TestCase):
             flydsl_cand["kernel_params"]["FLYDSL_TARGET_ARCH"], "gfx950",
         )
         self.assertTrue(flydsl_cand["kernel_params"]["FLYDSL_USES_SMEM"])
-        # Triton candidate must NOT get any FLYDSL_* fields.
         self.assertFalse(
             any(k.startswith("FLYDSL_") for k in triton_cand["kernel_params"]),
         )
@@ -392,8 +386,7 @@ class TestOrchestratorReusableRootsInSync(unittest.TestCase):
         self.handlers = kernel_request_handlers
 
     def test_orchestrator_allowlist_has_flydsl(self) -> None:
-        # Orchestrator gate (dynamic discovery) must include the FlyDSL
-        # checkout roots so it agrees with the kernel-agent classifier.
+        # Orchestrator gate must include FlyDSL roots to agree with the classifier.
         roots = self.handlers._reusable_source_roots()
         self.assertIn("/sgl-workspace/flydsl/", roots)
         self.assertIn("/wekafs/yunkai/flydsl/", roots)
@@ -412,17 +405,7 @@ if __name__ == "__main__":
 
 
 class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
-    """PR #668 pseudo_op names must be classified as FlyDSL.
-
-    TraceLens PR #668 injects ``pseudo_op::moe_flydsl_stage1`` /
-    ``pseudo_op::moe_flydsl_stage2`` synthetic events above
-    ``aiter::fused_moe_`` parents whose subtree carries FlyDSL stage
-    markers. These pseudo ops have no on-disk source file, so the
-    pre-existing ``_looks_like_flydsl_source`` content sniffer returns
-    False for them. The classifier must still surface them as
-    ``source_type='flydsl'`` via direct name-prefix match so Hyperloom
-    sends them to GEAK with ``kernel_type='flydsl'``.
-    """
+    """PR #668 pseudo_op names must be classified as FlyDSL (matched by name prefix; no on-disk source)."""
 
     def test_pseudo_op_moe_flydsl_stage1_recognised(self) -> None:
         self.assertEqual(
@@ -453,15 +436,7 @@ class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
 
 
 class TestPseudoOpSourceFallback(unittest.TestCase):
-    """GEAK source resolution must fall back off pseudo-op frame labels.
-
-    A TraceLens launcher path for a synthetic FlyDSL pseudo-op is a
-    profiler frame label (e.g. ``aiter/fused_moe.py(986): fused_moe_2stages``),
-    not a file GEAK can open. ``_resolve_source_file`` must prefer an
-    explicit, readable ``--source-file`` in that case, while still
-    preferring a real candidate source_file over the LLM-supplied path
-    in the normal (non-pseudo-op) case.
-    """
+    """GEAK source resolution must fall back off pseudo-op frame labels (prefer real readable source)."""
 
     def setUp(self) -> None:
         sys.path.insert(0, str(ROOT / "tools"))
