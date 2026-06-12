@@ -377,11 +377,18 @@ def build_dynamo_workload_body(
         # multinodeRoles -> 2 standalone prefill + 2 standalone decode).
         prefill_mn = ptp > gpus_per_node
         decode_mn = dtp > gpus_per_node
-        resources = [
-            frontend_resource,
-            _gpu_resource(pn, multinode=prefill_mn),
-            _gpu_resource(dn, multinode=decode_mn),
-        ]
+        prefill_res = _gpu_resource(pn, multinode=prefill_mn)
+        decode_res = _gpu_resource(dn, multinode=decode_mn)
+        # PD disaggregation streams the KV cache prefill->decode ACROSS pods, so
+        # both GPU roles need an RDMA device even when each role is single-node
+        # (TP <= gpus_per_node and thus not flagged multinode above). Without
+        # rdmaResource the mori/nixl/mooncake KV transfer plane cannot register
+        # RDMA queue pairs, the handoff silently no-ops (#transfer-req=0) and
+        # decode generates garbage. Mirror the native SaFE dispatcher's "1k".
+        pd_rdma = rdma_resource if (rdma_resource and rdma_resource != "1") else "1k"
+        prefill_res["rdmaResource"] = pd_rdma
+        decode_res["rdmaResource"] = pd_rdma
+        resources = [frontend_resource, prefill_res, decode_res]
         images = [image, image, image]
         entry_points = [frontend_ep, idle_ep, idle_ep]
         service_roles = ["frontend", "prefill", "decode"]
@@ -402,6 +409,13 @@ def build_dynamo_workload_body(
     env: dict[str, str] = _sanitize_extra_env(extra_env)
     env["MN_SSH_AUTHORIZED_KEY"] = ssh_authorized_key.strip()
     env["MN_SSH_PORT"] = str(ssh_port)
+    # Enable the Dynamo system status server (hosts /engine/start_profile)
+    # on every worker so the controller can trigger torch profiling for
+    # roofline rounds. Set at the DGD pod-spec level (lands in pid1 env) so
+    # it is inherited regardless of which launcher starts dynamo.sglang
+    # (launch_dynamo_node.py recovers it from pid1; native launches inherit
+    # directly). User extra_env may override via DYN_SYSTEM_PORT.
+    env.setdefault("DYN_SYSTEM_PORT", "9090")
 
     labels = _sanitize_extra_labels(extra_labels)
     if session_id:
