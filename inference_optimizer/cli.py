@@ -3586,10 +3586,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # CRITICAL: clear leftover stop_reason or Orchestration heartbeats forever thinking work is done.
         prior_crash = state.crash_count
 
-        # Issue-G: no_more_leverage / target_reached are intentional terminal states (SKILL Run-time signals);
-        # require --force-resume to push past them. Other reasons (time_exhausted, max_ticks, crash) auto-clear.
+        # Issue-G: target_reached is an intentional terminal state (SKILL Run-time signals);
+        # require --force-resume to push past it. Other reasons (time_exhausted, max_ticks, crash) auto-clear.
         force_resume = bool(getattr(args, "force_resume", False))
-        gated_terminal = {"no_more_leverage", "target_reached"}
+        gated_terminal = {"target_reached"}
         if prior_stop in gated_terminal and not force_resume:
             print(
                 f"\nERROR: --resume blocked by terminal stop_reason="
@@ -4139,7 +4139,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     _print_final_summary(coordinator.shared_state, stop_reason)
     return 0 if stop_reason in (
         "target_reached",
-        "no_more_leverage",
+        "global_converged",
         "time_exhausted",
         "max_ticks",
     ) else 1
@@ -4417,9 +4417,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--force-resume", action="store_true", default=False,
         help=(
             "Allow ``--resume`` to push past a terminal "
-            "``stop_reason='no_more_leverage'`` or ``'target_reached'``. "
+            "``stop_reason='target_reached'``. "
             "Without this flag the resume aborts (Issue-G guard, per "
-            "SKILL.md 'Run-time signals': those terminals require an "
+            "SKILL.md 'Run-time signals': that terminal requires an "
             "operator-side workload / strategy change before resuming). "
             "No-op outside ``--resume``."
         ),

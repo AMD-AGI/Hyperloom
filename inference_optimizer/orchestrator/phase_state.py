@@ -9,6 +9,7 @@ Monotonic chain PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CL
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Any
 
@@ -170,13 +171,17 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
     "plateau_kernel",
     "explore_phase_budget_exhausted",
     "kernel_phase_budget_exhausted",
+    "explore_budget_cap",               # EXPLORE → next phase at the absolute per-phase wall-clock cap (long/unbounded runs)
+    "kernel_budget_cap",                # KERNEL → SWEEP at the absolute per-phase wall-clock cap
+    "sweep_budget_cap",                 # SWEEP → reloop/CLOSE at the absolute per-phase wall-clock cap
     "sweep_done",
     "conc_sweep_done",                  # SWEEP → CLOSE when conc_sweep settles
     "sweep_budget_exhausted",
     "no_kernel_skipped",                # EXPLORE → SWEEP when kernel disabled
     "kernel_phase_aborted_no_trace",    # KERNEL → SWEEP when profile fails
     "explore_force_exit_low_budget",    # EXPLORE → next phase below operator force-exit thresholds
-    "no_more_leverage",                 # EXPLORE/KERNEL → SWEEP (non-terminal) via steward skip_to_sweep; winds down through SWEEP → CLOSE
+    "explore_no_more_leverage",         # EXPLORE → KERNEL (non-terminal): plateau / skip_to_sweep exhausts the explore lever
+    "kernel_no_more_leverage",          # KERNEL → SWEEP (non-terminal) via skip_to_sweep
     # FRAMEWORK_PR phase transitions.
     "framework_pr_phase_done",          # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
     "framework_pr_plateau",             # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
@@ -209,7 +214,6 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset({
 STOP_REASON_VOCAB: frozenset[str] = frozenset({
     # Legacy sentinels — kept for backward compat (resume from old sessions).
     "target_reached",
-    "no_more_leverage",
     "time_exhausted",
     "max_ticks",
     "policy_loop",
@@ -295,6 +299,15 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_CLOSE:   0.02,
 }
 
+# Wall-clock ceiling for an unbounded run (``max_minutes`` == 0): the container
+# lifetime. Used both as the global deadline and as the basis for the absolute
+# per-phase cap so an unbounded run still forces phase rotation.
+DEFAULT_LONGRUN_MAX_MINUTES: int = 14 * 24 * 60
+# Reference window the absolute per-phase cap applies its budget fraction to.
+# Short bounded runs bind on the (smaller) session-derived term — identical to
+# legacy behaviour; long/unbounded runs bind on this 24h reference.
+PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES: int = 24 * 60
+
 
 # Plateau judgment defaults (CLI --plateau-* flags); kept here for pure callers + tests.
 DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT:    float = 0.5
@@ -350,11 +363,46 @@ DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES: int = 3
 # (percentage points); guards against float noise being read as progress.
 DEFAULT_CYCLE_MIN_GAIN_PCT: float = 1e-6
 
+# Decaying acceptance curve: the marginal-gain bar shrinks each macro-cycle so
+# late cycles can still capture small wins while the run still converges once
+# even the relaxed bar is unmet. The KEEP threshold, the stack-stable threshold
+# (=keep/2) and the convergence gain bar all ride this single curve.
+KEEP_THRESHOLD_FLOOR_PCT: float = 0.1
+KEEP_THRESHOLD_SPAN_PCT: float = 0.9
+# Multi-node baseline noise floor is ~2x single-node; keep the same relative
+# shape by scaling the curve.
+MULTI_NODE_KEEP_THRESHOLD_FACTOR: float = 2.0
+
+
+def decaying_keep_threshold_pct(macro_cycle: int, *, multi_node: bool = False) -> float:
+    """KEEP / convergence gain threshold for cycle N = ``macro_cycle`` + 1.
+
+    ``0.1 + 0.9 / N`` (percentage points): N=1 → 1.0% (identical to the legacy
+    fixed threshold), decaying toward the 0.1% floor. Multi-node scales the
+    whole curve by 2 so N=1 → 2.0% (legacy multi-node baseline).
+
+    Args:
+        macro_cycle (int): Zero-based macro-cycle counter (N = macro_cycle + 1).
+        multi_node (bool): Scale the curve for the multi-node noise floor.
+
+    Returns:
+        float: Threshold in percentage points.
+    """
+    n = max(1, int(macro_cycle) + 1)
+    base = KEEP_THRESHOLD_FLOOR_PCT + KEEP_THRESHOLD_SPAN_PCT / n
+    return base * MULTI_NODE_KEEP_THRESHOLD_FACTOR if multi_node else base
+
 
 def is_cyclic_phases_enabled() -> bool:
-    """True iff the R1 cyclic phase machine is enabled via env."""
-    return os.environ.get(PHASE_CYCLIC_ENV, "").strip().lower() in {
-        "1", "true", "yes", "on",
+    """Whether the cyclic phase machine is enabled.
+
+    Enabled by default; set ``INFERENCE_OPTIMIZER_CYCLIC_PHASES`` to a falsy
+    value (``0``/``false``/``off``) to force the legacy monotonic chain. Even
+    when enabled, an actual reloop still requires budget headroom (the reloop
+    floor) and a non-converged run, so short runs never loop in practice.
+    """
+    return os.environ.get(PHASE_CYCLIC_ENV, "").strip().lower() not in {
+        "0", "false", "no", "off",
     }
 
 
@@ -372,7 +420,7 @@ def should_reloop_to_explore(
     max_cycles: int = DEFAULT_MAX_MACRO_CYCLES,
     min_remaining_sec: float = DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC,
     no_gain_cycles: int = DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES,
-    min_gain_pct: float = DEFAULT_CYCLE_MIN_GAIN_PCT,
+    min_gain_pct: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Decide whether SWEEP should open a new macro-cycle (R1) or wind to CLOSE.
 
@@ -389,10 +437,19 @@ def should_reloop_to_explore(
     if not is_cyclic_phases_enabled():
         return False, evidence
 
-    # Per-cycle gain since this cycle started → effective no-gain streak.
+    # Per-cycle gain since this cycle started → effective no-gain streak. A
+    # cycle only "gained" when its validated gain rose by at least the cycle's
+    # own (decaying) KEEP bar, so once even the relaxed bar is unmet for
+    # ``no_gain_cycles`` cycles in a row the run converges instead of looping
+    # forever on sub-threshold noise.
+    effective_min_gain = (
+        decaying_keep_threshold_pct(cycle) if min_gain_pct is None
+        else float(min_gain_pct)
+    )
     cur_gain = _cumulative_gain_validated(state)
     start_gain = float(getattr(state, "gain_at_cycle_start", 0.0) or 0.0)
-    cycle_gained = (cur_gain - start_gain) > float(min_gain_pct)
+    cycle_gained = (cur_gain - start_gain) > effective_min_gain
+    evidence["min_gain_pct"] = round(effective_min_gain, 6)
     prior_streak = int(getattr(state, "no_gain_cycle_streak", 0) or 0)
     effective_streak = 0 if cycle_gained else prior_streak + 1
     evidence["cycle_gain_delta"] = round(cur_gain - start_gain, 6)
@@ -623,6 +680,51 @@ def phase_budget_remaining_seconds(
         return None
     budget_seconds = mm * 60.0 * pct
     return max(0.0, budget_seconds - phase_elapsed_seconds(state, now_unix=now_unix))
+
+
+def effective_max_minutes(state: Any) -> float:
+    """Session minutes for deadline/cap math; unbounded runs use the 14-day ceiling."""
+    mm = _max_minutes(state)
+    return mm if mm > 0 else float(DEFAULT_LONGRUN_MAX_MINUTES)
+
+
+def phase_cap_seconds(
+    state: Any,
+    *,
+    budget_pct: dict[str, float] | None = None,
+) -> float | None:
+    """Absolute wall-clock ceiling (seconds) for the current phase.
+
+    Independent of the per-cycle budget window so it still fires when
+    ``max_minutes`` is 0 (unbounded), where ``phase_budget_remaining_seconds``
+    returns ``None``. Equals the smaller of the session-derived term and a
+    fixed 24h reference, each scaled by the phase budget fraction: short bounded
+    runs bind on the session term (legacy behaviour), long/unbounded runs bind
+    on the 24h reference so no single phase can monopolise the run.
+
+    Returns:
+        float | None: Cap in seconds, or ``None`` when no fraction applies.
+    """
+    budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
+    pct = budget.get((getattr(state, "phase", "") or "").upper(), 0.0)
+    if pct <= 0:
+        return None
+    proportional = effective_max_minutes(state) * 60.0 * pct
+    abs_cap = math.ceil(PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES * pct) * 60.0
+    return float(min(proportional, abs_cap))
+
+
+def phase_cap_exceeded(
+    state: Any,
+    *,
+    budget_pct: dict[str, float] | None = None,
+    now_unix: float | None = None,
+) -> bool:
+    """True when time spent in the current phase has reached its absolute cap."""
+    cap = phase_cap_seconds(state, budget_pct=budget_pct)
+    if cap is None:
+        return False
+    return phase_elapsed_seconds(state, now_unix=now_unix) >= cap
 
 
 # EXPLORE hard force-exit (HARD time gate)
@@ -976,8 +1078,9 @@ def exit_normal_explore(
     """EXPLORE normal exit.
 
     Priority: 0. HARD force-exit (IR-6, overrides plateau); 1. ``skip_to_kernel``
-    → ``plateau_explore``; 2. ``skip_to_sweep`` → ``no_more_leverage`` (non-terminal);
-    3. phase budget exhausted.
+    → ``plateau_explore``; 2. ``skip_to_sweep`` / detected plateau →
+    ``explore_no_more_leverage`` (non-terminal; routes to KERNEL to switch
+    lever); 3. phase budget exhausted.
     """
     forced, force_ev = should_force_exit_explore(
         state,
@@ -999,17 +1102,17 @@ def exit_normal_explore(
             "hint": hint,
         }
     if hint == ESCALATE_HINT_SKIP_TO_SWEEP:
-        return "no_more_leverage", {
-            "evidence": "no_more_leverage",
+        return "explore_no_more_leverage", {
+            "evidence": "explore_no_more_leverage",
             "hint": hint,
         }
-    # R3: in cyclic mode a detected EXPLORE plateau is *actionable* — wind the
-    # cycle down (→ SWEEP → reloop) and flag that the next cycle should switch
-    # bottleneck. Advisory-only off cyclic mode (legacy behaviour preserved).
+    # A detected EXPLORE plateau is not terminal: exhausted leverage at this
+    # layer means switch lever (→ KERNEL), flagging that the next macro-cycle
+    # should steer off the plateaued bottleneck. Advisory-only off cyclic mode.
     if is_cyclic_phases_enabled():
         plateaued, plateau_ev = compute_plateau_explore(state)
         if plateaued:
-            return "no_more_leverage", {
+            return "explore_no_more_leverage", {
                 "evidence": "plateau_explore",
                 "plateau": True,
                 "switch_bottleneck": True,
@@ -1020,6 +1123,10 @@ def exit_normal_explore(
     )
     if remaining is not None and remaining <= 0:
         return "explore_phase_budget_exhausted", {
+            "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+        }
+    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
+        return "explore_budget_cap", {
             "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
         }
     return None
@@ -1034,11 +1141,11 @@ def exit_normal_kernel(
     """KERNEL normal exit.
 
     Priority: 1. ``skip_to_close`` defers to global terminal; 2. ``skip_to_sweep``
-    → ``no_more_leverage``; 3. phase budget exhausted.
+    → ``kernel_no_more_leverage`` (non-terminal); 3. phase budget exhausted.
     """
     if _pending_escalate_hint(state) == ESCALATE_HINT_SKIP_TO_SWEEP:
-        return "no_more_leverage", {
-            "evidence": "no_more_leverage",
+        return "kernel_no_more_leverage", {
+            "evidence": "kernel_no_more_leverage",
             "hint": ESCALATE_HINT_SKIP_TO_SWEEP,
         }
     rejected = getattr(state, "rejected_kernel_ids", None) or []
@@ -1048,6 +1155,11 @@ def exit_normal_kernel(
     )
     if remaining is not None and remaining <= 0:
         return "kernel_phase_budget_exhausted", {
+            "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "rejected_kernel_count": rejected_count,
+        }
+    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
+        return "kernel_budget_cap", {
             "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
             "rejected_kernel_count": rejected_count,
         }
@@ -1079,6 +1191,10 @@ def exit_normal_sweep(
     )
     if remaining is not None and remaining <= 0:
         return "sweep_budget_exhausted", {
+            "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+        }
+    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
+        return "sweep_budget_cap", {
             "elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
         }
     return None
@@ -1328,10 +1444,9 @@ def compute_next_phase(
             )),
         )
         if norm is not None:
-            # Non-terminal "no more leverage" → wind down to SWEEP,
-            # skipping the KERNEL hop.
-            if norm[0] == "no_more_leverage":
-                return PHASE_SWEEP, norm[0], norm[1]
+            # Exhausted EXPLORE leverage (plateau / skip_to_sweep) is not
+            # terminal: switch lever by advancing to KERNEL rather than skipping
+            # it. Only when KERNEL is disabled does EXPLORE wind down to SWEEP.
             if kernel_enabled:
                 return PHASE_KERNEL, norm[0], norm[1]
             return PHASE_SWEEP, "no_kernel_skipped", {
@@ -1356,8 +1471,15 @@ def compute_next_phase(
             # while budget remains and the run hasn't globally converged (R7);
             # otherwise wind down to CLOSE (the monotonic-chain behaviour).
             reloop, reloop_ev = should_reloop_to_explore(state, now_unix=now_unix)
-            if reloop and explore_enabled:
-                return PHASE_EXPLORE, "cycle_reloop", {
+            if reloop and (framework_phase_enabled or explore_enabled):
+                # Reloop to the highest-leverage layer still available: FRAMEWORK_PR
+                # (also picks up newly-merged upstream PRs) when enabled, else
+                # EXPLORE. The Coordinator resets that phase's per-cycle state so
+                # it does not instantly self-skip as "already done".
+                reloop_target = (
+                    PHASE_FRAMEWORK_PR if framework_phase_enabled else PHASE_EXPLORE
+                )
+                return reloop_target, "cycle_reloop", {
                     **norm[1], **reloop_ev, "loopback": True,
                 }
             # R7: if cyclic looping was blocked because leverage is exhausted

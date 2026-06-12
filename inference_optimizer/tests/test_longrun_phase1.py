@@ -92,7 +92,7 @@ def test_sweep_closes_when_insufficient_remaining(monkeypatch):
 
 
 def test_sweep_closes_when_cyclic_disabled(monkeypatch):
-    monkeypatch.delenv(CYCLIC_ENV, raising=False)
+    monkeypatch.setenv(CYCLIC_ENV, "0")
     st = _sweep_state()
     target, reason, _ = ps.compute_next_phase(st, max_hours=96.0)
     assert target == ps.PHASE_CLOSE
@@ -182,7 +182,10 @@ async def test_coordinator_applies_loopback(cyclic_coordinator):
 
     await c._advance_phase_if_needed()
 
-    assert st.phase == ps.PHASE_EXPLORE
+    # Reloop targets the highest-leverage layer (FRAMEWORK_PR enabled by default).
+    # The phase is re-opened on reloop (phase_done reset to False), so the entry
+    # pump runs a fresh discover; with no new PRs it fast-exits next tick.
+    assert st.phase == ps.PHASE_FRAMEWORK_PR
     assert st.macro_cycle == 1
     # Per-cycle sweep markers cleared so the new cycle's SWEEP runs fresh.
     assert st.last_sweep == {}
@@ -190,10 +193,13 @@ async def test_coordinator_applies_loopback(cyclic_coordinator):
     # Gain anchored for the new cycle; gained this cycle → streak reset.
     assert st.gain_at_cycle_start == pytest.approx(7.0)
     assert st.no_gain_cycle_streak == 0
-    # The loopback row is stamped with the new cycle number.
-    last_row = st.phase_history[-1]
-    assert last_row["to_phase"] == "EXPLORE"
-    assert last_row["cycle"] == 1
+    # The loopback transition row is stamped with the new cycle number
+    # (the entry pump may append later non-transition rows).
+    loopback_row = next(
+        r for r in reversed(st.phase_history) if r.get("to_phase")
+    )
+    assert loopback_row["to_phase"] == "FRAMEWORK_PR"
+    assert loopback_row["cycle"] == 1
 
 
 @pytest.mark.asyncio
@@ -254,7 +260,7 @@ def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
 # Regression — cyclic-off path unchanged (12h single-cycle behaviour)
 # ==========================================================================
 def test_regression_sweep_to_close_evidence_carries_no_loopback(monkeypatch):
-    monkeypatch.delenv(CYCLIC_ENV, raising=False)
+    monkeypatch.setenv(CYCLIC_ENV, "0")
     st = _sweep_state()
     target, reason, evidence = ps.compute_next_phase(st, max_hours=12.0)
     assert (target, reason) == (ps.PHASE_CLOSE, "sweep_done")

@@ -65,25 +65,25 @@ def test_explore_plateau_is_actionable_in_cyclic(monkeypatch):
     out = ps.exit_normal_explore(st)
     assert out is not None
     reason, evidence = out
-    assert reason == "no_more_leverage"
+    assert reason == "explore_no_more_leverage"
     assert evidence.get("switch_bottleneck") is True
     assert evidence.get("plateau") is True
 
 
 def test_explore_plateau_is_advisory_only_when_cyclic_off(monkeypatch):
-    monkeypatch.delenv(CYCLIC_ENV, raising=False)
+    monkeypatch.setenv(CYCLIC_ENV, "0")
     st = _plateaued_explore_state()
     # Budget remains + no escalate hint + cyclic off → plateau does NOT force exit.
     assert ps.exit_normal_explore(st) is None
 
 
-def test_compute_next_phase_plateau_winds_explore_to_sweep(monkeypatch):
+def test_compute_next_phase_plateau_routes_explore_to_kernel(monkeypatch):
     monkeypatch.setenv(CYCLIC_ENV, "1")
     st = _plateaued_explore_state()
     target, reason, evidence = ps.compute_next_phase(st, max_hours=96.0)
-    # no_more_leverage skips the KERNEL hop straight to SWEEP.
-    assert target == ps.PHASE_SWEEP
-    assert reason == "no_more_leverage"
+    # Exhausted explore leverage switches lever to KERNEL (non-terminal).
+    assert target == ps.PHASE_KERNEL
+    assert reason == "explore_no_more_leverage"
     assert evidence.get("switch_bottleneck") is True
 
 
@@ -131,7 +131,8 @@ async def test_coordinator_marks_bottleneck_switch_on_plateau(cyclic_coordinator
 
     await c._advance_phase_if_needed()
 
-    assert st.phase == ps.PHASE_SWEEP
+    # Exhausted explore leverage switches lever to KERNEL (non-terminal).
+    assert st.phase == ps.PHASE_KERNEL
     assert st.pending_bottleneck_switch is True
     assert st.last_cycle_bottleneck == "MoE_fused"
 
@@ -162,7 +163,7 @@ def test_redirect_advisory_renders_with_suggested_domain(cyclic_coordinator):
 
 def test_redirect_advisory_empty_when_cyclic_off(cyclic_coordinator, monkeypatch):
     c = cyclic_coordinator
-    monkeypatch.delenv(CYCLIC_ENV, raising=False)
+    monkeypatch.setenv(CYCLIC_ENV, "0")
     st = c.shared_state
     st.phase = ps.PHASE_EXPLORE
     st.mark_bottleneck_switch(prev_bottleneck="MoE_fused")

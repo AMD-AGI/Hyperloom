@@ -1387,13 +1387,13 @@ class Coordinator:
             log.exception("Coordinator: _on_phase_entered hook failed")
 
     def _apply_macro_cycle_reloop(self, evidence: dict[str, Any]) -> None:
-        """Open a new macro-cycle on a SWEEP→EXPLORE loopback (R1/R2/R7).
+        """Open a new macro-cycle on a SWEEP loopback (to FRAMEWORK_PR or EXPLORE).
 
-        Increments ``macro_cycle``, persists the R7 no-gain streak + the
-        per-cycle gain anchor, and resets per-cycle counters so the new cycle
-        gets a fresh budget / plateau evaluation. The negative ledger
-        (``explore_search.tested``) is deliberately PRESERVED across cycles so a
-        later cycle never re-explores an already-rejected variant.
+        Increments ``macro_cycle``, persists the no-gain streak + the per-cycle
+        gain anchor, resets per-cycle counters (including re-opening FRAMEWORK_PR)
+        so the new cycle gets a fresh budget / plateau evaluation. The explore
+        ledger is preserved; its already-KEEP entries stay blocked while
+        sub-threshold ones may unblock as the KEEP bar decays.
         """
         state = self.shared_state
         prior_cycle = int(getattr(state, "macro_cycle", 0) or 0)
@@ -1416,6 +1416,14 @@ class Coordinator:
             state.reset_explore_plateau_proxy()
         except Exception:  # noqa: BLE001 — resets are best-effort
             log.exception("Coordinator: per-cycle reset failed on reloop")
+        # Re-open FRAMEWORK_PR for the new cycle so the loopback target does not
+        # instantly self-skip as "already done". Already-tested PRs are still
+        # skipped: framework_pr_batches (and the per-candidate progress rows that
+        # dedup within them) are preserved, so a fresh discover only surfaces PRs
+        # merged upstream since, and fast-exits via
+        # ``discover_returned_no_new_candidates`` when there are none.
+        state.framework_pr_phase_done = False
+        state.framework_pr_discover_failures = 0
         # Clear the per-cycle SWEEP completion markers: exit_normal_sweep keys off
         # last_sweep / last_conc_sweep status, so a stale "succeeded" from the
         # prior cycle would make the next cycle's SWEEP exit instantly without
@@ -4146,9 +4154,14 @@ class Coordinator:
         # Stash so _compose_prompt can update target_gap_pct.
         self._current_objective = objective
         grace_sec = effective_closing_grace_sec(max_minutes, closing_grace_sec)
-        deadline = (
-            time.monotonic() + max_minutes * 60.0 if max_minutes else None
+        # Unbounded runs (max_minutes falsy) are capped at the container lifetime
+        # so a long run always has a final wall-clock safety net; bounded runs
+        # keep their explicit deadline unchanged.
+        effective_minutes = (
+            max_minutes if max_minutes
+            else _phase_state.DEFAULT_LONGRUN_MAX_MINUTES
         )
+        deadline = time.monotonic() + effective_minutes * 60.0
         self._run_started_monotonic = time.monotonic()
         self._run_deadline = deadline
         # Capture the live loop so the inline fast-action context tool (A3) can marshal coroutines back here.
@@ -5444,6 +5457,26 @@ class Coordinator:
         es = getattr(self.shared_state, "explore_search", None)
         if isinstance(es, dict) and es.get("tested"):
             params.setdefault("explore_search", es)
+        keep = self._decaying_keep_threshold_pct()
+        if keep is not None:
+            params.setdefault("keep_threshold_pct", keep)
+            params.setdefault("stack_stable_threshold_pct", keep / 2.0)
+
+    def _decaying_keep_threshold_pct(self) -> float | None:
+        """Per-cycle KEEP threshold to inject, or ``None`` to keep executor defaults.
+
+        Only active in cyclic mode: the bar shrinks along the shared decaying
+        curve as macro-cycles accrue. Returns ``None`` off cyclic mode so short /
+        non-cyclic runs fall back to the executor's fixed default (no regression);
+        first cycle (N=1) reproduces that same default value anyway.
+        """
+        if not _phase_state.is_cyclic_phases_enabled():
+            return None
+        from .action_executors._multi_node_env import is_multi_node
+        cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        return _phase_state.decaying_keep_threshold_pct(
+            cycle, multi_node=is_multi_node(),
+        )
 
     async def _materialize_approved_proposal(
         self,
@@ -5512,6 +5545,10 @@ class Coordinator:
                 else self.shared_state.baseline_tput
             params.setdefault("base_tput", float(base or 0.0))
             params.setdefault("base_extra_args", cb_args)
+        if pending.action_name == "integrate_patch":
+            keep = self._decaying_keep_threshold_pct()
+            if keep is not None:
+                params.setdefault("keep_threshold_pct", keep)
         lanes, ttl = self._registry_lanes_ttl(pending.action_name)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=pending.action_name,
