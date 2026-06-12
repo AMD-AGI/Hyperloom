@@ -394,6 +394,23 @@ class Coordinator:
                 int(getattr(self.shared_state, "gpu_specialist_capacity", 0) or 0)
             ),
         )
+        # Dispatcher re-scan poll: while awaiting in-flight tasks, re-scan the
+        # queue at this cadence so a queued GPU task starts the moment its lane
+        # frees (instead of waiting out a long specialist / integrate_patch that
+        # was already being awaited). FIRST_COMPLETED handles lane frees that
+        # coincide with a task completion; the poll covers TTL/external releases.
+        try:
+            self._dispatcher_poll_sec = max(
+                0.05,
+                float(
+                    os.environ.get(
+                        "INFERENCE_OPTIMIZER_DISPATCHER_POLL_SECONDS", "10"
+                    )
+                    or 10.0
+                ),
+            )
+        except (TypeError, ValueError):
+            self._dispatcher_poll_sec = 10.0
         # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
         try:
             from ..storage.schema import set_lane_capacity as _set_lane_capacity
@@ -7800,14 +7817,72 @@ class Coordinator:
             ))
 
     async def _pump_dispatcher_once(self) -> None:
-        """Dispatch queued tasks respecting per-lane capacity (serial at capacity=1, fans out when research_lane.capacity > 1). Inv-7.3: lease bound to task_id, runner releases it."""
+        """Dispatch queued tasks respecting per-lane capacity, re-scanning for
+        newly-fittable tasks while in-flight tasks run.
+
+        Unlike a single capture + ``gather``, this re-scans the queue whenever an
+        in-flight task completes (FIRST_COMPLETED) or a short poll elapses, so a
+        queued GPU task (e.g. an explore round) starts the moment its lane frees
+        rather than waiting out a long specialist / integrate_patch that was
+        already being awaited. The pump still fully drains all currently
+        dispatchable work before returning (one-pump-per-tick semantics
+        preserved). Inv-7.3: lease bound to task_id, runner releases it.
+        """
+        inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
+        while True:
+            inflight.extend(
+                await self._spawn_fitting_queued(
+                    exclude_ids={t.task_id for t, _, _ in inflight},
+                )
+            )
+            if not inflight:
+                return
+            done, _pending = await asyncio.wait(
+                [atask for _, atask, _ in inflight],
+                timeout=self._dispatcher_poll_sec,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                # Poll elapsed with no completion; re-scan in case a lane freed
+                # via lease TTL expiry / external release.
+                continue
+            remaining: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
+            completed: list[tuple[Task, Any, Any]] = []
+            for entry in inflight:
+                task, atask, gpu_lease = entry
+                if atask in done:
+                    try:
+                        maybe_result: Any = atask.result()
+                    except BaseException as exc:  # noqa: BLE001 — mirror gather(return_exceptions=True)
+                        maybe_result = exc
+                    completed.append((task, maybe_result, gpu_lease))
+                else:
+                    remaining.append(entry)
+            inflight = remaining
+            for task, maybe_result, gpu_lease in completed:
+                await self._reap_dispatched_task(task, maybe_result, gpu_lease)
+
+    async def _spawn_fitting_queued(
+        self, *, exclude_ids: set[str],
+    ) -> list[tuple[Task, "asyncio.Task[SubAgentResult]", Any]]:
+        """Spawn every currently lane-fitting queued task not already in flight.
+
+        Returns the ``(task, asyncio_task, gpu_lease)`` tuples spawned this pass
+        (possibly empty). Pure dispatch — per-task completion bookkeeping is
+        handled by :meth:`_reap_dispatched_task`. Mirrors the prior capacity /
+        GPU-specialist-lease logic exactly. Inv-7.3: lease bound to task_id.
+        """
         queued = await self.tasks.queued()
         if not queued:
-            return
+            return []
         holders = await self.locks.lane_holders()
         capacities = await self.locks.lane_capacities()
         spawned: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         for task in queued:
+            if task.task_id in exclude_ids:
+                # Already dispatched in a prior pass of this pump; the DB row may
+                # still read 'queued' until the runner's first transition lands.
+                continue
             lanes_needed = list(task.requires_lanes or [])
             if lanes_needed:
                 try:
@@ -7897,13 +7972,22 @@ class Coordinator:
                 ),
                 gpu_lease,
             ))
-        if not spawned:
-            return
-        # Gather all spawned tasks (keeps tick semantics simple); defensively absorb any leaked exception.
-        results = await asyncio.gather(
-            *(t for _, t, _ in spawned), return_exceptions=True,
-        )
-        for (task, _, gpu_lease), maybe_result in zip(spawned, results):
+        return spawned
+
+    async def _reap_dispatched_task(
+        self, task: Task, maybe_result: Any, gpu_lease: Any,
+    ) -> None:
+        """Run completion bookkeeping for one finished dispatched task.
+
+        Mirrors the prior post-``gather`` per-task handling verbatim (GPU-lease
+        release, specialist auto-retry, ``delegated_result`` emission, ledgers,
+        shared-state promotion, fact-write, explore-gap refresh). The
+        single-element loop preserves the original body unchanged — ``continue``
+        acts as an early return for this task.
+        """
+        for (task, _, gpu_lease), maybe_result in zip(
+            [(task, None, gpu_lease)], [maybe_result],
+        ):
             if gpu_lease is not None:
                 try:
                     await self.gpu_specialist_pool.release(gpu_lease)
