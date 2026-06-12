@@ -52,6 +52,13 @@ ALLOWED_FILES: dict[str, str] = {
         "extra_server_args so pre-rename variant dicts still match",
     "inference_optimizer/orchestrator/optimization_journal.py":
         "journal classification reads existing stack/variant args fields",
+    # legacy v0.6 breakdown reader walks raw optimization_stack which can
+    # carry the pre-rename candidate_extra_sglang_args field; the emitted
+    # key is the canonical extra_server_args.
+    "inference_optimizer/breakdown/legacy_collectors.py":
+        "legacy v0.6 reader: raw optimization_stack carries pre-rename "
+        "candidate_extra_sglang_args (breakdown loads state without the "
+        "SharedState key migration)",
     # CI transform reads legacy-keyed session_breakdown.json artefacts.
     "ci/transform_to_session_summary_v2.py":
         "legacy session-breakdown JSON reader (operator-side back-compat)",

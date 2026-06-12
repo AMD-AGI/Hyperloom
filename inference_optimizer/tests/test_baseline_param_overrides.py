@@ -406,6 +406,11 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
 
 def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
     """#210 fix: the baseline executor's Magpie subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH`` so Magpie loads the patched checkout."""
+    # Disable the #523 local-disk mirror so the effective InferenceX path is
+    # ``$INFERENCEX_PATH`` verbatim; otherwise the assertion is host-dependent
+    # (relocation triggers whenever the test runs on a network FS such as
+    # wekafs/NFS, where ``_is_network_fs`` resolves the path to a mounted type).
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "1")
     monkeypatch.setenv("INFERENCEX_PATH", "/wekafs/hyperloom/InferenceX")
     base = tmp_path / "base.yaml"
     _write_yaml(base)
