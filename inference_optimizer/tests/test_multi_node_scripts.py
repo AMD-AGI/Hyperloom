@@ -653,7 +653,8 @@ def test_dynamo_body_rejects_bad_enums():
 
 def test_dynamo_body_pd_independent_instances_no_multinode():
     # PD with TP that fits one pod (tp <= gpus_per_node): prefill/decode are
-    # independent single-node instances -> NO multinodeRoles, NO rdma.
+    # independent single-node instances -> NO multinodeRoles, but PD still
+    # carries rdmaResource for the cross-pod KV transfer plane.
     # Matches the canonical PD body (replica=2, TP=8).
     from inference_optimizer.multi_node._internal import workload_spec
 
@@ -666,7 +667,10 @@ def test_dynamo_body_pd_independent_instances_no_multinode():
     assert "multinodeRoles" not in b["dynamoOptions"]
     assert len(b["resources"]) == 3 and len(b["images"]) == 3
     assert b["resources"][1]["replica"] == 2 and b["resources"][2]["replica"] == 2
-    assert "rdmaResource" not in b["resources"][1]
+    # PD always carries rdmaResource ("1k") for the cross-pod KV transfer
+    # plane, even when each role is single-node (TP <= gpus_per_node).
+    assert b["resources"][1]["rdmaResource"] == "1k"
+    assert b["resources"][2]["rdmaResource"] == "1k"
 
 
 def test_dynamo_body_pd_multinode_when_tp_exceeds_node():
@@ -680,8 +684,8 @@ def test_dynamo_body_pd_multinode_when_tp_exceeds_node():
            "pd_prefill_tp": 16, "pd_decode_tp": 16},
     )
     assert b["dynamoOptions"]["multinodeRoles"] == ["prefill", "decode"]
-    assert b["resources"][1]["rdmaResource"] == "1"
-    assert b["resources"][2]["rdmaResource"] == "1"
+    assert b["resources"][1]["rdmaResource"] == "1k"
+    assert b["resources"][2]["rdmaResource"] == "1k"
 
 
 def test_dynamo_discover_role_pods_groups_prefill_decode():
