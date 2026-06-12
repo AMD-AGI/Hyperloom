@@ -552,6 +552,8 @@ class KernelDiscoveryRun(TypedDict, total=False):
         source (str): Discovery source (``tracelens`` / ``roofline`` / ...).
         status (str): Run status (``success`` / ``failed``).
         ts (str): ISO UTC timestamp of the run.
+        duration_sec (float | None): Wall-clock seconds the discovery run took
+            (source efficiency), or None.
         tool (KernelToolMetadata): Provenance of the discovery tool.
         scan (dict[str, Any]): Scan inputs/outputs (``splitter_mode`` /
             ``trace_dir`` / ``candidates_path`` / ``trace_report_path``).
@@ -562,6 +564,7 @@ class KernelDiscoveryRun(TypedDict, total=False):
     source: str
     status: str
     ts: str
+    duration_sec: float | None
     tool: KernelToolMetadata
     scan: dict[str, Any]
     hot_kernel_count: int
@@ -668,6 +671,9 @@ class KernelJourneyEntry(TypedDict, total=False):
         gpu_pct (float | None): Share of total GPU time (from discovery), or None.
         bound_type (str): Bottleneck class (from discovery).
         source_file (str | None): Source file (from discovery), or None.
+        micro_speedup (float | None): Best achieved micro-benchmark speedup
+            across attempts (kernel-level), or None. Pair with
+            ``e2e.e2e_gain_pct`` for the speedup-vs-e2e correlation.
         discovery (DiscoveredHotKernel): Stage-1 discovery snapshot.
         dispatch (KernelDispatch): Stage-2 dispatch decision.
         backend_attempts (list[KernelBackendAttempt]): Stage-3 backend attempts.
@@ -683,6 +689,7 @@ class KernelJourneyEntry(TypedDict, total=False):
     gpu_pct: float | None
     bound_type: str
     source_file: str | None
+    micro_speedup: float | None
     discovery: DiscoveredHotKernel
     dispatch: KernelDispatch
     backend_attempts: list[KernelBackendAttempt]

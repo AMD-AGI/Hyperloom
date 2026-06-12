@@ -485,6 +485,7 @@ def record_kernel_discovery(
     tool_root: str | None = None,
     tool_root_env: str | None = None,
     tool_version: str | None = None,
+    duration_sec: Any = None,
     error: str | None = None,
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
@@ -510,6 +511,7 @@ def record_kernel_discovery(
             "source":           str(source or ""),
             "status":           str(status or ""),
             "ts":               _now_iso_safe(),
+            "duration_sec":     _to_float(duration_sec),
             "tool":             meta,
             "scan":             scan,
             "hot_kernel_count": len(kernels),
@@ -586,6 +588,14 @@ def record_kernel_backend_result(
         attempts = attempts if isinstance(attempts, list) else []
         result_meta = result.get("metadata") if isinstance(
             result.get("metadata"), dict) else {}
+        # The kernel-level micro_speedup is derived (best across attempts) and
+        # lives in ``verification`` -- the raw per-attempt dict carries none. We
+        # stamp it onto the adopted (best) attempt so the journey can correlate
+        # achieved speedup with the e2e gain.
+        verification = result.get("verification") if isinstance(
+            result.get("verification"), dict) else {}
+        best_attempt_id = _best_attempt_id(attempts, verification)
+        kernel_micro_speedup = _to_float(verification.get("micro_speedup"))
         recorded_any = False
         for att in attempts:
             if not isinstance(att, dict):
@@ -595,23 +605,30 @@ def record_kernel_backend_result(
             optimized = att.get("optimized_path") or att.get("optimized_file")
             att_meta = att.get("metadata") if isinstance(
                 att.get("metadata"), dict) else {}
+            micro_speedup = _to_float(
+                att.get("micro_speedup") or att.get("speedup"))
+            if (micro_speedup is None and kernel_micro_speedup is not None
+                    and attempt_id and attempt_id == best_attempt_id):
+                micro_speedup = kernel_micro_speedup
             payload = {
                 "kernel_id":          kid,
                 "attempt_id":         attempt_id,
                 "run_id":             run_id,
                 "backend":            backend,
                 "model":              att.get("model"),
-                "ts":                 str(att.get("ts") or att.get("started_at") or ""),
+                "ts":                 str(att.get("ts") or att.get("started_at")
+                                          or att.get("created_at") or ""),
                 "status":             str(att.get("status") or "").lower(),
                 "decision":           str(att.get("decision") or "").upper(),
-                "micro_speedup":      _to_float(
-                    att.get("micro_speedup") or att.get("speedup")),
+                "micro_speedup":      micro_speedup,
                 "compile_passed":     _to_bool(att.get("compile_passed")),
                 "correctness_passed": _to_bool(att.get("correctness_passed")),
                 "optimized_files":    [str(optimized)] if optimized else [],
                 "error":              att.get("error") or att.get("error_message"),
+                "error_class":        str(att.get("error_type") or "") or None,
                 "duration_sec":       _to_float(
-                    att.get("duration_sec") or att.get("elapsed_sec")),
+                    att.get("duration_sec") or att.get("elapsed_sec")
+                    or att.get("elapsed_s")),
                 "tool": _tool_metadata(
                     backend or "kernel_agent",
                     root=str(att_meta.get("root_dir") or result_meta.get("root_dir") or "")

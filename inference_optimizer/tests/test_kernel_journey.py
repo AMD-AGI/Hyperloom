@@ -125,6 +125,42 @@ def test_kernel_backend_result_records_pre_dispatch_failure(tmp_path: Path) -> N
     assert out["kernel_journey"]["kernels"][0]["outcome"] == "attempted"
 
 
+def test_backend_attempt_maps_kernel_agent_field_names(tmp_path: Path) -> None:
+    # kernel-agent emits elapsed_s / created_at / error_type and keeps the
+    # achieved speedup at the kernel level in verification (best attempt). The
+    # recorder must map those onto the journey attempt + entry.
+    instrument.record_kernel_backend_result(tmp_path, {
+        "kernel_id": "k001", "run_id": "r1",
+        "verification": {"micro_speedup": 1.42, "best_attempt_id": "a1"},
+        "attempts": [
+            {"attempt_id": "a1", "backend": "geak", "status": "completed",
+             "elapsed_s": 87.5, "created_at": "2026-06-12T00:00:00Z"},
+            {"attempt_id": "a2", "backend": "claude", "status": "timeout",
+             "error_type": "timeout", "elapsed_s": 12.0},
+        ],
+    })
+    out = assemble_parts(tmp_path)
+    entry = out["kernel_journey"]["kernels"][0]
+    a1, a2 = entry["backend_attempts"]
+    assert a1["duration_sec"] == 87.5
+    assert a1["ts"] == "2026-06-12T00:00:00Z"
+    # kernel-level best speedup stamped onto the adopted attempt.
+    assert a1["micro_speedup"] == 1.42
+    assert a2["error_class"] == "timeout"
+    # Entry exposes the best achieved speedup for the e2e correlation.
+    assert entry["micro_speedup"] == 1.42
+
+
+def test_discovery_run_carries_duration(tmp_path: Path) -> None:
+    instrument.record_kernel_discovery(
+        tmp_path, source="tracelens", status="success",
+        hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 10.0}],
+        scan={}, duration_sec=4.2,
+    )
+    out = assemble_parts(tmp_path)
+    assert out["kernel_journey"]["discovery_runs"][0]["duration_sec"] == 4.2
+
+
 def test_attach_kernel_roofline_enriches_journey() -> None:
     from inference_optimizer.breakdown.exporter import _attach_kernel_roofline
 
