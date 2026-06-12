@@ -8331,6 +8331,7 @@ class Coordinator:
                 else:
                     self.shared_state.baseline_tput = float(tput)
                 self.shared_state.baseline_failure_streak = 0
+                self.shared_state.baseline_arg_error_streak = 0
                 changed = True
             acc = result.get("accuracy")
             if isinstance(acc, (int, float)):

@@ -180,3 +180,32 @@ def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
     args = cfg["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert args.count("--attention-backend") == 1, f"duplicate flag: {args}"
     assert "ROCM_AITER_FA" in args, "last-wins should keep variant value"
+
+
+def test_build_variant_yaml_preserves_json_arg(tmp_path: Path) -> None:
+    """Dedupe must not break JSON-valued args like --json-model-override-args."""
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump({
+            "benchmark": {
+                "framework": "sglang",
+                "envs": {
+                    "EXTRA_SGLANG_ARGS": (
+                        '--json-model-override-args \'{"rope_scaling":null}\''
+                        " --context-length 8192"
+                    ),
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    variant = _variant("v1", "--context-length 4096")
+    out = gr._build_variant_yaml(
+        base, "", variant, output_subdir=tmp_path / "v1",
+    )
+    cfg = yaml.safe_load(out.read_text(encoding="utf-8"))
+    args = cfg["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+    assert "--json-model-override-args" in args
+    assert "rope_scaling" in args, f"JSON value mangled: {args}"
+    assert args.count("--context-length") == 1, f"duplicate flag: {args}"
+    assert "4096" in args, "last-wins should keep variant value"

@@ -739,6 +739,49 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
+def _shell_safe_dedupe(args: str) -> str:
+    """Last-wins dedupe that preserves quoted/JSON values via shlex.
+
+    Unlike _dedupe_extra_server_args (which uses str.split and can break
+    JSON args), this uses shlex.split to tokenize, keeping quoted values
+    intact. Each ``--flag value`` pair keeps its last occurrence.
+    """
+    import shlex
+    try:
+        tokens = shlex.split(args)
+    except ValueError:
+        return args
+    pairs: dict[str, list[str]] = {}
+    order: list[str] = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t.startswith("--"):
+            flag = t
+            i += 1
+            vals: list[str] = []
+            if i < len(tokens) and not tokens[i].startswith("--"):
+                vals = [tokens[i]]
+                i += 1
+            pair = [flag, *vals] if vals else [flag]
+            if flag not in pairs:
+                order.append(flag)
+            pairs[flag] = pair
+        else:
+            key = f"__pos_{len(order)}__"
+            order.append(key)
+            pairs[key] = [t]
+            i += 1
+    out: list[str] = []
+    for k in order:
+        for v in pairs[k]:
+            if " " in v or "{" in v:
+                out.append(shlex.quote(v))
+            else:
+                out.append(v)
+    return " ".join(out)
+
+
 # sglang scheduler watchdog timeout injection: on MI300X with aiter, the first
 # request's ``mha_batch_prefill`` JIT compile can exceed sglang's 300s default
 # watchdog, firing SIGQUIT mid-warmup -> baseline_failed. Inject a longer
@@ -1106,8 +1149,7 @@ def _build_variant_yaml(
         variant.extra_server_args,
     )
     if combined:
-        from ..coordinator_helpers import _dedupe_extra_server_args
-        envs[extra_args_env] = _dedupe_extra_server_args(combined)
+        envs[extra_args_env] = _shell_safe_dedupe(combined)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
 
@@ -1421,9 +1463,9 @@ async def run_grid(
             # PD knobs auto-resolved from $PD_* env; PD config stays constant
             # across variants within one run.
             await restart_server_for_round(
-                extra_server_args=merge_server_args(
+                extra_server_args=_shell_safe_dedupe(merge_server_args(
                     base_extra_args, variant.extra_server_args,
-                ),
+                )),
                 model_path=model_path,
                 ep=int(os.environ.get("EP") or 0) or None,
             )

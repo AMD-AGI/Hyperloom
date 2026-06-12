@@ -947,3 +947,37 @@ def test_teardown_lifecycle_server_removes_state_files(tmp_path):
 
     assert not (pid_dir / "vllm_8888.pid").exists()
     assert not (pid_dir / "vllm_8888.json").exists()
+
+
+# -- #522: _classify_subprocess_error unit tests ----------------------------
+
+from inference_optimizer.orchestrator.action_executors.baseline import (
+    _classify_subprocess_error,
+)
+
+
+def test_classify_fast_exit_unknown_backend():
+    assert _classify_subprocess_error(
+        5.0, "ValueError: Unknown attention backend: 'ROCM_FLASH'"
+    ) == "fast_exit_arg_error"
+
+
+def test_classify_fast_exit_unrecognized_args():
+    assert _classify_subprocess_error(
+        2.0, "error: unrecognized arguments: --bogus-flag"
+    ) == "fast_exit_arg_error"
+
+
+def test_classify_slow_failure_not_arg_error():
+    """A slow failure (>30s) with the same stderr pattern must NOT be
+    classified as arg error — it could be a real inference crash."""
+    assert _classify_subprocess_error(
+        120.0, "ValueError: some runtime error"
+    ) == "subprocess_nonzero"
+
+
+def test_classify_fast_exit_without_pattern():
+    """A fast exit without arg-error patterns stays subprocess_nonzero."""
+    assert _classify_subprocess_error(
+        3.0, "Segmentation fault (core dumped)"
+    ) == "subprocess_nonzero"
