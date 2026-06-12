@@ -17,6 +17,7 @@ from inference_optimizer.orchestrator.backends import (
     ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
+from inference_optimizer.orchestrator.task_registry import Task
 from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.paths import make_session_dir
 
@@ -56,6 +57,8 @@ def coord(session_dir) -> Coordinator:
 async def test_promote_baseline_sets_anchor_and_current_best(coord: Coordinator) -> None:
     # Skip the heavy PRELUDE cascade by pre-marking a pending roofline task.
     coord.shared_state.auto_roofline_pending_task_id = "pending-x"
+    coord.shared_state.baseline_failure_streak = 2
+    coord.shared_state.baseline_arg_error_streak = 1
     await coord._promote_to_shared_state("baseline", {
         "output_throughput": 1000.0,
         "warmup_round_tput": 900.0,
@@ -69,12 +72,41 @@ async def test_promote_baseline_sets_anchor_and_current_best(coord: Coordinator)
     # warmup anchor wins as the comparison baseline; hot number kept separately
     assert coord.shared_state.baseline_tput == 900.0
     assert coord.shared_state.baseline_hot_tput == 1000.0
+    assert coord.shared_state.baseline_failure_streak == 0
+    assert coord.shared_state.baseline_arg_error_streak == 0
     assert coord.shared_state.current_best["action"] == "baseline"
 
 
 @pytest.mark.asyncio
 async def test_promote_baseline_non_dict_is_noop(coord: Coordinator) -> None:
     await coord._promote_to_shared_state("baseline", "not-a-dict")  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_fast_arg_errors_stop_after_two(
+    coord: Coordinator,
+) -> None:
+    task = Task(
+        task_id="baseline-fast-arg",
+        kind="baseline",
+        state="running",
+        params={"config_path": "baseline.yaml"},
+        idempotency_key="baseline-fast-arg",
+    )
+    result = {
+        "status": "failed",
+        "error_class": "fast_exit_arg_error",
+        "error": "ValueError: Unknown attention backend: ROCM_FLASH",
+    }
+
+    await coord._handle_unpromotable_result(task, result)
+    assert coord.shared_state.baseline_arg_error_streak == 1
+    assert coord.shared_state.stop_reason != "baseline_arg_error"
+
+    await coord._handle_unpromotable_result(task, result)
+    assert coord.shared_state.baseline_arg_error_streak == 2
+    assert coord.shared_state.baseline_failure_streak == 0
+    assert coord.shared_state.stop_reason == "baseline_arg_error"
 
 
 @pytest.mark.asyncio
