@@ -157,3 +157,26 @@ def test_build_variant_yaml_injects_extra_envs(tmp_path: Path) -> None:
     # variant + base server args merged into the framework's args env
     arg_key = gr.server_args_env_name("sglang")
     assert "--foo 1" in envs[arg_key]
+
+
+def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
+    """#520: when base YAML + base_extra_args + variant all set the same flag,
+    the materialized YAML must contain each flag only once (last wins)."""
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump({
+            "benchmark": {
+                "framework": "vllm",
+                "envs": {"EXTRA_VLLM_ARGS": "--attention-backend ROCM_ATTN"},
+            },
+        }),
+        encoding="utf-8",
+    )
+    variant = _variant("v1", "--attention-backend ROCM_AITER_FA")
+    out = gr._build_variant_yaml(
+        base, "", variant, output_subdir=tmp_path / "v1",
+    )
+    cfg = yaml.safe_load(out.read_text(encoding="utf-8"))
+    args = cfg["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert args.count("--attention-backend") == 1, f"duplicate flag: {args}"
+    assert "ROCM_AITER_FA" in args, "last-wins should keep variant value"

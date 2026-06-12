@@ -1106,7 +1106,8 @@ def _build_variant_yaml(
         variant.extra_server_args,
     )
     if combined:
-        envs[extra_args_env] = combined
+        from ..coordinator_helpers import _dedupe_extra_server_args
+        envs[extra_args_env] = _dedupe_extra_server_args(combined)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
 
