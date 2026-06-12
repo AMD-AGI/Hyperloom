@@ -17,6 +17,14 @@ set -uo pipefail
 OOB_SRC="${OOB_SRC:-}"
 PIP="/opt/venv/bin/pip"
 command -v "$PIP" >/dev/null 2>&1 || PIP="python3 -m pip"
+OOB_INSTALL_SRC=""
+if [ -n "$OOB_SRC" ] && [ -d "$OOB_SRC" ]; then
+  if [ -f "$OOB_SRC/pyproject.toml" ]; then
+    OOB_INSTALL_SRC="$OOB_SRC"
+  elif [ -f "$OOB_SRC/oob_cli/pyproject.toml" ]; then
+    OOB_INSTALL_SRC="$OOB_SRC/oob_cli"
+  fi
+fi
 
 # 1. Node.js / npm (NodeSource apt) — needed for claude/codex/@cursor CLIs.
 if ! command -v node >/dev/null 2>&1 || ! npm --version >/dev/null 2>&1; then
@@ -30,10 +38,10 @@ fi
 
 # 2. oob python CLI from the shared OOB_SRC checkout (no copy: NFS is shared).
 if ! command -v oob >/dev/null 2>&1; then
-  if [ -n "$OOB_SRC" ] && [ -d "$OOB_SRC" ]; then
-    [ -f "$OOB_SRC/requirements.txt" ] && \
-      $PIP install -q --no-cache-dir --break-system-packages -r "$OOB_SRC/requirements.txt" >/tmp/mn_oob_pip.log 2>&1 || true
-    $PIP install -q --no-cache-dir --break-system-packages "$OOB_SRC" >>/tmp/mn_oob_pip.log 2>&1 || true
+  if [ -n "$OOB_INSTALL_SRC" ]; then
+    [ -f "$OOB_INSTALL_SRC/requirements.txt" ] && \
+      $PIP install -q --no-cache-dir --break-system-packages -r "$OOB_INSTALL_SRC/requirements.txt" >/tmp/mn_oob_pip.log 2>&1 || true
+    $PIP install -q --no-cache-dir --break-system-packages "$OOB_INSTALL_SRC" >>/tmp/mn_oob_pip.log 2>&1 || true
   fi
 fi
 

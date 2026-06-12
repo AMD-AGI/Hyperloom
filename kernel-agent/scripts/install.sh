@@ -1129,13 +1129,23 @@ ensure_rag_index() {
 
 ensure_oob() {
   log "ensuring OOB backend"
+  local oob_install_src=""
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
     mkdir -p "$(dirname "${OOB_CLI_ROOT}")"
   fi
   if ! command -v oob >/dev/null 2>&1; then
     if [ -d "$OOB_SRC" ]; then
+      if [ -f "${OOB_SRC}/pyproject.toml" ]; then
+        oob_install_src="$OOB_SRC"
+      elif [ -f "${OOB_SRC}/oob_cli/pyproject.toml" ]; then
+        oob_install_src="${OOB_SRC}/oob_cli"
+      fi
+      if [ -z "$oob_install_src" ]; then
+        warn "OOB source has no pyproject.toml at $OOB_SRC or $OOB_SRC/oob_cli"
+        return 0
+      fi
       if [ ! -d "${OOB_CLI_ROOT}" ]; then
-        run cp -r "$OOB_SRC" "${OOB_CLI_ROOT}"
+        run cp -r "$oob_install_src" "${OOB_CLI_ROOT}"
       fi
       if [ -f "${OOB_CLI_ROOT}/requirements.txt" ]; then
         run python3 -m pip install -q --no-cache-dir --break-system-packages -r "${OOB_CLI_ROOT}/requirements.txt"
