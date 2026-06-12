@@ -7,6 +7,7 @@ A tiny ``sys.modules`` ray stub lets CI import the scripts without Ray.
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import os
@@ -556,6 +557,391 @@ def test_extra_label_primus_claw_prefix_still_stripped():
     assert b["labels"].get("custom.example/team") == "infra"
 
 
+# ---------------------------------------------------------------------------
+# build_dynamo_workload_body tests (Dynamo idle-pod backend).
+
+_DYNAMO_MIN_KWARGS = dict(
+    workspace="ws-a",
+    display_name="t",
+    image="img:1-ssh",
+    nodes=2,
+    gpus_per_node=8,
+    cpus_per_node=96,
+    mem_gi_per_node=1024,
+    ephemeral_gi_per_node=400,
+    ssh_authorized_key="ssh-ed25519 AAAAC3xx mn",
+)
+
+
+def test_dynamo_body_multinode_idle_shape():
+    # Multi-node Dynamo body: DynamoDeployment kind, [frontend, worker]
+    # resources, worker.replica == node count, multinodeRoles=["worker"],
+    # idle worker entryPoint, frontend on :8000.
+    import base64
+
+    from inference_optimizer.multi_node._internal import workload_spec
+
+    b = workload_spec.build_dynamo_workload_body(**_DYNAMO_MIN_KWARGS)
+
+    assert b["groupVersionKind"] == {"kind": "DynamoDeployment", "version": "v1"}
+    assert b["dynamoOptions"]["serviceRoles"] == ["frontend", "worker"]
+    assert b["dynamoOptions"]["multinodeRoles"] == ["worker"]
+    assert b["dynamoOptions"]["backendFramework"] == "sglang"
+    assert b["dynamoOptions"]["kvTransferBackend"] == "nixl"
+
+    fe, worker = b["resources"]
+    assert fe["replica"] == 1 and "gpu" not in fe
+    # worker.replica IS the node count (new API), not a Deployment replica.
+    assert worker["replica"] == 2
+    assert worker["gpu"] == "8"
+    assert worker["sharedMemory"] == "200Gi"
+    assert worker["rdmaResource"] == "1"  # cross-node RDMA on multi-node
+
+    # entryPoints are base64; worker is the idle launcher, frontend is :8000.
+    fe_ep = base64.b64decode(b["entryPoints"][0]).decode()
+    wk_ep = base64.b64decode(b["entryPoints"][1]).decode()
+    assert "dynamo.frontend" in fe_ep and "--http-port 8000" in fe_ep
+    assert wk_ep == "/usr/local/bin/mn-idle.sh"
+
+    # SSH control-plane env injected; service fronts :8000 (not sglang :8888).
+    assert b["env"]["MN_SSH_AUTHORIZED_KEY"] == "ssh-ed25519 AAAAC3xx mn"
+    assert b["env"]["MN_SSH_PORT"] == "2222"
+    assert b["service"]["port"] == 8000 and b["service"]["targetPort"] == 8000
+
+
+def test_dynamo_body_single_node_omits_multinode_and_rdma():
+    # nodes=1: no multinodeRoles, no rdmaResource (single-pod aggregated).
+    from inference_optimizer.multi_node._internal import workload_spec
+
+    kw = dict(_DYNAMO_MIN_KWARGS)
+    kw["nodes"] = 1
+    b = workload_spec.build_dynamo_workload_body(**kw)
+
+    assert "multinodeRoles" not in b["dynamoOptions"]
+    _, worker = b["resources"]
+    assert worker["replica"] == 1
+    assert "rdmaResource" not in worker
+
+
+def test_dynamo_body_requires_ssh_key():
+    # The idle-pod control plane is unreachable without an authorized key,
+    # so the builder fails fast rather than producing a dead deployment.
+    import pytest as _pytest
+
+    from inference_optimizer.multi_node._internal import workload_spec
+
+    kw = dict(_DYNAMO_MIN_KWARGS)
+    kw["ssh_authorized_key"] = "   "
+    with _pytest.raises(ValueError, match="ssh_authorized_key"):
+        workload_spec.build_dynamo_workload_body(**kw)
+
+
+def test_dynamo_body_rejects_bad_enums():
+    import pytest as _pytest
+
+    from inference_optimizer.multi_node._internal import workload_spec
+
+    with _pytest.raises(ValueError, match="backend_framework"):
+        workload_spec.build_dynamo_workload_body(
+            **{**_DYNAMO_MIN_KWARGS, "backend_framework": "tensorrt"},
+        )
+    with _pytest.raises(ValueError, match="kv_transfer_backend"):
+        workload_spec.build_dynamo_workload_body(
+            **{**_DYNAMO_MIN_KWARGS, "kv_transfer_backend": "rdma"},
+        )
+
+
+def test_dynamo_body_pd_independent_instances_no_multinode():
+    # PD with TP that fits one pod (tp <= gpus_per_node): prefill/decode are
+    # independent single-node instances -> NO multinodeRoles, but PD still
+    # carries rdmaResource for the cross-pod KV transfer plane.
+    # Matches the canonical PD body (replica=2, TP=8).
+    from inference_optimizer.multi_node._internal import workload_spec
+
+    b = workload_spec.build_dynamo_workload_body(
+        **{**_DYNAMO_MIN_KWARGS, "nodes": 1, "pd_mode": "disaggregated",
+           "pd_prefill_nodes": 2, "pd_decode_nodes": 2,
+           "pd_prefill_tp": 8, "pd_decode_tp": 8},
+    )
+    assert b["dynamoOptions"]["serviceRoles"] == ["frontend", "prefill", "decode"]
+    assert "multinodeRoles" not in b["dynamoOptions"]
+    assert len(b["resources"]) == 3 and len(b["images"]) == 3
+    assert b["resources"][1]["replica"] == 2 and b["resources"][2]["replica"] == 2
+    # PD always carries rdmaResource ("1k") for the cross-pod KV transfer
+    # plane, even when each role is single-node (TP <= gpus_per_node).
+    assert b["resources"][1]["rdmaResource"] == "1k"
+    assert b["resources"][2]["rdmaResource"] == "1k"
+
+
+def test_dynamo_body_pd_multinode_when_tp_exceeds_node():
+    # PD with TP that exceeds one pod's GPUs: prefill/decode span nodes (LWS)
+    # -> multinodeRoles + rdmaResource.
+    from inference_optimizer.multi_node._internal import workload_spec
+
+    b = workload_spec.build_dynamo_workload_body(
+        **{**_DYNAMO_MIN_KWARGS, "nodes": 1, "pd_mode": "disaggregated",
+           "pd_prefill_nodes": 2, "pd_decode_nodes": 2,
+           "pd_prefill_tp": 16, "pd_decode_tp": 16},
+    )
+    assert b["dynamoOptions"]["multinodeRoles"] == ["prefill", "decode"]
+    assert b["resources"][1]["rdmaResource"] == "1k"
+    assert b["resources"][2]["rdmaResource"] == "1k"
+
+
+def test_dynamo_discover_role_pods_groups_prefill_decode():
+    from inference_optimizer.multi_node._internal import dynamo_support
+
+    wl = {"pods": [
+        {"podId": "x-frontend-a", "resourceId": 0, "podIP": "10.0.0.9"},
+        {"podId": "x-prefillworker-1", "resourceId": 1, "podIP": "10.0.1.1"},
+        {"podId": "x-prefillworker-0", "resourceId": 1, "podIP": "10.0.1.0"},
+        {"podId": "x-decodeworker-0", "resourceId": 2, "podIP": "10.0.2.0"},
+    ]}
+    r = dynamo_support.discover_role_pods(wl)
+    assert [p["podIP"] for p in r["prefill"]] == ["10.0.1.0", "10.0.1.1"]
+    assert [p["podIP"] for p in r["decode"]] == ["10.0.2.0"]
+    assert r["frontend"] and not r["worker"]
+
+
+def test_dynamo_disagg_flags_and_launch_args():
+    from inference_optimizer.multi_node._internal import dynamo_support
+
+    df = dynamo_support.disagg_flags("prefill", "nixl")
+    assert "--disaggregation-mode prefill" in df
+    assert "--disaggregation-transfer-backend nixl" in df
+    assert "30001" in df
+    assert dynamo_support.disagg_flags("bogus", "nixl") == ""
+
+    la = dynamo_support.build_node_launch_args(
+        framework="sglang", model="/m", tp=8, nnodes=1,
+        disagg_mode="decode", kv_transfer_backend="nixl",
+    )
+    assert "--extra-args" in la and "decode" in la
+
+
+def test_dynamo_body_vllm_backend_and_session_label():
+    from inference_optimizer.multi_node._internal import workload_spec
+
+    b = workload_spec.build_dynamo_workload_body(
+        **{
+            **_DYNAMO_MIN_KWARGS,
+            "backend_framework": "vllm",
+            "kv_transfer_backend": "mooncake",
+            "session_id": "sess-xyz",
+        },
+    )
+    assert b["dynamoOptions"]["backendFramework"] == "vllm"
+    assert b["dynamoOptions"]["kvTransferBackend"] == "mooncake"
+    assert b["labels"].get("primus-claw/session-id") == "sess-xyz"
+
+
+# ---------------------------------------------------------------------------
+# dynamo_support pure-helper tests (Dynamo backend SSH fan-out).
+
+
+def test_dynamo_discover_worker_pods_excludes_frontend_sorts_by_ordinal():
+    from inference_optimizer.multi_node._internal import dynamo_support
+
+    wl = {"pods": [
+        {"podId": "dyn-frontend-abc", "resourceId": 0, "podIP": "10.0.0.9"},
+        {"podId": "dyn-worker-1", "resourceId": 1, "podIP": "10.0.0.2"},
+        {"podId": "dyn-worker-0", "resourceId": 1, "podIP": "10.0.0.1"},
+        {"podId": "dyn-worker-pending", "resourceId": 1, "podIP": ""},
+    ]}
+    w = dynamo_support.discover_worker_pods(wl)
+    assert [p["podIP"] for p in w] == ["10.0.0.1", "10.0.0.2"]
+    assert [p["lwsIndex"] for p in w] == [0, 1]
+
+
+def test_dynamo_frontend_service_url_prefers_live_then_dns():
+    from inference_optimizer.multi_node._internal import dynamo_support
+
+    assert (
+        dynamo_support.frontend_service_url("wid", "ws")
+        == "http://wid.ws.svc.cluster.local:8000"
+    )
+    assert (
+        dynamo_support.frontend_service_url(
+            "wid", "ws", {"clusterIp": "10.1.2.3", "port": 8000}
+        ) == "http://10.1.2.3:8000"
+    )
+
+
+def test_dynamo_frontend_service_url_internal_domain_and_nested_port():
+    from inference_optimizer.multi_node._internal import dynamo_support
+
+    # internalDomain wins.
+    assert dynamo_support.frontend_service_url(
+        "w", "ns", {"internalDomain": "w.ns.svc.cluster.local:8000",
+                    "clusterIp": "1.2.3.4", "port": {"port": 8000}},
+    ) == "http://w.ns.svc.cluster.local:8000"
+    # Nested port dict (SaFE shape) -> integer port, not the dict repr.
+    assert dynamo_support.frontend_service_url(
+        "w", "ns", {"clusterIp": "192.168.154.0",
+                    "port": {"protocol": "TCP", "port": 8000, "targetPort": 8000}},
+    ) == "http://192.168.154.0:8000"
+
+
+def test_dynamo_build_node_launch_args_sglang_and_kill_only():
+    from inference_optimizer.multi_node._internal import dynamo_support
+
+    a = dynamo_support.build_node_launch_args(
+        framework="sglang", model="/m/x", tp=16, nnodes=2, ep=16,
+        extra_args="--mem-fraction-static 0.7",
+    )
+    assert "--framework sglang" in a
+    assert "--tp 16" in a and "--nnodes 2" in a and "--ep 16" in a
+    # Rank is self-determined pod-side from $LWS_WORKER_INDEX, never encoded.
+    assert "--node-rank" not in a
+    assert "--extra-args" in a and "0.7" in a
+
+    k = dynamo_support.build_node_launch_args(
+        framework="vllm", model="", tp=0, nnodes=2, kill_only=True,
+    )
+    assert "--kill-only" in k and "--framework vllm" in k
+    assert "--model" not in k
+
+
+# ---------------------------------------------------------------------------
+# Dynamo kernel ops routing/isolation (apply-patch / kernel-bench / install-geak).
+
+
+def test_resolve_geak_src_resolution_order(monkeypatch):
+    from inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.delenv("HYPERLOOM_GEAK_SRC", raising=False)
+    monkeypatch.delenv("HYPERLOOM_ROOT", raising=False)
+    monkeypatch.delenv("USER_DATA_PATH", raising=False)
+    assert mn_cli._resolve_geak_src("/x/geak") == "/x/geak"  # explicit wins
+    monkeypatch.setenv("USER_DATA_PATH", "/data")
+    assert mn_cli._resolve_geak_src(None) == "/data/runtime/geak"
+    monkeypatch.setenv("HYPERLOOM_ROOT", "/r")
+    assert mn_cli._resolve_geak_src(None) == "/r/geak"
+    monkeypatch.setenv("HYPERLOOM_GEAK_SRC", "/explicit/geak")
+    assert mn_cli._resolve_geak_src(None) == "/explicit/geak"
+
+
+def test_apply_patch_routes_to_dynamo_only_when_backend_dynamo(tmp_path, monkeypatch):
+    # backend=dynamo -> _dynamo_apply_patch; backend=rayjob -> legacy head_pod_ip
+    # path (EXIT_CONFIG_ERROR without head_pod_ip). Proves isolation.
+    from inference_optimizer.multi_node import cli as mn_cli
+
+    sp = tmp_path / "s.json"
+    monkeypatch.setattr(mn_cli, "STATE_FILE", sp)  # module-level const
+    monkeypatch.setattr(mn_cli, "_dynamo_apply_patch", lambda a: 4242)
+
+    ns = argparse.Namespace(
+        patch_file="/p", target_path="/t", backup_dir="/b", kernel_id="k",
+        timeout_sec=60, print_logs=False, poll_interval=6, poll_timeout=110,
+    )
+    sp.write_text('{"backend":"dynamo","nodes":2}', encoding="utf-8")
+    assert mn_cli.cmd_apply_patch(ns) == 4242  # routed to dynamo
+
+    sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
+    assert mn_cli.cmd_apply_patch(ns) == mn_cli.EXIT_CONFIG_ERROR  # legacy path
+
+
+def test_kernel_bench_routes_to_dynamo_only_when_backend_dynamo(tmp_path, monkeypatch):
+    from inference_optimizer.multi_node import cli as mn_cli
+
+    sp = tmp_path / "s.json"
+    monkeypatch.setattr(mn_cli, "STATE_FILE", sp)
+    monkeypatch.setattr(mn_cli, "_dynamo_kernel_bench", lambda a: 7777)
+
+    ns = argparse.Namespace(
+        workspace="/w", bench_command="true", files_b64_json="{}",
+        result_glob="*.json", timeout_sec=60, print_logs=False,
+        poll_interval=6, poll_timeout=110,
+    )
+    sp.write_text('{"backend":"dynamo","nodes":2}', encoding="utf-8")
+    assert mn_cli.cmd_kernel_bench(ns) == 7777
+    sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
+    assert mn_cli.cmd_kernel_bench(ns) == mn_cli.EXIT_CONFIG_ERROR
+
+
+def test_install_geak_best_effort_noop_for_rayjob(tmp_path, monkeypatch):
+    # The provisioner hook must be a no-op (0) for non-dynamo backends.
+    from inference_optimizer.multi_node import cli as mn_cli
+
+    sp = tmp_path / "s.json"
+    monkeypatch.setattr(mn_cli, "STATE_FILE", sp)
+    sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
+    assert mn_cli.install_geak_on_pods_best_effort() == 0
+
+
+def test_install_oob_and_kernel_tools_noop_for_rayjob(tmp_path, monkeypatch):
+    # OOB + combined kernel-tools install hooks must no-op (0) for non-dynamo.
+    from inference_optimizer.multi_node import cli as mn_cli
+
+    sp = tmp_path / "s.json"
+    monkeypatch.setattr(mn_cli, "STATE_FILE", sp)
+    sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
+    assert mn_cli.install_oob_on_pods_best_effort() == 0
+    assert mn_cli.install_kernel_tools_on_pods_best_effort() == 0
+
+
+# ---------------------------------------------------------------------------
+# dynamo_ssh_env_from_state isolation tests (kernel-agent GEAK SSH placement).
+
+
+def _write_mn_state(tmp_path, monkeypatch, payload):
+    import json as _json
+    sp = tmp_path / "mn_state.json"
+    sp.write_text(_json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
+    return sp
+
+
+def test_dynamo_ssh_env_empty_for_rayjob(tmp_path, monkeypatch):
+    # RayJob backend (or single-node) must yield {} so the Ray RAY_ADDRESS
+    # placement path is left completely untouched.
+    from inference_optimizer.orchestrator.action_executors import _multi_node_env
+
+    _write_mn_state(tmp_path, monkeypatch, {
+        "backend": "rayjob", "nodes": 2, "head_pod_ip": "10.0.0.1",
+        "ray_address": "10.0.0.1:6379",
+    })
+    assert _multi_node_env.dynamo_ssh_env_from_state() == {}
+
+
+def test_dynamo_ssh_env_aggregated_picks_worker_pod(tmp_path, monkeypatch):
+    from inference_optimizer.orchestrator.action_executors import _multi_node_env
+
+    _write_mn_state(tmp_path, monkeypatch, {
+        "backend": "dynamo", "nodes": 2, "pd_mode": "aggregated",
+        "worker_pod_ips": ["10.0.1.0", "10.0.1.1"],
+        "ssh_key_path": "/tmp/mn_ssh/k", "ssh_port": 2222,
+    })
+    env = _multi_node_env.dynamo_ssh_env_from_state()
+    assert env["KERNEL_AGENT_GPU_PLACEMENT"] == "ssh"
+    assert env["MN_SSH_HOST"] == "10.0.1.0"
+    assert env["MN_SSH_PORT"] == "2222"
+    assert env["MN_SSH_KEY"] == "/tmp/mn_ssh/k"
+
+
+def test_dynamo_ssh_env_pd_picks_prefill_then_decode(tmp_path, monkeypatch):
+    from inference_optimizer.orchestrator.action_executors import _multi_node_env
+
+    _write_mn_state(tmp_path, monkeypatch, {
+        "backend": "dynamo", "nodes": 2, "pd_mode": "disaggregated",
+        "prefill_pod_ips": ["10.0.2.0"], "decode_pod_ips": ["10.0.3.0"],
+        "ssh_key_path": "/tmp/mn_ssh/k", "ssh_port": 2222,
+    })
+    env = _multi_node_env.dynamo_ssh_env_from_state()
+    assert env["MN_SSH_HOST"] == "10.0.2.0"  # prefill first
+
+
+def test_dynamo_ssh_env_empty_without_pods_or_key(tmp_path, monkeypatch):
+    from inference_optimizer.orchestrator.action_executors import _multi_node_env
+
+    _write_mn_state(tmp_path, monkeypatch, {
+        "backend": "dynamo", "nodes": 2, "worker_pod_ips": [],
+        "ssh_key_path": "/tmp/k",
+    })
+    assert _multi_node_env.dynamo_ssh_env_from_state() == {}
+
+
+# ---------------------------------------------------------------------------
 # _write_rayjob_meta sidecar JSON tests.
 
 
