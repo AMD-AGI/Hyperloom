@@ -761,6 +761,255 @@ def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path):
     assert result["measure_round_runtime_sec"] < result["subprocess_runtime_sec"]
 
 
+def test_double_run_pre_start_cleanup_kills_zombie_and_clears_stale_meta(
+    tmp_path,
+):
+    """#5: when the reuse port is occupied by a zombie (healthy but no
+    metadata), pre-start cleanup must (a) unlink stale pid/json without
+    sending signals to potentially-recycled PIDs, and (b) invoke
+    _kill_stale_servers() to reap the zombie listener."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    output_dir.mkdir(parents=True)
+    (output_dir / "vllm_8888.pid").write_text("2147483646")
+
+    kill_calls = {"n": 0}
+
+    def fake_kill():
+        kill_calls["n"] += 1
+
+    captured: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured)
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch.object(
+        type(executor), "_port_healthy", return_value=True,
+    ), patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "_kill_stale_servers",
+        side_effect=fake_kill,
+    ), patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert kill_calls["n"] == 1
+    assert not (output_dir / "vllm_8888.pid").exists()
+    assert state["calls"] == 2
+    assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
+    warmup_lc = captured[0]["benchmark"]["server_lifecycle"]
+    measure_lc = captured[1]["benchmark"]["server_lifecycle"]
+    assert warmup_lc["cleanup"] is False
+    assert measure_lc["cleanup"] is True
+    assert warmup_lc["pid_dir"] == measure_lc["pid_dir"] == str(output_dir)
+
+
+def test_pre_start_cleanup_no_kill_when_port_free(tmp_path):
+    """When the port is NOT occupied (no zombie), _kill_stale_servers must
+    NOT fire — avoids killing unrelated servers sharing the pod."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    output_dir.mkdir(parents=True)
+    (output_dir / "vllm_8888.pid").write_text("2147483646")
+
+    kill_calls = {"n": 0}
+
+    def fake_kill():
+        kill_calls["n"] += 1
+
+    captured: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured)
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch.object(
+        type(executor), "_port_healthy", return_value=False,
+    ), patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "_kill_stale_servers",
+        side_effect=fake_kill,
+    ), patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    # Port was free — global kill must NOT have fired.
+    assert kill_calls["n"] == 0
+    # Stale pid file still removed (safe unlink, no signal).
+    assert not (output_dir / "vllm_8888.pid").exists()
+    assert state["calls"] == 2
+
+
+def test_pre_start_cleanup_no_kill_when_metadata_existed(tmp_path):
+    """A healthy port with matching metadata is not a zombie signal.
+
+    The global stale-server reaper must not fire for a likely legitimate
+    server. File preservation is covered by the direct pre-start test below;
+    this full double-run path later removes files in final teardown.
+    """
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    output_dir.mkdir(parents=True)
+    (output_dir / "vllm_8888.pid").write_text("2147483646")
+    (output_dir / "vllm_8888.json").write_text("{}")
+
+    kill_calls = {"n": 0}
+
+    def fake_kill():
+        kill_calls["n"] += 1
+
+    captured: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured)
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch.object(
+        type(executor), "_port_healthy", return_value=True,
+    ), patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "_kill_stale_servers",
+        side_effect=fake_kill,
+    ), patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert kill_calls["n"] == 0
+    assert state["calls"] == 2
+
+
+def test_pre_start_cleanup_preserves_metadata_when_reuse_target_healthy(
+    tmp_path,
+):
+    """Direct guard: do not create port-occupied/no-metadata state."""
+    output_dir = tmp_path / "ws"
+    output_dir.mkdir(parents=True)
+    pid_file = output_dir / "vllm_8888.pid"
+    meta_file = output_dir / "vllm_8888.json"
+    pid_file.write_text("2147483646")
+    meta_file.write_text("{}")
+
+    executor = _executor(tmp_path / "base.yaml", tmp_path)
+    kill_calls = {"n": 0}
+
+    def fake_kill():
+        kill_calls["n"] += 1
+
+    with patch.object(
+        type(executor), "_port_healthy", return_value=True,
+    ), patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "_kill_stale_servers",
+        side_effect=fake_kill,
+    ):
+        executor._pre_start_cleanup(
+            pid_dir=output_dir, framework="vllm", port=8888,
+        )
+
+    assert kill_calls["n"] == 0
+    assert pid_file.exists()
+    assert meta_file.exists()
+
+
+def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path):
+    """The pre-start cleanup is best-effort: a raising _kill_stale_servers()
+    must not abort the run — the double-run proceeds and still succeeds."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+
+    def boom():
+        raise RuntimeError("proc scan blew up")
+
+    captured: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured)
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch.object(
+        type(executor), "_port_healthy", return_value=True,
+    ), patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "_kill_stale_servers",
+        side_effect=boom,
+    ), patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert state["calls"] == 2
+
+
+def test_pre_start_cleanup_skipped_when_single_round(tmp_path, monkeypatch):
+    """Single-round (double-run disabled) keeps legacy behaviour: the
+    pre-start deep clean is a double-run-only concern and must not fire."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+
+    kill_calls = {"n": 0}
+
+    def fake_kill():
+        kill_calls["n"] += 1
+
+    captured: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured)
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx({
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+    })
+
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "_kill_stale_servers",
+        side_effect=fake_kill,
+    ), patch(
+        "inference_optimizer.orchestrator.action_executors.baseline."
+        "run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert state["calls"] == 1
+    assert kill_calls["n"] == 0
+
+
 def test_teardown_lifecycle_server_removes_state_files(tmp_path):
     """The defensive teardown unlinks stale pid/meta files without raising."""
     executor = _executor(tmp_path / "base.yaml", tmp_path)
@@ -777,3 +1026,53 @@ def test_teardown_lifecycle_server_removes_state_files(tmp_path):
 
     assert not (pid_dir / "vllm_8888.pid").exists()
     assert not (pid_dir / "vllm_8888.json").exists()
+
+
+# -- #522: _classify_subprocess_error unit tests ----------------------------
+
+from inference_optimizer.orchestrator.action_executors.baseline import (
+    _classify_subprocess_error,
+)
+
+
+def test_classify_fast_exit_unknown_backend():
+    assert _classify_subprocess_error(
+        5.0, "ValueError: Unknown attention backend: 'ROCM_FLASH'"
+    ) == "fast_exit_arg_error"
+
+
+def test_classify_fast_exit_unrecognized_args():
+    assert _classify_subprocess_error(
+        2.0, "error: unrecognized arguments: --bogus-flag"
+    ) == "fast_exit_arg_error"
+
+
+def test_classify_slow_failure_not_arg_error():
+    """A slow failure (>30s) with the same stderr pattern must NOT be
+    classified as arg error — it could be a real inference crash."""
+    assert _classify_subprocess_error(
+        120.0, "ValueError: some runtime error"
+    ) == "subprocess_nonzero"
+
+
+def test_classify_fast_exit_without_pattern():
+    """A fast exit without arg-error patterns stays subprocess_nonzero."""
+    assert _classify_subprocess_error(
+        3.0, "Segmentation fault (core dumped)"
+    ) == "subprocess_nonzero"
+
+
+def test_classify_fast_runtime_value_error_not_arg_error():
+    """A generic fast runtime ValueError is not enough for arg-error routing."""
+    assert _classify_subprocess_error(
+        3.0, "ValueError: tensor shape mismatch during warmup"
+    ) == "subprocess_nonzero"
+
+
+def test_classify_value_error_with_argv_dump_not_arg_error():
+    """A command/argv dump containing flags is not arg validation by itself."""
+    assert _classify_subprocess_error(
+        3.0,
+        "ValueError: tensor shape mismatch during warmup\n"
+        "argv: vllm serve --model /models/foo --tp 8",
+    ) == "subprocess_nonzero"

@@ -668,9 +668,100 @@ class ProfileExecutor(BaselineExecutor):
             if isinstance(extra, dict):
                 extra["mn_round_restarted"] = True
 
-        # InferenceX patches now live in ``_after_materialize_config`` (run
-        # earlier) so they cover the exact checkout Magpie executes.
-        result = await super().__call__(ctx)
+        # NOTE: InferenceX patches (``ensure_benchmark_lib_patched`` and
+        # ``ensure_benchmark_serving_patched``) used to live here on the
+        # multi-node feature branch. Main moved them into the
+        # ``_after_materialize_config`` hook (run earlier in the
+        # materialize step) so the patch always covers the exact
+        # InferenceX checkout Magpie will execute, regardless of which
+        # subdirectory benchmark.inferencex_path resolves to. Removing
+        # the duplicate calls here keeps the patch idempotent (same
+        # behaviour) while letting the single-source-of-truth in
+        # ``_after_materialize_config`` carry the resolved-path
+        # validation.
+        # Multi-node dynamo only: the Dynamo frontend does not propagate
+        # /start_profile to the SSH-launched disagg workers, so torch
+        # profiling must be triggered directly on each worker's system
+        # server (/engine/start_profile). Bracket the Magpie benchmark with
+        # start/stop so traces land in the shared-FS round trace dir for
+        # TraceLens. The helper no-ops for RayJob / single-node and is
+        # fail-soft per worker. ``PROFILE_EXTRA_BODY`` (start_step/num_steps
+        # computed by _workload_envs) is the start_profile payload.
+        from ._multi_node_server_lifecycle import trigger_dynamo_engine_profile
+        prof_body: dict[str, Any] = {}
+        try:
+            import json as _json
+            parsed = _json.loads(os.environ.get("PROFILE_EXTRA_BODY") or "{}")
+            if isinstance(parsed, dict):
+                prof_body = parsed
+        except (ValueError, TypeError):
+            prof_body = {}
+        # The sglang disaggregated scheduler crashes
+        # (``TypeError: unsupported operand type(s) for +=: 'NoneType' and
+        # 'int'`` -> SIGQUIT, server disconnects, no trace) when
+        # start_profile carries the step-window / stage-split params that
+        # the single-node InferenceX PROFILE_EXTRA_BODY normally sets
+        # (``profile_by_stage`` / ``merge_profiles`` / ``num_steps`` /
+        # ``start_step``). Isolated reproduction: ``output_dir``-only =
+        # 8 traces written cleanly; any of the step/stage params = scheduler
+        # crash. So the dynamo engine-route path forwards ONLY ``output_dir``
+        # and bounds the trace by the start/stop wall-clock window instead.
+        _SAFE_PROFILE_KEYS = ("output_dir",)
+        prof_body = {
+            k: v for k, v in prof_body.items() if k in _SAFE_PROFILE_KEYS
+        }
+        # Pin the trace output dir explicitly. The disagg workers may not
+        # carry SGLANG_TORCH_PROFILER_DIR (baseline-time launches never set
+        # it and per-round restarts can resume rather than relaunch), so
+        # without output_dir sglang writes nowhere the sandbox can read ->
+        # roofline profile_no_trace. ``round_trace_root`` is the same
+        # shared-FS dir the post-bench trace scan reads (wekafs, mounted on
+        # the worker pods; verified writable from the worker).
+        if round_trace_root:
+            prof_body.setdefault("output_dir", round_trace_root)
+        # Bounded profiling window. Open-ended profiling for the whole
+        # Magpie run overflows the disagg scheduler's in-memory trace and
+        # crashes stop_profile ("Server disconnected", no trace) — verified:
+        # a 4s window writes 8 traces cleanly, a ~10min full-run window
+        # crashes the worker. num_steps would bound it but crashes the
+        # disagg scheduler too. So bound by WALL-CLOCK: after a warmup delay
+        # (let load reach steady state) profile a short fixed window
+        # concurrently with the full Magpie run (which still produces the
+        # throughput number), then stop. ``trigger_dynamo_engine_profile``
+        # no-ops for RayJob / single-node, so this is multi-node-dynamo only.
+        import asyncio as _asyncio
+        warmup_s = float(
+            os.environ.get("HYPERLOOM_MN_PROFILE_WARMUP_S", "60") or 60
+        )
+        window_s = float(
+            os.environ.get("HYPERLOOM_MN_PROFILE_WINDOW_S", "8") or 8
+        )
+        _prof_started = {"v": False}
+
+        async def _bounded_profile_window() -> None:
+            await _asyncio.sleep(warmup_s)
+            await trigger_dynamo_engine_profile("start", prof_body)
+            _prof_started["v"] = True
+            await _asyncio.sleep(window_s)
+            await trigger_dynamo_engine_profile("stop")
+            _prof_started["v"] = False
+
+        prof_task = _asyncio.create_task(_bounded_profile_window())
+        try:
+            result = await super().__call__(ctx)
+        finally:
+            # Magpie ended (or raised): wind the window task down and make
+            # sure profiling is never left running open-ended.
+            if not prof_task.done():
+                prof_task.cancel()
+                try:
+                    await prof_task
+                except (_asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+            if _prof_started.get("v"):
+                # start fired but stop didn't (window task cancelled mid-run
+                # because Magpie finished first) -> ensure a matching stop.
+                await trigger_dynamo_engine_profile("stop")
 
         # Augment with trace_dir. Multi-node: traces live at the round-scoped
         # wekafs dir we restarted with (not $HYPERLOOM_MN_PROFILE_TRACE_DIR,
@@ -690,7 +781,30 @@ class ProfileExecutor(BaselineExecutor):
                 result["trace_dir"] = str(trace_dir)
                 result["trace_files"] = [str(p) for p in trace_files]
                 if trace_files:
-                    result["main_trace_path"] = str(trace_files[0])
+                    # Multi-node only: the shared round dir can hold more
+                    # than one profiling batch (e.g. a tiny warmup-window
+                    # capture that recorded CPU-only activity PLUS the real
+                    # GPU-rich capture). Handing TraceLens the CPU-only one
+                    # fails with "Trace contains zero GPU kernel events".
+                    # GPU-rich traces are orders of magnitude larger
+                    # (hundreds of MB vs ~250 KB CPU-only), so select the
+                    # LARGEST file as the main trace rather than the
+                    # earliest-by-name. Single-node (elif below) is
+                    # untouched — it never produces a competing CPU-only
+                    # batch.
+                    def _safe_size(p: Path) -> int:
+                        try:
+                            return p.stat().st_size
+                        except OSError:
+                            return 0
+                    main_trace = max(trace_files, key=_safe_size)
+                    result["main_trace_path"] = str(main_trace)
+                    log.info(
+                        "profile_executor: multi-node main trace selected by "
+                        "size: %s (%d bytes; %d candidate traces this round)",
+                        main_trace.name, _safe_size(main_trace),
+                        len(trace_files),
+                    )
                 elif all_files:
                     log.warning(
                         "profile_executor: multi-node trace dir %s has "
