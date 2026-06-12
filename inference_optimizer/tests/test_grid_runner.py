@@ -998,3 +998,26 @@ class TestDedupVllmServerArgs:
     def test_distinct_single_value_flags_untouched(self):
         raw = "--max-num-seqs 256 --block-size 16 --kv-cache-dtype fp8"
         assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+
+    def test_mixed_equals_and_space_forms_dedup_last_wins(self):
+        # `--flag value` (YAML base) then `--flag=value` (variant): last wins.
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend ROCM_AITER_FA --attention-backend=ROCM_FLASH",
+            "vllm",
+        )
+        assert out == "--attention-backend=ROCM_FLASH"
+
+    def test_mixed_equals_then_space_form_dedup_last_wins(self):
+        # Reverse order: `--flag=value` then `--flag value`.
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend=ROCM_AITER_FA --attention-backend ROCM_FLASH",
+            "vllm",
+        )
+        assert out == "--attention-backend ROCM_FLASH"
+
+    def test_three_occurrences_keep_only_last(self):
+        out = _grid_runner.dedup_vllm_server_args(
+            "--attention-backend A --attention-backend B --attention-backend C",
+            "vllm",
+        )
+        assert out == "--attention-backend C"

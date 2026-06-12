@@ -222,6 +222,81 @@ def test_is_stale_proxy_url_matches_legacy_only():
     assert not cli._is_stale_proxy_url(None)
 
 
+# _sync_geak_config_base_url (#521): GEAK reads $GEAK_CONFIG yaml, not env.
+_GEAK_CFG_TEMPLATE = """model:
+  model_class: litellm
+  model_name: openai/claude-opus-4-7
+  api_key: sk-test
+  base_url: {url}
+  model_kwargs:
+    max_tokens: 16384
+run:
+  mode: full
+"""
+
+
+def test_sync_geak_config_rewrites_stale_base_url(tmp_path):
+    """An install-time gateway URL is rewritten to the operator tunnel."""
+    cfg = tmp_path / "geak.yaml"
+    cfg.write_text(
+        _GEAK_CFG_TEMPLATE.format(
+            url="https://core42.example-internal-host.invalid/api/v1/llm-proxy/v1",
+        ),
+        encoding="utf-8",
+    )
+    tunnel = "https://127.0.0.1:18444/api/v1/llm-proxy/v1"
+
+    changed = cli._sync_geak_config_base_url(str(cfg), tunnel)
+
+    assert changed is True
+    text = cfg.read_text(encoding="utf-8")
+    assert f"base_url: {tunnel}" in text
+    assert "core42.example-internal-host.invalid" not in text
+    # Other keys untouched.
+    assert "model_class: litellm" in text
+    assert "api_key: sk-test" in text
+
+
+def test_sync_geak_config_noop_when_already_in_sync(tmp_path):
+    cfg = tmp_path / "geak.yaml"
+    url = "https://127.0.0.1:18444/api/v1/llm-proxy/v1"
+    cfg.write_text(_GEAK_CFG_TEMPLATE.format(url=url), encoding="utf-8")
+    before = cfg.read_text(encoding="utf-8")
+
+    assert cli._sync_geak_config_base_url(str(cfg), url) is False
+    assert cfg.read_text(encoding="utf-8") == before
+
+
+def test_sync_geak_config_missing_file_is_safe(tmp_path):
+    missing = tmp_path / "nope.yaml"
+    assert cli._sync_geak_config_base_url(str(missing), "https://x/v1") is False
+
+
+def test_sync_geak_config_no_base_url_line_is_safe(tmp_path):
+    cfg = tmp_path / "geak.yaml"
+    cfg.write_text("model:\n  model_class: litellm\n", encoding="utf-8")
+    assert cli._sync_geak_config_base_url(str(cfg), "https://x/v1") is False
+
+
+def test_sync_geak_config_empty_args_are_safe(tmp_path):
+    cfg = tmp_path / "geak.yaml"
+    cfg.write_text(_GEAK_CFG_TEMPLATE.format(url="https://x/v1"), encoding="utf-8")
+    assert cli._sync_geak_config_base_url("", "https://y/v1") is False
+    assert cli._sync_geak_config_base_url(str(cfg), "") is False
+
+
+def test_sync_geak_config_preserves_url_with_special_chars(tmp_path):
+    """A replacement URL with regex-special chars must land verbatim."""
+    cfg = tmp_path / "geak.yaml"
+    cfg.write_text(
+        _GEAK_CFG_TEMPLATE.format(url="https://old/v1"), encoding="utf-8",
+    )
+    weird = r"https://host/api\g<0>/v1"
+
+    assert cli._sync_geak_config_base_url(str(cfg), weird) is True
+    assert f"base_url: {weird}" in cfg.read_text(encoding="utf-8")
+
+
 # _ensure_python_sdks
 class _RecordingRun:
     """Test double for subprocess.run that records calls and replays a script."""
