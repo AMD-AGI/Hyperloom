@@ -4341,10 +4341,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             # receipt if it already ran), so a step-2.5 failure still gets a
             # final receipt spliced in.
             try:
-                from .orchestrator.trace.langfuse_emitter import flush_session
+                from .orchestrator.trace.langfuse_emitter import (
+                    flush_session,
+                    record_session_breakdown,
+                )
                 flush_session(session_dir)
                 from .breakdown import patch_breakdown_langfuse
                 patch_breakdown_langfuse(session_dir)
+                record_session_breakdown(session_dir)
             except Exception:  # noqa: BLE001
                 log.debug("langfuse flush_session (post-sequencer) failed", exc_info=True)
         else:
@@ -4374,10 +4378,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             # HYPERLOOM_LANGFUSE_ENABLE + LANGFUSE_* are set; idempotent if the
             # CLOSE sequencer already flushed (re-writes the receipt only).
             try:
-                from .orchestrator.trace.langfuse_emitter import flush_session
+                from .orchestrator.trace.langfuse_emitter import (
+                    flush_session,
+                    record_session_breakdown,
+                )
                 flush_session(session_dir)
                 from .breakdown import patch_breakdown_langfuse
                 patch_breakdown_langfuse(session_dir)
+                record_session_breakdown(session_dir)
             except Exception:  # noqa: BLE001
                 log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
 
@@ -5615,7 +5623,141 @@ def _build_parser() -> argparse.ArgumentParser:
              "back-compat smoke tests; production should stay strict.",
     )
 
+    rec = sub.add_parser(
+        "recover-session",
+        help="Rebuild + push the session_breakdown for a session that exited "
+             "abnormally (crash / SIGKILL) so its breakdown lands on Langfuse.",
+    )
+    rec.add_argument(
+        "--session-dir", type=Path, required=True,
+        help="Session directory of the crashed run (contains state.json / "
+             "reports/trace/ and the recorder fragments).",
+    )
+    rec.add_argument(
+        "--force", action="store_true",
+        help="Re-run even when the session already looks complete "
+             "(close_sequence_done / breakdown already recorded).",
+    )
+    rec.add_argument(
+        "--backfill-trace", action="store_true",
+        help="Also replay reports/trace/llm_calls.jsonl as Langfuse "
+             "generations. Use ONLY when the live emitter never ran for this "
+             "session (e.g. it was disabled during the run); otherwise it "
+             "duplicates generations already pushed live.",
+    )
+
     return p
+
+
+def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
+    """Inspect on-disk artifacts to judge whether a session finished cleanly.
+
+    Pure read of state.json / session_breakdown.json / langfuse_receipt.json.
+    Returns flags used by :func:`_run_recover_session` to decide whether the
+    session still needs a (re)build + Langfuse push.
+    """
+    import json
+
+    from .breakdown import BREAKDOWN_FILENAME
+
+    state_path = session_dir / "state.json"
+    close_done = False
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            close_done = bool((state or {}).get("close_sequence_done"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    breakdown_exists = (session_dir / BREAKDOWN_FILENAME).exists()
+
+    from .orchestrator.trace.langfuse_emitter import read_receipt
+    receipt = read_receipt(session_dir) or {}
+    counts = receipt.get("counts") or {}
+    breakdown_recorded = bool(counts.get("breakdown_recorded"))
+    counts_final = bool(receipt.get("counts_final"))
+
+    return {
+        "close_done": close_done,
+        "breakdown_exists": breakdown_exists,
+        "breakdown_recorded": breakdown_recorded,
+        "counts_final": counts_final,
+        "looks_complete": close_done and breakdown_recorded,
+    }
+
+
+def _run_recover_session(args: argparse.Namespace) -> int:
+    """Offline recovery for a session that exited abnormally.
+
+    Rebuilds ``session_breakdown.json`` from the crash-time recorder fragments
+    (the merge step), reconciles + flushes Langfuse, splices the post-flush
+    receipt into the breakdown, and attaches the full breakdown JSON to the
+    session's trace. Idempotent across processes (guarded by the persisted
+    Langfuse receipt), so re-running is safe.
+    """
+    session_dir = args.session_dir.resolve()
+    if not session_dir.is_dir():
+        print(f"ERROR: session dir not found: {session_dir}", file=sys.stderr)
+        return 2
+
+    status = _session_recovery_status(session_dir)
+    print(
+        f"recover-session   : {session_dir}\n"
+        f"  close_sequence_done={status['close_done']} "
+        f"breakdown_exists={status['breakdown_exists']} "
+        f"breakdown_recorded={status['breakdown_recorded']} "
+        f"counts_final={status['counts_final']}"
+    )
+    if status["looks_complete"] and not args.force:
+        print(
+            "  -> already complete (breakdown built and recorded to Langfuse); "
+            "pass --force to rebuild anyway."
+        )
+        return 0
+
+    # 1) Rebuild/merge the breakdown from whatever fragments survived the crash.
+    try:
+        from .breakdown import write_breakdown_json
+        breakdown_path = write_breakdown_json(session_dir)
+        print(f"  rebuilt breakdown : {breakdown_path}")
+    except Exception:  # noqa: BLE001
+        log.exception("recover-session: breakdown rebuild failed")
+        return 1
+
+    # 2) Reconcile + flush Langfuse, splice the final receipt, attach the SBD.
+    try:
+        from .breakdown import patch_breakdown_langfuse
+        from .orchestrator.trace.langfuse_emitter import (
+            flush_session,
+            record_session_breakdown,
+        )
+        flush_session(session_dir)
+        patch_breakdown_langfuse(session_dir)
+        record_session_breakdown(session_dir)
+        print("  langfuse          : flushed + breakdown attached")
+    except Exception:  # noqa: BLE001
+        log.exception("recover-session: langfuse push failed (non-fatal)")
+
+    # 3) Optional full generation replay (off by default; duplicates if the
+    #    live emitter already ran for this session).
+    if args.backfill_trace:
+        try:
+            from .scripts.backfill_langfuse import build_plan, ingest
+            rc = ingest(build_plan(session_dir))
+            print(f"  trace backfill    : rc={rc}")
+        except Exception:  # noqa: BLE001
+            log.exception("recover-session: trace backfill failed (non-fatal)")
+
+    # 4) Re-package the artifact bundle so /workspace carries the recovered SBD.
+    try:
+        from .breakdown import package_session_artifacts
+        pkg_path = package_session_artifacts(session_dir)
+        if pkg_path is not None:
+            print(f"  artifact package  : {pkg_path}")
+    except Exception:  # noqa: BLE001
+        log.exception("recover-session: artifact package failed (non-fatal)")
+
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -5659,6 +5801,8 @@ def main(argv: list[str] | None = None) -> int:
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))
         return asyncio.run(_run_optimize(args))
+    if args.command == "recover-session":
+        return _run_recover_session(args)
     parser.print_help()
     return 2
 
