@@ -86,7 +86,24 @@ def assemble_parts(
 
     _compose_critic_robustness(out)
     _compose_kernel_journey(out)
+    _compose_versions(out)
     return out
+
+
+def _compose_versions(out: dict[str, Any]) -> None:
+    """Fold the ``versions`` item substream into a top-level ``{tool: meta}``
+    map (last write per tool wins; the substream is already deduped by tool key
+    at record time). No-op when nothing was recorded."""
+    rows = out.get("versions")
+    if not isinstance(rows, list):
+        return
+    merged: dict[str, Any] = {}
+    for r in rows:
+        if isinstance(r, dict):
+            tool = str(r.get("tool") or "").lower()
+            if tool:
+                merged[tool] = r
+    out["versions"] = merged
 
 
 def _compose_critic_robustness(out: dict[str, Any]) -> None:
@@ -174,6 +191,7 @@ def _compose_kernel_journey(out: dict[str, Any]) -> None:
             "gpu_pct":          disc.get("gpu_pct"),
             "bound_type":       str(disc.get("bound_type") or ""),
             "source_file":      disc.get("source_file"),
+            "micro_speedup":    _best_micro_speedup(atts),
             "discovery":        disc,
             "dispatch":         disp,
             "backend_attempts": atts,
@@ -193,6 +211,27 @@ def _compose_kernel_journey(out: dict[str, Any]) -> None:
         "discovery_runs": discovery_runs,
         "kernels":        kernels,
     }
+
+
+def _best_micro_speedup(attempts: list[dict[str, Any]]) -> float | None:
+    """Best (max) micro_speedup across a kernel's attempts, or None.
+
+    Surfaces the kernel-level achieved speedup at the journey-entry top level so
+    the dashboard can correlate it with ``e2e.e2e_gain_pct`` without digging
+    through the attempt ladder.
+    """
+    best: float | None = None
+    for att in attempts:
+        if not isinstance(att, dict):
+            continue
+        v = att.get("micro_speedup")
+        try:
+            f = float(v) if v is not None else None
+        except (TypeError, ValueError):
+            f = None
+        if f is not None and (best is None or f > best):
+            best = f
+    return best
 
 
 def _kernel_outcome(

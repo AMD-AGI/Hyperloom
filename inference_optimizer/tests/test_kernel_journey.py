@@ -10,12 +10,28 @@ substream was recorded.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from inference_optimizer.breakdown.recorder import (
     assemble_parts,
     instrument,
 )
+
+
+def _init_git_repo(path: Path) -> str:
+    for argv in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+        ["git", "commit", "--allow-empty", "-q", "-m", "init"],
+    ):
+        subprocess.run(argv, cwd=path, check=True, capture_output=True)
+    out = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--short", "HEAD"],
+        check=True, capture_output=True, text=True,
+    )
+    return out.stdout.strip()
 
 
 def test_kernel_journey_absent_without_substreams(tmp_path: Path) -> None:
@@ -103,3 +119,141 @@ def test_kernel_backend_result_keeps_retries_across_runs(tmp_path: Path) -> None
     out = assemble_parts(tmp_path)
     attempts = out["kernel_journey"]["kernels"][0]["backend_attempts"]
     assert len(attempts) == 2
+
+
+def test_kernel_backend_result_records_pre_dispatch_failure(tmp_path: Path) -> None:
+    # Backend failed before running any attempt (empty attempts + failed status)
+    # -> a synthetic FAILED marker so the failure is visible in kernel_journey.
+    instrument.record_kernel_backend_result(tmp_path, {
+        "kernel_id": "k001", "run_id": "r1", "attempts": [],
+        "status": "failed", "error_class": "non_reusable_kernel",
+        "error": "empty kernel shape", "backend": "geak",
+    })
+    out = assemble_parts(tmp_path)
+    attempts = out["kernel_journey"]["kernels"][0]["backend_attempts"]
+    assert len(attempts) == 1
+    att = attempts[0]
+    assert att["decision"] == "FAILED"
+    assert att["pre_dispatch_failure"] is True
+    assert att["error_class"] == "non_reusable_kernel"
+    assert att["backend"] == "geak"
+    # With an attempt present the kernel reads as "attempted", not "skipped".
+    assert out["kernel_journey"]["kernels"][0]["outcome"] == "attempted"
+
+
+def test_backend_attempt_maps_kernel_agent_field_names(tmp_path: Path) -> None:
+    # kernel-agent emits elapsed_s / created_at / error_type and keeps the
+    # achieved speedup at the kernel level in verification (best attempt). The
+    # recorder must map those onto the journey attempt + entry.
+    instrument.record_kernel_backend_result(tmp_path, {
+        "kernel_id": "k001", "run_id": "r1",
+        "verification": {"micro_speedup": 1.42, "best_attempt_id": "a1"},
+        "attempts": [
+            {"attempt_id": "a1", "backend": "geak", "status": "completed",
+             "elapsed_s": 87.5, "created_at": "2026-06-12T00:00:00Z"},
+            {"attempt_id": "a2", "backend": "claude", "status": "timeout",
+             "error_type": "timeout", "elapsed_s": 12.0},
+        ],
+    })
+    out = assemble_parts(tmp_path)
+    entry = out["kernel_journey"]["kernels"][0]
+    a1, a2 = entry["backend_attempts"]
+    assert a1["duration_sec"] == 87.5
+    assert a1["ts"] == "2026-06-12T00:00:00Z"
+    # kernel-level best speedup stamped onto the adopted attempt.
+    assert a1["micro_speedup"] == 1.42
+    assert a2["error_class"] == "timeout"
+    # Entry exposes the best achieved speedup for the e2e correlation.
+    assert entry["micro_speedup"] == 1.42
+
+
+def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
+    # Discovery + backend recording feed the top-level versions map (one object
+    # per tool, keyed by tool name), and no longer inline `tool` per element.
+    instrument.record_kernel_discovery(
+        tmp_path, source="tracelens", status="success",
+        hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 10.0}],
+        scan={},
+    )
+    instrument.record_kernel_backend_result(tmp_path, {
+        "kernel_id": "k1", "run_id": "r1", "attempts": [
+            {"attempt_id": "a1", "backend": "geak", "status": "completed"},
+        ],
+    })
+    out = assemble_parts(tmp_path)
+    versions = out["versions"]
+    assert isinstance(versions, dict)
+    assert set(versions) >= {"tracelens", "geak"}
+    assert versions["geak"]["tool"] == "geak"
+    # Inline tool metadata is gone from the per-element shapes.
+    assert "tool" not in out["kernel_journey"]["discovery_runs"][0]
+    assert "tool" not in out["kernel_journey"]["kernels"][0]["backend_attempts"][0]
+
+
+def test_discovery_run_carries_duration(tmp_path: Path) -> None:
+    instrument.record_kernel_discovery(
+        tmp_path, source="tracelens", status="success",
+        hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 10.0}],
+        scan={}, duration_sec=4.2,
+    )
+    out = assemble_parts(tmp_path)
+    assert out["kernel_journey"]["discovery_runs"][0]["duration_sec"] == 4.2
+
+
+def test_tool_version_probe_git_strategies(tmp_path: Path) -> None:
+    sha = _init_git_repo(tmp_path)
+    # geak -> git short SHA (NOT pip mini-swe-agent); commit == version.
+    meta = instrument._tool_metadata("geak", root=str(tmp_path))
+    assert meta["commit"] == sha
+    assert meta["version"] == sha
+    # tracelens -> git describe (--always falls back to the short sha here).
+    meta_tl = instrument._tool_metadata("tracelens", root=str(tmp_path))
+    assert meta_tl["version"]  # non-empty describe output
+    # A caller-supplied version always wins over the probe.
+    meta_explicit = instrument._tool_metadata(
+        "geak", root=str(tmp_path), version="v9.9",
+    )
+    assert meta_explicit["version"] == "v9.9"
+
+
+def test_tool_version_probe_cmd_and_dist() -> None:
+    # CLI strategy: python3 --version is always available in CI.
+    assert instrument._probe_tool_version(
+        ("cmd", ("python3", "--version")), "",
+    ).lower().startswith("python")
+    # dist strategy resolves an installed package and rejects bogus 0.0.0.
+    assert instrument._dist_version(("pytest",))
+    assert instrument._dist_version(("definitely-not-a-real-dist-xyz",)) == ""
+
+
+def test_attach_kernel_roofline_enriches_journey() -> None:
+    from inference_optimizer.breakdown.exporter import _attach_kernel_roofline
+
+    kernel_journey = {
+        "discovery_runs": [],
+        "kernels": [{
+            "kernel_id": "k001", "name": "moe", "gpu_pct": 42.0,
+            "bound_type": "",
+            "discovery": {
+                "kernel_id": "k001", "bound_type": "",
+                "arithmetic_intensity": None, "efficiency_percent": None,
+            },
+            "backend_attempts": [],
+        }],
+    }
+    kernel_roofline = {
+        "kernels": [{
+            "kernel_id": "k001", "name": "moe", "bound_type": "memory",
+            "arithmetic_intensity": 3.5, "flops_per_byte": 2.1,
+            "efficiency_percent": 61.0, "rocprof_roofline": {"foo": "bar"},
+        }],
+    }
+    _attach_kernel_roofline(kernel_journey, kernel_roofline)
+    entry = kernel_journey["kernels"][0]
+    assert entry["roofline"]["arithmetic_intensity"] == 3.5
+    assert entry["roofline"]["rocprof_roofline"] == {"foo": "bar"}
+    # Header + discovery numeric fields backfilled from roofline.
+    assert entry["bound_type"] == "memory"
+    assert entry["discovery"]["bound_type"] == "memory"
+    assert entry["discovery"]["arithmetic_intensity"] == 3.5
+    assert entry["discovery"]["efficiency_percent"] == 61.0

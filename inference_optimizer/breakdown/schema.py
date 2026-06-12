@@ -524,13 +524,21 @@ class KernelToolMetadata(TypedDict, total=False):
 
 
 class DiscoveredHotKernel(TypedDict, total=False):
-    """One hot kernel surfaced by a discovery run (projected onto the journey)."""
+    """One hot kernel surfaced by a discovery run (projected onto the journey).
+
+    The roofline numeric fields (``arithmetic_intensity`` / ``flops_per_byte``
+    / ``efficiency_percent``) are backfilled at export from ``kernel_roofline``
+    when discovery surfaced them empty (roofline enrichment runs after the
+    discovery record is written).
+    """
     kernel_id: str
     name: str
     gpu_pct: float | None
     time_ms: float | None
     bound_type: str
     arithmetic_intensity: float | None
+    flops_per_byte: float | None
+    efficiency_percent: float | None
     reusable_native_kernel: bool
     source_file: str | None
     recommended_backends: list[str]
@@ -544,17 +552,21 @@ class KernelDiscoveryRun(TypedDict, total=False):
         source (str): Discovery source (``tracelens`` / ``roofline`` / ...).
         status (str): Run status (``success`` / ``failed``).
         ts (str): ISO UTC timestamp of the run.
-        tool (KernelToolMetadata): Provenance of the discovery tool.
+        duration_sec (float | None): Wall-clock seconds the discovery run took
+            (source efficiency), or None.
         scan (dict[str, Any]): Scan inputs/outputs (``splitter_mode`` /
             ``trace_dir`` / ``candidates_path`` / ``trace_report_path``).
         hot_kernel_count (int): Number of hot kernels surfaced.
         hot_kernels (list[DiscoveredHotKernel]): The surfaced hot kernels.
         error (str | None): Failure text, or None on success.
+
+    The discovery tool's authoritative version is not inlined here; it lives in
+    the top-level ``versions`` map keyed by ``source``.
     """
     source: str
     status: str
     ts: str
-    tool: KernelToolMetadata
+    duration_sec: float | None
     scan: dict[str, Any]
     hot_kernel_count: int
     hot_kernels: list[DiscoveredHotKernel]
@@ -599,8 +611,14 @@ class KernelBackendAttempt(TypedDict, total=False):
         correctness_passed (bool | None): Whether correctness passed, or None.
         optimized_files (list[str]): Optimized artifact paths.
         error (str | None): Failure text, or None.
+        error_class (str | None): Failure classification (pre-dispatch markers).
         duration_sec (float | None): Wall-clock seconds the attempt ran, or None.
-        tool (KernelToolMetadata): Provenance of the backend tool.
+        pre_dispatch_failure (bool): True for a synthetic marker recorded when a
+            backend failed before running any real attempt (e.g. geak rejecting
+            an empty/non-reusable kernel shape).
+
+    The backend tool's authoritative version is not inlined here; it lives in
+    the top-level ``versions`` map keyed by ``backend``.
     """
     kernel_id: str
     attempt_id: str
@@ -615,8 +633,9 @@ class KernelBackendAttempt(TypedDict, total=False):
     correctness_passed: bool | None
     optimized_files: list[str]
     error: str | None
+    error_class: str | None
     duration_sec: float | None
-    tool: KernelToolMetadata
+    pre_dispatch_failure: bool
 
 
 class KernelE2E(TypedDict, total=False):
@@ -654,10 +673,16 @@ class KernelJourneyEntry(TypedDict, total=False):
         gpu_pct (float | None): Share of total GPU time (from discovery), or None.
         bound_type (str): Bottleneck class (from discovery).
         source_file (str | None): Source file (from discovery), or None.
+        micro_speedup (float | None): Best achieved micro-benchmark speedup
+            across attempts (kernel-level), or None. Pair with
+            ``e2e.e2e_gain_pct`` for the speedup-vs-e2e correlation.
         discovery (DiscoveredHotKernel): Stage-1 discovery snapshot.
         dispatch (KernelDispatch): Stage-2 dispatch decision.
         backend_attempts (list[KernelBackendAttempt]): Stage-3 backend attempts.
         e2e (KernelE2E): Stage-4 end-to-end integrate outcome.
+        roofline (dict[str, Any]): A copy of the matching ``kernel_roofline``
+            entry (arithmetic intensity / efficiency / bound type / rocprof
+            roofline), attached at export. Absent when no roofline ran.
         outcome (str): Coarse rollup (``adopted`` / ``reverted`` / ``attempted``
             / ``dispatched`` / ``skipped`` / ``discovered``).
     """
@@ -666,10 +691,12 @@ class KernelJourneyEntry(TypedDict, total=False):
     gpu_pct: float | None
     bound_type: str
     source_file: str | None
+    micro_speedup: float | None
     discovery: DiscoveredHotKernel
     dispatch: KernelDispatch
     backend_attempts: list[KernelBackendAttempt]
     e2e: KernelE2E
+    roofline: dict[str, Any]
     outcome: str
 
 
@@ -1757,6 +1784,11 @@ class SessionBreakdown(TypedDict, total=False):
     # substreams; empty {} on sessions that predate it, so v1/v2 readers that
     # don't know it simply ignore it.
     kernel_journey: KernelJourney
+    # Authoritative external-tool versions, one ``KernelToolMetadata`` object
+    # per tool (geak / tracelens / claude / codex / ...), keyed by tool name.
+    # Additive optional section recorded at author time; empty {} on sessions
+    # that predate the recorder.
+    versions: dict[str, KernelToolMetadata]
 
     warnings: list[str]
     source_files: SourceFiles

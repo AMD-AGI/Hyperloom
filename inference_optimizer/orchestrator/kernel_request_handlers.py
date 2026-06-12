@@ -1325,7 +1325,9 @@ async def trace_analyze_handler(
         cmd += ["--dry-run"]
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
 
+    _disc_started = time.monotonic()
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
+    _disc_duration_sec = round(time.monotonic() - _disc_started, 3)
     result = _shape_tool_result(rc, stdout, stderr)
     artifacts = result.get("artifact_paths") if isinstance(result, dict) else None
     if isinstance(artifacts, dict) and artifacts.get("kernel_candidates"):
@@ -1398,8 +1400,10 @@ async def trace_analyze_handler(
                     "candidates_path":    str(result.get("candidates_path") or ""),
                     "trace_report_path":  str(result.get("trace_report_path") or ""),
                 },
-                tool_root=str(HYPERLOOM_KERNEL_AGENT_ROOT or "") or None,
-                tool_root_env=_KERNEL_AGENT_ROOT_ENV,
+                # tracelens version/commit is read from $TRACELENS_ROOT (its
+                # own checkout), resolved by the recorder's tool registry; we
+                # don't pin it to the kernel-agent root here.
+                duration_sec=_disc_duration_sec,
                 error=(str(result.get("error") or "") or None
                        if str(result.get("status") or "") == "failed" else None),
             )

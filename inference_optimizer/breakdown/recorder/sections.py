@@ -57,6 +57,10 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "kernel_dispatch":             "item",  # one per kernel: dispatched? which backends?
     "kernel_backend_result":       "item",  # one per backend attempt (geak/oob)
     "kernel_e2e":                  "item",  # one per kernel: e2e integrate gain
+    # Authoritative external-tool versions (geak/tracelens/claude/codex/...),
+    # one item per tool (idempotent by tool name); folded into the top-level
+    # ``versions`` map at assembly.
+    "versions":                    "item",
 }
 
 # Sections computed at finalize from in-memory state, never written as

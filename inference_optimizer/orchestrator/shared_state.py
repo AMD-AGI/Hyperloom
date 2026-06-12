@@ -1423,7 +1423,23 @@ class SharedState:
                     _sel = result.get("selected_backends") or result.get("backends")
                     if isinstance(_sel, list):
                         _backends = [str(b).lower() for b in _sel if b]
-                _dispatched = bool(_attempts)
+                # A backend that failed before dispatching attempts (e.g. geak
+                # rejecting an empty/non-reusable kernel shape) still counts as
+                # dispatched: the backend was invoked. Mirror the failure-detect
+                # used by record_kernel_backend_result so the synthetic FAILED
+                # attempt and the dispatch flag stay consistent.
+                _status = str(result.get("status") or "").lower()
+                _err_class = str(result.get("error_class") or "")
+                _decision = str(
+                    (result.get("proposal") or {}).get("decision") or "").upper()
+                _failed_predispatch = (not _attempts) and (
+                    _status in {"failed", "error", "crashed", "timeout"}
+                    or (_decision == "REVERT" and bool(_err_class))
+                )
+                if _failed_predispatch and not _backends:
+                    _b = str(result.get("backend") or "").lower() or "geak"
+                    _backends = [_b]
+                _dispatched = bool(_attempts) or _failed_predispatch
                 instrument.record_kernel_dispatch(
                     sdir,
                     kernel_id=_kid,

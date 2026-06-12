@@ -404,23 +404,97 @@ def _to_bool(value: Any) -> bool | None:
     return None
 
 
-# Cache of resolved tool metadata, keyed by the resolved root dir. The git
-# probe is a one-shot per root: it never re-runs in the hot path.
+# Cache of resolved tool metadata, keyed by ``tool:root_dir``. The git/CLI/pip
+# probes are a one-shot per key: they never re-run in the hot path.
 _TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
 
+# Per-tool "authoritative version" recipe. ``root_env`` holds the install root
+# (used for the commit probe and the git-based version strategies). ``version``
+# picks how the human version is derived:
+#   * "git_describe" -> ``git describe --tags --always --dirty`` of the root
+#   * "git_short"    -> ``git rev-parse --short HEAD`` of the root (== commit)
+#   * ("cmd", argv)  -> first line of ``argv --version`` style CLI output
+#   * ("dist", names)-> importlib.metadata version of the first matching dist
+# Notes (verified on-cluster): GEAK's version is its git SHA, NOT the pip
+# ``mini-swe-agent`` (that's the upstream core); InferenceX is git-only (no pip
+# package); TraceLens reads best as ``git describe``; OOB sub-agents report via
+# their npm CLIs (codex/claude), and the OOB harness itself via ``oob-mcp-server``.
+_TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
+    "tracelens":    {"root_env": "TRACELENS_ROOT",            "version": "git_describe"},
+    "geak":         {"root_env": "GEAK_ROOT",                 "version": "git_short"},
+    "mini":         {"root_env": "GEAK_ROOT",                 "version": "git_short"},
+    "geak-gaagent": {"root_env": "GEAK_ROOT",                 "version": "git_short"},
+    "claude":       {"root_env": "",                          "version": ("cmd", ("claude", "--version"))},
+    "codex":        {"root_env": "",                          "version": ("cmd", ("codex", "--version"))},
+    "oob":          {"root_env": "",                          "version": ("dist", ("oob-mcp-server",))},
+    "inferencex":   {"root_env": "INFERENCEX_PATH",           "version": "git_short"},
+    "kernel_agent": {"root_env": "HYPERLOOM_KERNEL_AGENT_ROOT", "version": "git_short"},
+}
 
-def _git_short_commit(root: Path) -> str:
-    """Best-effort ``git rev-parse --short HEAD`` for ``root`` (never raises)."""
+
+def _run_first_line(argv: list[str]) -> str:
+    """Run ``argv`` and return the trimmed first output line (never raises)."""
     import subprocess  # local: keep module import cost off the common path
 
     try:
         out = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=3, check=False,
+            argv, capture_output=True, text=True, timeout=3, check=False,
         )
-        return out.stdout.strip() if out.returncode == 0 else ""
     except Exception:  # noqa: BLE001
         return ""
+    if out.returncode != 0:
+        return ""
+    text = (out.stdout or "").strip() or (out.stderr or "").strip()
+    return text.splitlines()[0].strip()[:120] if text else ""
+
+
+def _git_short_commit(root: Path) -> str:
+    """Best-effort ``git rev-parse --short HEAD`` for ``root`` (never raises)."""
+    return _run_first_line(
+        ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+    )
+
+
+def _git_describe(root: Path) -> str:
+    """Best-effort ``git describe --tags --always --dirty`` (never raises)."""
+    return _run_first_line(
+        ["git", "-C", str(root), "describe", "--tags", "--always", "--dirty"],
+    )
+
+
+def _dist_version(names: tuple[str, ...]) -> str:
+    """First resolvable ``importlib.metadata`` version among ``names`` ("" if none)."""
+    try:
+        from importlib.metadata import version as _dist_ver
+    except Exception:  # noqa: BLE001
+        return ""
+    for name in names:
+        try:
+            v = str(_dist_ver(name) or "").strip()
+        except Exception:  # noqa: BLE001
+            continue
+        # Stale ``UNKNOWN.egg-info`` can masquerade as 0.0.0; reject it.
+        if v and v != "0.0.0":
+            return v
+    return ""
+
+
+def _probe_tool_version(strategy: Any, root_dir: str) -> str:
+    """Resolve a tool's human version per its provenance ``strategy``."""
+    try:
+        if strategy == "git_describe":
+            return _git_describe(Path(root_dir)) if root_dir else ""
+        if strategy == "git_short":
+            return _git_short_commit(Path(root_dir)) if root_dir else ""
+        if isinstance(strategy, tuple) and len(strategy) == 2:
+            kind, arg = strategy
+            if kind == "cmd":
+                return _run_first_line(list(arg))
+            if kind == "dist":
+                return _dist_version(tuple(arg))
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
 
 
 def _tool_metadata(
@@ -432,15 +506,23 @@ def _tool_metadata(
 ) -> dict[str, Any]:
     """Resolve ``{tool, root_dir, commit, version}`` for an external tool.
 
-    ``root`` (explicit) wins over ``root_env`` (an env var holding the path).
-    The commit is a cached ``git rev-parse`` of the root; ``version`` is passed
-    through verbatim when the tool already surfaced its own. All best-effort:
-    a missing root just yields empty strings.
+    Root resolution: explicit ``root`` > caller ``root_env`` > the tool's
+    registered ``root_env``. ``commit`` is a cached ``git rev-parse`` of the
+    root. ``version`` is the caller-supplied value when the tool already
+    surfaced its own, else a cached per-tool probe (git describe / CLI
+    ``--version`` / pip dist) following ``_TOOL_PROVENANCE``. All best-effort:
+    nothing here ever raises into the optimizer.
     """
     import os
 
-    root_dir = str(root or (os.environ.get(root_env or "") or "")).strip()
-    cache_key = f"{tool}:{root_dir}"
+    key = str(tool or "").lower()
+    hint = _TOOL_PROVENANCE.get(key, {})
+    root_dir = str(
+        root
+        or os.environ.get(root_env or "", "")
+        or os.environ.get(str(hint.get("root_env") or ""), "")
+    ).strip()
+    cache_key = f"{key}:{root_dir}"
     cached = _TOOL_META_CACHE.get(cache_key)
     if cached is None:
         commit = ""
@@ -450,10 +532,18 @@ def _tool_metadata(
                     commit = _git_short_commit(Path(root_dir))
             except Exception:  # noqa: BLE001
                 commit = ""
-        cached = {"tool": tool, "root_dir": root_dir, "commit": commit}
+        probed = _probe_tool_version(hint.get("version"), root_dir) if hint else ""
+        cached = {
+            "tool": tool, "root_dir": root_dir,
+            "commit": commit, "_probed_version": probed,
+        }
         _TOOL_META_CACHE[cache_key] = cached
-    meta = dict(cached)
-    meta["version"] = str(version or "")
+    meta = {
+        "tool":     cached["tool"],
+        "root_dir": cached["root_dir"],
+        "commit":   cached["commit"],
+    }
+    meta["version"] = str(version or "") or str(cached.get("_probed_version") or "")
     return meta
 
 
@@ -466,6 +556,8 @@ def _normalize_hot_kernel(k: dict[str, Any]) -> dict[str, Any]:
         "time_ms":                 _to_float(k.get("time_ms") or k.get("duration_ms")),
         "bound_type":              str(k.get("bound_type") or k.get("bottleneck") or ""),
         "arithmetic_intensity":    _to_float(k.get("arithmetic_intensity")),
+        "flops_per_byte":          _to_float(k.get("flops_per_byte")),
+        "efficiency_percent":      _to_float(k.get("efficiency_percent")),
         "reusable_native_kernel":  bool(k.get("reusable_native_kernel") or False),
         "source_file":             k.get("source_file"),
         "recommended_backends":    list(k.get("recommended_backends") or []),
@@ -483,6 +575,7 @@ def record_kernel_discovery(
     tool_root: str | None = None,
     tool_root_env: str | None = None,
     tool_version: str | None = None,
+    duration_sec: Any = None,
     error: str | None = None,
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
@@ -501,14 +594,11 @@ def record_kernel_discovery(
             if isinstance(k, dict)
         ]
         scan = dict(scan or {})
-        meta = _tool_metadata(
-            source, root=tool_root, root_env=tool_root_env, version=tool_version,
-        )
         payload = {
             "source":           str(source or ""),
             "status":           str(status or ""),
             "ts":               _now_iso_safe(),
-            "tool":             meta,
+            "duration_sec":     _to_float(duration_sec),
             "scan":             scan,
             "hot_kernel_count": len(kernels),
             "hot_kernels":      kernels,
@@ -521,8 +611,43 @@ def record_kernel_discovery(
         _recorder(session_dir, producer).record_item(
             "kernel_discovery", payload, key=key,
         )
+        # The discovery tool's authoritative version lands in the top-level
+        # ``versions`` map (keyed by tool name), not inline per run.
+        record_tool_version(
+            session_dir, tool=source, root=tool_root,
+            root_env=tool_root_env, version=tool_version, producer=producer,
+        )
     except Exception:  # noqa: BLE001
         log.debug("record_kernel_discovery failed", exc_info=True)
+
+
+def record_tool_version(
+    session_dir: Path | str | None,
+    *,
+    tool: str,
+    root: str | None = None,
+    root_env: str | None = None,
+    version: str | None = None,
+    producer: str = PRODUCER_KERNEL_AGENT,
+) -> None:
+    """Record one external tool's authoritative version into ``versions``.
+
+    Idempotent per tool name (last write wins). Resolves ``{tool, root_dir,
+    commit, version}`` via the tool provenance registry and spools it as one
+    ``versions`` item; the assembler folds the substream into the top-level
+    ``versions`` map. Best-effort: never raises into the optimizer.
+    """
+    if not session_dir or not tool:
+        return
+    try:
+        meta = _tool_metadata(
+            tool, root=root, root_env=root_env, version=version,
+        )
+        _recorder(session_dir, producer).record_item(
+            "versions", meta, key=str(tool).lower(),
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("record_tool_version failed", exc_info=True)
 
 
 def record_kernel_dispatch(
@@ -584,6 +709,15 @@ def record_kernel_backend_result(
         attempts = attempts if isinstance(attempts, list) else []
         result_meta = result.get("metadata") if isinstance(
             result.get("metadata"), dict) else {}
+        # The kernel-level micro_speedup is derived (best across attempts) and
+        # lives in ``verification`` -- the raw per-attempt dict carries none. We
+        # stamp it onto the adopted (best) attempt so the journey can correlate
+        # achieved speedup with the e2e gain.
+        verification = result.get("verification") if isinstance(
+            result.get("verification"), dict) else {}
+        best_attempt_id = _best_attempt_id(attempts, verification)
+        kernel_micro_speedup = _to_float(verification.get("micro_speedup"))
+        recorded_any = False
         for att in attempts:
             if not isinstance(att, dict):
                 continue
@@ -592,33 +726,94 @@ def record_kernel_backend_result(
             optimized = att.get("optimized_path") or att.get("optimized_file")
             att_meta = att.get("metadata") if isinstance(
                 att.get("metadata"), dict) else {}
+            micro_speedup = _to_float(
+                att.get("micro_speedup") or att.get("speedup"))
+            if (micro_speedup is None and kernel_micro_speedup is not None
+                    and attempt_id and attempt_id == best_attempt_id):
+                micro_speedup = kernel_micro_speedup
             payload = {
                 "kernel_id":          kid,
                 "attempt_id":         attempt_id,
                 "run_id":             run_id,
                 "backend":            backend,
                 "model":              att.get("model"),
-                "ts":                 str(att.get("ts") or att.get("started_at") or ""),
+                "ts":                 str(att.get("ts") or att.get("started_at")
+                                          or att.get("created_at") or ""),
                 "status":             str(att.get("status") or "").lower(),
                 "decision":           str(att.get("decision") or "").upper(),
-                "micro_speedup":      _to_float(
-                    att.get("micro_speedup") or att.get("speedup")),
+                "micro_speedup":      micro_speedup,
                 "compile_passed":     _to_bool(att.get("compile_passed")),
                 "correctness_passed": _to_bool(att.get("correctness_passed")),
                 "optimized_files":    [str(optimized)] if optimized else [],
                 "error":              att.get("error") or att.get("error_message"),
+                "error_class":        str(att.get("error_type") or "") or None,
                 "duration_sec":       _to_float(
-                    att.get("duration_sec") or att.get("elapsed_sec")),
-                "tool": _tool_metadata(
-                    backend or "kernel_agent",
-                    root=str(att_meta.get("root_dir") or result_meta.get("root_dir") or "")
-                    or None,
-                    root_env="HYPERLOOM_KERNEL_AGENT_ROOT",
-                    version=str(att_meta.get("version") or result_meta.get("version") or ""),
-                ),
+                    att.get("duration_sec") or att.get("elapsed_sec")
+                    or att.get("elapsed_s")),
             }
             key = attempt_id or (f"{run_id}-{backend}" if run_id else None)
             rec.record_item("kernel_backend_result", payload, key=key)
+            recorded_any = True
+            # The backend's authoritative version lands in the top-level
+            # ``versions`` map (keyed by backend name), not inline per attempt.
+            # geak -> $GEAK_ROOT git SHA, claude/codex -> CLI --version.
+            if backend:
+                record_tool_version(
+                    session_dir, tool=backend,
+                    root=str(att_meta.get("root_dir")
+                             or result_meta.get("root_dir") or "") or None,
+                    version=str(att_meta.get("version")
+                                or result_meta.get("version") or "") or None,
+                    producer=producer,
+                )
+
+        if recorded_any or not kid:
+            return
+
+        # No per-backend attempts: capture a pre-dispatch / infra failure as a
+        # synthetic FAILED attempt so kernel_journey shows the failure too
+        # (mirrors record_kernel_invocations' pre-dispatch marker; without this
+        # the kernel looks merely "dispatched" with an empty attempt ladder).
+        status = str(result.get("status") or "").lower()
+        err_class = str(result.get("error_class") or "")
+        decision = str(
+            (result.get("proposal") or {}).get("decision") or "").upper()
+        failed = status in _FAILED_STATUSES or (
+            decision == "REVERT" and bool(err_class)
+        )
+        if not failed:
+            return
+        backend = str(result.get("backend") or "").lower() or "geak"
+        payload = {
+            "kernel_id":            kid,
+            "attempt_id":           "",
+            "run_id":               run_id,
+            "backend":              backend,
+            "model":                None,
+            "ts":                   _now_iso_safe(),
+            "status":               status or "failed",
+            "decision":             "FAILED",
+            "micro_speedup":        None,
+            "compile_passed":       None,
+            "correctness_passed":   None,
+            "optimized_files":      [],
+            "error":                result.get("error") or err_class or None,
+            "error_class":          err_class or None,
+            "duration_sec":         None,
+            # Distinguishes a pre-dispatch gating failure (no backend ran) from
+            # a backend that ran and failed.
+            "pre_dispatch_failure": True,
+        }
+        rec.record_item(
+            "kernel_backend_result", payload,
+            key=f"{kid}-predispatch",
+        )
+        record_tool_version(
+            session_dir, tool=backend,
+            root=str(result_meta.get("root_dir") or "") or None,
+            version=str(result_meta.get("version") or "") or None,
+            producer=producer,
+        )
     except Exception:  # noqa: BLE001
         log.debug("record_kernel_backend_result failed", exc_info=True)
 
@@ -779,5 +974,6 @@ __all__ = [
     "record_robustness_signal",
     "record_singleton_section",
     "record_specialist_round",
+    "record_tool_version",
     "snapshot_state_sections",
 ]

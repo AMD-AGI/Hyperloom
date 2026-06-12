@@ -61,6 +61,71 @@ def _load_manifest(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
         return {}
 
 
+_ROOFLINE_NUMERIC_FIELDS = (
+    "arithmetic_intensity",
+    "flops_per_byte",
+    "efficiency_percent",
+)
+
+
+def _attach_kernel_roofline(
+    kernel_journey: dict[str, Any],
+    kernel_roofline: dict[str, Any],
+) -> None:
+    """Merge per-kernel roofline metrics into the ``kernel_journey`` view.
+
+    For every journey entry with a matching ``kernel_roofline`` kernel (by
+    ``kernel_id``, falling back to ``name``), attach the full roofline entry
+    under ``roofline`` and backfill the discovery numeric fields that discovery
+    surfaced empty (roofline enrichment happens after discovery records). Pure
+    best-effort: a missing/empty roofline table or kernel just leaves the
+    journey untouched.
+    """
+    if not isinstance(kernel_journey, dict) or not isinstance(
+        kernel_roofline, dict,
+    ):
+        return
+    kernels = kernel_journey.get("kernels")
+    roofline_kernels = kernel_roofline.get("kernels")
+    if not isinstance(kernels, list) or not isinstance(roofline_kernels, list):
+        return
+
+    by_kid: dict[str, dict[str, Any]] = {}
+    by_name: dict[str, dict[str, Any]] = {}
+    for rk in roofline_kernels:
+        if not isinstance(rk, dict):
+            continue
+        kid = str(rk.get("kernel_id") or "")
+        name = str(rk.get("name") or "")
+        if kid:
+            by_kid.setdefault(kid, rk)
+        if name:
+            by_name.setdefault(name, rk)
+
+    for entry in kernels:
+        if not isinstance(entry, dict):
+            continue
+        rk = by_kid.get(str(entry.get("kernel_id") or "")) or by_name.get(
+            str(entry.get("name") or ""),
+        )
+        if not rk:
+            continue
+        entry["roofline"] = dict(rk)
+        # Promote bound_type onto the entry header when discovery left it blank.
+        if not str(entry.get("bound_type") or "") and rk.get("bound_type"):
+            entry["bound_type"] = rk.get("bound_type")
+        disc = entry.get("discovery")
+        if not isinstance(disc, dict):
+            continue
+        if not str(disc.get("bound_type") or "") and rk.get("bound_type"):
+            disc["bound_type"] = rk.get("bound_type")
+        for field in _ROOFLINE_NUMERIC_FIELDS:
+            if disc.get(field) in (None, 0, 0.0) and rk.get(field) not in (
+                None, 0, 0.0,
+            ):
+                disc[field] = rk.get(field)
+
+
 def build(
     session_dir: Path | str,
     *,
@@ -265,7 +330,15 @@ def build(
     # Pure recorder section (no collector fallback): empty {} on sessions that
     # predate the substreams, so v1/v2 readers that don't know it just ignore
     # it and historical breakdowns stay byte-for-byte identical.
+    # Authoritative external-tool versions, folded into a {tool: meta} map by
+    # the recorder assembler. Pure recorder section (no collector fallback).
+    versions           = _pick("versions", {})
     kernel_journey     = _pick("kernel_journey", {})
+    # Attach a copy of the per-kernel roofline metrics onto each journey entry
+    # and backfill discovery numeric fields that discovery couldn't surface
+    # (arithmetic_intensity / bound_type / efficiency) since roofline is
+    # enriched after discovery. Best-effort; never raises.
+    _attach_kernel_roofline(kernel_journey, kernel_roofline)
 
     source_files = collectors.collect_source_files(
         sd,
@@ -334,6 +407,11 @@ def build(
         # attempts -> e2e), composed from the recorder substreams. Additive,
         # optional; empty {} on sessions that predate the substreams.
         "kernel_journey":      kernel_journey,
+        # Authoritative external-tool versions, one object per tool
+        # (geak / tracelens / claude / codex / ...), keyed by tool name. Each
+        # carries ``{tool, root_dir, commit, version}``. Empty {} on sessions
+        # that predate the recorder.
+        "versions":            versions,
 
         "warnings":            warnings,
         "source_files":        source_files,
