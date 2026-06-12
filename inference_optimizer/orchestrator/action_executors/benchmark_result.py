@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -589,7 +590,173 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     )
 
 
+# ── Approximate throughput for killed-overtime variants ──
+#
+# A variant reaped at the soft overtime deadline never writes a
+# ``benchmark_report.json`` / ``inferencex_result.json``, so the normal
+# measurement path yields nothing. The inference engine, however, prints its
+# instantaneous decode throughput to ``server.log`` every few hundred steps:
+#   sglang: ``... gen throughput (token/s): 1234.56, #queue-req: 0``
+#   vllm:   ``... Avg generation throughput: 1234.5 tokens/s, Running: 64 ...``
+# Averaging the steady-state samples gives a rough (intentionally imprecise)
+# output-throughput estimate so the run is still legible post-mortem. This is
+# informational only — callers keep the variant marked killed/failed.
+_SGLANG_GEN_TPUT_RE = re.compile(
+    r"gen throughput \(token/s\):\s*([0-9]+(?:\.[0-9]+)?)",
+    re.IGNORECASE,
+)
+_VLLM_GEN_TPUT_RE = re.compile(
+    r"Avg generation throughput:\s*([0-9]+(?:\.[0-9]+)?)\s*tokens?/s",
+    re.IGNORECASE,
+)
+
+# Fraction of the leading (warmup/ramp-up) samples dropped before averaging so
+# the estimate reflects sustained decode rather than the cold-start climb.
+_DEFAULT_WARMUP_SKIP_FRAC: float = 0.25
+
+
+def _parse_server_log_gen_throughput(log_path: Path) -> list[float]:
+    """Return every positive decode-throughput sample logged in ``server.log``.
+
+    Scans the file line by line (tolerating decode errors) for the sglang and
+    vllm periodic ``gen throughput`` / ``Avg generation throughput`` markers.
+    Zero samples (prefill-only windows) are kept here and filtered downstream.
+
+    Args:
+        log_path (Path): Path to a captured ``server.log``.
+
+    Returns:
+        list[float]: Parsed throughput values in log order; empty on IO error
+        or when no markers are present.
+    """
+    samples: list[float] = []
+    try:
+        with log_path.open(encoding="utf-8", errors="replace") as f:
+            for line in f:
+                match = _SGLANG_GEN_TPUT_RE.search(line) or _VLLM_GEN_TPUT_RE.search(line)
+                if match is None:
+                    continue
+                value = _to_float(match.group(1))
+                if value is not None:
+                    samples.append(value)
+    except OSError:
+        return []
+    return samples
+
+
+def _steady_state_mean(
+    samples: list[float],
+    *,
+    warmup_skip_frac: float = _DEFAULT_WARMUP_SKIP_FRAC,
+) -> float | None:
+    """Average the steady-state portion of throughput ``samples``.
+
+    Drops non-positive samples (prefill-only windows) and the leading
+    ``warmup_skip_frac`` of what remains before averaging. Falls back to the
+    full positive set when the warmup trim would empty it.
+
+    Args:
+        samples (list[float]): Throughput samples in chronological order.
+        warmup_skip_frac (float): Fraction of leading positive samples to drop.
+
+    Returns:
+        float | None: The steady-state mean, or ``None`` when no positive
+        samples exist.
+    """
+    positive = [s for s in samples if s > 0]
+    if not positive:
+        return None
+    skip = int(len(positive) * max(0.0, min(1.0, warmup_skip_frac)))
+    steady = positive[skip:] or positive
+    return sum(steady) / len(steady)
+
+
+def _find_server_logs(slot: Path) -> list[Path]:
+    """Return ``server.log`` files under ``slot``, largest first.
+
+    Args:
+        slot (Path): The variant slot directory to scan recursively.
+
+    Returns:
+        list[Path]: Matching log paths ordered by descending size; empty on
+        IO error or when none exist.
+    """
+    try:
+        logs = list(slot.rglob("server.log"))
+    except OSError:
+        return []
+
+    def _size(path: Path) -> int:
+        """Best-effort byte size used to rank candidate logs (0 on error)."""
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+
+    return sorted(logs, key=_size, reverse=True)
+
+
+def estimate_output_throughput_from_server_log(
+    log_path: Path,
+    *,
+    warmup_skip_frac: float = _DEFAULT_WARMUP_SKIP_FRAC,
+) -> dict[str, Any] | None:
+    """Estimate sustained output throughput from one engine ``server.log``.
+
+    Args:
+        log_path (Path): Path to a captured ``server.log``.
+        warmup_skip_frac (float): Fraction of leading samples treated as
+            warmup and excluded from the average.
+
+    Returns:
+        dict[str, Any] | None: ``{"output_throughput", "num_samples",
+        "source_path"}`` when at least one positive sample is found, else
+        ``None``.
+    """
+    samples = _parse_server_log_gen_throughput(log_path)
+    mean = _steady_state_mean(samples, warmup_skip_frac=warmup_skip_frac)
+    if mean is None:
+        return None
+    return {
+        "output_throughput": mean,
+        "num_samples": sum(1 for s in samples if s > 0),
+        "source_path": str(log_path),
+    }
+
+
+def estimate_killed_variant_throughput(
+    slot: Path,
+    *,
+    warmup_skip_frac: float = _DEFAULT_WARMUP_SKIP_FRAC,
+) -> dict[str, Any] | None:
+    """Estimate output throughput for a killed-overtime variant from its logs.
+
+    Locates the richest ``server.log`` under ``slot`` (largest first) and
+    returns the first usable steady-state estimate. Best-effort and never
+    raises; intended purely as informational post-mortem context.
+
+    Args:
+        slot (Path): The variant slot directory (after artifact harvest).
+        warmup_skip_frac (float): Fraction of leading samples treated as
+            warmup and excluded from the average.
+
+    Returns:
+        dict[str, Any] | None: The estimate dict from
+        :func:`estimate_output_throughput_from_server_log`, or ``None`` when no
+        log yields a positive sample.
+    """
+    for log_path in _find_server_logs(slot):
+        estimate = estimate_output_throughput_from_server_log(
+            log_path, warmup_skip_frac=warmup_skip_frac,
+        )
+        if estimate is not None:
+            return estimate
+    return None
+
+
 __all__ = [
+    "estimate_killed_variant_throughput",
+    "estimate_output_throughput_from_server_log",
     "extract_benchmark_measurement",
     "harvest_leaked_artifacts",
     "is_valid_measurement",

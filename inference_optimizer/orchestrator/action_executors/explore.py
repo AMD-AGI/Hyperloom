@@ -841,6 +841,11 @@ class ExploreExecutor:
                         round(variant_runtime / baseline_runtime_sec, 3)
                         if baseline_runtime_sec > 0 else None
                     )
+                    # Rough output tok/s salvaged from the engine's partial
+                    # server.log throughput logs. Informational only: ``tput``
+                    # stays None so this never enters winner selection or gain
+                    # math; the estimate rides alongside as a separate key.
+                    est_tput = getattr(r, "estimated_output_throughput", None)
                     tested_update[fp] = {
                         "fingerprint": fp,
                         "name": gv.name,
@@ -851,6 +856,7 @@ class ExploreExecutor:
                         "status": r.status,
                         "tput": None,
                         "gain_pct": None,
+                        "estimated_output_throughput": est_tput,
                         "base_tput": running_base_tput,
                         "round_id": round_id,
                         "ts": _now_iso(),
@@ -876,6 +882,7 @@ class ExploreExecutor:
                         "reason": "killed_overtime",
                         "gain_pct": None,
                         "tput": None,
+                        "estimated_output_throughput": est_tput,
                         "runtime_sec": round(variant_runtime, 2),
                         "wall_clock_ratio_vs_baseline": wall_clock_ratio,
                         "round_id": round_id,
@@ -890,6 +897,7 @@ class ExploreExecutor:
                         "provenance": provenance,
                         "gain_pct": None,
                         "tput": None,
+                        "estimated_output_throughput": est_tput,
                         "reason": "killed_overtime",
                         "workspace": r.workspace,
                         "runtime_sec": round(variant_runtime, 2),
@@ -898,10 +906,12 @@ class ExploreExecutor:
                     log.warning(
                         "explore: variant %s KILLED_OVERTIME "
                         "(runtime=%.1fs vs baseline=%.1fs, ratio=%.2fx, "
-                        "kill_ratio=%.2fx); skipping KEEP/REVERT ladder.",
+                        "kill_ratio=%.2fx, est_output_tput=%s tok/s); "
+                        "skipping KEEP/REVERT ladder.",
                         gv.name, variant_runtime, baseline_runtime_sec,
                         wall_clock_ratio if wall_clock_ratio is not None else -1.0,
                         overtime_kill_ratio,
+                        f"{est_tput:.1f}" if est_tput is not None else "n/a",
                     )
                     continue
 
@@ -1188,6 +1198,13 @@ class ExploreExecutor:
                 metrics["gain_pct"] = te.get("gain_pct")
             if te.get("stack_rebench_tput") is not None:
                 metrics["stack_rebench_tput"] = te.get("stack_rebench_tput")
+            # Rough decode tput salvaged from a killed-overtime variant's
+            # partial server.log. Informational only (no ``tput``/gain), but
+            # lets the LLM/KB see roughly how fast the killed run was decoding.
+            if te.get("estimated_output_throughput") is not None:
+                metrics["estimated_output_throughput"] = te.get(
+                    "estimated_output_throughput",
+                )
             # surface wall-clock + kill ratio so the LLM/KB sees "ran too
             # slow → early kill" instead of an opaque FAILED row.
             if te.get("runtime_sec") is not None:

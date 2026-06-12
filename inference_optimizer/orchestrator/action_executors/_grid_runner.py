@@ -32,6 +32,7 @@ from ._subprocess_kill import (
     run_with_session_kill,
 )
 from .benchmark_result import (
+    estimate_killed_variant_throughput,
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
 )
@@ -584,6 +585,11 @@ class VariantResult:
         runtime_sec (float | None): Wall-clock seconds the subprocess consumed.
         killed_overtime (bool): ``True`` iff reaped by the soft overtime
             deadline rather than crashing/timing-out/succeeding.
+        estimated_output_throughput (float | None): Rough output tokens/sec
+            estimated from the engine's periodic ``server.log`` throughput
+            logs when the variant was killed before finishing. Informational
+            only — never a real measurement and never used for winner
+            selection; ``output_throughput`` stays ``None`` on the kill path.
     """
 
     name: str
@@ -616,6 +622,11 @@ class VariantResult:
     # Fix-E: True iff reaped by the overtime soft deadline; caller demotes to
     # the synthetic ``KILLED_OVERTIME`` outcome (no tput / fingerprint).
     killed_overtime: bool = False
+    # Rough output tok/s salvaged from the engine's periodic ``server.log``
+    # throughput logs on the killed_overtime path. Informational only: the
+    # variant stays ``failed``/``killed_overtime`` and this never feeds winner
+    # selection (which keys off ``output_throughput``).
+    estimated_output_throughput: float | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -659,6 +670,7 @@ class VariantResult:
             "note":               self.note,
             "runtime_sec":        self.runtime_sec,
             "killed_overtime":    self.killed_overtime,
+            "estimated_output_throughput": self.estimated_output_throughput,
         }
 
 
@@ -1568,6 +1580,24 @@ async def run_grid(
                 ok_destination,
                 subprocess_started_unix=variant_started_unix,
             )
+            # Best-effort rough tput from the engine's periodic server.log
+            # throughput logs: the variant never finished so there's no
+            # benchmark_report, but the partial decode rate is still useful
+            # post-mortem. Informational only — the variant stays failed and
+            # this never feeds winner selection.
+            ok_warnings = [
+                f"harvested_leaked_artifact:{src}" for src, _ in ok_harvested
+            ]
+            ok_estimate = estimate_killed_variant_throughput(slot)
+            estimated_tput = (
+                ok_estimate.get("output_throughput") if ok_estimate else None
+            )
+            if estimated_tput is not None:
+                ok_warnings.append(
+                    "estimated_output_throughput_from_server_log:"
+                    f"{estimated_tput:.1f}tok/s"
+                    f"(n={ok_estimate.get('num_samples')})"
+                )
             results.append(VariantResult(
                 name=variant.name, extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
@@ -1575,21 +1605,20 @@ async def run_grid(
                 returncode=rc,
                 killed_overtime=True,
                 runtime_sec=variant_runtime_sec,
+                estimated_output_throughput=estimated_tput,
                 error=(
                     f"killed_overtime: wall-clock {variant_runtime_sec:.1f}s "
                     f"exceeded soft_deadline_sec={float(soft_deadline_sec or 0.0):.1f}s"
                 ),
                 note=variant.note,
-                nonfatal_warnings=[
-                    f"harvested_leaked_artifact:{src}"
-                    for src, _ in ok_harvested
-                ],
+                nonfatal_warnings=ok_warnings,
             ))
             log.info(
                 "_grid_runner: variant %s killed_overtime "
-                "(runtime=%.1fs deadline=%.1fs)",
+                "(runtime=%.1fs deadline=%.1fs est_output_tput=%s tok/s)",
                 variant.name, variant_runtime_sec,
                 float(soft_deadline_sec or 0.0),
+                f"{estimated_tput:.1f}" if estimated_tput is not None else "n/a",
             )
             await _pulse_after_variant(i)
             if not keep_going_on_failure:
