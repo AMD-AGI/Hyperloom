@@ -486,8 +486,10 @@ ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
 ESCALATE_HINT_EXTEND_KERNEL_BUDGET:  str = "extend_kernel_budget"
 ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX: str = "pause_specialist_"
 
-# ``skip_to_sweep`` is the non-terminal "no more leverage" signal (winds down
-# to SWEEP → CLOSE), unlike terminal ``skip_to_close``.
+# ``skip_to_sweep`` is the non-terminal "exhausted the current lever" signal:
+# from EXPLORE it advances to KERNEL (switch lever, via ``explore_no_more_leverage``);
+# from KERNEL it winds down to SWEEP → CLOSE (via ``kernel_no_more_leverage``).
+# Unlike terminal ``skip_to_close``, it never ends the run on its own.
 ESCALATE_HINT_VOCAB: frozenset[str] = frozenset({
     ESCALATE_HINT_SKIP_TO_KERNEL,
     ESCALATE_HINT_SKIP_TO_SWEEP,

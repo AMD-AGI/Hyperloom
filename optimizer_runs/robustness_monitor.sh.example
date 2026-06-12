@@ -139,7 +139,7 @@ try:
     from inference_optimizer.orchestrator.phase_state import STOP_REASON_VOCAB
 except ImportError:
     STOP_REASON_VOCAB = frozenset({
-        "target_reached", "no_more_leverage", "time_exhausted", "max_ticks",
+        "target_reached", "global_converged", "time_exhausted", "max_ticks",
         "baseline_failed", "prelude_baseline_failed", "policy_loop",
         "prelude_policy_loop", "emergency", "signal", "unknown", "custom",
         "crash_threshold_exceeded", "user_stop_requested",

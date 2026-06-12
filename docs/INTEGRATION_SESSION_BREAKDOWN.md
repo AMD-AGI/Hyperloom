@@ -89,7 +89,7 @@ started, …).
 | `sandbox_user_id`  | string \| null | Hosted SaFE user id; populated from env `SANDBOX_USER_ID`.                            |
 | `created_at_utc`   | string  | ISO-8601 UTC.                                                                                |
 | `ended_at_utc`     | string  | ISO-8601 UTC.                                                                                |
-| `stop_reason`      | string  | One of `target_reached`, `time_exhausted`, `no_more_leverage`, `max_ticks`, `baseline_failed`, ... |
+| `stop_reason`      | string  | One of `target_reached`, `time_exhausted`, `global_converged`, `max_ticks`, `baseline_failed`, ... |
 | `max_minutes`      | int     | Configured time budget.                                                                       |
 | `elapsed_minutes`  | float   | Actual wall-clock.                                                                            |
 | `host`             | string  | Hostname of the Coordinator pod.                                                              |

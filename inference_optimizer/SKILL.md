@@ -1165,7 +1165,7 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 - `No accelerator` (Magpie): subprocess `PATH` must lead with `$(dirname "$PYTHON")` (or set `MAGPIE_PYTHON`); use `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
 - Repeated `trace_analyze` with unchanged trace/config: bug — reuse `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
-- `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
+- `stop_reason=global_converged`: the cyclic phase machine exhausted leverage across macro-cycles (R7: consecutive no-gain cycles); stop and report, only resume if the user changes workload / search space / model / strategy. (Leverage exhaustion *within* a single phase is now the non-terminal phase-exit reason `explore_no_more_leverage` / `kernel_no_more_leverage`, which switches lever rather than ending the run.)
 - `stop_reason=policy_loop`: Coordinator hit ≥10 consecutive `policy_denied` events for the same action/rule pair; all top actions may be locked or pruned. Inspect `SharedState.policy_denial_history` and the per-tick `Policy denials` block. To recover: manually edit `state.json` to remove the action from `pruned_families`, clear `policy_denial_streak` / `stop_reason`, and re-propose with fresh `params.grid` content (omit stale `idempotency_key`).
 - `stop_reason=time_exhausted`: resume same session (`--resume`); do not start fresh.
 

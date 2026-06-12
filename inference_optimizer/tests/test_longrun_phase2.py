@@ -4,8 +4,8 @@
 
 Covers:
 * cyclic EXPLORE plateau is *actionable* (winds the cycle down via
-  ``no_more_leverage`` + ``switch_bottleneck``); advisory-only when cyclic off.
-* ``compute_next_phase`` routes a plateaued EXPLORE → SWEEP (skips KERNEL).
+  ``explore_no_more_leverage`` + ``switch_bottleneck``); advisory-only when cyclic off.
+* ``compute_next_phase`` routes a plateaued EXPLORE → KERNEL (switch lever).
 * Coordinator stamps the bottleneck-switch handoff onto SharedState.
 * The redirect advisory renders in the next cycle's EXPLORE and names a
   suggested specialist domain; it clears once the live bottleneck drifts.
