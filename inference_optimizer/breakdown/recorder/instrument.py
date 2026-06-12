@@ -466,6 +466,8 @@ def _normalize_hot_kernel(k: dict[str, Any]) -> dict[str, Any]:
         "time_ms":                 _to_float(k.get("time_ms") or k.get("duration_ms")),
         "bound_type":              str(k.get("bound_type") or k.get("bottleneck") or ""),
         "arithmetic_intensity":    _to_float(k.get("arithmetic_intensity")),
+        "flops_per_byte":          _to_float(k.get("flops_per_byte")),
+        "efficiency_percent":      _to_float(k.get("efficiency_percent")),
         "reusable_native_kernel":  bool(k.get("reusable_native_kernel") or False),
         "source_file":             k.get("source_file"),
         "recommended_backends":    list(k.get("recommended_backends") or []),
@@ -584,6 +586,7 @@ def record_kernel_backend_result(
         attempts = attempts if isinstance(attempts, list) else []
         result_meta = result.get("metadata") if isinstance(
             result.get("metadata"), dict) else {}
+        recorded_any = False
         for att in attempts:
             if not isinstance(att, dict):
                 continue
@@ -619,6 +622,55 @@ def record_kernel_backend_result(
             }
             key = attempt_id or (f"{run_id}-{backend}" if run_id else None)
             rec.record_item("kernel_backend_result", payload, key=key)
+            recorded_any = True
+
+        if recorded_any or not kid:
+            return
+
+        # No per-backend attempts: capture a pre-dispatch / infra failure as a
+        # synthetic FAILED attempt so kernel_journey shows the failure too
+        # (mirrors record_kernel_invocations' pre-dispatch marker; without this
+        # the kernel looks merely "dispatched" with an empty attempt ladder).
+        status = str(result.get("status") or "").lower()
+        err_class = str(result.get("error_class") or "")
+        decision = str(
+            (result.get("proposal") or {}).get("decision") or "").upper()
+        failed = status in _FAILED_STATUSES or (
+            decision == "REVERT" and bool(err_class)
+        )
+        if not failed:
+            return
+        backend = str(result.get("backend") or "").lower() or "geak"
+        payload = {
+            "kernel_id":            kid,
+            "attempt_id":           "",
+            "run_id":               run_id,
+            "backend":              backend,
+            "model":                None,
+            "ts":                   _now_iso_safe(),
+            "status":               status or "failed",
+            "decision":             "FAILED",
+            "micro_speedup":        None,
+            "compile_passed":       None,
+            "correctness_passed":   None,
+            "optimized_files":      [],
+            "error":                result.get("error") or err_class or None,
+            "error_class":          err_class or None,
+            "duration_sec":         None,
+            # Distinguishes a pre-dispatch gating failure (no backend ran) from
+            # a backend that ran and failed.
+            "pre_dispatch_failure": True,
+            "tool": _tool_metadata(
+                backend,
+                root=str(result_meta.get("root_dir") or "") or None,
+                root_env="HYPERLOOM_KERNEL_AGENT_ROOT",
+                version=str(result_meta.get("version") or ""),
+            ),
+        }
+        rec.record_item(
+            "kernel_backend_result", payload,
+            key=f"{kid}-predispatch",
+        )
     except Exception:  # noqa: BLE001
         log.debug("record_kernel_backend_result failed", exc_info=True)
 

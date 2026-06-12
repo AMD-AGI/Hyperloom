@@ -103,3 +103,56 @@ def test_kernel_backend_result_keeps_retries_across_runs(tmp_path: Path) -> None
     out = assemble_parts(tmp_path)
     attempts = out["kernel_journey"]["kernels"][0]["backend_attempts"]
     assert len(attempts) == 2
+
+
+def test_kernel_backend_result_records_pre_dispatch_failure(tmp_path: Path) -> None:
+    # Backend failed before running any attempt (empty attempts + failed status)
+    # -> a synthetic FAILED marker so the failure is visible in kernel_journey.
+    instrument.record_kernel_backend_result(tmp_path, {
+        "kernel_id": "k001", "run_id": "r1", "attempts": [],
+        "status": "failed", "error_class": "non_reusable_kernel",
+        "error": "empty kernel shape", "backend": "geak",
+    })
+    out = assemble_parts(tmp_path)
+    attempts = out["kernel_journey"]["kernels"][0]["backend_attempts"]
+    assert len(attempts) == 1
+    att = attempts[0]
+    assert att["decision"] == "FAILED"
+    assert att["pre_dispatch_failure"] is True
+    assert att["error_class"] == "non_reusable_kernel"
+    assert att["backend"] == "geak"
+    # With an attempt present the kernel reads as "attempted", not "skipped".
+    assert out["kernel_journey"]["kernels"][0]["outcome"] == "attempted"
+
+
+def test_attach_kernel_roofline_enriches_journey() -> None:
+    from inference_optimizer.breakdown.exporter import _attach_kernel_roofline
+
+    kernel_journey = {
+        "discovery_runs": [],
+        "kernels": [{
+            "kernel_id": "k001", "name": "moe", "gpu_pct": 42.0,
+            "bound_type": "",
+            "discovery": {
+                "kernel_id": "k001", "bound_type": "",
+                "arithmetic_intensity": None, "efficiency_percent": None,
+            },
+            "backend_attempts": [],
+        }],
+    }
+    kernel_roofline = {
+        "kernels": [{
+            "kernel_id": "k001", "name": "moe", "bound_type": "memory",
+            "arithmetic_intensity": 3.5, "flops_per_byte": 2.1,
+            "efficiency_percent": 61.0, "rocprof_roofline": {"foo": "bar"},
+        }],
+    }
+    _attach_kernel_roofline(kernel_journey, kernel_roofline)
+    entry = kernel_journey["kernels"][0]
+    assert entry["roofline"]["arithmetic_intensity"] == 3.5
+    assert entry["roofline"]["rocprof_roofline"] == {"foo": "bar"}
+    # Header + discovery numeric fields backfilled from roofline.
+    assert entry["bound_type"] == "memory"
+    assert entry["discovery"]["bound_type"] == "memory"
+    assert entry["discovery"]["arithmetic_intensity"] == 3.5
+    assert entry["discovery"]["efficiency_percent"] == 61.0

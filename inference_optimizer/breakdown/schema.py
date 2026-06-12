@@ -524,13 +524,21 @@ class KernelToolMetadata(TypedDict, total=False):
 
 
 class DiscoveredHotKernel(TypedDict, total=False):
-    """One hot kernel surfaced by a discovery run (projected onto the journey)."""
+    """One hot kernel surfaced by a discovery run (projected onto the journey).
+
+    The roofline numeric fields (``arithmetic_intensity`` / ``flops_per_byte``
+    / ``efficiency_percent``) are backfilled at export from ``kernel_roofline``
+    when discovery surfaced them empty (roofline enrichment runs after the
+    discovery record is written).
+    """
     kernel_id: str
     name: str
     gpu_pct: float | None
     time_ms: float | None
     bound_type: str
     arithmetic_intensity: float | None
+    flops_per_byte: float | None
+    efficiency_percent: float | None
     reusable_native_kernel: bool
     source_file: str | None
     recommended_backends: list[str]
@@ -599,7 +607,11 @@ class KernelBackendAttempt(TypedDict, total=False):
         correctness_passed (bool | None): Whether correctness passed, or None.
         optimized_files (list[str]): Optimized artifact paths.
         error (str | None): Failure text, or None.
+        error_class (str | None): Failure classification (pre-dispatch markers).
         duration_sec (float | None): Wall-clock seconds the attempt ran, or None.
+        pre_dispatch_failure (bool): True for a synthetic marker recorded when a
+            backend failed before running any real attempt (e.g. geak rejecting
+            an empty/non-reusable kernel shape).
         tool (KernelToolMetadata): Provenance of the backend tool.
     """
     kernel_id: str
@@ -615,7 +627,9 @@ class KernelBackendAttempt(TypedDict, total=False):
     correctness_passed: bool | None
     optimized_files: list[str]
     error: str | None
+    error_class: str | None
     duration_sec: float | None
+    pre_dispatch_failure: bool
     tool: KernelToolMetadata
 
 
@@ -658,6 +672,9 @@ class KernelJourneyEntry(TypedDict, total=False):
         dispatch (KernelDispatch): Stage-2 dispatch decision.
         backend_attempts (list[KernelBackendAttempt]): Stage-3 backend attempts.
         e2e (KernelE2E): Stage-4 end-to-end integrate outcome.
+        roofline (dict[str, Any]): A copy of the matching ``kernel_roofline``
+            entry (arithmetic intensity / efficiency / bound type / rocprof
+            roofline), attached at export. Absent when no roofline ran.
         outcome (str): Coarse rollup (``adopted`` / ``reverted`` / ``attempted``
             / ``dispatched`` / ``skipped`` / ``discovered``).
     """
@@ -670,6 +687,7 @@ class KernelJourneyEntry(TypedDict, total=False):
     dispatch: KernelDispatch
     backend_attempts: list[KernelBackendAttempt]
     e2e: KernelE2E
+    roofline: dict[str, Any]
     outcome: str
 
 
