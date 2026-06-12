@@ -178,6 +178,41 @@ def test_redirect_advisory_empty_outside_explore(cyclic_coordinator):
     assert c._bottleneck_redirect_advisory_block() == ""
 
 
+def test_acceptance_threshold_advisory_lists_unblocked(cyclic_coordinator):
+    c = cyclic_coordinator
+    st = c.shared_state
+    st.macro_cycle = 2  # cycle 3 → KEEP bar 0.40%
+    st.explore_search = {
+        "tested": {
+            "fp1": {"name": "v_hi", "outcome": "REVERT", "gain_pct": 0.6},
+            "fp2": {"name": "v_lo", "outcome": "REVERT", "gain_pct": 0.2},
+            "fp3": {"name": "v_keep", "outcome": "KEEP", "gain_pct": 3.0},
+        },
+        "rejected": [],
+    }
+    block = c._acceptance_threshold_advisory_block()
+    assert "KEEP>=0.40%" in block
+    assert "v_hi" in block          # 0.6% >= 0.40% → re-testable
+    assert "v_lo" in block          # 0.2% < 0.40% → reference only
+    assert "v_keep" not in block    # KEEP'd → never surfaced for re-test
+
+
+def test_acceptance_threshold_advisory_empty_first_cycle(cyclic_coordinator):
+    c = cyclic_coordinator
+    st = c.shared_state
+    st.macro_cycle = 0  # first cycle: bar == legacy default, nothing decayed
+    assert c._acceptance_threshold_advisory_block() == ""
+
+
+def test_acceptance_threshold_advisory_empty_when_cyclic_off(
+    cyclic_coordinator, monkeypatch,
+):
+    c = cyclic_coordinator
+    monkeypatch.setenv(CYCLIC_ENV, "0")
+    c.shared_state.macro_cycle = 3
+    assert c._acceptance_threshold_advisory_block() == ""
+
+
 # ==========================================================================
 # R3 — drift clears the pending switch
 # ==========================================================================

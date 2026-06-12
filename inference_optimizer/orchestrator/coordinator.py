@@ -4844,6 +4844,16 @@ class Coordinator:
                 sections.append("=== Bottleneck redirect (advisory) ===")
                 sections.append(redirect_block)
 
+            # Decaying acceptance bar + prior variants now re-testable under it.
+            try:
+                accept_block = self._acceptance_threshold_advisory_block()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: acceptance threshold advisory failed")
+                accept_block = ""
+            if accept_block:
+                sections.append("=== Acceptance threshold (advisory) ===")
+                sections.append(accept_block)
+
         # Conversational DELTA turn: tell the agent verbose state was not re-pushed + how to pull it.
         if agent_name == "orchestration" and not push_full:
             sections.append("=== Context (pull on demand) ===")
@@ -6663,13 +6673,73 @@ class Coordinator:
                 lines.append(f"  dominant_direction={direction} ({pct:.1f}%)")
         cycle = int(getattr(state, "macro_cycle", 0) or 0)
         lines.append(
-            f"  macro_cycle={cycle}; prior-cycle rejected fingerprints are "
-            "bucketed per cycle and remain de-duped (never re-explored)."
+            f"  macro_cycle={cycle}; KEEP'd variants stay de-duped permanently, "
+            "but prior sub-threshold variants whose measured gain now meets the "
+            "decayed KEEP bar are unblocked for re-test."
         )
         lines.append(
             "Advisory only: pick the domain/tag yourself; this nudges focus, "
             "it does not gate dispatch."
         )
+        return "\n".join(lines)
+
+    def _acceptance_threshold_advisory_block(self) -> str:
+        """Render the current decaying acceptance bar + re-testable prior variants.
+
+        Active only in cyclic mode after at least one macro-cycle (when the bar
+        has decayed below the first-cycle default). Surfaces the current KEEP /
+        stack-stable thresholds and lists prior sub-threshold variants whose
+        measured gain now meets the decayed bar (unblocked for re-test) plus a
+        few still below it (reference only). Advisory; never gates dispatch.
+        """
+        state = self.shared_state
+        keep = self._decaying_keep_threshold_pct()
+        if keep is None:
+            return ""
+        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        if cycle < 1:
+            return ""
+        stable = keep / 2.0
+        unlockable = {"REVERT", "KEEP_UNSTABLE", "no_promote"}
+        search = getattr(state, "explore_search", None) or {}
+        entries: list[dict[str, Any]] = []
+        if isinstance(search, dict):
+            tested = search.get("tested") or {}
+            if isinstance(tested, dict):
+                entries.extend(v for v in tested.values() if isinstance(v, dict))
+            rejected = search.get("rejected") or []
+            if isinstance(rejected, list):
+                entries.extend(v for v in rejected if isinstance(v, dict))
+        now_unblocked: list[tuple[str, float]] = []
+        still_blocked: list[tuple[str, float]] = []
+        for e in entries:
+            if str(e.get("outcome") or "") not in unlockable:
+                continue
+            try:
+                g = float(e.get("gain_pct"))
+            except (TypeError, ValueError):
+                continue
+            name = str(e.get("name") or e.get("fingerprint") or "")[:48]
+            (now_unblocked if g >= keep else still_blocked).append((name, g))
+        lines: list[str] = [
+            f"Current acceptance bar (macro_cycle={cycle}): "
+            f"KEEP>={keep:.2f}% stack_stable>={stable:.2f}%.",
+            "KEEP'd variants stay de-duped permanently; prior sub-threshold "
+            "variants are de-duped only while below the current KEEP bar.",
+        ]
+        if now_unblocked:
+            now_unblocked.sort(key=lambda p: p[1], reverse=True)
+            lines.append(
+                "Re-testable now (prior gain now clears the bar; re-propose if "
+                "still relevant):"
+            )
+            for name, g in now_unblocked[:8]:
+                lines.append(f"  {name}: prior gain {g:+.2f}% >= {keep:.2f}%")
+        if still_blocked:
+            still_blocked.sort(key=lambda p: p[1], reverse=True)
+            lines.append("Still below the bar (reference only, not re-tested):")
+            for name, g in still_blocked[:5]:
+                lines.append(f"  {name}: prior gain {g:+.2f}% < {keep:.2f}%")
         return "\n".join(lines)
 
     def _target_gap_advisory_block(self) -> str:
