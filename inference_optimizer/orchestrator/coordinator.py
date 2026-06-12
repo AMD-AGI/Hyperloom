@@ -1067,12 +1067,24 @@ class Coordinator:
             )
 
     def _kernel_enabled(self) -> bool:
+        """Whether the kernel role is registered and enabled.
+
+        Returns:
+            ``True`` if the kernel role exists and the persisted
+            ``kernel_enabled`` flag is set.
+        """
         # Mirror persisted kernel_enabled flag; --no-kernel removes the kernel role.
         return "kernel" in self.role_registry and bool(
             getattr(self.shared_state, "kernel_enabled", True)
         )
 
     def _explore_enabled(self) -> bool:
+        """Whether the EXPLORE phase is enabled for this run.
+
+        Returns:
+            ``True`` unless ``--no-explore`` disabled it (collapsing to
+            KERNEL/SWEEP).
+        """
         # Mirror persisted explore_enabled flag; --no-explore collapses to KERNEL/SWEEP. EXPLORE is a phase, not a role.
         return bool(getattr(self.shared_state, "explore_enabled", True))
 
@@ -3126,10 +3138,17 @@ class Coordinator:
         # No-op unless live push is enabled; idempotent (a later cli.finally
         # flush only re-writes the receipt). Best-effort.
         try:
-            from .trace.langfuse_emitter import flush_session
+            from .trace.langfuse_emitter import (
+                flush_session,
+                record_session_breakdown,
+            )
             flush_session(self.session_dir)
             from ..breakdown import patch_breakdown_langfuse
             patch_breakdown_langfuse(self.session_dir)
+            # After the breakdown file is in its final (post-flush) form, attach
+            # the complete JSON to the trace as a ``session_breakdown``
+            # observation. Best-effort; no-op when live push is disabled.
+            record_session_breakdown(self.session_dir)
         except Exception as exc:  # noqa: BLE001 — defensive
             log.debug("CLOSE step 2.5 (langfuse flush) failed", exc_info=True)
             await self._record_close_step(
@@ -4335,6 +4354,15 @@ class Coordinator:
         return "\n".join(sections)
 
     async def _load_system_prompt(self, agent_name: str) -> str:
+        """Load the system prompt for an agent, honoring overrides.
+
+        Args:
+            agent_name: Name of the agent/role whose prompt to load.
+
+        Returns:
+            The override prompt if configured, the role's prompt file
+            contents, or a placeholder string when none exists.
+        """
         # Demo/test override via self.system_prompt_overrides[agent_name].
         override = getattr(self, "system_prompt_overrides", {}).get(agent_name)
         if override is not None:
@@ -6606,6 +6634,15 @@ class Coordinator:
         ))
 
     async def _handle_force_dispatch(self, source: str, intent: Intent) -> None:
+        """Handle a ``force_dispatch`` intent by emitting an event.
+
+        Currently a P0-3 stub: it broadcasts a ``force_dispatch`` event;
+        real dispatcher reordering arrives in P0-5 with the priority queue.
+
+        Args:
+            source: Identifier of the intent's originating agent.
+            intent: The ``force_dispatch`` intent carrying ``task_id``.
+        """
         # P0-3 stub: emit an event; real dispatcher reordering lands in P0-5 with the priority queue.
         await self.bus.append_and_seq(Message.new(
             source, "*", "event",
@@ -8213,6 +8250,28 @@ class Coordinator:
                 }
                 if gap_canonical_id:
                     stack_entry["gap_canonical_id"] = gap_canonical_id
+                # Stamp the variant's stable join key (and source) so breakdown
+                # attribution can map this explore gain back to its specialist
+                # provenance via explore_search.winners_history. Without it the
+                # phase_breakdown.explore.by_domain join always misses and every
+                # gain collapses into ``default_grid``.
+                fp_val = ""
+                prov_val = ""
+                if isinstance(bv, dict):
+                    fp_val = str(bv.get("fingerprint") or "").strip()
+                    if not fp_val:
+                        from .action_executors._canonical_fingerprint import (
+                            canonical_fingerprint,
+                        )
+                        fp_val = canonical_fingerprint(
+                            candidate_args or full_args,
+                            dict(bv.get("extra_envs") or {}),
+                        )
+                    prov_val = str(bv.get("provenance") or "").strip()
+                if fp_val:
+                    stack_entry["fingerprint"] = fp_val
+                if prov_val:
+                    stack_entry["provenance"] = prov_val
                 self.shared_state.optimization_stack.append(stack_entry)
                 # Mirror append into gain_per_stack_entry so the two parallel lists stay index-aligned.
                 self.shared_state.append_stack_gain_entry(

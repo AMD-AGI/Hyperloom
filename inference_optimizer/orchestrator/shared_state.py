@@ -522,6 +522,11 @@ class SharedState:
     # Orchestration working memory — durable compacted reasoning snapshot for compaction + crash-recovery rebuild; Coordinator-only writer, not in session_breakdown.
     orchestration_memory: dict[str, Any] = field(default_factory=dict)
 
+    # Non-field instance attr (set in load_or_init / save): session dir used by
+    # breakdown instrumentation. Plain class attr => not a dataclass field, so
+    # asdict()/state.json never serialize it.
+    _session_dir = None
+
     # Persistence
     @classmethod
     def state_path(cls, session_dir: Path) -> Path:
@@ -553,13 +558,31 @@ class SharedState:
         """
         path = cls.state_path(session_dir)
         if not path.exists():
-            return cls()
-        with path.open(encoding="utf-8") as f:
-            raw = json.load(f)
-        return cls.from_dict(raw)
+            inst = cls()
+        else:
+            with path.open(encoding="utf-8") as f:
+                raw = json.load(f)
+            inst = cls.from_dict(raw)
+        # Remember the session dir so breakdown instrumentation can record
+        # fragments at author time (non-field attr; not serialized by asdict).
+        inst._session_dir = Path(session_dir)
+        return inst
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
+        """Construct a :class:`SharedState` from a raw mapping, migrating it.
+
+        Acts as the unified migration entry point: an absent
+        ``schema_version`` is treated as 1, legacy keys are renamed to
+        their canonical form, and unknown keys are dropped. The operation
+        is idempotent and short-circuits when already at the latest schema.
+
+        Args:
+            raw: Decoded state mapping (e.g. from JSON on disk).
+
+        Returns:
+            A fully-populated, migrated :class:`SharedState` instance.
+        """
         # Unified migration entry point; absent schema_version treated as 1. Idempotent (latest version short-circuits).
         incoming_version = int(raw.get("schema_version") or 1)
         needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
@@ -801,6 +824,14 @@ class SharedState:
             except OSError:
                 pass
             raise
+        # Author-time breakdown capture: snapshot state-owned sections into the
+        # recorder spool right after persisting. Best-effort; never blocks save.
+        self._session_dir = Path(session_dir)
+        try:
+            from ..breakdown.recorder import instrument
+            instrument.snapshot_state_sections(session_dir, self)
+        except Exception:  # noqa: BLE001
+            pass
 
     # Mutators (Coordinator only — LLM agents go via intents)
     def add_pruned_family(self, family: str) -> bool:
@@ -1318,6 +1349,27 @@ class SharedState:
         })
         self.kernel_integrate_attempts[key] = entry
 
+        # kernel_journey stage 4 (end-to-end integrate outcome): additive,
+        # idempotent per kernel_id, best-effort.
+        try:
+            from ..breakdown.recorder import instrument
+            sdir = getattr(self, "_session_dir", None)
+            if sdir and kernel_id:
+                _dec = str(result.get("decision") or "").upper()
+                instrument.record_kernel_e2e(
+                    sdir,
+                    kernel_id=kernel_id,
+                    integrated=(_dec == "KEEP"),
+                    e2e_gain_pct=result.get("gain_pct"),
+                    validated=True if _dec == "KEEP" else None,
+                    decision=_dec,
+                    patch_path=patch_path,
+                    target_file=target_file,
+                    extra_server_args=extra_args,
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
         if result.get("decision") == "KEEP":
             return entry
 
@@ -1361,6 +1413,58 @@ class SharedState:
         """Capture kernel_optimization_handler result for the next Orch turn; empty kernel_id no-op, non-KEEP can't overwrite a pending KEEP, retires kernel_id (r24 guard) after >= max_partial PARTIALs (INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL)."""
         if not isinstance(result, dict):
             return
+        # Author-time breakdown capture: record geak/oob invocations (incl.
+        # backend + pre-dispatch failures) before the metadata-less early
+        # return so no failed attempt becomes invisible in the geak/oob view.
+        try:
+            from ..breakdown.recorder import instrument
+            sdir = getattr(self, "_session_dir", None)
+            instrument.record_kernel_invocations(sdir, result)
+            # kernel_journey stage 2 (dispatch) + stage 3 (backend attempts):
+            # additive, never overlaps the legacy geak/oob view above.
+            _kid = str(result.get("kernel_id") or "")
+            if sdir and _kid:
+                _attempts = result.get("attempts")
+                _attempts = _attempts if isinstance(_attempts, list) else []
+                _backends = []
+                for _a in _attempts:
+                    if isinstance(_a, dict):
+                        _b = str(_a.get("backend") or "").lower()
+                        if _b and _b not in _backends:
+                            _backends.append(_b)
+                if not _backends:
+                    _sel = result.get("selected_backends") or result.get("backends")
+                    if isinstance(_sel, list):
+                        _backends = [str(b).lower() for b in _sel if b]
+                # A backend that failed before dispatching attempts (e.g. geak
+                # rejecting an empty/non-reusable kernel shape) still counts as
+                # dispatched: the backend was invoked. Mirror the failure-detect
+                # used by record_kernel_backend_result so the synthetic FAILED
+                # attempt and the dispatch flag stay consistent.
+                _status = str(result.get("status") or "").lower()
+                _err_class = str(result.get("error_class") or "")
+                _decision = str(
+                    (result.get("proposal") or {}).get("decision") or "").upper()
+                _failed_predispatch = (not _attempts) and (
+                    _status in {"failed", "error", "crashed", "timeout"}
+                    or (_decision == "REVERT" and bool(_err_class))
+                )
+                if _failed_predispatch and not _backends:
+                    _b = str(result.get("backend") or "").lower() or "geak"
+                    _backends = [_b]
+                _dispatched = bool(_attempts) or _failed_predispatch
+                instrument.record_kernel_dispatch(
+                    sdir,
+                    kernel_id=_kid,
+                    dispatched=_dispatched,
+                    backends=_backends,
+                    skip_reason="" if _dispatched else str(
+                        result.get("error_class") or result.get("status") or ""),
+                    orchestration_commit=str(getattr(self, "code_revision", "") or ""),
+                )
+                instrument.record_kernel_backend_result(sdir, result)
+        except Exception:  # noqa: BLE001
+            pass
         kernel_id = str(result.get("kernel_id") or "")
         if not kernel_id:
             # Metadata-less failure: preserve prior streaming-record KEEP.
@@ -1809,6 +1913,14 @@ class SharedState:
             history = history[-max_history:]
         setattr(self, attempts_attr, history)
         setattr(self, last_attr, dict(entry))
+        # Author-time breakdown capture: one phase_timeline event per attempt.
+        try:
+            from ..breakdown.recorder import instrument
+            instrument.record_phase_event(
+                getattr(self, "_session_dir", None), action=action, entry=entry,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return entry
 
     def record_action_failure(
@@ -2252,13 +2364,24 @@ class SharedState:
         round_id = str(entry.get("round_id") or "").strip()
         if not round_id:
             self.specialist_rounds.append(dict(entry))
-            return
-        existing = self.specialist_rounds
-        for i, prev in enumerate(existing):
-            if isinstance(prev, dict) and str(prev.get("round_id") or "") == round_id:
-                existing[i] = dict(entry)
-                return
-        existing.append(dict(entry))
+        else:
+            existing = self.specialist_rounds
+            matched = False
+            for i, prev in enumerate(existing):
+                if isinstance(prev, dict) and str(prev.get("round_id") or "") == round_id:
+                    existing[i] = dict(entry)
+                    matched = True
+                    break
+            if not matched:
+                existing.append(dict(entry))
+        # Author-time breakdown capture: one specialist_runs item per round.
+        try:
+            from ..breakdown.recorder import instrument
+            instrument.record_specialist_round(
+                getattr(self, "_session_dir", None), entry,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def bump_specialist_domain_empty_streak(
         self, domain: str, *, empty: bool,
@@ -2426,6 +2549,14 @@ class SharedState:
         ledger = [e for e in (self.intervention_mix or []) if isinstance(e, dict)]
 
         def _ct(entry: dict[str, Any]) -> str:
+            """Return an entry's normalized ``change_type`` string.
+
+            Args:
+                entry: A single intervention-mix ledger entry.
+
+            Returns:
+                The lowercased, stripped change type (empty if absent).
+            """
             return str(entry.get("change_type") or "").strip().lower()
 
         total_config = sum(1 for e in ledger if _ct(e) == "config")
@@ -3506,6 +3637,11 @@ class SharedState:
         )
 
     def _format_last_trace_analyze(self) -> str:
+        """Render the most recent trace-analyze blob for the prompt.
+
+        Returns:
+            A formatted summary of ``last_trace_analyze``.
+        """
         return self._format_trace_analyze_blob(self.last_trace_analyze)
 
     def _format_trace_analyze_blob(self, blob: dict[str, Any] | None) -> str:

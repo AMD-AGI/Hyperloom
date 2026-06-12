@@ -156,11 +156,29 @@ def _read_baseline_yaml_benchmark(state: Any) -> dict[str, Any]:
 
 
 def _benchmark_envs(benchmark: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``envs`` mapping from a benchmark record.
+
+    Args:
+        benchmark: Benchmark record.
+
+    Returns:
+        The ``envs`` dict, or ``{}`` when absent or not a dict.
+    """
     envs = benchmark.get("envs") or {}
     return envs if isinstance(envs, dict) else {}
 
 
 def _env_int(envs: dict[str, Any], key: str) -> int:
+    """Read a positive integer from an env mapping.
+
+    Args:
+        envs: Environment mapping.
+        key: Key to read.
+
+    Returns:
+        The parsed positive integer, or ``0`` when missing, non-positive, or
+        unparseable.
+    """
     raw = envs.get(key)
     if raw is None:
         return 0
@@ -172,6 +190,14 @@ def _env_int(envs: dict[str, Any], key: str) -> int:
 
 
 def _server_args_from_envs(envs: dict[str, Any]) -> str:
+    """Assemble server CLI args from recognized env keys.
+
+    Args:
+        envs: Environment mapping.
+
+    Returns:
+        A space-joined string of the non-empty server-arg env values.
+    """
     parts = [
         str(envs[k]).strip()
         for k in _RUNTIME_SERVER_ARG_ENV_KEYS
@@ -285,6 +311,15 @@ def resolve_runtime_workload(
     envs = _benchmark_envs(benchmark)
 
     def _state_int(name: str) -> int:
+        """Read a positive integer attribute from ``state``.
+
+        Args:
+            name: Attribute name to read.
+
+        Returns:
+            The positive integer value, or ``0`` when missing, non-positive, or
+            unparseable.
+        """
         try:
             parsed = int(getattr(state, name, 0) or 0)
             return parsed if parsed > 0 else 0
@@ -792,6 +827,14 @@ _EMPTY_BREAKDOWN = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
 
 
 def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
+    """Return the per-element byte size for activation/KV tensors.
+
+    Args:
+        meta: Model metadata.
+
+    Returns:
+        The dtype byte width used for activation and KV-cache sizing.
+    """
     return max(float(meta.weight_dtype_bytes or 2.0), 2.0)
 
 
@@ -1175,11 +1218,33 @@ def compute_roofline_from_perfmodel(
         linears.append(("lm_head", hidden, vocab, 1))
 
     def _roofline_time(fl: float, by: float) -> tuple[float, str, float, float]:
+        """Roofline time for one op given its FLOPs and byte traffic.
+
+        Args:
+            fl: Floating-point operations for the op.
+            by: Bytes moved for the op.
+
+        Returns:
+            A tuple ``(time, bound_kind, t_mem, t_cmp)`` where ``time`` is the
+            roofline max of compute and memory time and ``bound_kind`` is
+            ``"compute"`` or ``"memory"``.
+        """
         t_cmp = fl / f_peak if f_peak > 0 else 1e30
         t_mem = by / bw_bps if bw_bps > 0 else 1e30
         return max(t_cmp, t_mem), "compute" if t_cmp >= t_mem else "memory", t_mem, t_cmp
 
     def _forward(batch: int, s_q: int, s_kv: int) -> tuple[float, float, float, list[OpBreakdown]]:
+        """Roofline-model one forward pass for the given shapes.
+
+        Args:
+            batch: Batch size (concurrency).
+            s_q: Query sequence length.
+            s_kv: Key/value sequence length.
+
+        Returns:
+            A tuple ``(total_time, total_mem_time, total_cmp_time, ops)`` where
+            ``ops`` is the per-op breakdown list.
+        """
         total_t = 0.0
         total_mem_t = 0.0
         total_cmp_t = 0.0

@@ -586,6 +586,15 @@ def _write_kernel_opt_summary(
         out_path = output_dir / "kernel_optimization_summary.json"
         with out_path.open("w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, sort_keys=True)
+        # Author-time breakdown capture: mirror the summary into the recorder.
+        try:
+            from ...breakdown.recorder import instrument
+            instrument.record_singleton_section(
+                session_dir, "kernel_optimization_summary", summary,
+                producer="coordinator",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return out_path
     except Exception as exc:  # noqa: BLE001
         log.warning(
@@ -705,6 +714,16 @@ class ReportExecutor:
         self.max_highlights = int(max_highlights)
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Run the report-generation action for the given context.
+
+        Args:
+            ctx: Action context; used to resolve the session directory
+                and report parameters.
+
+        Returns:
+            A result dict with a ``status`` field, failing when the
+            session directory cannot be resolved.
+        """
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
             return {"status": "failed",

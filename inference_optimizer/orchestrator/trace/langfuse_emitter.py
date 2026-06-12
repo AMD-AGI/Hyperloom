@@ -54,10 +54,26 @@ log = logging.getLogger(__name__)
 
 
 def _manifest_path(session_dir: Path) -> Path:
+    """Return the path to a session's ``manifest.json``.
+
+    Args:
+        session_dir: Session directory.
+
+    Returns:
+        The manifest file path.
+    """
     return session_dir / "manifest.json"
 
 
 def _receipt_path(session_dir: Path) -> Path:
+    """Return the path to a session's Langfuse receipt file.
+
+    Args:
+        session_dir: Session directory.
+
+    Returns:
+        The ``langfuse_receipt.json`` path under the trace directory.
+    """
     return trace_dir(session_dir) / "langfuse_receipt.json"
 
 
@@ -220,6 +236,15 @@ def _set_trace_attrs(
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Load a JSONL file into a list of dict records.
+
+    Args:
+        path: Path to the ``.jsonl`` file.
+
+    Returns:
+        The dict records; missing files, unreadable files, and malformed lines
+        yield (or are skipped to) an empty/partial list.
+    """
     import json
 
     out: list[dict[str, Any]] = []
@@ -243,6 +268,15 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _load_json(path: Path) -> dict[str, Any]:
+    """Load a JSON object file.
+
+    Args:
+        path: Path to the JSON file.
+
+    Returns:
+        The parsed object, or ``{}`` when the file is missing, unreadable, or
+        not a JSON object.
+    """
     import json
 
     if not path.exists():
@@ -264,6 +298,15 @@ class LangfuseEmitter:
     """
 
     def __init__(self, session_dir: Path) -> None:
+        """Initialize the per-session emitter.
+
+        Resolves the manifest and correlation labels unconditionally (even when
+        the live push is disabled) so the receipt always reports the right trace
+        and correlation ids.
+
+        Args:
+            session_dir: Session directory whose traces are emitted.
+        """
         self.session_dir = Path(session_dir)
         self._lock = threading.Lock()
         # pair_key -> partial generation parts ({"llm": row} / {"conv": row}).
@@ -297,6 +340,7 @@ class LangfuseEmitter:
             "scores_sent": 0,           # decision Scores created (span + trace)
             "spans_opened": 0,          # phase + agent spans created
             "ext_shards_read": 0,       # out-of-process ext/*.jsonl files swept
+            "breakdown_recorded": 0,    # 1 once the full SBD JSON was attached
             "errors": 0,                # swallowed send failures
         }
         self._flushed = False
@@ -346,10 +390,16 @@ class LangfuseEmitter:
 
     @property
     def enabled(self) -> bool:
+        """Whether live push to Langfuse is enabled for this session."""
         return self._enabled
 
     # -- span hierarchy (trace -> phase -> agent -> generation) ---------
     def _trace_name(self) -> str:
+        """Return the human-readable trace name.
+
+        Returns:
+            The model name, else the session label, else ``"hyperloom"``.
+        """
         return str(self._manifest.get("model_name") or self._session_label or "hyperloom")
 
     def _ensure_root(self, start: Any) -> Any:
@@ -374,6 +424,15 @@ class LangfuseEmitter:
         return self._root_span
 
     def _ensure_phase_span(self, phase: str, start: Any) -> Any:
+        """Get-or-create the span for a phase under the trace root.
+
+        Args:
+            phase: Phase name.
+            start: Span start time.
+
+        Returns:
+            The cached or newly opened phase span.
+        """
         span = self._phase_spans.get(phase)
         if span is None:
             root = self._ensure_root(start)
@@ -422,6 +481,12 @@ class LangfuseEmitter:
             log.debug("langfuse: record_conversation failed", exc_info=True)
 
     def _buffer(self, row: dict[str, Any], *, half: str) -> None:
+        """Buffer one half of a generation and emit once both halves arrive.
+
+        Args:
+            row: The token (``llm``) or conversation (``conv``) row.
+            half: Which half this row represents (``"llm"`` or ``"conv"``).
+        """
         key = lfmap.pair_key(row)
         emit_parts: dict[str, dict[str, Any]] | None = None
         with self._lock:
@@ -510,6 +575,62 @@ class LangfuseEmitter:
             self._flushed = True
             self._write_receipt()
 
+    def record_session_breakdown(self, breakdown: dict[str, Any]) -> None:
+        """Attach the complete ``session_breakdown.json`` document to the trace.
+
+        Emitted as one ``session_breakdown`` observation whose ``output`` is the
+        full JSON, attached to this session's ``trace_id`` so it lands on the
+        same trace even when called after :meth:`flush_session` has closed the
+        live spans (the normal order: write file -> flush -> patch langfuse ->
+        record here). Idempotent (a second call is a no-op) and best-effort:
+        any send failure is swallowed and never breaks shutdown.
+        """
+        if not self._enabled or not isinstance(breakdown, dict) or not breakdown:
+            return
+        if self._counts.get("breakdown_recorded"):
+            return
+        # Cross-process guard: a prior process (the original run, or an earlier
+        # `recover-session`) may have already attached the document. The
+        # persisted receipt is the only state shared across processes, so an
+        # offline recovery in a fresh process stays idempotent.
+        persisted = read_receipt(self.session_dir) or {}
+        if (persisted.get("counts") or {}).get("breakdown_recorded"):
+            self._counts["breakdown_recorded"] = 1
+            return
+        try:
+            obs = _start_obs(
+                self._client,
+                name="session_breakdown",
+                as_type="span",
+                trace_context={"trace_id": self._trace_id},
+                input=None,
+                output=breakdown,
+                metadata={
+                    "schema_version": breakdown.get("schema_version"),
+                    "exporter_version": breakdown.get("exporter_version"),
+                    "stop_reason": (breakdown.get("session") or {}).get("stop_reason"),
+                },
+            )
+            # Stamp trace name/session_id too, so a session whose only trace
+            # artifact is the breakdown (e.g. no LLM calls) is still grouped.
+            _set_trace_attrs(
+                obs, name=self._trace_name(), session_id=self._session_label,
+            )
+            _end_obs(obs, None)
+            self._counts["breakdown_recorded"] = 1
+        except Exception:  # noqa: BLE001
+            self._counts["errors"] += 1
+            log.debug("langfuse: record_session_breakdown failed", exc_info=True)
+        finally:
+            try:
+                self._client.flush()
+            except Exception:  # noqa: BLE001
+                self._counts["errors"] += 1
+                log.debug("langfuse: flush after breakdown failed", exc_info=True)
+            # Persist the breakdown_recorded flag so a later process (recovery)
+            # sees it and skips re-attaching the document.
+            self._write_receipt()
+
     def _close_spans(self) -> None:
         """End every open span, innermost first (agent -> phase -> root)."""
         for span in list(self._agent_spans.values()):
@@ -521,6 +642,11 @@ class LangfuseEmitter:
 
     @staticmethod
     def _safe_end(span: Any) -> None:
+        """End a span, swallowing any errors.
+
+        Args:
+            span: The span object to end.
+        """
         try:
             span.end()
         except Exception:  # noqa: BLE001
@@ -572,6 +698,13 @@ class LangfuseEmitter:
     def _create_score(
         self, score: dict[str, Any], *, phase: str, agent: str,
     ) -> None:
+        """Attach a Langfuse Score to the owning agent span or the trace.
+
+        Args:
+            score: Score payload (``name``, ``value``, ``data_type``, ...).
+            phase: Phase that owns the decision, used to locate the span.
+            agent: Agent/component that owns the decision.
+        """
         span = self._agent_spans.get((phase, agent))
         try:
             if span is not None and hasattr(span, "score"):
@@ -676,6 +809,38 @@ def flush_session(session_dir: Path) -> None:
     get_emitter(session_dir).flush_session()
 
 
+def _read_breakdown_file(session_dir: Path) -> dict[str, Any]:
+    """Load the written ``session_breakdown.json`` for ``session_dir`` ({} if absent)."""
+    import json
+
+    from ...breakdown import BREAKDOWN_FILENAME
+
+    path = Path(session_dir) / BREAKDOWN_FILENAME
+    if not path.exists():
+        return {}
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        return obj if isinstance(obj, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def record_session_breakdown(
+    session_dir: Path,
+    breakdown: dict[str, Any] | None = None,
+) -> None:
+    """Attach the final ``session_breakdown.json`` to the session's trace.
+
+    Call after the breakdown is written and the langfuse section patched (so
+    the attached document is the complete, post-flush form). Reads the file
+    from disk when ``breakdown`` is not supplied. No-op when live push is
+    disabled; best-effort (never raises).
+    """
+    if breakdown is None:
+        breakdown = _read_breakdown_file(Path(session_dir))
+    get_emitter(session_dir).record_session_breakdown(breakdown)
+
+
 def read_receipt(session_dir: Path) -> dict[str, Any] | None:
     """Read the persisted ``langfuse_receipt.json`` for ``session_dir``.
 
@@ -701,4 +866,5 @@ __all__ = [
     "flush_session",
     "get_emitter",
     "read_receipt",
+    "record_session_breakdown",
 ]

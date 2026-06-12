@@ -1325,7 +1325,9 @@ async def trace_analyze_handler(
         cmd += ["--dry-run"]
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
 
+    _disc_started = time.monotonic()
     rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
+    _disc_duration_sec = round(time.monotonic() - _disc_started, 3)
     result = _shape_tool_result(rc, stdout, stderr)
     artifacts = result.get("artifact_paths") if isinstance(result, dict) else None
     if isinstance(artifacts, dict) and artifacts.get("kernel_candidates"):
@@ -1380,6 +1382,33 @@ async def trace_analyze_handler(
                 metadata,
                 trace_report_path=str(report_path or ""),
             )
+
+        # kernel_journey stage 1 (hot-kernel discovery): additive, best-effort.
+        # Records the tracelens run + its hot-kernel list + tool provenance so
+        # the journey can thread discovery -> dispatch -> backends -> e2e.
+        try:
+            from ..breakdown.recorder import instrument
+            _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
+            instrument.record_kernel_discovery(
+                session_dir,
+                source="tracelens",
+                status=str(result.get("status") or ""),
+                hot_kernels=_hot if isinstance(_hot, list) else [],
+                scan={
+                    "splitter_mode":      steady_state_mode,
+                    "trace_dir":          str(trace_input),
+                    "candidates_path":    str(result.get("candidates_path") or ""),
+                    "trace_report_path":  str(result.get("trace_report_path") or ""),
+                },
+                # tracelens version/commit is read from $TRACELENS_ROOT (its
+                # own checkout), resolved by the recorder's tool registry; we
+                # don't pin it to the kernel-agent root here.
+                duration_sec=_disc_duration_sec,
+                error=(str(result.get("error") or "") or None
+                       if str(result.get("status") or "") == "failed" else None),
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return result
 
 
@@ -1533,11 +1562,19 @@ def _optimization_wrapper_timeout_sec(payload: dict) -> int:
 def _backend_order(payload: dict) -> list[str]:
     """Resolve the ordered list of optimization backends to try.
 
-    Uses an explicit ``payload['backend_order']`` or
-    ``KERNEL_OPT_BACKEND_ORDER`` env if present; otherwise falls back to the
-    default GEAK-first ladder. Unknown backends are filtered out, and
-    ``cursor`` is dropped from the auto-derived ladder when ``CURSOR_API_KEY``
-    is unset (explicit orders are respected as-is).
+    Precedence (highest to lowest):
+
+    1. ``payload['backend_order']`` – explicit per-request override.
+    2. ``KERNEL_OPT_BACKEND_ORDER`` env var – comma-separated list.
+    3. ``KERNEL_OPT_BACKENDS`` env var – accepted as an alias for
+       ``KERNEL_OPT_BACKEND_ORDER``.
+    4. The built-in GEAK-first default ladder.
+
+    All backend names are normalized to lowercase before filtering, so
+    values like ``"GEAK"`` or ``"Claude"`` are treated the same as their
+    lowercase equivalents.  Unknown backends are silently dropped, and
+    ``cursor`` is removed from the auto-derived ladder when
+    ``CURSOR_API_KEY`` is unset (explicit orders are respected as-is).
 
     Args:
         payload (dict): Request payload that may carry ``backend_order``.
@@ -1546,9 +1583,13 @@ def _backend_order(payload: dict) -> list[str]:
         list[str]: The filtered, ordered backend names (subset of
             ``{"claude", "codex", "cursor", "geak"}``).
     """
-    raw = payload.get("backend_order") or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
+    raw = (
+        payload.get("backend_order")
+        or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
+        or os.environ.get("KERNEL_OPT_BACKENDS")
+    )
     if raw:
-        order = [item.strip() for item in str(raw).split(",") if item.strip()]
+        order = [item.strip().lower() for item in str(raw).split(",") if item.strip()]
         explicit = True
     else:
         # Ignore legacy payload["backends"]; the default ladder (GEAK first) mirrors ``kernel_optimization.choose_backends`` so single/batch agree.
@@ -2319,6 +2360,25 @@ def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+def _record_kernel_roofline_sidecar(session_dir: Path) -> None:
+    """Transcribe ``reports/kernel_roofline.json`` (written by the external
+    kernel-agent tool) into the breakdown recorder as a ``kernel_roofline``
+    singleton. Best-effort; never raises."""
+    try:
+        sidecar_path = Path(session_dir) / "reports" / "kernel_roofline.json"
+        if not sidecar_path.is_file():
+            return
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or not payload:
+            return
+        from ..breakdown.recorder import instrument
+        instrument.record_singleton_section(
+            session_dir, "kernel_roofline", payload, producer="kernel-agent",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _lookup_kernel_roofline_name(session_dir: Path, kernel_id: str) -> str:
     """Resolve the TraceLens/device kernel name for a roofline sidecar row."""
     sidecar_path = session_dir / "reports" / "kernel_roofline.json"
@@ -2369,6 +2429,14 @@ def _record_after_kernel_opt_rocprof_status(
 
 
 def _rocprof_timeout_sec() -> int:
+    """Resolve the rocprof roofline subprocess timeout in seconds.
+
+    Reads ``HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC`` and clamps it to a
+    minimum of 60 seconds.
+
+    Returns:
+        The timeout in seconds (defaults to 1800).
+    """
     try:
         return max(60, int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800")))
     except (TypeError, ValueError):
@@ -2376,6 +2444,17 @@ def _rocprof_timeout_sec() -> int:
 
 
 def _rocprof_profile_command(test_command: str) -> str:
+    """Rewrite a test command to run in rocprof profiling mode.
+
+    Swaps a ``--correctness`` flag for ``--profile`` only when the command
+    targets a recognized unittest harness; otherwise returns it unchanged.
+
+    Args:
+        test_command: The original kernel test command.
+
+    Returns:
+        The (possibly rewritten) command string.
+    """
     if "--correctness" not in test_command:
         return test_command
     if "/unittest/harness_" not in test_command and " harness_" not in test_command:
@@ -2520,6 +2599,9 @@ async def _run_after_kernel_opt_rocprof(
             rocprof_status=status,
             phase="after_kernel_opt",
         )
+        # Author-time breakdown capture: transcribe the external tool's sidecar
+        # (reports/kernel_roofline.json) into the recorder right after it lands.
+        _record_kernel_roofline_sidecar(session_dir)
     except Exception as exc:
         log.warning("integrate: after_kernel_opt sidecar update failed: %s", exc)
 
@@ -2536,6 +2618,20 @@ def _schedule_after_kernel_opt_rocprof(
     session_dir: Path,
     log: logging.Logger,
 ) -> dict[str, Any]:
+    """Schedule a background rocprof roofline run after a kernel integrate.
+
+    Honors ``HYPERLOOM_ROCPROF_ROOFLINE`` to disable profiling; otherwise
+    records a ``scheduled`` status and launches the run as a tracked
+    background task.
+
+    Args:
+        kernel_id: Identifier of the integrated kernel.
+        session_dir: Session directory for status sidecars.
+        log: Logger for status and error reporting.
+
+    Returns:
+        A status dict indicating whether the run was scheduled or skipped.
+    """
     rocprof_env = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE", "1").strip().lower()
     if rocprof_env in {"0", "false", "no", "off"}:
         _record_after_kernel_opt_rocprof_status(
@@ -2562,6 +2658,11 @@ def _schedule_after_kernel_opt_rocprof(
     _BACKGROUND_ROCPROF_TASKS.add(task)
 
     def _done(done_task: asyncio.Task[Any]) -> None:
+        """Completion callback that drops the task and logs failures.
+
+        Args:
+            done_task: The finished background rocprof task.
+        """
         _BACKGROUND_ROCPROF_TASKS.discard(done_task)
         try:
             done_task.result()
@@ -2664,6 +2765,11 @@ async def integrate_handler(
         os.environ["AITER_REBUILD"] = "1"
 
     def _restore_aiter_rebuild_env() -> None:
+        """Restore the ``AITER_REBUILD`` env var to its prior value.
+
+        No-op unless a forced rebuild was applied for this re-baseline;
+        otherwise pops or restores the original value (GH #458).
+        """
         if not force_aiter_rebuild:
             return
         if _prev_aiter_rebuild is None:
