@@ -2,27 +2,11 @@
 
 """Specialist subprocess MCP config generator.
 
-Generates the ``--mcp-config`` JSON file that the ``claude`` subprocess
-spawned by :class:`SpecialistSubprocessDispatcher` reads. Without this
-file the subprocess starts with ``mcp_servers=[]`` and any
-``mcp__<server>__*`` tool name listed in ``--allowedTools`` resolves to
-nothing — the specialist silently loses access to PR Monitor.
-
-The generated config currently registers one server:
-
-* ``pr_monitor`` — streamable-HTTP MCP at the URL advertised by
-  :meth:`KnowledgePlane.specialist_mcp_url`. The server name MUST be
-  ``pr_monitor`` so the tool names already in the specialist whitelist
-  (``mcp__pr_monitor__pr_search`` / ``pr_get`` / …) resolve.
-
-Cortex KB does not expose an MCP surface (REST only); its read
-context is pre-warmed into Section 4 of the specialist prompt by
-``Coordinator._warm_specialist_params``. Listing dead
-``mcp__cortex_kb__*`` names in the whitelist is harmful (LLM tries to
-call them and gets tool-not-found errors), so the runner-level
-whitelist no longer includes them either.
-
-Schema follows :data:`claude_agent_sdk.types.McpHttpServerConfig`.
+Generates the ``--mcp-config`` JSON the ``claude`` subprocess reads,
+registering one server: ``pr_monitor`` (streamable-HTTP MCP at
+:meth:`KnowledgePlane.specialist_mcp_url`); the name MUST be ``pr_monitor`` so
+whitelist tool names resolve. Schema follows
+:data:`claude_agent_sdk.types.McpHttpServerConfig`.
 """
 
 from __future__ import annotations
@@ -46,19 +30,16 @@ def write_specialist_mcp_config(
 ) -> Path | None:
     """Write the specialist subprocess MCP config and return its path.
 
-    Returns ``None`` when no MCP server is wireable (caller should then
-    leave ``--mcp-config`` off the claude command line). Mutating the
-    on-disk file is idempotent: repeated calls with the same inputs
-    overwrite the file with byte-identical content.
+    Returns ``None`` when no MCP server is wireable (caller leaves
+    ``--mcp-config`` off). Idempotent.
 
     Parameters
     ----------
     session_dir
-        Session root. The file lands at
+        Session root; file lands at
         ``<session_dir>/runtime/<SPECIALIST_MCP_CONFIG_FILENAME>``.
     pr_monitor_mcp_url
-        ``KnowledgePlane.specialist_mcp_url()`` — empty string means
-        PR Monitor is disabled / degraded.
+        ``KnowledgePlane.specialist_mcp_url()`` — empty means disabled.
     """
     servers: dict[str, dict[str, Any]] = {}
     pr_url = (pr_monitor_mcp_url or "").strip()

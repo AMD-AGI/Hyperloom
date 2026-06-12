@@ -86,7 +86,7 @@ Earlier launchers may have waited for the Coordinator to emit a
 - inference_optimizer optimize ... # expects setup as first action
 + bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
 + . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
-+ ray stop --force; ray start --head --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
++ ray stop --force; ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true; ray start --head --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
 + inference_optimizer optimize ...
 ```
 
