@@ -4,7 +4,7 @@ ARG RUNNER_VERSION=2.333.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl git python3 python3-pip jq ca-certificates \
     libicu-dev libssl-dev libkrb5-dev zlib1g-dev \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -14,14 +14,25 @@ RUN pip3 install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements
 
 RUN curl -fsSL https://raw.githubusercontent.com/AMD-AGI/Primus-SaFE/main/Scripts/setup-certs/setup.sh | bash
 
+# Unprivileged user: the Actions runner refuses to run as root by default and
+# dropping root limits blast radius if a job is compromised.
+RUN useradd --create-home --shell /bin/bash runner
+
 WORKDIR /actions-runner
 
 RUN curl -sL -o actions-runner.tar.gz \
        "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" \
     && tar xzf actions-runner.tar.gz \
     && rm actions-runner.tar.gz \
-    && ./bin/installdependencies.sh
+    && ./bin/installdependencies.sh \
+    && chown -R runner:runner /actions-runner
 
 LABEL runner.version="${RUNNER_VERSION}"
+
+USER runner
+
+# Liveness: healthy only while the runner listener process is up.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD pgrep -f "Runner.Listener|run.sh" >/dev/null 2>&1 || exit 1
 
 CMD ["bash"]
