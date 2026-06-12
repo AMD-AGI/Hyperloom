@@ -25,6 +25,56 @@ EXPORTER_VERSION = "session-breakdown-1.0.0"
 BREAKDOWN_FILENAME = "session_breakdown.json"
 
 
+def _phase_event_key(ev: dict[str, Any]) -> tuple[str, str, str]:
+    """Dedupe key matching :func:`collectors.collect_phase_timeline`.
+
+    ``(action, ts-to-second, change|task_id)`` with the timestamp canonicalised
+    to ``...Z`` so a recorder fragment row and the collector's audit-list row
+    for the same attempt collapse to one event.
+    """
+    return (
+        str(ev.get("action") or ""),
+        collectors._iso_z(ev.get("ts"))[:19],
+        str(ev.get("change") or ev.get("task_id") or ""),
+    )
+
+
+def _merge_phase_timeline(
+    fragment: Any, collector_value: Any,
+) -> list[dict[str, Any]]:
+    """Union the recorder ``phase_timeline`` fragment with the collector result.
+
+    The collector merges three sources (optimization_journal + audit lists +
+    kernel_opt/integrate lanes); the recorder fragment only carries audit-action
+    attempts. A plain fragment-wins replacement (``_pick``) would therefore drop
+    the journal KEEP/REVERT and kernel lanes, so we keep the collector result as
+    the base and only append fragment rows whose dedupe key is missing (the
+    crash-survivable audit rows the on-disk state may have lost). Result stays
+    sorted by ``ts`` like the collector's own output.
+    """
+    base: list[dict[str, Any]] = (
+        list(collector_value) if isinstance(collector_value, list) else []
+    )
+    if not isinstance(fragment, list) or not fragment:
+        return base
+    seen = {_phase_event_key(ev) for ev in base if isinstance(ev, dict)}
+    for ev in fragment:
+        if not isinstance(ev, dict):
+            continue
+        # Normalise to the collector's audit-row shape so keys line up.
+        norm = dict(ev)
+        norm.setdefault("kernel_id", None)
+        norm.setdefault("phase", "")
+        norm.setdefault("change", str(ev.get("action") or ""))
+        key = _phase_event_key(norm)
+        if key in seen:
+            continue
+        seen.add(key)
+        base.append(norm)
+    base.sort(key=lambda e: e.get("ts") or "")
+    return base
+
+
 def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
     """Read ``state.json`` as a plain dict; empty dict + warning when missing."""
     state_path = session_dir / "state.json"
@@ -191,9 +241,17 @@ def build(
     final             = _pick("final", _safe_collect("final",
                                        lambda: collectors.collect_final(sd, state, warnings),
                                        warnings))
-    phase_timeline    = _pick("phase_timeline", _safe_collect("phase_timeline",
-                                       lambda: collectors.collect_phase_timeline(sd, state, warnings),
-                                       warnings))
+    # Merge (not _pick replace): the recorder fragment only carries audit-action
+    # attempts, while the collector also folds in optimization_journal KEEP/REVERT
+    # and the kernel_opt/integrate lanes. Fragment-wins would drop those (and
+    # cascade into action_timeline / phase_segments / token_usage which all
+    # derive from this), so union + dedupe instead.
+    phase_timeline    = _merge_phase_timeline(
+        assembled.get("phase_timeline"),
+        _safe_collect("phase_timeline",
+                      lambda: collectors.collect_phase_timeline(sd, state, warnings),
+                      warnings),
+    )
     # Derived from the resolved (fragment-or-collector) phase_timeline.
     phase_segments    = _safe_collect("phase_segments",
                                        lambda: collectors.collect_phase_segments(

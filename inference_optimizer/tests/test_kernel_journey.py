@@ -257,3 +257,88 @@ def test_attach_kernel_roofline_enriches_journey() -> None:
     assert entry["discovery"]["bound_type"] == "memory"
     assert entry["discovery"]["arithmetic_intensity"] == 3.5
     assert entry["discovery"]["efficiency_percent"] == 61.0
+
+
+def test_merge_phase_timeline_unit_keeps_collector_and_dedups() -> None:
+    from inference_optimizer.breakdown.exporter import _merge_phase_timeline
+
+    collector = [
+        {"action": "baseline", "ts": "2026-06-12T00:00:01Z", "change": "baseline",
+         "decision": "promoted"},
+        {"action": "kernel_opt", "ts": "2026-06-12T00:00:02Z",
+         "change": "kernel_opt:k001", "kernel_id": "k001", "decision": "KEEP"},
+    ]
+    fragment = [
+        # Same attempt as the collector baseline row -> must dedupe (no dup).
+        {"action": "baseline", "ts": "2026-06-12T00:00:01Z", "task_id": "t1",
+         "decision": "promoted"},
+        # An audit row the on-disk state lost -> must be appended.
+        {"action": "explore", "ts": "2026-06-12T00:00:03Z", "task_id": "t2",
+         "decision": "promoted"},
+    ]
+    merged = _merge_phase_timeline(fragment, collector)
+    actions = [e["action"] for e in merged]
+    # Collector's journal/kernel lanes preserved + the missing audit row added.
+    assert actions == ["baseline", "kernel_opt", "explore"]
+    # Sorted by ts and no duplicate baseline event.
+    assert sum(1 for e in merged if e["action"] == "baseline") == 1
+
+
+def test_build_phase_timeline_merges_journal_and_kernel_lanes(
+    tmp_path: Path,
+) -> None:
+    # Regression: a recorder phase_timeline fragment must NOT erase the
+    # optimization_journal KEEP/REVERT or the kernel_opt/integrate lanes that
+    # only the collector folds in (the fragment carries audit actions only).
+    import json
+
+    from inference_optimizer.breakdown import exporter
+
+    (tmp_path / "reports").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "reports" / "optimization_journal.json").write_text(
+        json.dumps({"entries": [
+            {"ts": "2026-06-12T00:00:01Z", "kind": "baseline",
+             "change": "baseline", "outcome": "KEEP", "phase": "EXPLORE",
+             "throughput_after": 5000.0},
+            {"ts": "2026-06-12T00:00:05Z", "kind": "explore",
+             "change": "explore", "outcome": "REVERT", "phase": "EXPLORE",
+             "gain_pct": -2.0},
+        ]}),
+        encoding="utf-8",
+    )
+    (tmp_path / "state.json").write_text(
+        json.dumps({
+            "kernel_opt_attempts": {
+                "k001": {"last_ts": "2026-06-12T00:00:03Z",
+                         "history": [{"ts": "2026-06-12T00:00:03Z",
+                                      "decision": "KEEP"}]},
+            },
+            "kernel_integrate_attempts": {
+                "patch-1": {"kernel_id": "k001", "patch_path": "/p.diff",
+                            "attempts": [{"ts": "2026-06-12T00:00:04Z",
+                                          "status": "ok", "decision": "KEEP",
+                                          "gain_pct": 3.0}]},
+            },
+        }),
+        encoding="utf-8",
+    )
+    # Record an audit-action fragment -> triggers the v3 assembled/merge path.
+    instrument.record_phase_event(
+        tmp_path, action="baseline",
+        entry={"task_id": "t1", "ts": "2026-06-12T00:00:01Z",
+               "status": "succeeded", "decision": "promoted"},
+    )
+
+    out = exporter.build(tmp_path)
+    timeline = out["phase_timeline"]
+    actions = {e.get("action") for e in timeline}
+    # Journal KEEP/REVERT + both kernel lanes survived the fragment merge.
+    assert "baseline" in actions
+    assert "explore" in actions
+    assert "kernel_opt" in actions
+    assert "integrate" in actions
+    decisions = {(e.get("action"), e.get("decision")) for e in timeline}
+    assert ("explore", "REVERT") in decisions
+    assert ("integrate", "KEEP") in decisions
+    # action_timeline aliases phase_timeline (same cascade source).
+    assert out["action_timeline"] == timeline
