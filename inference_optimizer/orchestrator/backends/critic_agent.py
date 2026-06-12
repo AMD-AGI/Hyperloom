@@ -236,6 +236,26 @@ def _proposal_scope_literal(proposal: dict[str, Any]) -> str:
     return ""
 
 
+def _verdict_references_kb(review: dict[str, Any] | None) -> bool:
+    """Whether any final review verdict cites KB evidence.
+
+    Scans ``review_verdicts[].kb_evidence`` for a truthy reference. Used by the
+    KB trace to record whether the decision actually leaned on KB data.
+
+    Args:
+        review (dict[str, Any] | None): The parsed review object.
+
+    Returns:
+        bool: ``True`` if at least one verdict references KB evidence.
+    """
+    if not isinstance(review, dict):
+        return False
+    for v in review.get("review_verdicts") or []:
+        if isinstance(v, dict) and v.get("kb_evidence"):
+            return True
+    return False
+
+
 def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None:
     """Set ``review_constraints.cross_domain`` + rule descriptors when any
     proposal is cross-domain (unified ``scope == 'domains'`` dial). Idempotent."""
@@ -318,6 +338,11 @@ class CriticAgentBackend:
     # Per-action verdict policy (action_name -> archival/exploration/promotion)
     # enriched onto ``review_constraints.action_verdict_policy`` post prepare-review.
     action_verdict_policy: dict[str, str] = field(default_factory=dict)
+    # Substrate KB assess injection switch. ``None`` reads the
+    # ``CORTEX_KB_ASSESS_INJECT`` env at turn time (default OFF = dry-run: the
+    # assess verdicts are still fetched + traced, but withheld from the LLM
+    # prompt so they don't steer the decision). ``True``/``False`` force it.
+    kb_assess_inject: bool | None = None
     name: str = "critic-agent"
     # #170 — optional web tools (web_search / web_fetch). ``web_tools_config``
     # None reads from env; ``web_tool_clients_factory`` injects test clients.
@@ -653,11 +678,20 @@ class CriticAgentBackend:
             (i.payload.get("verdict"), i.payload.get("source"))
             for i in intents if i.type.value == "review_verdict"
         ]
+        assess_injected = self._kb_assess_inject_enabled()
+        kb_assess_trace = self._build_kb_assess_trace(
+            judge_bundle, review, injected=assess_injected,
+        )
+        kb_priors_trace = self._build_kb_priors_trace(judge_bundle, review)
         log.info(
             "critic_agent_backend turn=%d session=%s proposals=%d "
-            "verdicts=%s kb_skipped=%s required_context=%s finish=%s",
+            "verdicts=%s kb_skipped=%s required_context=%s finish=%s "
+            "kb_assess_mode=%s kb_assess_verdicts=%d kb_priors=%d",
             turn_idx, session_id, len(proposals),
             verdicts_summary, kb_skipped, required_context, llm_finish,
+            kb_assess_trace.get("mode") or "n/a",
+            kb_assess_trace.get("verdict_count") or 0,
+            kb_priors_trace.get("prior_count") or 0,
         )
         self.calls.append({
             "turn_idx": turn_idx,
@@ -667,6 +701,9 @@ class CriticAgentBackend:
             "required_context": required_context,
             "finish_reason": llm_finish,
             "workdir": str(workdir),
+            "kb_assess_mode": kb_assess_trace.get("mode"),
+            "kb_assess_verdicts": kb_assess_trace.get("verdict_count") or 0,
+            "kb_priors_count": kb_priors_trace.get("prior_count") or 0,
         })
 
         # Author-time breakdown capture: record this critic iteration before the
@@ -679,9 +716,19 @@ class CriticAgentBackend:
                 review=review,
                 emit=emit,
                 workdir=workdir,
+                kb_assess=kb_assess_trace,
+                kb_priors=kb_priors_trace,
             )
         except Exception:  # noqa: BLE001
             pass
+
+        # Second sink: mirror the KB integration trace into Langfuse (opt-in,
+        # best-effort) so it lands on the same trace as the critic generations.
+        self._mirror_kb_trace_to_langfuse(
+            turn_idx=turn_idx,
+            kb_assess=kb_assess_trace,
+            kb_priors=kb_priors_trace,
+        )
 
         return BackendTurnResult(
             intents=intents,
@@ -852,6 +899,156 @@ class CriticAgentBackend:
                 )
         return env
 
+    def _mirror_kb_trace_to_langfuse(
+        self,
+        *,
+        turn_idx: int,
+        kb_assess: dict[str, Any],
+        kb_priors: dict[str, Any],
+    ) -> None:
+        """Mirror the per-iteration KB trace into Langfuse (best-effort).
+
+        Emits one span per non-empty trace under the ``critic`` agent so the
+        "was KB used / request / response / influenced decision" evidence is
+        visible alongside the critic generations. No-op when Langfuse is
+        disabled; never raises into the review path.
+
+        Args:
+            turn_idx (int): The critic iteration index.
+            kb_assess (dict[str, Any]): The assess trace (may be empty).
+            kb_priors (dict[str, Any]): The priors trace (may be empty).
+        """
+        try:
+            from ..trace.langfuse_emitter import get_emitter
+            emitter = get_emitter(self.session_dir)
+            if not emitter.enabled:
+                return
+            if kb_assess:
+                emitter.record_kb_span(
+                    name=f"kb_assess:iter_{turn_idx}",
+                    agent="critic",
+                    output=kb_assess,
+                    metadata={
+                        "kind": "kb_assess",
+                        "iter": turn_idx,
+                        "mode": kb_assess.get("mode"),
+                        "verdict_count": kb_assess.get("verdict_count") or 0,
+                        "referenced_in_verdict": bool(
+                            kb_assess.get("referenced_in_verdict")
+                        ),
+                    },
+                )
+            if kb_priors:
+                emitter.record_kb_span(
+                    name=f"kb_priors:iter_{turn_idx}",
+                    agent="critic",
+                    output=kb_priors,
+                    metadata={
+                        "kind": "kb_priors",
+                        "iter": turn_idx,
+                        "prior_count": kb_priors.get("prior_count") or 0,
+                        "referenced_in_verdict": bool(
+                            kb_priors.get("referenced_in_verdict")
+                        ),
+                    },
+                )
+        except Exception:  # noqa: BLE001 — trace must never break the review
+            log.debug("critic_agent: langfuse kb mirror failed", exc_info=True)
+
+    def _kb_assess_inject_enabled(self) -> bool:
+        """Whether substrate assess verdicts are fed to the LLM this turn.
+
+        ``kb_assess_inject`` (when not ``None``) forces the mode; otherwise the
+        ``CORTEX_KB_ASSESS_INJECT`` env decides, defaulting to OFF (dry-run).
+
+        Returns:
+            bool: ``True`` to inject the verdicts into the prompt.
+        """
+        if self.kb_assess_inject is not None:
+            return bool(self.kb_assess_inject)
+        return os.environ.get(
+            "CORTEX_KB_ASSESS_INJECT", "",
+        ).strip().lower() in ("1", "true", "yes", "on")
+
+    @staticmethod
+    def _build_kb_assess_trace(
+        judge_bundle: dict[str, Any],
+        review: dict[str, Any] | None,
+        *,
+        injected: bool,
+    ) -> dict[str, Any]:
+        """Assemble the substrate-assess KB trace for one critic iteration.
+
+        Folds the runtime-captured ``kb_assess_trace`` (configured? skip reason?
+        focus? per-proposal requests) with the resolved verdict count, whether
+        the verdicts were injected into the prompt this turn (vs dry-run), and
+        whether the final verdict referenced KB evidence.
+
+        Args:
+            judge_bundle (dict[str, Any]): The prepared judge bundle.
+            review (dict[str, Any] | None): The parsed review object.
+            injected (bool): Whether the verdicts were fed to the LLM.
+
+        Returns:
+            dict[str, Any]: The assess trace (empty when nothing was captured).
+        """
+        trace = dict(judge_bundle.get("kb_assess_trace") or {})
+        verdicts = judge_bundle.get("kb_assess_by_proposal") or {}
+        if not trace and not verdicts:
+            return {}
+        return {
+            "configured": bool(trace.get("configured")),
+            "skipped_reason": trace.get("skipped_reason"),
+            "focus": trace.get("focus") or {},
+            "requests": trace.get("requests") or [],
+            "verdict_count": len(verdicts),
+            "injected": bool(injected),
+            "mode": "injected" if injected else "dry_run",
+            "referenced_in_verdict": (
+                _verdict_references_kb(review) if injected else False
+            ),
+        }
+
+    @staticmethod
+    def _build_kb_priors_trace(
+        judge_bundle: dict[str, Any],
+        review: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Assemble the historical-priors KB trace for one critic iteration.
+
+        Folds the runtime-captured ``kb_priors_trace`` (scope/limit/per-request
+        cache+count) with the total prior count, the skip reason (if any), and
+        whether the final verdict referenced KB evidence. Priors are always
+        injected, so ``referenced_in_verdict`` is unconditional here.
+
+        Args:
+            judge_bundle (dict[str, Any]): The prepared judge bundle.
+            review (dict[str, Any] | None): The parsed review object.
+
+        Returns:
+            dict[str, Any]: The priors trace (empty when nothing was captured).
+        """
+        trace = dict(judge_bundle.get("kb_priors_trace") or {})
+        by_proposal = judge_bundle.get("kb_priors_by_proposal") or {}
+        for_decision = judge_bundle.get("kb_priors_for_decision") or []
+        skipped = judge_bundle.get("kb_read_skipped_reason")
+        if not trace and not by_proposal and not for_decision and not skipped:
+            return {}
+        total = sum(
+            len(v) for v in by_proposal.values() if isinstance(v, list)
+        ) + len(for_decision)
+        return {
+            "configured": bool(trace.get("configured")),
+            "mode": trace.get("mode"),
+            "client_mode": trace.get("client_mode"),
+            "scope_filter": trace.get("scope_filter") or {},
+            "limit": trace.get("limit"),
+            "requests": trace.get("requests") or [],
+            "skipped_reason": skipped,
+            "prior_count": total,
+            "referenced_in_verdict": _verdict_references_kb(review),
+        }
+
     async def _reason(
         self,
         *,
@@ -875,25 +1072,29 @@ class CriticAgentBackend:
             raw model text, and the final finish reason.
         """
         preamble = self._load_skill_preamble()
-        bundle_text = json.dumps(
-            {
-                "kind": judge_bundle.get("kind"),
-                "session_id": judge_bundle.get("session_id"),
-                "decision_id": judge_bundle.get("decision_id"),
-                "merged_context": judge_bundle.get("merged_context"),
-                "missing_context": judge_bundle.get("missing_context"),
-                "required_context": judge_bundle.get("required_context"),
-                "proposals": judge_bundle.get("proposals"),
-                "kb_priors_by_proposal": judge_bundle.get("kb_priors_by_proposal"),
-                "kb_priors_for_decision": judge_bundle.get("kb_priors_for_decision"),
-                "kb_assess_by_proposal": judge_bundle.get("kb_assess_by_proposal"),
-                "kb_read_skipped_reason": judge_bundle.get("kb_read_skipped_reason"),
-                "review_constraints": judge_bundle.get("review_constraints"),
-                "notes": judge_bundle.get("notes"),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+        bundle_view: dict[str, Any] = {
+            "kind": judge_bundle.get("kind"),
+            "session_id": judge_bundle.get("session_id"),
+            "decision_id": judge_bundle.get("decision_id"),
+            "merged_context": judge_bundle.get("merged_context"),
+            "missing_context": judge_bundle.get("missing_context"),
+            "required_context": judge_bundle.get("required_context"),
+            "proposals": judge_bundle.get("proposals"),
+            "kb_priors_by_proposal": judge_bundle.get("kb_priors_by_proposal"),
+            "kb_priors_for_decision": judge_bundle.get("kb_priors_for_decision"),
+            "kb_read_skipped_reason": judge_bundle.get("kb_read_skipped_reason"),
+            "review_constraints": judge_bundle.get("review_constraints"),
+            "notes": judge_bundle.get("notes"),
+        }
+        # Dry-run gate: only feed the substrate assess verdicts to the LLM when
+        # injection is explicitly enabled. When OFF the verdicts are still
+        # fetched + traced (see _build_kb_assess_trace) but kept out of the
+        # prompt so they cannot steer the decision.
+        if self._kb_assess_inject_enabled():
+            bundle_view["kb_assess_by_proposal"] = judge_bundle.get(
+                "kb_assess_by_proposal"
+            )
+        bundle_text = json.dumps(bundle_view, ensure_ascii=False, indent=2)
         user_prompt = (
             f"{preamble}\n\n"
             f"==== JUDGE BUNDLE ====\n{bundle_text}\n==== END JUDGE BUNDLE ====\n\n"

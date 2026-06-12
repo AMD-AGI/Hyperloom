@@ -77,6 +77,15 @@ from .remote_client import RemoteRecipeClient, RemoteRecipeClientError
 
 log = logging.getLogger(__name__)
 
+# Short, stable labels for the configured remote backend keyed by client class
+# name (used by :meth:`RecipeKB._remote_label` for logs/audit trace). Unknown
+# backends fall back to their class name.
+_REMOTE_LABELS: dict[str, str] = {
+    "RemoteRecipeClient": "cortex",
+    "GbrainRemoteRecipeClient": "gbrain",
+    "CompositeRemoteRecipeClient": "composite",
+}
+
 
 def _labels_from_canonical_id(canonical_id: str) -> dict[str, str]:
     """Decode a canonical_id into the 5-key ``label_match`` dict the
@@ -317,11 +326,18 @@ class RecipeKB:
             Defaults to ``log.warning`` so audit-collector hooks
             can wire a structured event in without a
             dispatcher-internal change.
+        audit_hook: Optional callback invoked (best-effort, never
+            raising into the caller) after every read/write with a
+            structured event dict describing whether the remote was
+            used, the request, and the resolution. Defaults to
+            ``None`` (no audit). Wired by the CLI to append a
+            ``recipe_snapshot/.audit.jsonl`` trace.
     """
 
     local: LocalRecipeStore
     remote: RemoteRecipeClient | None = None
     on_remote_failure: Any = None
+    audit_hook: Any = None
 
     # ------------------------------------------------------------------
     # Capability flags
@@ -375,6 +391,91 @@ class RecipeKB:
         through untouched rather than being silently emptied.
         """
         return _v2_to_arbor(row)
+
+    def _remote_label(self) -> str:
+        """A short, stable label for the configured remote backend.
+
+        Returns:
+            str: ``"none"`` when no remote, else ``"cortex"`` /
+                ``"gbrain"`` / ``"composite"`` (falling back to the
+                client class name for any future backend).
+        """
+        if self.remote is None:
+            return "none"
+        return _REMOTE_LABELS.get(
+            type(self.remote).__name__, type(self.remote).__name__,
+        )
+
+    def _emit_audit(self, event: dict[str, Any]) -> None:
+        """Best-effort emit one audit event to ``audit_hook`` (never raises).
+
+        Args:
+            event (dict[str, Any]): The structured audit record.
+        """
+        hook = self.audit_hook
+        if not callable(hook):
+            return
+        try:
+            hook(event)
+        except Exception:  # noqa: BLE001 - audit must never break a KB op
+            log.debug("recipe_kb: audit_hook raised", exc_info=True)
+
+    def _read_audit_event(
+        self,
+        *,
+        method: str,
+        resolution: str,
+        row: dict[str, Any] | None,
+        canonical_id: str = "",
+        prefer: dict[str, Any] | None = None,
+        label_match: dict[str, Any] | None = None,
+        candidates: int = 0,
+    ) -> dict[str, Any]:
+        """Build a structured audit record for one recipe-snapshot read.
+
+        Captures whether the remote was consulted and which backend served
+        the row (``remote``), the request (``canonical_id`` / ``prefer`` /
+        ``label_match``), how it resolved (``remote`` / ``remote_miss`` /
+        ``remote_error`` / ``local``), and a compact view of the returned row
+        so the trace answers "was the recipe-snapshot used, what did we ask,
+        and what came back" without storing the full payload.
+
+        Args:
+            method (str): The read method (``get_recipe`` / ``search``).
+            resolution (str): How the read resolved.
+            row (dict[str, Any] | None): The resolved row (or first row).
+            canonical_id (str): Requested canonical id (``get_recipe``).
+            prefer (dict[str, Any] | None): Rerank hints, if any.
+            label_match (dict[str, Any] | None): Search filter, if any.
+            candidates (int): Number of remote candidate rows considered.
+
+        Returns:
+            dict[str, Any]: The audit event (no timestamp; the hook stamps it).
+        """
+        result: dict[str, Any] | None = None
+        if isinstance(row, dict):
+            result = {
+                "canonical_id": str(row.get("canonical_id") or ""),
+                "exact": bool(
+                    canonical_id
+                    and str(row.get("canonical_id") or "") == canonical_id
+                ),
+                "best_throughput": float(row.get("best_throughput") or 0.0),
+                "best_config_nonempty": bool(row.get("best_config")),
+            }
+        return {
+            "method": method,
+            "remote": self._remote_label(),
+            "resolution": resolution,
+            "hit": row is not None,
+            "candidates": int(candidates),
+            "request": {
+                "canonical_id": canonical_id or None,
+                "prefer_keys": sorted((prefer or {}).keys()),
+                "label_match": label_match or None,
+            },
+            "result": result,
+        }
 
     def _note_failure(self, method: str, exc: Exception) -> None:
         """Report a remote read failure before local fall-through.
@@ -595,6 +696,7 @@ class RecipeKB:
             dict[str, Any] | None: The recipe row in arbor shape, or
                 ``None`` when neither store has the row.
         """
+        resolution = "local"
         if version is None and self._remote_active():
             try:
                 labels = _labels_from_canonical_id(canonical_id)
@@ -608,17 +710,30 @@ class RecipeKB:
                 if rows:
                     normalized = [self._normalize_remote_row(r) for r in rows]
                     ranked = _rerank_by_prefer(normalized, prefer)
+                    self._emit_audit(self._read_audit_event(
+                        method="get_recipe", resolution="remote",
+                        row=ranked[0], canonical_id=canonical_id,
+                        prefer=prefer, candidates=len(rows),
+                    ))
                     return ranked[0]
                 # remote miss — fall through to local.
+                resolution = "remote_miss"
             except RemoteRecipeClientError as exc:
                 self._note_failure("get_recipe", exc)
+                resolution = "remote_error"
             except InvalidCanonicalIdError as exc:
                 # Can't build label_match from a malformed cid; the
                 # local store applies the same parse, so just degrade.
                 log.warning("get_recipe: %s; local-only read", exc)
-        return self.local.get_recipe(
+                resolution = "remote_error"
+        local_row = self.local.get_recipe(
             canonical_id=canonical_id, version=version,
         )
+        self._emit_audit(self._read_audit_event(
+            method="get_recipe", resolution=resolution, row=local_row,
+            canonical_id=canonical_id, prefer=prefer,
+        ))
+        return local_row
 
     def get_history(
         self,
@@ -688,6 +803,7 @@ class RecipeKB:
         ``prefer`` only reorders; the ``required`` filter
         (``label_match`` / ``metric_filters``) decides membership.
         """
+        resolution = "local"
         if self._remote_active():
             try:
                 rows = self.remote.search(  # type: ignore[union-attr]
@@ -705,9 +821,18 @@ class RecipeKB:
                 # hasn't received our local writes yet.
                 if rows:
                     normalized = [self._normalize_remote_row(r) for r in rows]
-                    return _rerank_by_prefer(normalized, prefer)
+                    ranked = _rerank_by_prefer(normalized, prefer)
+                    self._emit_audit(self._read_audit_event(
+                        method="search", resolution="remote",
+                        row=ranked[0] if ranked else None,
+                        label_match=label_match, prefer=prefer,
+                        candidates=len(rows),
+                    ))
+                    return ranked
+                resolution = "remote_miss"
             except RemoteRecipeClientError as exc:
                 self._note_failure("search", exc)
+                resolution = "remote_error"
         local_rows = self.local.search(
             label_match=label_match,
             metric_filters=metric_filters,
@@ -715,7 +840,13 @@ class RecipeKB:
             order_by=order_by,
             limit=limit,
         )
-        return _rerank_by_prefer(local_rows, prefer)
+        ranked_local = _rerank_by_prefer(local_rows, prefer)
+        self._emit_audit(self._read_audit_event(
+            method="search", resolution=resolution,
+            row=ranked_local[0] if ranked_local else None,
+            label_match=label_match, prefer=prefer,
+        ))
+        return ranked_local
 
     def list_attempts(
         self,

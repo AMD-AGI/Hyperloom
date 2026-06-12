@@ -335,6 +335,17 @@ class JudgeBundle:
     # Substrate KB per-proposal reasonableness verdicts (optional enrichment),
     # keyed by proposal ``msg_id``; empty when assess is unconfigured/skipped.
     kb_assess_by_proposal: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Audit trail for the KB assess call: whether it was configured, why it was
+    # skipped (if so), the focus used, and the exact request levers sent per
+    # proposal. Consumed by the Coordinator backend for trace/SBD; NOT fed to
+    # the LLM (the verdicts in ``kb_assess_by_proposal`` are the LLM-facing view).
+    kb_assess_trace: dict[str, Any] = field(default_factory=dict)
+    # Audit trail for the historical KB prior reads (``list_priors``): the shared
+    # scope_filter/limit and the exact per-proposal request (topic/kind) plus the
+    # cache/count of each lookup. Consumed by the Coordinator backend for
+    # trace/SBD; the priors themselves live in ``kb_priors_by_proposal`` /
+    # ``kb_priors_for_decision`` (which ARE fed to the LLM).
+    kb_priors_trace: dict[str, Any] = field(default_factory=dict)
     # Recent Robustness findings so the SKILL can factor in what already broke;
     # empty when absent or disabled.
     robustness_priors: list[dict[str, Any]] = field(default_factory=list)
@@ -367,6 +378,8 @@ class JudgeBundle:
             "kb_assess_by_proposal": {
                 k: dict(v) for k, v in self.kb_assess_by_proposal.items()
             },
+            "kb_assess_trace": dict(self.kb_assess_trace),
+            "kb_priors_trace": dict(self.kb_priors_trace),
             "robustness_priors": [dict(p) for p in self.robustness_priors],
             "kb_read_skipped_reason": self.kb_read_skipped_reason,
             "review_constraints": dict(self.review_constraints),
@@ -630,6 +643,8 @@ class DecisionReviewer:
         topic_hits: dict[str, list[dict[str, Any]]] = {}
         ctx = WriteContext(session_id=req.session_id, review_id=req.decision_id)
         any_kb_unreachable = False
+        prior_limit = int(os.environ.get("CRITIC_KB_PRIOR_LIMIT", "5"))
+        priors_requests: list[dict[str, Any]] = []
         if req.proposals:
             for p in req.proposals:
                 topic = self._topic_for_proposal(p)
@@ -638,7 +653,7 @@ class DecisionReviewer:
                     kind=None,
                     topic=topic,
                     metadata_filter=None,
-                    limit=int(os.environ.get("CRITIC_KB_PRIOR_LIMIT", "5")),
+                    limit=prior_limit,
                     ctx=ctx,
                 )
                 topic_hits[p.msg_id] = priors.get("priors") or []
@@ -646,6 +661,12 @@ class DecisionReviewer:
                     any_kb_unreachable = True
                 self.session_memory.append_event(req.session_id, {
                     "kind": "kb_prior_lookup",
+                    "msg_id": p.msg_id,
+                    "topic": topic,
+                    "cache": priors.get("cache"),
+                    "count": len(topic_hits[p.msg_id]),
+                })
+                priors_requests.append({
                     "msg_id": p.msg_id,
                     "topic": topic,
                     "cache": priors.get("cache"),
@@ -659,7 +680,7 @@ class DecisionReviewer:
                 kind=None,
                 topic=topic,
                 metadata_filter=None,
-                limit=int(os.environ.get("CRITIC_KB_PRIOR_LIMIT", "5")),
+                limit=prior_limit,
                 ctx=ctx,
             )
             bundle.kb_priors_for_decision = priors.get("priors") or []
@@ -671,6 +692,24 @@ class DecisionReviewer:
                 "cache": priors.get("cache"),
                 "count": len(bundle.kb_priors_for_decision),
             })
+            priors_requests.append({
+                "msg_id": None,
+                "topic": topic,
+                "cache": priors.get("cache"),
+                "count": len(bundle.kb_priors_for_decision),
+            })
+
+        # Audit trail for the historical KB prior reads (always injected; no
+        # env gate). The priors themselves feed the LLM; this records what we
+        # asked and what came back so the Coordinator can trace it into the SBD.
+        bundle.kb_priors_trace = {
+            "configured": True,
+            "mode": "per_proposal" if req.proposals else "per_decision",
+            "client_mode": os.environ.get("CRITIC_KB_CLIENT_MODE", ""),
+            "scope_filter": dict(scope_filter),
+            "limit": prior_limit,
+            "requests": priors_requests,
+        }
 
         if any_kb_unreachable:
             bundle.kb_read_skipped_reason = "kb_unreachable"
@@ -711,25 +750,56 @@ class DecisionReviewer:
             req (CriticRequest): The parsed request (for proposals).
         """
         client = self.kb_assess_client
-        if client is None or not req.proposals:
+        trace: dict[str, Any] = {
+            "configured": client is not None,
+            "skipped_reason": None,
+            "focus": {},
+            "requests": [],
+        }
+        if client is None:
+            trace["skipped_reason"] = "not_configured"
+            bundle.kb_assess_trace = trace
+            return
+        if not req.proposals:
+            trace["skipped_reason"] = "no_proposals"
+            bundle.kb_assess_trace = trace
             return
         focus = self._assess_focus(bundle.merged_context)
+        trace["focus"] = dict(focus)
         if not focus.get("model"):
+            trace["skipped_reason"] = "unknown_model"
+            bundle.kb_assess_trace = trace
             return
         results: dict[str, dict[str, Any]] = {}
         for p in req.proposals:
             params, envs, args = _proposal_levers(p.payload)
             if not params and not envs and not args:
+                trace["requests"].append({
+                    "msg_id": p.msg_id,
+                    "skipped": "no_levers",
+                })
                 continue
             verdict = client.assess(focus=focus, params=params, envs=envs, args=args)
+            req_entry: dict[str, Any] = {
+                "msg_id": p.msg_id,
+                "params_keys": sorted(params.keys()),
+                "envs_keys": sorted(envs.keys()),
+                "args_count": len(args),
+                "responded": verdict is not None,
+            }
             if verdict is None:
+                trace["requests"].append(req_entry)
                 continue
+            req_entry["reasonable"] = verdict.get("reasonable")
+            trace["requests"].append(req_entry)
             results[p.msg_id] = verdict
             self.session_memory.append_event(req.session_id, {
                 "kind": "kb_assess_lookup",
                 "msg_id": p.msg_id,
                 "reasonable": verdict.get("reasonable"),
             })
+        trace["verdict_count"] = len(results)
+        bundle.kb_assess_trace = trace
         if results:
             bundle.kb_assess_by_proposal = results
             bundle.notes.append(

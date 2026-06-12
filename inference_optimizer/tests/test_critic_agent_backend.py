@@ -24,6 +24,7 @@ from inference_optimizer.orchestrator.backends import (
 from inference_optimizer.orchestrator.backends.base import BackendError
 from inference_optimizer.orchestrator.backends.critic_agent import (
     _extract_review_json,
+    _verdict_references_kb,
 )
 from inference_optimizer.protocol.intent import IntentType
 
@@ -1254,3 +1255,206 @@ async def test_critic_agent_heartbeat_when_no_proposal(
             f"LLM should be skipped when proposals are empty; calls={client.completions.calls}"
     finally:
         await c.stop()
+
+
+# -----------------------------------------------------------------
+# KB trace + dry-run injection gate
+# -----------------------------------------------------------------
+def test_verdict_references_kb_helper():
+    assert _verdict_references_kb(None) is False
+    assert _verdict_references_kb({"review_verdicts": []}) is False
+    assert _verdict_references_kb(
+        {"review_verdicts": [{"verdict": "approve"}]}
+    ) is False
+    assert _verdict_references_kb(
+        {"review_verdicts": [{"verdict": "reject", "kb_evidence": ["kb_x"]}]}
+    ) is True
+
+
+def test_build_kb_assess_trace_dry_run_vs_injected():
+    judge_bundle = {
+        "kb_assess_trace": {
+            "configured": True, "skipped_reason": None,
+            "focus": {"model": "m"},
+            "requests": [{"msg_id": "p1", "responded": True}],
+        },
+        "kb_assess_by_proposal": {"p1": {"reasonable": "supported"}},
+    }
+    review = {"review_verdicts": [{"verdict": "reject", "kb_evidence": ["k"]}]}
+    dry = CriticAgentBackend._build_kb_assess_trace(
+        judge_bundle, review, injected=False,
+    )
+    assert dry["mode"] == "dry_run"
+    assert dry["injected"] is False
+    assert dry["verdict_count"] == 1
+    # In dry-run the verdict can't have been steered by assess, so False.
+    assert dry["referenced_in_verdict"] is False
+
+    inj = CriticAgentBackend._build_kb_assess_trace(
+        judge_bundle, review, injected=True,
+    )
+    assert inj["mode"] == "injected"
+    assert inj["referenced_in_verdict"] is True
+
+
+def test_build_kb_assess_trace_empty_when_nothing_captured():
+    assert CriticAgentBackend._build_kb_assess_trace({}, {}, injected=False) == {}
+
+
+def test_build_kb_priors_trace_counts_and_reference():
+    judge_bundle = {
+        "kb_priors_trace": {
+            "configured": True, "mode": "per_proposal",
+            "client_mode": "live", "scope_filter": {"model": "m"},
+            "limit": 5, "requests": [{"msg_id": "p1", "count": 2}],
+        },
+        "kb_priors_by_proposal": {"p1": [{"slug": "a"}, {"slug": "b"}]},
+        "kb_priors_for_decision": [],
+        "kb_read_skipped_reason": None,
+    }
+    review = {"review_verdicts": [{"verdict": "approve", "kb_evidence": ["k"]}]}
+    trace = CriticAgentBackend._build_kb_priors_trace(judge_bundle, review)
+    assert trace["configured"] is True
+    assert trace["mode"] == "per_proposal"
+    assert trace["prior_count"] == 2
+    assert trace["referenced_in_verdict"] is True
+
+
+def test_build_kb_priors_trace_carries_skip_reason():
+    judge_bundle = {
+        "kb_priors_trace": {},
+        "kb_priors_by_proposal": {},
+        "kb_priors_for_decision": [],
+        "kb_read_skipped_reason": "kb_unreachable",
+    }
+    trace = CriticAgentBackend._build_kb_priors_trace(judge_bundle, None)
+    assert trace["skipped_reason"] == "kb_unreachable"
+    assert trace["prior_count"] == 0
+
+
+def test_kb_assess_inject_enabled_resolution(
+    fake_critic_root: Path, fake_session_dir: Path, monkeypatch,
+):
+    monkeypatch.delenv("CORTEX_KB_ASSESS_INJECT", raising=False)
+    backend = CriticAgentBackend(
+        critic_agent_root=fake_critic_root,
+        session_dir=fake_session_dir,
+        codex_client_factory=lambda: FakeOpenAIClient([]),
+        runtime_caller_factory=lambda: (lambda call: None),
+    )
+    # Default: dry-run (off).
+    assert backend._kb_assess_inject_enabled() is False
+    monkeypatch.setenv("CORTEX_KB_ASSESS_INJECT", "true")
+    assert backend._kb_assess_inject_enabled() is True
+    # Explicit field overrides the env.
+    backend.kb_assess_inject = False
+    assert backend._kb_assess_inject_enabled() is False
+
+
+def _assess_judge_bundle() -> dict[str, Any]:
+    return {
+        "kind": "coordinator_inbox",
+        "merged_context": {"model": "m", "framework": "sglang"},
+        "proposals": [
+            {"msg_id": "p1", "from_agent": "orchestration",
+             "action_name": "sweep", "payload": {}, "predicted_gain_pct": 1.0},
+        ],
+        "kb_priors_by_proposal": {"p1": []},
+        "kb_priors_for_decision": [],
+        "kb_priors_trace": {
+            "configured": True, "mode": "per_proposal", "client_mode": "",
+            "scope_filter": {"model": "m"}, "limit": 5,
+            "requests": [{"msg_id": "p1", "cache": "miss", "count": 0}],
+        },
+        "kb_assess_by_proposal": {"p1": {"reasonable": "supported"}},
+        "kb_assess_trace": {
+            "configured": True, "skipped_reason": None, "focus": {"model": "m"},
+            "requests": [{"msg_id": "p1", "responded": True}],
+            "verdict_count": 1,
+        },
+        "kb_read_skipped_reason": None,
+        "review_constraints": {},
+        "notes": [],
+        "missing_context": [],
+        "required_context": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_dry_run_withholds_assess_from_prompt(
+    fake_critic_root: Path, fake_session_dir: Path, monkeypatch,
+):
+    monkeypatch.delenv("CORTEX_KB_ASSESS_INJECT", raising=False)
+    reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic"}]}'
+    backend, fake = _make_backend(
+        fake_critic_root, fake_session_dir,
+        codex_replies=[reply], judge_bundle=_assess_judge_bundle(),
+    )
+    await backend.run("prompt")
+    prompt = fake.completions.calls[0]["messages"][-1]["content"]
+    assert "kb_assess_by_proposal" not in prompt
+    # priors are always present in the prompt.
+    assert "kb_priors_by_proposal" in prompt
+    assert backend.calls[0]["kb_assess_mode"] == "dry_run"
+    assert backend.calls[0]["kb_assess_verdicts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_inject_enabled_feeds_assess_to_prompt(
+    fake_critic_root: Path, fake_session_dir: Path, monkeypatch,
+):
+    monkeypatch.setenv("CORTEX_KB_ASSESS_INJECT", "1")
+    reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic"}]}'
+    backend, fake = _make_backend(
+        fake_critic_root, fake_session_dir,
+        codex_replies=[reply], judge_bundle=_assess_judge_bundle(),
+    )
+    await backend.run("prompt")
+    prompt = fake.completions.calls[0]["messages"][-1]["content"]
+    assert "kb_assess_by_proposal" in prompt
+    assert backend.calls[0]["kb_assess_mode"] == "injected"
+
+
+class _FakeKbEmitter:
+    def __init__(self):
+        self.enabled = True
+        self.spans: list[dict[str, Any]] = []
+
+    def record_kb_span(self, **kwargs):
+        self.spans.append(kwargs)
+
+
+@pytest.mark.asyncio
+async def test_run_mirrors_kb_trace_to_langfuse(
+    fake_critic_root: Path, fake_session_dir: Path, monkeypatch,
+):
+    fake_em = _FakeKbEmitter()
+    from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
+    monkeypatch.setattr(lfe, "get_emitter", lambda sd: fake_em)
+    reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic"}]}'
+    backend, _ = _make_backend(
+        fake_critic_root, fake_session_dir,
+        codex_replies=[reply], judge_bundle=_assess_judge_bundle(),
+    )
+    await backend.run("prompt")
+    names = sorted(s["name"] for s in fake_em.spans)
+    assert names == ["kb_assess:iter_0", "kb_priors:iter_0"]
+    agents = {s["agent"] for s in fake_em.spans}
+    assert agents == {"critic"}
+
+
+@pytest.mark.asyncio
+async def test_run_skips_langfuse_mirror_when_disabled(
+    fake_critic_root: Path, fake_session_dir: Path, monkeypatch,
+):
+    fake_em = _FakeKbEmitter()
+    fake_em.enabled = False
+    from inference_optimizer.orchestrator.trace import langfuse_emitter as lfe
+    monkeypatch.setattr(lfe, "get_emitter", lambda sd: fake_em)
+    reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic"}]}'
+    backend, _ = _make_backend(
+        fake_critic_root, fake_session_dir,
+        codex_replies=[reply], judge_bundle=_assess_judge_bundle(),
+    )
+    await backend.run("prompt")
+    assert fake_em.spans == []

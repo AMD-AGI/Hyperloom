@@ -542,3 +542,61 @@ def test_kb_assess_skips_proposal_without_levers(tmp_path):
     bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_nolevers"))
     assert bundle.kb_assess_by_proposal == {}
     assert fake.calls == []
+
+
+# -----------------------------------------------------------------
+# KB trace audit fields (kb_assess_trace / kb_priors_trace)
+# -----------------------------------------------------------------
+def test_kb_assess_trace_not_configured(tmp_path, monkeypatch):
+    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
+    sm = SessionMemory(root=tmp_path / "sm")
+    writer = KBWriter(InMemoryKBClient(), session_memory=sm)
+    rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
+    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_LEVERS, "sess_t1"))
+    assert bundle.kb_assess_trace["configured"] is False
+    assert bundle.kb_assess_trace["skipped_reason"] == "not_configured"
+
+
+def test_kb_assess_trace_records_requests(tmp_path):
+    sm = SessionMemory(root=tmp_path / "sm")
+    writer = KBWriter(InMemoryKBClient(), session_memory=sm)
+    fake = _FakeAssess()
+    rev = DecisionReviewer(session_memory=sm, kb_writer=writer, kb_assess_client=fake)
+    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_LEVERS, "sess_t2"))
+    trace = bundle.kb_assess_trace
+    assert trace["configured"] is True
+    assert trace["skipped_reason"] is None
+    assert trace["focus"]["model"] == "Qwen3-14B"
+    assert trace["verdict_count"] == 1
+    req = trace["requests"][0]
+    assert req["msg_id"] == "lev1"
+    assert req["params_keys"] == ["kv_cache_dtype"]
+    assert req["responded"] is True
+    assert req["reasonable"] == "supported"
+
+
+def test_kb_priors_trace_records_scope_and_requests(tmp_path):
+    sm = SessionMemory(root=tmp_path / "sm")
+    kb = InMemoryKBClient()
+    kb.upsert({
+        "scope": {
+            "org": "hyperloom", "framework": "sglang", "model": "qwen3-14b",
+            "model_family": "qwen", "workload": "decode", "precision": "fp8",
+        },
+        "kind": "pitfall", "slug": "active-path-unproven-pitfall",
+        "importance": 0.5, "metadata": {"topic": "active path"},
+    })
+    writer = KBWriter(kb, session_memory=sm)
+    rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
+    prompt = (
+        "=== Shared session state ===\n"
+        "model=qwen3-14b framework=sglang workload=decode precision=fp8\n"
+        "=== Inbox for critic ===\n"
+        "  seq=1 msg_id=aaa from=orchestration topic=proposal payload={'action_name': 'kernel_opt'}\n"
+    )
+    bundle = rev.prepare_review(_coordinator_request(prompt, "sess_pt"))
+    trace = bundle.kb_priors_trace
+    assert trace["configured"] is True
+    assert trace["mode"] == "per_proposal"
+    assert trace["scope_filter"].get("model") == "qwen3-14b"
+    assert any(r["msg_id"] == "aaa" for r in trace["requests"])
