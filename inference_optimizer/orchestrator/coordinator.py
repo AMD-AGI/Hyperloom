@@ -3138,10 +3138,17 @@ class Coordinator:
         # No-op unless live push is enabled; idempotent (a later cli.finally
         # flush only re-writes the receipt). Best-effort.
         try:
-            from .trace.langfuse_emitter import flush_session
+            from .trace.langfuse_emitter import (
+                flush_session,
+                record_session_breakdown,
+            )
             flush_session(self.session_dir)
             from ..breakdown import patch_breakdown_langfuse
             patch_breakdown_langfuse(self.session_dir)
+            # After the breakdown file is in its final (post-flush) form, attach
+            # the complete JSON to the trace as a ``session_breakdown``
+            # observation. Best-effort; no-op when live push is disabled.
+            record_session_breakdown(self.session_dir)
         except Exception as exc:  # noqa: BLE001 — defensive
             log.debug("CLOSE step 2.5 (langfuse flush) failed", exc_info=True)
             await self._record_close_step(
@@ -7191,19 +7198,30 @@ class Coordinator:
             result=result_payload,
         )
         any_changed = True
-        # Legacy baseline-specific gates (streak counter + baseline_failed stop reason + baseline_not_promoted event).
+        # Baseline-specific gates: streak counter + stop_reason + baseline_not_promoted event.
+        # #522: fast arg errors (fast_exit_arg_error) get their own streak so
+        # they don't burn the slow-baseline retry budget on deterministic
+        # failures that the same params will never fix.
         baseline_event_payload: dict[str, Any] | None = None
         if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
-            self.shared_state.baseline_failure_streak += 1
-            if self.shared_state.baseline_failure_streak >= 3:
-                self.shared_state.set_stop_reason("baseline_failed")
+            err_class = result_payload.get("error_class", "")
+            if err_class == "fast_exit_arg_error":
+                self.shared_state.baseline_arg_error_streak += 1
+                if self.shared_state.baseline_arg_error_streak >= 2:
+                    self.shared_state.set_stop_reason("baseline_arg_error")
+            else:
+                self.shared_state.baseline_failure_streak += 1
+                self.shared_state.baseline_arg_error_streak = 0
+                if self.shared_state.baseline_failure_streak >= 3:
+                    self.shared_state.set_stop_reason("baseline_failed")
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
                 "failure_streak": self.shared_state.baseline_failure_streak,
+                "arg_error_streak": self.shared_state.baseline_arg_error_streak,
                 "stop_reason": self.shared_state.stop_reason,
                 "result_status": result_payload.get("status"),
-                "error_class": result_payload.get("error_class"),
+                "error_class": err_class,
             }
             any_changed = True
         # Mirror the promote-path roofline failure handling: bump streak, clear auto-roofline gate, emit operator warning.
@@ -8395,6 +8413,28 @@ class Coordinator:
                 }
                 if gap_canonical_id:
                     stack_entry["gap_canonical_id"] = gap_canonical_id
+                # Stamp the variant's stable join key (and source) so breakdown
+                # attribution can map this explore gain back to its specialist
+                # provenance via explore_search.winners_history. Without it the
+                # phase_breakdown.explore.by_domain join always misses and every
+                # gain collapses into ``default_grid``.
+                fp_val = ""
+                prov_val = ""
+                if isinstance(bv, dict):
+                    fp_val = str(bv.get("fingerprint") or "").strip()
+                    if not fp_val:
+                        from .action_executors._canonical_fingerprint import (
+                            canonical_fingerprint,
+                        )
+                        fp_val = canonical_fingerprint(
+                            candidate_args or full_args,
+                            dict(bv.get("extra_envs") or {}),
+                        )
+                    prov_val = str(bv.get("provenance") or "").strip()
+                if fp_val:
+                    stack_entry["fingerprint"] = fp_val
+                if prov_val:
+                    stack_entry["provenance"] = prov_val
                 self.shared_state.optimization_stack.append(stack_entry)
                 # Mirror append into gain_per_stack_entry so the two parallel lists stay index-aligned.
                 self.shared_state.append_stack_gain_entry(
@@ -8472,6 +8512,7 @@ class Coordinator:
                 else:
                     self.shared_state.baseline_tput = float(tput)
                 self.shared_state.baseline_failure_streak = 0
+                self.shared_state.baseline_arg_error_streak = 0
                 changed = True
             acc = result.get("accuracy")
             if isinstance(acc, (int, float)):

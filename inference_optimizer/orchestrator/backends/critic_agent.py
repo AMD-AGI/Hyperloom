@@ -662,6 +662,20 @@ class CriticAgentBackend:
             "workdir": str(workdir),
         })
 
+        # Author-time breakdown capture: record this critic iteration before the
+        # workdir can be pruned (composed into critic_robustness at assembly).
+        try:
+            from ...breakdown.recorder import instrument
+            instrument.record_critic_iteration(
+                self.session_dir,
+                iter_n=turn_idx,
+                review=review,
+                emit=emit,
+                workdir=workdir,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         return BackendTurnResult(
             intents=intents,
             raw_text=llm_text,

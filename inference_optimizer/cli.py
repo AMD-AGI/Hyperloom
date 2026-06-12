@@ -1192,6 +1192,20 @@ _AMD_UNSUPPORTED_ARCHITECTURES = frozenset({"deepseekv32forcausallm"})
 # causing AttributeError deep in engine init.
 _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 
+# Phi-3 su/longrope rope_scaling: Phi3Config._rope_scaling_validation() requires
+# rope_scaling to be a dict of EXACTLY 3 keys (type/short_factor/long_factor).
+# These 128k checkpoints ship a top-level rope_theta that transformers folds
+# into the rope_scaling dict during config load, so the validator sees 4 keys
+# and raises ValueError at AutoConfig.from_pretrained() — before SGLang's
+# --json-model-override-args can apply, so the override cannot recover the run.
+_PHI3_ROPE_TYPES = frozenset({"su", "longrope"})
+
+# Gemma2 missing hidden_act: sglang's gemma2 runtime reads config.hidden_act
+# unconditionally. Some checkpoints ship only hidden_activation (the HF field
+# name), so config.hidden_act is absent and the model crashes with
+# AttributeError in engine init. Hardware-agnostic.
+_GEMMA2_ARCHITECTURES = frozenset({"gemma2forcausallm"})
+
 # Quantization formats with no ROCm/AMD runtime path. NVIDIA ModelOpt FP8/NVFP4
 # use vendor-specific scale packing (no sglang ROCm loader); bitsandbytes ships
 # CUDA-only kernels; NVFP4/FP4 need Blackwell hardware. AMD-native fp8 (Quark /
@@ -1246,6 +1260,64 @@ def _detect_amd_unsupported_quant(model_path: str) -> str | None:
                     f"hardware; no AMD/ROCm runtime path exists."
                 )
     return None
+
+
+def _detect_phi3_rope_scaling_incompatible(data: dict) -> str | None:
+    """Return a reason when a Phi-3 su/longrope config crashes Phi3Config validation.
+
+    Phi3Config._rope_scaling_validation() requires rope_scaling to be a 3-key
+    dict, but transformers folds the top-level rope_theta into rope_scaling at
+    load, yielding 4 keys and a ValueError. This is hardware-agnostic and the
+    su/longrope type triggers it; yarn (the non-longrope path) is left alone.
+    """
+    model_type = str(data.get("model_type") or "").strip().lower()
+    arches = {a.lower() for a in _config_architectures(data)}
+    if model_type != "phi3" and "phi3forcausallm" not in arches:
+        return None
+    rope = data.get("rope_scaling")
+    if not isinstance(rope, dict):
+        return None
+    rope_type = str(rope.get("type") or "").strip().lower()
+    if rope_type not in _PHI3_ROPE_TYPES:
+        return None
+    # The crash only triggers when a top-level rope_theta exists: transformers
+    # folds it into rope_scaling, giving 4 keys instead of the required 3.
+    # Without rope_theta the 3-key dict passes validation fine.
+    if data.get("rope_theta") is None:
+        return None
+    return (
+        f"config.json is a Phi-3 model with rope_scaling.type='{rope_type}' "
+        f"and a top-level rope_theta={data['rope_theta']}; "
+        "Phi3Config._rope_scaling_validation requires a 3-key rope_scaling, but "
+        "transformers folds the top-level rope_theta into it at load, so the "
+        "validator sees 4 keys and raises ValueError at "
+        "AutoConfig.from_pretrained — before --json-model-override-args can "
+        "apply, so the engine crashes in init."
+    )
+
+
+def _detect_gemma2_missing_hidden_act(data: dict) -> str | None:
+    """Return a reason when a Gemma2 config omits hidden_act.
+
+    sglang's gemma2 runtime reads config.hidden_act unconditionally; configs
+    that only ship hidden_activation crash with AttributeError in engine init.
+    """
+    model_type = str(data.get("model_type") or "").strip().lower()
+    arches = {a.lower() for a in _config_architectures(data)}
+    if model_type != "gemma2" and not (arches & _GEMMA2_ARCHITECTURES):
+        return None
+    scopes = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        scopes.append(nested)
+    if any(s.get("hidden_act") for s in scopes):
+        return None
+    return (
+        "config.json is a Gemma2 model but lacks hidden_act (only "
+        "hidden_activation may be present); sglang's gemma2 runtime reads "
+        "config.hidden_act unconditionally and crashes with AttributeError "
+        "in engine init."
+    )
 
 
 def _detect_incompatible_model_config(
@@ -1319,6 +1391,15 @@ def _detect_incompatible_model_config(
             "init dereferences a missing max_position_embeddings and crashes "
             "in engine init (DeepSeek-V3.2-Exp class)."
         )
+    # Phi-3 longrope/su rope_scaling with non-canonical keys: hardware-agnostic
+    # (it is a transformers-layer Phi3Config validation, not a ROCm gap).
+    phi3_reason = _detect_phi3_rope_scaling_incompatible(data)
+    if phi3_reason is not None:
+        return phi3_reason
+    # Gemma2 missing hidden_act: also hardware-agnostic.
+    gemma2_reason = _detect_gemma2_missing_hidden_act(data)
+    if gemma2_reason is not None:
+        return gemma2_reason
     # Custom AutoConfig with unregistered model_type: sglang/vLLM fall
     # back to PreTrainedConfig (no max_position_embeddings attr) → crash.
     auto_map = data.get("auto_map")
@@ -4386,10 +4467,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             # receipt if it already ran), so a step-2.5 failure still gets a
             # final receipt spliced in.
             try:
-                from .orchestrator.trace.langfuse_emitter import flush_session
+                from .orchestrator.trace.langfuse_emitter import (
+                    flush_session,
+                    record_session_breakdown,
+                )
                 flush_session(session_dir)
                 from .breakdown import patch_breakdown_langfuse
                 patch_breakdown_langfuse(session_dir)
+                record_session_breakdown(session_dir)
             except Exception:  # noqa: BLE001
                 log.debug("langfuse flush_session (post-sequencer) failed", exc_info=True)
         else:
@@ -4419,10 +4504,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             # HYPERLOOM_LANGFUSE_ENABLE + LANGFUSE_* are set; idempotent if the
             # CLOSE sequencer already flushed (re-writes the receipt only).
             try:
-                from .orchestrator.trace.langfuse_emitter import flush_session
+                from .orchestrator.trace.langfuse_emitter import (
+                    flush_session,
+                    record_session_breakdown,
+                )
                 flush_session(session_dir)
                 from .breakdown import patch_breakdown_langfuse
                 patch_breakdown_langfuse(session_dir)
+                record_session_breakdown(session_dir)
             except Exception:  # noqa: BLE001
                 log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
 
@@ -5669,7 +5758,141 @@ def _build_parser() -> argparse.ArgumentParser:
              "back-compat smoke tests; production should stay strict.",
     )
 
+    rec = sub.add_parser(
+        "recover-session",
+        help="Rebuild + push the session_breakdown for a session that exited "
+             "abnormally (crash / SIGKILL) so its breakdown lands on Langfuse.",
+    )
+    rec.add_argument(
+        "--session-dir", type=Path, required=True,
+        help="Session directory of the crashed run (contains state.json / "
+             "reports/trace/ and the recorder fragments).",
+    )
+    rec.add_argument(
+        "--force", action="store_true",
+        help="Re-run even when the session already looks complete "
+             "(close_sequence_done / breakdown already recorded).",
+    )
+    rec.add_argument(
+        "--backfill-trace", action="store_true",
+        help="Also replay reports/trace/llm_calls.jsonl as Langfuse "
+             "generations. Use ONLY when the live emitter never ran for this "
+             "session (e.g. it was disabled during the run); otherwise it "
+             "duplicates generations already pushed live.",
+    )
+
     return p
+
+
+def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
+    """Inspect on-disk artifacts to judge whether a session finished cleanly.
+
+    Pure read of state.json / session_breakdown.json / langfuse_receipt.json.
+    Returns flags used by :func:`_run_recover_session` to decide whether the
+    session still needs a (re)build + Langfuse push.
+    """
+    import json
+
+    from .breakdown import BREAKDOWN_FILENAME
+
+    state_path = session_dir / "state.json"
+    close_done = False
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            close_done = bool((state or {}).get("close_sequence_done"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    breakdown_exists = (session_dir / BREAKDOWN_FILENAME).exists()
+
+    from .orchestrator.trace.langfuse_emitter import read_receipt
+    receipt = read_receipt(session_dir) or {}
+    counts = receipt.get("counts") or {}
+    breakdown_recorded = bool(counts.get("breakdown_recorded"))
+    counts_final = bool(receipt.get("counts_final"))
+
+    return {
+        "close_done": close_done,
+        "breakdown_exists": breakdown_exists,
+        "breakdown_recorded": breakdown_recorded,
+        "counts_final": counts_final,
+        "looks_complete": close_done and breakdown_recorded,
+    }
+
+
+def _run_recover_session(args: argparse.Namespace) -> int:
+    """Offline recovery for a session that exited abnormally.
+
+    Rebuilds ``session_breakdown.json`` from the crash-time recorder fragments
+    (the merge step), reconciles + flushes Langfuse, splices the post-flush
+    receipt into the breakdown, and attaches the full breakdown JSON to the
+    session's trace. Idempotent across processes (guarded by the persisted
+    Langfuse receipt), so re-running is safe.
+    """
+    session_dir = args.session_dir.resolve()
+    if not session_dir.is_dir():
+        print(f"ERROR: session dir not found: {session_dir}", file=sys.stderr)
+        return 2
+
+    status = _session_recovery_status(session_dir)
+    print(
+        f"recover-session   : {session_dir}\n"
+        f"  close_sequence_done={status['close_done']} "
+        f"breakdown_exists={status['breakdown_exists']} "
+        f"breakdown_recorded={status['breakdown_recorded']} "
+        f"counts_final={status['counts_final']}"
+    )
+    if status["looks_complete"] and not args.force:
+        print(
+            "  -> already complete (breakdown built and recorded to Langfuse); "
+            "pass --force to rebuild anyway."
+        )
+        return 0
+
+    # 1) Rebuild/merge the breakdown from whatever fragments survived the crash.
+    try:
+        from .breakdown import write_breakdown_json
+        breakdown_path = write_breakdown_json(session_dir)
+        print(f"  rebuilt breakdown : {breakdown_path}")
+    except Exception:  # noqa: BLE001
+        log.exception("recover-session: breakdown rebuild failed")
+        return 1
+
+    # 2) Reconcile + flush Langfuse, splice the final receipt, attach the SBD.
+    try:
+        from .breakdown import patch_breakdown_langfuse
+        from .orchestrator.trace.langfuse_emitter import (
+            flush_session,
+            record_session_breakdown,
+        )
+        flush_session(session_dir)
+        patch_breakdown_langfuse(session_dir)
+        record_session_breakdown(session_dir)
+        print("  langfuse          : flushed + breakdown attached")
+    except Exception:  # noqa: BLE001
+        log.exception("recover-session: langfuse push failed (non-fatal)")
+
+    # 3) Optional full generation replay (off by default; duplicates if the
+    #    live emitter already ran for this session).
+    if args.backfill_trace:
+        try:
+            from .scripts.backfill_langfuse import build_plan, ingest
+            rc = ingest(build_plan(session_dir))
+            print(f"  trace backfill    : rc={rc}")
+        except Exception:  # noqa: BLE001
+            log.exception("recover-session: trace backfill failed (non-fatal)")
+
+    # 4) Re-package the artifact bundle so /workspace carries the recovered SBD.
+    try:
+        from .breakdown import package_session_artifacts
+        pkg_path = package_session_artifacts(session_dir)
+        if pkg_path is not None:
+            print(f"  artifact package  : {pkg_path}")
+    except Exception:  # noqa: BLE001
+        log.exception("recover-session: artifact package failed (non-fatal)")
+
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -5713,6 +5936,8 @@ def main(argv: list[str] | None = None) -> int:
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))
         return asyncio.run(_run_optimize(args))
+    if args.command == "recover-session":
+        return _run_recover_session(args)
     parser.print_help()
     return 2
 

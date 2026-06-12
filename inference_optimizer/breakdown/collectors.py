@@ -2742,6 +2742,38 @@ def _patch_winners_history(
     return out
 
 
+def _shape_winners_history(
+    explore_search: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Persist ``explore_search.winners_history`` rows with their join key + source.
+
+    ``_shape_ledger`` drops this history, so without re-emitting it the exported
+    ``explore_search`` carries no ``fingerprint``→``provenance`` map and downstream
+    consumers can't reconstruct ``phase_breakdown.explore.by_domain`` offline.
+    """
+    if not isinstance(explore_search, dict):
+        return []
+    rows = explore_search.get("winners_history")
+    if not isinstance(rows, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for w in rows:
+        if not isinstance(w, dict):
+            continue
+        out.append({
+            "round_id":     str(w.get("round_id") or ""),
+            "variant_name": str(w.get("variant_name") or w.get("name") or ""),
+            "fingerprint":  str(w.get("fingerprint") or ""),
+            "provenance":   str(w.get("provenance") or ""),
+            "scope":        str(w.get("scope") or ""),
+            "gain_pct":     _to_float(w.get("gain_pct")),
+            "extra_args":   str(w.get("extra_args") or w.get("extra_server_args") or ""),
+            "extra_envs":   dict(w.get("extra_envs") or {}),
+            "ts":           str(w.get("ts") or ""),
+        })
+    return out
+
+
 def collect_explore_search(
     state: dict[str, Any],
     warnings: list[str],
@@ -2758,6 +2790,11 @@ def collect_explore_search(
     # Emit all three ledgers (unified explore + legacy params/backends) so
     # breakdown reprocesses both vintages; unused ones shape to empty shells.
     explore_ledger = _shape_ledger(state.get("explore_search"))
+    # Persist provenance+fingerprint winners_history so offline recompute /
+    # downstream can recover the explore specialist attribution.
+    explore_ledger["winners_history"] = _shape_winners_history(
+        state.get("explore_search")
+    )
     explore_ledger["winner_history"] = list(state.get("params_winner_history") or [])
     explore_ledger["no_promote_streak"] = int(
         state.get("params_no_promote_streak") or 0
@@ -3351,7 +3388,7 @@ def _promote_legacy_gain_entries(
             cum_after = None
         delta = (cum_after - prev_cum) if cum_after is not None else None
         se = stack[i] if i < len(stack) and isinstance(stack[i], dict) else {}
-        out.append({
+        promoted: dict[str, Any] = {
             "ts": str(se.get("ts") or ""),
             "action": str(se.get("action") or ""),
             "variant_name": se.get("variant_name") or se.get("kernel_id"),
@@ -3365,7 +3402,17 @@ def _promote_legacy_gain_entries(
                 or se.get("candidate_extra_server_args")
                 or ""
             ),
-        })
+        }
+        # Carry the explore join key / source forward when the Coordinator
+        # stamped them, so phase_breakdown.explore.by_domain can attribute
+        # the gain to its specialist provenance instead of ``default_grid``.
+        fp = str(se.get("fingerprint") or se.get("variant_fingerprint") or "")
+        if fp:
+            promoted["fingerprint"] = fp
+        prov = str(se.get("provenance") or "").strip()
+        if prov:
+            promoted["provenance"] = prov
+        out.append(promoted)
         if cum_after is not None:
             prev_cum = cum_after
     return out
@@ -3752,7 +3799,7 @@ def _reconstruct_gain_ledger(
             continue
         delta = _to_float(entry.get("gain_pct"))
         cum_after = cum_before + (delta or 0.0)
-        out.append({
+        row: dict[str, Any] = {
             "ts":                str(entry.get("ts") or ""),
             "stack_len_before":  i,
             "stack_len_after":   i + 1,
@@ -3762,7 +3809,16 @@ def _reconstruct_gain_ledger(
             "cum_gain_after":    round(cum_after, 4),
             "delta_pct":         delta,
             "extra_server_args": str(entry.get("extra_server_args") or ""),
-        })
+        }
+        # Preserve the explore join key / source so attribution can resolve the
+        # specialist provenance (else by_domain collapses into ``default_grid``).
+        fp = str(entry.get("fingerprint") or entry.get("variant_fingerprint") or "")
+        if fp:
+            row["fingerprint"] = fp
+        prov = str(entry.get("provenance") or "").strip()
+        if prov:
+            row["provenance"] = prov
+        out.append(row)
         cum_before = cum_after
     return out
 
