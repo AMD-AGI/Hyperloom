@@ -120,7 +120,11 @@ def fake_vllm_world(tmp_path: Path, monkeypatch):
 
 
 def _make_fake_sglang_install(tmp_path: Path) -> Path:
-    """Build the editable ``python/sglang/...`` layout; returns the apply root (parent of ``python/``)."""
+    """Build the editable ``python/sglang/...`` layout; returns the apply root (parent of ``python/``).
+
+    Includes stub files for the extra_sentinels annotation markers so that
+    post-apply sentinel verification passes after fake patches are applied.
+    """
     apply_root = tmp_path / "sgl_repo"
     pkg = apply_root / "python" / "sglang" / "srt" / "utils"
     pkg.mkdir(parents=True)
@@ -130,6 +134,24 @@ def _make_fake_sglang_install(tmp_path: Path) -> Path:
     )
     (apply_root / "python" / "sglang" / "srt" / "__init__.py").write_text("")
     (apply_root / "python" / "sglang" / "srt" / "utils" / "__init__.py").write_text("")
+    # Pre-populate extra_sentinels targets with annotation marker text so
+    # post-apply sentinel checks pass in test fixtures.
+    managers = apply_root / "python" / "sglang" / "srt" / "managers"
+    managers.mkdir(parents=True, exist_ok=True)
+    (managers / "scheduler.py").write_text(
+        "# stub\ndef _build_profile_annotation(): pass\ndef profile_annotation(): pass\n",
+    )
+    (managers / "scheduler_profiler_mixin.py").write_text(
+        "# stub roofline_annotations execute_ torch.profiler.record_function\n",
+    )
+    (managers / "io_struct.py").write_text(
+        "# stub shape_discovery roofline_annotations\n",
+    )
+    entrypoints = apply_root / "python" / "sglang" / "srt" / "entrypoints"
+    entrypoints.mkdir(parents=True, exist_ok=True)
+    (entrypoints / "http_server.py").write_text(
+        "# stub shape_discovery roofline_annotations\n",
+    )
     return apply_root
 
 
@@ -641,6 +663,22 @@ def _make_fake_wheel_sglang_install(tmp_path: Path) -> Path:
     )
     (site_packages / "sglang" / "srt" / "__init__.py").write_text("")
     (site_packages / "sglang" / "srt" / "utils" / "__init__.py").write_text("")
+    managers = site_packages / "sglang" / "srt" / "managers"
+    managers.mkdir(parents=True, exist_ok=True)
+    (managers / "scheduler.py").write_text(
+        "# stub\ndef _build_profile_annotation(): pass\ndef profile_annotation(): pass\n",
+    )
+    (managers / "scheduler_profiler_mixin.py").write_text(
+        "# stub roofline_annotations execute_ torch.profiler.record_function\n",
+    )
+    (managers / "io_struct.py").write_text(
+        "# stub shape_discovery roofline_annotations\n",
+    )
+    entrypoints = site_packages / "sglang" / "srt" / "entrypoints"
+    entrypoints.mkdir(parents=True, exist_ok=True)
+    (entrypoints / "http_server.py").write_text(
+        "# stub shape_discovery roofline_annotations\n",
+    )
     return site_packages
 
 
