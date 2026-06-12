@@ -7917,12 +7917,17 @@ class Coordinator:
         preserved). Inv-7.3: lease bound to task_id, runner releases it.
         """
         inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
+        # Cumulative across the whole pump, not just the live in-flight set: a
+        # fast task can complete and be reaped (leaving ``inflight``) before its
+        # own queued->running transition is visible to ``tasks.queued()``, so
+        # excluding only the live set would re-dispatch it in a later pass and
+        # spin. A task is dispatched at most once per pump; genuinely new /
+        # lane-freed tasks carry ids absent from this set and still get picked up.
+        dispatched_ids: set[str] = set()
         while True:
-            inflight.extend(
-                await self._spawn_fitting_queued(
-                    exclude_ids={t.task_id for t, _, _ in inflight},
-                )
-            )
+            spawned = await self._spawn_fitting_queued(exclude_ids=dispatched_ids)
+            dispatched_ids.update(t.task_id for t, _, _ in spawned)
+            inflight.extend(spawned)
             if not inflight:
                 return
             done, _pending = await asyncio.wait(
