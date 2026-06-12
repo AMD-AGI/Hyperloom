@@ -33,7 +33,15 @@ class RuntimeAdapterError(RuntimeError):
 
 
 def _emit_json(obj: Any, out: str | None) -> None:
-    """Serialize obj as JSON to stdout or a file path."""
+    """Serialize obj as JSON to stdout or a file path.
+
+    Always writes to stdout; additionally writes to ``out`` when it names a
+    real path (not ``None`` or ``"-"``).
+
+    Args:
+        obj (Any): JSON-serialisable object to emit.
+        out (str | None): Destination path, or ``None``/``"-"`` for stdout only.
+    """
     text = json.dumps(obj, ensure_ascii=False, indent=2)
     if out and out != "-":
         path = Path(out)
@@ -44,7 +52,18 @@ def _emit_json(obj: Any, out: str | None) -> None:
 
 
 def _load_request(path: str) -> "ExploreRequest":
-    """Load and parse a JSON request file into an ExploreRequest."""
+    """Load and parse a JSON request file into an ExploreRequest.
+
+    Args:
+        path (str): Path to the JSON request file.
+
+    Returns:
+        ExploreRequest: The parsed request.
+
+    Raises:
+        RuntimeAdapterError: If the file is missing, not valid JSON, or its root
+            is not a JSON object.
+    """
     from ..models import ExploreRequest
 
     req_path = Path(path).expanduser()
@@ -62,7 +81,11 @@ def _load_request(path: str) -> "ExploreRequest":
 
 
 def _cmd_schema(args: argparse.Namespace) -> None:
-    """Print the ExploreRequest schema summary."""
+    """Print the ExploreRequest schema summary.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (unused).
+    """
     del args
     _emit_json(
         {
@@ -84,7 +107,12 @@ def _cmd_schema(args: argparse.Namespace) -> None:
 
 
 def _cmd_explore(args: argparse.Namespace) -> None:
-    """Run the full exploration; plan by default, build/bench when --execute."""
+    """Run the full exploration; plan by default, build/bench when --execute.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args with ``request``,
+            ``execute``, and ``out``.
+    """
     from ..explorer import explore
 
     request = _load_request(args.request)
@@ -93,7 +121,11 @@ def _cmd_explore(args: argparse.Namespace) -> None:
 
 
 def _cmd_candidates(args: argparse.Namespace) -> None:
-    """Enumerate candidates per request.search_modes and emit JSON."""
+    """Enumerate candidates per request.search_modes and emit JSON.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args with ``request`` and ``out``.
+    """
     from ..sources import enumerate_candidates
 
     request = _load_request(args.request)
@@ -111,10 +143,18 @@ def _cmd_candidates(args: argparse.Namespace) -> None:
 
 
 def _read_json_request(path: str) -> dict[str, Any]:
-    """Load a JSON request file for the ``phase-*`` subcommands.
-
-    Mirrors :func:`critic-agent.runtime.cli._read_json` but enforces a
+    """Load a JSON request file for the ``phase-*`` subcommands; enforces a
     dict at the top level since every ``phase-*`` request is an object.
+
+    Args:
+        path (str): Path to the JSON request file.
+
+    Returns:
+        dict[str, Any]: The decoded request object.
+
+    Raises:
+        RuntimeAdapterError: If the file is missing, not valid JSON, or its root
+            is not a JSON object.
     """
     req_path = Path(path).expanduser()
     if not req_path.exists():
@@ -131,6 +171,16 @@ def _read_json_request(path: str) -> dict[str, Any]:
 
 
 def _pr_url_for(repo: str, pr_number: int | str) -> str:
+    """Build a canonical GitHub PR URL from a repo slug and PR number.
+
+    Args:
+        repo (str): Repository slug in ``owner/name`` form.
+        pr_number (int | str): PR number; only an ``int`` yields a URL.
+
+    Returns:
+        str: The PR URL, or an empty string when ``repo`` is empty or
+            ``pr_number`` is not an int.
+    """
     if repo and isinstance(pr_number, int):
         return f"https://github.com/{repo}/pull/{pr_number}"
     return ""
@@ -151,6 +201,12 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
          "candidates": [{"pr_url", "repo", "ref", "pr_number", "title",
                           "summary", "score", "diff_url",
                           "gap_canonical_id"}, ...]}
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args with ``request`` and ``out``.
+
+    Raises:
+        RuntimeAdapterError: If no repo URL can be resolved for the framework.
     """
     import uuid as _uuid
     from dataclasses import asdict as _asdict
@@ -162,8 +218,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     framework = str(request.get("framework") or "sglang").strip().lower()
     repo_url = str(request.get("repo_url") or "").strip()
     if not repo_url:
-        # Fall back to the standalone repo_map (no reverse-import of
-        # inference_optimizer; framework-agent is a standalone package).
+        # Standalone repo_map; no reverse-import of inference_optimizer.
         from framework_agent.repo_map import repo_url_for_framework
         repo_url = repo_url_for_framework(framework)
     if not repo_url:
@@ -257,7 +312,16 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
 
 
 def _cmd_kb(args: argparse.Namespace) -> None:
-    """Dispatch ``fa kb <op>`` to the appropriate kb-module helper."""
+    """Dispatch ``fa kb <op>`` to the appropriate kb-module helper.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args carrying ``kb_op`` and the
+            op-specific options (``domain``, ``query``, ``body``, etc.).
+
+    Raises:
+        RuntimeAdapterError: On an unknown op, a missing domain/body, or an
+            invalid ``--findings`` file.
+    """
     from .. import kb as kb_mod
     from ..models import Finding
 
@@ -361,13 +425,18 @@ def _cmd_kb(args: argparse.Namespace) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Construct the top-level argparse parser for framework-agent CLI."""
+    """Construct the top-level argparse parser for framework-agent CLI.
+
+    Returns:
+        argparse.ArgumentParser: The configured parser with all subcommands and
+            global logging flags registered.
+    """
     parser = argparse.ArgumentParser(
         prog="framework-agent",
         description="Explore serving framework PRs/refs in isolated worktrees.",
     )
-    # Global flags wired into logging_setup.configure_logging. Kept on the
-    # top-level parser so every subcommand picks them up uniformly.
+    # Global logging flags on the top-level parser so every subcommand picks
+    # them up uniformly (wired into logging_setup.configure_logging).
     parser.add_argument(
         "--log-level",
         default=None,
@@ -514,7 +583,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point invoked by both `framework-agent` and `fa` scripts."""
+    """Entry point invoked by both `framework-agent` and `fa` scripts.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; ``None`` uses
+            ``sys.argv``.
+
+    Returns:
+        int: Process exit code: ``0`` on success, ``2`` on a handled or
+            unexpected error.
+    """
     parser = _build_parser()
     args = parser.parse_args(argv)
     from ..logging_setup import configure_logging, get_logger

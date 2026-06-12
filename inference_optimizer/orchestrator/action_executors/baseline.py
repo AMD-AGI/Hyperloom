@@ -1,50 +1,33 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Real ``baseline`` ActionRunner — runs Magpie SGLang benchmark.
+"""Real ``baseline`` ActionRunner — runs Magpie SGLang benchmark (§16.1).
 
- + §16.1 baseline action.
+Runs the Magpie CLI as a subprocess, parses ``benchmark_report.json``,
+and returns the result on the bus as a ``delegated_result`` event.
 
-Wire-up:
+RunnerContext.task.params keys (all optional; defaults from
+BASELINE_DEFAULT_CONFIG): ``config_path``, ``output_dir``, ``timeout_sec``.
 
-    sub.register_executor("baseline", baseline_executor)
-
-Orchestration emits ``delegate{action_name="baseline", params={...}}``;
-SubAgentRunner pulls this runner, acquires the action's lanes
-(`benchmark_lane` + `server_lifecycle`), runs the Magpie CLI as a
-subprocess, parses ``benchmark_report.json``, and returns the result on
-the bus as a ``delegated_result`` event so Orchestration can read the
-real ``baseline_tput`` next tick.
-
-The runner honours the following RunnerContext.task.params keys
-(all optional — defaults below come from BASELINE_DEFAULT_CONFIG):
-
-    config_path:  absolute path to a Magpie YAML config to use
-    output_dir:   workspace root for Magpie outputs
-    timeout_sec:  hard timeout (overrides YAML's timeout_seconds)
-
-Implementation notes:
-
-* We don't import Magpie programmatically (its CLI takes care of
-  InferenceX setup, GPU monitor, workspace creation). subprocess.run
-  is the cleanest seam.
-* Parses ``benchmark_report.json`` rather than ``inferencex_result.json``
-  because the former has the cleaner top-level schema.
-* Returns ``error_class`` on failure so the coordinator can route to
-  Robustness RCA later (P1-7).
+Returns ``error_class`` on failure so the coordinator can route to
+Robustness RCA later (P1-7).
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
+import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import yaml
 
@@ -54,11 +37,14 @@ from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
 from ._grid_runner import sanitize_result_dir, sanitize_script_name
 from ._subprocess_kill import (
+    SERVER_DEAD_RETURNCODE,
     _process_group_alive,
     _signal_group,
     run_with_session_kill,
+    server_log_death_excerpt,
 )
 from ._workload_envs import (
+    FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
 )
@@ -71,18 +57,11 @@ from .benchmark_result import (
 log = logging.getLogger(__name__)
 
 
-# Magpie's built-in InferenceX benchmark scripts that honour
-# ``MAGPIE_RUN_PHASE=server``/``client`` and therefore support the
-# server_lifecycle reuse protocol. Static mirror of Magpie's
-# ``benchmarker.MAGPIE_BUILTIN_SCRIPTS`` — duplicated (not imported) so
-# Hyperloom keeps no import-time dependency on Magpie internals (Magpie is
-# not importable in the unit-test sandbox). Keep in sync with Magpie. The
-# cold-start double-run guard only engages when the resolved benchmark
-# script is one of these; any other script (model-specific InferenceX
-# scripts, exotic GPU types without a generic Magpie script) falls back to
-# the legacy single round. ``atom_*`` per AMD-AGI/Magpie#34 (atom-as-a-
-# framework requires that PR, which also ships the phase-aware atom
-# scripts, so listing them here can never outrun Magpie support).
+# Magpie built-in benchmark scripts that honour ``MAGPIE_RUN_PHASE`` and
+# support the server_lifecycle reuse protocol. Static mirror of Magpie's
+# ``benchmarker.MAGPIE_BUILTIN_SCRIPTS`` (duplicated to avoid an import-time
+# Magpie dependency); keep in sync. The cold-start double-run guard only
+# engages for these scripts. ``atom_*`` per AMD-AGI/Magpie#34.
 MAGPIE_BUILTIN_SCRIPTS = frozenset(
     {
         "vllm_mi300x.sh",
@@ -94,24 +73,19 @@ MAGPIE_BUILTIN_SCRIPTS = frozenset(
     }
 )
 
-# Default HTTP port Magpie's server_lifecycle binds the persistent server
-# on when ``benchmark.envs.PORT`` is unset (matches Magpie's
-# ``benchmarker._reuse_benchmark_port`` fallback). The double-run guard
-# pins it explicitly into the per-round YAML so Magpie's reuse keying and
-# our defensive teardown agree on the same port.
+# Default HTTP port for the server_lifecycle persistent server when
+# ``benchmark.envs.PORT`` is unset; pinned into the per-round YAML so
+# Magpie's reuse keying and our teardown agree.
 BASELINE_REUSE_PORT_DEFAULT = 8888
 
 # Server-boot budget for the persistent server phase (server_lifecycle).
-# In lifecycle mode Magpie applies ``timeout_seconds`` to the client phase
-# only and gates server startup by this value. Matches Magpie's own
-# default; override via ``INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC``.
+# Override via ``INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC``.
 BASELINE_SERVER_READY_TIMEOUT_SEC = 2700
 
 
-# Legacy module-level constant kept pointing at the sglang yaml so existing
-# tests that import it as a fixture path continue to work. Runtime selection
-# of sglang vs vllm yaml goes through `default_baseline_config()` (re-exported
-# below as the legacy `_default_baseline_config` alias).
+# Legacy module-level constant kept pointing at the sglang yaml for tests
+# that import it as a fixture path. Runtime sglang/vllm selection goes
+# through `default_baseline_config()`.
 BASELINE_DEFAULT_CONFIG = (
     asset_root() / "scripts" / "configs" / "baseline_sglang.yaml"
 )
@@ -119,11 +93,9 @@ BASELINE_DEFAULT_TIMEOUT_SEC = 7800           # WARM-start cap, 130 min (raised 
 BASELINE_COLD_START_TIMEOUT_SEC = 9000        # COLD-start cap, 150 min (includes ~20 min cuda graph capture)
 COLD_START_KERNEL_THRESHOLD = 20              # < N .so files under aiter jit/build/ ⇒ COLD
 
-# Legacy fallback probe order for aiter's JIT cache dir. Used only when
-# `importlib.util.find_spec("aiter")` cannot resolve aiter dynamically
-# (e.g. probe invoked from a venv where aiter isn't importable). First
-# path that exists wins. Override via env
-# `INFERENCE_OPTIMIZER_AITER_JIT_DIR=/abs/path` (tried before this list).
+# Legacy fallback probe order for aiter's JIT cache dir, used only when
+# find_spec("aiter") can't resolve aiter dynamically. First existing path
+# wins. Override via env `INFERENCE_OPTIMIZER_AITER_JIT_DIR` (tried first).
 AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
     "/sgl-workspace/aiter/aiter/jit",
     "/sgl-workspace/aiter/aiter/jit/build",
@@ -136,24 +108,223 @@ AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
 )
 
 
-# Underscore-prefixed aliases re-exported for callers/tests; the canonical
+# Underscore-prefixed aliases re-exported for callers/tests; canonical
 # names live in `_workload_envs`.
 _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
 
 
+# #523: filesystem types that can be revoked / unmounted mid-run (e.g. a
+# wekafs/NFS mount flap). A process whose cwd lives on such a mount sees its
+# working directory "vanish underneath it" and any RELATIVE-path write hits
+# ``FileNotFoundError``. SGLang's cuda-graph profiling
+# (``--enable-profile-cuda-graph``, injected by profile_sglang.yaml) dumps
+# ``cuda_graph_runner_memory_usage.pickle`` to a bare relative path, and
+# Magpie launches the server via ``cd <inferencex> && bash <script>`` — so
+# the server's cwd IS the InferenceX checkout. When that checkout is on
+# wekafs and the mount flaps, the dump ENOENTs and the scheduler sigquits
+# before any ``.trace.json.gz`` is produced (issue #523).
+_NETWORK_FS_TYPES = frozenset(
+    {
+        "nfs", "nfs4", "cifs", "smb3", "lustre", "glusterfs", "ceph",
+        "fuse.weka", "wekafs", "wekafsgw", "fuse.juicefs", "fuse.s3fs",
+        "fuse.sshfs", "9p",
+    }
+)
+
+
+def _path_fstype(path: str) -> str:
+    """Return the filesystem type backing ``path`` per ``/proc/mounts``.
+
+    Picks the longest mountpoint that is a prefix of the resolved path.
+    Returns ``""`` when it cannot be determined (non-Linux, unreadable
+    ``/proc/mounts``, ...), which callers treat as "assume local".
+    """
+    try:
+        rp = os.path.realpath(path)
+    except OSError:
+        return ""
+    best_mp = ""
+    best_type = ""
+    try:
+        with open("/proc/mounts", encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                # /proc/mounts octal-escapes spaces etc. in the mountpoint.
+                try:
+                    mp = parts[1].encode("latin-1").decode("unicode_escape")
+                except (UnicodeDecodeError, UnicodeEncodeError):
+                    mp = parts[1]
+                fstype = parts[2]
+                norm = mp.rstrip("/") or "/"
+                if norm == "/":
+                    is_under = True  # root matches everything (lowest priority)
+                else:
+                    is_under = rp == norm or rp.startswith(norm + "/")
+                if is_under and len(norm) >= len(best_mp):
+                    best_mp = norm
+                    best_type = fstype
+    except OSError:
+        return ""
+    return best_type
+
+
+def _is_network_fs(path: str) -> bool:
+    """True when ``path`` is backed by a revocable network filesystem."""
+    return _path_fstype(path).lower() in _NETWORK_FS_TYPES
+
+
+@contextmanager
+def _mirror_lock(lock_path: str) -> Iterator[None]:
+    """Best-effort cross-process exclusive lock around the InferenceX mirror
+    copy+swap (#523).
+
+    Two tasks (or two sandbox processes) that resolve the SAME network-mount
+    source to the same hash-keyed ``dest`` would otherwise ``rmtree`` /
+    ``os.replace`` the mirror under each other — corrupting a tree another
+    run's server may be ``cd``-ed into. Serializing the swap makes the loser
+    wait for the winner and then overwrite a consistent tree. Degrades to no
+    exclusion when ``fcntl`` is unavailable (non-Linux) or the lock file
+    cannot be opened — the unique staging dir still prevents torn copies.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    try:
+        fp = open(lock_path, "w")
+    except OSError as exc:
+        log.warning(
+            "baseline_executor: cannot open InferenceX mirror lock %s (%s); "
+            "proceeding without cross-process exclusion", lock_path, exc,
+        )
+        yield
+        return
+    try:
+        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+        finally:
+            fp.close()
+
+
+def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
+    """Mirror an InferenceX checkout onto stable local disk.
+
+    #523: returns a local-disk path Magpie can ``cd`` into so the sglang
+    server's relative-path cuda-graph snapshot dump survives a network-mount
+    (wekafs/NFS) flap. No-op (returns ``src`` unchanged) when:
+
+    * relocation is disabled via
+      ``INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX=1``,
+    * ``src`` already lives on a local filesystem, or
+    * the copy fails for any reason.
+
+    Best-effort — never raises; on failure it falls back to ``src`` so the
+    run proceeds (degraded to the pre-fix behaviour) rather than aborting.
+    ``mirror_key`` lets callers isolate long-running tasks that share the same
+    source checkout: Baseline/Profile pass their task output dir, so a later
+    overlapping task cannot ``rmtree`` a mirror another server is still
+    ``cd``-ed into.
+
+    Ordering: the caller relocates BEFORE config materialization and passes
+    the returned path explicitly into materialization, so the subsequent
+    ProfileExecutor patch step (``_after_materialize_config`` reads the
+    materialized YAML first) patches the LOCAL mirror in place — the mirror
+    therefore ends up carrying the NUM_PROMPTS / PROFILE_EXTRA_BODY patches,
+    and Magpie ``cd``-s into the patched local copy.
+    """
+    src = str(src)
+    if os.environ.get(
+        "INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "",
+    ).strip() == "1":
+        return src
+    try:
+        if not _is_network_fs(src):
+            return src
+    except Exception:  # noqa: BLE001 — detection is best-effort
+        return src
+
+    real_src = os.path.realpath(src)
+    local_root = Path(
+        os.environ.get("INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", "")
+        or os.path.join(
+            os.path.expanduser("~"), ".cache", "hyperloom", "inferencex_local",
+        )
+    )
+    src_hash = hashlib.sha1(real_src.encode("utf-8")).hexdigest()[:16]
+    key_hash = hashlib.sha1(
+        str(mirror_key or "").encode("utf-8")
+    ).hexdigest()[:16]
+    dest_name = src_hash if not mirror_key else f"{src_hash}-{key_hash}"
+    dest = local_root / dest_name
+    try:
+        local_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log.warning(
+            "baseline_executor: could not create local InferenceX root %s "
+            "(%s); using the network-mount checkout.", local_root, exc,
+        )
+        return src
+    # Lock keyed on dest so concurrent tasks mirroring the same source
+    # serialize their rmtree/replace instead of racing (see _mirror_lock).
+    lock_path = str(local_root / f".{dest.name}.lock")
+    staging: Path | None = None
+    try:
+        with _mirror_lock(lock_path):
+            staging = Path(tempfile.mkdtemp(dir=str(local_root)))
+            staged_ix = staging / "InferenceX"
+            # Copy the tree fresh; re-copy every run because the per-task
+            # patch step (_after_materialize_config) rewrites the mirror in
+            # place. 8-9 MB onto local disk is sub-second. Holding the lock
+            # across rmtree+replace stops a concurrent task swapping ``dest``
+            # out from under this copy.
+            shutil.copytree(real_src, staged_ix, symlinks=True)
+            if dest.exists():
+                shutil.rmtree(dest, ignore_errors=True)
+            os.replace(staged_ix, dest)
+    except OSError as exc:
+        log.warning(
+            "baseline_executor: could not mirror InferenceX %s to local disk "
+            "(%s); using the network-mount checkout. The #523 cuda-graph "
+            "pickle dump may ENOENT if the mount flaps mid-run.",
+            real_src, exc,
+        )
+        return src
+    finally:
+        # Always clear the staging dir: empty after a successful os.replace,
+        # or holding a half-finished copy after a failure. Either way it must
+        # not accumulate under local_root across runs.
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    if not (dest / "benchmarks" / "benchmark_lib.sh").is_file():
+        log.warning(
+            "baseline_executor: local InferenceX mirror at %s is incomplete; "
+            "using original %s", dest, real_src,
+        )
+        shutil.rmtree(dest, ignore_errors=True)
+        return src
+    log.info(
+        "baseline_executor: #523 — mirrored InferenceX from network mount %s "
+        "to local disk %s so the server cwd (cuda-graph pickle dump target) "
+        "survives a wekafs/NFS flap.", real_src, dest,
+    )
+    return str(dest)
+
+
 def _resolve_aiter_jit_dir_dynamic() -> list[str]:
     """Locate aiter's ``jit/`` dir via Python's import machinery.
 
-    Wheel-packaged aiter ships ~80 pre-built ``.so`` directly under
-    ``<aiter>/jit/``; only runtime-JIT staging (a handful of patched
-    kernels) lives under ``<aiter>/jit/build/<module>/build/``. Counting
-    at ``<aiter>/jit/`` therefore correctly reflects a warm install,
-    while the legacy fixed list (precise to ``jit/build``) mis-reports
-    every wheel install as COLD.
-
-    Returns an ordered candidate list (``jit`` preferred over
-    ``jit/build``). Empty if aiter cannot be located.
+    Counting at ``<aiter>/jit/`` reflects a warm wheel install (~80
+    pre-built ``.so``); the legacy fixed ``jit/build`` list mis-reports
+    every wheel install as COLD. Returns an ordered candidate list
+    (``jit`` preferred over ``jit/build``); empty if aiter not found.
     """
     try:
         spec = importlib.util.find_spec("aiter")
@@ -171,18 +342,10 @@ def _resolve_aiter_jit_dir_dynamic() -> list[str]:
 def _probe_aiter_jit_cache() -> dict[str, Any]:
     """Inspect aiter's ``jit/`` dir to decide cold vs warm start.
 
-    Pure read-only filesystem probe — no subprocess, no GPU touch.
-    Resolution order:
-
-      1. ``$INFERENCE_OPTIMIZER_AITER_JIT_DIR`` env override
-      2. Dynamic ``<aiter>/jit`` then ``<aiter>/jit/build`` resolved via
-         ``importlib.util.find_spec("aiter")``
-      3. Legacy ``AITER_JIT_PROBE_PATHS`` fallback
-
-    First existing dir wins; we count ``.so`` files recursively and sum
-    their byte sizes. Any IO error degrades to ``probe_status="error"``
-    so callers (and unit tests on hosts with no aiter install) fall back
-    to the default WARM timeout instead of crashing.
+    Read-only filesystem probe (no subprocess / GPU). Resolution order:
+    env override → dynamic find_spec → legacy AITER_JIT_PROBE_PATHS. First
+    existing dir wins; counts ``.so`` recursively. Any IO error degrades
+    to ``probe_status="error"`` (callers fall back to the WARM timeout).
 
     Returns a dict with keys:
         path           Path that was probed, or None if nothing found.
@@ -191,6 +354,10 @@ def _probe_aiter_jit_cache() -> dict[str, Any]:
         is_cold        True iff kernel_count < COLD_START_KERNEL_THRESHOLD;
                        None when probe failed.
         probe_status   "found" | "not_found" | "error".
+
+    Returns:
+        dict[str, Any]: Probe info with keys ``path``, ``kernel_count``,
+            ``size_mb``, ``is_cold`` and ``probe_status``.
     """
     info: dict[str, Any] = {
         "path": None,
@@ -242,12 +409,9 @@ def _probe_aiter_jit_cache() -> dict[str, Any]:
 class BaselineExecutor:
     """Class form for tests / DI; ``baseline_executor`` is the bare callable.
 
-    ``session_dir`` is the canonical session root the executor will derive
-    its per-task workspace under (``<sd>/runs/baseline/<task_id>/``).
-    When the SubAgentRunner pre-creates that workspace and injects it via
-    ``ctx.extra["workspace"]``, the executor uses the injected path
-    verbatim — ``session_dir`` is then only the fallback for direct
-    instantiation in tests.
+    ``session_dir`` is the session root for the per-task workspace
+    (``<sd>/runs/baseline/<task_id>/``); used only as a fallback when the
+    SubAgentRunner injects a pre-created workspace via ``ctx.extra``.
     """
 
     def __init__(
@@ -259,10 +423,21 @@ class BaselineExecutor:
         default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
     ):
+        """Initialize the baseline executor with launch defaults.
+
+        Args:
+            magpie_python (str | None): Python interpreter used to invoke
+                Magpie; resolved automatically when ``None``.
+            default_config_path (Path | str | None): Default Magpie YAML config
+                path; resolved from ``$FRAMEWORK`` at call time when ``None``.
+            session_dir (Path | str | None): Canonical session root for
+                per-task workspaces; resolved automatically when ``None``.
+            default_timeout_sec (int): Default (warm-start) subprocess timeout.
+            cwd (Path | str): Working directory for the Magpie subprocess.
+        """
         from ._grid_runner import _resolve_magpie_python, _resolve_session_dir
         self.magpie_python = magpie_python or _resolve_magpie_python()
-        # None = resolve from $FRAMEWORK at call time. Tests may pass an
-        # explicit fixture path which then wins over the env-based resolver.
+        # None = resolve from $FRAMEWORK at call time; explicit fixture path wins.
         self.default_config_path = (
             Path(default_config_path) if default_config_path else None
         )
@@ -271,19 +446,18 @@ class BaselineExecutor:
         self.cwd = Path(cwd)
 
     def _resolve_default_config(self) -> Path:
-        """Hook for subclasses (ProfileExecutor) to swap the resolver."""
+        """Hook for subclasses (ProfileExecutor) to swap the resolver.
+
+        Returns:
+            Path: The default baseline Magpie YAML config path.
+        """
         return _default_baseline_config()
 
     def _resolve_workspace(self, ctx: RunnerContext, action: str) -> Path:
-        """Pick the per-task workspace dir for this executor invocation.
+        """Pick the per-task workspace dir.
 
-        Resolution order (highest priority first):
-
-        1. ``task.params['output_dir']`` — explicit caller wins.
-        2. ``ctx.extra['workspace']``    — SubAgentRunner pre-mkdir'd path.
-        3. ``runs_dir(self.session_dir, action, ctx.task.task_id)``
-           — direct-instantiation fallback (tests / examples that don't
-           wire the Coordinator).
+        Order: ``task.params['output_dir']`` → ``ctx.extra['workspace']``
+        → ``runs_dir(...)`` (direct-instantiation fallback for tests).
         """
         params = ctx.task.params or {}
         if params.get("output_dir"):
@@ -296,16 +470,10 @@ class BaselineExecutor:
     def _resolve_timeout(self, params: dict[str, Any]) -> int:
         """Pick the subprocess timeout for this baseline launch.
 
-        Decision order:
-        1. ``task.params['timeout_sec']`` — explicit caller wins, no probe.
-        2. Probe ``aiter/jit/build/`` — if found AND
-           ``kernel_count < COLD_START_KERNEL_THRESHOLD``, return the
-           cold-start cap (env-overridable via
-           ``INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC``).
-        3. Otherwise fall back to ``self.default_timeout_sec`` (warm cap).
-
-        Every path emits exactly one log line so the chosen timeout +
-        rationale is greppable in ``optimizer_runs/run_*.log``.
+        Order: explicit ``task.params['timeout_sec']`` → cold-start cap
+        when the aiter jit probe reports COLD (env-overridable via
+        ``INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC``) → warm default.
+        Every path emits one log line for greppability.
         """
         explicit = params.get("timeout_sec")
         if explicit:
@@ -354,13 +522,34 @@ class BaselineExecutor:
     ) -> dict[str, Any] | None:
         """Hook for subclasses after YAML materialization, before launch.
 
-        ProfileExecutor uses this to patch/validate the exact InferenceX
-        checkout named by the rendered YAML. Baseline/params/backends keep the
-        no-op default so their launch path is unchanged.
+        ProfileExecutor uses this to patch/validate the InferenceX checkout
+        named by the rendered YAML. No-op default keeps baseline unchanged.
         """
         return None
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Run the Magpie baseline benchmark and parse its result.
+
+        Materializes the workload config, resolves the timeout (with cold-start
+        detection), restarts the multi-node server when required, launches
+        Magpie via ``run_with_session_kill``, harvests leaked artifacts, parses
+        ``benchmark_report.json`` and the accuracy eval, and returns a result
+        dict the Coordinator promotes into SharedState.
+
+        Args:
+            ctx (RunnerContext): The runner context carrying ``task.params``
+                (config / model / timeout knobs) and ``extra`` (workspace).
+
+        Returns:
+            dict[str, Any]: On success, a ``status="succeeded"`` dict with
+                throughput / latency / accuracy measurements and artifact
+                paths; on failure, a ``status="failed"`` dict with an
+                ``error_class`` (``timeout``, ``subprocess_nonzero``,
+                ``no_workspace``, ``no_report``, ``invalid_measurement`` ...).
+
+        Raises:
+            FileNotFoundError: If the resolved baseline config does not exist.
+        """
         params = ctx.task.params or {}
         config_path = Path(
             params.get("config_path")
@@ -373,27 +562,42 @@ class BaselineExecutor:
         output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)
 
+        # #523: keep the InferenceX checkout Magpie will ``cd`` into on stable
+        # local disk. Magpie launches the server via ``cd <inferencex> && bash
+        # <script>`` (see Magpie ``_build_local_command``), so that checkout is
+        # the server's cwd — and SGLang's cuda-graph profiling dumps
+        # ``cuda_graph_runner_memory_usage.pickle`` there via a RELATIVE path.
+        # On wekafs/NFS a mid-run mount flap makes the cwd vanish and the dump
+        # ENOENTs (scheduler sigquit, no trace). Relocate BEFORE materialize so
+        # the rendered ``benchmark.inferencex_path`` (which Magpie actually
+        # honours — the MAGPIE_INFERENCEX_PATH env is only a fallback), the
+        # ProfileExecutor patch step, and Magpie all use the local mirror.
+        #
+        # Keep this value task-local. Mutating process-wide $INFERENCEX_PATH
+        # would let two overlapping asyncio tasks race between relocation,
+        # materialization and Magpie env export. Passing the same explicit path
+        # through all three call sites also documents the invariant directly.
+        ix_env = os.environ.get("INFERENCEX_PATH", "").strip()
+        effective_inferencex_path = (
+            _ensure_local_inferencex(ix_env, mirror_key=str(output_dir))
+            if ix_env else ""
+        )
+
         timeout_sec = self._resolve_timeout(params)
-        # Resolve model path: task.params['model_path'] (Coordinator-supplied) >
-        # $MODEL_PATH (CLI re-exported). If neither, leave the YAML's hardcoded
-        # `model:` alone so unit tests with explicit fixture paths still work.
+        # Model path: task.params['model_path'] > $MODEL_PATH; if neither,
+        # leave the YAML's hardcoded `model:` for fixture-based tests.
         resolved_model = (
             str(params.get("model_path") or "").strip()
             or os.environ.get("MODEL_PATH", "").strip()
         )
-        # Same pattern for gpu_type: cli.py canonicalizes (mi325x->mi300x) and
-        # re-exports $GPU_TYPE; tests / Coordinator can also override per-task.
+        # gpu_type: task.params > $GPU_TYPE (cli.py canonicalizes mi325x->mi300x).
         resolved_gpu = (
             str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower()
         )
-        # Orchestration-supplied script + result_dir overrides. Both are
-        # surfaced as ``task.params`` so the LLM can route around scripts
-        # that hardcode ``--result-dir /workspace/`` (see SKILL.md
-        # "Magpie leak-path salvage"). Sanitization at the executor
-        # boundary turns any malformed override into ``error_class=
-        # bad_param``; the Coordinator promotes that to a
-        # ``policy_denied`` observation rather than an unsafe subprocess.
+        # Orchestration-supplied script + result_dir overrides (route around
+        # scripts that hardcode ``--result-dir /workspace/``). Sanitization
+        # turns a malformed override into ``error_class=bad_param``.
         try:
             override_script = sanitize_script_name(params.get("benchmark_script"))
             override_result_dir = sanitize_result_dir(params.get("result_dir"))
@@ -404,17 +608,28 @@ class BaselineExecutor:
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
-        config_path = materialize_config_with_envs(
-            config_path,
-            output_dir,
-            extra_server_args=read_extra_server_args(params),
-            extra_envs=dict(params.get("extra_envs") or {}),
-            model_path=resolved_model,
-            gpu_type=resolved_gpu,
-            benchmark_script=override_script,
-        )
-        # Stash for the result so Coordinator can plumb it forward to
-        # downstream params/backends/sweep tasks (workload-contract reuse).
+        try:
+            config_path = materialize_config_with_envs(
+                config_path,
+                output_dir,
+                extra_server_args=read_extra_server_args(params),
+                extra_envs=dict(params.get("extra_envs") or {}),
+                model_path=resolved_model,
+                gpu_type=resolved_gpu,
+                inferencex_path=effective_inferencex_path,
+                benchmark_script=override_script,
+            )
+        except FrameworkScriptMismatchError as exc:
+            # Cross-framework script override (e.g. sglang_*.sh on a vllm run):
+            # return a structured failure instead of bubbling to coordinator.
+            return {
+                "status": "failed",
+                "error_class": "framework_script_mismatch",
+                "error": str(exc),
+                "output_dir": str(output_dir),
+            }
+        # Stash for the result so Coordinator can reuse it downstream
+        # (workload-contract reuse).
         materialized_config_path = config_path
         hook_result = self._after_materialize_config(config_path, output_dir)
         if hook_result is not None:
@@ -422,35 +637,15 @@ class BaselineExecutor:
             hook_result.setdefault("output_dir", str(output_dir))
             return hook_result
 
-        # Cold-start "warmup artifact" guard. The baseline action is the
-        # FIRST step of the optimization flow, so the server is always
-        # freshly booted for the model under test. The first benchmark
-        # window therefore pays one-time cold-start costs (kernel JIT /
-        # torch.compile first-compile, CUDA/HIP-graph first-capture,
-        # KV-cache cold allocation, GPU not yet at boost clocks); the
-        # client-side ``--num-warmups`` (hardcoded ``2 * CONC`` in
-        # InferenceX's bench scripts) is far too small to absorb those.
-        # Taking that contaminated number as the baseline inflates every
-        # later gain into a fictitious 1600%+ "improvement" (see
-        # hyperloom_models_jun1.csv rows tagged ``warmup``).
-        #
-        # Fix: run the benchmark TWICE against the SAME persistent server
-        # via Magpie's ``server_lifecycle`` reuse protocol. Round 1 boots
-        # the server and runs a full client load (paying every one-time
-        # cold cost); round 2 re-attaches to the now-hot server (client
-        # only, no restart) and its throughput is the clean baseline. This
-        # eliminates ALL cold-start contamination — not just on-disk JIT
-        # caches but also CUDA-graph capture, allocator and clock warmup —
-        # because round 2 never restarts the server.
-        #
-        # Eligibility (else fall back to the legacy single round):
-        #   * env ``INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN`` not disabled,
-        #   * single-node (server_lifecycle is local-only; multi-node uses
-        #     a long-lived RayJob server with no per-benchmark cold start),
-        #   * the resolved benchmark script is a Magpie built-in that
-        #     honours ``MAGPIE_RUN_PHASE`` (server_lifecycle requirement),
-        #   * the profiler is off (server_lifecycle + persistent server is
-        #     incompatible with torch_profiler unless cleanup=true).
+        # Cold-start "warmup artifact" guard: the freshly-booted server's
+        # first benchmark window pays one-time cold costs (JIT, graph
+        # capture, KV alloc, clock warmup) that the client-side warmups
+        # can't absorb, inflating later gains into fictitious "improvements".
+        # Fix: run TWICE against the SAME persistent server via Magpie's
+        # ``server_lifecycle`` reuse — round 1 boots + pays cold costs,
+        # round 2 re-attaches to the hot server and is the clean baseline.
+        # Eligibility (else single round): double-run env enabled,
+        # single-node, benchmark script is a Magpie built-in, profiler off.
         lifecycle = self._resolve_lifecycle_params(materialized_config_path)
         double_run = self._double_run_enabled() and lifecycle["eligible"]
 
@@ -459,6 +654,7 @@ class BaselineExecutor:
             "override_result_dir": override_result_dir,
             "resolved_model": resolved_model,
             "materialized_config_path": materialized_config_path,
+            "inferencex_path": effective_inferencex_path,
             "params": params,
             "ctx": ctx,
         }
@@ -477,13 +673,11 @@ class BaselineExecutor:
         port = lifecycle["port"]
         # pid_dir is SHARED across both rounds (Magpie keys the persistent
         # server by ``<pid_dir>/<framework>_<port>.{pid,json}``) so round 2
-        # discovers the server round 1 left running. Use the task root so
-        # it is isolated per baseline task and torn down with it.
+        # discovers round 1's server. Task root keeps it per-task isolated.
         pid_dir = output_dir
         try:
-            # Round 1 (warmup): boot + run server, leave it running
-            # (cleanup=false) so round 2 can re-attach. Throughput is
-            # discarded — it carries the cold-start contamination.
+            # Round 1 (warmup): boot + run, leave running (cleanup=false) so
+            # round 2 can re-attach. Throughput discarded (cold-contaminated).
             warmup_dir = output_dir / "warmup_round"
             warmup_cfg = self._write_lifecycle_config(
                 materialized_config_path, warmup_dir,
@@ -497,10 +691,8 @@ class BaselineExecutor:
                 config_path=warmup_cfg, output_dir=warmup_dir, **common,
             )
             if warmup_result.get("status") != "succeeded":
-                # Hard failure in the warmup round (server never came up,
-                # timeout, etc.) almost certainly recurs, so skip the
-                # measured round. The finally block tears down any server
-                # the warmup round may have left half-booted.
+                # Warmup failure almost certainly recurs, so skip the
+                # measured round; the finally block tears down any leak.
                 warmup_result.setdefault("nonfatal_warnings", [])
                 warmup_result["nonfatal_warnings"].append(
                     "baseline_warmup_round_failed",
@@ -514,9 +706,8 @@ class BaselineExecutor:
             warmup_tput = warmup_result.get("output_throughput")
             warmup_runtime = warmup_result.get("subprocess_runtime_sec")
 
-            # Round 2 (measured): re-attach to the hot server (client
-            # only). cleanup=true tears the server down after this round
-            # on the happy path; the finally block is the safety net.
+            # Round 2 (measured): re-attach to the hot server (client only).
+            # cleanup=true tears it down on the happy path; finally is the net.
             measure_dir = output_dir / "measure_round"
             measure_cfg = self._write_lifecycle_config(
                 materialized_config_path, measure_dir,
@@ -537,18 +728,11 @@ class BaselineExecutor:
                 )
                 result["warmup_round_tput"] = warmup_tput
                 # Overtime-kill anchor fix: the Coordinator promotes
-                # ``subprocess_runtime_sec`` into
-                # ``SharedState.baseline_runtime_sec``, which the
-                # ExploreExecutor turns into the per-variant soft-kill
-                # deadline (``baseline_runtime_sec * kill_ratio``). Explore
-                # variants each RESTART the server (full server-boot +
-                # client), but round 2 here reused the hot server
-                # (client-only), so its wall-clock is far too small an
-                # anchor and would soft-kill normal variants as
-                # KILLED_OVERTIME. Report round 1's FULL server-boot +
-                # client wall-clock as the anchor instead (it matches the
-                # explore variants' run profile); keep round 2's client-only
-                # time under a separate key for transparency / debugging.
+                # ``subprocess_runtime_sec`` into baseline_runtime_sec, the
+                # explore soft-kill anchor. Explore variants restart the
+                # server, so report round 1's FULL boot+client wall-clock
+                # (matches their profile); round 2's client-only time stays
+                # under a separate key.
                 if isinstance(warmup_runtime, (int, float)) and warmup_runtime > 0:
                     result["measure_round_runtime_sec"] = result.get(
                         "subprocess_runtime_sec",
@@ -567,16 +751,21 @@ class BaselineExecutor:
                 )
             return result
         finally:
-            # Defensive teardown: guarantees no persistent server leaks
-            # regardless of which round failed. Idempotent — on the happy
-            # path round 2's cleanup=true already removed the pid/meta
-            # files, so this is a no-op.
+            # Defensive teardown so no persistent server leaks regardless of
+            # which round failed. Idempotent (no-op on the happy path).
             self._teardown_lifecycle_server(
                 pid_dir=pid_dir, framework=framework, port=port,
             )
 
     @staticmethod
     def _double_run_enabled() -> bool:
+        """Whether baseline double-run is enabled.
+
+        Controlled by ``INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN``.
+
+        Returns:
+            ``True`` unless the env var is set to a falsey value.
+        """
         return os.environ.get(
             "INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "1",
         ).strip().lower() not in ("0", "false", "no", "")
@@ -584,8 +773,7 @@ class BaselineExecutor:
     def _resolve_lifecycle_params(
         self, materialized_config_path: Path,
     ) -> dict[str, Any]:
-        """Inspect the materialized YAML to decide server_lifecycle
-        eligibility for the cold-start double-run.
+        """Inspect the materialized YAML for server_lifecycle eligibility.
 
         Returns a dict with ``eligible`` (bool), ``framework`` (str),
         ``port`` (int) and ``reason`` (str, populated when ineligible).
@@ -644,12 +832,10 @@ class BaselineExecutor:
         pid_dir: Path,
         port: int,
     ) -> Path:
-        """Render a per-round YAML that injects ``benchmark.server_lifecycle``
-        on top of the materialized baseline config.
+        """Render a per-round YAML injecting ``benchmark.server_lifecycle``.
 
-        Both rounds share ``pid_dir`` + ``port`` so round 2 re-attaches to
-        the server round 1 left running. Only ``cleanup`` differs (round 1
-        persists the server, round 2 tears it down).
+        Both rounds share ``pid_dir`` + ``port`` so round 2 re-attaches;
+        only ``cleanup`` differs (round 1 persists, round 2 tears down).
         """
         with Path(base_config_path).open(encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
@@ -678,13 +864,8 @@ class BaselineExecutor:
         self, *, pid_dir: Path, framework: str, port: int,
     ) -> None:
         """Best-effort teardown of a persistent server left by the
-        double-run rounds. Idempotent and never raises (safe in finally).
-
-        On the happy path round 2's ``cleanup=true`` already removed the
-        pid/meta files and killed the server, so this is a no-op. It only
-        does real work on the abnormal paths (warmup-round failure, an
-        exception between rounds, or a round 2 timeout that skipped
-        Magpie's own cleanup).
+        double-run rounds. Idempotent and never raises (safe in finally);
+        a no-op on the happy path, real work only on abnormal paths.
         """
         base = Path(pid_dir)
         tag = f"{framework}_{port}"
@@ -700,13 +881,11 @@ class BaselineExecutor:
                 if len(parts) > 1:
                     server_pgid = int(parts[1])
         except (OSError, ValueError):
-            # Best-effort: proceed with whatever (if anything) was parsed
-            # before the error. Teardown is defensive and must never raise.
+            # Best-effort: proceed with whatever was parsed; never raise.
             pass
 
         if server_pid is not None and os.name == "posix":
-            # The persistent server is setsid'd into its own session, so
-            # its pgid equals its pid unless the pid file recorded one.
+            # Server is setsid'd, so pgid == pid unless the pid file gave one.
             pgid = server_pgid if server_pgid is not None else server_pid
             _signal_group(pgid, signal.SIGTERM)
             deadline = time.monotonic() + 5.0
@@ -724,8 +903,7 @@ class BaselineExecutor:
             try:
                 p.unlink()
             except OSError:
-                # File already gone (round 2 cleanup=true removed it) or
-                # unremovable; either way teardown must not raise.
+                # Already gone or unremovable; teardown must not raise.
                 pass
 
     async def _run_single_benchmark(
@@ -737,15 +915,14 @@ class BaselineExecutor:
         override_result_dir: str | None,
         resolved_model: str,
         materialized_config_path: Path,
+        inferencex_path: str,
         params: dict[str, Any],
         ctx: RunnerContext,
     ) -> dict[str, Any]:
         """Run one Magpie benchmark subprocess and parse its result.
 
-        This is the single-round execution core extracted from
-        ``__call__`` so the cold-start guard can invoke it twice (warmup
-        round + measured round). ``output_dir`` is the per-round slot the
-        Magpie workspace and harvested artifacts land under.
+        Single-round core extracted from ``__call__`` so the cold-start
+        guard can invoke it twice. ``output_dir`` is the per-round slot.
         """
         cmd = [
             self.magpie_python, "-m", "Magpie", "-v", "benchmark",
@@ -754,57 +931,35 @@ class BaselineExecutor:
             "--run-mode", "local",
         ]
         env = os.environ.copy()
-        # Make sure the venv is first in PATH so the benchmark script's
-        # `python3` resolves to one with torch+rocm. Magpie YAML also sets
-        # this but defending in depth costs nothing.
+        # Put the venv first in PATH so the benchmark script's `python3`
+        # resolves to one with torch+rocm (defense in depth vs Magpie YAML).
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        # #210 (Deval, comment 8): pin Magpie's InferenceX-resolution
-        # to ``$INFERENCEX_PATH`` so Magpie loads the SAME InferenceX
-        # checkout that Hyperloom's ``_inferencex_patcher`` has
-        # patched. ``MAGPIE_INFERENCEX_PATH`` is the highest-precedence
-        # resolution rung in Magpie's
-        # ``_resolve_default_inferencex_dir`` (``Magpie/modes/
-        # benchmark/inferencex.py:43``); without setting it, Magpie
-        # falls through to ``./InferenceX`` next to its repo or the
-        # ``$XDG_CACHE_HOME/magpie/InferenceX`` cache, either of which
-        # may be a separate, unpatched checkout (the symptom reported
-        # in #210 comments 4 + 6).
-        inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+        # #210/#523: pin Magpie's InferenceX resolution to the same per-task
+        # checkout rendered into benchmark.inferencex_path and patched by
+        # ProfileExecutor. Do not re-read process env here; the task-local
+        # explicit value avoids cross-task races on $INFERENCEX_PATH.
         if inferencex_path:
             env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
-        # Always-on ``$RESULT_DIR`` default: covers Magpie scripts that
-        # respect the env var (and would otherwise fall back to a
-        # hardcoded path under ``/workspace/``). Scripts that ignore
-        # ``$RESULT_DIR`` still leak — the
-        # ``extract_benchmark_measurement`` salvage pass picks those
-        # up. Operators / Orchestration can override the destination
-        # via ``task.params['result_dir']``.
+        # Always-on ``$RESULT_DIR`` default for scripts that respect it
+        # (else they fall back to ``/workspace/``); scripts that ignore it
+        # are caught by the ``extract_benchmark_measurement`` salvage pass.
         env["RESULT_DIR"] = override_result_dir or str(output_dir)
-        # Pin SERVER_LOG / GPU_METRICS_CSV per-task so Magpie's
-        # ``single_node/*.sh`` wrappers write the server log and per-second
-        # GPU telemetry into the task workspace alongside
-        # ``benchmark_report.json`` instead of leaking to
-        # ``/workspace/server.log`` / ``/workspace/gpu_metrics.csv``.
-        # ``harvest_leaked_artifacts`` still runs below as defense-in-depth
-        # for any wrapper that hardcodes the destination ignoring the env.
+        # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into
+        # the task workspace instead of leaking to ``/workspace/``;
+        # ``harvest_leaked_artifacts`` below is the defense-in-depth net.
         env["SERVER_LOG"] = str(output_dir / "server.log")
         env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
 
-        # Multi-node mode (--nodes >= 2): inject MAGPIE_RUN_PHASE=client
-        # + BENCHMARK_BASE_URL=<head pod ClusterIP> so Magpie skips its
-        # own server launch and benchmark_serving targets the RayJob
-        # head. ``magpie_remote_env()`` returns {} in single-node, so
-        # ``env`` is unchanged on the default path.
+        # Multi-node (--nodes >= 2): inject MAGPIE_RUN_PHASE=client +
+        # BENCHMARK_BASE_URL so Magpie skips its server launch and targets
+        # the RayJob head. No-op ({}) in single-node.
         from ._multi_node_env import magpie_remote_env
         env.update(magpie_remote_env())
 
-        # Multi-node only: restart sglang/vllm with this round's flags
-        # so every benchmark runs against a fresh server (parity with
-        # single-node Magpie's PHASE=all server lifecycle). No-op in
-        # single-node. Profile rounds set ctx.extra["mn_round_restarted"]
-        # before super().__call__() to claim the restart; honour that
-        # flag so each Magpie spawn corresponds to exactly one server
-        # boot.
+        # Multi-node only: restart sglang/vllm per round for a fresh server
+        # (parity with single-node PHASE=all). No-op in single-node. Profile
+        # rounds set ctx.extra["mn_round_restarted"] to claim the restart so
+        # each Magpie spawn maps to exactly one server boot.
         from ._multi_node_server_lifecycle import (
             ServerRestartFailed,
             restart_server_for_round,
@@ -812,12 +967,9 @@ class BaselineExecutor:
         ctx_extra = getattr(ctx, "extra", None) or {}
         if not ctx_extra.get("mn_round_restarted"):
             try:
-                # PD knobs (pd_mode / pd_prefill_nodes / pd_decode_nodes
-                # / pd_prefill_tp / pd_decode_tp / pd_transfer_backend /
-                # pd_ib_device) are resolved by the helper from $PD_* env
-                # (set by cli.py) and fall back to state.json — keeping
-                # this call site identical between colocated and
-                # disaggregated runs (the agent only changes CLI flags).
+                # PD knobs auto-resolved by the helper from $PD_* env (set
+                # by cli.py), falling back to state.json — call site is
+                # identical between colocated and disaggregated runs.
                 await restart_server_for_round(
                     extra_server_args=read_extra_server_args(params),
                     framework=os.environ.get("FRAMEWORK") or None,
@@ -838,21 +990,45 @@ class BaselineExecutor:
         log.info("baseline_executor: launching Magpie cmd=%s output_dir=%s",
                  cmd, output_dir)
 
-        # Magpie is launched via ``run_with_session_kill`` (a
-        # ``subprocess.run``-compatible wrapper that ALSO tears down
-        # the entire descendant tree on every exit path — success,
-        # nonzero, timeout, exception). Plain ``subprocess.run`` leaks
-        # vLLM / SGLang server processes for any wrapper that
-        # ``nohup`` / ``setsid`` / daemonizes the server (bugs.md §B);
-        # those leaks were the root cause of the bash-source race in
-        # bugs.md §C #1, where a leaked bash re-sources a benchmark
-        # script while the next Magpie subprocess is mid-
-        # ``shutil.copy2``. See ``_subprocess_kill.py``.
+        # Magpie launched via ``run_with_session_kill`` (subprocess.run-like
+        # but tears down the whole descendant tree on every exit path).
+        # Plain subprocess.run leaks daemonized server processes (bugs.md §B,
+        # root cause of the bash-source race in §C #1). See
+        # ``_subprocess_kill.py``.
         subprocess_started_unix = time.time()
+        # Anchor the Magpie *parent* process cwd to the stable per-task
+        # output_dir instead of the default ``/tmp`` (defence-in-depth for any
+        # relative-path writes Magpie itself makes). NOTE: this does NOT fix
+        # #523 on its own — Magpie re-roots the actual server via
+        # ``cd <inferencex>`` (see ``_build_local_command`` in Magpie), so the
+        # server's cwd (where SGLang dumps the cuda-graph pickle) is the
+        # InferenceX checkout, not this output_dir. The #523 fix is
+        # ``_ensure_local_inferencex`` above, which keeps that checkout on
+        # stable local disk.
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # #524 hardening: a reused output_dir (explicit ``params['output_dir']``
+        # on a retry, or a re-run of the same task slot) may still hold a
+        # PRIOR attempt's server.log. Its terminal engine/worker-init markers
+        # would otherwise misclassify THIS attempt as ``server_init_dead`` even
+        # when the current server booted fine — the post-run scan
+        # (``server_log_death_excerpt`` below) can't tell a stale marker from a
+        # fresh one. Clear it so classification only sees this attempt's log.
+        stale_server_log = output_dir / "server.log"
+        try:
+            stale_server_log.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.warning(
+                "baseline_executor: could not clear stale server.log %s (%s); "
+                "a prior attempt's markers may bias failure classification.",
+                stale_server_log, exc,
+            )
         try:
             proc = await asyncio.to_thread(
                 run_with_session_kill, cmd,
-                env=env, cwd=str(self.cwd), timeout=timeout_sec,
+                env=env, cwd=str(output_dir), timeout=timeout_sec,
+                server_log_path=str(output_dir / "server.log"),
             )
             subprocess_runtime_sec = max(
                 0.0, time.time() - subprocess_started_unix,
@@ -881,20 +1057,34 @@ class BaselineExecutor:
         proc_stdout = proc.stdout
         proc_stderr = proc.stderr
 
+        # #524: when the inference server's engine/worker bootstrap dies (e.g.
+        # vLLM ``RuntimeError: Engine core initialization failed``), the real
+        # root cause is in server.log, not in Magpie's stdout/stderr tail — and
+        # the liveness watchdog may have reaped the hung parent with
+        # ``SERVER_DEAD_RETURNCODE``. Detect that once here and reuse it across
+        # the failure branches below so the failure is classified
+        # ``server_init_dead`` (parity with the explore/grid path) and the
+        # operator sees the actual server fault instead of a generic
+        # ``subprocess_nonzero``. Backend-agnostic: the markers cover both
+        # vLLM and SGLang engine/worker init failures.
+        server_death_excerpt = server_log_death_excerpt(
+            str(output_dir / "server.log")
+        )
+        server_init_dead = (
+            server_death_excerpt is not None
+            or proc_returncode == SERVER_DEAD_RETURNCODE
+        )
+        server_init_dead_error = server_death_excerpt or (
+            "server engine/worker init failed (reaped by liveness watchdog); "
+            "see server.log"
+        )
+
         # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
         candidates = sorted(output_dir.glob("benchmark_*"))
-        # Always-on artifact harvest. Magpie's shell wrappers hardcode
-        # ``/workspace/server.log`` + ``/workspace/gpu_metrics.csv`` +
-        # ``/workspace/profile_*.trace.json.gz`` + ``/workspace/
-        # inferencex_result*.json`` (see ``harvest_leaked_artifacts``
-        # for the full list). Without this pass the NFS clone of
-        # ``<session>/runs/baseline/<task_id>/`` is missing the
-        # wrapper-side artifacts even on a fully successful run.
-        # Runs unconditionally (success / failure / no_workspace) so
-        # diagnostics for the failure paths survive too. Mtime gating
-        # rejects stale leaks from prior runs. Destination prefers the
-        # benchmark workspace dir; falls back to the task output_dir
-        # when Magpie never created one.
+        # Always-on artifact harvest: copy wrapper-side leaks hardcoded
+        # under ``/workspace/`` into the task workspace (see
+        # ``harvest_leaked_artifacts``). Runs unconditionally so failure-path
+        # diagnostics survive; mtime gating rejects stale prior-run leaks.
         harvest_destination = candidates[-1] if candidates else output_dir
         harvested = harvest_leaked_artifacts(
             harvest_destination,
@@ -912,6 +1102,32 @@ class BaselineExecutor:
                 "output_dir": str(output_dir),
                 "harvested_artifacts": [str(dst) for _, dst in harvested],
             }
+            # Magpie never created a benchmark_* workspace, so the wrapper
+            # never wrote server.log. Persist the captured stderr/stdout to
+            # a file so the failure survives the NFS clone and S3 archive
+            # (without this, no_workspace failures leave zero on-disk logs).
+            captured = (proc_stderr or "") + (proc_stdout or "")
+            stderr_log_path: str | None = None
+            if captured.strip():
+                try:
+                    log_file = output_dir / "baseline_stderr.log"
+                    log_file.write_text(captured, encoding="utf-8")
+                    stderr_log_path = str(log_file)
+                except OSError as exc:
+                    log.warning(
+                        "baseline_executor: failed to persist stderr log: %s",
+                        exc,
+                    )
+            if stderr_log_path:
+                failure_extras["stderr_log_path"] = stderr_log_path
+            if server_init_dead:
+                return {
+                    "status": "failed",
+                    "error_class": "server_init_dead",
+                    "returncode": proc_returncode,
+                    "error": server_init_dead_error,
+                    **failure_extras,
+                }
             if proc_returncode != 0:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
                 return {
@@ -950,7 +1166,10 @@ class BaselineExecutor:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
         if not measurement.get("valid_measurement"):
-            if proc_returncode != 0:
+            if server_init_dead:
+                error_class = "server_init_dead"
+                error = server_init_dead_error
+            elif proc_returncode != 0:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
                 error_class = "subprocess_nonzero"
                 error = tail
@@ -979,29 +1198,20 @@ class BaselineExecutor:
             "returncode": proc_returncode,
             "report_path": str(report_path) if report_path.exists() else None,
             "workspace": str(workspace),
-            # Path to the materialized YAML used for THIS baseline. Coordinator
-            # promotes this into SharedState.baseline_config_path so subsequent
-            # params/backends/sweep tasks reuse it as their `config_path` —
-            # without this, `_grid_runner._build_variant_yaml` would render
-            # variants from the shipped YAML's smoke defaults (CONC=8/ISL=256/
-            # OSL=256/TP=1) and produce ~10x lower throughput than baseline.
-            # See `_workload_envs.py` for the bug history.
+            # Materialized YAML for THIS baseline. Coordinator promotes it
+            # into SharedState.baseline_config_path so downstream tasks reuse
+            # it as `config_path` (else variants render from the YAML's smoke
+            # defaults and produce ~10x lower throughput). See `_workload_envs.py`.
             "materialized_config": str(materialized_config_path),
-            # Wall-clock of the Magpie subprocess (success path only).
-            # Coordinator promotes this into
-            # ``SharedState.baseline_runtime_sec`` so the explore
-            # overtime-kill gate (``--explore-overtime-kill-ratio``)
-            # can derive a per-variant deadline of
-            # ``baseline_runtime_sec * ratio``. Measured around the
-            # ``run_with_session_kill`` call only; not exposed on the
-            # failure paths (timeout / nonzero / no_workspace /
-            # no_report / invalid_measurement) so a botched baseline
-            # cannot accidentally seed a tiny / huge deadline.
+            # Magpie subprocess wall-clock (success path only). Coordinator
+            # promotes into ``SharedState.baseline_runtime_sec``, the explore
+            # overtime-kill anchor. Omitted on failure paths so a botched
+            # baseline can't seed a bad deadline.
             "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
         }
 
-        # Parse accuracy eval results (GSM8K). RUN_EVAL=true was injected
-        # into the yaml so Magpie ran lm-eval while the server was still up.
+        # Parse accuracy eval results (GSM8K); RUN_EVAL=true ran lm-eval
+        # while the server was up.
         from ._accuracy_gate import parse_eval_results
         eval_data = parse_eval_results(workspace)
         if eval_data.get("accuracy") is not None:
@@ -1024,8 +1234,7 @@ class BaselineExecutor:
         return result
 
 
-# Module-level callable so callers can do ``register_executor("baseline",
-# baseline_executor)`` without instantiating.
+# Module-level callable for ``register_executor("baseline", baseline_executor)``.
 baseline_executor = BaselineExecutor()
 
 
