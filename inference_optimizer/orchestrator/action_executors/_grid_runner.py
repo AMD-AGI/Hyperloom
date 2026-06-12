@@ -747,6 +747,10 @@ _SPACE_VALUE_FLAGS = (
     "--override-generation-config",
     "--tool-call-parser",
 )
+_MULTI_VALUE_FLAGS = (
+    "--cuda-graph-bs",
+    "--cuda-graph-max-bs",
+)
 
 
 def _shell_safe_dedupe(args: str) -> str:
@@ -761,7 +765,7 @@ def _shell_safe_dedupe(args: str) -> str:
     """
     if not args.strip():
         return ""
-    if any(f in args for f in _SPACE_VALUE_FLAGS):
+    if any(f in args for f in _SPACE_VALUE_FLAGS + _MULTI_VALUE_FLAGS):
         return args
     tokens = args.split()
     pairs: dict[str, list[str]] = {}

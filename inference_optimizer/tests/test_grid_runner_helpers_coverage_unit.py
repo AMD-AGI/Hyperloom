@@ -194,6 +194,13 @@ def test_shell_safe_dedupe_leaves_json_arg_untouched() -> None:
     assert out == args, f"JSON-bearing string must be left as-is: {out}"
 
 
+def test_shell_safe_dedupe_leaves_multi_value_arg_untouched() -> None:
+    """Multi-token flags must not be reassembled as stray positional tokens."""
+    args = "--cuda-graph-bs 1 2 4 --cuda-graph-bs 8 16"
+    out = gr._shell_safe_dedupe(args)
+    assert out == args
+
+
 def test_shell_safe_dedupe_normalizes_equals_form() -> None:
     """#520: --flag=value and --flag value must dedupe to one (last wins)."""
     out = gr._shell_safe_dedupe(
