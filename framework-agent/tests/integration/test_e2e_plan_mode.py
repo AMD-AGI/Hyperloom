@@ -1,12 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Integration test: ``fa explore`` (plan mode) end-to-end against fake Primus.
-
-Runs the actual ``framework-agent`` CLI as a subprocess so the test
-exercises argparse + JSON-IO + the explorer pipeline as a real user
-would. The Primus Cortex backend is replaced by the in-process
-``fake_primus`` fixture so no internet access is needed.
-"""
+"""Integration test: ``fa explore`` (plan mode) e2e — runs the CLI as a subprocess (argparse + JSON-IO + explorer) against the in-process ``fake_primus`` fixture (no internet)."""
 
 from __future__ import annotations
 
