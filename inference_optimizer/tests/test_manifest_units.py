@@ -1,11 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for ``inference_optimizer.manifest`` helpers.
-
-Existing tests round-trip the manifest writer at a high level; we
-target the auxiliary helpers (objective summary, dependency provenance,
-image detection fallbacks) so each branch has explicit coverage.
-"""
+"""Unit tests for ``inference_optimizer.manifest`` helpers (objective summary, dependency provenance, image detection)."""
 
 from __future__ import annotations
 
@@ -19,9 +14,7 @@ import pytest
 from inference_optimizer import manifest as mf
 
 
-# ---------------------------------------------------------------------------
 # small helpers
-# ---------------------------------------------------------------------------
 
 class TestObjectiveSummary:
     def test_gain_pct(self):
@@ -47,9 +40,7 @@ class TestObjectiveSummary:
         assert mf._objective_summary(ns) == {"kind": "time_only", "value": None}
 
 
-# ---------------------------------------------------------------------------
 # build_session_id
-# ---------------------------------------------------------------------------
 
 class TestBuildSessionId:
     def test_uses_model_name_when_provided(self):
@@ -63,9 +54,7 @@ class TestBuildSessionId:
         assert sid.startswith("session_")
 
 
-# ---------------------------------------------------------------------------
 # _describe_dep + _build_dependencies
-# ---------------------------------------------------------------------------
 
 class TestDescribeDep:
     def test_unset_env(self, monkeypatch):
@@ -104,9 +93,7 @@ class TestDescribeDep:
         assert out["path"] == str(tmp_path / "legacy")
 
 
-# ---------------------------------------------------------------------------
 # _detect_image
-# ---------------------------------------------------------------------------
 
 class TestDetectImage:
     def test_returns_env_when_set(self, monkeypatch):
@@ -148,9 +135,7 @@ class TestDetectImage:
         assert mf._detect_image() is None
 
 
-# ---------------------------------------------------------------------------
 # build_manifest end-to-end
-# ---------------------------------------------------------------------------
 
 class TestBuildManifest:
     def test_default_no_args(self, tmp_path, monkeypatch):
@@ -206,14 +191,7 @@ class TestWriteAndLoad:
 
 
 class TestDependencyEscapeGuard:
-    """``_describe_dep`` must never raise out (provenance-capture contract),
-    even when the dependency path makes ``Path.resolve`` raise.
-
-    On CPython 3.10 ``Path.resolve(strict=False)`` raises
-    ``RuntimeError('Symlink loop ...')`` on a self-referential symlink. The
-    escape-guard's ``resolve`` calls only caught ``(OSError, ValueError)``, so
-    such a dep path bubbled the RuntimeError out of manifest generation.
-    """
+    """``_describe_dep`` must never raise, even when the dep path makes ``Path.resolve`` raise a symlink-loop RuntimeError."""
 
     def test_describe_dep_survives_symlink_loop(self, tmp_path, monkeypatch):
         udp = tmp_path / "udp"

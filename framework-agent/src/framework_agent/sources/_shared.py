@@ -2,9 +2,9 @@
 
 """Shared types and helpers across PR source backends.
 
-Defines `GitHubPr` (a lightweight result record) and `_repo_slug` (a
-repo_url -> "owner/name" parser) so that Primus Cortex and GitHub backends
-can produce uniform candidate records without circular imports.
+Defines `GitHubPr` (lightweight result record) and `_repo_slug`
+(repo_url -> "owner/name") so backends produce uniform candidate records
+without circular imports.
 """
 
 from __future__ import annotations
@@ -29,16 +29,19 @@ class GitHubPr:
 
     @property
     def ref(self) -> str:
-        """Stable candidate ref used downstream (`Candidate.ref`)."""
+        """Stable candidate ref used downstream (`Candidate.ref`).
+
+        Returns:
+            str: The ref string of the form ``"PR:<number>"``.
+        """
         return f"PR:{self.number}"
 
 
 def _repo_slug(repo_url: str) -> str:
     """Parse ``owner/name`` from a GitHub-style git URL.
 
-    Accepts the common forms (https + .git, https without .git, ssh).
-    Raises ValueError on a non-GitHub or malformed URL so callers can
-    surface a clean error instead of guessing.
+    Accepts https (+/- .git) and ssh forms. Raises ValueError on a non-GitHub
+    or malformed URL.
     """
     raw = repo_url.strip()
     if raw.endswith(".git"):

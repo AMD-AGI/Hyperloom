@@ -2,11 +2,8 @@
 
 """Run all signal rules and de-duplicate Symptoms.
 
-The classifier is intentionally dumb: it iterates a fixed list of
-evaluators and appends whatever they emit. De-duplication uses
-``Symptom.dedup_key()`` so the same rule firing on the same subject
-twice (e.g. via inbox + coordinator events) folds into a single record;
-the highest severity wins on ties.
+Iterates a fixed list of evaluators and appends what they emit, then
+de-dups via ``Symptom.dedup_key()`` (highest severity wins on ties).
 """
 
 from __future__ import annotations
@@ -71,11 +68,8 @@ SignalEvaluator = Callable[[ReactorContext, SourceData], list[Symptom]]
 class Classifier:
     """Compose the configured signal evaluators.
 
-    Most evaluators are pure functions; the ``gpu_leak`` rule is
-    stateful (it counts consecutive hits to suppress false positives
-    from cold-start VRAM ramps) and therefore lives behind a
-    :class:`GpuLeakDetector` instance constructed in
-    :meth:`__post_init__`.
+    Most evaluators are pure functions; stateful rules (e.g. ``gpu_leak``)
+    live behind detector instances constructed in :meth:`__post_init__`.
     """
 
     stall_config: StallConfig = field(default_factory=StallConfig)
@@ -116,10 +110,8 @@ class Classifier:
         default_factory=ExternalDepsConfig
     )
     extra_evaluators: list[SignalEvaluator] = field(default_factory=list)
-    # Cross-tick persistence for stateful sub-detectors. When the
-    # caller wires this in (factory always does), each detector below
-    # receives a slot view it uses to survive subprocess restarts.
-    # ``None`` (e.g. ad-hoc tests) keeps everything in-memory only.
+    # Cross-tick persistence for stateful sub-detectors so they survive
+    # subprocess restarts; ``None`` keeps everything in-memory only.
     state_store: "DetectorStateStore | None" = None
     _gpu_leak_detector: GpuLeakDetector = field(init=False, repr=False)
     _aiter_jit_detector: AiterJitDetector = field(init=False, repr=False)
@@ -132,6 +124,12 @@ class Classifier:
     _tracelens_cli_latch: TraceLensCliFiredOnce = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Construct the stateful sub-detectors with their persistence views.
+
+        Each stateful detector receives a per-name state view from
+        ``state_store`` (or ``None`` for in-memory-only operation) so it can
+        survive subprocess restarts.
+        """
         store = self.state_store
         self._gpu_leak_detector = GpuLeakDetector(
             self.gpu_leak_config,
@@ -162,6 +160,19 @@ class Classifier:
         )
 
     def classify(self, data: SourceData, ctx: ReactorContext) -> list[Symptom]:
+        """Run every configured signal evaluator and return de-duplicated symptoms.
+
+        Invokes the pure-function rules and the stateful detectors, appends any
+        ``extra_evaluators``, then folds duplicates via :func:`_dedup`.
+
+        Args:
+            data (SourceData): Collected source data for this tick.
+            ctx (ReactorContext): Reactor context for this tick.
+
+        Returns:
+            list[Symptom]: De-duplicated symptoms ordered by severity (HIGH
+                first) then name and subject.
+        """
         symptoms: list[Symptom] = []
         symptoms.extend(
             evaluate_stall_signals(ctx, data, config=self.stall_config)
@@ -184,33 +195,22 @@ class Classifier:
                 ctx, data, config=self.cluster_fault_config
             )
         )
-        # Budget signals are pure-context (the SharedState time-budget
-        # block is rendered by Coordinator and parsed into ctx); they
-        # do not need a SourceData fetch so we evaluate them last.
+        # Budget signals are pure-context (no SourceData fetch needed).
         symptoms.extend(
             evaluate_budget_signals(ctx, config=self.budget_config)
         )
-        # Stateful detectors (aiter cache regression, gain plateau).
         symptoms.extend(self._aiter_jit_detector.evaluate(ctx, data))
         symptoms.extend(self._progress_detector.evaluate(ctx, data))
-        # B1 same-fingerprint retry detector — stateless; reads
-        # ``coordinator_events`` / inbox to walk the streak.
         symptoms.extend(
             evaluate_repeated_payload_signals(
                 ctx, data, config=self.repeated_payload_config,
             )
         )
-        # G decision-audit signals — stateless; reads the persisted
-        # decision artefacts ``LocalProbe._sample_decision_audit``
-        # collected into :attr:`SourceData.local_decision_audit`.
         symptoms.extend(
             evaluate_decision_audit_signals(
                 ctx, data, config=self.decision_audit_config,
             )
         )
-        # C preflight signals — model-GPU fit (boot-time, once per
-        # manifest fingerprint), Amdahl kernel-ceiling (post-profile),
-        # cold-start vs budget (every tick when cold).
         symptoms.extend(self._model_gpu_fit_detector.evaluate(ctx, data))
         symptoms.extend(self._amdahl_ceiling_detector.evaluate(ctx, data))
         symptoms.extend(
@@ -218,33 +218,24 @@ class Classifier:
                 ctx, data, config=self.cold_start_config,
             )
         )
-        # E critic health (KB outage / unavailable streak / prune stuck /
-        # runtime stuck).
         symptoms.extend(
             evaluate_critic_health_signals(
                 ctx, data, config=self.critic_health_config,
             )
         )
-        # F kernel pipeline + external backend health. The stateless
-        # rules (F2/F3/F4/F5) live in the module helper; the stateful
-        # F1 ray-pending detector tracks consecutive-tick streaks.
+        # F1 ray-pending is stateful; F2/F4/F5 live in the module helper.
         symptoms.extend(self._ray_pending_detector.evaluate(ctx, data))
         symptoms.extend(
             evaluate_kernel_pipeline_signals(
                 ctx, data, config=self.kernel_pipeline_config,
             )
         )
-        # I state integrity (state.json / WAL / leases / agent files /
-        # Coordinator PID). Stateless — each tick re-evaluates the
-        # current filesystem snapshot.
         symptoms.extend(
             evaluate_state_integrity_signals(
                 ctx, data, config=self.state_integrity_config,
             )
         )
-        # J external dependencies (gateway / WekaFS / TraceLens CLI).
-        # The TraceLens CLI latch is owned here so the detector fires
-        # at most once per session.
+        # TraceLens CLI latch is owned here so J3 fires at most once per session.
         symptoms.extend(
             evaluate_external_deps_signals(
                 ctx, data,
@@ -258,6 +249,15 @@ class Classifier:
 
 
 def _dedup(symptoms: list[Symptom]) -> list[Symptom]:
+    """Collapse symptoms sharing a dedup key, keeping the highest severity.
+
+    Args:
+        symptoms (list[Symptom]): Raw symptoms from all evaluators.
+
+    Returns:
+        list[Symptom]: De-duplicated symptoms sorted by descending severity,
+            then name, then subject.
+    """
     by_key: dict[tuple[str, ...], Symptom] = {}
     for sym in symptoms:
         key = sym.dedup_key()
