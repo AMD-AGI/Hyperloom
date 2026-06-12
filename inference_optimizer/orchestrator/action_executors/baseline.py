@@ -35,7 +35,11 @@ from ...compat.payload_aliases import read_extra_server_args
 from ...paths import asset_root
 from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
-from ._grid_runner import sanitize_result_dir, sanitize_script_name
+from ._grid_runner import (
+    _kill_stale_servers,
+    sanitize_result_dir,
+    sanitize_script_name,
+)
 from ._subprocess_kill import (
     SERVER_DEAD_RETURNCODE,
     _process_group_alive,
@@ -676,6 +680,12 @@ class BaselineExecutor:
         # discovers round 1's server. Task root keeps it per-task isolated.
         pid_dir = output_dir
         try:
+            # #5: deep-clean zombie listeners + stale pid/meta BEFORE round 1
+            # boots its server. Runs once here (not per round) so round 1's
+            # persistent server survives for round 2's re-attach.
+            self._pre_start_cleanup(
+                pid_dir=pid_dir, framework=framework, port=port,
+            )
             # Round 1 (warmup): boot + run, leave running (cleanup=false) so
             # round 2 can re-attach. Throughput discarded (cold-contaminated).
             warmup_dir = output_dir / "warmup_round"
@@ -859,6 +869,54 @@ class BaselineExecutor:
         with out.open("w", encoding="utf-8") as f:
             yaml.safe_dump(cfg, f, sort_keys=False)
         return out
+
+    @staticmethod
+    def _port_healthy(port: int, timeout: float = 3.0) -> bool:
+        """Return True when localhost:{port}/health responds HTTP 200."""
+        import urllib.request
+        try:
+            r = urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/health", timeout=timeout,
+            )
+            return r.status == 200
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _pre_start_cleanup(
+        self, *, pid_dir: Path, framework: str, port: int,
+    ) -> None:
+        """#5: best-effort startup pre-clean for the double-run path.
+
+        Only acts when there is concrete evidence of a zombie: the reuse
+        port responds to /health but the matching metadata file is absent
+        (the exact "Reuse metadata mismatch" trigger). In that case it
+        calls _kill_stale_servers() to reap the orphan listener. Stale
+        pid/json files are always unlinked (without sending signals to
+        potentially-recycled PIDs). Never raises.
+        """
+        base = Path(pid_dir)
+        tag = f"{framework}_{port}"
+        pid_file = base / f"{tag}.pid"
+        meta_file = base / f"{tag}.json"
+        # Unlink stale metadata/pid files only (no signal to possibly-
+        # recycled PIDs — _teardown_lifecycle_server is too aggressive here).
+        for p in (pid_file, meta_file):
+            try:
+                if p.exists():
+                    p.unlink()
+            except OSError:
+                pass
+        # Narrow trigger: only deep-clean when the port is occupied by a
+        # zombie (healthy endpoint, no metadata). Avoids killing unrelated
+        # servers sharing the pod.
+        try:
+            if self._port_healthy(port) and not meta_file.exists():
+                _kill_stale_servers()
+        except Exception as exc:  # noqa: BLE001 — best-effort pre-clean
+            log.warning(
+                "baseline_executor: pre-start _kill_stale_servers failed "
+                "(%s); proceeding.", exc,
+            )
 
     def _teardown_lifecycle_server(
         self, *, pid_dir: Path, framework: str, port: int,
