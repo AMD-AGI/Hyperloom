@@ -200,6 +200,100 @@ def test_pending_keep_kernel_ids_do_not_retry_needs_review():
     assert state.next_pending_keep_kernel_id() == "k001"
 
 
+def _patch_stack_validation_internals(monkeypatch, *, new_tput: float):
+    """Stub apply/revert/bench so the real stack-validation decision path runs."""
+    import inference_optimizer.orchestrator.kernel_request_handlers as krh
+    import inference_optimizer.orchestrator.action_executors.baseline as baseline_mod
+    import inference_optimizer.orchestrator.action_executors.benchmark_result as br
+
+    def _fake_apply(payload, *, session_dir, kernel_id):
+        return {"status": "ok", "kernel_id": kernel_id, "manifest_path": None}
+
+    def _fake_revert(applied):
+        return {"status": "ok"}
+
+    class _FakeBaselineExecutor:
+        def __init__(self, *, session_dir):
+            self.session_dir = session_dir
+
+        async def __call__(self, ctx):
+            return {
+                "output_throughput": new_tput,
+                "report_path": "/tmp/report",
+                "workspace": "/tmp/workspace",
+            }
+
+    monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", _fake_apply)
+    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", _fake_revert)
+    monkeypatch.setattr(baseline_mod, "BaselineExecutor", _FakeBaselineExecutor)
+    monkeypatch.setattr(br, "is_valid_measurement", lambda result: True)
+
+
+def _stack_validation_coordinator(tmp_path: Path) -> Coordinator:
+    c = Coordinator.__new__(Coordinator)
+    c.session_dir = tmp_path
+    # current_best already banks a +10% KEEP'd kernel, applied on disk.
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        baseline_config_path=str(tmp_path / "base.yaml"),
+        current_best={"action": "integrate", "tput": 110.0, "kernel_id": "k_prev"},
+    )
+    c.shared_state.optimization_stack = [
+        {"action": "integrate", "kernel_id": "k_prev", "tput": 110.0},
+    ]
+    for kid, gain in (("k001", 0.6), ("k004", 0.8)):
+        c.shared_state.record_kernel_integrate_result({
+            "status": "ok",
+            "decision": "NEEDS_REVIEW",
+            "kernel_id": kid,
+            "patch_path": f"/tmp/{kid}_opt.cu",
+            "target_file": f"/tmp/{kid}.cu",
+            "new_tput": 100.0 + gain,
+            "gain_pct": gain,
+            "workspace": f"/tmp/integrate-{kid}",
+        })
+    return c
+
+
+@pytest.mark.asyncio
+async def test_stack_validation_reverts_when_no_gain_over_current_best(
+    tmp_path: Path, monkeypatch,
+):
+    """Stack worse than current_best (110) but above baseline (100) must REVERT.
+
+    Regression guard: the KEEP decision is incremental over current_best, not
+    total over the original baseline. new_tput=109 is +9% vs baseline yet -0.9%
+    vs current_best, so the stack adds no value and must be reverted.
+    """
+    c = _stack_validation_coordinator(tmp_path)
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    _patch_stack_validation_internals(monkeypatch, new_tput=109.0)
+
+    result = await c._run_kernel_stack_validation_e2e(stack)
+
+    assert result["decision"] == "REVERT"
+    assert result["gain_pct"] == pytest.approx(9.0)
+    assert result["stack_incremental_gain_pct"] == pytest.approx(-0.9090909, rel=1e-3)
+    assert result["revert_result"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_stack_validation_keeps_on_positive_increment_over_current_best(
+    tmp_path: Path, monkeypatch,
+):
+    """A real increment over current_best (110 -> 112, +1.8%) must KEEP."""
+    c = _stack_validation_coordinator(tmp_path)
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    _patch_stack_validation_internals(monkeypatch, new_tput=112.0)
+
+    result = await c._run_kernel_stack_validation_e2e(stack)
+
+    assert result["decision"] == "KEEP"
+    assert result["gain_pct"] == pytest.approx(12.0)
+    assert result["stack_incremental_gain_pct"] == pytest.approx(1.8181818, rel=1e-3)
+    assert result["revert_result"]["status"] == "skipped"
+
+
 @pytest.mark.asyncio
 async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: Path):
     """Two positive sub-threshold kernel patches should get one combined E2E validation."""

@@ -3115,16 +3115,33 @@ class Coordinator:
                 decision = "REVERT"
                 new_tput = 0.0
                 gain_pct = -100.0
+                incremental_gain_pct = -100.0
             else:
                 base_tput = float(self.shared_state.baseline_tput or 0.0)
+                # The stack is applied on top of the current_best filesystem
+                # state (its KEEP patches are still applied), so the KEEP
+                # decision must use the *incremental* gain over current_best,
+                # not the total gain over the original baseline. Otherwise the
+                # already-banked current_best gain would carry a zero- or
+                # negative-contribution stack past the 1% threshold.
+                current_best = self.shared_state.current_best or {}
+                current_best_tput = float(current_best.get("tput") or 0.0)
+                decision_base = (
+                    current_best_tput if current_best_tput > 0 else base_tput
+                )
                 new_tput = float(bench_result.get("output_throughput") or 0.0)
                 gain_pct = (
                     (new_tput - base_tput) / base_tput * 100.0
                     if base_tput > 0 else 0.0
                 )
+                incremental_gain_pct = (
+                    (new_tput - decision_base) / decision_base * 100.0
+                    if decision_base > 0 else 0.0
+                )
                 decision = (
                     "KEEP"
-                    if gain_pct > KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
+                    if incremental_gain_pct
+                    > KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
                     else "REVERT"
                 )
 
@@ -3137,6 +3154,10 @@ class Coordinator:
                 "base_tput": float(self.shared_state.baseline_tput or 0.0),
                 "new_tput": new_tput,
                 "gain_pct": gain_pct,
+                "stack_incremental_gain_pct": incremental_gain_pct,
+                "stack_incremental_keep_threshold_pct": (
+                    KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
+                ),
                 "report_path": bench_result.get("report_path") if isinstance(bench_result, dict) else None,
                 "workspace": bench_result.get("workspace") if isinstance(bench_result, dict) else str(workspace),
                 "apply_result": {"status": "ok", "stack_apply_results": apply_results},
