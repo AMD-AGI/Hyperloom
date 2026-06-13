@@ -34,6 +34,7 @@ def _build_backends(
     session_dir: Path,
     critic_agent_root: Path | None = None,
     critic_kb_mode: str = "inmemory",
+    cortex_kb_url: str | None = None,
     robustness_choice: str = "mock",
     robustness_agent_root: Path | None = None,
     robustness_options: dict[str, Any] | None = None,
@@ -78,6 +79,7 @@ def _build_backends(
             session_dir=session_dir,
             codex_model=codex_model,
             kb_mode=critic_kb_mode,
+            cortex_kb_url=cortex_kb_url,
             action_verdict_policy=_policy,
         )
 

@@ -43,6 +43,48 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
     return _workspace_root_resolve() / "kb"
 
 
+def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
+    """Wire ``RecipeKB.audit_hook`` to append remote-read trace events.
+
+    Each recipe-snapshot remote read (``get_recipe`` / ``search``) is appended
+    to ``recipe_snapshot/.audit.jsonl`` so the trace records whether the
+    snapshot KB (gbrain / cortex) was consulted, the request, and how it
+    resolved. Best-effort and never raises into the KB op. No-op without a
+    session dir or when the dispatcher predates ``audit_hook``.
+
+    Args:
+        kb (Any): The RecipeKB dispatcher (or a mirroring wrapper around it).
+        session_dir (Path | None): Session dir hosting the audit log.
+    """
+    if session_dir is None:
+        return
+    # Unwrap the inline gbrain-mirroring wrapper so the hook lands on the
+    # actual RecipeKB whose reads emit the audit events.
+    target = getattr(kb, "_inner", kb)
+    if not hasattr(target, "audit_hook"):
+        return
+
+    from datetime import datetime, timezone
+
+    from .session_paths import recipe_snapshot_audit_jsonl
+
+    audit_path = recipe_snapshot_audit_jsonl(Path(session_dir))
+
+    def _hook(event: dict[str, Any]) -> None:
+        try:
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            row = {
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                **event,
+            }
+            with audit_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, sort_keys=True) + "\n")
+        except Exception:  # noqa: BLE001 — audit must never break a KB op
+            log.debug("recipe_snapshot audit append failed", exc_info=True)
+
+    target.audit_hook = _hook
+
+
 def _build_recipe_kb_dispatcher(
     args: argparse.Namespace,
 ) -> Any:
@@ -143,6 +185,8 @@ def _bootstrap_cortex_kb(
     (fail_fast=False); a hard T0 failure warns and continues warm-start-empty.
     """
     kb = _build_recipe_kb_dispatcher(args)
+    # Trace every recipe-snapshot remote read into the session audit log.
+    _attach_recipe_audit_hook(kb, session_dir)
 
     state = SharedState.load_or_init(session_dir)
     workload = (
