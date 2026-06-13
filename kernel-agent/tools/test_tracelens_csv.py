@@ -3677,3 +3677,110 @@ def test_extract_total_time_us_from_gpu_timeline(tmp_path):
 
 def test_extract_total_time_us_returns_none_when_missing(tmp_path):
     assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# _normalize_profiler_op_name / graph-captured keyword recovery
+# ---------------------------------------------------------------------------
+
+def test_normalize_profiler_op_name_strips_graph_wrappers():
+    n = tla._normalize_profiler_op_name
+    # Launch wrapper + return type + template are peeled to the bare symbol.
+    assert n("hipGraphLaunch->void ck::foo_kernel<int>") == "ck::foo_kernel<int>"
+    # Plain symbol with no namespace keeps the identifier after stripping void.
+    assert (
+        n("hipGraphLaunch->void paged_attention_ll4mi_QKV_mfma16_kernel<x>")
+        == "paged_attention_ll4mi_QKV_mfma16_kernel<x>"
+    )
+    # Embedded Itanium-mangled symbol is surfaced for the _Z demangle path.
+    assert (
+        n("hipGraphLaunch->_ZN5aiter37dynamic_per_group_scaled_quant_fp8E")
+        == "_ZN5aiter37dynamic_per_group_scaled_quant_fp8E"
+    )
+    # .kd suffix and "(Synthetic Op)" annotation are removed.
+    assert (
+        n("hipGraphLaunch->triton_poi_fused_2.kd (Synthetic Op)")
+        == "triton_poi_fused_2"
+    )
+    # Already-clean names pass through unchanged (regression guard).
+    assert n("aten::mm") == "aten::mm"
+    assert (
+        n("sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427")
+        == "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427"
+    )
+
+
+def test_candidate_keywords_recovers_graph_captured_symbols():
+    # Before normalization these kept the "hipGraphLaunch->void " prefix and
+    # greped to nothing; now they yield the real kernel identifier.
+    kws = tla._candidate_keywords(
+        "hipGraphLaunch->void paged_attention_ll4mi_QKV_mfma16_kernel<x>"
+    )
+    assert "paged_attention_ll4mi_QKV_mfma16_kernel" in kws
+
+    kws = tla._candidate_keywords(
+        "hipGraphLaunch->_ZN5aiter37dynamic_per_group_scaled_quant_fp8E"
+    )
+    assert "dynamic_per_group_scaled_quant_fp8E" in kws
+
+    # Clean profiler symbol still resolves to the same keyword as before.
+    kws = tla._candidate_keywords(
+        "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427"
+    )
+    assert kws == ["fused_moe_triton_kernels_invoke_fused_moe_kernel_427"]
+
+
+def test_deterministic_other_bucket_logs_unresolved_high_time_op(
+    tmp_path, monkeypatch,
+):
+    """A high-GPU-time other-bucket op with no resolvable source must be logged,
+    not silently dropped (root-cause-B observability guard)."""
+    _write_priority_json(tmp_path, [])
+    _write_metrics_json(tmp_path, "other", [
+        {
+            "name": "hipGraphLaunch->void ck::kernel_moe_gemm_2lds<...>",
+            "time_ms": 217.0,
+            "count": 4,
+            "args": "(1,2) bf16",
+            "launcher_path": "",
+        },
+    ])
+    # Simulate a vendor template kernel that exists only as a compiled .so:
+    # no editable source can be grepped.
+    monkeypatch.setattr(tla, "locate_source_via_grep", lambda name: "")
+
+    log_path = tmp_path / "deterministic.log"
+    result = tla.deterministic_extract_hot_kernels(
+        tmp_path, top_k=5, log_path=log_path,
+    )
+
+    assert result == []
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "no editable source resolved" in log_text
+    assert "time_ms=217.000" in log_text
+
+
+def test_deterministic_other_bucket_keeps_resolvable_graph_op(
+    tmp_path, monkeypatch,
+):
+    """A graph-captured op whose symbol resolves to source is kept as a candidate."""
+    _write_priority_json(tmp_path, [])
+    _write_metrics_json(tmp_path, "other", [
+        {
+            "name": "hipGraphLaunch->void aiter::my_triton_kernel<x> (Synthetic Op)",
+            "time_ms": 50.0,
+            "count": 2,
+            "args": "(8,16) fp16",
+            "launcher_path": "",
+        },
+    ])
+    monkeypatch.setattr(
+        tla, "locate_source_via_grep",
+        lambda name: "/sgl-workspace/aiter/my_triton_kernel.py",
+    )
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+
+    assert len(result) == 1
+    assert result[0]["source_file"] == "/sgl-workspace/aiter/my_triton_kernel.py"
+    assert result[0]["duration_us"] == 50000.0

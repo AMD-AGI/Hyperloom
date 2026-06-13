@@ -1095,6 +1095,41 @@ _TYPE_BLOCKLIST = {
 }
 
 
+def _normalize_profiler_op_name(name: str) -> str:
+    """Strip graph-capture / synthetic wrappers from a TraceLens op symbol.
+
+    Graph-captured (HIP/CUDA graph) traces record op names with a launch
+    wrapper and display annotations that are not part of the kernel symbol,
+    e.g. ``hipGraphLaunch->void ck::foo_kernel<...>`` or
+    ``hipGraphLaunch->triton_poi_fused_2.kd (Synthetic Op)``. Left intact,
+    these pollute keyword extraction (the keyword keeps the
+    ``hipGraphLaunch->void `` prefix and greps to nothing) and hide an embedded
+    Itanium-mangled symbol from the ``_Z`` demangling path.
+
+    This peels off, in order: a leading ``<launcher>->`` capture wrapper, a
+    leading C++ return-type token, a trailing ``(... Op)`` annotation, and a
+    trailing ``.kd`` HSA code-object suffix. Already-clean names (e.g.
+    ``sglang_profiler::...`` or ``aten::mm``) pass through unchanged.
+    """
+    s = (name or "").strip()
+    if not s:
+        return ""
+    # Leading graph-launch capture wrapper: ``hipGraphLaunch->`` / ``cudaGraphLaunch->``.
+    s = re.sub(r"^[A-Za-z][A-Za-z0-9_]*->", "", s).strip()
+    # Leading C++ return-type token before the symbol (only relevant when there
+    # is no ``::`` namespace to slice on later).
+    s = re.sub(
+        r"^(?:void|bool|int|unsigned|long|short|char|float|double|size_t)\s+",
+        "", s,
+    ).strip()
+    # Trailing display annotation such as ``(Synthetic Op)``.
+    s = re.sub(r"\s*\([^()]*\bOp\)\s*$", "", s).strip()
+    # Trailing ``.kd`` HSA code-object suffix.
+    if s.endswith(".kd"):
+        s = s[:-3].strip()
+    return s or (name or "").strip()
+
+
 def _candidate_keywords(name: str) -> list[str]:
     """Pick stable search keywords from a kernel symbol.
 
@@ -1108,7 +1143,7 @@ def _candidate_keywords(name: str) -> list[str]:
         list[str]: Up to three descriptive search keywords, most-specific
             first; empty when nothing usable can be extracted.
     """
-    cleaned = name.strip()
+    cleaned = _normalize_profiler_op_name(name)
     if cleaned.startswith("_Z"):
         # Itanium ABI uses <len><name>; walk through and slice manually so
         # consecutive segments (e.g. 5aiter26cross_device_reduce_2stage...) are
@@ -1257,7 +1292,7 @@ def _compound_subwindow_keywords(name: str) -> list[str]:
     function symbol (e.g. ``invoke_fused_moe_kernel``) still resolves. The
     namespace/profiler prefix and a trailing numeric id are stripped first.
     """
-    cleaned = _strip_template_args(name.strip())
+    cleaned = _strip_template_args(_normalize_profiler_op_name(name))
     if "::" in cleaned:
         cleaned = cleaned.split("::")[-1]
     cleaned = re.sub(r"_\d+$", "", cleaned)  # drop a trailing launcher line number
@@ -3080,9 +3115,26 @@ def deterministic_extract_hot_kernels(
         # exactly the regression this guards against. If the definition cannot
         # be located, skip — classify_patchability would drop a wrapper anyway.
         if not op_name:
+            if log_path is not None:
+                append_log(
+                    log_path,
+                    "deterministic: other-bucket op skipped (no op name) "
+                    f"time_ms={time_ms} launcher={launcher_path!r}",
+                )
             continue
         source_file = locate_source_via_grep(op_name)
         if not source_file:
+            # Never silently drop a hot op: surface unresolved high-GPU-time
+            # kernels (e.g. vendor CK/Tensile templates that exist only as
+            # compiled .so, or graph-captured names) so "missing hot_kernels"
+            # is observable instead of vanishing without a trace.
+            if log_path is not None:
+                append_log(
+                    log_path,
+                    "deterministic: other-bucket op skipped (no editable "
+                    f"source resolved) time_ms={time_ms:.3f} "
+                    f"name={op_name!r} launcher={launcher_path!r}",
+                )
             continue
 
         duration_us = time_ms * 1000
