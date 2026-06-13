@@ -230,6 +230,14 @@ async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path
         last_baseline: dict = field(default_factory=dict)
         phase_history: list = field(default_factory=list)
         close_sequence_done: bool = False
+        # Mirror the SharedState fields the SWEEP-entry stack-validation path
+        # touches so this bare double doesn't trip on attribute access.
+        kernel_integrate_attempts: dict = field(default_factory=dict)
+        optimization_stack: list = field(default_factory=list)
+        pending_stack_validation_result: dict = field(default_factory=dict)
+        pending_stack_validation_apply_results: list = field(
+            default_factory=list,
+        )
 
         def save(self, _session_dir: Path | None) -> None:
             return None

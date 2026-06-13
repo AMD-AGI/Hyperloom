@@ -723,6 +723,158 @@ def _format_shapes_for_case(shapes: Any) -> str:
     return str(shapes)
 
 
+_SHAPE_ARG_RE = re.compile(
+    r"^\s*\((?P<dims>[^)]*)\)\s*(?P<dtype>[A-Za-z0-9_]+)?\s*$"
+)
+
+
+def _split_shape_fragments(shape_text: Any) -> list[str]:
+    """Split TraceLens ``Args`` text into per-argument shape fragments."""
+    text = str(shape_text or "").strip()
+    if not text:
+        return []
+    return [
+        frag.strip()
+        for frag in re.split(r"\s*(?:<br\s*/?>|\n)\s*", text, flags=re.IGNORECASE)
+        if frag.strip()
+    ]
+
+
+def _parse_shape_arg(raw: Any, *, index: int) -> dict[str, Any]:
+    """Parse one shape fragment such as ``(15360,8,768) bf16``."""
+    text = str(raw or "").strip()
+    out: dict[str, Any] = {"index": index, "raw": text}
+    match = _SHAPE_ARG_RE.match(text)
+    if not match:
+        return out
+    dims: list[int | str] = []
+    dims_text = match.group("dims").strip()
+    if dims_text:
+        for part in dims_text.split(","):
+            item = part.strip()
+            if not item:
+                continue
+            try:
+                dims.append(int(item))
+            except ValueError:
+                dims.append(item)
+    out["shape"] = dims
+    dtype = (match.group("dtype") or "").strip()
+    if dtype:
+        out["dtype"] = dtype
+    return out
+
+
+def _shape_case_from_value(
+    value: Any,
+    *,
+    call_count: Any = None,
+    primary: bool = False,
+) -> dict[str, Any]:
+    """Build one structured benchmark shape case from TraceLens shape data."""
+    if isinstance(value, dict):
+        structured_args = value.get("args")
+        raw_shape = value.get("shape") or value.get("Args") or value.get("args") or ""
+        case_count = value.get("call_num", value.get("call_count", call_count))
+    elif isinstance(value, (list, tuple)):
+        structured_args = None
+        fragments: list[str] = []
+        case_count = call_count
+        for item in value:
+            if isinstance(item, dict):
+                shape = item.get("shape") or item.get("Args") or item.get("args") or ""
+                if case_count is None:
+                    case_count = item.get("call_num", item.get("call_count"))
+            else:
+                shape = item
+            if shape not in (None, "", [], ()):
+                fragments.append(str(shape))
+        raw_shape = "<br>".join(fragments)
+    else:
+        structured_args = None
+        raw_shape = value
+        case_count = call_count
+    try:
+        parsed_count = int(float(case_count or 1))
+    except (TypeError, ValueError):
+        parsed_count = 1
+    if isinstance(structured_args, list):
+        args = list(structured_args)
+    else:
+        fragments = _split_shape_fragments(raw_shape)
+        args = [
+            _parse_shape_arg(fragment, index=idx)
+            for idx, fragment in enumerate(fragments)
+        ]
+    return {
+        "primary": bool(primary),
+        "call_count": parsed_count,
+        "raw": str(raw_shape or "").strip(),
+        "args": args,
+    }
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Coerce a TraceLens numeric field, returning ``default`` on drift."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _structured_benchmark_shape_cases(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Expose primary/supplementary serving shapes in machine-readable form."""
+    group = candidate.get("task_group")
+    rows = group.get("rows") if isinstance(group, dict) else None
+    cases: list[dict[str, Any]] = []
+    input_shapes = candidate.get("input_shapes")
+    is_synthetic = bool(candidate.get("_input_shapes_synthetic"))
+    if isinstance(rows, list) and rows:
+        # A task_group represents one dispatch covering multiple observed
+        # shapes for the same source function. Prefer its rows so the prompt
+        # keeps supplementary shapes instead of only the primary candidate.
+        for idx, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            case = _shape_case_from_value(
+                row.get("shapes"),
+                call_count=row.get("call_count"),
+                primary=idx == 0,
+            )
+            case.update({
+                "operation": str(row.get("name") or ""),
+                "aggregate_time_ms": _safe_float(row.get("duration_us")) / 1000.0,
+                "percent_e2e": row.get("percent_of_total"),
+                "bound": str(row.get("bound_type") or ""),
+                "source": "task_group",
+            })
+            if case["raw"] or case["args"]:
+                cases.append(case)
+    if (
+        not cases
+        and isinstance(input_shapes, list)
+        and input_shapes
+        and not is_synthetic
+    ):
+        # Only use input_shapes when they come from a real program output
+        # (TraceLens / runtime enrichment), not from the synthetic
+        # legacy-shapes conversion in enrich_candidates_with_runtime_metadata.
+        for idx, entry in enumerate(input_shapes):
+            case = _shape_case_from_value(entry, primary=idx == 0)
+            case["source"] = "input_shapes"
+            if case["raw"] or case["args"]:
+                cases.append(case)
+    if not cases:
+        return {}
+    cases[0]["primary"] = True
+    for case in cases[1:]:
+        case["primary"] = False
+    return {
+        "primary_shape": cases[0],
+        "supplementary_shapes": cases[1:],
+    }
+
+
 def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
     """Fallback shapes block when no TraceLens ``task_group`` is attached.
 
@@ -1207,6 +1359,7 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
     input_dtypes = candidate.get("input_dtypes")
     if input_dtypes is None:
         input_dtypes = candidate.get("dtypes", [])
+    benchmark_shape_cases = _structured_benchmark_shape_cases(candidate)
 
     runtime_flags: dict[str, Any] = {}
     if isinstance(candidate.get("runtime_flags"), dict):
@@ -1263,7 +1416,7 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
     for key in ("KV_DTYPE", "BLOCK_SIZE", "HEAD_SIZE"):
         kernel_params.setdefault(key, candidate.get(key))
 
-    return {
+    metadata = {
         "kernel_path": str(source_file or ""),
         "kernel_name": kernel_name,
         "input_shapes": input_shapes or [],
@@ -1282,6 +1435,9 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
             candidate.get("source_promoted_from_launcher"),
         ),
     }
+    if benchmark_shape_cases:
+        metadata["benchmark_shape_cases"] = benchmark_shape_cases
+    return metadata
 
 
 def build_prompt(
@@ -1618,6 +1774,14 @@ def build_prompt(
         f"repo: {kernel_repo}",
         f"GPU percent: {candidate.get('gpu_pct', 'unknown')}",
         f"Shapes: {json.dumps(candidate.get('shapes', []), sort_keys=True)}",
+        (
+            "Shape contract: when `benchmark_shape_cases` is present in the "
+            "metadata, benchmark its `primary_shape` first and use "
+            "`supplementary_shapes` only as additional coverage. Do not invent "
+            "shapes or reorder tensor arguments."
+            if kernel_metadata.get("benchmark_shape_cases")
+            else ""
+        ),
         promotion_block,
         "",
         "Kernel runtime metadata (structured context for GEAK; unknown fields are null, empty arrays, or empty objects):",

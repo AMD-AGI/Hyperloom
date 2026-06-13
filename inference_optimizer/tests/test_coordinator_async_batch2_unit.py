@@ -741,6 +741,32 @@ async def test_record_specialist_result_with_proposals(coord: Coordinator) -> No
 
 
 @pytest.mark.asyncio
+async def test_record_specialist_result_no_dead_research_evidence_log(
+    coord: Coordinator, caplog,
+) -> None:
+    """Regression (#486 leftover): the deleted ``_aggregate_research_evidence``
+    call raised AttributeError that was swallowed into a spammy error log on
+    every specialist result. The dead call must be gone, so no such error is
+    logged."""
+    import logging
+
+    task = _ptask("rec-spec-dead", "specialist")
+    with caplog.at_level(logging.ERROR):
+        await coord._record_specialist_result(
+            task=task,
+            done_payload={
+                "domain": "kernel",
+                "proposal_set": [{"name": "p1"}],
+            },
+            source="specialist:rec-spec-dead",
+        )
+    assert not any(
+        "research-evidence aggregation failed" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_record_specialist_result_research_scout(coord: Coordinator, monkeypatch) -> None:
     task = _ptask("rec-spec-2", "specialist")
     harvested: list[dict] = []
