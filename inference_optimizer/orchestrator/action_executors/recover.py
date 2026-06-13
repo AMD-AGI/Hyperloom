@@ -10,9 +10,14 @@ for tiered cleanup:
 
 1. **soft** — ``pgrep`` stale owners, SIGTERM, wait ``SERVER_KILL_WAIT_S``,
    SIGKILL survivors.
-2. **hard** (env-gated) — when soft leaves VRAM pinned AND
-   ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1``, shell out to
-   ``rocm-smi --gpureset --gpu=all`` (30s timeout), captured for the audit.
+2. **hard** (opt-IN, env-gated) — only when soft leaves VRAM pinned AND
+   ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET`` is explicitly truthy AND the
+   session's own GPUs can be derived from ``ROCR_VISIBLE_DEVICES``: shell out
+   to ``rocm-smi --gpureset --gpu=<session ids>`` (30s timeout). It NEVER
+   issues an implicit ``--gpu=all`` — a full-node reset is tenant-affecting
+   and must not arm by default (esp. on shared nodes). With the env gate off
+   or the device scope unknown, the hard reset is skipped and the reason is
+   recorded in ``gpureset_skipped_reason``.
 
 We deliberately do NOT reload amdgpu, restart the pod/Ray head, or touch
 persistent runtime config (would kill the optimizer or need root). A
@@ -30,6 +35,8 @@ Returned dict (also persisted to ``runs/recover/<task_id>/result.json``)::
         "mid_free_mb_per_gpu":    [{gpu_id, free_mb}, ...],   # after kills
         "post_free_mb_per_gpu":   [{gpu_id, free_mb}, ...],   # after gpureset
         "gpureset_attempted":     bool,
+        "gpureset_target_gpus":   [int, ...],   # session GPU ids scoped for reset
+        "gpureset_skipped_reason":str | None,   # why a hard reset was skipped
         "gpureset_result":        {returncode, stdout, stderr, error} | {},
         "error_class":            str,                        # only on failure
     }
@@ -70,15 +77,50 @@ _OWNER_PATTERNS: tuple[str, ...] = (
 def _env_gate_allows_gpureset() -> bool:
     """Whether hard GPU reset is permitted during recovery.
 
-    Enabled by default (exclusive-node assumption); set
-    ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET=0`` to disable on shared nodes.
+    Opt-IN: disabled unless ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET`` is explicitly
+    truthy. A ``rocm-smi --gpureset`` is a tenant-affecting operation, so it
+    must never arm by default (esp. on shared nodes). Even when enabled, the
+    reset is scoped to the session's own GPUs (see :func:`_session_gpu_ids`);
+    it never resets ``--gpu=all`` implicitly.
 
     Returns:
-        bool: ``True`` unless the env gate is explicitly disabled.
+        bool: ``True`` only when the env gate is explicitly enabled.
     """
-    return os.getenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "").strip().lower() not in {
-        "0", "false", "no", "off",
+    return os.getenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "").strip().lower() in {
+        "1", "true", "yes", "on",
     }
+
+
+def _session_gpu_ids() -> list[int] | None:
+    """Physical GPU ids this session owns, parsed from ``ROCR_VISIBLE_DEVICES``.
+
+    Returns a sorted list of integer physical card indices to scope the
+    gpureset to, or ``None`` when the env is unset/empty or contains a
+    non-integer token (e.g. a GPU UUID). When ``None`` the session's device
+    set cannot be safely determined, so the caller skips the hard reset
+    rather than falling back to the tenant-affecting ``--gpu=all``.
+
+    NOTE: ``rocm-smi --gpu=<id>`` indexes PHYSICAL cards and
+    ``ROCR_VISIBLE_DEVICES`` holds physical indices, so the values pass
+    through unchanged — they are deliberately NOT remapped to the masked
+    logical 0..N-1 space (doing so would reset another tenant's cards).
+
+    Returns:
+        list[int] | None: Sorted physical GPU ids, or ``None`` when unknown.
+    """
+    raw = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
+    if not raw:
+        return None
+    ids: list[int] = []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            ids.append(int(tok))
+        except ValueError:
+            return None  # UUID / non-int token -> cannot safely scope a reset
+    return sorted(set(ids)) or None
 
 
 def _is_multi_node_sandbox() -> bool:
@@ -197,16 +239,31 @@ class RecoverExecutor:
         # 3) Probe after kills.
         mid = await asyncio.to_thread(self._probe_gpu_free_mb)
 
-        # 4) Hard cleanup (gpureset) — gated by env + force_cleanup.
+        # 4) Hard cleanup (gpureset) — opt-in env gate + force_cleanup, and
+        # ALWAYS scoped to this session's own GPUs (never implicit --gpu=all).
+        gpu_ids = _session_gpu_ids()
         gpureset_result: dict[str, Any] | None = None
+        gpureset_skipped_reason: str | None = None
         if (
             force_cleanup
             and allow_reset
             and not self._all_recovered(mid)
         ):
-            gpureset_result = await asyncio.to_thread(
-                self._try_rocm_smi_gpureset
-            )
+            if gpu_ids:
+                gpureset_result = await asyncio.to_thread(
+                    self._try_rocm_smi_gpureset, gpu_ids,
+                )
+            else:
+                gpureset_skipped_reason = "no_session_gpu_scope"
+                log.warning(
+                    "recover_executor: refusing implicit full-node gpureset — "
+                    "ROCR_VISIBLE_DEVICES is unset/unparseable so the cards "
+                    "this session owns cannot be confirmed. Set "
+                    "ROCR_VISIBLE_DEVICES to scope the reset to your GPUs. "
+                    "Skipping hard reset."
+                )
+        elif force_cleanup and not allow_reset and not self._all_recovered(mid):
+            gpureset_skipped_reason = "gpureset_disabled"
 
         # 5) Final probe (only matters if we attempted gpureset).
         post = (
@@ -226,6 +283,8 @@ class RecoverExecutor:
             "mid_free_mb_per_gpu": mid,
             "post_free_mb_per_gpu": post,
             "gpureset_attempted": gpureset_result is not None,
+            "gpureset_target_gpus": gpu_ids or [],
+            "gpureset_skipped_reason": gpureset_skipped_reason,
             "gpureset_result": gpureset_result or {},
         }
         if not succeeded:
@@ -512,25 +571,33 @@ class RecoverExecutor:
         except (ProcessLookupError, PermissionError):
             return False
 
-    # hard cleanup — rocm-smi --gpureset (env-gated)
-    def _try_rocm_smi_gpureset(self) -> dict[str, Any]:
-        """Attempt a best-effort ``rocm-smi --gpureset --gpu=all``.
+    # hard cleanup — rocm-smi --gpureset (opt-in env gate, session-scoped)
+    def _try_rocm_smi_gpureset(self, gpu_ids: list[int]) -> dict[str, Any]:
+        """Attempt a best-effort ``rocm-smi --gpureset`` scoped to ``gpu_ids``.
+
+        ``gpu_ids`` are this session's own PHYSICAL card indices (from
+        :func:`_session_gpu_ids`); they are passed verbatim to ``--gpu=`` so
+        only the session's cards are reset — never ``--gpu=all``.
+
+        Args:
+            gpu_ids (list[int]): Physical GPU indices to reset (non-empty).
 
         Returns:
-            dict[str, Any]: A result record with the return code and
-            captured output, or an ``error`` key when ``rocm-smi`` is
+            dict[str, Any]: A result record with the return code, the target
+            GPUs and captured output, or an ``error`` key when ``rocm-smi`` is
             missing or the call times out.
         """
         if not shutil.which("rocm-smi"):
             return {"error": "rocm-smi not on PATH"}
+        gpu_arg = ",".join(str(i) for i in gpu_ids)
         log.warning(
-            "recover_executor: HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1; "
-            "attempting `rocm-smi --gpureset --gpu=all` (best effort, "
-            "typically requires root)"
+            "recover_executor: HYPERLOOM_RECOVER_ALLOW_GPU_RESET enabled; "
+            "attempting `rocm-smi --gpureset --gpu=%s` (session-scoped, best "
+            "effort, typically requires root)", gpu_arg,
         )
         try:
             proc = subprocess.run(
-                ["rocm-smi", "--gpureset", "--gpu=all"],
+                ["rocm-smi", "--gpureset", f"--gpu={gpu_arg}"],
                 check=False,
                 capture_output=True,
                 text=True,

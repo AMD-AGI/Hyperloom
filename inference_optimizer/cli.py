@@ -2498,6 +2498,30 @@ def _emit_preflight_diagnostics(
     print(f"  aiter jit cache     = {cache_line}")
     print(f"  cold_start_timeout  = {cold_cap}s")
     print(f"  warm_timeout        = {BASELINE_DEFAULT_TIMEOUT_SEC}s")
+    # Surface the hard GPU-reset arming state up front: `recover` (robustness-
+    # delegated) may shell out to `rocm-smi --gpureset` on gpu_memory_leaked.
+    # It is opt-in and scoped to ROCR_VISIBLE_DEVICES (never implicit --gpu=all).
+    _gpureset_on = os.environ.get(
+        "HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    _rocr_scope = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
+    if _gpureset_on and _rocr_scope:
+        print(
+            f"  recover_gpureset    = ARMED — robustness may auto "
+            f"`rocm-smi --gpureset --gpu={_rocr_scope}` on gpu_memory_leaked; "
+            f"WARNING: confirm this session exclusively owns those cards"
+        )
+    elif _gpureset_on:
+        print(
+            "  recover_gpureset    = ARMED but UNSCOPED (ROCR_VISIBLE_DEVICES "
+            "unset) — hard reset will be SKIPPED (refuses implicit --gpu=all)"
+        )
+    else:
+        print(
+            "  recover_gpureset    = disabled (opt-in; set "
+            "HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1 to enable, scoped to "
+            "ROCR_VISIBLE_DEVICES)"
+        )
     if anthropic_base_url:
         print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url} (direct to gateway)")
     else:
