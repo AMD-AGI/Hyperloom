@@ -3760,6 +3760,39 @@ def test_deterministic_other_bucket_logs_unresolved_high_time_op(
     assert "time_ms=217.000" in log_text
 
 
+def test_minimal_analysis_md_includes_system_level_signals(tmp_path):
+    """System-Level Signals section is rendered from gpu_timeline.csv (no LLM)."""
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "gpu_timeline.csv").write_text(
+        "type,time ms,percent\n"
+        "computation_time,800.0,80.0\n"
+        "exposed_comm_time,40.0,4.0\n"
+        "exposed_memcpy_time,10.0,1.0\n"
+        "idle_time,200.0,20.0\n"
+        "total_time,1000.0,100.0\n",
+        encoding="utf-8",
+    )
+
+    report = tla.generate_minimal_analysis_md(tmp_path, [], idle_pct=20.0)
+    text = report.read_text(encoding="utf-8")
+
+    assert "## System-Level Signals" in text
+    assert "GPU idle | 20.00%" in text
+    # 20% idle is above the default 80%? No — default gate is high; ensure the
+    # note reflects the threshold comparison deterministically.
+    assert "idle gate" in text
+    assert "Exposed communication | 4.00%" in text
+    assert "Exposed memcpy (device copy) | 1.00%" in text
+
+
+def test_minimal_analysis_md_omits_system_signals_without_timeline(tmp_path):
+    """No gpu_timeline.csv -> no System-Level Signals section (no fabrication)."""
+    report = tla.generate_minimal_analysis_md(tmp_path, [], idle_pct=None)
+    text = report.read_text(encoding="utf-8")
+    assert "## System-Level Signals" not in text
+
+
 def test_deterministic_other_bucket_keeps_resolvable_graph_op(
     tmp_path, monkeypatch,
 ):

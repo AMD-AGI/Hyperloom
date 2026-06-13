@@ -3219,6 +3219,47 @@ def generate_minimal_analysis_md(
         lines.append(f"**Idle %**: {idle_pct:.2f}%")
         lines.append("")
 
+    # System-Level Signals — deterministic GPU-timeline shares (idle / exposed
+    # communication / exposed device copy). Read straight from gpu_timeline.csv
+    # with no LLM interpretation; idle is flagged against the same threshold
+    # that gates hot-kernel extraction. The agent route surfaces these as
+    # LLM-written recommendations — here we expose only the underlying numbers.
+    if gpu_rows:
+        def _timeline_pct(row_type: str) -> float | None:
+            for row in gpu_rows:
+                if (row.get("type") or "").strip().lower() == row_type:
+                    try:
+                        return float(row.get("percent", 0))
+                    except (TypeError, ValueError):
+                        return None
+            return None
+
+        idle_share = _timeline_pct("idle_time")
+        comm_share = _timeline_pct("exposed_comm_time")
+        memcpy_share = _timeline_pct("exposed_memcpy_time")
+        if any(v is not None for v in (idle_share, comm_share, memcpy_share)):
+            idle_threshold = _resolve_idle_pct_threshold()
+            lines.append("## System-Level Signals")
+            lines.append("")
+            lines.append("| Signal | % of total GPU time | Note |")
+            lines.append("|--------|---------------------|------|")
+            if idle_share is not None:
+                note = (
+                    f"above {idle_threshold:.0f}% idle gate"
+                    if idle_share > idle_threshold
+                    else f"within {idle_threshold:.0f}% idle gate"
+                )
+                lines.append(f"| GPU idle | {idle_share:.2f}% | {note} |")
+            if comm_share is not None:
+                lines.append(
+                    f"| Exposed communication | {comm_share:.2f}% | - |"
+                )
+            if memcpy_share is not None:
+                lines.append(
+                    f"| Exposed memcpy (device copy) | {memcpy_share:.2f}% | - |"
+                )
+            lines.append("")
+
     # Top Hot Kernels table
     lines.append("## Top Hot Kernels")
     lines.append("")
