@@ -127,13 +127,6 @@ _INTERLEAVE_KERNEL_EXTRAS: frozenset[str] = frozenset({
     "explore", "specialist", "integrate_patch",
 })
 
-# When --no-explore, only integrate_patch is useful in KERNEL interleave
-# (explore/specialist dispatch config variants that belong to the EXPLORE phase).
-_INTERLEAVE_KERNEL_NO_EXPLORE: frozenset[str] = frozenset({
-    "integrate_patch",
-})
-
-
 def is_phase_interleave_enabled() -> bool:
     """Return True when EXPLORE↔KERNEL interleave is enabled (default OFF; env opt-in knob)."""
     raw = (os.environ.get(PHASE_INTERLEAVE_ENV) or "").strip().lower()
@@ -141,15 +134,19 @@ def is_phase_interleave_enabled() -> bool:
 
 
 def llm_proposable_actions_for_with_interleave(
-    phase: str, *, interleave: bool | None = None,
-    explore_enabled: bool | None = None,
+    phase: str,
+    *,
+    interleave: bool | None = None,
+    explore_enabled: bool = True,
 ) -> frozenset[str]:
-    """Return the active LLM-proposable set for ``phase``.
+    """Return the active LLM-proposable set for ``phase`` (when interleave on, EXPLORE adds kernel-owned names, KERNEL adds the explore triple).
 
-    When interleave is on, EXPLORE adds kernel-owned names and KERNEL adds the
-    explore triple.  However, when ``explore_enabled=False`` (--no-explore), the
-    KERNEL extras are narrowed to ``integrate_patch`` only — explore/specialist
-    are EXPLORE-phase actions and must not leak into a kernel-only session.
+    When ``explore_enabled`` is False (``--no-explore``), the ``explore``
+    grid-runner is stripped from the KERNEL interleave extras so the
+    interleave grey channel cannot reintroduce explore work into a run that
+    disabled the EXPLORE phase. ``specialist`` / ``integrate_patch`` stay
+    available because KERNEL legitimately uses them (specialist research +
+    patch integration).
     """
     key = (phase or "").strip().upper()
     base = PHASE_LLM_PROPOSABLE_ACTIONS.get(key, frozenset())
@@ -160,18 +157,22 @@ def llm_proposable_actions_for_with_interleave(
     if key == PHASE_EXPLORE:
         return base | _INTERLEAVE_EXPLORE_EXTRAS
     if key == PHASE_KERNEL:
-        if explore_enabled is False:
-            return base | _INTERLEAVE_KERNEL_NO_EXPLORE
-        return base | _INTERLEAVE_KERNEL_EXTRAS
+        kernel_extras = _INTERLEAVE_KERNEL_EXTRAS
+        if not explore_enabled:
+            kernel_extras = kernel_extras - {"explore"}
+        return base | kernel_extras
     return base
 
 
 def is_action_llm_proposable_in_phase_with_interleave(
-    action_name: str, phase: str, *, interleave: bool | None = None,
-    explore_enabled: bool | None = None,
+    action_name: str,
+    phase: str,
+    *,
+    interleave: bool | None = None,
+    explore_enabled: bool = True,
 ) -> bool:
     """Mirror of :func:`is_action_llm_proposable_in_phase` honoring the
-    interleave flag."""
+    interleave flag (and the ``--no-explore`` KERNEL grey-channel strip)."""
     proposable = llm_proposable_actions_for_with_interleave(
         phase, interleave=interleave, explore_enabled=explore_enabled,
     )

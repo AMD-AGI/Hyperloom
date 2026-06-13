@@ -3018,8 +3018,7 @@ class SharedState:
             )
         proposable = tuple(sorted(
             llm_proposable_actions_for_with_interleave(
-                phase,
-                explore_enabled=self.explore_enabled if hasattr(self, "explore_enabled") else None,
+                phase, explore_enabled=bool(getattr(self, "explore_enabled", True)),
             )
         ))
         allowed_line = (

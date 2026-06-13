@@ -134,6 +134,7 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         "error":              v.error,
         "error_class":        v.error_class,
         "killed_overtime":    v.killed_overtime,
+        "estimated_output_throughput": v.estimated_output_throughput,
         "workspace":          v.workspace,
         "report_path":        v.report_path,
     }
