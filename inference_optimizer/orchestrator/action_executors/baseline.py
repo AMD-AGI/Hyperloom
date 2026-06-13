@@ -59,27 +59,6 @@ from .benchmark_result import (
 log = logging.getLogger(__name__)
 
 
-# Magpie built-in benchmark scripts that honour ``MAGPIE_RUN_PHASE`` and
-# support the server_lifecycle reuse protocol. Static mirror of Magpie's
-# ``benchmarker.MAGPIE_BUILTIN_SCRIPTS`` (duplicated to avoid an import-time
-# Magpie dependency); keep in sync. The cold-start double-run guard only
-# engages for these scripts. ``atom_*`` per AMD-AGI/Magpie#34.
-MAGPIE_BUILTIN_SCRIPTS = frozenset(
-    {
-        "vllm_mi300x.sh",
-        "vllm_mi355x.sh",
-        "sglang_mi300x.sh",
-        "sglang_mi355x.sh",
-        "atom_mi300x.sh",
-        "atom_mi355x.sh",
-    }
-)
-
-# Default HTTP port for the server_lifecycle persistent server when
-# ``benchmark.envs.PORT`` is unset; pinned into the per-round YAML so
-# Magpie's reuse keying and our teardown agree.
-BASELINE_REUSE_PORT_DEFAULT = 8888
-
 # #522: fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args)
 # should not consume the slow-baseline retry budget.
 FAST_EXIT_THRESHOLD_SEC = 30.0
@@ -117,11 +96,6 @@ def _classify_subprocess_error(
     ):
         return "fast_exit_arg_error"
     return "subprocess_nonzero"
-
-# Server-boot budget for the persistent server phase (server_lifecycle).
-# Override via ``INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC``.
-BASELINE_SERVER_READY_TIMEOUT_SEC = 2700
-
 
 # Legacy module-level constant kept pointing at the sglang yaml for tests
 # that import it as a fixture path. Runtime sglang/vllm selection goes
