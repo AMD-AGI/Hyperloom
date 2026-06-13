@@ -11,7 +11,7 @@
     "matrix; the workflow forwards them to optimize_submit.py as",
     "--manual --framework --precision --tp --concurrency so per-model config",
     "is FIXED (no auto-detect). Precision is per-model NATIVE because MI300X",
-    "(gfx942) has no native FP4: FP8 for R1/Qwen3-Next/Qwen3.6/MiMo, INT4 for",
+    "(gfx942) has no native FP4: FP8 for R1/GLM-4.7/Qwen3-Next/Qwen3.6/MiMo, INT4 for",
     "Kimi, FP4 only for MXFP4-native gpt-oss. Qwen3.6 weights are BF16 (~67G, no",
     "quantization_config); FP4 was a no-op — run dynamic FP8 on MI300X instead.",
     "tp8 everywhere except",
@@ -29,9 +29,9 @@
   ],
   "_api_check": {
     "endpoint": "GET /api/playground/models?workspace=core42-hyperloom",
-    "checked_at": "2026-06-05",
-    "all_registered": true,
-    "note": "All 8 rows are Ready in core42-hyperloom and pre-staged under /wekafs/models/<org>-<repo>, so SaFE register hits local_path mode (no re-download). GLM-5 and GLM-5.1 were dropped 2026-06-05 (multi-node only; running the other 8 single-node models). Substitutions vs the original wishlist: MiniMax-M3 -> MiniMax-M2.5 (no official M3); MiMo-V2-PRO -> MiMo-V2.5-Pro (no MiMo-V2-PRO). Qwen3.6 repo is Qwen/Qwen3.6-35B-A3B (no -Instruct suffix).",
+    "checked_at": "2026-06-13",
+    "all_registered": false,
+    "note": "Original 8 rows are Ready in core42-hyperloom and pre-staged under /wekafs/models/<org>-<repo>, so SaFE register hits local_path mode (no re-download). Added GLM-4.7-FP8 and DeepSeek-V4-Flash on 2026-06-13 to make a 10-model daily pool. GLM-5 and GLM-5.1 were dropped 2026-06-05 (multi-node only; running single-node models here). Substitutions vs the original wishlist: MiniMax-M3 -> MiniMax-M2.5 (no official M3); MiMo-V2-PRO -> MiMo-V2.5-Pro (no MiMo-V2-PRO). Qwen3.6 repo is Qwen/Qwen3.6-35B-A3B (no -Instruct suffix).",
     "playground_ids": {
       "deepseek-ai/DeepSeek-R1-0528": "deepseek-r1-0528-kmbd8",
       "moonshotai/Kimi-K2.6": "kimi-k2-6-k9cpr",
@@ -143,6 +143,30 @@
       "conc": 64,
       "registered": true,
       "note": "vLLM lacks this arch; needs sglang 0.5.11 ROCm image (verified registered). ~963G -> tp8 required (~120G/GPU). FP8 baseline."
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 8,
+      "label": "GLM 4.7",
+      "repo_id": "zai-org/GLM-4.7-FP8",
+      "framework": "sglang",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "note": "FP8 compressed-tensors native. Added to make the daily fixed pool 10 models; follows the existing large-FP8-MoE sglang+tp8+conc64 pattern."
+    },
+    {
+      "pool_id": "inferencex-daily-fixed",
+      "pool_index": 9,
+      "label": "DeepSeek V4 Flash",
+      "repo_id": "deepseek-ai/DeepSeek-V4-Flash",
+      "framework": "vllm",
+      "precision": "FP8",
+      "tp": 8,
+      "conc": 64,
+      "registered": true,
+      "note": "Upstream mixed FP4 experts + FP8 dense/attention, tracked as FP8 for the fixed daily pool. Uses the existing single-node vLLM+tp8+conc64 pattern."
     }
   ]
 }
