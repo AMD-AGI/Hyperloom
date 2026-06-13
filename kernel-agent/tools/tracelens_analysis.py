@@ -3057,23 +3057,33 @@ def deterministic_extract_hot_kernels(
     # categorizes them as "other" with no efficiency model.
     other_ops = ops_by_category.get("other", [])
     for op in other_ops:
-        launcher_path = op.get("launcher_path", "")
-        if not launcher_path or launcher_path in ("\u2014", "-"):
-            continue
-        source_file = _resolve_source_file_from_kernel_path(launcher_path)
-        if not source_file:
-            continue
         time_ms = op.get("time_ms", 0)
         if time_ms < 1.0:
             continue
 
-        op_name = op.get("operation", "")
+        # TraceLens "other" metrics rows carry the profiler op name under
+        # ``name`` (e.g. ``sglang_profiler::fused_moe_triton_kernels_invoke_
+        # fused_moe_kernel_427``), which embeds the kernel *definition* file
+        # stem + function. ``launcher_path`` only points at the Python wrapper
+        # that *calls* the kernel (e.g. ``fused_moe.py(391)``), so it must not
+        # be used as the editable source.
+        op_name = op.get("name", "") or op.get("operation", "")
+        launcher_path = op.get("launcher_path", "")
+        if launcher_path in ("\u2014", "-"):
+            launcher_path = ""
+
+        # Resolve the symbol to its definition site (handles the launcher-vs-
+        # definition split, e.g. the ``fused_moe.py`` wrapper vs the actual
+        # ``fused_moe_triton_kernels.py`` @triton.jit kernel). We deliberately
+        # do NOT fall back to ``launcher_path`` as the source: a launcher path
+        # points at the calling wrapper, not an editable kernel body, which is
+        # exactly the regression this guards against. If the definition cannot
+        # be located, skip — classify_patchability would drop a wrapper anyway.
         if not op_name:
-            _, _, func_name = _parse_launcher_path(launcher_path)
-            if func_name:
-                op_name = f"sglang_profiler::{func_name}"
-            else:
-                op_name = launcher_path.split("/")[-1].split("(")[0]
+            continue
+        source_file = locate_source_via_grep(op_name)
+        if not source_file:
+            continue
 
         duration_us = time_ms * 1000
         op_count = op.get("count", 1)

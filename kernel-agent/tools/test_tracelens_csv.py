@@ -3533,6 +3533,96 @@ def test_deterministic_extract_skips_metric_mismatch(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# deterministic_extract_hot_kernels — "other" bucket inclusion + sorting
+# ---------------------------------------------------------------------------
+
+_OTHER_MOE_NAME = (
+    "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427"
+)
+_MOE_KERNEL_DEF = (
+    "/sgl-workspace/sglang/python/sglang/srt/layers/moe/"
+    "moe_runner/triton_utils/fused_moe_triton_kernels.py"
+)
+# The wrapper that merely *launches* the kernel — must never be the source.
+_MOE_LAUNCHER_PATH = (
+    "sglang/srt/layers/moe/moe_runner/triton_utils/"
+    "fused_moe.py(391): _fused_moe_kernel_sequence"
+)
+
+
+def test_deterministic_extract_includes_other_bucket_kernel(tmp_path, monkeypatch):
+    """A high-GPU-time "other"-bucket Triton kernel (fused_moe) that never
+    appears in priority_data findings must still be surfaced, resolved to its
+    *definition* file (not the launcher wrapper)."""
+    _write_metrics_json(tmp_path, "other", [
+        {"name": _OTHER_MOE_NAME, "time_ms": 354.0, "count": 96,
+         "args": "(16384,2048) bf16", "launcher_path": _MOE_LAUNCHER_PATH,
+         "library": "Triton"},
+    ])
+    # priority_data has only a small gemm finding — no fused_moe.
+    _write_metrics_json(tmp_path, "gemm", [
+        {"name": "aten::mm", "time_ms": 10.0, "count": 5,
+         "args": "(1024,1024) bf16", "launcher_path": ""},
+    ])
+    _write_priority_json(tmp_path, [
+        {"global_rank": 1, "category": "gemm", "impact_score": 0.8,
+         "members": [{"operation": "aten::mm", "time_ms": 10.0,
+                      "efficiency_pct": 45.0, "bound_type": "compute"}]},
+    ])
+    # Hermetic: pin symbol resolution to the kernel definition file.
+    monkeypatch.setattr(tla, "locate_source_via_grep",
+                        lambda name: _MOE_KERNEL_DEF if name == _OTHER_MOE_NAME else "")
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+    by_name = {c["name"]: c for c in result}
+    assert _OTHER_MOE_NAME in by_name, "fused_moe other-bucket op must be surfaced"
+    moe = by_name[_OTHER_MOE_NAME]
+    assert moe["source_file"] == _MOE_KERNEL_DEF, "must resolve to definition, not launcher"
+    assert "fused_moe.py" not in moe["source_file"], "must NOT point at the launcher wrapper"
+    assert moe["candidate_source"] == "other_bucket_fallback"
+
+
+def test_deterministic_extract_sorts_all_candidates_by_duration(tmp_path, monkeypatch):
+    """The dominant "other"-bucket kernel (354ms) must outrank a small
+    priority-data kernel (10ms) — all candidates sorted by GPU time."""
+    _write_metrics_json(tmp_path, "other", [
+        {"name": _OTHER_MOE_NAME, "time_ms": 354.0, "count": 96,
+         "args": "(16384,2048) bf16", "launcher_path": _MOE_LAUNCHER_PATH,
+         "library": "Triton"},
+    ])
+    _write_metrics_json(tmp_path, "elementwise", [
+        {"name": "sgl_kernel::silu_and_mul", "time_ms": 10.0, "count": 5,
+         "args": "(1024,1024) bf16", "launcher_path": ""},
+    ])
+    _write_priority_json(tmp_path, [
+        {"global_rank": 1, "category": "elementwise", "impact_score": 1.9,
+         "members": [{"operation": "sgl_kernel::silu_and_mul", "time_ms": 10.0,
+                      "efficiency_pct": 17.0, "bound_type": "memory"}]},
+    ])
+    monkeypatch.setattr(tla, "locate_source_via_grep",
+                        lambda name: _MOE_KERNEL_DEF if name == _OTHER_MOE_NAME else "")
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+    assert result[0]["name"] == _OTHER_MOE_NAME, "biggest kernel must rank first"
+    durations = [c["duration_us"] for c in result]
+    assert durations == sorted(durations, reverse=True), "candidates sorted desc by duration"
+
+
+def test_deterministic_extract_skips_other_op_with_unresolvable_source(tmp_path, monkeypatch):
+    """An "other"-bucket op whose symbol cannot be resolved to a definition
+    file is skipped (never falls back to the launcher wrapper as source)."""
+    _write_metrics_json(tmp_path, "other", [
+        {"name": "sglang_profiler::mystery_op_999", "time_ms": 50.0, "count": 1,
+         "args": "", "launcher_path": _MOE_LAUNCHER_PATH, "library": "Triton"},
+    ])
+    _write_priority_json(tmp_path, [])
+    monkeypatch.setattr(tla, "locate_source_via_grep", lambda name: "")
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+    assert result == [], "unresolvable other-bucket op must be skipped"
+
+
+# ---------------------------------------------------------------------------
 # _match_op_by_time
 # ---------------------------------------------------------------------------
 
