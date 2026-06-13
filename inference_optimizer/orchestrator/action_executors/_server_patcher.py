@@ -644,25 +644,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
             "patches",
             plan.framework, p.name, mode, len(applied),
         )
-        for prev, prev_mode in reversed(applied):
-            if prev_mode == "git":
-                rolled_back = _git(
-                    git, ("apply", "-R", strip_arg, str(prev)), plan.apply_root,
-                )
-            else:
-                rolled_back = (
-                    patch_bin is not None
-                    and _patch_apply(
-                        patch_bin, prev, plan.apply_root, plan.apply_strip,
-                        reverse=True,
-                    )
-                )
-            if not rolled_back:
-                log.error(
-                    "_server_patcher: rollback of %s (mode=%s) also failed — "
-                    "install may be in inconsistent state; manual review "
-                    "required", prev.name, prev_mode,
-                )
+        _rollback_applied(applied, plan, git, patch_bin, strip_arg)
         return False
 
     fuzzy_count = sum(1 for _, mode in applied if mode == "patch")
@@ -681,12 +663,48 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         log.error(
             "_server_patcher: post-apply sentinel check FAILED for %s %s — "
             "patches were applied/skipped (%d applied, %d skipped) but the "
-            "sentinel markers are not all present; the profiled trace may "
-            "lack kernel shape annotations",
-            plan.framework, plan.version, len(applied), skipped,
+            "sentinel markers are not all present; rolling back %d "
+            "applied patch(es) so the framework tree matches the reported "
+            "failure (no half-patched fallback)",
+            plan.framework, plan.version, len(applied), skipped, len(applied),
         )
+        _rollback_applied(applied, plan, git, patch_bin, strip_arg)
         return False
     return True
+
+
+def _rollback_applied(
+    applied: list[tuple[Path, str]],
+    plan: _PatchPlan,
+    git: str,
+    patch_bin: str | None,
+    strip_arg: str,
+) -> None:
+    """Reverse-apply ``applied`` patches (newest first) to restore the tree.
+
+    Used both when a later patch fails mid-transaction and when the post-apply
+    sentinel check rejects an otherwise-clean apply, so ``_apply_atomic`` never
+    leaves the framework tree modified while returning ``False``.
+    """
+    for prev, prev_mode in reversed(applied):
+        if prev_mode == "git":
+            rolled_back = _git(
+                git, ("apply", "-R", strip_arg, str(prev)), plan.apply_root,
+            )
+        else:
+            rolled_back = (
+                patch_bin is not None
+                and _patch_apply(
+                    patch_bin, prev, plan.apply_root, plan.apply_strip,
+                    reverse=True,
+                )
+            )
+        if not rolled_back:
+            log.error(
+                "_server_patcher: rollback of %s (mode=%s) also failed — "
+                "install may be in inconsistent state; manual review "
+                "required", prev.name, prev_mode,
+            )
 
 
 # fuzz=2 (GNU patch's default), not 10: fuzz=10 could silently apply change

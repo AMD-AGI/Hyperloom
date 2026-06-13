@@ -1294,3 +1294,56 @@ def test_apply_atomic_skips_already_applied_member(tmp_path, monkeypatch):
     assert (apply_root / "already.py").read_text(encoding="utf-8") == (
         "# already applied\n"
     )
+
+
+def test_apply_atomic_rolls_back_when_post_apply_sentinel_fails(
+    tmp_path, monkeypatch,
+):
+    """Transaction integrity: when patches apply cleanly to disk but the
+    post-apply sentinel check fails, ``_apply_atomic`` must roll back the
+    already-written patches (not leave the framework tree modified while
+    reporting failure)."""
+    real_which = shutil.which
+    monkeypatch.setattr(
+        _server_patcher.shutil,
+        "which",
+        lambda name: real_which("git") if name == "git" else None,
+    )
+    apply_root = tmp_path / "tree"
+    apply_root.mkdir()
+
+    patches_dir = tmp_path / "patches"
+    patches_dir.mkdir()
+    new_patch = patches_dir / "01_new.patch"
+    new_patch.write_text(
+        textwrap.dedent(
+            """\
+            diff --git a/created.py b/created.py
+            new file mode 100644
+            index 000000000..3333333
+            --- /dev/null
+            +++ b/created.py
+            @@ -0,0 +1 @@
+            +# freshly applied
+            """
+        ),
+        encoding="utf-8",
+    )
+    # Sentinel text the applied content does NOT contain -> _is_patched False
+    # after a clean apply, exercising the post-apply gate.
+    plan = _server_patcher._PatchPlan(
+        framework="sglang",
+        version="0.5.11",
+        apply_root=apply_root,
+        patches=(new_patch,),
+        sentinel_file=apply_root / "created.py",
+        sentinel_text=("MARKER_THAT_IS_NEVER_PRESENT",),
+        apply_strip=1,
+    )
+
+    assert _server_patcher._apply_atomic(plan) is False
+    # The patch was applied to disk then must be reverted; the file must not
+    # linger (disk state must match the reported failure).
+    assert not (apply_root / "created.py").exists(), (
+        "post-apply sentinel failure must roll back already-applied patches"
+    )
