@@ -3264,30 +3264,39 @@ def generate_minimal_analysis_md(
     lines.append("## Top Hot Kernels")
     lines.append("")
     if candidates:
+        # GPU% is the kernel's share of total GPU time (gpu_pct), the real
+        # impact signal — unlike Impact (impact_score) which is 0 for the
+        # "other" bucket that has no TraceLens efficiency model.
         lines.append(
-            "| Rank | Operation | Time (us) | Efficiency | Impact | "
-            "Category | Bound |"
+            "| Rank | Operation | Time (us) | GPU% | Efficiency | Impact | "
+            "Category | Bound | Source File |"
         )
         lines.append(
-            "|------|-----------|-----------|------------|--------|"
-            "----------|-------|"
+            "|------|-----------|-----------|------|------------|--------|"
+            "----------|-------|-------------|"
         )
         for i, c in enumerate(candidates, 1):
             lines.append(
                 f"| {i} | {c.get('name', '')} "
                 f"| {c.get('duration_us', 0):.1f} "
+                f"| {c.get('gpu_pct', 0):.2f}% "
                 f"| {c.get('efficiency_percent', 0):.1f}% "
                 f"| {c.get('impact_score', 0):.2f} "
                 f"| {c.get('tracelens_category', '')} "
-                f"| {c.get('bound_type', '')} |"
+                f"| {c.get('bound_type', '')} "
+                f"| {c.get('source_file', '') or '-'} |"
             )
         lines.append("")
 
     # Per-P-item details for humans/downstream display; deterministic route
     # consumers should use the structured JSON artifacts instead of parsing this.
+    # Emit P-item sections in ascending rank order (P0, P1, ...) regardless of
+    # the time-sorted candidate order above.
     seen_ranks: set[int] = set()
-    for c in candidates:
-        rank = c.get("tracelens_pitem_rank", 0)
+    ordered_ranks = sorted(
+        {int(c.get("tracelens_pitem_rank", 0)) for c in candidates}
+    )
+    for rank in ordered_ranks:
         if rank in seen_ranks:
             continue
         seen_ranks.add(rank)
@@ -3305,23 +3314,25 @@ def generate_minimal_analysis_md(
         lines.append("")
         lines.append(
             "**Data:**\n\n"
-            "| Operation | Time (us) | %E2E | Count | FLOPS/Byte | "
-            "Efficiency | Bound | Args | Kernel Path |"
+            "| Operation | Time (us) | GPU% | %E2E | Count | FLOPS/Byte | "
+            "Efficiency | Bound | Args | Source File | Kernel Path (launcher) |"
         )
         lines.append(
-            "|-----------|-----------|------|-------|------------|"
-            "------------|-------|------|-------------|"
+            "|-----------|-----------|------|------|-------|------------|"
+            "------------|-------|------|-------------|------------------------|"
         )
         for rc in rank_cands:
             lines.append(
                 f"| {rc.get('name', '')} "
                 f"| {rc.get('duration_us', 0):.1f} "
+                f"| {rc.get('gpu_pct', 0):.2f}% "
                 f"| {rc.get('impact_score', 0):.2f} "
                 f"| {rc.get('call_count', 1)} "
                 f"| - "
                 f"| {rc.get('efficiency_percent', 0):.1f}% "
                 f"| {rc.get('bound_type', '')} "
                 f"| {' '.join(rc.get('shapes', []))} "
+                f"| {rc.get('source_file', '') or '-'} "
                 f"| {rc.get('kernel_path', '')} |"
             )
         lines.append("")
