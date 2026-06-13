@@ -442,6 +442,39 @@ def test_collect_kb_provenance_no_warning_when_marker_missing(
     assert not any(w.startswith("pr_monitor:") for w in warnings_list)
 
 
+def test_collect_kb_provenance_summarises_recipe_snapshot_reads(
+    tmp_path: Path,
+):
+    """The recipe-snapshot read audit is summarised into kb_provenance."""
+    from inference_optimizer.breakdown.collectors import collect_kb_provenance
+    from inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
+
+    audit = recipe_snapshot_audit_jsonl(tmp_path)
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text("\n".join(json.dumps(r) for r in [
+        {"method": "get_recipe", "remote": "gbrain", "resolution": "remote", "hit": True},
+        {"method": "get_recipe", "remote": "gbrain", "resolution": "remote_miss", "hit": False},
+        {"method": "get_recipe", "remote": "cortex", "resolution": "local", "hit": True},
+    ]) + "\n", encoding="utf-8")
+
+    out = collect_kb_provenance(tmp_path, state={}, manifest={}, warnings=[])
+    rs = out["recipe_snapshot_reads"]
+    assert rs["count"] == 3
+    assert rs["hits"] == 2
+    assert rs["by_remote"] == {"gbrain": 2, "cortex": 1}
+    assert rs["by_resolution"] == {"remote": 1, "remote_miss": 1, "local": 1}
+    assert len(rs["tail"]) == 3
+
+
+def test_collect_kb_provenance_recipe_reads_empty_when_no_audit(
+    tmp_path: Path,
+):
+    from inference_optimizer.breakdown.collectors import collect_kb_provenance
+    out = collect_kb_provenance(tmp_path, state={}, manifest={}, warnings=[])
+    assert out["recipe_snapshot_reads"]["count"] == 0
+    assert out["recipe_snapshot_reads"]["hits"] == 0
+
+
 # 4. KB_gaps/Gap-16 — CLI flag plumbing reaches _bootstrap_knowledge_plane
 def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:
     """Pin the dest-name + default contract the bootstrap reads."""

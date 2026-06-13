@@ -882,6 +882,8 @@ def record_critic_iteration(
     review: dict[str, Any] | None,
     emit: dict[str, Any] | None,
     workdir: Path | str | None,
+    kb_assess: dict[str, Any] | None = None,
+    kb_priors: dict[str, Any] | None = None,
     producer: str = "critic",
 ) -> None:
     """Record one ``critic_robustness.critic_iterations`` item.
@@ -889,6 +891,11 @@ def record_critic_iteration(
     Recorded per-iteration (idempotent on ``iter_n``) so the critic backend's
     workdir pruning never erases history; payload mirrors
     ``collectors.collect_critic_robustness``.
+
+    ``kb_assess`` / ``kb_priors`` (when provided) carry the per-iteration KB
+    integration trace: whether the substrate assess / historical priors were
+    used, the request, the response, and whether the final verdict referenced
+    them. Omitted from the payload when empty so historical items are unchanged.
     """
     if not session_dir:
         return
@@ -907,6 +914,10 @@ def record_critic_iteration(
             "emit_path":         _rel(wd / "emit.json", session_dir) if wd else None,
             "review_path":       _rel(wd / "review.json", session_dir) if wd else None,
         }
+        if isinstance(kb_assess, dict) and kb_assess:
+            payload["kb_assess"] = kb_assess
+        if isinstance(kb_priors, dict) and kb_priors:
+            payload["kb_priors"] = kb_priors
         _recorder(session_dir, producer).record_item(
             "critic_iterations", payload, key=str(iter_n),
         )
