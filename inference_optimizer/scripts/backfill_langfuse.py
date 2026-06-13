@@ -77,6 +77,7 @@ from inference_optimizer.orchestrator.trace.langfuse_emitter import (
     _set_trace_attrs,
     _start_obs,
 )
+from inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
 
 log = logging.getLogger("backfill_langfuse")
 
@@ -146,6 +147,7 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
     llm = _load_jsonl(tdir / LLM_CALLS)
     conv = _load_jsonl(tdir / CONVERSATIONS)
     decisions = _load_jsonl(tdir / DECISION_TRACE)
+    recipe_audit = _load_jsonl(recipe_snapshot_audit_jsonl(session_dir))
     manifest = _load_json(session_dir / MANIFEST)
 
     conv_by_key: dict[tuple, dict[str, Any]] = {}
@@ -192,12 +194,14 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
         "created_at": manifest.get("created_at_utc"),
         "phases": phases,
         "decisions": decisions,
+        "recipe_audit": recipe_audit,
         "stats": {
             "llm_calls": len(llm),
             "conversations": len(conv),
             "decisions": len(decisions),
             "generations_with_text": paired,
             "phase_count": len(phases),
+            "recipe_audit": len(recipe_audit),
         },
     }
 
@@ -276,6 +280,8 @@ def print_plan(plan: dict[str, Any]) -> None:
     )
     print(f"  Scores: {len(plan['decisions'])} decisions "
           f"(KEEP={keep} REVERT={rev} no_promote={nop}; gain_pct set={gainful})")
+    print(f"  Recipe-snapshot reads: {len(plan.get('recipe_audit') or [])} "
+          f"audit row(s)")
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +371,33 @@ def ingest(plan: dict[str, Any]) -> int:
         _end_obs(phase_span, p_hi or p_lo or trace_start)
         if p_hi is not None:
             last_end = p_hi
+
+    # Recipe-snapshot / gbrain remote reads -> spans under a recipe_kb agent.
+    recipe_audit = plan.get("recipe_audit") or []
+    if recipe_audit:
+        ra_times = [lfmap.parse_ts(r.get("ts")) for r in recipe_audit]
+        ra_times = [t for t in ra_times if t is not None]
+        ra_lo = min(ra_times) if ra_times else last_end
+        ra_span = _start_obs(
+            root,
+            name=f"agent:recipe_kb", as_type="span", start_time=ra_lo or trace_start,
+            metadata={"phase": UNPHASED, "agent": "recipe_kb",
+                      "read_count": len(recipe_audit)},
+        )
+        for r in recipe_audit:
+            r_start = lfmap.parse_ts(r.get("ts"))
+            method = str(r.get("method") or "read")
+            obs = _start_obs(
+                ra_span,
+                name=f"kb:recipe_snapshot:{method}", as_type="span",
+                start_time=r_start, input=None, output=r,
+                metadata={"kind": "recipe_snapshot", "method": method,
+                          "remote": r.get("remote"),
+                          "resolution": r.get("resolution"),
+                          "hit": bool(r.get("hit"))},
+            )
+            _end_obs(obs, r_start)
+        _end_obs(ra_span, (max(ra_times) if ra_times else None) or trace_start)
 
     # Decision scores -> the owning agent span (trace-level fallback).
     for i, drow in enumerate(plan["decisions"]):

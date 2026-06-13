@@ -517,6 +517,86 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# KB trace spans (record_kb_span + recipe-snapshot audit flush)
+# ---------------------------------------------------------------------------
+def test_record_kb_span_disabled_is_noop(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
+    em = lfe.LangfuseEmitter(tmp_path)
+    em.record_kb_span(name="kb_assess:iter_0", agent="critic", output={"x": 1})
+    assert em._counts["kb_spans_sent"] == 0
+
+
+def test_record_kb_span_nests_under_agent(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em = lfe.LangfuseEmitter(sd)
+    em.record_kb_span(
+        name="kb_assess:iter_2", agent="critic",
+        output={"mode": "dry_run", "verdict_count": 1},
+        metadata={"kind": "kb_assess", "iter": 2},
+        ts="2026-06-09T15:14:54.100000+00:00",
+    )
+    span = client.span_named("kb_assess:iter_2")
+    assert span is not None
+    assert span.kwargs["output"] == {"mode": "dry_run", "verdict_count": 1}
+    assert span.kwargs["metadata"]["kind"] == "kb_assess"
+    # nested under agent:critic
+    assert client.span_named("agent:critic") is not None
+    assert span.ended is True
+    assert em._counts["kb_spans_sent"] == 1
+
+
+def test_flush_backfills_recipe_snapshot_audit(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    from inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
+    audit = recipe_snapshot_audit_jsonl(sd)
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text("\n".join(json.dumps(r) for r in [
+        {"ts": "2026-06-09T15:14:54Z", "method": "get_recipe",
+         "remote": "gbrain", "resolution": "remote", "hit": True},
+        {"ts": "2026-06-09T15:14:55Z", "method": "search",
+         "remote": "cortex", "resolution": "local", "hit": False},
+    ]) + "\n", encoding="utf-8")
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+    assert client.span_named("kb:recipe_snapshot:get_recipe") is not None
+    assert client.span_named("kb:recipe_snapshot:search") is not None
+    assert client.span_named("agent:recipe_kb") is not None
+    persisted = lfe.read_receipt(sd)
+    assert persisted["counts"]["recipe_audit_read"] == 2
+    assert persisted["counts"]["kb_spans_sent"] == 2
+
+
+def test_flush_recipe_audit_idempotent(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    from inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
+    audit = recipe_snapshot_audit_jsonl(sd)
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text(
+        json.dumps({"ts": "2026-06-09T15:14:54Z", "method": "get_recipe",
+                    "remote": "gbrain", "resolution": "remote", "hit": True}) + "\n",
+        encoding="utf-8",
+    )
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+    n = len([s for s in client.spans
+             if s.kwargs.get("name", "").startswith("kb:recipe_snapshot")])
+    em.flush_session()
+    n2 = len([s for s in client.spans
+              if s.kwargs.get("name", "").startswith("kb:recipe_snapshot")])
+    assert n == 1 and n2 == 1
+
+
+# ---------------------------------------------------------------------------
 # Best-effort fault posture
 # ---------------------------------------------------------------------------
 def test_send_exception_is_swallowed(tmp_path, monkeypatch):

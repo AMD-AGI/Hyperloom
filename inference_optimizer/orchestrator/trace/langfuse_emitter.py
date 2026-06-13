@@ -37,6 +37,7 @@ from typing import Any
 
 from ...session_paths import (
     decision_trace_path,
+    recipe_snapshot_audit_jsonl,
     trace_dir,
     trace_ext_dir,
 )
@@ -341,6 +342,8 @@ class LangfuseEmitter:
             "spans_opened": 0,          # phase + agent spans created
             "ext_shards_read": 0,       # out-of-process ext/*.jsonl files swept
             "breakdown_recorded": 0,    # 1 once the full SBD JSON was attached
+            "kb_spans_sent": 0,         # KB trace spans (assess/priors/recipe)
+            "recipe_audit_read": 0,     # recipe_snapshot/.audit.jsonl rows swept
             "errors": 0,                # swallowed send failures
         }
         self._flushed = False
@@ -500,6 +503,54 @@ class LangfuseEmitter:
                 conv_row=emit_parts.get("conv"),
             )
 
+    def record_kb_span(
+        self,
+        *,
+        name: str,
+        agent: str,
+        output: Any,
+        phase: str = lfmap.UNPHASED,
+        metadata: dict[str, Any] | None = None,
+        ts: str | None = None,
+    ) -> None:
+        """Emit one non-LLM KB trace as a span nested under its agent span.
+
+        Used for the KB integration trace (substrate ``kb_assess`` /
+        historical ``kb_priors`` per critic iteration, and recipe-snapshot /
+        gbrain remote reads) so the "was KB used, what did we ask, what came
+        back, did it influence the decision" evidence lands on the same trace
+        as the LLM generations. The full trace dict goes in ``output``; a small
+        scalar summary goes in ``metadata`` for filtering. Best-effort and a
+        no-op unless live push is enabled.
+
+        Args:
+            name (str): Span name (e.g. ``"kb_assess:iter_3"``).
+            agent (str): Owning agent (``"critic"`` / ``"recipe_kb"``).
+            output (Any): The trace payload attached as the span output.
+            phase (str): Phase bucket; defaults to ``(unphased)``.
+            metadata (dict[str, Any] | None): Scalar summary for filtering.
+            ts (str | None): ISO timestamp for span start, if known.
+        """
+        if not self._enabled:
+            return
+        try:
+            start = lfmap.parse_ts(ts)
+            parent = self._ensure_agent_span(phase, agent, start)
+            obs = _start_obs(
+                parent,
+                name=name,
+                as_type="span",
+                start_time=start,
+                input=None,
+                output=output,
+                metadata=metadata or {},
+            )
+            _end_obs(obs, start)
+            self._counts["kb_spans_sent"] += 1
+        except Exception:  # noqa: BLE001 — trace must never break the loop
+            self._counts["errors"] += 1
+            log.debug("langfuse: record_kb_span failed", exc_info=True)
+
     def _emit_generation(
         self,
         *,
@@ -561,6 +612,7 @@ class LangfuseEmitter:
         try:
             self._flush_pending_halves()
             self._flush_ext_shards()
+            self._flush_recipe_kb_audit()
             self._flush_decision_scores()
             self._close_spans()
         except Exception:  # noqa: BLE001
@@ -678,6 +730,35 @@ class LangfuseEmitter:
             self._counts["ext_shards_read"] += 1
             for row in _load_jsonl(shard):
                 self._emit_generation(token_row=row, conv_row=None)
+
+    def _flush_recipe_kb_audit(self) -> None:
+        """Backfill recipe-snapshot / gbrain remote reads from the audit log.
+
+        The recipe KB dispatcher appends one row per remote read to
+        ``runtime/recipe_snapshot/.audit.jsonl`` (it has no Langfuse handle, by
+        design). Each row becomes a ``kb:recipe_snapshot:<method>`` span under
+        the ``recipe_kb`` agent so the trace shows which backend served the
+        warm-start recipe, the request, and how it resolved. Read out-of-band
+        at session end (mirrors :meth:`_flush_ext_shards`); idempotent via the
+        ``flush_session`` guard.
+        """
+        rows = _load_jsonl(recipe_snapshot_audit_jsonl(self.session_dir))
+        for row in rows:
+            self._counts["recipe_audit_read"] += 1
+            method = str(row.get("method") or "read")
+            self.record_kb_span(
+                name=f"kb:recipe_snapshot:{method}",
+                agent="recipe_kb",
+                output=row,
+                metadata={
+                    "kind": "recipe_snapshot",
+                    "method": method,
+                    "remote": row.get("remote"),
+                    "resolution": row.get("resolution"),
+                    "hit": bool(row.get("hit")),
+                },
+                ts=row.get("ts"),
+            )
 
     def _flush_decision_scores(self) -> None:
         """Convert each decision_trace row into Langfuse Score(s).
