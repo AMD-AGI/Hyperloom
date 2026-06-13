@@ -6417,18 +6417,6 @@ class Coordinator:
                     task.task_id,
                 )
 
-        # Aggregate any research evidence (PR / diff / NVIDIA refs)
-        # reported by this specialist into the exploration-depth tracker.
-        # Applies to every domain that self-reports a ``research`` block
-        # (pr_intel + research_scout), de-duped across the session.
-        try:
-            self._aggregate_research_evidence(done_payload)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception(
-                "depth: research-evidence aggregation failed for task=%s",
-                task.task_id,
-            )
-
         # Harvest research-scout output (hints, competitor target, gap seeds, PR dedup). Fail-soft.
         if domain == "research_scout_specialist":
             try:
