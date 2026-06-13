@@ -1161,6 +1161,27 @@ async def test_trace_analyze_handler_dry_run_returns_structured_result(session_d
 
 
 @pytest.mark.asyncio
+async def test_trace_analyze_handler_tolerates_non_string_analysis_route(session_dir):
+    """A non-string analysis_route (e.g. bool/list from an LLM payload) must not
+    crash cmd construction with AttributeError; it is coerced and ignored."""
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+    for bad_route in (True, ["deterministic"], {"route": "agent"}, 1):
+        payload = {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "framework": "sglang",
+            "top_k": 5,
+            "dry_run": True,
+            "budget_minutes": 1,
+            "analysis_route": bad_route,
+        }
+        res = await krh.trace_analyze_handler(payload, session_dir=session_dir)
+        # Must return a structured result, never raise AttributeError.
+        assert res["status"] in ("ok", "succeeded", "failed")
+
+
+@pytest.mark.asyncio
 async def test_trace_analyze_handler_surfaces_candidates_path(session_dir, monkeypatch):
     captured: dict = {}
 

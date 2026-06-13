@@ -459,6 +459,11 @@ class SharedState:
     plateau_overrides: dict[str, Any] = field(default_factory=dict)
     # E2E integrate bookkeeping keyed by kernel_id+patch_path+args; prevents re-validating the same patch after NEEDS_REVIEW/REVERT.
     kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
+    # Crash-safe stack-validation checkpoints (SWEEP-entry combo E2E).
+    pending_stack_validation_result: dict[str, Any] = field(default_factory=dict)
+    pending_stack_validation_apply_results: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
     rejected_kernel_patches: list[dict[str, Any]] = field(default_factory=list)
     # Kernel ids with no remaining automated path (from REVERTs + exhausted integrate attempts).
     rejected_kernel_ids: list[str] = field(default_factory=list)
@@ -1650,48 +1655,65 @@ class SharedState:
                 sources.add(src)
         return sources
 
-    def next_pending_keep_kernel_id(self) -> str:
-        """Return next KEEP kernel_id awaiting integrate ("" if drained); excludes integrated/rejected/same-file-conflict KEEPs, picks highest ``last_micro_speedup`` first."""
-        integrated_ids = self._kernel_ids_in_optimization_stack()
-        integrated_sources = self._source_files_in_optimization_stack()
-        rejected = set(self.rejected_kernel_ids or [])
-
-        best_kid = ""
-        best_micro = float("-inf")
-        for kid, entry in (self.kernel_opt_attempts or {}).items():
+    def _kernel_ids_with_integrate_attempts(self) -> set[str]:
+        """kernel_ids that already received an E2E integrate verdict."""
+        ids: set[str] = set()
+        for entry in (self.kernel_integrate_attempts or {}).values():
             if not isinstance(entry, dict):
                 continue
-            if str(entry.get("last_decision", "")).upper() != "KEEP":
+            kid = str(entry.get("kernel_id") or "").strip()
+            if kid:
+                ids.add(kid)
+        return ids
+
+    def _kernel_trace_impact_pct(self, kernel_id: str) -> float:
+        """Return TraceLens gpu_pct for a kernel_id; unknown kernels sort last."""
+        kid = str(kernel_id or "").strip()
+        if not kid:
+            return 0.0
+        trace = self.last_trace_analyze or {}
+        for row in trace.get("hot_kernels_top15") or []:
+            if not isinstance(row, dict):
                 continue
-            if kid in integrated_ids or kid in rejected:
-                continue
-            src = str(entry.get("last_source_file") or "")
-            if src and src in integrated_sources:
-                # Same-file conflict: a stronger KEEP on this file was already integrated.
+            if str(row.get("kernel_id") or "").strip() != kid:
                 continue
             try:
-                micro = float(entry.get("last_micro_speedup") or 0.0)
+                return float(row.get("gpu_pct") or 0.0)
             except (TypeError, ValueError):
-                micro = 0.0
-            if micro > best_micro:
-                best_micro = micro
-                best_kid = kid
-        return best_kid
+                return 0.0
+        return 0.0
+
+    def next_pending_keep_kernel_id(self) -> str:
+        """Return next KEEP kernel_id awaiting integrate ("" if drained).
+
+        Ordering favors trace impact (``gpu_pct``) over kernel micro speedup:
+        E2E validation should test the highest-impact hot kernel first, not
+        merely the patch with the largest isolated microbenchmark win.
+        """
+        pending = self.pending_keep_kernel_ids()
+        return pending[0] if pending else ""
 
     def pending_keep_kernel_ids(self) -> list[str]:
-        """All KEEP kernel_ids awaiting integrate, sorted strongest-first; surfaced in the prompt so the LLM doesn't propose ``report`` before draining them."""
+        """All KEEP kernel_ids awaiting integrate, sorted impact-first.
+
+        Kernels that already have an integrate attempt (including
+        ``NEEDS_REVIEW``) are excluded so a noisy near-threshold result does not
+        automatically rerun the same patch up to the historical max-attempt cap.
+        Positive ``NEEDS_REVIEW`` rows are handled by stack validation instead.
+        """
         integrated_ids = self._kernel_ids_in_optimization_stack()
         integrated_sources = self._source_files_in_optimization_stack()
+        attempted_ids = self._kernel_ids_with_integrate_attempts()
         rejected = set(self.rejected_kernel_ids or [])
         # Mirror next_pending_keep_kernel_id same-file guard: only strongest KEEP per source_file is queueable.
         claimed_sources: set[str] = set()
-        ranked: list[tuple[float, str, str]] = []
+        ranked: list[tuple[float, float, str, str]] = []
         for kid, entry in (self.kernel_opt_attempts or {}).items():
             if not isinstance(entry, dict):
                 continue
             if str(entry.get("last_decision", "")).upper() != "KEEP":
                 continue
-            if kid in integrated_ids or kid in rejected:
+            if kid in integrated_ids or kid in attempted_ids or kid in rejected:
                 continue
             src = str(entry.get("last_source_file") or "")
             if src and src in integrated_sources:
@@ -1700,10 +1722,10 @@ class SharedState:
                 micro = float(entry.get("last_micro_speedup") or 0.0)
             except (TypeError, ValueError):
                 micro = 0.0
-            ranked.append((micro, kid, src))
-        ranked.sort(key=lambda x: x[0], reverse=True)
+            ranked.append((self._kernel_trace_impact_pct(kid), micro, kid, src))
+        ranked.sort(key=lambda x: (x[0], x[1]), reverse=True)
         result: list[str] = []
-        for _micro, kid, src in ranked:
+        for _impact, _micro, kid, src in ranked:
             if src and src in claimed_sources:
                 continue
             if src:

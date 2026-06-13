@@ -189,6 +189,7 @@ def _section_phase_semantics(
         proposable = sorted(
             llm_proposable_actions_for_with_interleave(
                 phase, interleave=interleave,
+                explore_enabled=explore_enabled if interleave else None,
             )
         )
         flag = disabled_suffix.get(phase)

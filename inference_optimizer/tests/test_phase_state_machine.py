@@ -161,20 +161,20 @@ def test_phase_interleave_on_widens_explore_and_kernel():
 
 
 def test_phase_interleave_env_flag_is_picked_up(monkeypatch):
-    """The helpers honour the env flag; interleave is ON by default, only an explicit off value disables it."""
-    # Unset / empty => ON by default.
+    """The helpers honour the env flag; interleave is OFF by default, only an explicit on value enables it."""
+    # Unset / empty => OFF by default.
     monkeypatch.delenv(phase_state.PHASE_INTERLEAVE_ENV, raising=False)
-    assert phase_state.is_phase_interleave_enabled() is True
-    assert phase_state.is_action_llm_proposable_in_phase_with_interleave(
+    assert phase_state.is_phase_interleave_enabled() is False
+    assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
         "kernel_opt", "EXPLORE",
     )
-    # Explicit on values stay on.
+    # Explicit on values enable interleave.
     monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "1")
     assert phase_state.is_phase_interleave_enabled() is True
     assert phase_state.is_action_llm_proposable_in_phase_with_interleave(
         "kernel_opt", "EXPLORE",
     )
-    # Explicit off values are the rollback knob.
+    # Explicit off values stay off.
     monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "0")
     assert phase_state.is_phase_interleave_enabled() is False
     assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(

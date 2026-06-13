@@ -19,6 +19,8 @@ def _args(**overrides):
         "correctness_passed": None,
         "dry_run": False,
         "source_file": "/tmp/source.hip",
+        "extra_server_args": "",
+        "kernel_id": "k001",
     }
     base.update(overrides)
     return Namespace(**base)
@@ -44,6 +46,170 @@ def _attempt(report: Path | None = None, artifact: Path | None = None):
         "optimized_path": str(artifact or "/tmp/optimized.hip"),
         "backend_paths": paths,
     }
+
+
+def test_structured_shape_cases_parse_moe_args():
+    shape = (
+        "(15360,8,768) bf16<br>(128,1536,2048) bf16<br>"
+        "(139256,) int<br>(139256,) fp32"
+    )
+    candidate = {
+        "name": "aiter::ck_moe_stage2",
+        "input_shapes": [{"call_num": 48, "shape": shape}],
+    }
+
+    cases = ko._structured_benchmark_shape_cases(candidate)
+
+    primary = cases["primary_shape"]
+    assert primary["call_count"] == 48
+    assert primary["args"][0] == {
+        "index": 0,
+        "raw": "(15360,8,768) bf16",
+        "shape": [15360, 8, 768],
+        "dtype": "bf16",
+    }
+    assert primary["args"][2]["shape"] == [139256]
+    assert primary["args"][2]["dtype"] == "int"
+    assert primary["args"][3]["dtype"] == "fp32"
+    assert cases["supplementary_shapes"] == []
+
+
+def test_structured_shape_cases_prefer_input_shapes():
+    candidate = {
+        "name": "aiter::ck_moe_stage2",
+        "input_shapes": [
+            {"call_num": 7, "shape": "(1,2,3) bf16<BR/>(4,) int"},
+        ],
+        # Legacy prose field disagrees; it must not win over input_shapes.
+        "shapes": [{"call_num": 99, "shape": "(999,) fp32"}],
+    }
+
+    cases = ko._structured_benchmark_shape_cases(candidate)
+
+    primary = cases["primary_shape"]
+    assert primary["source"] == "input_shapes"
+    assert primary["call_count"] == 7
+    assert primary["args"][0]["shape"] == [1, 2, 3]
+    assert primary["args"][0]["dtype"] == "bf16"
+    assert primary["args"][1]["shape"] == [4]
+    assert primary["args"][1]["dtype"] == "int"
+
+
+def test_structured_shape_cases_tolerates_bad_task_group_duration():
+    candidate = {
+        "task_group": {
+            "rows": [{
+                "name": "op",
+                "shapes": ["(8,16) fp32"],
+                "call_count": 3,
+                "duration_us": "N/A",
+            }],
+        },
+    }
+
+    cases = ko._structured_benchmark_shape_cases(candidate)
+
+    primary = cases["primary_shape"]
+    assert primary["source"] == "task_group"
+    assert primary["aggregate_time_ms"] == 0.0
+    assert primary["args"][0]["shape"] == [8, 16]
+
+
+def test_structured_shape_cases_include_task_group_supplementary_shapes():
+    candidate = {
+        "input_shapes": [
+            {"call_num": 5, "shape": "(1,2) fp16"},
+        ],
+        "task_group": {
+            "rows": [
+                {
+                    "name": "op",
+                    "shapes": ["(1,2) fp16"],
+                    "call_count": 5,
+                    "duration_us": 1000,
+                },
+                {
+                    "name": "op",
+                    "shapes": ["(4,8) bf16"],
+                    "call_count": 3,
+                    "duration_us": 500,
+                },
+            ],
+        },
+    }
+
+    cases = ko._structured_benchmark_shape_cases(candidate)
+
+    assert cases["primary_shape"]["args"][0]["shape"] == [1, 2]
+    supplementary = cases["supplementary_shapes"]
+    assert len(supplementary) == 1
+    assert supplementary[0]["source"] == "task_group"
+    assert supplementary[0]["args"][0]["shape"] == [4, 8]
+    assert supplementary[0]["args"][0]["dtype"] == "bf16"
+
+
+def test_structured_shape_cases_falls_back_to_input_shapes_when_group_rows_empty():
+    candidate = {
+        "input_shapes": [
+            {"call_num": 5, "shape": "(1,2) fp16"},
+        ],
+        "task_group": {
+            "rows": [
+                {"name": "op", "shapes": [], "call_count": 5},
+            ],
+        },
+    }
+
+    cases = ko._structured_benchmark_shape_cases(candidate)
+
+    primary = cases["primary_shape"]
+    assert primary["source"] == "input_shapes"
+    assert primary["call_count"] == 5
+    assert primary["args"][0]["shape"] == [1, 2]
+
+
+def test_build_prompt_includes_structured_shape_contract():
+    shape = "(15360,8,768) bf16<br>(128,1536,2048) bf16"
+    candidate = {
+        "name": "aiter::ck_moe_stage2",
+        "source_file": "/tmp/gemm_moe_ck2stages.cu",
+        "source_type": "hip_cpp",
+        "kernel_repo": "/tmp/aiter",
+        "gpu_pct": 24.3,
+        "input_shapes": [{"call_num": 48, "shape": shape}],
+    }
+
+    prompt = ko.build_prompt(candidate, _args(), backend="codex")
+
+    assert "when `benchmark_shape_cases` is present" in prompt
+    assert '"benchmark_shape_cases"' in prompt
+    assert '"primary_shape"' in prompt
+    metadata_json = prompt.split("```json\n", 1)[1].split("\n```", 1)[0]
+    metadata = json.loads(metadata_json)
+    primary = metadata["benchmark_shape_cases"]["primary_shape"]
+    assert primary["args"][0]["shape"] == [15360, 8, 768]
+    assert primary["args"][1]["shape"] == [128, 1536, 2048]
+
+
+def test_build_prompt_omits_structured_shape_cases_without_program_output():
+    candidate = {
+        "name": "aiter::ck_moe_stage2",
+        "source_file": "/tmp/gemm_moe_ck2stages.cu",
+        "source_type": "hip_cpp",
+        "kernel_repo": "/tmp/aiter",
+        # Legacy prose-only shapes remain available through the old Shapes:
+        # line and Benchmark shapes block, but they do not create the new
+        # structured metadata.
+        "shapes": [{"call_num": 48, "shape": "(15360,8,768) bf16"}],
+    }
+
+    prompt = ko.build_prompt(candidate, _args(), backend="codex")
+    metadata_json = prompt.split("```json\n", 1)[1].split("\n```", 1)[0]
+    metadata = json.loads(metadata_json)
+
+    assert "benchmark_shape_cases" not in metadata
+    assert "Shapes:" in prompt
+    assert "when `benchmark_shape_cases` is present" not in prompt
 
 
 def test_benchmark_available_alone_does_not_pass_correctness(tmp_path):
