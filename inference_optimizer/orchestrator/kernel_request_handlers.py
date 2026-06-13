@@ -1326,8 +1326,10 @@ async def trace_analyze_handler(
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    # Forward the analysis route switch (deterministic vs agent).
-    analysis_route = (
+    # Forward the analysis route switch (deterministic vs agent). Coerce to str
+    # first (mirrors steady_state_mode) so a non-string payload value (e.g. a
+    # bool/list emitted by the LLM) cannot raise AttributeError here.
+    analysis_route = str(
         payload.get("analysis_route")
         or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")
     ).strip().lower()
