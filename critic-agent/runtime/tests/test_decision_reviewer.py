@@ -469,3 +469,134 @@ def test_kb_priors_cache_hit_avoids_second_kb_call(reviewer):
     bundle = rev.prepare_review(_coordinator_request(prompt, "sess_cache_e2e"))
     # KB is now empty, but the bundle still has priors from the cache hit.
     assert bundle.kb_priors_by_proposal["aaa"]
+
+
+# -----------------------------------------------------------------
+# Optional substrate KB /v2/reasoning/assess enrichment
+# -----------------------------------------------------------------
+class _FakeAssess:
+    """Records assess() calls and returns a canned verdict."""
+
+    def __init__(self, verdict=None):
+        self.verdict = verdict if verdict is not None else {
+            "reasonable": "supported", "verdicts": [], "summary": {"confirmed": 1},
+        }
+        self.calls = []
+
+    def assess(self, *, focus, params=None, envs=None, args=""):
+        self.calls.append({"focus": focus, "params": params, "envs": envs, "args": args})
+        return self.verdict
+
+
+_PROMPT_WITH_LEVERS = (
+    "=== Shared session state ===\n"
+    "model=Qwen3-14B framework=sglang baseline_tput=1200\n"
+    "=== Inbox for critic ===\n"
+    "  seq=1 msg_id=lev1 from=orchestration topic=proposal payload="
+    "{'action_name': 'sweep', 'params': {'kv_cache_dtype': 'fp8', "
+    "'extra_envs': {'VLLM_USE_AITER': '1'}, 'extra_server_args': '--quantization fp8'}}\n"
+)
+
+
+def test_kb_assess_skipped_when_unconfigured(tmp_path, monkeypatch):
+    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
+    sm = SessionMemory(root=tmp_path / "sm")
+    kb = InMemoryKBClient()
+    writer = KBWriter(kb, session_memory=sm)
+    rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
+    # no CORTEX_KB_URL → no assess client built from env
+    assert rev.kb_assess_client is None
+    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_LEVERS, "sess_noassess"))
+    assert bundle.kb_assess_by_proposal == {}
+
+
+def test_kb_assess_injected_when_client_configured(tmp_path):
+    sm = SessionMemory(root=tmp_path / "sm")
+    kb = InMemoryKBClient()
+    writer = KBWriter(kb, session_memory=sm)
+    fake = _FakeAssess()
+    rev = DecisionReviewer(session_memory=sm, kb_writer=writer, kb_assess_client=fake)
+
+    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_LEVERS, "sess_assess"))
+
+    assert "lev1" in bundle.kb_assess_by_proposal
+    assert bundle.kb_assess_by_proposal["lev1"]["reasonable"] == "supported"
+    # focus mapped from merged context
+    call = fake.calls[0]
+    assert call["focus"]["model"] == "Qwen3-14B"
+    assert call["focus"]["framework"] == "sglang"
+    # levers split out of payload params
+    assert call["params"] == {"kv_cache_dtype": "fp8"}
+    assert call["envs"] == {"VLLM_USE_AITER": "1"}
+    assert call["args"] == "--quantization fp8"
+
+
+def test_kb_assess_skips_proposal_without_levers(tmp_path):
+    sm = SessionMemory(root=tmp_path / "sm")
+    kb = InMemoryKBClient()
+    writer = KBWriter(kb, session_memory=sm)
+    fake = _FakeAssess()
+    rev = DecisionReviewer(session_memory=sm, kb_writer=writer, kb_assess_client=fake)
+
+    # baseline proposal carries no params/envs/args → no assess call
+    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_nolevers"))
+    assert bundle.kb_assess_by_proposal == {}
+    assert fake.calls == []
+
+
+# -----------------------------------------------------------------
+# KB trace audit fields (kb_assess_trace / kb_priors_trace)
+# -----------------------------------------------------------------
+def test_kb_assess_trace_not_configured(tmp_path, monkeypatch):
+    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
+    sm = SessionMemory(root=tmp_path / "sm")
+    writer = KBWriter(InMemoryKBClient(), session_memory=sm)
+    rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
+    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_LEVERS, "sess_t1"))
+    assert bundle.kb_assess_trace["configured"] is False
+    assert bundle.kb_assess_trace["skipped_reason"] == "not_configured"
+
+
+def test_kb_assess_trace_records_requests(tmp_path):
+    sm = SessionMemory(root=tmp_path / "sm")
+    writer = KBWriter(InMemoryKBClient(), session_memory=sm)
+    fake = _FakeAssess()
+    rev = DecisionReviewer(session_memory=sm, kb_writer=writer, kb_assess_client=fake)
+    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_LEVERS, "sess_t2"))
+    trace = bundle.kb_assess_trace
+    assert trace["configured"] is True
+    assert trace["skipped_reason"] is None
+    assert trace["focus"]["model"] == "Qwen3-14B"
+    assert trace["verdict_count"] == 1
+    req = trace["requests"][0]
+    assert req["msg_id"] == "lev1"
+    assert req["params_keys"] == ["kv_cache_dtype"]
+    assert req["responded"] is True
+    assert req["reasonable"] == "supported"
+
+
+def test_kb_priors_trace_records_scope_and_requests(tmp_path):
+    sm = SessionMemory(root=tmp_path / "sm")
+    kb = InMemoryKBClient()
+    kb.upsert({
+        "scope": {
+            "org": "hyperloom", "framework": "sglang", "model": "qwen3-14b",
+            "model_family": "qwen", "workload": "decode", "precision": "fp8",
+        },
+        "kind": "pitfall", "slug": "active-path-unproven-pitfall",
+        "importance": 0.5, "metadata": {"topic": "active path"},
+    })
+    writer = KBWriter(kb, session_memory=sm)
+    rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
+    prompt = (
+        "=== Shared session state ===\n"
+        "model=qwen3-14b framework=sglang workload=decode precision=fp8\n"
+        "=== Inbox for critic ===\n"
+        "  seq=1 msg_id=aaa from=orchestration topic=proposal payload={'action_name': 'kernel_opt'}\n"
+    )
+    bundle = rev.prepare_review(_coordinator_request(prompt, "sess_pt"))
+    trace = bundle.kb_priors_trace
+    assert trace["configured"] is True
+    assert trace["mode"] == "per_proposal"
+    assert trace["scope_filter"].get("model") == "qwen3-14b"
+    assert any(r["msg_id"] == "aaa" for r in trace["requests"])
