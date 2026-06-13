@@ -214,3 +214,9 @@ def test_monitor_handles_leading_zero_wait_sec(tmp_path):
 
     assert proc.returncode == 0, f"rc={proc.returncode}\nstdout={out}\nstderr={err}"
     assert "value too great for base" not in err
+
+
+def test_monitor_resume_is_pinned_to_resolved_session_dir():
+    """Crash recovery must never use bare --resume, which auto-picks the latest session."""
+    text = MONITOR.read_text(encoding="utf-8")
+    assert '--resume --resume-from "$session_dir"' in text
