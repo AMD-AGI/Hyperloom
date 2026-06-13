@@ -3052,6 +3052,70 @@ def deterministic_extract_hot_kernels(
             if len(candidates) >= top_k:
                 return candidates
 
+    # Fallback: scan "other" category for high-impact ops that have actionable
+    # source files (e.g. Triton kernels like fused_moe). These are often the
+    # largest GPU-time consumers but don't appear in priority_data because
+    # TraceLens categorizes them as "other" with no efficiency model.
+    other_ops = ops_by_category.get("other", [])
+    if other_ops and len(candidates) < top_k:
+        # Sort by time descending — the biggest "other" ops first.
+        ranked_other = sorted(
+            other_ops, key=lambda o: o.get("time_ms", 0), reverse=True,
+        )
+        for op in ranked_other:
+            if len(candidates) >= top_k:
+                break
+            launcher_path = op.get("launcher_path", "")
+            if not launcher_path or launcher_path in ("\u2014", "-"):
+                continue
+            source_file = _resolve_source_file_from_kernel_path(launcher_path)
+            if not source_file:
+                continue
+            # Only include ops with meaningful time contribution.
+            time_ms = op.get("time_ms", 0)
+            if time_ms < 1.0:
+                continue
+            # Derive a readable name from the launcher path when operation is empty.
+            op_name = op.get("operation", "")
+            if not op_name:
+                # e.g. "fused_moe.py(391): _fused_moe_kernel" → "sglang_profiler::_fused_moe_kernel"
+                _, _, func_name = _parse_launcher_path(launcher_path)
+                if func_name:
+                    op_name = f"sglang_profiler::{func_name}"
+                else:
+                    op_name = launcher_path.split("/")[-1].split("(")[0]
+
+            duration_us = time_ms * 1000
+            op_count = op.get("count", 1)
+
+            shapes_raw = op.get("args", "")
+            shapes = [shapes_raw] if shapes_raw else []
+            input_shapes: list[dict[str, Any]] = []
+            if shapes_raw:
+                input_shapes.append({
+                    "call_num": op_count,
+                    "shape": shapes_raw,
+                })
+
+            candidate = {
+                "name": op_name,
+                "duration_us": round(duration_us, 3),
+                "call_count": op_count,
+                "efficiency_percent": 0.0,
+                "impact_score": 0.0,
+                "bound_type": "unknown",
+                "tracelens_category": "other",
+                "tracelens_pitem_rank": 0,
+                "kernel_path": launcher_path,
+                "tracelens_launcher_path": launcher_path,
+                "source_file": source_file,
+                "shapes": shapes,
+                "input_shapes": input_shapes,
+                "library": op.get("library", ""),
+                "candidate_source": "other_bucket_fallback",
+            }
+            candidates.append(candidate)
+
     return candidates
 
 
