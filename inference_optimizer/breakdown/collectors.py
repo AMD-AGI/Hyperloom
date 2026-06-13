@@ -4434,6 +4434,7 @@ def collect_kb_provenance(
         cortex_flusher_status_json as _flusher_status_path,
         cortex_pending_ndjson as _pending_path,
         pr_monitor_status_json as _pr_status_path,
+        recipe_snapshot_audit_jsonl as _recipe_audit_path,
     )
 
     # Surface the PR Monitor reachability snapshot via ``warnings`` so it's greppable.
@@ -4510,6 +4511,23 @@ def collect_kb_provenance(
         st = str(row.get("status") or "unknown")
         status_counts[st] = status_counts.get(st, 0) + 1
 
+    # Recipe-snapshot / gbrain remote read audit (RecipeKB.audit_hook ->
+    # recipe_snapshot/.audit.jsonl). Summarises whether the snapshot KB was
+    # actually consulted, which backend served it, and how each read resolved.
+    recipe_audit = _read_last_n_audit(_recipe_audit_path(session_dir), n=50)
+    recipe_by_resolution: dict[str, int] = {}
+    recipe_by_remote: dict[str, int] = {}
+    recipe_hits = 0
+    for row in recipe_audit:
+        recipe_by_resolution[str(row.get("resolution") or "unknown")] = (
+            recipe_by_resolution.get(str(row.get("resolution") or "unknown"), 0) + 1
+        )
+        recipe_by_remote[str(row.get("remote") or "unknown")] = (
+            recipe_by_remote.get(str(row.get("remote") or "unknown"), 0) + 1
+        )
+        if row.get("hit"):
+            recipe_hits += 1
+
     cortex_sid = (state.get("cortex_session_id") or "").strip()
     warm = state.get("warm_start_recipe") or {}
     pitfalls = state.get("warm_start_pitfalls") or []
@@ -4536,6 +4554,13 @@ def collect_kb_provenance(
         },
         "audit_tail_count":     len(audit_tail),
         "audit_status_counts":  status_counts,
+        "recipe_snapshot_reads": {
+            "count":         len(recipe_audit),
+            "hits":          recipe_hits,
+            "by_resolution": recipe_by_resolution,
+            "by_remote":     recipe_by_remote,
+            "tail":          recipe_audit[-10:],
+        },
         "flusher_status": _collect_flusher_status(
             session_dir,
             status_path=_flusher_status_path(session_dir),
