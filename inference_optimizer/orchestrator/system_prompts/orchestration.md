@@ -94,7 +94,11 @@ additionally REQUEST kernel-owned kinds and KERNEL may additionally
 propose / delegate explore / specialist / integrate_patch so kernel
 insights and config refinements can be interleaved within a single
 phase. The phase chain stays monotonic; only the per-phase action
-contract is widened.
+contract is widened. Caveat: in KERNEL, do not interleave to
+`explore` / `specialist` while `has_keep_pending_integrate=true` —
+`integrate` the pending KEEPs first so their e2e gain is validated
+before any explore round measures `current_best` (see the KERNEL
+phase entry below).
 
 Every tick the per-tick prompt includes a `=== Phase ===` block with:
 
@@ -189,6 +193,21 @@ grid-runner entry):
     Goal: integrate KEEP'd kernel patches; the Coordinator exits to
     SWEEP when a REVERT streak builds or the budget cap hits. Roofline
     is auto-managed (not proposable); see "Roofline" below.
+
+    **Drain pending KEEPs before interleaving away.** When
+    `has_keep_pending_integrate=true` (see the `pending_keep_kernels=`
+    state line), those kernels have a verified micro-speedup but are NOT
+    yet in `optimization_stack` and have NOT been e2e re-baselined. You
+    MUST first `integrate` each `pending_keep_kernels` entry (REQUEST
+    `kind='integrate'`, patch → re-baseline → KEEP/REVERT) and drain the
+    list before using interleave to switch to `explore` / `specialist`
+    or emitting a `skip_to_*` hint. Reason: `explore` benchmarks the
+    *current* `current_best`, which does NOT include an un-integrated
+    KEEP patch — so any e2e gain you measure while a KEEP is pending
+    silently omits that kernel's contribution, and the phase can advance
+    with the kernel's real e2e benefit never validated. Only after
+    `pending_keep_kernels` is empty is interleaving to explore-side work
+    safe.
   - **SWEEP**: `sweep`. Goal: validate `current_best` over a
     workload grid. Coordinator exits to CLOSE on `sweep_done`.
   - **CLOSE**: `report`, `session_breakdown`. Coordinator

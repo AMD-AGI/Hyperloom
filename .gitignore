@@ -21,13 +21,8 @@ venv/
 trace_rank*.json
 .rocprofv3/
 
-# Optimization run artifacts (runtime per-session output; ignored). One
-# tracked exception: the .example template SKILL.md tells operators to
-# `cp` from at session start. Use ``optimizer_runs/*`` (not the bare
-# ``optimizer_runs/`` directory) so git still recurses into the dir
-# and the negation pattern below can re-include the .example file.
+# Optimization run artifacts (runtime per-session output; ignored).
 optimizer_runs/*
-!optimizer_runs/robustness_monitor.sh.example
 optimization_logs/
 optimization_reports/
 optimized_versions/

@@ -234,6 +234,49 @@ async def test_run_grid_overtime_kill_branch(tmp_path, monkeypatch):
     )
     assert results[0].status == "failed"
     assert results[0].killed_overtime is True
+    # No server.log written -> no estimate, but still no crash.
+    assert results[0].estimated_output_throughput is None
+
+
+@pytest.mark.asyncio
+async def test_run_grid_overtime_kill_estimates_tput_from_server_log(
+    tmp_path, monkeypatch,
+):
+    """A killed-overtime variant salvages a rough output tput from the engine's
+    partial ``server.log`` decode-throughput logs (informational only)."""
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+
+    def _overtime(*_a, output_dir, **_k):
+        # Mimic the engine dumping periodic decode throughput before the soft
+        # deadline reaper fires.
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(output_dir) / "server.log").write_text(
+            "Decode batch. gen throughput (token/s): 100.0, #queue-req: 0\n"
+            "Decode batch. gen throughput (token/s): 900.0, #queue-req: 0\n"
+            "Decode batch. gen throughput (token/s): 1000.0, #queue-req: 0\n"
+            "Decode batch. gen throughput (token/s): 1100.0, #queue-req: 0\n"
+            "Decode batch. gen throughput (token/s): 1200.0, #queue-req: 0\n"
+        )
+        return gr.OVERTIME_KILL_RETURNCODE, "", ""
+
+    monkeypatch.setattr(gr, "_run_magpie", _overtime)
+    results = await run_grid(
+        base_yaml_path=base, base_extra_args="",
+        grid=[GridVariant("vA")], output_root=tmp_path / "out",
+        variant_timeout_sec=5, soft_deadline_sec=1.0,
+    )
+    r = results[0]
+    assert r.status == "failed"
+    assert r.killed_overtime is True
+    # Real measurement stays absent so winner selection is unaffected.
+    assert r.output_throughput is None
+    # warmup trim drops the 100.0 ramp -> mean(900,1000,1100,1200)=1050.0
+    assert r.estimated_output_throughput == pytest.approx(1050.0)
+    assert any(
+        w.startswith("estimated_output_throughput_from_server_log:")
+        for w in r.nonfatal_warnings
+    )
 
 
 @pytest.mark.asyncio
