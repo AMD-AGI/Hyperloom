@@ -349,15 +349,16 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     """
     tracelens_root = _resolve_tracelens_root(arg)
     if tracelens_root is None:
-        log.info(
-            "_server_patcher: TRACELENS_ROOT (public) unset/missing — skip SGLang patch"
+        log.warning(
+            "_server_patcher: TRACELENS_ROOT (public) unset/missing — skip SGLang patch "
+            "(kernel shape profiling will be unavailable)"
         )
         return None
 
     try:
         import sglang  # type: ignore  # noqa: I001 - runtime probe
     except Exception as e:  # noqa: BLE001
-        log.info("_server_patcher: sglang not importable (%s); skip patch", e)
+        log.warning("_server_patcher: sglang not importable (%s); skip patch", e)
         return None
 
     version = (getattr(sglang, "__version__", "") or "").strip()
@@ -366,8 +367,9 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     # the TraceLens-shipped manifest.
     patches_root = _patch_tree(tracelens_root, "sglang_roofline_patches")
     if not patches_root.is_dir():
-        log.info(
-            "_server_patcher: SGLang patches root missing (%s); skip",
+        log.warning(
+            "_server_patcher: SGLang patches root missing (%s); skip — "
+            "kernel shape profiling will be unavailable",
             patches_root,
         )
         return None
@@ -376,9 +378,10 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     # upgraded — see README "Prepare Source Trees").
     patches_dir = _resolve_sglang_patches_dir(patches_root, version)
     if patches_dir is None:
-        log.info(
+        log.warning(
             "_server_patcher: no SGLang patches found under %s/%s/ for "
-            "version %s; upgrade TraceLens to Hyperloom_integration_v0.3.1+",
+            "version %s; upgrade TraceLens to Hyperloom_integration_v0.3.1+ — "
+            "kernel shape profiling will be unavailable",
             patches_root,
             _versioned_patches_subdir_name(version) or "<unknown>",
             version,
@@ -386,17 +389,18 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         return None
 
     if not _sglang_version_accepted(version, patches_dir=patches_dir):
-        log.info(
+        log.warning(
             "_server_patcher: SGLang %s not in supported version list "
             "(consulted: $HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS, "
             "$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS, %s/SUPPORTED_VERSIONS, "
-            "then built-in minor allowlist %s); skip",
+            "then built-in minor allowlist %s); skip — kernel shape profiling "
+            "will be unavailable",
             version, patches_dir, _SGLANG_DEFAULT_ALLOWED_MINORS,
         )
         return None
     patches = tuple(sorted(patches_dir.glob("*.patch")))
     if not patches:
-        log.info("_server_patcher: SGLang patches directory empty; skip")
+        log.warning("_server_patcher: SGLang patches directory empty; skip")
         return None
 
     # Support both layouts: editable (``-p1`` from repo root) and wheel
@@ -415,33 +419,29 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     # ``sglang/srt/utils/kernel_shape_profiler.py`` in both layouts.
     sentinel = sglang_module.parent / "srt" / "utils" / "kernel_shape_profiler.py"
     sglang_pkg = sglang_module.parent
-    filtered_names = {p.name for p in filtered_patches}
-    core_annotation_patch_names = {
-        "scheduler.patch",
-        "scheduler_profiler_mixin.patch",
-        "io_struct.patch",
-        "http_server.patch",
-    }
-    extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = ()
-    if core_annotation_patch_names.issubset(filtered_names):
-        extra_sentinels = (
-            (
-                sglang_pkg / "srt" / "managers" / "scheduler.py",
-                ("_build_profile_annotation", "profile_annotation"),
-            ),
-            (
-                sglang_pkg / "srt" / "managers" / "scheduler_profiler_mixin.py",
-                ("roofline_annotations", "execute_", "torch.profiler.record_function"),
-            ),
-            (
-                sglang_pkg / "srt" / "managers" / "io_struct.py",
-                ("shape_discovery", "roofline_annotations"),
-            ),
-            (
-                sglang_pkg / "srt" / "entrypoints" / "http_server.py",
-                ("shape_discovery", "roofline_annotations"),
-            ),
-        )
+    # Always verify the annotation pipeline sentinels, not just the main
+    # kernel_shape_profiler file. Previous logic gated extra_sentinels on
+    # patch filenames matching a hardcoded set, which broke when TraceLens
+    # renamed patches or when partial applies left the main sentinel present
+    # but annotations missing.
+    extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = (
+        (
+            sglang_pkg / "srt" / "managers" / "scheduler.py",
+            ("_build_profile_annotation", "profile_annotation"),
+        ),
+        (
+            sglang_pkg / "srt" / "managers" / "scheduler_profiler_mixin.py",
+            ("roofline_annotations", "execute_", "torch.profiler.record_function"),
+        ),
+        (
+            sglang_pkg / "srt" / "managers" / "io_struct.py",
+            ("shape_discovery", "roofline_annotations"),
+        ),
+        (
+            sglang_pkg / "srt" / "entrypoints" / "http_server.py",
+            ("shape_discovery", "roofline_annotations"),
+        ),
+    )
     return _PatchPlan(
         framework="sglang",
         version=version,
@@ -600,6 +600,18 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
             )
             apply_modes[p] = "skip"
             continue
+        # Symmetric check for patches previously applied via fuzzy `patch`
+        # (git reverse may fail on fuzzy-applied hunks).
+        if patch_bin and _patch_reverse_dry_run(
+            patch_bin, p, plan.apply_root, plan.apply_strip,
+        ):
+            log.info(
+                "_server_patcher: %s patch %s already applied (fuzzy reverse "
+                "dry-run clean); skipping it",
+                plan.framework, p.name,
+            )
+            apply_modes[p] = "skip"
+            continue
         log.warning(
             "_server_patcher: `git apply --check %s` AND fuzzy `patch %s "
             "--dry-run` both failed for %s (version %s, patch %s), and it is "
@@ -632,25 +644,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
             "patches",
             plan.framework, p.name, mode, len(applied),
         )
-        for prev, prev_mode in reversed(applied):
-            if prev_mode == "git":
-                rolled_back = _git(
-                    git, ("apply", "-R", strip_arg, str(prev)), plan.apply_root,
-                )
-            else:
-                rolled_back = (
-                    patch_bin is not None
-                    and _patch_apply(
-                        patch_bin, prev, plan.apply_root, plan.apply_strip,
-                        reverse=True,
-                    )
-                )
-            if not rolled_back:
-                log.error(
-                    "_server_patcher: rollback of %s (mode=%s) also failed — "
-                    "install may be in inconsistent state; manual review "
-                    "required", prev.name, prev_mode,
-                )
+        _rollback_applied(applied, plan, git, patch_bin, strip_arg)
         return False
 
     fuzzy_count = sum(1 for _, mode in applied if mode == "patch")
@@ -660,7 +654,57 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
         len(applied), plan.framework, plan.version,
         len(applied) - fuzzy_count, fuzzy_count, skipped,
     )
+    # Post-apply sentinel verification: confirm the patched install actually
+    # has all sentinel markers present. Catches edge cases where all members
+    # were skipped, fuzzy apply was semantically wrong, or extra_sentinels
+    # (annotation pipeline markers) are missing despite the main sentinel
+    # existing.
+    if not _is_patched(plan):
+        log.error(
+            "_server_patcher: post-apply sentinel check FAILED for %s %s — "
+            "patches were applied/skipped (%d applied, %d skipped) but the "
+            "sentinel markers are not all present; rolling back %d "
+            "applied patch(es) so the framework tree matches the reported "
+            "failure (no half-patched fallback)",
+            plan.framework, plan.version, len(applied), skipped, len(applied),
+        )
+        _rollback_applied(applied, plan, git, patch_bin, strip_arg)
+        return False
     return True
+
+
+def _rollback_applied(
+    applied: list[tuple[Path, str]],
+    plan: _PatchPlan,
+    git: str,
+    patch_bin: str | None,
+    strip_arg: str,
+) -> None:
+    """Reverse-apply ``applied`` patches (newest first) to restore the tree.
+
+    Used both when a later patch fails mid-transaction and when the post-apply
+    sentinel check rejects an otherwise-clean apply, so ``_apply_atomic`` never
+    leaves the framework tree modified while returning ``False``.
+    """
+    for prev, prev_mode in reversed(applied):
+        if prev_mode == "git":
+            rolled_back = _git(
+                git, ("apply", "-R", strip_arg, str(prev)), plan.apply_root,
+            )
+        else:
+            rolled_back = (
+                patch_bin is not None
+                and _patch_apply(
+                    patch_bin, prev, plan.apply_root, plan.apply_strip,
+                    reverse=True,
+                )
+            )
+        if not rolled_back:
+            log.error(
+                "_server_patcher: rollback of %s (mode=%s) also failed — "
+                "install may be in inconsistent state; manual review "
+                "required", prev.name, prev_mode,
+            )
 
 
 # fuzz=2 (GNU patch's default), not 10: fuzz=10 could silently apply change
@@ -691,6 +735,33 @@ def _patch_dry_run(
     except (OSError, subprocess.TimeoutExpired) as e:
         log.warning(
             "_server_patcher: patch --dry-run in %s failed to spawn (%s)",
+            cwd, e,
+        )
+        return False
+    return result.returncode == 0
+
+
+def _patch_reverse_dry_run(
+    patch_bin: str, patch_file: Path, cwd: Path, strip: int = 1,
+) -> bool:
+    """Probe ``patch -R -p<strip> --fuzz=2 --dry-run`` for a single patch.
+
+    Symmetric counterpart to :func:`_patch_dry_run` for detecting patches
+    that were previously applied via fuzzy ``patch`` (where ``git apply -R
+    --check`` would fail due to fuzz-shifted hunks).
+    """
+    try:
+        with patch_file.open("rb") as fh:
+            result = subprocess.run(
+                (patch_bin, f"-p{strip}", f"--fuzz={_FUZZ}", "-R", "--dry-run", "--silent"),
+                cwd=str(cwd),
+                stdin=fh,
+                capture_output=True,
+                timeout=_GIT_TIMEOUT_SEC,
+            )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log.debug(
+            "_server_patcher: patch -R --dry-run in %s failed to spawn (%s)",
             cwd, e,
         )
         return False
