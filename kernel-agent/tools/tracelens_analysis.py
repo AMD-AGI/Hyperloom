@@ -4738,9 +4738,19 @@ def main() -> int:
                             )
 
                     if raw_agent_candidates:
-                        total_dur = sum(
-                            float(c.get("duration_us") or 0)
-                            for c in raw_agent_candidates
+                        # Use whole-trace GPU time as the gpu_pct denominator
+                        # (same as the deterministic route) so a kernel's
+                        # gpu_pct means its share of total GPU time, not its
+                        # share of the top-k candidate sum. Falls back to the
+                        # candidate sum only when gpu_timeline.csv is missing.
+                        total_dur = (
+                            _extract_total_time_us_from_gpu_timeline(
+                                skill_result.output_dir
+                            )
+                            or sum(
+                                float(c.get("duration_us") or 0)
+                                for c in raw_agent_candidates
+                            )
                         )
                         agent_candidates = _finalize_candidates(
                             raw_agent_candidates,
