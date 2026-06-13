@@ -153,10 +153,11 @@ commands. This section is only the control flow.
    the workspace root, not a session dir.
 6. Read `SESSION_DIR` from launch-info (`jq -r .session_dir "$LAUNCH_INFO_FILE"`).
    Refuse to guess by timestamp.
-7. For runs longer than 5 min, start the robustness monitor from
-   `optimizer_runs/robustness_monitor.sh.example`. Its only allowed relaunch is
-   same-session `optimize --resume --resume-from "$SESSION_DIR"` after an
-   unexpected crash; no fresh run and no latest-session auto-pick.
+7. For runs longer than 5 min, copy the robustness monitor template from
+   `inference_optimizer/launcher/robustness_monitor.sh.example` to the runtime
+   `optimizer_runs/robustness_monitor.sh` and start it. Its only allowed
+   relaunch is same-session `optimize --resume --resume-from "$SESSION_DIR"`
+   after an unexpected crash; no fresh run and no latest-session auto-pick.
 
 ## Report Back To User
 

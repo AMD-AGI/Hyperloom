@@ -147,7 +147,7 @@ fresh run or auto-pick the latest session.
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 mkdir -p "$RUN_DIR"
 export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
-cp "$REPO_ROOT/optimizer_runs/robustness_monitor.sh.example" \
+cp "$REPO_ROOT/inference_optimizer/launcher/robustness_monitor.sh.example" \
    "$RUN_DIR/robustness_monitor.sh"
 chmod +x "$RUN_DIR/robustness_monitor.sh"
 setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \

@@ -41,12 +41,11 @@
 #      polled for up to $LAUNCH_INFO_WAIT_SEC if not yet flushed)
 #   3. fail loudly; never guess or fall back to a timestamp/default path
 #
-# Invocation pattern (see ``inference_optimizer/SKILL.md`` §"Robustness
-# Monitor for Long Runs"):
+# Invocation pattern:
 #
 #   export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 #   mkdir -p "$RUN_DIR"
-#   cp "$REPO_ROOT/optimizer_runs/robustness_monitor.sh.example" \
+#   cp "$REPO_ROOT/inference_optimizer/launcher/robustness_monitor.sh.example" \
 #      "$RUN_DIR/robustness_monitor.sh"
 #   chmod +x "$RUN_DIR/robustness_monitor.sh"
 #   setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
