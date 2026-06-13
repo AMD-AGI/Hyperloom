@@ -488,32 +488,41 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
     dtrace.write_text(
         json.dumps({
             "decision": {"change": "tp_sweep", "component": "kernel",
+                         "operation_kind": "kernel_opt",
                          "outcome": "KEEP", "gain_pct": 12.5, "task_id": "k1"},
             "phase": "KERNEL", "tick": 5, "ts": "2026-06-09T16:00:00Z",
         }) + "\n"
         + json.dumps({
-            "decision": {"change": "radix", "component": "orchestration",
+            "decision": {"change": "radix", "component": "grid",
+                         "operation_kind": "param", "provenance": "default_grid",
                          "outcome": "REVERT", "gain_pct": None, "task_id": "t2"},
             "phase": "EXPLORE", "tick": 6, "ts": "2026-06-09T16:05:00Z",
         }) + "\n",
         encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
-    # Create an agent span for (KERNEL, kernel) so its decision attaches there;
-    # the (EXPLORE, orchestration) decision has no span -> trace-level fallback.
+    # Create an agent span for (KERNEL, kernel) so its step span parents there.
     em.record_llm_call(_llm_row(phase="KERNEL", component="kernel", role="kernel"))
     em.record_conversation(_conv_row(phase="KERNEL", component="kernel", role="kernel"))
     em.flush_session()
 
+    # Each decision now opens an ``optimization_step:<operation_kind>`` span,
+    # tagged with operation_kind in metadata, and its scores attach to it.
+    kernel_step = client.span_named("optimization_step:kernel_opt")
+    param_step = client.span_named("optimization_step:param")
+    assert kernel_step is not None
+    assert kernel_step.kwargs["metadata"]["operation_kind"] == "kernel_opt"
+    assert param_step is not None
+    assert param_step.kwargs["metadata"]["operation_kind"] == "param"
+    assert param_step.kwargs["metadata"]["provenance"] == "default_grid"
+
+    # KERNEL KEEP w/ gain -> decision_outcome + gain_pct; EXPLORE REVERT -> 1.
     span_score_names = sorted(s["name"] for s in client.observation_scores)
-    trace_score_names = sorted(s["name"] for s in client.scores)
-    # KERNEL/kernel KEEP w/ gain -> 2 span-level scores.
-    assert span_score_names == ["decision_outcome", "gain_pct"]
-    # EXPLORE/orchestration REVERT w/o gain -> 1 trace-level fallback score.
-    assert trace_score_names == ["decision_outcome"]
+    assert span_score_names == ["decision_outcome", "decision_outcome", "gain_pct"]
     gain = [s for s in client.observation_scores if s["name"] == "gain_pct"][0]
     assert gain["value"] == 12.5
     assert gain["data_type"] == "NUMERIC"
+    assert gain["metadata"]["operation_kind"] == "kernel_opt"
 
 
 # ---------------------------------------------------------------------------
