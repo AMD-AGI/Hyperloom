@@ -73,6 +73,18 @@ class JournalEntry:
     task_id:           str = ""
     variant_name:      str = ""
     ts:                str = ""
+    # Proposer attribution (who proposed this change). ``provenance`` is the raw
+    # explore label (``llm_direct`` / ``default_grid`` / ``specialist:<domain>``);
+    # ``scope`` is the orthogonal specialist dial (domain / domains / freeform);
+    # ``fingerprint`` is the variant join key into ``explore_search``. All empty
+    # on non-explore rows and on legacy journals (stripped by ``to_dict``).
+    provenance:        str = ""
+    scope:             str = ""
+    fingerprint:       str = ""
+    # Per-variant measurement detail beyond the headline gain/throughput
+    # (runtime_sec / wall_clock_ratio_vs_baseline / stack_rebench_tput /
+    # estimated_output_throughput). Empty dict stripped by ``to_dict``.
+    metrics:           dict[str, Any] = field(default_factory=dict)
     # Full-trace D1: orchestrator tick at the moment of decision. Lets the
     # decision-trace collector join this KEEP/REVERT row to the LLM calls
     # recorded for the same tick. Defaults to ``None`` (not 0) so older
@@ -89,7 +101,12 @@ class JournalEntry:
                 removed.
         """
         raw = dataclasses.asdict(self)
-        return {k: v for k, v in raw.items() if v is not None and v != ""}
+        # Strip None, empty strings, and empty containers ({} / []) so the file
+        # stays compact and byte-diffable (an unset ``metrics`` dict vanishes).
+        return {
+            k: v for k, v in raw.items()
+            if v is not None and v != "" and v != {} and v != []
+        }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> JournalEntry:
@@ -114,6 +131,10 @@ class JournalEntry:
             task_id=str(d.get("task_id", "")),
             variant_name=str(d.get("variant_name", "")),
             ts=str(d.get("ts", "")),
+            provenance=str(d.get("provenance", "")),
+            scope=str(d.get("scope", "")),
+            fingerprint=str(d.get("fingerprint", "")),
+            metrics=dict(d.get("metrics") or {}),
             tick=_optional_int(d.get("tick")),
         )
 
@@ -305,6 +326,50 @@ def classify_change_kind(task_kind: str, variant: dict[str, Any] | None = None) 
         if args:
             return KIND_PARAM
     return KIND_OTHER
+
+
+# operation_kind: a single stable, filterable label for "what this step did".
+# Reuses the change-kind vocabulary but renames the two kernel kinds to the
+# action names dashboards/traces filter on, and falls back to the raw action
+# for non-explore steps (baseline / profile / roofline / sweep / framework_pr).
+_OP_KIND_RENAME: dict[str, str] = {
+    KIND_KERNEL_FILE: "kernel_opt",
+    KIND_INTEGRATE:   "kernel_integrate",
+}
+
+
+def operation_kind_for(action: str, kind: str = "") -> str:
+    """Map an (action, change-kind) pair to a stable ``operation_kind`` label.
+
+    Examples: explore ``backend`` / ``param`` / ``env``; kernel ``kernel_opt`` /
+    ``kernel_integrate``; ``baseline`` / ``profile`` / ``roofline`` / ``sweep``.
+    Prefers the fine change-kind, falling back to the action when the kind is
+    absent or ``other``.
+    """
+    k = (kind or "").lower()
+    if k and k != KIND_OTHER:
+        return _OP_KIND_RENAME.get(k, k)
+    a = (action or "").lower()
+    if a in ("kernel_opt", "deep_kernel_analysis", "operator_tuning"):
+        return "kernel_opt"
+    if a == "integrate":
+        return "kernel_integrate"
+    return a or KIND_OTHER
+
+
+def proposer_for(provenance: str) -> str:
+    """Map an explore ``provenance`` label to a stable proposer/component name.
+
+    ``specialist:<domain>`` is kept verbatim (so a trace can filter on the exact
+    specialist); ``llm_direct`` / ``legacy:*`` / empty collapse to
+    ``orchestration``; ``default_grid`` becomes ``grid``.
+    """
+    p = (provenance or "").strip()
+    if not p or p == "llm_direct" or p.startswith("legacy:"):
+        return "orchestration"
+    if p == "default_grid":
+        return "grid"
+    return p
 
 
 def summarize_change(
