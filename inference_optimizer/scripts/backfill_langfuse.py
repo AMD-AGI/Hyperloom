@@ -400,11 +400,22 @@ def ingest(plan: dict[str, Any]) -> int:
         _end_obs(ra_span, (max(ra_times) if ra_times else None) or trace_start)
 
     # Decision scores -> the owning agent span (trace-level fallback).
+    # ``component`` is the resolved proposer (specialist:<domain> / grid /
+    # orchestration); normalise it back to a span-attachable agent so the score
+    # still lands under a real agent span. operation_kind rides in score metadata.
+    def _span_agent_for(proposer: str) -> str:
+        p = (proposer or "").strip()
+        if p.startswith("specialist:"):
+            return "specialist"
+        if p == "grid":
+            return "orchestration"
+        return p or lfmap.UNKNOWN_AGENT
+
     for i, drow in enumerate(plan["decisions"]):
         for score in lfmap.decision_to_scores(drow):
             meta = score.get("metadata") or {}
             phase = str(meta.get("phase") or lfmap.UNPHASED)
-            agent = str(meta.get("component") or lfmap.UNKNOWN_AGENT)
+            agent = _span_agent_for(str(meta.get("component") or ""))
             span = agent_spans.get((phase, agent))
             try:
                 if span is not None and hasattr(span, "score"):
