@@ -66,11 +66,11 @@
       "label": "Kimi K2.6",
       "repo_id": "moonshotai/Kimi-K2.6",
       "framework": "sglang",
-      "precision": "INT4",
+      "precision": "FP8",
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "INT4 compressed-tensors native. vLLM tp8 hits MLA num_head%16 assert; sglang handles tp8 cleanly. ~554G weights -> ~69G/GPU at tp8."
+      "note": "Temporary FP8 dispatch on 2026-06-13 for Kimi K2.6. vLLM tp8 hits MLA num_head%16 assert; sglang handles tp8 cleanly. Original daily config is INT4 compressed-tensors native."
     },
     {
       "pool_id": "inferencex-daily-fixed",
