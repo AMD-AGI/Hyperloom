@@ -23,12 +23,12 @@ If install repeatedly fails while building GEAK / `mini-swe-agent` with missing
 files such as `src/minisweagent/...`, the workspace-shared GEAK mirror may be
 half-created (`.git` exists but `src/` is incomplete) or the filesystem may be
 showing stale metadata. Do not manually clone GEAK, delete only `build/`, or
-edit `source-mirrors/` in place. Stop any other installer using the same
-`$USER_DATA_PATH`, remove the entire
-`${HYPERLOOM_ROOT:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/source-mirrors}/geak`
+edit the checkout in place. Stop any other installer using the same dependency
+root, remove the entire
+`${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/GEAK`
 directory, then rerun the full install so `install.sh` owns the fresh clone.
-Multiple concurrent installs sharing one `$USER_DATA_PATH` also share
-`source-mirrors/`; avoid running them at the same time.
+Multiple concurrent installs sharing one dependency root also share this
+checkout; avoid running them at the same time.
 
 In sandboxes where `/workspace/hyperloom` is unwritable, override the
 **workspace root** with `USER_DATA_PATH` (not the per-session subdir):

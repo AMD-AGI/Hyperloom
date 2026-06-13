@@ -17,12 +17,62 @@ from pathlib import Path
 from typing import Any
 
 from . import collectors
-from .schema import SCHEMA_VERSION
+from .schema import SCHEMA_VERSION, SCHEMA_VERSION_V3
 
 log = logging.getLogger(__name__)
 
 EXPORTER_VERSION = "session-breakdown-1.0.0"
 BREAKDOWN_FILENAME = "session_breakdown.json"
+
+
+def _phase_event_key(ev: dict[str, Any]) -> tuple[str, str, str]:
+    """Dedupe key matching :func:`collectors.collect_phase_timeline`.
+
+    ``(action, ts-to-second, change|task_id)`` with the timestamp canonicalised
+    to ``...Z`` so a recorder fragment row and the collector's audit-list row
+    for the same attempt collapse to one event.
+    """
+    return (
+        str(ev.get("action") or ""),
+        collectors._iso_z(ev.get("ts"))[:19],
+        str(ev.get("change") or ev.get("task_id") or ""),
+    )
+
+
+def _merge_phase_timeline(
+    fragment: Any, collector_value: Any,
+) -> list[dict[str, Any]]:
+    """Union the recorder ``phase_timeline`` fragment with the collector result.
+
+    The collector merges three sources (optimization_journal + audit lists +
+    kernel_opt/integrate lanes); the recorder fragment only carries audit-action
+    attempts. A plain fragment-wins replacement (``_pick``) would therefore drop
+    the journal KEEP/REVERT and kernel lanes, so we keep the collector result as
+    the base and only append fragment rows whose dedupe key is missing (the
+    crash-survivable audit rows the on-disk state may have lost). Result stays
+    sorted by ``ts`` like the collector's own output.
+    """
+    base: list[dict[str, Any]] = (
+        list(collector_value) if isinstance(collector_value, list) else []
+    )
+    if not isinstance(fragment, list) or not fragment:
+        return base
+    seen = {_phase_event_key(ev) for ev in base if isinstance(ev, dict)}
+    for ev in fragment:
+        if not isinstance(ev, dict):
+            continue
+        # Normalise to the collector's audit-row shape so keys line up.
+        norm = dict(ev)
+        norm.setdefault("kernel_id", None)
+        norm.setdefault("phase", "")
+        norm.setdefault("change", str(ev.get("action") or ""))
+        key = _phase_event_key(norm)
+        if key in seen:
+            continue
+        seen.add(key)
+        base.append(norm)
+    base.sort(key=lambda e: e.get("ts") or "")
+    return base
 
 
 def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
@@ -61,6 +111,71 @@ def _load_manifest(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
         return {}
 
 
+_ROOFLINE_NUMERIC_FIELDS = (
+    "arithmetic_intensity",
+    "flops_per_byte",
+    "efficiency_percent",
+)
+
+
+def _attach_kernel_roofline(
+    kernel_journey: dict[str, Any],
+    kernel_roofline: dict[str, Any],
+) -> None:
+    """Merge per-kernel roofline metrics into the ``kernel_journey`` view.
+
+    For every journey entry with a matching ``kernel_roofline`` kernel (by
+    ``kernel_id``, falling back to ``name``), attach the full roofline entry
+    under ``roofline`` and backfill the discovery numeric fields that discovery
+    surfaced empty (roofline enrichment happens after discovery records). Pure
+    best-effort: a missing/empty roofline table or kernel just leaves the
+    journey untouched.
+    """
+    if not isinstance(kernel_journey, dict) or not isinstance(
+        kernel_roofline, dict,
+    ):
+        return
+    kernels = kernel_journey.get("kernels")
+    roofline_kernels = kernel_roofline.get("kernels")
+    if not isinstance(kernels, list) or not isinstance(roofline_kernels, list):
+        return
+
+    by_kid: dict[str, dict[str, Any]] = {}
+    by_name: dict[str, dict[str, Any]] = {}
+    for rk in roofline_kernels:
+        if not isinstance(rk, dict):
+            continue
+        kid = str(rk.get("kernel_id") or "")
+        name = str(rk.get("name") or "")
+        if kid:
+            by_kid.setdefault(kid, rk)
+        if name:
+            by_name.setdefault(name, rk)
+
+    for entry in kernels:
+        if not isinstance(entry, dict):
+            continue
+        rk = by_kid.get(str(entry.get("kernel_id") or "")) or by_name.get(
+            str(entry.get("name") or ""),
+        )
+        if not rk:
+            continue
+        entry["roofline"] = dict(rk)
+        # Promote bound_type onto the entry header when discovery left it blank.
+        if not str(entry.get("bound_type") or "") and rk.get("bound_type"):
+            entry["bound_type"] = rk.get("bound_type")
+        disc = entry.get("discovery")
+        if not isinstance(disc, dict):
+            continue
+        if not str(disc.get("bound_type") or "") and rk.get("bound_type"):
+            disc["bound_type"] = rk.get("bound_type")
+        for field in _ROOFLINE_NUMERIC_FIELDS:
+            if disc.get(field) in (None, 0, 0.0) and rk.get(field) not in (
+                None, 0, 0.0,
+            ):
+                disc[field] = rk.get(field)
+
+
 def build(
     session_dir: Path | str,
     *,
@@ -90,37 +205,68 @@ def build(
     state = _load_state(sd, warnings)
     manifest = _load_manifest(sd, warnings)
 
+    # Author-time recorder fragments (write-side spool). When present they are
+    # the source of truth for their section (they capture facts the collectors
+    # can miss: pre-dispatch/infra failures, pruned robustness signals, ...);
+    # when absent the legacy collectors are used as fallback, so historical
+    # sessions and recorder-disabled runs behave exactly as before.
+    assembled = _load_assembled(sd, warnings)
+    # Version stamp follows the aggregation path: a recorder-aggregated
+    # breakdown ("new way", any fragments present) is v3.0; the legacy
+    # collector-only fallback keeps the previous v2 version unchanged.
+    schema_version = SCHEMA_VERSION_V3 if assembled else SCHEMA_VERSION
+
+    def _pick(section: str, collector_value: Any) -> Any:
+        """Fragment value if recorded and non-empty, else the collector value."""
+        frag = assembled.get(section)
+        if isinstance(frag, list) and frag:
+            return frag
+        if isinstance(frag, dict) and frag:
+            return frag
+        return collector_value
+
     from datetime import datetime, timezone
     exported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     # Section collectors (each catches its own errors via warnings).
-    session_meta      = _safe_collect("session",
+    session_meta      = _pick("session", _safe_collect("session",
                                        lambda: collectors.collect_session(sd, state, manifest, warnings),
-                                       warnings)
-    workload          = _safe_collect("workload",
+                                       warnings))
+    workload          = _pick("workload", _safe_collect("workload",
                                        lambda: collectors.collect_workload(state, manifest, warnings),
-                                       warnings)
-    baseline          = _safe_collect("baseline",
+                                       warnings))
+    baseline          = _pick("baseline", _safe_collect("baseline",
                                        lambda: collectors.collect_baseline(sd, state, warnings),
-                                       warnings)
-    final             = _safe_collect("final",
+                                       warnings))
+    final             = _pick("final", _safe_collect("final",
                                        lambda: collectors.collect_final(sd, state, warnings),
-                                       warnings)
-    phase_timeline    = _safe_collect("phase_timeline",
-                                       lambda: collectors.collect_phase_timeline(sd, state, warnings),
-                                       warnings)
+                                       warnings))
+    # Merge (not _pick replace): the recorder fragment only carries audit-action
+    # attempts, while the collector also folds in optimization_journal KEEP/REVERT
+    # and the kernel_opt/integrate lanes. Fragment-wins would drop those (and
+    # cascade into action_timeline / phase_segments / token_usage which all
+    # derive from this), so union + dedupe instead.
+    phase_timeline    = _merge_phase_timeline(
+        assembled.get("phase_timeline"),
+        _safe_collect("phase_timeline",
+                      lambda: collectors.collect_phase_timeline(sd, state, warnings),
+                      warnings),
+    )
+    # Derived from the resolved (fragment-or-collector) phase_timeline.
     phase_segments    = _safe_collect("phase_segments",
                                        lambda: collectors.collect_phase_segments(
                                            state, phase_timeline, warnings,
                                        ),
                                        warnings,
                                        default=[])
-    geak_invocations, oob_invocations = _safe_collect(
+    geak_c, oob_c = _safe_collect(
         "invocations",
         lambda: collectors.collect_kernel_invocations(sd, warnings),
         warnings,
         default=([], []),
     )
+    geak_invocations = _pick("geak_invocations", geak_c)
+    oob_invocations = _pick("oob_invocations", oob_c)
     capability_summary = _safe_collect("capability_summary",
                                         lambda: collectors.collect_capability_summary(
                                             state, geak_invocations, oob_invocations, warnings,
@@ -131,18 +277,18 @@ def build(
                                             sd, state, geak_invocations, oob_invocations, warnings,
                                         ),
                                         warnings)
-    explore_search     = _safe_collect("explore_search",
+    explore_search     = _pick("explore_search", _safe_collect("explore_search",
                                         lambda: collectors.collect_explore_search(state, warnings),
-                                        warnings)
-    sweep              = _safe_collect("sweep",
+                                        warnings))
+    sweep              = _pick("sweep", _safe_collect("sweep",
                                         lambda: collectors.collect_sweep(sd, state, warnings),
-                                        warnings)
-    critic_robustness  = _safe_collect("critic_robustness",
+                                        warnings))
+    critic_robustness  = _pick("critic_robustness", _safe_collect("critic_robustness",
                                         lambda: collectors.collect_critic_robustness(sd, warnings),
-                                        warnings)
-    telemetry          = _safe_collect("telemetry",
+                                        warnings))
+    telemetry          = _pick("telemetry", _safe_collect("telemetry",
                                         lambda: collectors.collect_telemetry(sd, state, warnings),
-                                        warnings)
+                                        warnings))
     attribution        = _safe_collect("attribution",
                                         lambda: collectors.collect_attribution(
                                             state, geak_invocations, oob_invocations,
@@ -150,61 +296,61 @@ def build(
                                             warnings,
                                         ),
                                         warnings)
-    kb_provenance      = _safe_collect("kb_provenance",
+    kb_provenance      = _pick("kb_provenance", _safe_collect("kb_provenance",
                                         lambda: collectors.collect_kb_provenance(
                                             session_dir, state, manifest, warnings,
                                         ),
-                                        warnings)
+                                        warnings))
     # specialist sub-agent dispatch records (single source: state + on-disk transcripts).
-    specialist_runs    = _safe_collect("specialist_runs",
+    specialist_runs    = _pick("specialist_runs", _safe_collect("specialist_runs",
                                         lambda: collectors.collect_specialist_runs(
                                             sd, state, warnings,
                                             include_transcripts=include_transcripts,
                                         ),
                                         warnings,
-                                        default=[])
+                                        default=[]))
     # Raw ``state.optimization_stack[]`` passthrough (full per-entry evidence; never raises).
-    optimization_stack = _safe_collect("optimization_stack",
+    optimization_stack = _pick("optimization_stack", _safe_collect("optimization_stack",
                                         lambda: collectors.collect_optimization_stack(state),
                                         warnings,
-                                        default=[])
+                                        default=[]))
     # Hot-kernel roofline table (Dashboard §1) from ``<sd>/reports/kernel_roofline.json``.
-    kernel_roofline    = _safe_collect("kernel_roofline",
+    kernel_roofline    = _pick("kernel_roofline", _safe_collect("kernel_roofline",
                                         lambda: collectors.collect_kernel_roofline(
                                             sd, warnings,
                                         ),
                                         warnings,
-                                        default={})
+                                        default={}))
     # Kernel-agent attempt outcome summary (Breakdown panel integration spec §A1);
     # mirrors ``reports/kernel_optimization_summary.json``, empty → dashboard hides Block 1.
-    kernel_optimization_summary = _safe_collect(
+    kernel_optimization_summary = _pick("kernel_optimization_summary", _safe_collect(
         "kernel_optimization_summary",
         lambda: collectors.collect_kernel_optimization_summary(sd, warnings),
         warnings,
-        default={})
+        default={}))
     # Post-optimization concurrency sweep (Breakdown panel integration spec §A2);
     # mirrors ``reports/conc_sweep_summary.json``, empty → dashboard hides Block 2.
-    conc_sweep_summary = _safe_collect(
+    conc_sweep_summary = _pick("conc_sweep_summary", _safe_collect(
         "conc_sweep_summary",
         lambda: collectors.collect_conc_sweep_summary(sd, warnings),
         warnings,
-        default={})
+        default={}))
     # Per-snapshot roofline comparison list (markdown ``## Roofline`` source) from ``state.roofline_snapshots``.
-    roofline           = _safe_collect("roofline",
+    roofline           = _pick("roofline", _safe_collect("roofline",
                                         lambda: collectors.collect_roofline(
                                             state, warnings,
                                         ),
                                         warnings,
-                                        default=[])
+                                        default=[]))
     # Optimization-progress curve (Dashboard §2): stack ledger + ceiling/target
     # lines from state.json. Renamed from ``roofline`` to avoid clashing with the
     # list-shaped section above.
-    roofline_progress  = _safe_collect("roofline_progress",
+    roofline_progress  = _pick("roofline_progress", _safe_collect("roofline_progress",
                                         lambda: collectors.collect_roofline_progress(
                                             sd, state, manifest, warnings,
                                         ),
                                         warnings,
-                                        default={})
+                                        default={}))
     # Full-trace: unified token + decision timeline. Joins the per-call
     # token ledger (reports/trace/llm_calls.jsonl + ext/*.jsonl) with the
     # KEEP/REVERT journal + dynamic_action dispatch history. Empty (zeroed
@@ -237,6 +383,20 @@ def build(
                                         ),
                                         warnings,
                                         default={})
+    # Kernel-major lifecycle view (discovery -> dispatch -> backend attempts ->
+    # e2e), composed by the recorder assembler from its four item substreams.
+    # Pure recorder section (no collector fallback): empty {} on sessions that
+    # predate the substreams, so v1/v2 readers that don't know it just ignore
+    # it and historical breakdowns stay byte-for-byte identical.
+    # Authoritative external-tool versions, folded into a {tool: meta} map by
+    # the recorder assembler. Pure recorder section (no collector fallback).
+    versions           = _pick("versions", {})
+    kernel_journey     = _pick("kernel_journey", {})
+    # Attach a copy of the per-kernel roofline metrics onto each journey entry
+    # and backfill discovery numeric fields that discovery couldn't surface
+    # (arithmetic_intensity / bound_type / efficiency) since roofline is
+    # enriched after discovery. Best-effort; never raises.
+    _attach_kernel_roofline(kernel_journey, kernel_roofline)
 
     source_files = collectors.collect_source_files(
         sd,
@@ -247,7 +407,7 @@ def build(
     )
 
     return {
-        "schema_version":      SCHEMA_VERSION,
+        "schema_version":      schema_version,
         "exported_at_utc":     exported_at,
         "exporter_version":    EXPORTER_VERSION,
 
@@ -301,10 +461,44 @@ def build(
         # ``disabled_reason``) on the default path. Local jsonl ledger is
         # always written regardless.
         "langfuse":            langfuse,
+        # Kernel-major lifecycle view (discovery -> dispatch -> backend
+        # attempts -> e2e), composed from the recorder substreams. Additive,
+        # optional; empty {} on sessions that predate the substreams.
+        "kernel_journey":      kernel_journey,
+        # Authoritative external-tool versions, one object per tool
+        # (geak / tracelens / claude / codex / ...), keyed by tool name. Each
+        # carries ``{tool, root_dir, commit, version}``. Empty {} on sessions
+        # that predate the recorder.
+        "versions":            versions,
 
         "warnings":            warnings,
         "source_files":        source_files,
     }
+
+
+def _load_assembled(
+    session_dir: Path,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Assemble recorder fragments into ``{section: value}`` (empty on opt-out
+    or when no fragments exist). Never raises — a recorder bug must not poison
+    the export; it just falls back to collectors."""
+    disabled = os.environ.get(
+        "INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER", "",
+    ).strip().lower() in ("1", "true", "yes")
+    if disabled:
+        return {}
+    try:
+        from .recorder import assemble_parts, has_parts
+
+        if not has_parts(session_dir):
+            return {}
+        out = assemble_parts(session_dir, warnings=warnings)
+        return out if isinstance(out, dict) else {}
+    except Exception as exc:  # noqa: BLE001
+        log.exception("recorder: assemble_parts failed")
+        warnings.append(f"recorder: assemble_parts failed: {type(exc).__name__}: {exc}")
+        return {}
 
 
 def _safe_collect(

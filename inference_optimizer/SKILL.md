@@ -145,7 +145,8 @@ commands. This section is only the control flow.
    `TRACELENS_INTERNAL_ROOT`) are local sandbox inputs only.
 2. Run install and source the generated env in the same shell. Do not manually
    pip-install SDKs, edit `~/.claude/config.json`, start Ray, or repair
-   `runtime/source-mirrors/`; `_preflight()` and `install.sh` own those.
+   `${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/`
+   or `$USER_DATA_PATH/runtime/`; `_preflight()` and `install.sh` own those.
 3. Optionally write `$USER_DATA_PATH/model_arch.json` if the model architecture
    is known. It is advisory only; skip rather than guessing.
 4. Run the IR-1 portable preflight after install. Never print tokens.

@@ -18,7 +18,8 @@ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 
 `install.sh` is the only full install entrypoint. Source the generated
 `kernel-agent.env.sh`; do not derive auth aliases, GEAK paths, or InferenceX
-paths by hand. Do not manually repair `runtime/source-mirrors/`.
+paths by hand. Do not manually repair `$USER_DATA_PATH/runtime/` or
+`${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/`.
 
 Optionally write `$USER_DATA_PATH/model_arch.json` if the architecture is known.
 It is advisory only; skip rather than guessing.

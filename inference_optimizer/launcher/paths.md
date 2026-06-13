@@ -8,13 +8,9 @@ holds shared `runtime/` and `logs/`.
 
 ```text
 $USER_DATA_PATH/                          # workspace_root — set by operator / Claw / SaFE
-├── runtime/                              # workspace-shared (install.sh, Magpie, kernel-agent.env.sh)
+├── runtime/                              # workspace-shared env files / config
 │   ├── kernel-agent.env.sh
 │   ├── geak-config/local.yaml
-│   ├── Magpie/
-│   └── source-mirrors/{Primus-Claw,OOB,InferenceX,TraceLens[,TraceLens-internal]}/
-│       # TraceLens public is required; TraceLens-internal is optional and only
-│       # present when TRACELENS_INTERNAL_ROOT is set (open-source-only otherwise)
 ├── logs/                                 # workspace-shared launcher stdout
 └── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
     └── <UTC_YYYYMMDDTHHMMSSZ>/           # session_dir — manifest.json, state.json, runs/, …
@@ -54,12 +50,16 @@ session dir printed by the CLI.
 | Workspace root | `$USER_DATA_PATH` → `paths.workspace_root()` | Shared `runtime/` + `logs/` and parent of all sessions |
 | Session dir | `$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR` → `paths.session_dir()` | Per-run directory containing `manifest.json` / `state.json` / `storage/coordinator.db` |
 
-**Launcher rule:** do not hand-build, create, delete, or repair paths under
-`$USER_DATA_PATH/runtime/` (especially `source-mirrors/`). Those are
-workspace-shared assets owned by `install.sh`, including Magpie, GEAK, OOB,
-TraceLens mirrors, env files, and config. Manual edits there can corrupt
-another run's checkout. If install state looks wrong, rerun `install.sh` or
-follow `troubleshooting.md`; do not clone or clean the mirrors by hand.
+Open-source dependencies are cloned pod-local, not under `runtime/`:
+`${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/`
+contains Magpie, TraceLens, GEAK, and InferenceX. OOB is copied there from
+`$OOB_SRC` / `$HYPERLOOM_BUNDLE`.
+
+**Launcher rule:** do not hand-build, create, delete, or repair paths under the
+pod-local open-source root or under `$USER_DATA_PATH/runtime/`. Those assets are
+owned by `install.sh`. Manual edits can corrupt another run's checkout. If
+install state looks wrong, rerun `install.sh` or follow `troubleshooting.md`;
+do not clone or clean the mirrors by hand.
 
 **Session rule:** never treat `$USER_DATA_PATH` as the session dir when
 `$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR` is set. Read `manifest.json` /
@@ -77,18 +77,16 @@ pick the wrong run.
 Read-only sources or warm-start caches, each overridable via its own env if you
 want a fully self-contained session:
 
-- **TraceLens** — `$TRACELENS_ROOT` (default
-  `$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`; when unset,
-  `kernel-agent/scripts/install.sh` clones
-  [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins it
-  to a fixed SHA. Export `TRACELENS_ROOT=<path>` only as an operator override
-  to point at a pre-existing checkout you maintain; this skips both the clone
-  and the SHA pin). Optional internal extension at `$TRACELENS_INTERNAL_ROOT`
-  (no default; internal users set it to their own checkout to opt in,
-  otherwise open-source-only). The per-version
+- **TraceLens** — `install.sh` clones public TraceLens into
+  `${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens`
+  unless `$TRACELENS_ROOT` points at an operator-managed checkout. Optional
+  internal extension at `$TRACELENS_INTERNAL_ROOT` (no default; internal users
+  set it to their own checkout to opt in, otherwise open-source-only). The
+  per-version
   `sglang_roofline_patches/sglang_<minor>_<patch>/` layout under TraceLens is
   required by `_server_patcher`.
-- `$OOB_SRC` / `$HYPERLOOM_BUNDLE`
+- **OOB** — provided via `$OOB_SRC` / `$HYPERLOOM_BUNDLE` and copied into the
+  pod-local open-source root.
 - `/sgl-workspace/{aiter,sglang,vllm}/`
 - `~/.claude/config.json` + `~/.codex/auth.json`
 - `~/.cache/amd-ai-devtool/semantic-index/` (GEAK RAG embedding cache)

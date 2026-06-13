@@ -54,8 +54,12 @@ from ._accuracy_gate import (
 from ._canonical_fingerprint import canonical_fingerprint, workload_signature
 from ._explore_roofline_filter import compute_saturation_advisory
 from ._grid_runner import (
+    _MN_BACKENDS_PRIORITY,
+    _MN_PARAMS_PRIORITY,
     GridVariant,
     _resolve_session_dir,
+    apply_multi_node_invalid_variants,
+    reorder_grid_for_multi_node,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
@@ -783,6 +787,29 @@ class ExploreExecutor:
                         if isinstance(p, (int, float)) and float(p) >= 80.0
                     )),
                 )
+
+        # Multi-node grid shaping (companion to the roofline gate above).
+        # Both helpers short-circuit on ``is_multi_node() is False``: the
+        # invalid filter returns ``(list(grid), [])`` and reorder preserves the
+        # original order, so the single-node ``runnable`` is bit-for-bit
+        # identical and ``skipped_dup`` gains nothing — single-node behaviour is
+        # never altered (hard requirement). In multi-node mode: drop
+        # known-regression variants (cuda-graph-max-bs < CONC), then surface
+        # likely-winners first so a max-hours cut still benches the strong
+        # candidates. (apply_single_node_invalid_variants is intentionally NOT
+        # called here: it would mutate the single-node grid.)
+        if runnable:
+            runnable, _mn_dropped = apply_multi_node_invalid_variants(runnable)
+            for _d in _mn_dropped:
+                skipped_dup.append({
+                    "name": _d.get("name", ""),
+                    "reason": _d.get("source", "grid_invalid"),
+                    "detail": _d.get("reason", ""),
+                })
+            runnable = reorder_grid_for_multi_node(
+                runnable,
+                priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
+            )
 
         round_id_seed = int(search.get("cursor") or 0) + 1
         round_id = f"explore-{round_id_seed:03d}"
