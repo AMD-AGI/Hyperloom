@@ -135,9 +135,9 @@ _INTERLEAVE_KERNEL_NO_EXPLORE: frozenset[str] = frozenset({
 
 
 def is_phase_interleave_enabled() -> bool:
-    """Return True when EXPLORE↔KERNEL interleave is enabled (default ON, P3_18; env is rollback knob)."""
+    """Return True when EXPLORE↔KERNEL interleave is enabled (default OFF; env opt-in knob)."""
     raw = (os.environ.get(PHASE_INTERLEAVE_ENV) or "").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    return raw in {"1", "true", "yes", "on"}
 
 
 def llm_proposable_actions_for_with_interleave(
