@@ -77,6 +77,8 @@ def _section_session_context(
     objective_kind: str,
     objective_value: float | str | None,
     max_minutes: int,
+    explore_enabled: bool = True,
+    framework_phase_enabled: bool = True,
     framework_source_roots: tuple[str, ...] | None = None,
 ) -> list[str]:
     """Build the SESSION CONTEXT section lines.
@@ -106,6 +108,9 @@ def _section_session_context(
         "",
         f"- framework        : {framework}",
         f"- kernel_enabled   : {'true' if kernel_enabled else 'false'}",
+        f"- explore_enabled  : {'true' if explore_enabled else 'false'}",
+        f"- framework_phase_enabled : "
+        f"{'true' if framework_phase_enabled else 'false'}",
         f"- objective        : {obj}",
         f"- max_minutes      : {max_minutes}",
         f"- framework_source_roots: {roots_line}",
@@ -128,39 +133,69 @@ def _section_session_context(
         "anything outside that set returns `policy_denied` with rule",
         "`phase_incompatible`. The 6-phase chain is:",
         "  PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE",
-        "(FRAMEWORK_PR is skipped under ``--no-framework``.)",
-        "Transitions are Coordinator-owned (you cannot write phase).",
+        "Disabled phases (see PHASE CONTRACT below) are skipped but keep "
+        "their place in the chain. Transitions are Coordinator-owned "
+        "(you cannot write phase).",
     ]
 
 
-def _section_phase_semantics(*, kernel_enabled: bool) -> list[str]:
+def _section_phase_semantics(
+    *,
+    kernel_enabled: bool,
+    explore_enabled: bool = True,
+    framework_phase_enabled: bool = True,
+) -> list[str]:
     """Render the per-phase allowed-action contract (current phase injected
-    dynamically by the Coordinator)."""
+    dynamically by the Coordinator).
+
+    Phases switched off by ``--no-explore`` / ``--no-kernel`` /
+    ``--no-framework`` keep their row in the 6-phase chain but are annotated
+    ``(DISABLED: --no-xxx — phase skipped)`` so Orchestration plans against the
+    phases the run will actually enter.
+    """
     from ..phase_state import (
         PHASE_NAMES,
         is_phase_interleave_enabled,
         llm_proposable_actions_for_with_interleave,
     )
 
+    # phase name -> the flag that disabled it (None => always enabled).
+    disabled_suffix: dict[str, str] = {}
+    if not framework_phase_enabled:
+        disabled_suffix["FRAMEWORK_PR"] = "--no-framework"
+    if not explore_enabled:
+        disabled_suffix["EXPLORE"] = "--no-explore"
+    if not kernel_enabled:
+        disabled_suffix["KERNEL"] = "--no-kernel"
+
     interleave = is_phase_interleave_enabled()
     lines: list[str] = [
         "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "",
-        "The Coordinator runs the optimization in a 6-phase linear pipeline",
-        "(FRAMEWORK_PR collapses out with `--no-framework`, leaving 5).",
+        "The Coordinator runs the optimization in a 6-phase linear pipeline.",
         "Each tick it injects a `=== Phase ===` block with the current",
         "phase. Per-phase proposable action sets (PolicyGate R1 enforces these):",
         "",
     ]
+    if disabled_suffix:
+        skipped = ", ".join(
+            f"{ph} ({flag})" for ph, flag in disabled_suffix.items()
+        )
+        lines.append(
+            f"Phases SKIPPED this run (never entered): {skipped}."
+        )
+        lines.append("")
     for phase in PHASE_NAMES:
         proposable = sorted(
             llm_proposable_actions_for_with_interleave(
                 phase, interleave=interleave,
             )
         )
-        if not kernel_enabled and phase == "KERNEL":
+        flag = disabled_suffix.get(phase)
+        if flag:
             lines.append(
-                f"- **{phase}**: {', '.join(proposable)} (skipped in --no-kernel runs)"
+                f"- **{phase}**: {', '.join(proposable)} "
+                f"(DISABLED: {flag} — phase skipped)"
             )
         else:
             lines.append(f"- **{phase}**: {', '.join(proposable)}")
@@ -762,6 +797,8 @@ def build_orchestration_prompt(
     enabled_actions: Iterable[str],
     framework: str = "sglang",
     kernel_enabled: bool | None = None,
+    explore_enabled: bool = True,
+    framework_phase_enabled: bool = True,
     objective_kind: str = "time_only",
     objective_value: float | str | None = None,
     max_minutes: int = 0,
@@ -776,6 +813,11 @@ def build_orchestration_prompt(
     enabled_actions: enabled action names; final ordering is by pipeline_phase.
     framework: ``sglang`` / ``vllm`` — printed in SESSION CONTEXT.
     kernel_enabled: explicit override; ``None`` derives from KERNEL_OWNED actions.
+    explore_enabled: when False (``--no-explore``) the EXPLORE phase is skipped;
+        the prompt annotates it as DISABLED so Orchestration's plan matches the
+        real phase chain.
+    framework_phase_enabled: when False (``--no-framework``) the FRAMEWORK_PR
+        phase is skipped; annotated DISABLED in the prompt.
     objective_kind / objective_value: :mod:`objective` strings, printed verbatim.
     max_minutes: wall-clock budget for the run.
     rules_fragment_path: path to ``orchestration.md``; placeholder if unreadable.
@@ -797,10 +839,16 @@ def build_orchestration_prompt(
             objective_kind=objective_kind,
             objective_value=objective_value,
             max_minutes=max_minutes,
+            explore_enabled=explore_enabled,
+            framework_phase_enabled=framework_phase_enabled,
             framework_source_roots=framework_source_roots,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
-        _section_phase_semantics(kernel_enabled=kernel_enabled),
+        _section_phase_semantics(
+            kernel_enabled=kernel_enabled,
+            explore_enabled=explore_enabled,
+            framework_phase_enabled=framework_phase_enabled,
+        ),
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled),
     ]
@@ -814,18 +862,33 @@ def build_orchestration_prompt(
     return "\n\n".join(parts).rstrip() + "\n"
 
 
-def default_enabled_actions(*, no_kernel: bool) -> tuple[str, ...]:
+def default_enabled_actions(
+    *, no_kernel: bool, no_explore: bool = False,
+) -> tuple[str, ...]:
     """Return the canonical enabled-action set used by the CLI.
 
+    Filters :data:`FULL_ENABLED_ACTIONS` per flag so the flags compose: a
+    ``--no-kernel --no-explore`` run drops both kernel-owned names and the
+    ``explore`` grid-runner. ``--no-framework`` is intentionally absent — the
+    ``framework_pr`` action is Coordinator-internal and never appears in the
+    catalogue, so it has nothing to trim.
+
     Args:
-        no_kernel (bool): When ``True``, return the no-kernel action set;
-            otherwise the full set.
+        no_kernel (bool): When ``True``, drop the kernel-only actions (keep the
+            intersection with :data:`NO_KERNEL_ENABLED_ACTIONS`).
+        no_explore (bool): When ``True``, drop the ``explore`` grid-runner
+            action (EXPLORE phase is skipped).
 
     Returns:
-        tuple[str, ...]: :data:`NO_KERNEL_ENABLED_ACTIONS` when ``no_kernel`` is
-        set, else :data:`FULL_ENABLED_ACTIONS`.
+        tuple[str, ...]: The filtered enabled-action set, preserving
+        :data:`FULL_ENABLED_ACTIONS` ordering.
     """
-    return NO_KERNEL_ENABLED_ACTIONS if no_kernel else FULL_ENABLED_ACTIONS
+    actions = list(FULL_ENABLED_ACTIONS)
+    if no_kernel:
+        actions = [a for a in actions if a in NO_KERNEL_ENABLED_ACTIONS]
+    if no_explore:
+        actions = [a for a in actions if a != "explore"]
+    return tuple(actions)
 
 
 __all__ = [

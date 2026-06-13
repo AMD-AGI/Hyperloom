@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``optimizer_runs/robustness_monitor.sh.example`` session-dir resolution.
+"""Tests for ``launcher/robustness_monitor.sh.example`` session-dir resolution.
 
 The monitor resolves the session dir from an explicit env var or the
 ``$LAUNCH_INFO_FILE`` ``.session_dir`` field (polling a bounded window if not
@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MONITOR = REPO_ROOT / "optimizer_runs" / "robustness_monitor.sh.example"
+MONITOR = REPO_ROOT / "inference_optimizer" / "launcher" / "robustness_monitor.sh.example"
 
 # Vars the monitor consumes; stripped from the inherited env so each test is hermetic.
 _MONITOR_VARS = (
@@ -214,3 +214,9 @@ def test_monitor_handles_leading_zero_wait_sec(tmp_path):
 
     assert proc.returncode == 0, f"rc={proc.returncode}\nstdout={out}\nstderr={err}"
     assert "value too great for base" not in err
+
+
+def test_monitor_resume_is_pinned_to_resolved_session_dir():
+    """Crash recovery must never use bare --resume, which auto-picks the latest session."""
+    text = MONITOR.read_text(encoding="utf-8")
+    assert '--resume --resume-from "$session_dir"' in text
