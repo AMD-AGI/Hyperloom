@@ -44,7 +44,8 @@ MAINTENANCE_EVERY_TICKS: int = 50
 # R2: default per-macro-cycle wall-clock window (hours) in cyclic mode. Each
 # phase's budget fraction (DEFAULT_PHASE_BUDGET_PCT) applies to this window
 # rather than the whole run. Env override: INFERENCE_OPTIMIZER_CYCLE_HOURS.
-DEFAULT_CYCLE_HOURS: float = 6.0
+# Wall-clock bar quartered (was 6.0) for short-run cycle testing.
+DEFAULT_CYCLE_HOURS: float = 1.5
 # Trailing window for the crash-rate emergency stop: the threshold counts only
 # crashes within this many seconds so old crashes age out on long runs/resume.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
@@ -1688,8 +1689,16 @@ class Coordinator:
         next_candidate = self._select_next_framework_pr_candidate()
         if next_candidate is None:
             # Hold the phase open while authored patches are still benched/critic-reviewed (gains must land before plateau judge); gated by authoring flag.
+            # Only wait when the pump itself discovered a PR batch to author against:
+            # an empty batch list means no pump-initiated authoring is outstanding, so
+            # an LLM-proposed integrate_patch must NOT keep FRAMEWORK_PR open (else the
+            # phase livelocks under a large budget — no discover, no done, no advance).
+            discovered_batch = bool(
+                getattr(self.shared_state, "framework_pr_batches", None) or []
+            )
             if (
-                getattr(self.shared_state, "framework_pr_authoring_enabled", False)
+                discovered_batch
+                and getattr(self.shared_state, "framework_pr_authoring_enabled", False)
                 and await self._framework_pr_authoring_inflight()
             ):
                 return
@@ -6725,18 +6734,6 @@ class Coordinator:
                     "phase-routing change applied",
                     task.task_id,
                 )
-
-        # Aggregate any research evidence (PR / diff / NVIDIA refs)
-        # reported by this specialist into the exploration-depth tracker.
-        # Applies to every domain that self-reports a ``research`` block
-        # (pr_intel + research_scout), de-duped across the session.
-        try:
-            self._aggregate_research_evidence(done_payload)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception(
-                "depth: research-evidence aggregation failed for task=%s",
-                task.task_id,
-            )
 
         # Harvest research-scout output (hints, competitor target, gap seeds, PR dedup). Fail-soft.
         if domain == "research_scout_specialist":
