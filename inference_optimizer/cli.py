@@ -1895,17 +1895,42 @@ def _default_target_summary(args: argparse.Namespace) -> str:
     return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
 
 
-def _print_final_summary(state: SharedState, stop_reason: str) -> None:
+def _read_failure_summary(session_dir: Path) -> dict | None:
+    """Read ``reports/final.json``'s ``failure_summary`` block, if present.
+
+    Best-effort: returns ``None`` when the file is missing/unreadable or the
+    block is absent (e.g. non-failure runs). Used to surface the real terminal
+    root cause in the end-of-run summary on ``baseline_failed`` (#465).
+    """
+    try:
+        from .session_paths import reports_dir
+        final_json = reports_dir(session_dir) / "final.json"
+        data = json.loads(final_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    fs = data.get("failure_summary") if isinstance(data, dict) else None
+    return fs if isinstance(fs, dict) else None
+
+
+def _print_final_summary(
+    state: SharedState,
+    stop_reason: str,
+    session_dir: Path | None = None,
+) -> None:
     """Print the end-of-run summary block to stdout.
 
     Reports the stop reason, session id, model, baseline throughput, the
     per-round (informational) cumulative gain, the validated cumulative gain
     (with a staleness warning when the optimization stack grew after the last
     validation), the current best config, pruned families, and crash count.
+    On ``baseline_failed`` it also surfaces the real terminal root cause from
+    ``reports/final.json`` instead of a benign upstream WARN (#465).
 
     Args:
         state (SharedState): The final shared state after the run completes.
         stop_reason (str): Why the run stopped (e.g. ``"target_reached"``).
+        session_dir (Path | None): Session root, used to read the
+            ``failure_summary`` block on failure runs.
 
     Returns:
         None
@@ -1916,6 +1941,19 @@ def _print_final_summary(state: SharedState, stop_reason: str) -> None:
     print(f"  session_id           : {state.session_id}")
     print(f"  model                : {state.model_name}")
     print(f"  baseline_tput        : {state.baseline_tput:.1f} tok/s/GPU")
+    if session_dir is not None and stop_reason == "baseline_failed":
+        failure_summary = _read_failure_summary(session_dir)
+        if failure_summary and failure_summary.get("root_cause"):
+            print(
+                f"  root_cause           : "
+                f"[{failure_summary.get('root_cause_type', 'unknown')}] "
+                f"{failure_summary.get('root_cause')}"
+            )
+            if failure_summary.get("server_log"):
+                print(
+                    f"  server_log           : "
+                    f"{failure_summary.get('server_log')}"
+                )
     print(
         f"  cumulative_gain      : {state.cumulative_gain:.2f}% "
         f"(per-round sum — informational)"
@@ -4680,7 +4718,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
 
-    _print_final_summary(coordinator.shared_state, stop_reason)
+    _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
     return 0 if stop_reason in (
         "target_reached",
         "no_more_leverage",
