@@ -3368,6 +3368,39 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: EXPLORE re-dispatch failed")
 
+    def _aggregate_research_evidence(self, done_payload: dict[str, Any]) -> None:
+        """Aggregate research evidence (PR ids / diffs / NVIDIA refs) into the
+        session-wide seen-set, de-duped across the session.
+
+        Applies to every domain that self-reports a ``research`` block
+        (``pr_intel`` + ``research_scout``), so FRAMEWORK_PR / explore lanes do
+        not re-fetch the same references. Fail-soft: never raises (the caller
+        also guards, but keep this self-contained so partial payloads degrade
+        gracefully).
+        """
+        block = done_payload.get("research")
+        if not isinstance(block, dict):
+            return
+        pr_ids: list[Any] = []
+        for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs"):
+            vals = block.get(key)
+            if isinstance(vals, list):
+                pr_ids.extend(vals)
+        if not pr_ids:
+            return
+        try:
+            added = self.shared_state.register_seen_pr_ids(pr_ids)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "depth: register_seen_pr_ids failed during research aggregation",
+            )
+            return
+        if added:
+            log.info(
+                "depth: aggregated %d new research reference(s) into seen-set",
+                added,
+            )
+
     def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
         """Persist scout output (hints, competitor target, gap seeds, dedup); all steps fail-soft."""
         from . import research_hints as _research_hints
