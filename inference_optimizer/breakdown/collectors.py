@@ -19,6 +19,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from ..orchestrator.optimization_journal import (
+    classify_change_kind,
+    operation_kind_for,
+    proposer_for,
+)
+
 log = logging.getLogger(__name__)
 
 
@@ -1348,6 +1354,19 @@ def _journal_entry_to_event(e: dict[str, Any]) -> dict[str, Any]:
         action = kind
     else:
         action = change or kind or "other"
+    provenance = str(e.get("provenance") or "")
+    extras = {k: v for k, v in (
+        ("variant_name", e.get("variant_name")),
+        ("reason", e.get("reason")),
+        # Proposer attribution + stable filter label, threaded so the timeline
+        # answers "what / how / who" for each step.
+        ("provenance", provenance),
+        ("proposer", proposer_for(provenance) if provenance else ""),
+        ("scope", str(e.get("scope") or "")),
+        ("fingerprint", str(e.get("fingerprint") or "")),
+        ("operation_kind", operation_kind_for(action, kind)),
+        ("metrics", e.get("metrics") if isinstance(e.get("metrics"), dict) else None),
+    ) if v}
     return {
         "ts":              _iso_z(e.get("ts")),
         "action":          action,
@@ -1361,10 +1380,7 @@ def _journal_entry_to_event(e: dict[str, Any]) -> dict[str, Any]:
         "error_class":     e.get("error_class"),
         "phase":           str(e.get("phase") or ""),
         "change":          change,
-        "extras":          {k: v for k, v in (
-            ("variant_name", e.get("variant_name")),
-            ("reason", e.get("reason")),
-        ) if v},
+        "extras":          extras,
     }
 
 
@@ -2671,15 +2687,31 @@ def _shape_ledger(
         """
         if not isinstance(e, dict):
             return {}
-        return {
+        args = str(e.get("extra_server_args") or "")
+        envs = dict(e.get("extra_envs") or {})
+        provenance = str(e.get("provenance") or "")
+        # Classify the variant into a stable operation_kind (backend/param/env)
+        # so the ledger can be filtered the same way as the timeline / trace.
+        change_kind = classify_change_kind(
+            "explore", {"extra_server_args": args, "extra_envs": envs},
+        )
+        shaped = {
             "name":              str(e.get("name") or ""),
             "fingerprint":       str(e.get("fingerprint") or ""),
-            "extra_server_args": str(e.get("extra_server_args") or ""),
-            "extra_envs":        dict(e.get("extra_envs") or {}),
+            "extra_server_args": args,
+            "extra_envs":        envs,
             "output_throughput": _to_float(e.get("output_throughput") or e.get("tput")),
             "gain_pct":          _to_float(e.get("gain_pct")),
             "ts":                str(e.get("ts") or ""),
+            "operation_kind":    operation_kind_for("explore", change_kind),
         }
+        if provenance:
+            shaped["provenance"] = provenance
+            shaped["proposer"] = proposer_for(provenance)
+        scope = str(e.get("scope") or "")
+        if scope:
+            shaped["scope"] = scope
+        return shaped
 
     accepted = [_shape_entry(e) for e in ledger.get("accepted") or []]
     rejected = [_shape_entry(e) for e in ledger.get("rejected") or []]
@@ -4434,6 +4466,7 @@ def collect_kb_provenance(
         cortex_flusher_status_json as _flusher_status_path,
         cortex_pending_ndjson as _pending_path,
         pr_monitor_status_json as _pr_status_path,
+        recipe_snapshot_audit_jsonl as _recipe_audit_path,
     )
 
     # Surface the PR Monitor reachability snapshot via ``warnings`` so it's greppable.
@@ -4510,6 +4543,23 @@ def collect_kb_provenance(
         st = str(row.get("status") or "unknown")
         status_counts[st] = status_counts.get(st, 0) + 1
 
+    # Recipe-snapshot / gbrain remote read audit (RecipeKB.audit_hook ->
+    # recipe_snapshot/.audit.jsonl). Summarises whether the snapshot KB was
+    # actually consulted, which backend served it, and how each read resolved.
+    recipe_audit = _read_last_n_audit(_recipe_audit_path(session_dir), n=50)
+    recipe_by_resolution: dict[str, int] = {}
+    recipe_by_remote: dict[str, int] = {}
+    recipe_hits = 0
+    for row in recipe_audit:
+        recipe_by_resolution[str(row.get("resolution") or "unknown")] = (
+            recipe_by_resolution.get(str(row.get("resolution") or "unknown"), 0) + 1
+        )
+        recipe_by_remote[str(row.get("remote") or "unknown")] = (
+            recipe_by_remote.get(str(row.get("remote") or "unknown"), 0) + 1
+        )
+        if row.get("hit"):
+            recipe_hits += 1
+
     cortex_sid = (state.get("cortex_session_id") or "").strip()
     warm = state.get("warm_start_recipe") or {}
     pitfalls = state.get("warm_start_pitfalls") or []
@@ -4536,6 +4586,13 @@ def collect_kb_provenance(
         },
         "audit_tail_count":     len(audit_tail),
         "audit_status_counts":  status_counts,
+        "recipe_snapshot_reads": {
+            "count":         len(recipe_audit),
+            "hits":          recipe_hits,
+            "by_resolution": recipe_by_resolution,
+            "by_remote":     recipe_by_remote,
+            "tail":          recipe_audit[-10:],
+        },
         "flusher_status": _collect_flusher_status(
             session_dir,
             status_path=_flusher_status_path(session_dir),
@@ -5119,6 +5176,38 @@ def collect_langfuse(
     }
 
 
+def _proposal_scores_by_variant(state: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Index ``specialist_rounds[].ensemble_scores`` by variant name.
+
+    Returns ``{variant_name: [{rater, score, reason}, ...]}`` so a decision row
+    can show who scored the proposal and how (the proposal_scorer signal that
+    fed the KEEP/REVERT). Best-effort: shape drift yields an empty map.
+    """
+    out: dict[str, list[dict[str, Any]]] = {}
+    rounds = state.get("specialist_rounds")
+    if not isinstance(rounds, list):
+        return out
+    for r in rounds:
+        if not isinstance(r, dict):
+            continue
+        ens = r.get("ensemble_scores")
+        models = ens.get("models") if isinstance(ens, dict) else None
+        if not isinstance(models, dict):
+            continue
+        for slug, per_model in models.items():
+            if not isinstance(per_model, dict):
+                continue
+            for name, cell in per_model.items():
+                if not isinstance(cell, dict) or cell.get("score") is None:
+                    continue
+                out.setdefault(str(name), []).append({
+                    "rater": str(slug),
+                    "score": _to_float(cell.get("score")),
+                    "reason": str(cell.get("reason") or ""),
+                })
+    return out
+
+
 def collect_decision_trace(
     session_dir: Path,
     state: dict[str, Any],
@@ -5145,6 +5234,7 @@ def collect_decision_trace(
     """
     calls = _load_llm_calls(session_dir, warnings)
     phase_windows = _build_phase_windows(state)
+    scores_by_variant = _proposal_scores_by_variant(state)
 
     # ── Index calls by decision key; orphans (no key) go to a ts list ──
     calls_by_key: dict[str, list[dict[str, Any]]] = {}
@@ -5167,19 +5257,47 @@ def collect_decision_trace(
         key = _decision_key(task_id, "")
         ts = _iso_z(e.get("ts"))
         phase = str(e.get("phase") or "").strip() or _phase_at(ts, phase_windows)
+        provenance = str(e.get("provenance") or "")
+        change_kind = str(e.get("kind") or "")
+        # ``component`` is now the real proposer (specialist:<domain> / grid /
+        # orchestration) derived from provenance, not a hard-coded constant, so
+        # the decision timeline answers "who proposed this".
+        decision: dict[str, Any] = {
+            "component": proposer_for(provenance) if provenance else "orchestration",
+            "change": str(e.get("change") or ""),
+            "outcome": str(e.get("outcome") or ""),
+            "gain_pct": _to_float(e.get("gain_pct")),
+            "task_id": task_id,
+            "operation_kind": operation_kind_for("", change_kind),
+        }
+        if change_kind:
+            decision["kind"] = change_kind
+        if provenance:
+            decision["provenance"] = provenance
+        scope = str(e.get("scope") or "")
+        if scope:
+            decision["scope"] = scope
+        fingerprint = str(e.get("fingerprint") or "")
+        if fingerprint:
+            decision["fingerprint"] = fingerprint
+        detail_metrics = e.get("metrics")
+        if isinstance(detail_metrics, dict) and detail_metrics:
+            decision["metrics"] = detail_metrics
+        variant_name = str(e.get("variant_name") or "")
+        if variant_name:
+            decision["variant_name"] = variant_name
+            # Attach the proposal_scorer signal (who rated this proposal, how)
+            # so the decision step answers "was it scored, by whom, how high".
+            scored = scores_by_variant.get(variant_name)
+            if scored:
+                decision["proposal_scores"] = scored
         decisions.append({
             "kind": "keep_revert",
             "key": key,
             "phase": phase,
             "tick": e.get("tick"),
             "ts": ts,
-            "decision": {
-                "component": "orchestration",
-                "change": str(e.get("change") or ""),
-                "outcome": str(e.get("outcome") or ""),
-                "gain_pct": _to_float(e.get("gain_pct")),
-                "task_id": task_id,
-            },
+            "decision": decision,
         })
     for row in _load_dispatch_history_all(session_dir, warnings):
         dyn_id = str(row.get("dyn_id") or "")
@@ -5194,6 +5312,7 @@ def collect_decision_trace(
             "ts": ts,
             "decision": {
                 "component": "dynamic_action",
+                "operation_kind": "dynamic_action",
                 "event": str(row.get("event") or ""),
                 "dyn_id": dyn_id,
                 "verdict": row.get("verdict"),

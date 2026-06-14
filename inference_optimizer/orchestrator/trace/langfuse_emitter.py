@@ -37,6 +37,7 @@ from typing import Any
 
 from ...session_paths import (
     decision_trace_path,
+    recipe_snapshot_audit_jsonl,
     trace_dir,
     trace_ext_dir,
 )
@@ -341,6 +342,8 @@ class LangfuseEmitter:
             "spans_opened": 0,          # phase + agent spans created
             "ext_shards_read": 0,       # out-of-process ext/*.jsonl files swept
             "breakdown_recorded": 0,    # 1 once the full SBD JSON was attached
+            "kb_spans_sent": 0,         # KB trace spans (assess/priors/recipe)
+            "recipe_audit_read": 0,     # recipe_snapshot/.audit.jsonl rows swept
             "errors": 0,                # swallowed send failures
         }
         self._flushed = False
@@ -500,6 +503,54 @@ class LangfuseEmitter:
                 conv_row=emit_parts.get("conv"),
             )
 
+    def record_kb_span(
+        self,
+        *,
+        name: str,
+        agent: str,
+        output: Any,
+        phase: str = lfmap.UNPHASED,
+        metadata: dict[str, Any] | None = None,
+        ts: str | None = None,
+    ) -> None:
+        """Emit one non-LLM KB trace as a span nested under its agent span.
+
+        Used for the KB integration trace (substrate ``kb_assess`` /
+        historical ``kb_priors`` per critic iteration, and recipe-snapshot /
+        gbrain remote reads) so the "was KB used, what did we ask, what came
+        back, did it influence the decision" evidence lands on the same trace
+        as the LLM generations. The full trace dict goes in ``output``; a small
+        scalar summary goes in ``metadata`` for filtering. Best-effort and a
+        no-op unless live push is enabled.
+
+        Args:
+            name (str): Span name (e.g. ``"kb_assess:iter_3"``).
+            agent (str): Owning agent (``"critic"`` / ``"recipe_kb"``).
+            output (Any): The trace payload attached as the span output.
+            phase (str): Phase bucket; defaults to ``(unphased)``.
+            metadata (dict[str, Any] | None): Scalar summary for filtering.
+            ts (str | None): ISO timestamp for span start, if known.
+        """
+        if not self._enabled:
+            return
+        try:
+            start = lfmap.parse_ts(ts)
+            parent = self._ensure_agent_span(phase, agent, start)
+            obs = _start_obs(
+                parent,
+                name=name,
+                as_type="span",
+                start_time=start,
+                input=None,
+                output=output,
+                metadata=metadata or {},
+            )
+            _end_obs(obs, start)
+            self._counts["kb_spans_sent"] += 1
+        except Exception:  # noqa: BLE001 — trace must never break the loop
+            self._counts["errors"] += 1
+            log.debug("langfuse: record_kb_span failed", exc_info=True)
+
     def _emit_generation(
         self,
         *,
@@ -561,6 +612,7 @@ class LangfuseEmitter:
         try:
             self._flush_pending_halves()
             self._flush_ext_shards()
+            self._flush_recipe_kb_audit()
             self._flush_decision_scores()
             self._close_spans()
         except Exception:  # noqa: BLE001
@@ -679,6 +731,35 @@ class LangfuseEmitter:
             for row in _load_jsonl(shard):
                 self._emit_generation(token_row=row, conv_row=None)
 
+    def _flush_recipe_kb_audit(self) -> None:
+        """Backfill recipe-snapshot / gbrain remote reads from the audit log.
+
+        The recipe KB dispatcher appends one row per remote read to
+        ``runtime/recipe_snapshot/.audit.jsonl`` (it has no Langfuse handle, by
+        design). Each row becomes a ``kb:recipe_snapshot:<method>`` span under
+        the ``recipe_kb`` agent so the trace shows which backend served the
+        warm-start recipe, the request, and how it resolved. Read out-of-band
+        at session end (mirrors :meth:`_flush_ext_shards`); idempotent via the
+        ``flush_session`` guard.
+        """
+        rows = _load_jsonl(recipe_snapshot_audit_jsonl(self.session_dir))
+        for row in rows:
+            self._counts["recipe_audit_read"] += 1
+            method = str(row.get("method") or "read")
+            self.record_kb_span(
+                name=f"kb:recipe_snapshot:{method}",
+                agent="recipe_kb",
+                output=row,
+                metadata={
+                    "kind": "recipe_snapshot",
+                    "method": method,
+                    "remote": row.get("remote"),
+                    "resolution": row.get("resolution"),
+                    "hit": bool(row.get("hit")),
+                },
+                ts=row.get("ts"),
+            )
+
     def _flush_decision_scores(self) -> None:
         """Convert each decision_trace row into Langfuse Score(s).
 
@@ -689,23 +770,98 @@ class LangfuseEmitter:
         missing), it falls back to a trace-level score.
         """
         for drow in _load_jsonl(decision_trace_path(self.session_dir)):
-            for score in lfmap.decision_to_scores(drow):
-                meta = score.get("metadata") or {}
-                phase = str(meta.get("phase") or lfmap.UNPHASED)
-                agent = str(meta.get("component") or lfmap.UNKNOWN_AGENT)
-                self._create_score(score, phase=phase, agent=agent)
+            scores = lfmap.decision_to_scores(drow)
+            if not scores:
+                continue
+            meta0 = scores[0].get("metadata") or {}
+            phase = str(meta0.get("phase") or lfmap.UNPHASED)
+            agent = self._span_agent_for(str(meta0.get("component") or ""))
+            # Per-decision span carrying ``operation_kind`` (+ proposer / effect)
+            # so the trace can be filtered by "what this step did". Scores attach
+            # to this step span when it opens, else to the owning agent span.
+            step_span = self._open_decision_span(drow, phase, agent)
+            for score in scores:
+                self._create_score(
+                    score, phase=phase, agent=agent, span=step_span,
+                )
+            if step_span is not None:
+                self._safe_end(step_span)
+
+    @staticmethod
+    def _span_agent_for(proposer: str) -> str:
+        """Map a resolved proposer back to a span-attachable agent name.
+
+        ``specialist:<domain>`` collapses to the ``specialist`` agent span and
+        ``grid`` to ``orchestration`` (grid proposals are orchestration-driven),
+        so the per-decision score still lands under a real agent span instead of
+        always falling back to the trace level.
+        """
+        p = (proposer or "").strip()
+        if p.startswith("specialist:"):
+            return "specialist"
+        if p == "grid":
+            return "orchestration"
+        return p or lfmap.UNKNOWN_AGENT
+
+    def _open_decision_span(
+        self, drow: dict[str, Any], phase: str, agent: str,
+    ) -> Any:
+        """Open an ``optimization_step:<operation_kind>`` span for one decision.
+
+        Parented to the owning agent span (then phase span, then root). Carries
+        operation_kind + proposer + effect in metadata so dashboards/Langfuse can
+        filter steps directly. Returns the span, or ``None`` when no parent is
+        open or the SDK rejects the call (best-effort; never raises).
+        """
+        parent = (
+            self._agent_spans.get((phase, agent))
+            or self._phase_spans.get(phase)
+            or self._root_span
+        )
+        if parent is None:
+            return None
+        dec = drow.get("decision") or {}
+        op_kind = str(dec.get("operation_kind") or "decision")
+        md = {
+            "operation_kind": op_kind,
+            "proposer": dec.get("component"),
+            "provenance": dec.get("provenance"),
+            "scope": dec.get("scope"),
+            "change": dec.get("change"),
+            "outcome": dec.get("outcome"),
+            "gain_pct": dec.get("gain_pct"),
+            "variant_name": dec.get("variant_name"),
+            "fingerprint": dec.get("fingerprint"),
+            "task_id": dec.get("task_id"),
+            "phase": phase,
+            "tick": drow.get("tick"),
+            "metrics": dec.get("metrics"),
+            "proposal_scores": dec.get("proposal_scores"),
+        }
+        md = {k: v for k, v in md.items() if v is not None}
+        try:
+            return _start_obs(
+                parent, name=f"optimization_step:{op_kind}",
+                as_type="span", metadata=md,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("langfuse: open decision span failed", exc_info=True)
+            return None
 
     def _create_score(
         self, score: dict[str, Any], *, phase: str, agent: str,
+        span: Any = None,
     ) -> None:
-        """Attach a Langfuse Score to the owning agent span or the trace.
+        """Attach a Langfuse Score to a step span / agent span / the trace.
 
         Args:
             score: Score payload (``name``, ``value``, ``data_type``, ...).
             phase: Phase that owns the decision, used to locate the span.
             agent: Agent/component that owns the decision.
+            span: Optional pre-opened step span; preferred over the agent span.
         """
-        span = self._agent_spans.get((phase, agent))
+        if span is None:
+            span = self._agent_spans.get((phase, agent))
         try:
             if span is not None and hasattr(span, "score"):
                 span.score(

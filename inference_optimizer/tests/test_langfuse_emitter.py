@@ -488,32 +488,121 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
     dtrace.write_text(
         json.dumps({
             "decision": {"change": "tp_sweep", "component": "kernel",
+                         "operation_kind": "kernel_opt",
                          "outcome": "KEEP", "gain_pct": 12.5, "task_id": "k1"},
             "phase": "KERNEL", "tick": 5, "ts": "2026-06-09T16:00:00Z",
         }) + "\n"
         + json.dumps({
-            "decision": {"change": "radix", "component": "orchestration",
+            "decision": {"change": "radix", "component": "grid",
+                         "operation_kind": "param", "provenance": "default_grid",
                          "outcome": "REVERT", "gain_pct": None, "task_id": "t2"},
             "phase": "EXPLORE", "tick": 6, "ts": "2026-06-09T16:05:00Z",
         }) + "\n",
         encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
-    # Create an agent span for (KERNEL, kernel) so its decision attaches there;
-    # the (EXPLORE, orchestration) decision has no span -> trace-level fallback.
+    # Create an agent span for (KERNEL, kernel) so its step span parents there.
     em.record_llm_call(_llm_row(phase="KERNEL", component="kernel", role="kernel"))
     em.record_conversation(_conv_row(phase="KERNEL", component="kernel", role="kernel"))
     em.flush_session()
 
+    # Each decision now opens an ``optimization_step:<operation_kind>`` span,
+    # tagged with operation_kind in metadata, and its scores attach to it.
+    kernel_step = client.span_named("optimization_step:kernel_opt")
+    param_step = client.span_named("optimization_step:param")
+    assert kernel_step is not None
+    assert kernel_step.kwargs["metadata"]["operation_kind"] == "kernel_opt"
+    assert param_step is not None
+    assert param_step.kwargs["metadata"]["operation_kind"] == "param"
+    assert param_step.kwargs["metadata"]["provenance"] == "default_grid"
+
+    # KERNEL KEEP w/ gain -> decision_outcome + gain_pct; EXPLORE REVERT -> 1.
     span_score_names = sorted(s["name"] for s in client.observation_scores)
-    trace_score_names = sorted(s["name"] for s in client.scores)
-    # KERNEL/kernel KEEP w/ gain -> 2 span-level scores.
-    assert span_score_names == ["decision_outcome", "gain_pct"]
-    # EXPLORE/orchestration REVERT w/o gain -> 1 trace-level fallback score.
-    assert trace_score_names == ["decision_outcome"]
+    assert span_score_names == ["decision_outcome", "decision_outcome", "gain_pct"]
     gain = [s for s in client.observation_scores if s["name"] == "gain_pct"][0]
     assert gain["value"] == 12.5
     assert gain["data_type"] == "NUMERIC"
+    assert gain["metadata"]["operation_kind"] == "kernel_opt"
+
+
+# ---------------------------------------------------------------------------
+# KB trace spans (record_kb_span + recipe-snapshot audit flush)
+# ---------------------------------------------------------------------------
+def test_record_kb_span_disabled_is_noop(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
+    em = lfe.LangfuseEmitter(tmp_path)
+    em.record_kb_span(name="kb_assess:iter_0", agent="critic", output={"x": 1})
+    assert em._counts["kb_spans_sent"] == 0
+
+
+def test_record_kb_span_nests_under_agent(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em = lfe.LangfuseEmitter(sd)
+    em.record_kb_span(
+        name="kb_assess:iter_2", agent="critic",
+        output={"mode": "dry_run", "verdict_count": 1},
+        metadata={"kind": "kb_assess", "iter": 2},
+        ts="2026-06-09T15:14:54.100000+00:00",
+    )
+    span = client.span_named("kb_assess:iter_2")
+    assert span is not None
+    assert span.kwargs["output"] == {"mode": "dry_run", "verdict_count": 1}
+    assert span.kwargs["metadata"]["kind"] == "kb_assess"
+    # nested under agent:critic
+    assert client.span_named("agent:critic") is not None
+    assert span.ended is True
+    assert em._counts["kb_spans_sent"] == 1
+
+
+def test_flush_backfills_recipe_snapshot_audit(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    from inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
+    audit = recipe_snapshot_audit_jsonl(sd)
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text("\n".join(json.dumps(r) for r in [
+        {"ts": "2026-06-09T15:14:54Z", "method": "get_recipe",
+         "remote": "gbrain", "resolution": "remote", "hit": True},
+        {"ts": "2026-06-09T15:14:55Z", "method": "search",
+         "remote": "cortex", "resolution": "local", "hit": False},
+    ]) + "\n", encoding="utf-8")
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+    assert client.span_named("kb:recipe_snapshot:get_recipe") is not None
+    assert client.span_named("kb:recipe_snapshot:search") is not None
+    assert client.span_named("agent:recipe_kb") is not None
+    persisted = lfe.read_receipt(sd)
+    assert persisted["counts"]["recipe_audit_read"] == 2
+    assert persisted["counts"]["kb_spans_sent"] == 2
+
+
+def test_flush_recipe_audit_idempotent(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    from inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
+    audit = recipe_snapshot_audit_jsonl(sd)
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text(
+        json.dumps({"ts": "2026-06-09T15:14:54Z", "method": "get_recipe",
+                    "remote": "gbrain", "resolution": "remote", "hit": True}) + "\n",
+        encoding="utf-8",
+    )
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+    n = len([s for s in client.spans
+             if s.kwargs.get("name", "").startswith("kb:recipe_snapshot")])
+    em.flush_session()
+    n2 = len([s for s in client.spans
+              if s.kwargs.get("name", "").startswith("kb:recipe_snapshot")])
+    assert n == 1 and n2 == 1
 
 
 # ---------------------------------------------------------------------------

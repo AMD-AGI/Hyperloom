@@ -7,8 +7,9 @@
 # terminal session (any ``stop_reason`` in ``STOP_REASON_VOCAB``, ``phase=CLOSE``,
 # or ``reports/final.md`` present), exits 0 without resuming. If the optimizer
 # process has disappeared from ``/proc`` *without* a terminal marker (unexpected
-# crash), re-launches it with ``--resume`` and updates ``$PID_FILE``. Logs the
-# resume invocation to ``$REPO_ROOT/optimizer_runs/resume_<ts>.log``.
+# crash), re-launches the same session only via
+# ``optimize --resume --resume-from "$session_dir"`` and updates ``$PID_FILE``.
+# Logs the resume invocation to ``$REPO_ROOT/optimizer_runs/resume_<ts>.log``.
 #
 # Required env (caller MUST export):
 #   PID_FILE        path to the optimizer's pidfile; rewritten on each resume
@@ -19,7 +20,8 @@
 #   MAX_HOURS                          24    deadline (this watchdog exits
 #                                            after MAX_HOURS + 1 buffer)
 #   TARGET_GAIN                        10    --target-gain forwarded to
-#                                            ``inference_optimizer optimize --resume``
+#                                            ``inference_optimizer optimize
+#                                            --resume --resume-from "$session_dir"``
 #   INFERENCE_OPTIMIZER_SESSION_DIR    (unset) session-dir holding state.json;
 #                                            when set it wins outright
 #   LAUNCH_INFO_FILE                   (unset) launch-info JSON written by
@@ -39,12 +41,11 @@
 #      polled for up to $LAUNCH_INFO_WAIT_SEC if not yet flushed)
 #   3. fail loudly; never guess or fall back to a timestamp/default path
 #
-# Invocation pattern (see ``inference_optimizer/SKILL.md`` §"Robustness
-# Monitor for Long Runs"):
+# Invocation pattern:
 #
 #   export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 #   mkdir -p "$RUN_DIR"
-#   cp "$REPO_ROOT/optimizer_runs/robustness_monitor.sh.example" \
+#   cp "$REPO_ROOT/inference_optimizer/launcher/robustness_monitor.sh.example" \
 #      "$RUN_DIR/robustness_monitor.sh"
 #   chmod +x "$RUN_DIR/robustness_monitor.sh"
 #   setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
@@ -173,7 +174,8 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
 
   echo "[robustness] optimizer stopped (no terminal marker); resuming $(date -Is)"
   resume_log="$REPO_ROOT/optimizer_runs/resume_$(date +%Y%m%d_%H%M%S).log"
-  MAGPIE_PYTHON="${MAGPIE_PYTHON}" setsid nohup inference_optimizer --verbose optimize --resume \
+  MAGPIE_PYTHON="${MAGPIE_PYTHON}" setsid nohup inference_optimizer --verbose optimize \
+    --resume --resume-from "$session_dir" \
     --target-gain "${TARGET_GAIN:-10}" --max-hours "${MAX_HOURS:-24}" \
     --tick-interval-sec 30 --kernel-claude \
     > "$resume_log" 2>&1 < /dev/null &

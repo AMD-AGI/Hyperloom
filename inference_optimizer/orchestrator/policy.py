@@ -19,6 +19,7 @@ from ..protocol.action_surfaces import (
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 from .phase_state import (
+    PHASE_KERNEL,
     PHASE_NAMES,
     PHASE_SWEEP,
     is_action_allowed_in_phase,
@@ -1040,6 +1041,30 @@ class PolicyGate:
         phase = (getattr(state, "phase", "") or "").strip().upper()
         if not phase or phase not in PHASE_NAMES:
             return
+        explore_enabled = bool(getattr(state, "explore_enabled", True))
+        # --no-explore is a hard intent: EXPLORE work is disabled for the whole
+        # run, so the interleave grey channel must not let KERNEL re-introduce
+        # an ``explore`` grid. This denial is ALWAYS fail-closed (independent of
+        # ``strict_phase``) because it reflects an explicit operator decision,
+        # not the softer per-phase action contract.
+        if (
+            not explore_enabled
+            and phase == PHASE_KERNEL
+            and action_name == EXPLORE_ACTION_NAME
+        ):
+            raise PolicyDenied(
+                f"action {EXPLORE_ACTION_NAME!r} is disabled for this run "
+                f"(--no-explore); KERNEL may not borrow the interleave "
+                f"channel to run an explore grid",
+                rule="explore_disabled",
+                hint=(
+                    "--no-explore skips the EXPLORE phase entirely. The "
+                    "phase-interleave grey channel cannot reintroduce "
+                    "`explore` into KERNEL. Use kernel-owned actions "
+                    "(kernel_opt / integrate / ...), or `specialist` / "
+                    "`integrate_patch` if you need patch research/integration."
+                ),
+            )
         # Robustness-delegate-only actions (e.g. ``recover``) are absent from the LLM-proposable set but still delegatable by robustness; accept if phase-allowed.
         if (
             intent_kind == "delegate"
@@ -1048,11 +1073,13 @@ class PolicyGate:
         ):
             return
         if is_action_llm_proposable_in_phase_with_interleave(
-            action_name, phase,
+            action_name, phase, explore_enabled=explore_enabled,
         ):
             return
         allowed = tuple(sorted(
-            llm_proposable_actions_for_with_interleave(phase)
+            llm_proposable_actions_for_with_interleave(
+                phase, explore_enabled=explore_enabled,
+            )
         ))
         hint = (
             f"you are in phase={phase}; action {action_name!r} is not in "

@@ -32,6 +32,7 @@ from ._subprocess_kill import (
     run_with_session_kill,
 )
 from .benchmark_result import (
+    estimate_killed_variant_throughput,
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
 )
@@ -682,6 +683,11 @@ class VariantResult:
         runtime_sec (float | None): Wall-clock seconds the subprocess consumed.
         killed_overtime (bool): ``True`` iff reaped by the soft overtime
             deadline rather than crashing/timing-out/succeeding.
+        estimated_output_throughput (float | None): Rough output tokens/sec
+            estimated from the engine's periodic ``server.log`` throughput
+            logs when the variant was killed before finishing. Informational
+            only — never a real measurement and never used for winner
+            selection; ``output_throughput`` stays ``None`` on the kill path.
     """
 
     name: str
@@ -714,6 +720,11 @@ class VariantResult:
     # Fix-E: True iff reaped by the overtime soft deadline; caller demotes to
     # the synthetic ``KILLED_OVERTIME`` outcome (no tput / fingerprint).
     killed_overtime: bool = False
+    # Rough output tok/s salvaged from the engine's periodic ``server.log``
+    # throughput logs on the killed_overtime path. Informational only: the
+    # variant stays ``failed``/``killed_overtime`` and this never feeds winner
+    # selection (which keys off ``output_throughput``).
+    estimated_output_throughput: float | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -757,6 +768,7 @@ class VariantResult:
             "note":               self.note,
             "runtime_sec":        self.runtime_sec,
             "killed_overtime":    self.killed_overtime,
+            "estimated_output_throughput": self.estimated_output_throughput,
         }
 
 
@@ -1344,6 +1356,7 @@ def _build_variant_yaml(
     model_path: str | None = None,
     gpu_type: str | None = None,
     benchmark_script: str | None = None,
+    server_lifecycle: dict[str, Any] | None = None,
 ) -> Path:
     """Materialize a per-variant Magpie YAML on disk.
 
@@ -1351,6 +1364,8 @@ def _build_variant_yaml(
     overrides the legacy hardcoded ``benchmark.model``; ``gpu_type`` pins the
     generic ``{framework}_{gpu_type}.sh``; ``benchmark_script`` (pre-sanitized)
     force-pins a script, applied last so the operator pick wins.
+    ``server_lifecycle`` (``{cleanup, pid_dir, port}``) enables Magpie's
+    persistent-server reuse so a paired round can re-attach to a hot server.
     """
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -1370,6 +1385,15 @@ def _build_variant_yaml(
         envs[extra_args_env] = _shell_safe_dedupe(combined)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
+
+    if server_lifecycle is not None:
+        from ._server_lifecycle import inject_lifecycle
+        inject_lifecycle(
+            bench,
+            cleanup=bool(server_lifecycle.get("cleanup", True)),
+            pid_dir=server_lifecycle["pid_dir"],
+            port=int(server_lifecycle["port"]),
+        )
 
     output_subdir.mkdir(parents=True, exist_ok=True)
     out_path = output_subdir / "config.yaml"
@@ -1593,6 +1617,7 @@ async def run_grid(
     benchmark_script: str | None = None,
     result_dir: str | None = None,
     soft_deadline_sec: float | None = None,
+    server_lifecycle: dict[str, Any] | None = None,
 ) -> list[VariantResult]:
     """Execute every variant in ``grid`` once, in order.
 
@@ -1605,6 +1630,9 @@ async def run_grid(
     that hardcode ``--result-dir /workspace/`` (see SKILL.md "Magpie leak-path
     salvage"). ``soft_deadline_sec`` (Fix E): reap a variant once wall-clock
     exceeds it, marking it ``killed_overtime=True``; None/0 disables (legacy).
+    ``server_lifecycle`` (``{cleanup, pid_dir, port}``) enables Magpie's
+    persistent-server reuse so a paired warm round can re-attach to a hot
+    server; None keeps the legacy boot-per-variant behaviour.
     """
     if not magpie_python:
         magpie_python = _resolve_magpie_python()
@@ -1635,6 +1663,7 @@ async def run_grid(
                 model_path=model_path,
                 gpu_type=gpu_type,
                 benchmark_script=benchmark_script,
+                server_lifecycle=server_lifecycle,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -1834,6 +1863,24 @@ async def run_grid(
                 ok_destination,
                 subprocess_started_unix=variant_started_unix,
             )
+            # Best-effort rough tput from the engine's periodic server.log
+            # throughput logs: the variant never finished so there's no
+            # benchmark_report, but the partial decode rate is still useful
+            # post-mortem. Informational only — the variant stays failed and
+            # this never feeds winner selection.
+            ok_warnings = [
+                f"harvested_leaked_artifact:{src}" for src, _ in ok_harvested
+            ]
+            ok_estimate = estimate_killed_variant_throughput(slot)
+            estimated_tput = (
+                ok_estimate.get("output_throughput") if ok_estimate else None
+            )
+            if estimated_tput is not None:
+                ok_warnings.append(
+                    "estimated_output_throughput_from_server_log:"
+                    f"{estimated_tput:.1f}tok/s"
+                    f"(n={ok_estimate.get('num_samples')})"
+                )
             results.append(VariantResult(
                 name=variant.name, extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
@@ -1841,21 +1888,20 @@ async def run_grid(
                 returncode=rc,
                 killed_overtime=True,
                 runtime_sec=variant_runtime_sec,
+                estimated_output_throughput=estimated_tput,
                 error=(
                     f"killed_overtime: wall-clock {variant_runtime_sec:.1f}s "
                     f"exceeded soft_deadline_sec={float(soft_deadline_sec or 0.0):.1f}s"
                 ),
                 note=variant.note,
-                nonfatal_warnings=[
-                    f"harvested_leaked_artifact:{src}"
-                    for src, _ in ok_harvested
-                ],
+                nonfatal_warnings=ok_warnings,
             ))
             log.info(
                 "_grid_runner: variant %s killed_overtime "
-                "(runtime=%.1fs deadline=%.1fs)",
+                "(runtime=%.1fs deadline=%.1fs est_output_tput=%s tok/s)",
                 variant.name, variant_runtime_sec,
                 float(soft_deadline_sec or 0.0),
+                f"{estimated_tput:.1f}" if estimated_tput is not None else "n/a",
             )
             await _pulse_after_variant(i)
             if not keep_going_on_failure:
