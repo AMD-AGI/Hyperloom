@@ -6459,6 +6459,18 @@ class Coordinator:
                     "research-scout harvest failed for task=%s", task.task_id,
                 )
 
+        # Aggregate research evidence from any domain (e.g. pr_intel) that
+        # self-reports a ``research`` block, so FRAMEWORK_PR / explore lanes
+        # reuse the session-wide seen-set. Idempotent for research_scout
+        # (already harvested above). Fail-soft.
+        try:
+            self._aggregate_research_evidence(done_payload)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception(
+                "research evidence aggregation failed for task=%s",
+                task.task_id,
+            )
+
         # Refresh the gaps ledger after a specialist round closes; record the verdict as a gap attempt.
         gap_cid = str(done_payload.get("gap_canonical_id") or "").strip()
         if gap_cid:
