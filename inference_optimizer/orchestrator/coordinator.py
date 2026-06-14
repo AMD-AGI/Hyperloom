@@ -3944,13 +3944,13 @@ class Coordinator:
         """On a plateau, dispatch a Coordinator-owned readonly specialist seeded
         with the deterministic trajectory digest to propose fresh directions.
 
-        Gated by ``INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW`` (default off);
-        idempotent per macro-cycle. The specialist targets the dominant
-        bottleneck's domain so its proposals flow through the standard
-        specialist → explore pipeline. Fail-soft.
+        Gated by ``INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW`` (default on; set
+        to a falsy value to opt out); idempotent per macro-cycle. The specialist
+        targets the dominant bottleneck's domain so its proposals flow through
+        the standard specialist → explore pipeline. Fail-soft.
         """
         if os.getenv(
-            "INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW", "0",
+            "INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW", "1",
         ).strip().lower() not in ("1", "true", "on", "yes"):
             return
         state = self.shared_state
