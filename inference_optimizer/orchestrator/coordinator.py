@@ -41,6 +41,7 @@ from .optimization_journal import (
     OUTCOME_NO_PROMOTE,
     OUTCOME_REVERT,
     classify_change_kind,
+    operation_kind_for,
     summarize_change,
 )
 from ..paths import db_path_for
@@ -8301,6 +8302,17 @@ class Coordinator:
         if outcome == OUTCOME_REVERT:
             error_class = (str(variant_outcome.get("error_class") or "") or None)
             reason = (str(variant_outcome.get("reason") or "") or None)
+        # Proposer attribution + per-variant measurement detail, carried from the
+        # explore executor's per_variant_outcomes so the decision row records who
+        # proposed the change and how it measured (beyond headline gain/tput).
+        detail_metrics = {
+            k: metrics[k]
+            for k in (
+                "runtime_sec", "wall_clock_ratio_vs_baseline",
+                "stack_rebench_tput", "estimated_output_throughput",
+            )
+            if isinstance(metrics, dict) and metrics.get(k) is not None
+        }
         journal.append_entry(JournalEntry(
             phase=self._journal_entry_phase(),
             iter=int(self.shared_state.tick or 0),
@@ -8313,6 +8325,10 @@ class Coordinator:
             reason=reason,
             task_id=task.task_id,
             variant_name=variant_name,
+            provenance=str(variant_outcome.get("provenance") or ""),
+            scope=str(variant_outcome.get("scope") or ""),
+            fingerprint=str(variant_outcome.get("fingerprint") or ""),
+            metrics=detail_metrics,
             tick=int(self.shared_state.tick or 0),
         ))
 
@@ -8903,6 +8919,23 @@ class Coordinator:
                     stack_entry["fingerprint"] = fp_val
                 if prov_val:
                     stack_entry["provenance"] = prov_val
+                # Stable filter label for "what kind of optimization" (backend /
+                # param / env), so the stack can be sliced like the timeline.
+                _stack_envs = (
+                    dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
+                )
+                stack_entry["operation_kind"] = operation_kind_for(
+                    task_kind,
+                    classify_change_kind(
+                        task_kind,
+                        {"extra_server_args": candidate_args, "extra_envs": _stack_envs},
+                    ),
+                )
+                _stack_scope = (
+                    str(bv.get("scope") or "").strip() if isinstance(bv, dict) else ""
+                )
+                if _stack_scope:
+                    stack_entry["scope"] = _stack_scope
                 self.shared_state.optimization_stack.append(stack_entry)
                 # Mirror append into gain_per_stack_entry so the two parallel lists stay index-aligned.
                 self.shared_state.append_stack_gain_entry(

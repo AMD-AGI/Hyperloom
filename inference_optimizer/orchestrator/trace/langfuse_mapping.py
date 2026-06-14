@@ -212,7 +212,19 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
         "change": dec.get("change"),
         "component": dec.get("component"),
         "task_id": dec.get("task_id"),
+        # Proposer attribution + filter label so a trace can be sliced by
+        # "what this step did" (operation_kind) and "who proposed it".
+        "operation_kind": dec.get("operation_kind"),
+        "proposer": dec.get("component"),
+        "provenance": dec.get("provenance"),
+        "scope": dec.get("scope"),
+        "variant_name": dec.get("variant_name"),
+        "fingerprint": dec.get("fingerprint"),
+        "metrics": dec.get("metrics"),
+        "proposal_scores": dec.get("proposal_scores"),
     }
+    # Drop keys the decision didn't carry so the score metadata stays compact.
+    meta = {k: v for k, v in meta.items() if v is not None}
     comment = str(dec.get("change") or "")
     scores: list[dict[str, Any]] = [{
         "name": "decision_outcome",

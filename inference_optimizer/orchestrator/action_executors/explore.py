@@ -1020,6 +1020,7 @@ class ExploreExecutor:
                         "round_id": round_id,
                         "ts": _now_iso(),
                         "provenance": provenance,
+                        "scope": scope,
                         "workload_signature": ws_sig,
                         "framework": framework,
                         "workspace": r.workspace,
@@ -1279,8 +1280,18 @@ class ExploreExecutor:
                 "outcome":      outcome,
                 "fingerprint":  fp_key,
                 "provenance":   str(te.get("provenance") or ""),
+                "scope":        str(te.get("scope") or ""),
                 "metrics":      metrics,
                 "reason":       reasons_by_fp.get(fp_key, ""),
+                # Carry the variant knobs so the journal can classify the change
+                # kind (backend / param / env) at decision-write time -- without
+                # this dict ``classify_change_kind`` always falls back to OTHER.
+                "variant": {
+                    "name":              str(te.get("name") or ""),
+                    "extra_server_args": str(te.get("extra_server_args") or ""),
+                    "extra_envs":        dict(te.get("extra_envs") or {}),
+                    "note":              str(te.get("note") or ""),
+                },
             })
         for sd in skipped_dup:
             per_variant_outcomes.append({

@@ -255,7 +255,13 @@ class PhaseEvent(TypedDict, total=False):
         key_metric_kind (str | None): Type/label of the key metric, or None.
         workspace (str | None): Benchmark workspace path, or None.
         error_class (str | None): Error classification on failure, or None.
-        extras (dict[str, Any]): Action-specific extra fields.
+        extras (dict[str, Any]): Action-specific extra fields. For journal-sourced
+            events this carries proposer attribution and a filter label:
+            ``provenance`` (raw explore label), ``proposer`` (resolved component:
+            ``specialist:<domain>`` / ``grid`` / ``orchestration``), ``scope``,
+            ``fingerprint``, ``operation_kind`` (``backend`` / ``param`` / ``env``
+            / ``kernel_opt`` / ``kernel_integrate`` / ``baseline`` / ...), and
+            ``metrics`` (per-variant measurement detail).
     """
     ts: str
     action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / trace_analyze / integrate
@@ -735,6 +741,13 @@ class ParamSearchEntry(TypedDict, total=False):
         gain_pct (float | None): Gain percent vs current best, or None.
         ts (str): ISO UTC timestamp of evaluation.
         status (str): Outcome (``accepted`` / ``rejected`` / ``tested``).
+        operation_kind (str): Filter label for the variant's change type
+            (``backend`` / ``param`` / ``env``).
+        provenance (str): Raw explore proposer label (``llm_direct`` /
+            ``default_grid`` / ``specialist:<domain>``).
+        proposer (str): Resolved proposer/component (``specialist:<domain>`` /
+            ``grid`` / ``orchestration``).
+        scope (str): Specialist dial (``domain`` / ``domains`` / ``freeform``).
     """
     name: str
     fingerprint: str
@@ -744,6 +757,10 @@ class ParamSearchEntry(TypedDict, total=False):
     gain_pct: float | None
     ts: str
     status: str                   # accepted / rejected / tested
+    operation_kind: str           # backend / param / env
+    provenance: str
+    proposer: str
+    scope: str
 
 
 class ParamSearchLedger(TypedDict, total=False):
@@ -1371,6 +1388,10 @@ class OptimizationStackEntry(TypedDict, total=False):
     fingerprint: str
     provenance: str
     task_id: str
+    # filter label for the kind of optimization (backend / param / env on
+    # explore KEEPs); specialist dial.
+    operation_kind: str
+    scope: str
 
 
 # Kernel Roofline — hot-kernel table for the dashboard, mirroring
@@ -1476,7 +1497,12 @@ class DecisionTraceEntry(TypedDict, total=False):
     phase: str                             # phase active at the decision (declared or ts-window backfill)
     tick: int | None                       # orchestrator tick (None when the producer didn't stamp one)
     ts: str                                # ISO ...Z of the decision
-    decision: dict[str, Any]               # {component, change/event/verdict, outcome, gain_pct, task_id/dyn_id}
+    # ``decision`` now carries proposer attribution + a filter label:
+    # {component (resolved proposer: specialist:<domain> / grid / orchestration),
+    #  operation_kind (backend / param / env / kernel_opt / kernel_integrate / ...),
+    #  change/event/verdict, outcome, gain_pct, task_id/dyn_id,
+    #  kind, provenance, scope, fingerprint, metrics}
+    decision: dict[str, Any]
     tokens: DecisionTokens
 
 
