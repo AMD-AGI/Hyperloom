@@ -169,10 +169,14 @@ def test_force_exit_unlimited_run_never_fires():
 
 
 def test_exit_normal_explore_force_exit_takes_priority_over_plateau():
-    """Force-exit must win even if plateau also has a verdict."""
+    """Force-exit must win even if plateau also has a verdict.
+
+    9.5h elapsed of a 10h budget -> 0.5h remaining < the 0.75h default
+    (quartered) strict force-exit threshold.
+    """
     state = _make_explore_state(
         max_minutes=600,
-        started_hours_ago=7.6,
+        started_hours_ago=9.5,
         phase_started_hours_ago=4.0,
     )
     # Seed enough plateau-shaped data that a plateau judgment would
@@ -189,9 +193,10 @@ def test_exit_normal_explore_force_exit_takes_priority_over_plateau():
 
 
 def test_compute_next_phase_routes_to_kernel_with_kernel_enabled():
+    # 9.5h elapsed of 10h -> 0.5h remaining < 0.75h default (quartered).
     state = _make_explore_state(
         max_minutes=600,
-        started_hours_ago=7.6,
+        started_hours_ago=9.5,
         phase_started_hours_ago=4.0,
     )
     state.kernel_enabled = True
@@ -203,9 +208,10 @@ def test_compute_next_phase_routes_to_kernel_with_kernel_enabled():
 
 
 def test_compute_next_phase_routes_to_sweep_when_kernel_disabled():
+    # 9.5h elapsed of 10h -> 0.5h remaining < 0.75h default (quartered).
     state = _make_explore_state(
         max_minutes=600,
-        started_hours_ago=7.6,
+        started_hours_ago=9.5,
         phase_started_hours_ago=4.0,
     )
     state.kernel_enabled = False
@@ -248,12 +254,13 @@ def test_force_exit_thresholds_routed_through_overrides():
 # Fix B: interleave-aware IR-6 narrowing
 # ---------------------------------------------------------------------------
 def test_interleave_narrows_force_exit_hours(monkeypatch):
-    """With interleave ON, the default 3h gate collapses to the 1h
-    CLOSE-buffer: 2.5h remaining no longer force-exits EXPLORE (kernel
-    work runs inside EXPLORE, so the 3h KERNEL reservation is moot)."""
+    """With interleave ON, the default 0.75h strict gate collapses to the
+    0.25h CLOSE-buffer (both quartered): 2.5h remaining no longer
+    force-exits EXPLORE (kernel work runs inside EXPLORE, so the strict
+    KERNEL reservation is moot)."""
     monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "1")
-    # 7.5h elapsed of 10h -> 2.5h remaining. Strict mode (3h) would fire;
-    # interleave mode (1h) must NOT.
+    # 7.5h elapsed of 10h -> 2.5h remaining; interleave mode (0.25h) must NOT
+    # fire, and the evidence must carry the interleave thresholds.
     state = _make_explore_state(
         max_minutes=600,
         started_hours_ago=7.5,
@@ -271,13 +278,14 @@ def test_interleave_narrows_force_exit_hours(monkeypatch):
 
 
 def test_interleave_still_fires_inside_close_buffer(monkeypatch):
-    """Interleave keeps the CLOSE-buffer safety net: < 1h remaining still
-    force-exits so SWEEP -> CLOSE + report can finish."""
+    """Interleave keeps the CLOSE-buffer safety net: < 0.25h remaining still
+    force-exits so SWEEP -> CLOSE + report can finish (interleave threshold
+    quartered from 1.0h)."""
     monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "1")
-    # 9.5h elapsed of 10h -> 0.5h remaining < 1h interleave threshold.
+    # 9.9h elapsed of 10h -> 0.1h remaining < 0.25h interleave threshold.
     state = _make_explore_state(
         max_minutes=600,
-        started_hours_ago=9.5,
+        started_hours_ago=9.9,
         phase_started_hours_ago=6.0,
     )
     fired, evidence = phase_state.should_force_exit_explore(state)

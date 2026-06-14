@@ -329,8 +329,9 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
 DEFAULT_LONGRUN_MAX_MINUTES: int = 14 * 24 * 60
 # Reference window the absolute per-phase cap applies its budget fraction to.
 # Short bounded runs bind on the (smaller) session-derived term — identical to
-# legacy behaviour; long/unbounded runs bind on this 24h reference.
-PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES: int = 24 * 60
+# legacy behaviour; long/unbounded runs bind on this reference.
+# Quartered (was 24h) alongside the long-run threshold for short-run testing.
+PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES: int = 6 * 60
 
 
 # Plateau judgment defaults (CLI --plateau-* flags); kept here for pure callers + tests.
@@ -343,7 +344,8 @@ DEFAULT_PLATEAU_KERNEL_LOOKBACK:          int   = 5
 
 # EXPLORE hard force-exit thresholds (IR-6 HARD time gate; overrides plateau).
 # Fires when remaining wall-clock < HOURS_REMAINING OR EXPLORE budget fraction < BUDGET_PCT.
-DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
+# NOTE: wall-clock bars quartered (was 3.0) for short-run state-transition testing.
+DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 0.75
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT:      float = 0.20
 
 # IR-6 under phase interleave (fix B): when EXPLORE↔KERNEL interleave is on,
@@ -354,7 +356,8 @@ DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT:      float = 0.20
 # fraction gate is disabled in this mode for the same reason (EXPLORE legitimately
 # spends the bulk of the budget because it is also doing KERNEL work). Both are
 # overridable via the explicit thresholds the caller passes.
-DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING_INTERLEAVE: float = 1.0
+# Wall-clock bar quartered (was 1.0) for short-run state-transition testing.
+DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING_INTERLEAVE: float = 0.25
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE:      float = 0.0
 
 # FRAMEWORK_PR plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
@@ -377,7 +380,8 @@ DEFAULT_MAX_MACRO_CYCLES: int = 1000
 # Minimum session wall-clock (seconds) that must remain to justify opening a new
 # macro-cycle; below this we wind down to CLOSE instead of starting a cycle we
 # cannot meaningfully use.
-DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = 1800.0  # 30 min
+# Wall-clock bar quartered (was 1800.0 / 30 min) for short-run cycle testing.
+DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = 450.0  # 7.5 min
 
 # R7 global convergence: number of consecutive no-gain macro-cycles after which
 # the run is considered converged (stop looping → CLOSE).
@@ -433,13 +437,15 @@ def is_cyclic_phases_enabled() -> bool:
 
 # Long-run gate. The cyclic macro-cycle behaviour (per-cycle budget window +
 # SWEEP→EXPLORE reloop) only engages for unbounded runs or bounded runs longer
-# than this threshold. A short bounded run (``--max-hours ≤ 24``) stays on the
+# than this threshold. A short bounded run (``--max-hours ≤ 6``) stays on the
 # legacy single-pass chain with whole-run phase budgets, regardless of the
-# (default-on) cyclic env flag — this is the "≤24h behaves exactly as before"
-# contract. Gating only on the env flag (not the budget) silently compressed
-# short-run phase budgets to the 6h cycle window and let SWEEP reloop with as
-# little as 30min remaining.
-DEFAULT_LONGRUN_THRESHOLD_MINUTES: float = 24 * 60
+# (default-on) cyclic env flag — this is the "short run behaves exactly as
+# before" contract. Gating only on the env flag (not the budget) silently
+# compressed short-run phase budgets to the cycle window and let SWEEP reloop
+# with very little remaining.
+# Threshold quartered (was 24h) so an ~18h run is treated as "long" and
+# exhibits the full cyclic macro-cycling that previously needed ~72h.
+DEFAULT_LONGRUN_THRESHOLD_MINUTES: float = 6 * 60
 
 
 def is_long_run(state: Any) -> bool:
@@ -447,8 +453,8 @@ def is_long_run(state: Any) -> bool:
 
     Unbounded runs (``max_minutes`` == 0, i.e. the 14-day ceiling) and bounded
     runs longer than :data:`DEFAULT_LONGRUN_THRESHOLD_MINUTES` are "long".
-    Everything ``≤ 24h`` is a short bounded run and must behave like the legacy
-    monotonic chain.
+    Everything ``≤ 6h`` (threshold quartered for short-run testing) is a short
+    bounded run and must behave like the legacy monotonic chain.
     """
     mm = _max_minutes(state)
     if mm <= 0:

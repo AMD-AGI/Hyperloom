@@ -83,8 +83,9 @@ def test_sweep_closes_when_globally_converged(monkeypatch):
 
 def test_sweep_closes_when_insufficient_remaining(monkeypatch):
     monkeypatch.setenv(CYCLIC_ENV, "1")
-    # Long run (48h) but only ~10min remain → below the 30-min reloop floor.
-    st = _sweep_state(max_minutes=48 * 60, started_hours_ago=48 - 10 / 60.0)
+    # Long run (48h) but only ~5min remain → below the 7.5-min reloop floor
+    # (DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC quartered from 1800s to 450s).
+    st = _sweep_state(max_minutes=48 * 60, started_hours_ago=48 - 5 / 60.0)
     target, reason, evidence = ps.compute_next_phase(st, max_hours=48.0)
     assert target == ps.PHASE_CLOSE
     assert reason == "sweep_done"
@@ -93,10 +94,11 @@ def test_sweep_closes_when_insufficient_remaining(monkeypatch):
 
 def test_short_bounded_run_never_reloops(monkeypatch):
     monkeypatch.setenv(CYCLIC_ENV, "1")
-    # 12h bounded run with plenty of budget + gain: legacy single-pass chain
-    # must wind down to CLOSE, never open a macro-cycle.
+    # 4h bounded run (<= the quartered 6h long-run threshold) with plenty of
+    # budget + gain: legacy single-pass chain must wind down to CLOSE, never
+    # open a macro-cycle.
     st = _sweep_state(
-        max_minutes=12 * 60, started_hours_ago=1.0,
+        max_minutes=4 * 60, started_hours_ago=1.0,
         cumulative_gain=5.0, gain_at_cycle_start=0.0,
     )
     reloop, ev = ps.should_reloop_to_explore(st)
@@ -109,9 +111,10 @@ def test_short_bounded_run_never_reloops(monkeypatch):
     assert "loopback" not in evidence
 
 
-def test_exactly_24h_is_short_run(monkeypatch):
+def test_exactly_threshold_is_short_run(monkeypatch):
     monkeypatch.setenv(CYCLIC_ENV, "1")
-    st = _sweep_state(max_minutes=24 * 60, started_hours_ago=1.0)
+    # Exactly at the (quartered) 6h threshold => still short (is_long_run is >).
+    st = _sweep_state(max_minutes=6 * 60, started_hours_ago=1.0)
     assert ps.is_long_run(st) is False
     reloop, ev = ps.should_reloop_to_explore(st)
     assert reloop is False
@@ -119,9 +122,11 @@ def test_exactly_24h_is_short_run(monkeypatch):
 
 
 def test_long_and_unbounded_runs_are_long():
-    # > 24h bounded → long.
-    st_long = _sweep_state(max_minutes=24 * 60 + 1, started_hours_ago=1.0)
+    # > 6h bounded (quartered threshold) → long. An ~18h run is now "long".
+    st_long = _sweep_state(max_minutes=6 * 60 + 1, started_hours_ago=1.0)
     assert ps.is_long_run(st_long) is True
+    st_18h = _sweep_state(max_minutes=18 * 60, started_hours_ago=1.0)
+    assert ps.is_long_run(st_18h) is True
     # Unbounded (max_minutes == 0) → long (14-day ceiling).
     st_unbounded = _sweep_state(max_minutes=0, started_hours_ago=1.0)
     assert ps.is_long_run(st_unbounded) is True
@@ -177,11 +182,11 @@ def test_budget_minutes_falls_back_to_max_minutes_when_disabled():
 
 
 def test_budget_minutes_ignores_cycle_window_for_short_run():
-    # Short bounded run (10h ≤ 24h): the per-cycle window must NOT apply, so
-    # phase budgets stay anchored on the whole session (legacy behaviour) even
-    # if cycle_minutes was pinned.
-    st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=600, cycle_minutes=360.0)
-    assert ps._budget_minutes(st) == 600.0
+    # Short bounded run (4h <= the quartered 6h threshold): the per-cycle window
+    # must NOT apply, so phase budgets stay anchored on the whole session
+    # (legacy behaviour) even if cycle_minutes was pinned.
+    st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=240, cycle_minutes=360.0)
+    assert ps._budget_minutes(st) == 240.0
 
 
 # ==========================================================================

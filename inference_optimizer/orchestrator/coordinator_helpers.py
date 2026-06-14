@@ -123,11 +123,12 @@ def effective_closing_grace_sec(
     """Resolve the closing-phase grace window after the wall-clock deadline.
 
     Explicit ``closing_grace_sec`` (including ``0`` to disable) wins;
-    otherwise default to ``min(120, max_minutes * 60 * 0.02)``.
+    otherwise default to ``min(30, max_minutes * 60 * 0.02)`` (cap quartered
+    from 120 for short-run state-transition testing).
     """
     if closing_grace_sec is not None:
         return float(closing_grace_sec)
-    return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
+    return min(30.0, (max_minutes or 0.0) * 60.0 * 0.02)
 
 
 def _parse_iso_unix(ts: str) -> float:

@@ -4,7 +4,7 @@
 
 Covers ``_build_robustness_options`` (multi-node ``--nodes >= 2`` cluster
 policy: disable local probe, enable cluster pod metrics, turn off the
-127.0.0.1:8888 inference probe, lift the no_levers floor to 60 min) and
+127.0.0.1:8888 inference probe, lift the no_levers floor to 15 min) and
 ``_resolve_robustness_choice`` (multi-node auto-downgrade to mock).
 """
 
@@ -84,21 +84,21 @@ def test_multi_node_auto_enables_disable_local_probe_and_pod_metrics():
 
 
 def test_multi_node_disables_inference_probe_and_bumps_floor():
-    """``nodes >= 2`` → inference probe off plus the full cluster policy and the 60 min no_levers floor."""
+    """``nodes >= 2`` → inference probe off plus the full cluster policy and the 15 min no_levers floor."""
     options = _build_robustness_options(_ns(nodes=2))
     assert options == {
         "nodes": 2,
         "disable_local_probe": True,
         "enable_cluster_pod_metrics": True,
         "auto_probe_inference_server": False,
-        "progress_no_levers_min_minutes": 60.0,
+        "progress_no_levers_min_minutes": 15.0,
     }
 
 
-def test_multi_node_bumps_no_levers_floor_to_60_minutes():
-    """``nodes >= 2`` → progress_no_levers_min_minutes=60.0; single-node keeps the default (key absent)."""
+def test_multi_node_bumps_no_levers_floor_to_15_minutes():
+    """``nodes >= 2`` → progress_no_levers_min_minutes=15.0 (quartered); single-node keeps the default (key absent)."""
     multi = _build_robustness_options(_ns(nodes=2))
-    assert multi["progress_no_levers_min_minutes"] == 60.0
+    assert multi["progress_no_levers_min_minutes"] == 15.0
     single = _build_robustness_options(_ns(nodes=1))
     assert "progress_no_levers_min_minutes" not in single
 
@@ -162,7 +162,7 @@ def test_multi_node_preserves_operator_flags():
         "disable_local_probe": True,
         "enable_cluster_pod_metrics": True,
         "auto_probe_inference_server": False,
-        "progress_no_levers_min_minutes": 60.0,
+        "progress_no_levers_min_minutes": 15.0,
     }
 
 
