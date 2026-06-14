@@ -2298,7 +2298,9 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
     with patch.object(krh, "_run_kernel_backend_sequence",
                        side_effect=fake_sequence):
         await krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy", "max_parallel": 3},
+            payload={"candidates_path": "/dummy",
+                     "backend_order": "geak,claude,codex",
+                     "max_parallel": 3},
             candidates=candidates,
             session_dir=session_dir,
             record_partial=record_partial,
@@ -2375,7 +2377,8 @@ async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
     }
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy"},
+            {"candidates_path": "/dummy",
+             "backend_order": "geak,claude,codex"},
             candidate,
             session_dir=session_dir,
         )
@@ -2408,7 +2411,8 @@ async def test_backend_ladder_breaks_on_first_keep(session_dir):
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy"},
+            {"candidates_path": "/dummy",
+             "backend_order": "geak,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py",
              "reusable_native_kernel": True},
             session_dir=session_dir,
@@ -2451,7 +2455,8 @@ async def test_backend_ladder_falls_back_to_highest_micro_when_no_keep(
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy"},
+            {"candidates_path": "/dummy",
+             "backend_order": "geak,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py",
              "reusable_native_kernel": True},
             session_dir=session_dir,
@@ -2493,7 +2498,8 @@ async def test_backend_sequence_parallel_runs_oob_even_when_geak_keeps(session_d
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy"},
+            {"candidates_path": "/dummy",
+             "backend_order": "geak,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py",
              "reusable_native_kernel": True},
             session_dir=session_dir,
@@ -2542,7 +2548,8 @@ async def test_backend_sequence_parallel_keeps_geak_when_oob_lower(session_dir):
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy"},
+            {"candidates_path": "/dummy",
+             "backend_order": "geak,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py",
              "reusable_native_kernel": True},
             session_dir=session_dir,
@@ -2588,7 +2595,8 @@ async def test_backend_sequence_parallel_oob_ladder_still_falls_back(session_dir
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy"},
+            {"candidates_path": "/dummy",
+             "backend_order": "geak,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py",
              "reusable_native_kernel": True},
             session_dir=session_dir,
@@ -2633,6 +2641,89 @@ async def test_backend_sequence_parallel_noop_without_geak(session_dir):
     # No geak in the ladder -> sequential break-on-KEEP: only claude runs.
     assert calls == ["claude"]
     assert (best.get("verification") or {}).get("micro_speedup") == 1.2
+
+
+@pytest.mark.asyncio
+async def test_backend_sequence_forge_keep_short_circuits(session_dir):
+    """Forge runs first and a KEEP short-circuits before GEAK/OOB.
+
+    Regression coverage for Bugbot: _kernel_result_rank() returns a tuple, so
+    the short-circuit must inspect the KEEP slot instead of comparing the tuple
+    directly to int 0.
+    """
+    calls: list[str] = []
+
+    async def fake_single(child, *, session_dir):
+        backend = child["backends"]
+        calls.append(backend)
+        if backend == "forge":
+            return {
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "KEEP", "reasons": []},
+                "verification": {"micro_speedup": 1.05,
+                                 "best_artifact_path": "/tmp/forge.py"},
+            }
+        raise AssertionError(f"forge KEEP must short-circuit before {backend!r}")
+
+    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
+        best = await krh._run_kernel_backend_sequence(
+            {"candidates_path": "/dummy",
+             "backend_order": "forge,geak,claude,codex"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py",
+             "reusable_native_kernel": True},
+            session_dir=session_dir,
+            parallel_backends=True,
+        )
+
+    assert calls == ["forge"]
+    assert (best.get("proposal") or {}).get("decision") == "KEEP"
+    assert best["batch_kernel_id"] == "k004"
+    assert {a["backend"] for a in best["backend_fallback_attempts"]} == {"forge"}
+
+
+@pytest.mark.asyncio
+async def test_batch_serializes_when_forge_in_ladder(session_dir, monkeypatch):
+    """Forge in-place editing is repo-global, so batch concurrency is capped at 1.
+
+    Even when GPU-rich mode says parallel backends are available, multiple
+    kernels must not race forge against other backends in the same live repo.
+    """
+    active = 0
+    max_active = 0
+    seen_flags: list[bool] = []
+
+    async def fake_sequence(base_payload, candidate, *, session_dir, parallel_backends=False):
+        nonlocal active, max_active
+        seen_flags.append(parallel_backends)
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {
+            "status": "ok",
+            "kernel_id": candidate["kernel_id"],
+            "proposal": {"decision": "REVERT", "reasons": []},
+            "verification": {"micro_speedup": 1.0},
+        }
+
+    monkeypatch.setattr(krh, "_should_parallelize_backends", lambda payload, n: True)
+    monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
+
+    out = await krh._run_optimization_batch(
+        {"candidates_path": "/dummy",
+         "backend_order": "forge,geak,claude,codex",
+         "max_parallel": 8},
+        [
+            {"kernel_id": "k001", "source_file": "/p/a.py"},
+            {"kernel_id": "k002", "source_file": "/p/b.py"},
+        ],
+        session_dir=session_dir,
+    )
+
+    assert max_active == 1
+    assert seen_flags == [True, True]
+    assert out["parallel_backends"] is True
 
 
 @pytest.mark.asyncio

@@ -503,7 +503,11 @@ def parse_backends(backends: str) -> list[str]:
             (``geak``, ``claude``, ``codex``, ``cursor``).
     """
     parsed = [b.strip().lower() for b in backends.split(",") if b.strip()]
-    allowed = {"geak", "claude", "codex", "cursor"}
+    # `forge` is the Kernel-Forge autonomous-loop backend; it is first in the
+    # default ladder (choose_backends) and falls through to geak/claude/codex
+    # when it skips a non-triton candidate or misses a KEEP. See
+    # claw-dev/docs-zh/forge-as-hyperloom-backend-integration.md.
+    allowed = {"geak", "claude", "codex", "cursor", "forge"}
     invalid = [b for b in parsed if b not in allowed]
     if invalid:
         raise ValueError(f"unsupported backend(s): {', '.join(invalid)} "
@@ -561,9 +565,11 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     if source_type == "vendor_binary":
         return [], notes
 
-    # Unified ladder (#144): GEAK first, then claude/codex. Without a benchmark GEAK still
-    # attempts but flags geak_without_benchmark=True so KEEP gates know confidence is reduced.
-    selected = ["geak", "claude", "codex"]
+    # Unified ladder: forge FIRST (Kernel-Forge autonomous loop; falls through to
+    # geak/claude/codex when forge skips a non-triton candidate or misses a KEEP),
+    # then GEAK, then claude/codex. Without a benchmark GEAK still attempts but flags
+    # geak_without_benchmark=True so KEEP gates know confidence is reduced.
+    selected = ["forge", "geak", "claude", "codex"]
     if not benchmark_available:
         notes["geak_without_benchmark"] = True
     return selected, notes
@@ -2595,6 +2601,37 @@ def invoke_backend(
                 if rocprof_before.get("txt_path"):
                     result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
             return result
+        if backend == "forge":
+            # Kernel-Forge autonomous-loop backend. Runs entirely inside a git
+            # worktree of kernel_repo (never mutates the live repo) and emits the
+            # same artifacts as OOB (optimized_versions/ + optimization_report.md),
+            # so the downstream verify/propose/integrate path is unchanged.
+            forge = _import_backend("forge_submit")
+            out_dir = _oob_output_dir(args.session_id, prompt_file)
+            result = forge.submit(
+                source_file=source_file,
+                prompt_file=prompt_file,
+                output_dir=out_dir,
+                test_command=common_test_command,
+                source_type=str((candidate or {}).get("source_type") or "unknown"),
+                candidate=candidate or {},
+                num_gpus=num_gpus,
+                timeout_s=timeout_s,
+                prefer_ray=prefer_ray,
+                kernel_repo=kernel_repo,
+            )
+            result["output_dir"] = str(out_dir)
+            if common_test_command:
+                result["test_command"] = common_test_command
+            if rocprof_before:
+                result["rocprof_before_kernel_opt_status"] = str(rocprof_before.get("status") or "")
+                if rocprof_before.get("reason"):
+                    result["rocprof_before_kernel_opt_reason"] = str(rocprof_before["reason"])
+                if rocprof_before.get("json_path"):
+                    result["rocprof_before_kernel_opt_json"] = str(rocprof_before["json_path"])
+                if rocprof_before.get("txt_path"):
+                    result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
+            return result
         return {
             "returncode": 2,
             "stdout_tail": f"unknown backend: {backend}",
@@ -2603,7 +2640,10 @@ def invoke_backend(
         }
     finally:
         # Always undo rogue writes under the kernel repo, regardless of exit code.
-        if log_path is not None:
+        # Skip for forge: it manages its own restore (per-file write-back on a
+        # temp branch); a blanket `git checkout -- .` here would overwrite the
+        # dirty-file state that forge just carefully restored.
+        if log_path is not None and backend != "forge":
             _git_checkout_fallback(kernel_repo, log_path)
 
 

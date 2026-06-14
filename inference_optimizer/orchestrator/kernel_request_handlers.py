@@ -109,7 +109,7 @@ def _reusable_source_roots() -> tuple[str, ...]:
     return tuple(out)
 _APPLY_TOOL_MODULE: Any | None = None
 # GEAK FIRST per SKILL.md §"choose_backends" "Default ladder"; Cursor last (dropped when CURSOR_API_KEY is unset).
-_DEFAULT_KERNEL_BACKEND_ORDER = ("geak", "claude", "codex", "cursor")
+_DEFAULT_KERNEL_BACKEND_ORDER = ("forge", "geak", "claude", "codex", "cursor")
 # Soft cap on concurrent kernel-backend coroutines (legacy MI300X 8-GPU fallback; pin with KERNEL_OPT_MAX_PARALLEL).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_OOB_BUDGET_MINUTES = 60.0
@@ -1602,7 +1602,10 @@ def _backend_order(payload: dict) -> list[str]:
         # Ignore legacy payload["backends"]; the default ladder (GEAK first) mirrors ``kernel_optimization.choose_backends`` so single/batch agree.
         order = list(_DEFAULT_KERNEL_BACKEND_ORDER)
         explicit = False
-    allowed = {"claude", "codex", "cursor", "geak"}
+    # `forge` (Kernel-Forge autonomous-loop backend) is first in
+    # _DEFAULT_KERNEL_BACKEND_ORDER; keep it in `allowed` so it survives the
+    # filter for both the default and any explicit backend_order.
+    allowed = {"claude", "codex", "cursor", "geak", "forge"}
     selected = [backend for backend in order if backend in allowed]
     # Drop cursor from the auto-derived ladder when CURSOR_API_KEY is unset (explicit order still wins).
     if not explicit and not os.environ.get("CURSOR_API_KEY", "").strip():
@@ -1987,10 +1990,32 @@ async def _run_kernel_backend_sequence(
     """
     kernel_id = str(candidate.get("kernel_id") or base_payload.get("kernel_id") or "")
     order = _backend_order(base_payload)
-    geak_group = [b for b in order if b == "geak"]
-    oob_group = [b for b in order if b != "geak"]
 
-    if parallel_backends and geak_group and oob_group:
+    # Forge edits the live repo in-place (temp branch + per-file restore) and
+    # must NOT race with other backends that read/write the same repo. Run it
+    # sequentially first; if it KEEPs, short-circuit. Otherwise continue with
+    # the geak / oob parallel split on the remaining backends.
+    forge_group = [b for b in order if b == "forge"]
+    remaining = [b for b in order if b != "forge"]
+    forge_best: dict | None = None
+    forge_attempts: list = []
+    best: dict | None = None
+    attempts: list = []
+    if forge_group:
+        forge_best, forge_attempts = await _run_backend_ladder(
+            base_payload, candidate, kernel_id, forge_group,
+            session_dir=session_dir,
+        )
+        if forge_best and _kernel_result_rank(forge_best)[0] > 0:
+            best = forge_best
+            attempts = forge_attempts
+
+    geak_group = [b for b in remaining if b == "geak"]
+    oob_group = [b for b in remaining if b != "geak"]
+
+    if best is not None:
+        pass
+    elif parallel_backends and geak_group and oob_group:
         (geak_best, geak_attempts), (oob_best, oob_attempts) = await asyncio.gather(
             _run_backend_ladder(
                 base_payload, candidate, kernel_id, geak_group,
@@ -2001,7 +2026,7 @@ async def _run_kernel_backend_sequence(
                 session_dir=session_dir,
             ),
         )
-        attempts = geak_attempts + oob_attempts
+        attempts = forge_attempts + geak_attempts + oob_attempts
         best = max(
             (r for r in (geak_best, oob_best) if r is not None),
             key=_kernel_result_rank,
@@ -2009,8 +2034,11 @@ async def _run_kernel_backend_sequence(
         )
     else:
         best, attempts = await _run_backend_ladder(
-            base_payload, candidate, kernel_id, order, session_dir=session_dir,
+            base_payload, candidate, kernel_id, remaining, session_dir=session_dir,
         )
+        attempts = forge_attempts + attempts
+        if best is None and forge_best is not None:
+            best = forge_best
 
     if best is None:
         best = {
@@ -2043,6 +2071,13 @@ async def _run_optimization_batch(
         or _default_kernel_batch_parallel()
     )
     max_parallel = max(1, max_parallel)
+    # Forge edits framework sources in-place. The per-repo lock protects one
+    # forge run, but if multiple kernels are processed concurrently a second
+    # kernel can miss the lock, skip forge, and race another backend against the
+    # first kernel's live-tree edits. Keep the whole kernel batch serial whenever
+    # forge is in the backend ladder.
+    if "forge" in _backend_order(payload):
+        max_parallel = 1
     # GPU-rich mode: when the node can fit a kernel's GEAK + OOB ladder
     # side-by-side (see :func:`_should_parallelize_backends`), race them per
     # kernel and keep the stronger result instead of short-circuiting on
