@@ -770,23 +770,98 @@ class LangfuseEmitter:
         missing), it falls back to a trace-level score.
         """
         for drow in _load_jsonl(decision_trace_path(self.session_dir)):
-            for score in lfmap.decision_to_scores(drow):
-                meta = score.get("metadata") or {}
-                phase = str(meta.get("phase") or lfmap.UNPHASED)
-                agent = str(meta.get("component") or lfmap.UNKNOWN_AGENT)
-                self._create_score(score, phase=phase, agent=agent)
+            scores = lfmap.decision_to_scores(drow)
+            if not scores:
+                continue
+            meta0 = scores[0].get("metadata") or {}
+            phase = str(meta0.get("phase") or lfmap.UNPHASED)
+            agent = self._span_agent_for(str(meta0.get("component") or ""))
+            # Per-decision span carrying ``operation_kind`` (+ proposer / effect)
+            # so the trace can be filtered by "what this step did". Scores attach
+            # to this step span when it opens, else to the owning agent span.
+            step_span = self._open_decision_span(drow, phase, agent)
+            for score in scores:
+                self._create_score(
+                    score, phase=phase, agent=agent, span=step_span,
+                )
+            if step_span is not None:
+                self._safe_end(step_span)
+
+    @staticmethod
+    def _span_agent_for(proposer: str) -> str:
+        """Map a resolved proposer back to a span-attachable agent name.
+
+        ``specialist:<domain>`` collapses to the ``specialist`` agent span and
+        ``grid`` to ``orchestration`` (grid proposals are orchestration-driven),
+        so the per-decision score still lands under a real agent span instead of
+        always falling back to the trace level.
+        """
+        p = (proposer or "").strip()
+        if p.startswith("specialist:"):
+            return "specialist"
+        if p == "grid":
+            return "orchestration"
+        return p or lfmap.UNKNOWN_AGENT
+
+    def _open_decision_span(
+        self, drow: dict[str, Any], phase: str, agent: str,
+    ) -> Any:
+        """Open an ``optimization_step:<operation_kind>`` span for one decision.
+
+        Parented to the owning agent span (then phase span, then root). Carries
+        operation_kind + proposer + effect in metadata so dashboards/Langfuse can
+        filter steps directly. Returns the span, or ``None`` when no parent is
+        open or the SDK rejects the call (best-effort; never raises).
+        """
+        parent = (
+            self._agent_spans.get((phase, agent))
+            or self._phase_spans.get(phase)
+            or self._root_span
+        )
+        if parent is None:
+            return None
+        dec = drow.get("decision") or {}
+        op_kind = str(dec.get("operation_kind") or "decision")
+        md = {
+            "operation_kind": op_kind,
+            "proposer": dec.get("component"),
+            "provenance": dec.get("provenance"),
+            "scope": dec.get("scope"),
+            "change": dec.get("change"),
+            "outcome": dec.get("outcome"),
+            "gain_pct": dec.get("gain_pct"),
+            "variant_name": dec.get("variant_name"),
+            "fingerprint": dec.get("fingerprint"),
+            "task_id": dec.get("task_id"),
+            "phase": phase,
+            "tick": drow.get("tick"),
+            "metrics": dec.get("metrics"),
+            "proposal_scores": dec.get("proposal_scores"),
+        }
+        md = {k: v for k, v in md.items() if v is not None}
+        try:
+            return _start_obs(
+                parent, name=f"optimization_step:{op_kind}",
+                as_type="span", metadata=md,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("langfuse: open decision span failed", exc_info=True)
+            return None
 
     def _create_score(
         self, score: dict[str, Any], *, phase: str, agent: str,
+        span: Any = None,
     ) -> None:
-        """Attach a Langfuse Score to the owning agent span or the trace.
+        """Attach a Langfuse Score to a step span / agent span / the trace.
 
         Args:
             score: Score payload (``name``, ``value``, ``data_type``, ...).
             phase: Phase that owns the decision, used to locate the span.
             agent: Agent/component that owns the decision.
+            span: Optional pre-opened step span; preferred over the agent span.
         """
-        span = self._agent_spans.get((phase, agent))
+        if span is None:
+            span = self._agent_spans.get((phase, agent))
         try:
             if span is not None and hasattr(span, "score"):
                 span.score(
