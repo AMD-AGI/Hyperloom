@@ -2,7 +2,7 @@
 
 r"""Parse the Coordinator-style ``_compose_prompt`` text into structured fields.
 
-The Coordinator () hands every reactor a prompt with
+The Coordinator hands every reactor a prompt with
 the following layout:
 
 ```

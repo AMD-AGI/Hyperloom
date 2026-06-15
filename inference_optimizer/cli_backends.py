@@ -188,8 +188,14 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     ``local_server_unreachable`` symptoms. We therefore default
     ``disable_local_probe`` + ``enable_cluster_pod_metrics`` to True,
     forward a workload_uid hint, disable the 127.0.0.1:8888 auto-probe,
-    and lift the ``no_levers_found`` floor to 60 min. Single-node
-    semantics stay untouched.
+    and lift the ``no_levers_found`` floor to 60 min.
+
+    Single-node opt-in: ``--robustness-disable-server-probe`` sets
+    ``auto_probe_inference_server=False`` so the 127.0.0.1:8888 /health
+    probe is silenced (the optimizer's per-benchmark server restarts
+    otherwise trip the same false ``local_server_unreachable``), while the
+    rest of LocalProbe keeps running. All other single-node semantics stay
+    untouched.
     """
     options: dict[str, Any] = {}
     server_url = getattr(args, "robustness_server_url", None)
@@ -236,12 +242,25 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
         if cat_list:
             options["pod_metrics_categories"] = cat_list
 
+    # ``auto_probe_inference_server`` controls the 127.0.0.1:8888 /health
+    # auto-probe inside LocalProbe.
+    #   * Multi-node: the inference server lives in the head pod, so the probe
+    #     can never succeed and would flood the bus with false-positive
+    #     ``local_server_unreachable`` symptoms — default it OFF.
+    #   * Single-node: the optimizer restarts the inference server between
+    #     benchmarks; those restart windows trip the SAME false positive (and
+    #     can escalate to a premature skip_to_close / robustness_escalated stop).
+    #     Operators opt in via ``--robustness-disable-server-probe``. Unlike
+    #     ``--robustness-disable-local-probe`` this is surgical: only the
+    #     127.0.0.1:8888 probe is silenced; the rest of LocalProbe (gpu-leak,
+    #     gateway 401, coordinator-zombie, aiter-JIT, disk/fd) keeps running.
+    disable_server_probe = getattr(args, "robustness_disable_server_probe", None)
+    if disable_server_probe is None and multi_node:
+        disable_server_probe = True
+    if disable_server_probe is not None:
+        options["auto_probe_inference_server"] = not bool(disable_server_probe)
+
     if multi_node:
-        # The inference server runs in the head pod, so the hardcoded
-        # 127.0.0.1:8888 health probe can never succeed and would flood
-        # the bus with false-positive ``local_server_unreachable``
-        # symptoms each tick — disable the auto-probe in multi-node.
-        options["auto_probe_inference_server"] = False
         # B3 no_levers_found floor — multi-node large-model spends
         # 35-50 min on sglang cold start + baseline + profile +
         # turnaround alone before the first explore family runs, so lift

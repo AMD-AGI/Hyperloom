@@ -161,13 +161,30 @@ def test_gate_orchestration_delegate_kernel_owned_rejected(gate):
     assert exc.value.rule == "kernel_owned_by_kernel_agent"
 
 
-def test_gate_gemm_tuning_rejected_for_non_fp8_proposal():
+def test_gate_orchestration_propose_kernel_owned_rejected():
+    """Kernel-owned actions are REQUEST-only on BOTH channels: propose_action of
+    a kernel-owned action is denied exactly like delegate (the ownership guard
+    fires before the fp8 / phase checks)."""
+    state = SharedState(phase="KERNEL", precision="bf16", framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    for action in ("kernel_opt", "gemm_tuning", "integrate", "deep_kernel_analysis"):
+        with pytest.raises(PolicyDenied) as exc:
+            gate.validate_intent("orchestration", Intent(
+                type=IntentType.PROPOSE_ACTION,
+                payload={"action_name": action, "predicted_gain_pct": 10.0},
+            ))
+        assert exc.value.rule == "kernel_owned_by_kernel_agent", action
+
+
+def test_gate_run_gemm_tuning_request_rejected_for_non_fp8():
+    """fp8-only gating still fires on the REQUEST channel (the legitimate path
+    for kernel-owned GEMM tuning) for a non-fp8 session."""
     state = SharedState(phase="KERNEL", precision="bf16", framework="sglang")
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", Intent(
-            type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": "gemm_tuning", "predicted_gain_pct": 10.0},
+            type=IntentType.REQUEST,
+            payload={"target_agent": "kernel", "kind": "run_gemm_tuning", "params": {}},
         ))
     assert exc.value.rule == "fp8_only_action"
 

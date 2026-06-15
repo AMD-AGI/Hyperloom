@@ -270,4 +270,3 @@ def _kb_writes_summary(critic_iters: list[Any]) -> dict[str, Any]:
 
 
 __all__ = ["assemble_parts", "has_parts", "parts_dir"]
-
