@@ -1606,7 +1606,7 @@ def build_prompt(
         "  or `rg ... <repo>`, NEVER `find /`.\n"
         "\n"
         "GOAL & TIME BUDGET:\n"
-        # GEAK v3.2.0 LLM-parses prompt for `--mode full` / `mode=quick` etc.
+        # GEAK v3.2.1 LLM-parses prompt for `--mode full` / `mode=quick` etc.
         # (prompts.py:73-76 trigger list). Emit the explicit token so the
         # parser locks in the right preset (yaml run.budgets.<mode>) instead
         # of leaking off other prompt phrases like "quick micro-benchmark".
