@@ -3,7 +3,7 @@
 """Orchestration permission widenings for scheduling-police intents.
 
 Orchestration may now emit PRUNE_BRANCH (Roofline-v2 C3) and
-ESCALATE_STRATEGY_CHANGE (loosen P3_18 18A) in addition to the robustness path;
+ESCALATE_STRATEGY_CHANGE in addition to the robustness path;
 FORCE_DISPATCH stays robustness-only, and Kernel/Critic cannot emit any.
 """
 
@@ -72,7 +72,7 @@ def test_orchestration_cannot_emit_force_dispatch(gate):
 
 
 def test_orchestration_can_emit_escalate_strategy_change(gate):
-    """Loosen P3_18 18A — Orchestration may emit phase-advance hints directly."""
+    """Orchestration may emit phase-advance hints directly."""
     gate.validate_intent("orchestration", Intent(
         type=IntentType.ESCALATE_STRATEGY_CHANGE,
         payload={"next_action_hint": "skip_to_kernel"},

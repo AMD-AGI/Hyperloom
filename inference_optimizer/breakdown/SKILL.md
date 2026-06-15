@@ -18,7 +18,7 @@ globs:
 
 A single JSON file: **`<session_dir>/session_breakdown.json`**.
 
-- Schema:   `hyperloom.session_breakdown.v2` (additive over v1; see `breakdown/schema.py`)
+- Schema:   `hyperloom.session_breakdown.v3.0` when recorder fragments are present, else `…v2` (collector-only fallback). Same additive wire shape; gate consumers on the major version, not exact-string equality. See `breakdown/schema.py` (`SCHEMA_VERSION` / `SCHEMA_VERSION_V3`).
 - Producer: `inference_optimizer/breakdown/exporter.py`
 - Filename: `BREAKDOWN_FILENAME` (= `session_breakdown.json`)
 
@@ -147,7 +147,9 @@ another (each becomes a `warnings[]` entry instead).
 - **LLM-based attribution** — every collector is deterministic /
   rule-based. Attribution is `delta_pct` math, not natural language.
 - **Schema migration** — consumers MUST check `schema_version` and gate
-  features on it.
+  features on it, comparing the **major** version (`vN`) rather than the
+  exact string: the producer emits both `…v2` and `…v3.0` today (see
+  Versioning policy) and they are wire-compatible.
 - **Cross-session aggregation** — one file per session. Use
   `ci/build_summary.py` (or a Jupyter notebook) for fleet views.
 
@@ -164,8 +166,14 @@ another (each becomes a `warnings[]` entry instead).
 
 ## Versioning policy
 
-- `schema_version` (in `schema.py`) is bumped ONLY on breaking
-  changes (renamed/removed fields, changed semantics).
+- `schema_version` (in `schema.py`) carries the **major** contract
+  version; it is bumped ONLY on breaking changes (renamed/removed
+  fields, changed semantics).
+- Two strings are in production today: `…v3.0` when the exporter
+  aggregates author-time recorder fragments, `…v2` for the legacy
+  collector-only fallback. They share one additive wire shape, so
+  consumers MUST match on the `vN` major prefix (or allowlist both),
+  never on exact-string equality.
 - Adding optional fields is **never** a breaking change.
 - `exporter_version` tracks the exporter implementation independently;
   consumers can ignore it.
