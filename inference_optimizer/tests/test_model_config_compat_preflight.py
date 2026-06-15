@@ -20,9 +20,13 @@ import pytest
 from inference_optimizer import cli
 
 
-def _write_config(model_dir: Path, **fields) -> None:
+def _write_config(model_dir: Path, *, with_tokenizer: bool = True, **fields) -> None:
     model_dir.mkdir(parents=True, exist_ok=True)
     (model_dir / "config.json").write_text(json.dumps(fields), encoding="utf-8")
+    # Most config-compat tests are unrelated to the tokenizer-artifact check;
+    # ship a tokenizer by default so they exercise only the field they target.
+    if with_tokenizer:
+        (model_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
 
 
 def _args(model: str, *, gpu_type: str | None = None) -> argparse.Namespace:
@@ -61,6 +65,96 @@ def test_detect_rope_with_maxpos_ok(tmp_path):
     _write_config(
         m, model_type="llama", max_position_embeddings=8192,
         rope_scaling={"type": "yarn", "factor": 4.0},
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_missing_tokenizer_blocks(tmp_path):
+    # Gensyn-Swarm fine-tune class: weights + config, no tokenizer artifacts.
+    m = tmp_path / "no_tok"
+    _write_config(
+        m, with_tokenizer=False,
+        model_type="qwen2", max_position_embeddings=32768,
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None
+    assert "tokenizer" in reason.lower()
+
+
+def test_detect_with_tokenizer_ok(tmp_path):
+    m = tmp_path / "with_tok"
+    _write_config(
+        m, with_tokenizer=False,
+        model_type="qwen2", max_position_embeddings=32768,
+    )
+    (m / "tokenizer.json").write_text("{}", encoding="utf-8")
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_missing_tokenizer_but_auto_map_ok(tmp_path):
+    # A custom AutoTokenizer in auto_map can supply the tokenizer at load time.
+    m = tmp_path / "auto_tok"
+    _write_config(
+        m, with_tokenizer=False,
+        model_type="custom", max_position_embeddings=4096,
+        auto_map={"AutoTokenizer": ["x.TokClass", None]},
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_minimax_m1_blocked_on_amd(tmp_path):
+    # minimax_m1 lightning-attention kernel needs 128KB LDS > MI300X 64KB.
+    m = tmp_path / "minimax"
+    _write_config(
+        m, model_type="minimax_m1",
+        architectures=["MiniMaxM1ForCausalLM"], max_position_embeddings=80000,
+    )
+    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    assert reason is not None
+    assert "AMD/ROCm" in reason
+
+
+def test_detect_minimax_m1_not_blocked_off_amd(tmp_path):
+    # AMD-specific LDS limit; do not block on non-AMD hardware.
+    m = tmp_path / "minimax_non_amd"
+    _write_config(
+        m, model_type="minimax_m1",
+        architectures=["MiniMaxM1ForCausalLM"], max_position_embeddings=80000,
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_unrecognized_arch_blocked_hardware_agnostic(tmp_path):
+    # glm4_moe_lite: Transformers does not recognize → ValidationError on any GPU.
+    m = tmp_path / "glm47flash"
+    _write_config(
+        m, model_type="glm4_moe_lite",
+        architectures=["Glm4MoeLiteForCausalLM"], max_position_embeddings=131072,
+    )
+    reason_amd = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    reason_off = cli._detect_incompatible_model_config(str(m))
+    assert reason_amd is not None and "not recognized" in reason_amd
+    assert reason_off is not None and "not recognized" in reason_off
+
+
+def test_detect_mimo_v2_flash_unrecognized_blocked(tmp_path):
+    # mimo_v2_flash: unrecognized arch + Unknown attention backend TRITON.
+    m = tmp_path / "mimo"
+    _write_config(
+        m, model_type="mimo_v2_flash",
+        architectures=["MiMoV2FlashForCausalLM"], max_position_embeddings=131072,
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "not recognized" in reason
+
+
+def test_detect_glm4_moe_not_blocked(tmp_path):
+    # glm4_moe (GLM-4.5/4.6 mainline) is a supported arch; must NOT be blocked
+    # by the unrecognized-arch rule (only glm4_moe_lite is unrecognized).
+    m = tmp_path / "glm4moe"
+    _write_config(
+        m, model_type="glm4_moe",
+        architectures=["Glm4MoeForCausalLM"], max_position_embeddings=131072,
     )
     assert cli._detect_incompatible_model_config(str(m)) is None
 
