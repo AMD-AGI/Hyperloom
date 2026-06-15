@@ -3583,11 +3583,14 @@ class Coordinator:
                 },
                 idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
             )
-            bench_result = await BaselineExecutor(
-                session_dir=self.session_dir,
-                shared_state=self.shared_state,
-            )(
-                RunnerContext(task=fake_task, lease=None)
+            # Inject the live SharedState via ctx.extra (not the constructor) so
+            # the eager-fallback one-shot is consumed in memory and the test
+            # baseline replica's constructor signature stays unchanged.
+            bench_result = await BaselineExecutor(session_dir=self.session_dir)(
+                RunnerContext(
+                    task=fake_task, lease=None,
+                    extra={"shared_state": self.shared_state},
+                )
             )
             if not is_valid_measurement(bench_result):
                 decision = "REVERT"
