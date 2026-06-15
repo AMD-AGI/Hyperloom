@@ -1193,14 +1193,33 @@ _ROPE_CONFIG_KEYS = ("rope_scaling", "rope_parameters", "rope_theta")
 
 # Architectures whose runtime path is not adapted to AMD/ROCm yet.
 # Matched case-insensitively against model_type and architectures.
-_AMD_UNSUPPORTED_MODEL_TYPES = frozenset({"deepseek_v32"})
-_AMD_UNSUPPORTED_ARCHITECTURES = frozenset({"deepseekv32forcausallm"})
+# minimax_m1: its lightning-attention kernel needs 128KB LDS (Required: 131072)
+# but MI300X's per-CU shared-memory limit is 64KB → "out of resource: shared
+# memory" → engine core init failed. Confirmed from MiniMax-M1-80k server.log.
+_AMD_UNSUPPORTED_MODEL_TYPES = frozenset({"deepseek_v32", "minimax_m1"})
+_AMD_UNSUPPORTED_ARCHITECTURES = frozenset({
+    "deepseekv32forcausallm", "minimaxm1forcausallm",
+})
 
 # model_type values that ship a custom AutoConfig (auto_map) but aren't
 # registered in sglang/vLLM's config mapping. sglang falls back to
 # PreTrainedConfig (base class), which lacks max_position_embeddings etc.,
 # causing AttributeError deep in engine init.
 _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
+
+# Architectures Transformers/sglang's ModelConfig does not recognize at all
+# (hardware-agnostic). The pydantic ModelConfig validation raises
+# "model type `X` but Transformers does not recognize this architecture"
+# → ValidationError in engine init regardless of GPU vendor. Matched
+# case-insensitively against model_type and architectures.
+# glm4_moe_lite: confirmed from zai-org-GLM-4.7-Flash server.log.
+# mimo_v2_flash: confirmed from XiaomiMiMo-MiMo-V2-Flash server.log ("model of
+# type mimo_v2_flash to instantiate a model of type ." + Unknown attention
+# backend TRITON) — the unrecognized arch leaves an empty model type.
+_UNRECOGNIZED_MODEL_TYPES = frozenset({"glm4_moe_lite", "mimo_v2_flash"})
+_UNRECOGNIZED_ARCHITECTURES = frozenset({
+    "glm4moeliteforcausallm", "mimov2flashforcausallm",
+})
 
 # Phi-3 su/longrope rope_scaling: Phi3Config._rope_scaling_validation() requires
 # rope_scaling to be a dict of EXACTLY 3 keys (type/short_factor/long_factor).
@@ -1330,6 +1349,64 @@ def _detect_gemma2_missing_hidden_act(data: dict) -> str | None:
     )
 
 
+# Local tokenizer artifacts sglang/HF need to build a real tokenizer. A
+# checkpoint shipping only weights + config (no tokenizer) loads a degraded
+# fallback whose warmup encodes an empty prompt → empty (M=0) batch → aiter
+# rotary_embedding SIGFPE on MI300X. Confirmed by repro: adding the official
+# Qwen2.5 tokenizer to such a model removes the M:0 crash entirely.
+_TOKENIZER_ARTIFACT_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "tokenizer.model",
+    "vocab.json",
+    "merges.txt",
+    "spiece.model",
+)
+
+
+def _detect_unrecognized_architecture(data: dict) -> str | None:
+    """Return a reason when the architecture is unknown to Transformers/sglang.
+
+    Hardware-agnostic: the ModelConfig pydantic validation rejects the unknown
+    model_type with a ValidationError in engine init on any GPU vendor.
+    """
+    model_type = str(data.get("model_type") or "").strip().lower()
+    arches = {a.lower() for a in _config_architectures(data)}
+    if (
+        model_type in _UNRECOGNIZED_MODEL_TYPES
+        or arches & _UNRECOGNIZED_ARCHITECTURES
+    ):
+        label = model_type or (next(iter(arches), "") if arches else "?")
+        return (
+            f"model type '{label}' is not recognized by Transformers/sglang's "
+            f"ModelConfig; engine init raises a pydantic ValidationError "
+            f"('does not recognize this architecture'). Needs a framework "
+            f"upgrade or a registered architecture mapping."
+        )
+    return None
+
+
+def _detect_missing_tokenizer_files(model_path: str, data: dict) -> str | None:
+    """Return a reason when a local checkpoint ships no tokenizer artifacts.
+
+    Conservative: only fires when NONE of the known tokenizer files exist AND
+    the config carries no custom AutoTokenizer (auto_map) that could supply one.
+    """
+    auto_map = data.get("auto_map")
+    if isinstance(auto_map, dict) and auto_map.get("AutoTokenizer"):
+        return None
+    mdir = Path(model_path)
+    if any((mdir / f).is_file() for f in _TOKENIZER_ARTIFACT_FILES):
+        return None
+    return (
+        "model directory ships weights + config but no tokenizer artifacts "
+        f"({', '.join(_TOKENIZER_ARTIFACT_FILES)}); sglang loads a degraded "
+        "fallback tokenizer whose warmup encodes an empty prompt, producing an "
+        "empty (M=0) batch that crashes the aiter rotary_embedding kernel with "
+        "SIGFPE on MI300X (Gensyn-Swarm fine-tune class)."
+    )
+
+
 def _detect_incompatible_model_config(
     model_path: str, gpu_type: str | None = None,
 ) -> str | None:
@@ -1410,6 +1487,16 @@ def _detect_incompatible_model_config(
     gemma2_reason = _detect_gemma2_missing_hidden_act(data)
     if gemma2_reason is not None:
         return gemma2_reason
+    # Unrecognized architecture (e.g. glm4_moe_lite): hardware-agnostic
+    # ModelConfig ValidationError in engine init.
+    unrecognized_reason = _detect_unrecognized_architecture(data)
+    if unrecognized_reason is not None:
+        return unrecognized_reason
+    # Missing tokenizer artifacts: hardware-agnostic; the degraded fallback
+    # tokenizer's empty-prompt warmup triggers an aiter M=0 SIGFPE.
+    tokenizer_reason = _detect_missing_tokenizer_files(model_path, data)
+    if tokenizer_reason is not None:
+        return tokenizer_reason
     # Custom AutoConfig with unregistered model_type: sglang/vLLM fall
     # back to PreTrainedConfig (no max_position_embeddings attr) → crash.
     auto_map = data.get("auto_map")
