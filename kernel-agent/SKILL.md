@@ -78,7 +78,7 @@ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
   `TraceLens_generate_perf_report_pytorch_inference --help`
   (Hyperloom is inference-only since v0.4; the training-mode CLI is no
   longer accepted)
-- GEAK CLI from `GEAK_REF` (default `v3.2.0`) +
+- GEAK CLI from `GEAK_REF` (default `v3.2.1`) +
   `${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml` (model resolution:
   `GEAK_MODEL_NAME` / `GEAK_API_KEY` / `GEAK_BASE_URL` from env, default
   `claude-opus-4-7`). Run-mode default for the generated yaml is
@@ -101,7 +101,7 @@ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
       environments.
     - `profiler-mcp` — unified profiling MCP (Metrix + rocprof-compute);
       produces `profile.json` per attempt. Metrix is no longer a separate
-      `metrix-mcp` folder in v3.2.0 — it is pulled in transitively via
+      `metrix-mcp` folder in v3.2.1 — it is pulled in transitively via
       `profiler-mcp/pyproject.toml` (`dependencies = ["metrix>=0.1.0"]`).
     - `cross-session-memory-mcp` — SQLite-backed cross-session memory
       retriever; points at `GEAK_MEMORY_STORE_PATH` (default
@@ -488,7 +488,7 @@ than a silent skip.
   runner SIGTERMs at 100%. `parallel_e2e_runner` will still extract whatever
   `optimization_report.md` / `optimized_versions/*` were on disk at SIGTERM
   time and promote the attempt to `partial` (see Proposal Rules).
-- **Why GEAK budget tracks $GEAK_RUN_MODE**: GEAK v3.2.0 yaml ships two
+- **Why GEAK budget tracks $GEAK_RUN_MODE**: GEAK v3.2.1 yaml ships two
   presets — `run.budgets.quick.total_s=3600` (1 h, 2 rounds) and
   `run.budgets.full.total_s=7200` (2 h, 5 rounds). GEAK's mini.py:435
   resolves mode by LLM-parsing the prompt-quoted budget: <120 min → quick,
