@@ -472,6 +472,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     result = await krh.run_optimization_handler(
         {
             "candidates_path": str(candidates),
+            "backend_order": "geak,claude,codex",
             "budget_minutes": 60,
             "max_parallel": 2,
         },
