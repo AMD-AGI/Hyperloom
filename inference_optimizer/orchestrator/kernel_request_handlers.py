@@ -1399,14 +1399,28 @@ async def trace_analyze_handler(
             )
 
         # kernel_journey stage 1 (hot-kernel discovery): additive, best-effort.
-        # Records the tracelens run + its hot-kernel list + tool provenance so
+        # Records the discovery run + its hot-kernel list + tool provenance so
         # the journey can thread discovery -> dispatch -> backends -> e2e.
         try:
             from ..breakdown.recorder import instrument
             _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
+            # Discovery source = the route that actually ran. The tool reports
+            # the authoritative mode (``orchestrator_mode``); the deterministic
+            # (no-LLM) route is surfaced to the dashboard as ``bypass`` while the
+            # LLM route stays ``tracelens``. Fall back to the requested
+            # ``analysis_route`` when the tool didn't echo a mode (e.g. early
+            # failure). Both routes drive the same TraceLens toolchain, so the
+            # version provenance (``tool``) stays ``tracelens`` either way.
+            _orch_mode = str(result.get("orchestrator_mode") or "").strip().lower()
+            _is_bypass = (
+                _orch_mode == "deterministic"
+                or analysis_route == "deterministic"
+            )
+            _disc_source = "bypass" if _is_bypass else "tracelens"
             instrument.record_kernel_discovery(
                 session_dir,
-                source="tracelens",
+                source=_disc_source,
+                tool="tracelens",
                 status=str(result.get("status") or ""),
                 hot_kernels=_hot if isinstance(_hot, list) else [],
                 scan={
@@ -1414,6 +1428,7 @@ async def trace_analyze_handler(
                     "trace_dir":          str(trace_input),
                     "candidates_path":    str(result.get("candidates_path") or ""),
                     "trace_report_path":  str(result.get("trace_report_path") or ""),
+                    "analysis_route":     _disc_source,
                 },
                 # tracelens version/commit is read from $TRACELENS_ROOT (its
                 # own checkout), resolved by the recorder's tool registry; we
