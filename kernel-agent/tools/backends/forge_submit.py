@@ -38,14 +38,11 @@ def _ensure_forge_on_path() -> str:
     `src/`, or the package dir itself) and prepend it to sys.path. When the
     env var is unset, do nothing and rely on an installed `kernel_agents`
     (e.g. `pip install -e`). Returns the path inserted, or "".
-
-    Returns:
-        str: the path prepended to ``sys.path``, or ``""`` when ``$FORGE_PATH``
-            is unset or no ``kernel_agents`` package can be located.
     """
-    root = (
-        os.environ.get("FORGE_PATH") or os.environ.get("KERNEL_FORGE_ROOT") or os.environ.get("KERNEL_FORGE_PATH") or ""
-    ).strip()
+    root = (os.environ.get("FORGE_PATH")
+            or os.environ.get("KERNEL_FORGE_ROOT")
+            or os.environ.get("KERNEL_FORGE_PATH")
+            or "").strip()
     if not root:
         return ""
     for cand in (os.path.join(root, "src"), root, os.path.dirname(root)):
@@ -72,17 +69,7 @@ _SOURCE_TYPE_TO_FELLOW = {
 
 
 def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120) -> subprocess.CompletedProcess:
-    """Run a subprocess, capturing text output (never raises on non-zero).
-
-    Args:
-        cmd (list[str]): the command argv to execute.
-        cwd (str | None): optional working directory for the subprocess.
-        timeout (int): subprocess timeout in seconds.
-
-    Returns:
-        subprocess.CompletedProcess: the completed process with captured text
-            stdout/stderr.
-    """
+    """Run a subprocess, capturing text output (never raises on non-zero)."""
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
 
 
@@ -90,13 +77,6 @@ def _resolve_gpu_target(candidate: dict) -> str:
     """Resolve the gfx target: env GPU_TARGET -> candidate platform -> probe.
 
     Never hard-codes; falls back to rocminfo when nothing else is available.
-
-    Args:
-        candidate (dict): the kernel candidate; its ``platform`` / ``arch``
-            fields hint the target when no env override is set.
-
-    Returns:
-        str: the resolved gfx target string (falls back to ``"gfx942"``).
     """
     env_target = (os.environ.get("GPU_TARGET") or os.environ.get("GPU_TYPE") or "").strip()
     if env_target:
@@ -116,30 +96,12 @@ def _resolve_gpu_target(candidate: dict) -> str:
 
 
 def _fellow_for_source_type(source_type: str) -> str | None:
-    """Map source_type to a Forge fellow (stage 1: triton only). None if unsupported.
-
-    Args:
-        source_type (str): the candidate source type (e.g. ``triton`` /
-            ``python``).
-
-    Returns:
-        str | None: the mapped Forge fellow name, or ``None`` when the source
-            type is unsupported.
-    """
+    """Map source_type to a Forge fellow (stage 1: triton only). None if unsupported."""
     return _SOURCE_TYPE_TO_FELLOW.get((source_type or "").strip().lower())
 
 
 def _git_toplevel(path: str) -> str:
-    """Return the git repo root containing `path`, or '' if not a git repo.
-
-    Args:
-        path (str): a path inside the candidate repo; its parent is probed with
-            ``git rev-parse --show-toplevel``.
-
-    Returns:
-        str: the git repo top-level directory, or ``""`` when ``path`` is not in
-            a git repo.
-    """
+    """Return the git repo root containing `path`, or '' if not a git repo."""
     try:
         proc = _run(["git", "-C", str(Path(path).parent), "rev-parse", "--show-toplevel"], timeout=30)
         if proc.returncode == 0:
@@ -155,44 +117,27 @@ def _default_branch(repo: str) -> str:
     Used to auto-recover a repo stranded on a leftover ``forge/`` temp branch by
     a hard-killed prior run. Prefers the remote's advertised default, then falls
     back to common local branch names.
-
-    Args:
-        repo (str): the git repo root to inspect.
-
-    Returns:
-        str: the default branch name (remote-advertised, else ``main`` /
-            ``master``), or ``""`` when none can be resolved.
     """
-    p = _run(["git", "-C", repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], timeout=30)
+    p = _run(["git", "-C", repo, "symbolic-ref", "--short",
+              "refs/remotes/origin/HEAD"], timeout=30)
     ref = (p.stdout or "").strip()
     if ref.startswith("origin/"):
-        return ref[len("origin/") :]
+        return ref[len("origin/"):]
     for name in ("main", "master"):
-        if _run(["git", "-C", repo, "rev-parse", "--verify", name], timeout=30).returncode == 0:
+        if _run(["git", "-C", repo, "rev-parse", "--verify", name],
+                timeout=30).returncode == 0:
             return name
     return ""
 
 
-def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, branch: str) -> tuple[str, str, str] | None:
+def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path,
+                      branch: str) -> tuple[str, str, str] | None:
     """Create a git worktree of kernel_repo at output_dir/worktree (R1/W1).
 
     Returns (worktree_dir, worktree_kernel_file, base_commit) or None when the
     repo is not a clean git checkout / source_file is not tracked (forge then
     skips, never mutating the live repo). base_commit is the commit the worktree
     was created at (HEAD); export diffs the best state against it.
-
-    Args:
-        source_file (str): the kernel source file to optimize.
-        kernel_repo (str): the kernel repo root (falls back to the git toplevel
-            of ``source_file`` when empty).
-        output_dir (Path): the run output dir; the worktree is created at
-            ``output_dir/worktree``.
-        branch (str): the temp branch name to create the worktree on.
-
-    Returns:
-        tuple[str, str, str] | None: ``(worktree_dir, worktree_kernel_file,
-            base_commit)``, or ``None`` when the repo is not a clean git
-            checkout or ``source_file`` is not tracked.
     """
     repo = kernel_repo or _git_toplevel(source_file)
     if not repo or not (Path(repo) / ".git").exists():
@@ -235,13 +180,9 @@ def _editable_roots() -> list[str]:
       1. Path-string .pth files that contain absolute paths in quotes.
       2. Setuptools-style .pth files that ``import __editable___<pkg>_finder``;
          the finder .py has a ``MAPPING`` dict mapping package names to paths.
-
-    Returns:
-        list[str]: the sorted absolute filesystem roots that editable-finder
-            installs map into.
     """
+    import re
     import site
-
     roots: set[str] = set()
     seen_dirs: set[str] = set()
     scan_dirs = list(sys.path)
@@ -288,8 +229,7 @@ def _editable_roots() -> list[str]:
                 continue
             fpath = os.path.join(d, n)
             try:
-                with open(fpath, errors="replace") as _fh:
-                    txt = _fh.read()
+                txt = open(fpath, errors="replace").read()
             except OSError:
                 continue
             # Layout 1: quoted absolute paths directly in the file.
@@ -303,8 +243,7 @@ def _editable_roots() -> list[str]:
                 if fm:
                     finder_file = os.path.join(d, fm.group(1) + ".py")
                     try:
-                        with open(finder_file, errors="replace") as _ffh:
-                            ftxt = _ffh.read()
+                        ftxt = open(finder_file, errors="replace").read()
                     except OSError:
                         continue
                     for m in re.findall(r"['\"](/[^'\"]+)['\"]", ftxt):
@@ -318,13 +257,6 @@ def _needs_inplace(kernel_repo: str) -> bool:
 
     In that case forge must edit the live repo in place (the finder imports the
     live path; a worktree copy would be invisible -> the loop would no-op).
-
-    Args:
-        kernel_repo (str): the kernel repo root to test.
-
-    Returns:
-        bool: True when ``kernel_repo`` is, contains, or sits under an
-            editable-finder root (forge must edit in place); False otherwise.
     """
     if not kernel_repo:
         return False
@@ -343,19 +275,10 @@ def _acquire_repo_lock(repo: str) -> int | None:
     cross-contaminated measurements). The lock serializes them; a caller that
     cannot get it must skip in-place (fall through to the next backend). Returns
     the held fd (release with _release_repo_lock) or None when already held.
-
-    Args:
-        repo (str): the live repo root to lock.
-
-    Returns:
-        int | None: the held lock file descriptor (release via
-            :func:`_release_repo_lock`), or ``None`` when the lock is already
-            held or cannot be opened.
     """
     try:
-        # Lock file is owner-only (0o600); no reason for group/other read
-        # (CodeQL py/overly-permissive-file).
-        fd = os.open(os.path.join(repo, ".git", "forge_inplace.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        fd = os.open(os.path.join(repo, ".git", "forge_inplace.lock"),
+                     os.O_CREAT | os.O_RDWR, 0o644)
     except OSError:
         return None
     try:
@@ -367,12 +290,7 @@ def _acquire_repo_lock(repo: str) -> int | None:
 
 
 def _release_repo_lock(fd: int | None) -> None:
-    """Release + close the in-place repo lock (best-effort).
-
-    Args:
-        fd (int | None): the lock file descriptor returned by
-            :func:`_acquire_repo_lock`; ``None`` is a no-op.
-    """
+    """Release + close the in-place repo lock (best-effort)."""
     if fd is None:
         return
     try:
@@ -401,17 +319,6 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
       - dirty working trees are allowed: restore only touches the source_file
         (per-file write-back, no ``reset --hard``), so other uncommitted changes
         in the repo are never destroyed.
-
-    Args:
-        source_file (str): the kernel source file to edit in place.
-        kernel_repo (str): the kernel repo root (falls back to the git toplevel
-            of ``source_file`` when empty).
-        branch (str): the temp branch name to create for the forge loop.
-
-    Returns:
-        tuple[str, str, dict] | None: ``(workspace=repo, kernel_file=source_file,
-            restore_info)``, or ``None`` when the repo is not a usable git
-            checkout (or another in-place run holds the lock).
     """
     repo = kernel_repo or _git_toplevel(source_file)
     if not repo or not (Path(repo) / ".git").exists():
@@ -429,16 +336,12 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
         return None  # another forge in-place run holds this repo; skip cleanly
 
     def _skip() -> None:
-        """Release the repo lock and bail out of in-place preparation.
-
-        Returns:
-            ``None`` (the sentinel callers return to signal a clean skip).
-        """
         _release_repo_lock(lock_fd)
         return None
 
     try:
-        orig_branch = _run(["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"], timeout=30).stdout.strip()
+        orig_branch = _run(["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
+                           timeout=30).stdout.strip()
         orig_head = _run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip()
         if not orig_head:
             return _skip()
@@ -454,12 +357,14 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
             if not default_branch:
                 return _skip()
             stale = orig_branch
-            co = _run(["git", "-C", repo, "checkout", "-f", default_branch], timeout=120)
+            co = _run(["git", "-C", repo, "checkout", "-f", default_branch],
+                      timeout=120)
             if co.returncode != 0:
                 return _skip()
             _run(["git", "-C", repo, "branch", "-D", stale], timeout=30)
             orig_branch = default_branch
-            orig_head = _run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip()
+            orig_head = _run(["git", "-C", repo, "rev-parse", "HEAD"],
+                             timeout=30).stdout.strip()
             if not orig_head:
                 return _skip()
         # Preflight: drop any stale temp branch from a prior crashed run so the
@@ -491,25 +396,19 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
         _run(["git", "-C", repo, "add", "-u"], timeout=60)
         dirty = _run(["git", "-C", repo, "diff", "--cached", "--quiet"], timeout=30)
         if dirty.returncode != 0:
-            _run(["git", "-C", repo, "commit", "-m", "forge: pre-existing dirty baseline"], timeout=60)
-            base_commit = _run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip() or orig_head
+            _run(["git", "-C", repo, "commit", "-m",
+                  "forge: pre-existing dirty baseline"], timeout=60)
+            base_commit = _run(["git", "-C", repo, "rev-parse", "HEAD"],
+                               timeout=30).stdout.strip() or orig_head
         else:
             base_commit = orig_head
     except Exception:
         _release_repo_lock(lock_fd)
         raise
 
-    restore = {
-        "repo": repo,
-        "orig_branch": orig_branch,
-        "orig_head": orig_head,
-        "branch": branch,
-        "source_file": source_file,
-        "backup": backup,
-        "relpath": relpath,
-        "lock_fd": lock_fd,
-        "base_commit": base_commit,
-    }
+    restore = {"repo": repo, "orig_branch": orig_branch, "orig_head": orig_head,
+               "branch": branch, "source_file": source_file, "backup": backup,
+               "relpath": relpath, "lock_fd": lock_fd, "base_commit": base_commit}
     return repo, source_file, restore
 
 
@@ -525,11 +424,6 @@ def _restore_inplace(restore: dict) -> None:
     dirty content snapshotted at prepare time), so checking files out of it
     restores precisely what was there before forge ran. Untracked files (build
     artifacts) are never touched (no ``reset --hard``).
-
-    Args:
-        restore (dict): the restore info dict produced by
-            :func:`_prepare_inplace` (repo, orig_branch/head, base_commit,
-            source_file, backup bytes, lock fd, ...).
     """
     if not restore:
         return
@@ -577,15 +471,7 @@ def _restore_inplace(restore: dict) -> None:
 
 
 def _remove_worktree(kernel_repo: str, source_file: str, wt: str, branch: str) -> None:
-    """Tear down the worktree + temp branch; live repo untouched (W3).
-
-    Args:
-        kernel_repo (str): the kernel repo root (falls back to the git toplevel
-            of ``source_file`` when empty).
-        source_file (str): the kernel source file (used to resolve the repo).
-        wt (str): the worktree directory to remove.
-        branch (str): the temp branch to delete.
-    """
+    """Tear down the worktree + temp branch; live repo untouched (W3)."""
     repo = kernel_repo or _git_toplevel(source_file)
     if not repo:
         return
@@ -663,16 +549,7 @@ main()
 
 
 def _build_driver_adapter(test_command: str, worktree: str, output_dir: Path) -> str:
-    """Write the driver-adapter script and return its path.
-
-    Args:
-        test_command (str): the Hyperloom harness/test command to wrap.
-        worktree (str): the worktree directory forced onto sys.path/cwd.
-        output_dir (Path): the run output dir the adapter is written under.
-
-    Returns:
-        str: the path to the written, executable driver-adapter script.
-    """
+    """Write the driver-adapter script and return its path."""
     adapter = output_dir / "forge_driver_adapter.py"
     adapter.write_text(_ADAPTER_TEMPLATE.format(test_command=test_command, worktree=worktree))
     adapter.chmod(0o755)
@@ -868,7 +745,8 @@ if __name__ == "__main__":
 '''
 
 
-def _autogen_forge_driver(candidate: dict, worktree_kernel: str, output_dir: Path, inplace: bool = False) -> str | None:
+def _autogen_forge_driver(candidate: dict, worktree_kernel: str, output_dir: Path,
+                          inplace: bool = False) -> str | None:
     """Auto-generate a Forge-native driver when no harness is supplied.
 
     Op templates keyed by candidate['operation'] / kernel name:
@@ -879,20 +757,6 @@ def _autogen_forge_driver(candidate: dict, worktree_kernel: str, output_dir: Pat
       - gemm / matmul    -> imports the kernel by FILE path (worktree-safe) +
         torch.matmul golden.
     Returns the driver path, or None when the op has no usable template.
-
-    Args:
-        candidate (dict): the kernel candidate; ``operation`` / ``name`` select
-            the op template.
-        worktree_kernel (str): the worktree kernel file path (substituted into
-            file-import templates).
-        output_dir (Path): the run output dir the driver is written under.
-        inplace (bool): whether forge is running in in-place mode (required for
-            the package-import moe template).
-
-    Returns:
-        str | None: the path to the written driver script, or ``None`` when the
-            op has no usable template (or moe is requested outside in-place
-            mode).
     """
     op = str(candidate.get("operation") or "").lower()
     hint = (op + " " + str(candidate.get("name") or "") + " " + worktree_kernel).lower()
@@ -921,13 +785,6 @@ def _tensor_dim_lists(candidate: dict) -> list[list[int]]:
     falls back to its tiny default shape (M=512) — which benches a memory-bound
     regime and yields a near-1.0x speedup instead of the real prefill gain. Parse
     both forms here.
-
-    Args:
-        candidate (dict): the kernel candidate carrying ``input_shapes`` in the
-            integer-list or dtype-tagged-string form.
-
-    Returns:
-        list[list[int]]: one integer dim list per parsed tensor shape.
     """
     out: list[list[int]] = []
     for e in candidate.get("input_shapes") or []:
@@ -954,13 +811,6 @@ def _gemm_dims(shapes: list[list[int]]) -> dict:
     Picks the first pair of 2D tensors whose inner dims agree (A[1]==B[0]); falls
     back to M/K from a single 2D tensor. Dims that cannot be derived are omitted
     so the driver keeps its own default for them.
-
-    Args:
-        shapes (list[list[int]]): per-tensor integer dim lists.
-
-    Returns:
-        dict: the derived ``{M, N, K}`` dims (partial when only a single 2D
-            tensor is available; empty when none can be derived).
     """
     twod = [s for s in shapes if len(s) == 2]
     for a in twod:
@@ -979,13 +829,6 @@ def _moe_dims(shapes: list[list[int]]) -> dict:
     [E,*,K] (3D), and topk ids/weights [M,t] (2D, small second dim). w2 is
     [E,K,N] (dim1==K) -> N=dim2; else w1 [E,2N,K] (dim2==K) -> N=dim1//2.
     Only confidently derived dims are returned; the rest fall back to defaults.
-
-    Args:
-        shapes (list[list[int]]): per-tensor integer dim lists.
-
-    Returns:
-        dict: the confidently derived subset of ``{M, N, K, E, TOPK}``; the rest
-            fall back to driver defaults.
     """
     twod = [s for s in shapes if len(s) == 2]
     threed = [s for s in shapes if len(s) == 3]
@@ -1026,14 +869,6 @@ def _shapes_from_candidate(candidate: dict) -> dict:
     omitted and the driver keeps its built-in default (safe degradation).
 
     With a single shape, minimal == primary and the sweep degenerates (Y3).
-
-    Args:
-        candidate (dict): the kernel candidate carrying ``operation`` / ``name``
-            and ``input_shapes``.
-
-    Returns:
-        dict: a shapes dict with ``primary`` / ``minimal`` named-dim mappings
-            and a ``validation`` list for the driver.
     """
     op = (str(candidate.get("operation") or "") + " " + str(candidate.get("name") or "")).lower()
     dims = _tensor_dim_lists(candidate)
@@ -1046,27 +881,21 @@ def _shapes_from_candidate(candidate: dict) -> dict:
     # Back-compat: honor an explicit pre-named dim dict if one was supplied.
     if not primary:
         shapes = candidate.get("input_shapes") or []
-        if shapes and isinstance(shapes[0], dict) and any(k in shapes[0] for k in ("M", "N", "K", "E", "TOPK")):
-            primary = {k: v for k, v in shapes[0].items() if k in ("M", "N", "K", "E", "TOPK")}
+        if shapes and isinstance(shapes[0], dict) and any(
+                k in shapes[0] for k in ("M", "N", "K", "E", "TOPK")):
+            primary = {k: v for k, v in shapes[0].items()
+                       if k in ("M", "N", "K", "E", "TOPK")}
     return {"primary": primary, "minimal": primary, "validation": [primary] if primary else []}
 
 
-def _write_report(output_dir: Path, baseline_ms: float | None, best_ms: float | None, improved: bool) -> Path:
+def _write_report(output_dir: Path, baseline_ms: float | None, best_ms: float | None,
+                  improved: bool) -> Path:
     """Write optimization_report.md with the locked anchors (doc Section 6.4).
 
     Only claims a KEEP-worthy result when the loop actually kept a validated
     kernel strictly faster than baseline (improved=True). Otherwise emits no
     speedup and [correctness] fail, so build_verification never KEEPs a kernel
     that wasn't really optimized/validated.
-
-    Args:
-        output_dir (Path): the run output dir the report is written under.
-        baseline_ms (float | None): the baseline wall time in ms.
-        best_ms (float | None): the best-kept wall time in ms.
-        improved (bool): whether a validated, strictly-faster kernel was kept.
-
-    Returns:
-        Path: the path to the written ``optimization_report.md``.
     """
     lines = ["# Forge optimization report", ""]
     if improved and baseline_ms and best_ms and best_ms > 0:
@@ -1082,9 +911,8 @@ def _write_report(output_dir: Path, baseline_ms: float | None, best_ms: float | 
     return report
 
 
-def _export_best_artifacts(
-    workspace: str, base_commit: str, worktree_kernel_file: str, source_file: str, output_dir: Path
-) -> tuple[str, list[str]]:
+def _export_best_artifacts(workspace: str, base_commit: str, worktree_kernel_file: str,
+                           source_file: str, output_dir: Path) -> tuple[str, list[str]]:
     """Export the best-kept state — ALL files the agent changed, not just the kernel.
 
     The loop now commits every tracked edit (``runner._git_commit`` uses
@@ -1103,21 +931,6 @@ def _export_best_artifacts(
         base_commit``) so a multi-file change can be applied at integration time.
 
     Returns (primary_artifact_path, changed_relpaths).
-
-    Args:
-        workspace (str): the worktree/live-repo workspace holding the best-kept
-            state.
-        base_commit (str): the pre-forge baseline commit to diff against.
-        worktree_kernel_file (str): the primary kernel file to copy as the
-            drop-in replacement artifact.
-        source_file (str): the original kernel source file (its suffix names the
-            artifact).
-        output_dir (Path): the run output dir artifacts are written under.
-
-    Returns:
-        tuple[str, list[str]]: ``(primary_artifact_path, changed_relpaths)`` —
-            the exported primary kernel path and every repo-relative file
-            changed since ``base_commit``.
     """
     dst_dir = output_dir / "optimized_versions"
     dst_dir.mkdir(parents=True, exist_ok=True)
@@ -1160,71 +973,119 @@ def _export_best_artifacts(
     return str(primary), changed
 
 
-def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float, gpu_ids: str = "") -> dict:
-    """Shape the result like oob_submit/geak_submit return dicts.
-
-    Args:
-        returncode (int): the process return code.
-        stdout (str): captured stdout.
-        stderr (str): captured stderr.
-        elapsed_s (float): wall time elapsed in seconds.
-        gpu_ids (str): GPU id string; defaults to the visible-device env vars
-            when empty.
-
-    Returns:
-        dict: the normalized result dict (returncode, stdout/stderr tails,
-            gpu_ids, elapsed_s, cmd).
-    """
+def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float,
+                gpu_ids: str = "") -> dict:
+    """Shape the result like oob_submit/geak_submit return dicts."""
     return {
         "returncode": returncode,
         "stdout_tail": (stdout or "")[-4000:],
         "stderr_tail": (stderr or "")[-4000:],
         "stdout": stdout or "",
-        "gpu_ids": gpu_ids or (os.environ.get("HIP_VISIBLE_DEVICES") or os.environ.get("CUDA_VISIBLE_DEVICES") or ""),
+        "gpu_ids": gpu_ids or (os.environ.get("HIP_VISIBLE_DEVICES")
+                               or os.environ.get("CUDA_VISIBLE_DEVICES") or ""),
         "elapsed_s": round(elapsed_s, 2),
         "cmd": ["forge_submit.submit"],
     }
 
 
-def submit(
-    source_file: str,
-    prompt_file: Path,
-    output_dir: Path,
-    test_command: str = "",
-    source_type: str = "unknown",
-    candidate: dict | None = None,
-    num_gpus: int = 1,
-    timeout_s: int = 1800,
-    prefer_ray: bool = True,
-    kernel_repo: str = "",
-) -> dict:
+def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
+                      shapes: dict, snr_threshold: float, max_iters: int,
+                      max_hours: float, branch: str, gpu_target: str,
+                      fellow: str, program_md_file: str, experiments_dir: Path,
+                      forge_log: Path, timeout_s: int) -> tuple:
+    """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
+
+    Shells out to ``kernel-agents forge-loop`` (like the GEAK backend shells
+    out to its CLI) so the LLM-driven loop runs in a hard-killable child
+    process. A hung fellow can no longer freeze the orchestrator: the
+    ``subprocess timeout`` kills the whole tree. Returns
+    (baseline_ms, best_ms, improved, loop_output, loop_exc).
+
+    The subprocess resolves ``kernel_agents`` from $FORGE_PATH (prepended to
+    PYTHONPATH) and runs ``python -m kernel_agents.cli forge-loop``.
+    """
+    import json as _json
+    result_json = experiments_dir.parent / "forge_cli_result.json"
+    forge_root = _ensure_forge_on_path()  # path that contains kernel_agents pkg
+    env = dict(os.environ)
+    if forge_root:
+        env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
+    env["GPU_TARGET"] = gpu_target
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        env.setdefault("IS_SANDBOX", "1")
+    cmd = [
+        sys.executable, "-m", "kernel_agents.cli", "forge-loop",
+        "--kernel", worktree_kernel,
+        "--driver", driver,
+        "--workspace", workspace,
+        "--shapes-json", _json.dumps(shapes),
+        "--snr-threshold", str(snr_threshold),
+        "--max-iters", str(max_iters),
+        "--max-hours", str(max_hours),
+        "--git-branch", branch,
+        "--gpu-target", gpu_target,
+        "--fellow", fellow,
+        "--experiments-dir", str(experiments_dir),
+        "--result-json", str(result_json),
+    ]
+    if program_md_file and Path(program_md_file).exists():
+        cmd += ["--program-md-file", str(program_md_file)]
+
+    loop_exc = None
+    out = ""
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout_s, env=env, cwd=workspace)
+        out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        if proc.returncode != 0:
+            loop_exc = RuntimeError(f"forge-loop exited rc={proc.returncode}")
+    except subprocess.TimeoutExpired as exc:
+        out = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+        loop_exc = RuntimeError(f"forge-loop timed out after {timeout_s}s")
+    except Exception as exc:  # noqa: BLE001
+        loop_exc = exc
+
+    try:
+        with open(forge_log, "a") as f:
+            f.write("\n=== forge-loop (cli) stdout ===\n")
+            f.write(out)
+            if loop_exc:
+                f.write(f"\n=== forge-loop exception ===\n{loop_exc}\n")
+    except OSError:
+        pass
+
+    # Parse the result: prefer the JSON sidecar, else the sentinel line.
+    baseline_ms = best_ms = None
+    improved = False
+    parsed = None
+    try:
+        if result_json.exists():
+            parsed = _json.loads(result_json.read_text())
+    except Exception:
+        parsed = None
+    if parsed is None and "__FORGE_RESULT__" in out:
+        try:
+            seg = out.split("__FORGE_RESULT__")[1]
+            parsed = _json.loads(seg)
+        except Exception:
+            parsed = None
+    if parsed:
+        baseline_ms = parsed.get("baseline_ms")
+        best_ms = parsed.get("best_ms")
+        improved = bool(parsed.get("improved"))
+    return baseline_ms, best_ms, improved, out, loop_exc
+
+
+def submit(source_file: str, prompt_file: Path, output_dir: Path,
+           test_command: str = "", source_type: str = "unknown",
+           candidate: dict | None = None, num_gpus: int = 1,
+           timeout_s: int = 1800, prefer_ray: bool = True,
+           kernel_repo: str = "") -> dict:
     """Run Forge's autonomous loop on one kernel; emit Hyperloom-contract artifacts.
 
     Stage 1 runs the loop in-process inside a git worktree (Ray wrapping is a
     follow-up to match OOB GPU leasing). Returns a normalized result dict and
     writes optimized_versions/ + optimization_report.md under output_dir.
-
-    Args:
-        source_file (str): the kernel source file to optimize.
-        prompt_file (Path): the Hyperloom-rendered prompt reused as the Forge
-            program text.
-        output_dir (Path): the run output dir for artifacts and logs.
-        test_command (str): optional Hyperloom harness/test command; when empty
-            a Forge-native driver is auto-generated.
-        source_type (str): the kernel source type (stage 1 supports triton).
-        candidate (dict | None): the kernel candidate metadata (operation,
-            input_shapes, platform, targets, ...).
-        num_gpus (int): the number of GPUs to lease for the run.
-        timeout_s (int): the overall run budget in seconds (drives the per-iter
-            Forge budget).
-        prefer_ray (bool): whether to prefer Ray wrapping (stage 1 runs
-            in-process).
-        kernel_repo (str): the kernel repo root (falls back to the git toplevel
-            of ``source_file`` when empty).
-
-    Returns:
-        dict: a normalized result dict (also carrying ``cli_workspace`` /
-            ``output_dir`` so the report scan finds the emitted artifacts).
     """
     started = time.time()
     candidate = candidate or {}
@@ -1233,9 +1094,8 @@ def submit(
 
     fellow = _fellow_for_source_type(source_type)
     if fellow is None:
-        return _normalized(
-            2, "", f"forge stage-1 supports triton only; got source_type={source_type}", time.time() - started
-        )
+        return _normalized(2, "", f"forge stage-1 supports triton only; got source_type={source_type}",
+                           time.time() - started)
     # No early skip when test_command is empty: forge can auto-generate a driver
     # from the candidate's operation + input_shapes (see _autogen_forge_driver),
     # which is its edge over GEAK for harness-less candidates.
@@ -1253,39 +1113,34 @@ def submit(
     if inplace:
         prep = _prepare_inplace(source_file, repo, branch)
         if prep is None:
-            return _normalized(
-                2,
-                "",
-                "forge: editable-finder package but repo is not a usable git checkout; skipping",
-                time.time() - started,
-            )
+            return _normalized(2, "", "forge: editable-finder package but repo is not a usable git "
+                               "checkout; skipping", time.time() - started)
         workspace, worktree_kernel, restore_info = prep
         base_commit = restore_info.get("base_commit") or ""
     else:
         wt_info = _prepare_worktree(source_file, kernel_repo, output_dir, branch)
         if wt_info is None:
-            return _normalized(
-                2,
-                "",
-                "forge: kernel_repo is not a clean git checkout or source_file "
-                "not tracked; skipping (live repo untouched)",
-                time.time() - started,
-            )
+            return _normalized(2, "", "forge: kernel_repo is not a clean git checkout or source_file "
+                               "not tracked; skipping (live repo untouched)", time.time() - started)
         workspace, worktree_kernel, base_commit = wt_info
 
     try:
         # Locate the Kernel-Forge code via $FORGE_PATH (like OOB_PATH for oob),
         # falling back to whatever `kernel_agents` is importable in the env.
         _ensure_forge_on_path()
-        # Lazy import: kernel_agents (Forge) is an optional dependency.
-        try:
-            from kernel_agents.config import Config
-            from kernel_agents.loop import IterationLoop
-            from kernel_agents.loop.runner import IterationConfig
-            from kernel_agents.tracker import ExperimentTracker
-            from kernel_agents.orchestrator.agent import make_agent_fn
-        except ImportError as exc:
-            return _normalized(127, "", f"kernel_agents (Forge) not importable: {exc}", time.time() - started)
+        # CLI mode (default) runs the loop in a subprocess, so kernel_agents need
+        # not be importable in THIS process. in-process mode needs the imports.
+        loop_mode = os.environ.get("FORGE_LOOP_MODE", "cli").strip().lower()
+        if loop_mode != "cli":
+            try:
+                from kernel_agents.config import Config
+                from kernel_agents.loop import IterationLoop
+                from kernel_agents.loop.runner import IterationConfig
+                from kernel_agents.tracker import ExperimentTracker
+                from kernel_agents.orchestrator.agent import make_agent_fn
+            except ImportError as exc:
+                return _normalized(127, "", f"kernel_agents (Forge) not importable: {exc}",
+                                   time.time() - started)
 
         import asyncio
 
@@ -1297,36 +1152,69 @@ def submit(
             driver = _autogen_forge_driver(candidate, worktree_kernel, output_dir, inplace=inplace)
             if driver is None:
                 return _normalized(
-                    2,
-                    "",
+                    2, "",
                     "forge: no test_command and could not auto-generate a driver for "
                     f"operation={candidate.get('operation')!r} (auto-gen supports gemm/matmul, "
                     "and fused_moe only in in-place mode; other ops need a "
                     "benchmark/test_command or an op template)",
-                    time.time() - started,
-                )
+                    time.time() - started)
         gpu_target = _resolve_gpu_target(candidate)
         # Export GPU_TARGET so Kernel-Forge's MCP server tools (build/bench/pmc)
         # pick up the resolved target instead of falling back to their own default.
         os.environ["GPU_TARGET"] = gpu_target
         shapes = _shapes_from_candidate(candidate)
+        forge_log = output_dir / "forge_loop.log"
+        experiments_dir = output_dir / "forge_experiments"
+        experiments_dir.mkdir(parents=True, exist_ok=True)
+        max_iters = int(os.environ.get("FORGE_MAX_ITERS", "8"))
+        snr_threshold = float((candidate.get("targets") or {}).get("snr_db", 30.0))
 
+        # ── CLI mode (default): run the loop in an isolated, hard-killable
+        # subprocess (like GEAK). A hung fellow can't freeze the orchestrator. ──
+        if loop_mode == "cli":
+            baseline_ms, best_ms, improved, loop_output, loop_exc = _run_loop_via_cli(
+                worktree_kernel=worktree_kernel, driver=driver, workspace=workspace,
+                shapes=shapes, snr_threshold=snr_threshold, max_iters=max_iters,
+                max_hours=max(0.05, timeout_s / 3600.0), branch=branch,
+                gpu_target=gpu_target, fellow=fellow,
+                program_md_file=str(prompt_file), experiments_dir=experiments_dir,
+                forge_log=forge_log, timeout_s=timeout_s)
+            _, changed_files = _export_best_artifacts(
+                workspace, base_commit, worktree_kernel, source_file, output_dir)
+            if changed_files:
+                try:
+                    (output_dir / "optimized_versions" / "changed_files.txt").write_text(
+                        "\n".join(changed_files) + "\n")
+                except OSError:
+                    pass
+            _write_report(output_dir, baseline_ms, best_ms, improved)
+            if loop_exc and baseline_ms is None:
+                # Hard failure with no measurement -> surface as forge failure.
+                return _normalized(1, "", f"forge cli loop failed: {loop_exc}",
+                                   time.time() - started)
+            msg = (f"forge done (cli): baseline={baseline_ms} best={best_ms} "
+                   f"improved={improved} fellow={fellow} gpu={gpu_target}")
+            res = _normalized(0, msg + "\n" + (loop_output or "")[-3000:], "",
+                              time.time() - started)
+            res["cli_workspace"] = str(output_dir)
+            res["output_dir"] = str(output_dir)
+            return res
+
+        # ── in-process mode (FORGE_LOOP_MODE=inproc): legacy path ──
         config = Config.from_env(gpu_target=gpu_target, workspace=workspace)
         # X5: redirect Forge experiment state under the run's output dir, not the
         # Forge package tree (Config.from_env does not wire experiments_dir).
-        config.experiments_dir = output_dir / "forge_experiments"
-        config.experiments_dir.mkdir(parents=True, exist_ok=True)
+        config.experiments_dir = experiments_dir
         # Derive Forge budget from Hyperloom's timeout_s (Y1). Default 8 iters:
         # agent_fn errors consume iterations silently (recorded in self.results
         # but not in the experiment tracker), so a higher budget ensures enough
         # successful iterations actually run validation + bench.
-        max_iters = int(os.environ.get("FORGE_MAX_ITERS", "8"))
         per_iter = max(60, timeout_s // max(1, max_iters))
         iter_config = IterationConfig(
             kernel_file=worktree_kernel,
             driver_script=driver,
             shapes=shapes,
-            snr_threshold=float((candidate.get("targets") or {}).get("snr_db", 30.0)),
+            snr_threshold=snr_threshold,
             max_iterations=max_iters,
             max_time_hours=max(0.05, timeout_s / 3600.0),
             time_per_iteration_sec=per_iter,
@@ -1370,56 +1258,30 @@ def submit(
         # run. FORGE_AGENT_RETRIES = extra attempts after the first (default 2).
         agent_retries = max(0, int(os.environ.get("FORGE_AGENT_RETRIES", "2")))
         _TRANSIENT = (
-            "error result: success",
-            "Reached maximum number of turns",
-            "Fatal error in message reader",
-            "message reader",
-            "Connection",
-            "connection reset",
-            "stream",
-            "EOF",
-            "broken pipe",
+            "error result: success", "Reached maximum number of turns",
+            "Fatal error in message reader", "message reader",
+            "Connection", "connection reset", "stream", "EOF", "broken pipe",
         )
 
         async def _logged_agent_fn(kernel_path: str, history: str) -> str:
-            """Run the Forge agent with per-call timeout, retries, and logging.
-
-            Wraps ``raw_agent_fn`` so each call is bounded by
-            ``agent_timeout_s`` and retried up to ``agent_retries`` times on
-            timeouts or transient SDK errors, appending an outcome line to the
-            forge loop log on every attempt.
-
-            Args:
-                kernel_path (str): Path to the kernel the agent edits.
-                history (str): Iteration history passed through to the agent.
-
-            Returns:
-                str: The agent's result string on success.
-
-            Raises:
-                Exception: The last timeout/transient error when all attempts
-                    are exhausted (or a non-transient error immediately).
-            """
             import asyncio as _aio
             import traceback as _tb
-
             last_exc: Exception | None = None
             for attempt in range(agent_retries + 1):
                 call_ts = time.strftime("%H:%M:%S", time.gmtime())
                 tag = f"attempt {attempt + 1}/{agent_retries + 1}"
                 try:
-                    result = await _aio.wait_for(raw_agent_fn(kernel_path, history), timeout=agent_timeout_s)
+                    result = await _aio.wait_for(
+                        raw_agent_fn(kernel_path, history), timeout=agent_timeout_s)
                     with open(forge_log, "a") as f:
                         f.write(f"[{call_ts}] agent_fn OK ({tag}): {result[:120]}\n")
                     return result
                 except _aio.TimeoutError as exc:
                     last_exc = exc
                     with open(forge_log, "a") as f:
-                        f.write(
-                            f"[{call_ts}] agent_fn TIMEOUT after {agent_timeout_s}s "
-                            f"({tag}; fellow hung) -> "
-                            f"{'retrying' if attempt < agent_retries else 'giving up'}\n"
-                        )
+                        f.write(f"[{call_ts}] agent_fn TIMEOUT after {agent_timeout_s}s "
+                                f"({tag}; fellow hung) -> "
+                                f"{'retrying' if attempt < agent_retries else 'giving up'}\n")
                     # Transient stream hang: a fresh query() usually reconnects.
                     continue
                 except Exception as exc:  # noqa: BLE001
@@ -1427,11 +1289,9 @@ def submit(
                     detail = _tb.format_exc()
                     transient = any(s.lower() in str(exc).lower() for s in _TRANSIENT)
                     with open(forge_log, "a") as f:
-                        f.write(
-                            f"[{call_ts}] agent_fn ERROR ({tag}; "
-                            f"{'transient->retry' if transient and attempt < agent_retries else 'fatal'}): "
-                            f"{exc}\n{detail}\n"
-                        )
+                        f.write(f"[{call_ts}] agent_fn ERROR ({tag}; "
+                                f"{'transient->retry' if transient and attempt < agent_retries else 'fatal'}): "
+                                f"{exc}\n{detail}\n")
                     if transient and attempt < agent_retries:
                         continue
                     raise
@@ -1471,7 +1331,6 @@ def submit(
             if not _proxy:
                 try:
                     import json as _json
-
                     _cfg = _json.loads((Path.home() / ".claude" / "config.json").read_text())
                     _cu = str(_cfg.get("customApiUrl") or "").rstrip("/")
                     if "/api/v1/llm-proxy" in _cu:
@@ -1485,9 +1344,7 @@ def submit(
         # timeline (baseline, agent rationale, validation stages, keep/revert
         # decisions, budget exhaustion) is preserved for post-mortem — the
         # runner prints to stdout which is otherwise lost inside asyncio.run.
-        import contextlib
-        import io
-
+        import contextlib, io
         loop_stdout = io.StringIO()
         loop_exc = None
         try:
@@ -1515,10 +1372,12 @@ def submit(
         # Export + report BEFORE _restore_inplace (in finally) reverts the
         # changed files. The best-kept state is on disk right now; capture ALL
         # files the agent touched (not just source_file) + a forge.patch.
-        _, changed_files = _export_best_artifacts(workspace, base_commit, worktree_kernel, source_file, output_dir)
+        _, changed_files = _export_best_artifacts(
+            workspace, base_commit, worktree_kernel, source_file, output_dir)
         if changed_files:
             try:
-                (output_dir / "optimized_versions" / "changed_files.txt").write_text("\n".join(changed_files) + "\n")
+                (output_dir / "optimized_versions" / "changed_files.txt").write_text(
+                    "\n".join(changed_files) + "\n")
             except OSError:
                 pass
         _write_report(output_dir, baseline_ms, best_ms, improved)
@@ -1526,7 +1385,8 @@ def submit(
         if loop_exc:
             raise loop_exc
 
-        msg = f"forge done: baseline={baseline_ms} best={best_ms} improved={improved} fellow={fellow} gpu={gpu_target}"
+        msg = (f"forge done: baseline={baseline_ms} best={best_ms} "
+               f"improved={improved} fellow={fellow} gpu={gpu_target}")
         res = _normalized(0, msg + "\n" + loop_output[-3000:], "", time.time() - started)
         # Expose output_dir as cli_workspace so run_attempt's report scan finds
         # <output_dir>/optimization_report.md + optimized_versions/ (same path
@@ -1536,7 +1396,8 @@ def submit(
         res["output_dir"] = str(output_dir)
         return res
     except Exception as exc:  # noqa: BLE001
-        return _normalized(1, "", f"forge submit failed: {type(exc).__name__}: {exc}", time.time() - started)
+        return _normalized(1, "", f"forge submit failed: {type(exc).__name__}: {exc}",
+                           time.time() - started)
     finally:
         if inplace:
             _restore_inplace(restore_info)

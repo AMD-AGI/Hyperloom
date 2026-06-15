@@ -179,3 +179,60 @@ def test_submit_skips_without_harness_or_template(tmp_path):
         candidate={},
     )
     assert res["returncode"] == 2
+
+
+def test_run_loop_via_cli_parses_result(tmp_path, monkeypatch):
+    """CLI mode parses the subprocess JSON result (sidecar + sentinel) and never
+    runs the loop in-process."""
+    import subprocess as _sp
+
+    exp_dir = tmp_path / "forge_experiments"
+    exp_dir.mkdir(parents=True)
+    sidecar = tmp_path / "forge_cli_result.json"
+
+    def fake_run(cmd, **kwargs):
+        # Emulate the forge-loop CLI: write the result sidecar + sentinel stdout.
+        sidecar.write_text('{"baseline_ms": 0.20, "best_ms": 0.18, '
+                           '"improved": true, "experiment_id": "abc123"}')
+
+        class P:
+            returncode = 0
+            stdout = "loop log...\n__FORGE_RESULT__{\"baseline_ms\":0.20}__FORGE_RESULT__\n"
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+
+    baseline, best, improved, out, exc = forge_submit._run_loop_via_cli(
+        worktree_kernel=str(tmp_path / "k.py"), driver=str(tmp_path / "d.py"),
+        workspace=str(tmp_path), shapes={"primary": {"M": 8}}, snr_threshold=30.0,
+        max_iters=2, max_hours=0.1, branch="forge/t/k", gpu_target="gfx942",
+        fellow="triton-fellow", program_md_file=str(tmp_path / "nope.md"),
+        experiments_dir=exp_dir, forge_log=tmp_path / "forge_loop.log", timeout_s=60)
+
+    assert exc is None
+    assert baseline == 0.20 and best == 0.18 and improved is True
+
+
+def test_run_loop_via_cli_timeout_returns_exc(tmp_path, monkeypatch):
+    """A subprocess timeout surfaces as loop_exc with no measurement (the caller
+    then reports a forge failure) — proving the hard-kill path works."""
+    import subprocess as _sp
+
+    def fake_run(cmd, **kwargs):
+        raise _sp.TimeoutExpired(cmd, kwargs.get("timeout", 1))
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    exp_dir = tmp_path / "forge_experiments"
+    exp_dir.mkdir(parents=True)
+
+    baseline, best, improved, out, exc = forge_submit._run_loop_via_cli(
+        worktree_kernel=str(tmp_path / "k.py"), driver=str(tmp_path / "d.py"),
+        workspace=str(tmp_path), shapes={}, snr_threshold=30.0, max_iters=2,
+        max_hours=0.1, branch="forge/t/k", gpu_target="gfx942",
+        fellow="triton-fellow", program_md_file="", experiments_dir=exp_dir,
+        forge_log=tmp_path / "forge_loop.log", timeout_s=1)
+
+    assert exc is not None and baseline is None and improved is False
