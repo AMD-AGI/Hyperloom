@@ -44,6 +44,10 @@ from .cli_backends import (  # noqa: F401 - re-exported for callers/tests
     _build_robustness_options,
     _robustness_server_configured,
 )
+from .orchestrator.action_executors._aiter_jit import (
+    AITER_LOCK_STALE_MINUTES,
+    clean_stale_aiter_locks as _clean_stale_aiter_locks_impl,
+)
 from .orchestrator.backends import ClaudeBackend
 from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
@@ -450,87 +454,18 @@ def _emit_launch_info(
 
 def _clean_stale_aiter_locks(
     aiter_jit_dir: Path | None = None,
-    stale_minutes: int = 5,
+    stale_minutes: int = AITER_LOCK_STALE_MINUTES,
 ) -> dict[str, Any]:
-    """Sweep aiter's JIT build dir for stale plain-file locks left by killed runs (else next run hangs).
+    """Startup sweep of stale aiter JIT locks; delegates to the shared helper.
 
-    Only deletes locks with mtime older than ``stale_minutes`` (default 5; above cold-start MoE build
-    time, below the hang-suspicion cliff). Build dir resolution: caller arg → $INFERENCE_OPTIMIZER_AITER_JIT_DIR
-    → dynamic <aiter>/jit/build → legacy fallbacks. Returns a stats dict; never raises (errors counted).
+    Thin shim preserving the historical signature / stats-dict contract for the
+    startup call site and tests. The canonical implementation (plus the
+    liveness-gated per-cold-start variant) lives in
+    ``orchestrator/action_executors/_aiter_jit.py``.
     """
-    stats: dict[str, Any] = {
-        "dir": None,
-        "scanned": 0,
-        "deleted": 0,
-        "skipped_fresh": 0,
-        "errors": 0,
-    }
-
-    if aiter_jit_dir is None:
-        candidates: list[str] = []
-        override = os.environ.get(
-            "INFERENCE_OPTIMIZER_AITER_JIT_DIR", "",
-        ).strip()
-        if override:
-            override_path = Path(override)
-            candidates.extend([str(override_path), str(override_path / "build")])
-        try:
-            import importlib.util as _il_util
-            spec = _il_util.find_spec("aiter")
-        except (ImportError, ValueError):
-            spec = None
-        if spec is not None and spec.origin:
-            aiter_root = Path(spec.origin).parent
-            candidates.append(str(aiter_root / "jit" / "build"))
-        candidates.extend([
-            "/sgl-workspace/aiter/aiter/jit/build",
-            "/usr/local/lib/python3.10/dist-packages/aiter/jit/build",
-            "/usr/local/lib/python3.12/dist-packages/aiter/jit/build",
-            "/opt/venv/lib/python3.10/site-packages/aiter/jit/build",
-            "/opt/venv/lib/python3.12/site-packages/aiter/jit/build",
-        ])
-        chosen: Path | None = None
-        for cand in candidates:
-            p = Path(cand)
-            if p.is_dir():
-                chosen = p
-                break
-        if chosen is None:
-            return stats
-        aiter_jit_dir = chosen
-
-    stats["dir"] = str(aiter_jit_dir)
-
-    threshold_seconds = float(stale_minutes) * 60.0
-    now = time.time()
-    lock_names = {"lock", ".ninja_lock"}
-    try:
-        walker = os.walk(str(aiter_jit_dir))
-    except OSError:
-        stats["errors"] += 1
-        return stats
-
-    for root, _dirs, files in walker:
-        for fname in files:
-            if not (fname in lock_names or fname.startswith("lock_")):
-                continue
-            stats["scanned"] += 1
-            fpath = Path(root) / fname
-            try:
-                age = now - fpath.stat().st_mtime
-            except OSError:
-                stats["errors"] += 1
-                continue
-            if age < threshold_seconds:
-                stats["skipped_fresh"] += 1
-                continue
-            try:
-                fpath.unlink()
-                stats["deleted"] += 1
-            except OSError:
-                stats["errors"] += 1
-
-    return stats
+    return _clean_stale_aiter_locks_impl(
+        aiter_jit_dir, stale_minutes=stale_minutes,
+    )
 
 
 def _autodetect_gpu_type() -> str | None:

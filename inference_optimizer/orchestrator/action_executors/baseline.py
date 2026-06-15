@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import importlib.util
 import json
 import logging
 import os
@@ -35,6 +34,12 @@ from ...paths import asset_root
 from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
+from ._aiter_jit import (
+    AITER_JIT_PROBE_PATHS,
+    COLD_START_KERNEL_THRESHOLD,
+    _resolve_aiter_jit_dir_dynamic,
+    sweep_stale_aiter_locks_if_dead,
+)
 from ._grid_runner import (
     _kill_stale_servers,
     sanitize_result_dir,
@@ -105,21 +110,9 @@ BASELINE_DEFAULT_CONFIG = (
 )
 BASELINE_DEFAULT_TIMEOUT_SEC = 7800           # WARM-start cap, 130 min (raised for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 ~82 min workload)
 BASELINE_COLD_START_TIMEOUT_SEC = 9000        # COLD-start cap, 150 min (includes ~20 min cuda graph capture)
-COLD_START_KERNEL_THRESHOLD = 20              # < N .so files under aiter jit/build/ ⇒ COLD
-
-# Legacy fallback probe order for aiter's JIT cache dir, used only when
-# find_spec("aiter") can't resolve aiter dynamically. First existing path
-# wins. Override via env `INFERENCE_OPTIMIZER_AITER_JIT_DIR` (tried first).
-AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
-    "/sgl-workspace/aiter/aiter/jit",
-    "/sgl-workspace/aiter/aiter/jit/build",
-    "/usr/local/lib/python3.10/dist-packages/aiter/jit",
-    "/usr/local/lib/python3.12/dist-packages/aiter/jit",
-    "/usr/local/lib/python3.10/site-packages/aiter/jit",
-    "/usr/local/lib/python3.12/site-packages/aiter/jit",
-    "/opt/venv/lib/python3.10/site-packages/aiter/jit",
-    "/opt/venv/lib/python3.12/site-packages/aiter/jit",
-)
+# COLD_START_KERNEL_THRESHOLD and AITER_JIT_PROBE_PATHS now live in
+# ``_aiter_jit`` (shared with cli.py's startup sweep); re-exported below for
+# callers/tests that import them from this module.
 
 
 # Underscore-prefixed aliases re-exported for callers/tests; canonical
@@ -332,27 +325,6 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     return str(dest)
 
 
-def _resolve_aiter_jit_dir_dynamic() -> list[str]:
-    """Locate aiter's ``jit/`` dir via Python's import machinery.
-
-    Counting at ``<aiter>/jit/`` reflects a warm wheel install (~80
-    pre-built ``.so``); the legacy fixed ``jit/build`` list mis-reports
-    every wheel install as COLD. Returns an ordered candidate list
-    (``jit`` preferred over ``jit/build``); empty if aiter not found.
-    """
-    try:
-        spec = importlib.util.find_spec("aiter")
-    except (ImportError, ValueError):  # noqa: BLE001 — aiter not importable
-        return []
-    if spec is None or not spec.origin:
-        return []
-    aiter_root = Path(spec.origin).parent
-    return [
-        str(aiter_root / "jit"),
-        str(aiter_root / "jit" / "build"),
-    ]
-
-
 def _probe_aiter_jit_cache() -> dict[str, Any]:
     """Inspect aiter's ``jit/`` dir to decide cold vs warm start.
 
@@ -503,6 +475,27 @@ class BaselineExecutor:
             "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC",
             BASELINE_COLD_START_TIMEOUT_SEC,
         ))
+        if cache["probe_status"] == "found" and cache["is_cold"]:
+            # Before paying the cold-start compile, reap aiter JIT locks left
+            # by a killed hipcc (else this build spins forever in FileBaton's
+            # untimed wait). Gated on "no live compiler" so a concurrent
+            # benchmark's in-flight compile on the node-global jit dir is never
+            # disturbed; ninja resumes incrementally from any surviving .o.
+            sweep = sweep_stale_aiter_locks_if_dead()
+            if sweep.get("skipped_live"):
+                log.info(
+                    "baseline_executor: aiter lock sweep skipped — live "
+                    "compiler process present (jit dir node-shared).",
+                )
+            elif sweep.get("deleted"):
+                log.warning(
+                    "baseline_executor: reaped %d stale aiter JIT lock(s) "
+                    "under %s (compiler_alive=%s) before cold start.",
+                    sweep["deleted"], sweep.get("dir"),
+                    sweep.get("compiler_alive"),
+                )
+                # Locks gone — re-probe so the log line below reflects reality.
+                cache = _probe_aiter_jit_cache()
         if cache["probe_status"] == "found" and cache["is_cold"]:
             log.warning(
                 "baseline_executor: COLD_START detected — aiter jit/build/ "
