@@ -5,7 +5,7 @@ name: SaFE Optimize Tiny (count-filler)
 # Scheduled/manual entrypoint for the count-filler pool, hosted off-repo at
 #   /wekafs/chenyi/ci-candidates/sub100_lt12b_pulse_notrun_2026-06-15.json
 #   = HF text-generation models with <12B params AND <100 downloads that pulse
-#     has NOT run yet. The goal is breadth ("凑数") — sweep the long tail.
+#     has NOT run yet. The goal is breadth -- sweep the long tail.
 #
 # It intentionally delegates to `SaFE Optimize Submit` so submission, waiting,
 # artifact collection, summary rendering, webhook, and perf publishing stay
