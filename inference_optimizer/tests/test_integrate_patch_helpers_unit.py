@@ -189,6 +189,45 @@ def test_patch_touched_paths_skips_unresolvable_and_creations(tmp_path):
     assert ip._patch_touched_paths(tmp_path, [patch]) == ["new.py"]
 
 
+# ---- Issue 6: deletion-only KEEP patches are staged for commit -------------
+def test_patch_touched_paths_emits_deleted_path(tmp_path):
+    """A pure-deletion patch emits the OLD path so git add -A stages the removal.
+
+    Post-apply the file is gone (new == /dev/null); the old path must still be
+    returned, else the KEEP commits nothing and a later REVERT resurrects it.
+    """
+    # File was already deleted by the (already-applied) patch — gone from disk.
+    delete = (
+        "--- a/pkg/gone.py\n"
+        "+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n"
+        "-content\n"
+    )
+    patch = tmp_path / "d.patch"
+    patch.write_text(delete, encoding="utf-8")
+    assert ip._patch_touched_paths(tmp_path, [patch]) == ["pkg/gone.py"]
+
+
+def test_patch_touched_paths_mixed_create_and_delete(tmp_path):
+    """A patch that creates one file and deletes another emits both paths."""
+    (tmp_path / "kept.py").write_text("hi\n", encoding="utf-8")
+    mixed = (
+        "--- /dev/null\n"
+        "+++ b/kept.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+hi\n"
+        "--- a/dropped.py\n"
+        "+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n"
+        "-bye\n"
+    )
+    patch = tmp_path / "m.patch"
+    patch.write_text(mixed, encoding="utf-8")
+    assert sorted(ip._patch_touched_paths(tmp_path, [patch])) == [
+        "dropped.py", "kept.py",
+    ]
+
+
 def test_git_commit_kept_no_paths_is_benign_noop(tmp_path, monkeypatch):
     # Empty path set must never shell out and must report success (no-op).
     called = {"n": 0}
@@ -254,6 +293,49 @@ def test_resolve_patch_paths_from_done_payload(tmp_path):
         specialist_workspace=tmp_path, explicit_patches=None,
         done_payload={"patches_written": [str(p)]})
     assert out[0].name == "x.patch"
+
+
+# ---- Issue 5a: path containment -------------------------------------------
+def test_resolve_patch_paths_drops_outside_workspace(tmp_path):
+    """An absolute patch path outside the specialist workspace is dropped."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    # A real, existing file that lives OUTSIDE the workspace.
+    outside = tmp_path / "evil.patch"
+    outside.write_text("z", encoding="utf-8")
+    out = ip._resolve_patch_paths(
+        specialist_workspace=workspace,
+        explicit_patches=[str(outside)],
+        done_payload=None)
+    assert out == []
+
+
+def test_resolve_patch_paths_accepts_inside_workspace(tmp_path):
+    """A patch inside the workspace (or its worktree) is accepted."""
+    workspace = tmp_path / "ws"
+    (workspace / "worktree" / "patches").mkdir(parents=True)
+    good = workspace / "worktree" / "patches" / "ok.patch"
+    good.write_text("z", encoding="utf-8")
+    out = ip._resolve_patch_paths(
+        specialist_workspace=workspace,
+        explicit_patches=[str(good)],
+        done_payload=None)
+    assert [p.name for p in out] == ["ok.patch"]
+
+
+def test_resolve_patch_paths_containment_survives_symlinked_workspace(tmp_path):
+    """A symlinked workspace root still matches (both sides resolved)."""
+    real = tmp_path / "real_ws"
+    (real / "patches").mkdir(parents=True)
+    good = real / "patches" / "ok.patch"
+    good.write_text("z", encoding="utf-8")
+    link = tmp_path / "link_ws"
+    link.symlink_to(real)
+    out = ip._resolve_patch_paths(
+        specialist_workspace=link,
+        explicit_patches=[str(link / "patches" / "ok.patch")],
+        done_payload=None)
+    assert [p.name for p in out] == ["ok.patch"]
 
 
 # ---- _read_done_payload ---------------------------------------------------

@@ -314,14 +314,22 @@ def _commit_strip_level(
 def _patch_touched_paths(
     framework_root: Path, patches: list[Path],
 ) -> list[str]:
-    """Repo-relative paths the applied ``patches`` modified/created.
+    """Repo-relative paths the applied ``patches`` created / modified / deleted.
 
     Used to scope the commit-on-KEEP to *only* the files this patch touched, so
     an unrelated dirty working tree under ``framework_root`` (generated files,
     manual edits, stray artifacts) is never swept into the ``hyperloom KEEP``
-    commit. Only paths that exist post-apply are emitted (pure deletions, the
-    rare KEEP shape, are skipped) so the subsequent ``git add`` pathspec can
-    never miss and silently stage nothing for the whole set.
+    commit.
+
+    Per header pair (``old`` ``---``, ``new`` ``+++``):
+      * created / modified → the ``new`` target exists post-apply → emit it.
+      * deleted (Issue 6) → ``new`` is ``/dev/null`` (or its target is gone)
+        and ``old`` existed pre-apply → emit the ``old`` path so the subsequent
+        ``git add -A -- <path>`` stages the *removal* of a tracked file.
+        Without this a pure-deletion KEEP committed nothing, and a later cycle's
+        ``git checkout -- .`` REVERT resurrected the deleted file.
+    A header that resolves to neither (matches nothing pre or post) is dropped
+    so ``git add`` cannot error on a bogus pathspec.
     """
     out: list[str] = []
     for patch in patches:
@@ -334,17 +342,26 @@ def _patch_touched_paths(
             continue
         lvl = _commit_strip_level(framework_root, pairs)
         for old, new in pairs:
-            for raw in (new, old):
-                if not raw or raw == _PATCH_DEV_NULL:
-                    continue
-                rel = _strip_path_prefix(raw, lvl)
-                try:
-                    exists = (framework_root / rel).exists()
-                except OSError:
-                    exists = False
-                if exists and rel not in out:
-                    out.append(rel)
-                    break  # one resolved path per header pair
+            rel_new = (
+                _strip_path_prefix(new, lvl)
+                if new and new != _PATCH_DEV_NULL else None
+            )
+            rel_old = (
+                _strip_path_prefix(old, lvl)
+                if old and old != _PATCH_DEV_NULL else None
+            )
+            try:
+                new_exists = bool(rel_new) and (framework_root / rel_new).exists()
+            except OSError:
+                new_exists = False
+            if rel_new and new_exists:
+                # Created or modified — the post-apply file is on disk.
+                if rel_new not in out:
+                    out.append(rel_new)
+            elif rel_old:
+                # Deletion — new target is gone; stage the removal of old.
+                if rel_old not in out:
+                    out.append(rel_old)
     return out
 
 
@@ -392,6 +409,15 @@ def _git_commit_kept(
     return False, cp.stderr.strip()
 
 
+def _is_within(child: Path, root: Path) -> bool:
+    """True iff ``child`` is ``root`` or nested under it (both pre-resolved)."""
+    try:
+        child.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def _resolve_patch_paths(
     *,
     specialist_workspace: Path,
@@ -403,6 +429,13 @@ def _resolve_patch_paths(
     Order: ``params.patches`` → ``specialist_done.patches_written`` →
     filesystem scan of ``specialist_workspace/{worktree/,}patches/``.
     Entries normalised to absolute Paths; missing ones logged + dropped.
+
+    Security (Issue 5a): a resolved patch path must live inside the specialist
+    workspace (or its worktree). ``params.patches`` is LLM-/specialist-
+    controllable, so an absolute path pointing outside the sandbox (another
+    session's patch, ``/etc/...``) is dropped — otherwise it would be read and
+    ``git apply``-ed against the framework tree. Both sides are ``resolve()``-d
+    first so a legitimately symlinked workspace still matches.
     """
     candidates: list[str] = []
     if explicit_patches:
@@ -421,6 +454,11 @@ def _resolve_patch_paths(
                     candidates.append(str(p))
                 for p in sorted(base.glob("*.diff")):
                     candidates.append(str(p))
+
+    allowed_roots = [
+        (specialist_workspace / "worktree").resolve(),
+        specialist_workspace.resolve(),
+    ]
 
     out: list[Path] = []
     for c in candidates:
@@ -441,7 +479,15 @@ def _resolve_patch_paths(
                 c, specialist_workspace,
             )
             continue
-        out.append(p.resolve())
+        resolved = p.resolve()
+        if not any(_is_within(resolved, root) for root in allowed_roots):
+            log.warning(
+                "integrate_patch: patch %r resolves outside the specialist "
+                "workspace (%s); dropping for safety",
+                c, specialist_workspace,
+            )
+            continue
+        out.append(resolved)
     return out
 
 
