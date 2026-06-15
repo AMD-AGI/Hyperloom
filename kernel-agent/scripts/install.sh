@@ -126,10 +126,10 @@ if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] || [ -z "${CURSOR
 fi
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
 GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
-# Pin GEAK to the v3.2.0 release, which carries the GEMM tuning entrypoint
+# Pin GEAK to the v3.2.1 release, which carries the GEMM tuning entrypoint
 # used by kernel-agent/tools/gemm_tuning.py (minisweagent.run.gemm_tuning).
 # Operators can override with GEAK_REF=<tag|branch|sha>.
-GEAK_REF="${GEAK_REF:-v3.2.0}"
+GEAK_REF="${GEAK_REF:-v3.2.1}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 OOB_ROOT="${OOB_ROOT:-${OOB_CLI_ROOT:-${_open_source_root}/OOB}}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
@@ -866,7 +866,7 @@ ensure_geak() {
       _PIP_CONSTRAINT_ARGS="--constraint ${GEAK_PIP_CONSTRAINT_FILE}"
     fi
     run python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${GEAK_ROOT}"
-    # GEAK v3.2.0 ships 4 MCP tools under mcp_tools/; all are imported
+    # GEAK v3.2.1 ships 4 MCP tools under mcp_tools/; all are imported
     # by the bundled ``minisweagent`` at preprocess time:
     #   * rag-mcp                    — knowledge-base retrieval (tools.rag)
     #   * profiler-mcp               — Metrix-backed instrumented profiling
