@@ -100,7 +100,7 @@ Notes:
 |-----------------|----------------------------------------------------|---------------------------------------------------------|
 | Session start   | API call / Job creation                            | Coordinator writes `manifest.json`, `state.json`.       |
 | Heartbeat       | Every 60 s                                         | Coordinator writes `state.json.tmp` → atomic rename.    |
-| Session end     | `target_reached` / `time_exhausted` / `no_more_leverage` | Coordinator writes `session_breakdown.json`, exits 0. |
+| Session end     | `target_reached` / `time_exhausted` / `global_converged` | Coordinator writes `session_breakdown.json`, exits 0. |
 | Crash recovery  | Pod OOM / preemption                               | Re-launch with `--resume`; reads `manifest.json` + `state.json`. |
 
 ---

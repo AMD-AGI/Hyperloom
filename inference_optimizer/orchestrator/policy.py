@@ -30,6 +30,8 @@ from .specialist_domains import (
     KNOWLEDGE_DOMAIN_TAG_SET,
     SPECIALIST_DOMAIN_KEYS,
     SPECIALIST_MAX_TURNS_HARD_CAP,
+    domain_for_tag,
+    get_domain,
     normalize_dispatch_tags,
 )
 from .specialist_profile import (
@@ -417,6 +419,18 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "phase_started_unix",
     "phase_history",
     "phase_budget_pct",
+    # R1/R2/R7 cyclic phase-machine state (Coordinator-only writers:
+    # ``_apply_macro_cycle_reloop`` + ``should_reloop_to_explore`` accounting).
+    # Locked so an LLM ``update_state`` cannot forge the macro-cycle counter,
+    # the per-cycle budget window, the per-cycle gain anchor / no-gain streak
+    # (which drive global-convergence + the decaying acceptance curve), or the
+    # cross-cycle bottleneck-switch handoff.
+    "macro_cycle",
+    "cycle_minutes",
+    "gain_at_cycle_start",
+    "no_gain_cycle_streak",
+    "pending_bottleneck_switch",
+    "last_cycle_bottleneck",
     # operator-facing lifecycle event log (#266). Coordinator-only writer
     # (SharedState.record_lifecycle_event); LLM update_state must not be
     # able to forge "phase X finished, outputs at <path>" events.
@@ -424,6 +438,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     # specialist sub-agent ledger; LLM cannot inject entries (proposals go via the R3 path).
     "specialist_rounds",
     "specialist_domain_empty_streak",
+    # per-kb_anchor coverage counters (point 1); Coordinator-only writers.
+    "rounds_since_last_specialist",
+    "rounds_since_last_keep",
     "last_specialist",
     # research_lane / GPU capacity set once at CLI/manifest time; locked so the LLM can't raise it mid-flight.
     "research_lane_capacity",
@@ -727,10 +744,21 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
-        # Soft check — reject only if registry is wired AND name is unknown AND not kernel-owned.
+        # Kernel-owned actions are REQUEST-only — mirror the delegate guard so the
+        # ownership contract is enforced on BOTH the propose and delegate channels
+        # (action_surfaces.KERNEL_OWNED_ACTIONS). Without this a propose_action
+        # would pass the gate and materialize as a ``kind=<kernel action>`` task
+        # that bypasses the kernel REQUEST handler.
+        if action_name in KERNEL_OWNED_ACTIONS:
+            raise PolicyDenied(
+                f"action={action_name!r} is owned by the kernel agent; "
+                f"emit REQUEST(target_agent='kernel', kind='...') instead "
+                f"of propose_action(action_name={action_name!r})",
+                rule="kernel_owned_by_kernel_agent",
+            )
+        # Soft check — reject only if registry is wired AND name is unknown.
         if (
             self.action_registry is not None
-            and action_name not in KERNEL_OWNED_ACTIONS
             and self.action_registry.get(action_name) is None
         ):
             raise PolicyDenied(
@@ -1387,13 +1415,22 @@ class PolicyGate:
         # scope='freeform' (absorbed dynamic_specialist) has no domain anchor:
         # it skips the tag / gap vocabulary checks and runs a lightweight
         # mechanical sanity gate instead.
-        if str(params.get("scope") or "").strip().lower() == \
-                SPECIALIST_SCOPE_FREEFORM:
+        scope_raw = str(params.get("scope") or "").strip().lower()
+        if scope_raw == SPECIALIST_SCOPE_FREEFORM:
             self._validate_freeform_specialist_dispatch(params)
             return
 
         # ``params.tags`` is canonical; a single ``params.domain`` is a backward-compatible alias.
         tags = normalize_dispatch_tags(params)
+        # A *bare* dispatch — no explicit scope and no domain/tag anchor —
+        # defaults to the cheap, read-only freeform lane (point 3: safe & cheap
+        # first) instead of being rejected. The freeform gate below still
+        # requires a non-empty task_description, so a fully empty dispatch is
+        # rejected there rather than running an anchorless patch specialist.
+        if not scope_raw and not tags:
+            self._validate_freeform_specialist_dispatch(params)
+            return
+
         if not tags:
             raise PolicyDenied(
                 "delegate{action='specialist'}: at least one tag is "
@@ -1456,6 +1493,14 @@ class PolicyGate:
         # ``sub_kind`` is a free-form prompt selector (not constrained to a catalogue).
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         if not gap:
+            # Friction symmetry (point 4): a domain/tag-anchored dispatch that
+            # omits the gap id is backfilled from the gaps[] ledger by matching
+            # the dispatch anchor against each gap's ``domain_hint`` — so the
+            # LLM doesn't have to hand-copy a canonical id (and isn't pushed
+            # toward freeform out of friction). Only mutates when a match is
+            # found; otherwise the rejection below still fires.
+            gap = self._autofill_gap_from_ledger(params, tags)
+        if not gap:
             raise PolicyDenied(
                 "delegate{action='specialist'}: params.gap_canonical_id required",
                 rule="specialist_dispatch_source",
@@ -1486,6 +1531,27 @@ class PolicyGate:
                     ),
                 )
 
+        self._validate_specialist_gpu_request(params)
+
+    def _validate_specialist_gpu_request(self, params: dict[str, Any]) -> None:
+        """Validate a specialist's optional GPU request against the GPU
+        specialist-pool ceiling.
+
+        Shared by the domain-anchored gate (``_validate_specialist_dispatch``)
+        and the freeform gate (``_validate_freeform_specialist_dispatch``) so a
+        ``scope='freeform'`` dispatch that sets ``needs_gpu`` is governed by the
+        same ceiling instead of slipping past it via the freeform early-return.
+        No-op when the dispatch needs no GPU.
+
+        A bench-enabled specialist (``mode=patch`` & ``bench=true``) does not
+        have to set ``needs_gpu`` explicitly: the Coordinator's
+        ``_warm_specialist_params`` auto-defaults it to True at dispatch so the
+        worktree micro-benchmark holds a GPU lease. We mirror that auto-default
+        here, otherwise such a dispatch slips past this gate (no explicit
+        ``needs_gpu``) and later becomes a GPU-needing queued task that can stall
+        forever when the pool is disabled (``--gpu-specialist-capacity 0``)
+        rather than being rejected at the policy layer.
+        """
         needs_gpu_raw = params.get("needs_gpu", False)
         if isinstance(needs_gpu_raw, str):
             needs_gpu = needs_gpu_raw.strip().lower() in (
@@ -1493,44 +1559,109 @@ class PolicyGate:
             )
         else:
             needs_gpu = bool(needs_gpu_raw)
-        if needs_gpu:
-            gpu_count_raw = params.get("gpu_count", 1)
-            try:
-                gpu_count = int(gpu_count_raw)
-            except (TypeError, ValueError) as exc:
-                raise PolicyDenied(
-                    "delegate{action='specialist'}: gpu_count must be "
-                    f"an integer, got {gpu_count_raw!r}",
-                    rule="specialist_gpu_request_invalid",
-                ) from exc
-            if gpu_count <= 0:
-                raise PolicyDenied(
-                    "delegate{action='specialist'}: gpu_count must be > 0 "
-                    "when needs_gpu=true",
-                    rule="specialist_gpu_request_invalid",
-                )
-            ceiling = gpu_specialist_ceiling(self.shared_state)
-            if ceiling <= 0:
-                raise PolicyDenied(
-                    "delegate{action='specialist'}: needs_gpu=true but the "
-                    "GPU specialist pool is disabled",
-                    rule="specialist_gpu_pool_disabled",
-                    hint=(
-                        "Start the session with --gpu-specialist-capacity > 0 "
-                        "or set INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY "
-                        "before dispatching GPU specialists."
-                    ),
-                )
-            if gpu_count > ceiling:
-                raise PolicyDenied(
-                    f"delegate{{action='specialist'}}: gpu_count={gpu_count} "
-                    f"exceeds GPU specialist capacity={ceiling}",
-                    rule="specialist_gpu_request_exceeds_capacity",
-                    hint=(
-                        "Lower params.gpu_count or start a session with a "
-                        "larger GPU specialist pool."
-                    ),
-                )
+        if not needs_gpu:
+            from .specialist_profile import resolve_specialist_profile
+            if resolve_specialist_profile(params).grants_bench_tool:
+                needs_gpu = True
+        if not needs_gpu:
+            return
+        gpu_count_raw = params.get("gpu_count", 1)
+        try:
+            gpu_count = int(gpu_count_raw)
+        except (TypeError, ValueError) as exc:
+            raise PolicyDenied(
+                "delegate{action='specialist'}: gpu_count must be "
+                f"an integer, got {gpu_count_raw!r}",
+                rule="specialist_gpu_request_invalid",
+            ) from exc
+        if gpu_count <= 0:
+            raise PolicyDenied(
+                "delegate{action='specialist'}: gpu_count must be > 0 "
+                "when needs_gpu=true",
+                rule="specialist_gpu_request_invalid",
+            )
+        ceiling = gpu_specialist_ceiling(self.shared_state)
+        if ceiling <= 0:
+            raise PolicyDenied(
+                "delegate{action='specialist'}: needs_gpu=true but the "
+                "GPU specialist pool is disabled",
+                rule="specialist_gpu_pool_disabled",
+                hint=(
+                    "Start the session with --gpu-specialist-capacity > 0 "
+                    "or set INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY "
+                    "before dispatching GPU specialists."
+                ),
+            )
+        if gpu_count > ceiling:
+            raise PolicyDenied(
+                f"delegate{{action='specialist'}}: gpu_count={gpu_count} "
+                f"exceeds GPU specialist capacity={ceiling}",
+                rule="specialist_gpu_request_exceeds_capacity",
+                hint=(
+                    "Lower params.gpu_count or start a session with a "
+                    "larger GPU specialist pool."
+                ),
+            )
+
+    def _autofill_gap_from_ledger(
+        self, params: dict[str, Any], tags: list[str],
+    ) -> str:
+        """Backfill ``params.gap_canonical_id`` from the gaps[] ledger.
+
+        Matches the dispatch anchor (domain key, its kb_anchor, and the
+        knowledge-domain ``tags``) against each gap's ``domain_hint``. Among the
+        matches, prefers the most actionable: highest severity, then the
+        least-attempted, then the oldest (most-stalled) gap. Mutates ``params``
+        in place and returns the chosen canonical id (``""`` when nothing
+        matches, leaving the caller's required-gap rejection intact).
+        """
+        state = getattr(self, "shared_state", None)
+        gaps = list(getattr(state, "gaps", None) or []) if state is not None else []
+        if not gaps:
+            return ""
+
+        # Build the anchor candidate set the gap's domain_hint may name.
+        candidates: set[str] = set()
+        domain_key = str(params.get("domain") or "").strip()
+        if domain_key:
+            candidates.add(domain_key.lower())
+            d = get_domain(domain_key)
+            if d and d.kb_anchor:
+                candidates.add(d.kb_anchor.lower())
+        for t in tags:
+            t_l = str(t).strip().lower()
+            if t_l:
+                candidates.add(t_l)
+            dt = domain_for_tag(t)
+            if dt:
+                candidates.add(dt.key.lower())
+                if dt.kb_anchor:
+                    candidates.add(dt.kb_anchor.lower())
+        if not candidates:
+            return ""
+
+        severity_rank = {"high": 3, "medium": 2, "low": 1}
+
+        def _selection_key(g: dict[str, Any]) -> tuple[int, int, str]:
+            sev = severity_rank.get(str(g.get("severity") or "").lower(), 0)
+            attempts = len(g.get("attempts") or [])
+            first_seen = str(g.get("first_seen_ts") or "")
+            # Highest severity first, then fewest attempts, then oldest.
+            return (-sev, attempts, first_seen)
+
+        matches = [
+            g for g in gaps
+            if isinstance(g, dict)
+            and str(g.get("canonical_id") or "").strip()
+            and str(g.get("domain_hint") or "").strip().lower() in candidates
+        ]
+        if not matches:
+            return ""
+        matches.sort(key=_selection_key)
+        chosen = str(matches[0].get("canonical_id") or "").strip()
+        if chosen:
+            params["gap_canonical_id"] = chosen
+        return chosen
 
     def _validate_freeform_specialist_dispatch(
         self, params: dict[str, Any],
@@ -1542,6 +1673,11 @@ class PolicyGate:
         ``tasks=[...]`` wave (bounded by SPECIALIST_FREEFORM_WAVE_MAX), each
         with a non-empty, length-bounded description that survives the
         red-line tripwire."""
+        # Freeform skips the domain-anchored max_turns gate by design (it
+        # carries no domain/gap), but a GPU request must still clear the same
+        # pool ceiling as a domain specialist — otherwise scope='freeform'
+        # would be a hole around the GPU accounting.
+        self._validate_specialist_gpu_request(params)
         wave = params.get("tasks")
         if wave is not None:
             if not isinstance(wave, list) or not wave:

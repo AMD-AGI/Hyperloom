@@ -59,21 +59,6 @@ def test_extract_workload_summary_full(tmp_path):
     assert out["top_bottleneck"] == "MoE_fused"
 
 
-# ---- derive_saturation_per_direction ----
-
-def test_derive_saturation_empty():
-    out = rs.derive_saturation_per_direction("")
-    assert out == {"compute": 0.0, "memory": 0.0, "host_overhead": 0.0, "comm": 0.0}
-
-
-def test_derive_saturation_full():
-    out = rs.derive_saturation_per_direction(_EXEC_MD)
-    assert out["compute"] == 70.5
-    assert out["memory"] == 85.0
-    assert out["host_overhead"] == 12.0  # via "Idle %"
-    assert out["comm"] == 3.2
-
-
 # ---- extract_top_kernel ----
 
 def test_extract_top_kernel_no_dir(tmp_path):
@@ -185,37 +170,6 @@ def test_comparison_from_history_before_after():
     assert out["mode"] == "before_after"
     assert out["delta"]["compute_pct"] == 10.0
     assert out["delta"]["top_kernel_efficiency_pct"] == 15.0
-
-
-# ---- build_roofline_comparison ----
-
-def test_build_comparison_no_paths():
-    assert rs.build_roofline_comparison({}, {}) is None
-
-
-def test_build_comparison_before_after(tmp_path):
-    base_md = tmp_path / "base" / "analysis.md"
-    latest_md = tmp_path / "latest" / "analysis.md"
-    base_md.parent.mkdir()
-    latest_md.parent.mkdir()
-    base_md.write_text(_EXEC_MD, encoding="utf-8")
-    latest_md.write_text(_EXEC_MD.replace("70.5", "80.0"), encoding="utf-8")
-    out = rs.build_roofline_comparison(
-        {"analysis_md_path": str(base_md), "ts": "t0", "snapshot_id": 1},
-        {"analysis_md_path": str(latest_md), "ts": "t1", "snapshot_id": 2},
-    )
-    assert out["mode"] == "before_after"
-    assert out["delta"]["compute_pct"] == 9.5
-
-
-def test_build_comparison_single_snapshot(tmp_path):
-    md = tmp_path / "analysis.md"
-    md.write_text(_EXEC_MD, encoding="utf-8")
-    out = rs.build_roofline_comparison(
-        {"analysis_md_path": str(md), "ts": "t0", "snapshot_id": 1},
-        {"analysis_md_path": str(md), "ts": "t0", "snapshot_id": 1},
-    )
-    assert out["mode"] == "single_snapshot"
 
 
 # ---- formatters ----

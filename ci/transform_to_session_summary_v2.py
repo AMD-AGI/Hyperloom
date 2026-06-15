@@ -27,16 +27,16 @@ We auto-detect:
 Usage
 -----
     # Single file (writes <input>.v2.json next to it)
-    python scripts/transform_to_session_summary_v2.py session_breakdown.json
+    python ci/transform_to_session_summary_v2.py session_breakdown.json
 
     # Explicit output path
-    python scripts/transform_to_session_summary_v2.py session_breakdown.json -o out.json
+    python ci/transform_to_session_summary_v2.py session_breakdown.json -o out.json
 
     # Batch: every *.json under a directory, output into another directory
-    python scripts/transform_to_session_summary_v2.py --in-dir ./remote_sessions --out-dir ./v2_out
+    python ci/transform_to_session_summary_v2.py --in-dir ./remote_sessions --out-dir ./v2_out
 
     # Stdout (one file only)
-    python scripts/transform_to_session_summary_v2.py session_breakdown.json -o -
+    python ci/transform_to_session_summary_v2.py session_breakdown.json -o -
 
 The output file name in batch mode is `<session_id>.json` when we can read a
 session id, otherwise it mirrors the input file's relative path.

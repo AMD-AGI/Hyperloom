@@ -34,10 +34,9 @@ def canonical_fingerprint(
 ) -> str:
     """Return the canonical 16-char fingerprint for a variant.
 
-    Produces the SAME hash as ``_grid_runner.variant_fingerprint`` for the same
-    inputs (lossless legacy → ledger merge); kept separate so call-sites depend
-    on the legacy canonical identity. Normalization: args ``shlex.split`` →
-    sorted tokens; envs ``(str(k), str(v))`` sorted by key; 16-char SHA-1.
+    Single source of truth for the content hash; ``_grid_runner.variant_fingerprint``
+    delegates here for the legacy import path. Normalization: args ``shlex.split``
+    → sorted tokens; envs ``(str(k), str(v))`` sorted by key; 16-char SHA-1.
     """
     args_text = str(extra_args or "")
     try:

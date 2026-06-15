@@ -229,7 +229,7 @@ def _section_default_verdict(actions: list[ActionMetadata]) -> list[str]:
         "## 4. DEFAULT VERDICT",
         "",
         "Per-action ``accuracy_risk`` / ``crash_risk`` / ``family`` are",
-        "prompt-advisory metadata, not hard gates. The post-P3_20 Critic",
+        "prompt-advisory metadata, not hard gates. The Critic",
         "only rejects on the safety carve-outs in §6 (mismatched",
         "benchmark, accuracy gate fail, missing rollback, robustness",
         "conflict, payload / provenance violations). Strategy concerns",

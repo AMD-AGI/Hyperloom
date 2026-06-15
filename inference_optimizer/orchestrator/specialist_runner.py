@@ -91,11 +91,18 @@ DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
     # Restricted Bash — runners may further filter via a callback. The
     # runner's per-call hook (TODO) will block destructive invocations.
     "Bash",
+    # Scratch planning surface (no side effects); aligns the specialist tool
+    # face with the broader CLI agent toolset.
+    "TodoWrite",
 ) + tuple(sorted(_WEB)) + PR_MONITOR_MCP_TOOLS
 
 
 # Tools explicitly denied even if the operator extends the whitelist.
-SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE)
+# ``Task`` is denied so a specialist can never recursively spawn its own
+# sub-agents: child agents would bypass the dispatcher's research_lane /
+# gpu_specialist_pool accounting and oversubscribe GPUs. Recursive fan-out is
+# the Coordinator's responsibility, not the specialist's.
+SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE) | {"Task"}
 
 
 def _now_iso() -> str:

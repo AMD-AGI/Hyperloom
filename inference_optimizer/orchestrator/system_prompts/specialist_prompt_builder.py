@@ -1086,7 +1086,17 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(_NONE_PLACEHOLDER)
         return rows
     for point in inp.warm_start_lessons:
-        attrs = (point or {}).get("attrs") or {}
+        # Warm-start data is external (Cortex/GBRAIN KB row) and may arrive as
+        # a plain-string lesson rather than a dict "point" with attrs; render
+        # the bare statement so the scout prompt never crashes on shape drift.
+        if isinstance(point, str):
+            statement = point.strip()
+            if statement:
+                rows.append(f"- **{statement}**")
+            continue
+        if not isinstance(point, dict):
+            continue
+        attrs = point.get("attrs") or {}
         statement = str(attrs.get("statement") or "").strip()
         if not statement:
             continue
@@ -1168,7 +1178,16 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(_NONE_PLACEHOLDER)
         return rows
     for point in inp.warm_start_pitfalls:
-        attrs = (point or {}).get("attrs") or {}
+        # Symmetric with §5b lessons: tolerate plain-string pitfalls from the
+        # external KB row alongside the structured dict "point" shape.
+        if isinstance(point, str):
+            description = point.strip()
+            if description:
+                rows.append(f"- **{description}**")
+            continue
+        if not isinstance(point, dict):
+            continue
+        attrs = point.get("attrs") or {}
         description = str(attrs.get("description") or "").strip()
         if not description:
             continue

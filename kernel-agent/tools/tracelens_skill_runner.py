@@ -288,7 +288,7 @@ def _import_sdk() -> tuple[Any, Any]:
         import claude_agent_sdk as sdk  # type: ignore
     except ImportError as exc:  # pragma: no cover - exercised via caller fallback
         raise RuntimeError(
-            "claude_agent_sdk not installed; run inference_optimizer/kernel-agent install first"
+            "claude_agent_sdk not installed; run kernel-agent/scripts/install.sh first"
         ) from exc
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
         raise RuntimeError("claude_agent_sdk missing query / ClaudeAgentOptions")
@@ -1069,8 +1069,10 @@ _FRAMEWORK_PKG_FALLBACK_ROOTS: dict[str, tuple[str, ...]] = {
         "/sgl-workspace/vllm",
     ),
     # atom fallback roots for CSV-only / static-analysis parses (import atom may not have run).
-    # Kept in sync with the _REUSABLE_SOURCE_ROOTS in kernel_request_handlers / tracelens_analysis
-    # (pinned by test_framework_paths_units.py). /app/ATOM is the editable-install parent.
+    # Kept in sync with the reusable-source roots in kernel_request_handlers
+    # (``_reusable_source_roots``) / tracelens_analysis (``_reusable_roots`` /
+    # ``KNOWN_SEARCH_ROOTS``), pinned by test_framework_paths_units.py. /app/ATOM
+    # is the editable-install parent.
     "atom": (
         "/app/ATOM",
         "/usr/local/lib/python3.12/dist-packages",

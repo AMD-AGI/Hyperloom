@@ -498,6 +498,11 @@ class SpecialistSubprocessDispatcher:
                 grace_until = now + 30.0
                 while time.monotonic() < grace_until and proc.poll() is None:
                     await asyncio.sleep(2.0)
+                # done.json written but the process (or its process-group
+                # children: SDK / curl) is still alive after grace — reap it so
+                # a multi-day run never leaks orphaned specialist subprocesses.
+                if proc.poll() is None:
+                    self._kill(proc)
                 outcome["exit_code"] = proc.poll()
                 outcome["elapsed"] = time.monotonic() - started
                 break

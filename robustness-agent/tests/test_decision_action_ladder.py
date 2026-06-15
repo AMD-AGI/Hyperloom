@@ -66,7 +66,7 @@ async def test_medium_severity_yields_alert_only():
 
 
 async def test_high_crash_emits_alert_only():
-    """Strategic HIGH symptoms surface alert(high) only (escalate/prune auto-emit dropped in loosen P3_19)."""
+    """Strategic HIGH symptoms surface alert(high) only (escalate/prune auto-emit dropped)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("crash_count_high", SymptomSeverity.HIGH, suggestion="revert")],
@@ -138,7 +138,7 @@ async def test_high_agent_stall_emits_alert_only():
 
 
 async def test_repeated_failure_emits_alert_only():
-    """prune_branch suggestion lives in the alert detail; auto-emit dropped in loosen P3_19."""
+    """prune_branch suggestion lives in the alert detail; auto-emit dropped."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -162,7 +162,7 @@ async def test_repeated_failure_emits_alert_only():
 # ---------------------------------------------------------------------------
 
 async def test_recover_unsuccessful_emits_alert_plus_delegate_report():
-    """``recover_unsuccessful`` keeps the ``delegate(report)`` finalization path (escalate auto-emit dropped, loosen P3_19)."""
+    """``recover_unsuccessful`` keeps the ``delegate(report)`` finalization path (escalate auto-emit dropped)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -203,7 +203,7 @@ async def test_recover_unsuccessful_emits_alert_plus_delegate_report():
 
 
 async def test_state_json_corrupt_alert_only():
-    """I1: state.json broken → HIGH alert only (can't auto-heal; escalate auto-emit dropped in loosen P3_19)."""
+    """I1: state.json broken → HIGH alert only (can't auto-heal; escalate auto-emit dropped)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("state_json_corrupt", SymptomSeverity.HIGH,
@@ -246,7 +246,7 @@ async def test_coordinator_wal_bloat_medium_alert_only():
 
 
 async def test_stale_lease_emits_kill_task_for_owner_lane():
-    """I3: HIGH emits kill_task(task_id) to release a lane held by a dead PID (paired escalate auto-emit dropped, loosen P3_19)."""
+    """I3: HIGH emits kill_task(task_id) to release a lane held by a dead PID (paired escalate auto-emit dropped)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("stale_lease", SymptomSeverity.HIGH,
@@ -299,7 +299,7 @@ async def test_inbox_bloat_low_emits_observation_only():
 
 
 async def test_coordinator_zombie_alert_only():
-    """I5: HIGH alert — cannot self-heal (Robustness shares the process tree); escalate auto-emit dropped in loosen P3_19."""
+    """I5: HIGH alert — cannot self-heal (Robustness shares the process tree); escalate auto-emit dropped."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("coordinator_zombie", SymptomSeverity.HIGH,
@@ -394,7 +394,7 @@ async def test_critic_runtime_stuck_alert_only():
 
 async def test_ray_pending_starvation_alert_only():
     """F1: kernel pipeline is wedged — alert + suggestion only.
-    Loosen P3_19 dropped the auto prune_branch."""
+    The auto prune_branch was dropped."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("ray_pending_starvation", SymptomSeverity.HIGH,
@@ -449,7 +449,7 @@ async def test_critic_prune_stuck_falls_to_medium_alert():
 
 
 async def test_model_gpu_infeasible_alert_only():
-    """C1: config cannot fit in HBM — alert only (auto prune of server-launching families dropped, loosen P3_19)."""
+    """C1: config cannot fit in HBM — alert only (auto prune of server-launching families dropped)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -660,7 +660,7 @@ async def test_g_medium_signals_fall_to_diagnose_alert():
 
 
 async def test_deadline_warning_high_emits_delegate_report():
-    """``deadline_warning`` HIGH (no validated gain) = alert(high) + finalization ``delegate(report)`` (escalate dropped, loosen P3_19)."""
+    """``deadline_warning`` HIGH (no validated gain) = alert(high) + finalization ``delegate(report)`` (escalate dropped)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -896,7 +896,7 @@ async def test_shm_pressure_high_alert_only():
 
 
 async def test_no_levers_found_falls_to_medium_alert():
-    """Loosen P3_19 demoted ``no_levers_found`` to MEDIUM (advisory) and dropped the auto ``delegate(report)``."""
+    """``no_levers_found`` is demoted to MEDIUM (advisory) and the auto ``delegate(report)`` is dropped."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -917,7 +917,7 @@ async def test_no_levers_found_falls_to_medium_alert():
 
 
 async def test_gain_plateau_falls_to_medium_alert():
-    """Loosen P3_19 demoted ``gain_plateau`` to MEDIUM (advisory)."""
+    """``gain_plateau`` is demoted to MEDIUM (advisory)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -1098,7 +1098,7 @@ def _gpu_leak_symptom(*, summary: str = "all 4 GPUs full, no owner") -> Symptom:
 
 
 async def test_gpu_memory_leaked_emits_alert_and_delegate():
-    """``gpu_memory_leaked`` keeps the ``delegate(recover, force_gpu_cleanup=True)`` cleanup path (escalate dropped, loosen P3_19)."""
+    """``gpu_memory_leaked`` keeps the ``delegate(recover, force_gpu_cleanup=True)`` cleanup path (escalate dropped)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_gpu_leak_symptom()], tick_index=7, now_unix=1.0,

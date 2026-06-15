@@ -2,7 +2,7 @@
 
 """Unit tests for the roofline-categorized advisory annotator.
 
-Plan P2_15 demoted the hard filter to an advisory annotator: variants are never
+The hard filter was demoted to an advisory annotator: variants are never
 dropped; it only reports which ones the latest snapshot flags ``likely_saturated``.
 """
 

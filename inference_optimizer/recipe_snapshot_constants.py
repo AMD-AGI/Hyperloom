@@ -4,14 +4,10 @@
 
 Mirrors the contract documented in
 ``primus-cortex-internal/docs/recipe-snapshot-api-reference.md``. The
-client (see :mod:`inference_optimizer.recipe_snapshot_client`) builds
-requests as plain dicts keyed by these ``Final[str]`` constants so a
-backend rename surfaces at one easy-to-grep call-site instead of being
-scattered across the codebase.
-
-This module replaces :mod:`inference_optimizer.cortex_kb_constants` —
-the legacy ``/v1/points`` graph surface is being retired in favour of
-the dedicated recipe-snapshot resource. See CHANGELOG for the cutover.
+recipe-KB remote clients (see :mod:`inference_optimizer.recipe_kb.remote_client`
+and :mod:`inference_optimizer.recipe_kb.gbrain_remote_client`) build requests as
+plain dicts keyed by these ``Final[str]`` constants so a backend rename surfaces
+at one easy-to-grep call-site instead of being scattered across the codebase.
 """
 
 from __future__ import annotations

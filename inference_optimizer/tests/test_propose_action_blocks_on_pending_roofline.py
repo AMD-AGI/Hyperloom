@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Regression (loosen P2_12): the ``wait_for_auto_roofline`` deny is gone — proposals proceed while an analysis task is in flight."""
+"""Regression: the ``wait_for_auto_roofline`` deny is gone — proposals proceed while an analysis task is in flight."""
 
 from __future__ import annotations
 
@@ -74,8 +74,8 @@ def test_roofline_pending_gate_hooks_removed():
         "_proposals_awaiting_roofline",
     ):
         assert not hasattr(Coordinator, attr), (
-            f"Coordinator.{attr} unexpectedly resurrected — the "
-            f"P2_12 deletion would silently re-introduce the "
+            f"Coordinator.{attr} unexpectedly resurrected — this "
+            f"would silently re-introduce the "
             f"wait_for_auto_roofline gate."
         )
     import inference_optimizer.orchestrator.coordinator as coord_mod

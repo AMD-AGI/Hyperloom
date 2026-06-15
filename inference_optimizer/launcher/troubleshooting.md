@@ -84,8 +84,12 @@ Bypass with `--critic-mock` for offline / smoke runs. See
   `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must
   contain explicit correctness evidence.
-- `stop_reason=no_more_leverage`: stop and report; only resume if the user
-  changes workload / search space / model / strategy.
+- `stop_reason=global_converged`: the cyclic phase machine exhausted leverage
+  across macro-cycles (R7: consecutive no-gain cycles); stop and report, only
+  resume if the user changes workload / search space / model / strategy.
+  (Leverage exhaustion *within* a single phase is now the non-terminal
+  phase-exit reason `explore_no_more_leverage` / `kernel_no_more_leverage`,
+  which switches lever rather than ending the run.)
 - `stop_reason=policy_loop`: Coordinator hit ≥10 consecutive `policy_denied`
   events for the same action/rule pair; all top actions may be locked or pruned.
   Inspect `SharedState.policy_denial_history` and the per-tick `Policy denials`

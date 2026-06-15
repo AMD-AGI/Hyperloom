@@ -355,7 +355,7 @@ async def test_explore_executor_safety_margin_param_overrides_default(
 async def test_explore_executor_roofline_advisory_annotates_without_dropping(
     sub_agent_runner, tmp_path,
 ):
-    """P2_15: a saturation snapshot produces a per-variant ``roofline_advisory`` but every variant still benches."""
+    """A saturation snapshot produces a per-variant ``roofline_advisory`` but every variant still benches."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)

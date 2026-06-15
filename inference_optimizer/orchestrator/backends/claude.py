@@ -24,7 +24,13 @@ from ...protocol.intent import (
     NoIntentEmitted,
     validate_envelope,
 )
-from .base import BackendError, BackendTurnResult, parse_call_timeout_env
+from .base import (
+    BackendError,
+    BackendTurnResult,
+    RetryPolicy,
+    parse_call_timeout_env,
+    retry_with_backoff,
+)
 from .mcp_context_tools import (
     CONTEXT_TOOL_QUALIFIED_NAMES,
     MCP_SERVER_NAME as CONTEXT_MCP_SERVER_NAME,
@@ -137,6 +143,10 @@ class ClaudeBackend:
             default=120.0,
         )
     )
+    # Bounded transient-failure retry/backoff (R6): a multi-day run must absorb
+    # gateway stalls / 5xx / connection blips instead of failing the turn.
+    # Env override via INFERENCE_OPTIMIZER_LLM_RETRY_* (ATTEMPTS=1 disables).
+    retry_policy: RetryPolicy = field(default_factory=RetryPolicy.from_env)
 
     # Test seams — set these to bypass SDK import / network calls.
     sdk_query_factory: Callable[..., Any] | None = None
@@ -268,18 +278,39 @@ class ClaudeBackend:
             resume_session_id=resume_session,
         )
         # Timeout guard: an upstream proxy stall must not park the reactor.
+        # Bounded retry/backoff (R6) absorbs transient stalls / blips across a
+        # multi-day run; a per-attempt wall-clock cap still bounds each try.
+        async def _one_attempt() -> tuple[Any, ...]:
+            return await asyncio.wait_for(
+                self._invoke_and_collect(full_prompt, options),
+                timeout=self.call_timeout_s,
+            )
+
+        def _note_retry(attempt: int, exc: BaseException, delay: float) -> None:
+            self.calls.append({
+                "warn": (
+                    f"claude SDK transient failure (attempt {attempt}): {exc!r}; "
+                    f"retrying in {delay:.2f}s"
+                ),
+            })
+
         try:
             (
                 intents, raw_text, tool_block_count, usage, session_id,
-            ) = await asyncio.wait_for(
-                self._invoke_and_collect(full_prompt, options),
-                timeout=self.call_timeout_s,
+            ) = await retry_with_backoff(
+                _one_attempt,
+                policy=self.retry_policy,
+                retry_on=(
+                    asyncio.TimeoutError, BackendError, ConnectionError, OSError,
+                ),
+                on_retry=_note_retry,
             )
         except asyncio.TimeoutError as exc:
             self.calls.append({
                 "warn": (
-                    f"claude SDK call timed out after {self.call_timeout_s:.0f}s; "
-                    "treating as no-intent so the reactor pass can proceed"
+                    f"claude SDK call timed out after {self.call_timeout_s:.0f}s "
+                    f"(retries exhausted); treating as no-intent so the reactor "
+                    "pass can proceed"
                 ),
             })
             raise BackendError(

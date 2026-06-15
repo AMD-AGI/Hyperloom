@@ -74,7 +74,7 @@ async def test_run_tick_emits_heartbeat_envelope(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_run_tick_emits_alert_on_high_crash_count(tmp_path: Path):
-    """Strategic HIGH symptoms (crash_count_high) emit alert(high) only (escalate/prune auto-emit retired in loosen P3_19)."""
+    """Strategic HIGH symptoms (crash_count_high) emit alert(high) only (escalate/prune auto-emit retired)."""
     from robustness_agent.runtime.cli import _coerce_request, _run_tick
 
     request = _coerce_request(

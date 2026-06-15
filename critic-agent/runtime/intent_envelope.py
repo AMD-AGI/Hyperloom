@@ -2,7 +2,7 @@
 
 """Build and validate Coordinator-compatible intent envelopes.
 
-The Coordinator () accepts intent envelopes of the form
+The Coordinator accepts intent envelopes of the form
 
 ```
 {"intents": [{"intent_type": "<type>", "payload": {...}}, ...]}

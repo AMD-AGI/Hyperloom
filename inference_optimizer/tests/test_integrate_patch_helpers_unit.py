@@ -152,6 +152,72 @@ def test_git_apply_reverse_no_level(tmp_path, monkeypatch):
     assert ok is False and "no matching -p level" in err
 
 
+# ---- _patch_touched_paths / commit scoping --------------------------------
+_DIFF = (
+    "--- a/pkg/mod.py\n"
+    "+++ b/pkg/mod.py\n"
+    "@@ -1 +1 @@\n"
+    "-old\n"
+    "+new\n"
+)
+
+
+def test_patch_touched_paths_returns_only_patched_file(tmp_path):
+    # Source file the patch targets exists; an unrelated dirty file does NOT.
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "mod.py").write_text("new\n", encoding="utf-8")
+    (tmp_path / "unrelated.py").write_text("dirty\n", encoding="utf-8")
+    patch = tmp_path / "p.patch"
+    patch.write_text(_DIFF, encoding="utf-8")
+
+    touched = ip._patch_touched_paths(tmp_path, [patch])
+    assert touched == ["pkg/mod.py"]
+    assert "unrelated.py" not in touched
+
+
+def test_patch_touched_paths_skips_unresolvable_and_creations(tmp_path):
+    # Creation patch: new file present (strip level 1), old is /dev/null.
+    (tmp_path / "new.py").write_text("content\n", encoding="utf-8")
+    create = (
+        "--- /dev/null\n"
+        "+++ b/new.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+content\n"
+    )
+    patch = tmp_path / "c.patch"
+    patch.write_text(create, encoding="utf-8")
+    assert ip._patch_touched_paths(tmp_path, [patch]) == ["new.py"]
+
+
+def test_git_commit_kept_no_paths_is_benign_noop(tmp_path, monkeypatch):
+    # Empty path set must never shell out and must report success (no-op).
+    called = {"n": 0}
+
+    def _run(*a, **k):
+        called["n"] += 1
+        return _CP(0, "")
+
+    monkeypatch.setattr(ip.subprocess, "run", _run)
+    ok, note = ip._git_commit_kept(tmp_path, "msg", [])
+    assert ok is True
+    assert called["n"] == 0  # never invoked git
+
+
+def test_git_commit_kept_scopes_add_to_paths(tmp_path, monkeypatch):
+    captured = {}
+
+    def _run(cmd, *a, **k):
+        captured.setdefault("cmds", []).append(cmd)
+        return _CP(0, "")
+
+    monkeypatch.setattr(ip.subprocess, "run", _run)
+    ok, _ = ip._git_commit_kept(tmp_path, "msg", ["pkg/mod.py"])
+    assert ok is True
+    add_cmd = captured["cmds"][0]
+    # The add must be pathspec-scoped, never a blanket "git add -A" of the tree.
+    assert add_cmd[-3:] == ["-A", "--", "pkg/mod.py"]
+
+
 # ---- _git_checkout_clean spawn failure ------------------------------------
 def test_git_checkout_clean_spawn_fail(tmp_path, monkeypatch):
     monkeypatch.setattr(ip.subprocess, "run",

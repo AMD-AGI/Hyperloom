@@ -3,10 +3,10 @@
 """Closed-schema writer for ``reports/trace/llm_calls.jsonl``.
 
 One module owns the canonical field contract for a single LLM call so
-every producer — the orchestration/kernel reactor, dynamic_action and
-specialist sub-agents, the Codex/critic/scorer inference steps, and the
-out-of-process children that write their own ``ext/*.jsonl`` shards — emits
-rows that the collector can join without guessing.
+every producer — the orchestration/kernel reactor, specialist sub-agents,
+the Codex/critic/scorer inference steps, and the out-of-process children
+that write their own ``ext/*.jsonl`` shards — emits rows that the collector
+can join without guessing.
 
 Design contract (FULL_TRACE_DESIGN §3.1, §4):
 
@@ -14,8 +14,7 @@ Design contract (FULL_TRACE_DESIGN §3.1, §4):
   required one — fails fast (:class:`LLMTraceRowError`) so a buggy call
   site cannot silently pollute the audit stream.
 * **Best-effort I/O**: disk failures while appending are logged and
-  swallowed; trace writes must never break the optimization loop. This
-  mirrors :mod:`..dynamic_action_history`.
+  swallowed; trace writes must never break the optimization loop.
 * **Token shape**: the four counters mirror the keys both
   :class:`ClaudeBackend` and :class:`CodexBackend` put on
   ``BackendTurnResult.metadata``. Backends without a prompt-cache split

@@ -512,7 +512,7 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
 def _format_steward_section(summary: dict[str, Any]) -> list[str]:
     """Render any legacy session_steward verdict + history.
 
-    Steward was retired in P3_17; kept for back-compat with older state.json
+    Steward was retired; kept for back-compat with older state.json
     carrying a populated ``last_remaining_gaps_assessment``.
     """
     assessment = summary.get("remaining_gaps_assessment") or {}

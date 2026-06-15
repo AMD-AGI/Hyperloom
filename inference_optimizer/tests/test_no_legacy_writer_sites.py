@@ -52,9 +52,9 @@ ALLOWED_FILES: dict[str, str] = {
         "extra_server_args so pre-rename variant dicts still match",
     "inference_optimizer/orchestrator/optimization_journal.py":
         "journal classification reads existing stack/variant args fields",
-    # Legacy v0.6 breakdown reconstruction reads the pre-rename
-    # candidate_extra_sglang_args from raw (un-migrated) optimization_stack
-    # entries; the emitted key is the canonical extra_server_args.
+    # legacy v0.6 breakdown reader walks raw optimization_stack which can
+    # carry the pre-rename candidate_extra_sglang_args field; the emitted
+    # key is the canonical extra_server_args.
     "inference_optimizer/breakdown/legacy_collectors.py":
         "legacy v0.6 reader: raw optimization_stack carries pre-rename "
         "candidate_extra_sglang_args (breakdown loads state without the "
