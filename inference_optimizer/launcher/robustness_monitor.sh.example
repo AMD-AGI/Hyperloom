@@ -173,12 +173,27 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   fi
 
   echo "[robustness] optimizer stopped (no terminal marker); resuming $(date -Is)"
-  resume_log="$REPO_ROOT/optimizer_runs/resume_$(date +%Y%m%d_%H%M%S).log"
+  # Resume logs land next to the pidfile (its dir is guaranteed to exist —
+  # $RUN_DIR). The old hardcoded $REPO_ROOT/optimizer_runs may not exist on a
+  # checkout whose run dir lives under $USER_DATA_PATH, which silently aborted
+  # the resume redirect and left PID_FILE pointing at a dead wrapper.
+  resume_log_dir="$(dirname "$PID_FILE")"
+  mkdir -p "$resume_log_dir"
+  resume_log="$resume_log_dir/resume_$(date +%Y%m%d_%H%M%S).log"
   MAGPIE_PYTHON="${MAGPIE_PYTHON}" setsid nohup inference_optimizer --verbose optimize \
     --resume --resume-from "$session_dir" \
     --target-gain "${TARGET_GAIN:-10}" --max-hours "${MAX_HOURS:-24}" \
     --tick-interval-sec 30 --kernel-claude \
     > "$resume_log" 2>&1 < /dev/null &
-  echo $! > "$PID_FILE"
+  # Record the REAL resumed optimizer pid, not the setsid wrapper ($!), which
+  # exits immediately and would make the next loop misfire another resume.
+  sleep 5
+  resumed_pid="$(pgrep -f 'inference_optimizer --verbose optimize --resume --resume-from '"$session_dir" | head -1)"
+  if [ -n "$resumed_pid" ]; then
+    echo "$resumed_pid" > "$PID_FILE"
+    echo "[robustness] resumed optimizer pid=$resumed_pid log=$resume_log"
+  else
+    echo "[robustness] WARN: could not resolve resumed optimizer pid; see $resume_log"
+  fi
   sleep 300
 done
