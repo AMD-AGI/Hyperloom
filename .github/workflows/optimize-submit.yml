@@ -37,7 +37,7 @@ on:
   # Rolling downloads>100 pool: 200 models TWICE a day, firing at UTC
   # 04:00 / 16:00 (Beijing 12:00 / 00:00). Each fire submits the
   # NEXT sequential 200-model slice of the rotate pool, now hosted off-repo at
-  # /wekafs/chenyi/ci-candidates/hf_downloads_gt100_rotate_2026-06-11.json
+  # $WEKAFS_CHENYI_DIR/ci-candidates/hf_downloads_gt100_rotate_2026-06-11.json
   # (ordered not-run first; the 449 >12B multimodal models are front-loaded),
   # stepping batch 0,1,2,... and wrapping at the pool end. Both
   # exclude_leaderboard and exclude_active are OFF on schedule: slices are
@@ -215,7 +215,7 @@ jobs:
       # active, the window wraps and the whole 2426-model pool keeps repeating.
       # Schedule reads the rotate pool from /wekafs (off-repo, RO-mounted on the
       # hyperloom runners) so the large candidates JSON never bloats the git repo.
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && '/wekafs/chenyi/ci-candidates/hf_downloads_gt100_rotate_2026-06-11.json' || github.event.inputs.candidates_file }}
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && format('{0}/ci-candidates/hf_downloads_gt100_rotate_2026-06-11.json', secrets.WEKAFS_CHENYI_DIR) || github.event.inputs.candidates_file }}
       # Schedule leaves batch_index empty so generate_hf_matrix derives a
       # SEQUENTIAL index from the scheduled-fire counter: each cron (UTC
       # 4/16) steps batch 0,1,2,... and wraps, marching the whole pool in

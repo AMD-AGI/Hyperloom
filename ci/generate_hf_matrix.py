@@ -37,10 +37,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from optimize_submit import HuggingFaceClient   # noqa: E402
 
-# Off-repo on /wekafs (RO-mounted on the hyperloom runners). The schedule sets
-# INPUT_CANDIDATES_FILE explicitly, so this is only the empty-env fallback.
-DEFAULT_CRON_CANDIDATES_FILE = (
-    "/wekafs/chenyi/ci-candidates/hf_downloads_gt100_rotate_2026-06-11.json"
+# The schedule always sets INPUT_CANDIDATES_FILE explicitly (built from the
+# WEKAFS_CHENYI_DIR secret), so this is only the empty-env fallback. Keep the
+# personal /wekafs root out of source; allow a CRON_CANDIDATES_FILE env override.
+DEFAULT_CRON_CANDIDATES_FILE = os.environ.get(
+    "CRON_CANDIDATES_FILE",
+    "ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json",
 )
 
 
