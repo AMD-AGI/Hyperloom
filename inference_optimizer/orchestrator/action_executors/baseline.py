@@ -575,6 +575,26 @@ class BaselineExecutor:
             return Path(extra["workspace"])
         return runs_dir(self.session_dir, action, ctx.task.task_id)
 
+    def _eager_fallback_armed(self, shared_state: Any | None = None) -> bool:
+        """Peek the one-shot eager fallback flag WITHOUT consuming it.
+
+        Used to keep the flag armed when the framework is unknown (cannot pick
+        a safe disable-cuda-graph flag), so the one-shot is not wasted.
+        Best-effort: missing/unreadable state reads as not armed.
+        """
+        try:
+            state = shared_state or self.shared_state
+            if state is None:
+                from ..shared_state import SharedState
+                state = SharedState.load_or_init(self.session_dir)
+            return bool(getattr(state, "baseline_eager_fallback", False))
+        except Exception:  # noqa: BLE001 — fallback must never break baseline
+            log.debug(
+                "baseline_executor: eager-fallback flag peek failed",
+                exc_info=True,
+            )
+            return False
+
     def _consume_eager_fallback(self, shared_state: Any | None = None) -> bool:
         """Consume the one-shot cuda-graph eager fallback flag from SharedState.
 
@@ -693,31 +713,32 @@ class BaselineExecutor:
         # One-shot cuda-graph eager fallback: a prior baseline hit a cuda-graph
         # capture failure and armed state.baseline_eager_fallback. Inject the
         # framework-correct disable-cuda-graph flag for this retry and consume
-        # the flag so it fires once.
+        # the flag so it fires once. Resolve framework FIRST: an unknown
+        # framework cannot pick a safe flag, so we leave the flag armed (do not
+        # consume) and let a later baseline with a known framework apply it,
+        # instead of burning the one-shot on a no-op retry.
         effective_extra_server_args = read_extra_server_args(params)
         extra = getattr(ctx, "extra", None) or {}
         live_shared_state = extra.get("shared_state") or self.shared_state
-        eager_fallback_applied = self._consume_eager_fallback(live_shared_state)
-        if eager_fallback_applied:
-            fw = (
-                str(params.get("framework") or "").strip()
-                or os.environ.get("FRAMEWORK", "").strip()
+        fw = (
+            str(params.get("framework") or "").strip()
+            or os.environ.get("FRAMEWORK", "").strip()
+        )
+        if not fw and self._eager_fallback_armed(live_shared_state):
+            log.warning(
+                "baseline_executor: eager fallback is armed but framework is "
+                "unknown; leaving the one-shot armed (not consuming) so a "
+                "later baseline with a known framework can apply it",
             )
-            if not fw:
-                log.warning(
-                    "baseline_executor: eager fallback was armed, but framework "
-                    "is unknown; skipping disable-cuda-graph injection to avoid "
-                    "passing a framework-specific flag to the wrong backend",
-                )
-            else:
-                cg_flag = _disable_cuda_graph_flag(fw)
-                effective_extra_server_args = _with_cuda_graph_disabled(
-                    effective_extra_server_args, fw,
-                )
-                log.warning(
-                    "baseline_executor: retrying with %s after a prior "
-                    "cuda-graph capture failure (framework=%s)", cg_flag, fw,
-                )
+        elif fw and self._consume_eager_fallback(live_shared_state):
+            cg_flag = _disable_cuda_graph_flag(fw)
+            effective_extra_server_args = _with_cuda_graph_disabled(
+                effective_extra_server_args, fw,
+            )
+            log.warning(
+                "baseline_executor: retrying with %s after a prior "
+                "cuda-graph capture failure (framework=%s)", cg_flag, fw,
+            )
 
         output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)

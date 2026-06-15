@@ -218,9 +218,12 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
 def _run_executor_with_server_log(
     tmp_path: Path, server_log_text: str, *, framework: str | None = "sglang",
     eager_armed: bool = False, shared_state: SharedState | None = None,
+    make_workspace: bool = False,
 ) -> tuple[dict, dict]:
     """Run BaselineExecutor.__call__ with a mocked Magpie that writes a
-    server.log and produces NO benchmark_* workspace (no_workspace path).
+    server.log. By default produces NO benchmark_* workspace (no_workspace
+    path); with ``make_workspace`` it creates one with an invalid report so the
+    invalid_measurement branch is exercised instead.
 
     Returns (result, captured) where captured["extra_server_args"] is the
     effective server-args string that reached materialization.
@@ -240,6 +243,12 @@ def _run_executor_with_server_log(
         slot = Path(cmd[out_idx + 1])
         slot.mkdir(parents=True, exist_ok=True)
         (slot / "server.log").write_text(server_log_text, encoding="utf-8")
+        if make_workspace:
+            # A benchmark_* workspace whose report yields no valid measurement,
+            # so __call__ reaches the invalid_measurement branch.
+            ws = slot / "benchmark_sglang_20260101_000000"
+            ws.mkdir(parents=True, exist_ok=True)
+            (ws / "benchmark_report.json").write_text("{}", encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 1, "", "boom")
 
     real_materialize = (
@@ -301,11 +310,12 @@ def test_executor_consumes_flag_and_injects_disable_flag(tmp_path: Path):
     assert SharedState.load_or_init(tmp_path).baseline_eager_fallback is False
 
 
-def test_executor_consumes_flag_but_skips_inject_when_framework_unknown(
+def test_executor_keeps_flag_armed_when_framework_unknown(
     tmp_path: Path, monkeypatch,
 ):
-    # Unknown framework must not default to the sglang-only flag: a vLLM retry
-    # with --disable-cuda-graph would fail argument validation.
+    # Unknown framework cannot pick a safe flag (sglang's --disable-cuda-graph
+    # would break a vLLM retry). The one-shot must stay ARMED (not consumed) so
+    # a later baseline with a known framework can still apply it.
     monkeypatch.delenv("FRAMEWORK", raising=False)
     result, captured = _run_executor_with_server_log(
         tmp_path, "boot failed\n", framework=None, eager_armed=True,
@@ -313,7 +323,8 @@ def test_executor_consumes_flag_but_skips_inject_when_framework_unknown(
     assert result["status"] == "failed"
     assert "--disable-cuda-graph" not in captured["extra_server_args"]
     assert "--enforce-eager" not in captured["extra_server_args"]
-    assert SharedState.load_or_init(tmp_path).baseline_eager_fallback is False
+    # Flag preserved for a later known-framework retry.
+    assert SharedState.load_or_init(tmp_path).baseline_eager_fallback is True
 
 
 def test_executor_no_inject_when_flag_not_armed(tmp_path: Path):
@@ -322,3 +333,21 @@ def test_executor_no_inject_when_flag_not_armed(tmp_path: Path):
     )
     assert result["status"] == "failed"
     assert "--disable-cuda-graph" not in captured["extra_server_args"]
+
+
+def test_executor_capture_wins_over_server_init_dead_invalid_measurement(
+    tmp_path: Path,
+):
+    # #3: a benchmark_* workspace EXISTS but yields no valid measurement, and
+    # server.log carries both a server-death marker and a capture marker. The
+    # invalid_measurement branch must still classify cuda_graph_capture_failed
+    # (capture wins over server_init_dead), mirroring the no_workspace branch.
+    log_text = (
+        "server engine/worker init failed (reaped by liveness watchdog)\n"
+        "operation not permitted when stream is capturing\n"
+    )
+    result, _ = _run_executor_with_server_log(
+        tmp_path, log_text, make_workspace=True,
+    )
+    assert result["status"] == "failed"
+    assert result["error_class"] == "cuda_graph_capture_failed"
