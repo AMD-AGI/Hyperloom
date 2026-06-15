@@ -139,10 +139,12 @@ def test_unbounded_explore_exits_when_cap_exceeded(monkeypatch):
 def test_bounded_explore_does_not_hit_absolute_cap(monkeypatch):
     monkeypatch.setenv(CYCLIC_ENV, "0")
     now = 1_000_000.0
-    # 2h run, 1 min into EXPLORE → well under both budget and cap.
+    # 10h bounded run, 1 min into EXPLORE → well under the phase budget and the
+    # absolute cap, and above the 3.0h force-exit wall-clock buffer (the session
+    # auto-stamps start_ts at construction, so session_remaining ≈ max_minutes).
     st = SharedState(
         phase=ps.PHASE_EXPLORE,
-        max_minutes=120,
+        max_minutes=600,
         phase_started_unix=now - 60,
         phase_budget_pct=dict(ps.DEFAULT_PHASE_BUDGET_PCT),
     )
