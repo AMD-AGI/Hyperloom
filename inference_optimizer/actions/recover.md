@@ -74,11 +74,19 @@ regression — that path goes through `integrate` REVERT instead.
                                 v
   hard reset  --> only when ALL hold:
                     * force_gpu_cleanup=True
-                    * HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1
+                    * HYPERLOOM_RECOVER_ALLOW_GPU_RESET truthy (opt-in;
+                      disabled by default — a gpureset is tenant-affecting)
+                    * the session's own GPUs are derivable from
+                      ROCR_VISIBLE_DEVICES
                     * mid-probe still shows leaked VRAM
-                  Runs `rocm-smi --gpureset --gpu=all` with a 30s
-                  timeout. Captures stdout/stderr/returncode for the
-                  audit log; never raises.
+                  Runs `rocm-smi --gpureset --gpu=<ROCR_VISIBLE_DEVICES>`,
+                  ALWAYS scoped to this session's physical cards — it NEVER
+                  issues an implicit `--gpu=all` full-node reset. When the
+                  env gate is off the step is skipped
+                  (gpureset_skipped_reason="gpureset_disabled"); when the
+                  GPU scope can't be derived it is skipped
+                  ("no_session_gpu_scope"). 30s timeout; captures
+                  stdout/stderr/returncode for the audit log; never raises.
                                 |
                                 v
   post-probe  --> rocm-smi (skipped when no gpureset attempted)

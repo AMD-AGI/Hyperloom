@@ -15,24 +15,39 @@ This page describes the contract from a consumer's perspective.
 
 ## 1. Versioning
 
-The top-level `schema_version` field is a stable string. The current
-producer emits:
+The top-level `schema_version` field is a stable string. The producer
+emits **one of two version strings depending on the aggregation path**:
 
 ```json
-"schema_version": "hyperloom.session_breakdown.v2"
+"schema_version": "hyperloom.session_breakdown.v2"     // legacy collector-only fallback
+"schema_version": "hyperloom.session_breakdown.v3.0"   // when author-time recorder fragments are present
 ```
 
-`v2` is **additive over `v1`**: it only adds sections (e.g.
+When the session has author-time recorder fragments (the "new way"
+write-side spool), the exporter aggregates from them and stamps
+`v3.0`; sessions without fragments (historical runs, recorder-disabled
+runs) fall back to the legacy collectors and keep the `v2` stamp. Both
+strings can therefore appear in production today.
+
+**`v3.0` is the same additive wire shape as `v2`** — the recorder path
+captures facts the collectors can miss (pre-dispatch / infra failures,
+pruned robustness signals) but adds no breaking field changes. A reader
+written for `v2` parses a `v3.0` file unchanged by ignoring unknown keys.
+`v2` is itself **additive over `v1`**: it only adds sections (e.g.
 `specialist_runs`, `action_timeline`, `kernel_optimization_summary`,
-`conc_sweep_summary`), so a `v1` reader can still consume a `v2` file by
-ignoring unknown keys.
+`conc_sweep_summary`).
 
 Compatibility rules:
 
+* **Do not gate on string equality.** A consumer that treats
+  `schema_version` as a contract MUST accept the `v2` **and** `v3.0`
+  family (e.g. parse the `vN[.M]` prefix and compare the **major**
+  component, or allowlist both strings). Pinning to the exact `v2`
+  string will reject `v3.0` files even though they are wire-compatible.
 * **New optional fields** may appear at any time **without** bumping
-  `schema_version`. Consumers must tolerate unknown keys.
+  the major version. Consumers must tolerate unknown keys.
 * **Renamed, removed, or semantically changed** fields require a major
-  bump (e.g. `v2` → `v3`). The runtime will continue to write the previous
+  bump (e.g. `v3` → `v4`). The runtime will continue to write the previous
   version's file in parallel for at least one release after the bump.
 * **Missing data** is always represented as `null`, `[]`, or `{}` —
   **never** as a default / fabricated value. Consumers MUST treat
@@ -410,8 +425,10 @@ regardless of producer.
 The Hyperloom team commits to:
 
 1. Never **removing** or **renaming** a documented field within a
-   major `schema_version`. Such changes require a `v2` bump and a
-   one-release deprecation window with both files written in parallel.
+   major `schema_version`. Such changes require a major bump (the next
+   being `v4`) and a one-release deprecation window with both files
+   written in parallel. Note `v3.0` is **not** such a break — it shares
+   `v2`'s wire shape and only marks the recorder-aggregation path.
 2. Never **fabricating** values for fields the runtime did not
    actually measure. Missing → null / `[]` / `{}`.
 3. Adding new **optional** fields freely. Consumers must tolerate
