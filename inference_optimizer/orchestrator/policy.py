@@ -1673,10 +1673,13 @@ class PolicyGate:
         ``tasks=[...]`` wave (bounded by SPECIALIST_FREEFORM_WAVE_MAX), each
         with a non-empty, length-bounded description that survives the
         red-line tripwire."""
-        # Freeform skips the domain-anchored max_turns gate by design (it
-        # carries no domain/gap), but a GPU request must still clear the same
-        # pool ceiling as a domain specialist — otherwise scope='freeform'
-        # would be a hole around the GPU accounting.
+        # Freeform deliberately skips the domain-anchored max_turns gate: a
+        # free-form investigation has no domain/gap to bound its depth, so it is
+        # constrained by the task TIMEOUT (lease TTL / wall-clock) rather than a
+        # turn cap. This is by design, NOT an oversight — do not re-add a
+        # max_turns bound here (see Issue 5b review). A GPU request must still
+        # clear the same pool ceiling as a domain specialist, otherwise
+        # scope='freeform' would be a hole around the GPU accounting.
         self._validate_specialist_gpu_request(params)
         wave = params.get("tasks")
         if wave is not None:
