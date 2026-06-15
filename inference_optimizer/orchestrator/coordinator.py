@@ -3583,8 +3583,14 @@ class Coordinator:
                 },
                 idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
             )
+            # Inject the live SharedState via ctx.extra (not the constructor) so
+            # the eager-fallback one-shot is consumed in memory and the test
+            # baseline replica's constructor signature stays unchanged.
             bench_result = await BaselineExecutor(session_dir=self.session_dir)(
-                RunnerContext(task=fake_task, lease=None)
+                RunnerContext(
+                    task=fake_task, lease=None,
+                    extra={"shared_state": self.shared_state},
+                )
             )
             if not is_valid_measurement(bench_result):
                 decision = "REVERT"
@@ -8531,6 +8537,9 @@ class Coordinator:
         # they don't burn the slow-baseline retry budget on deterministic
         # failures that the same params will never fix.
         baseline_event_payload: dict[str, Any] | None = None
+        # Intentional: only arm/streak while no baseline has succeeded yet
+        # (tput <= 0). On resume with an existing baseline we never re-arm the
+        # eager fallback. Scope is baseline-only; explore/sweep do not benefit.
         if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
             err_class = result_payload.get("error_class", "")
             if err_class == "fast_exit_arg_error":
@@ -8542,6 +8551,18 @@ class Coordinator:
                 self.shared_state.baseline_arg_error_streak = 0
                 if self.shared_state.baseline_failure_streak >= 3:
                     self.shared_state.set_stop_reason("baseline_failed")
+            # One-shot eager fallback: a (non-OOM) cuda-graph capture failure is
+            # often recoverable by disabling cuda-graph capture. Arm it once.
+            if (
+                err_class == "cuda_graph_capture_failed"
+                and not self.shared_state.baseline_eager_fallback
+            ):
+                self.shared_state.baseline_eager_fallback = True
+                log.warning(
+                    "baseline %s hit cuda-graph capture failure; arming "
+                    "disable-cuda-graph fallback for the next baseline retry",
+                    task.task_id,
+                )
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
