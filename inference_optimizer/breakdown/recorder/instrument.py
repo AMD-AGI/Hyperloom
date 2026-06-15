@@ -572,6 +572,7 @@ def record_kernel_discovery(
     status: str,
     hot_kernels: list[Any] | None = None,
     scan: dict[str, Any] | None = None,
+    tool: str | None = None,
     tool_root: str | None = None,
     tool_root_env: str | None = None,
     tool_version: str | None = None,
@@ -581,10 +582,18 @@ def record_kernel_discovery(
 ) -> None:
     """Record one hot-kernel discovery run (stage 1 of ``kernel_journey``).
 
-    One item per discovery invocation (tracelens / roofline scan), keyed by the
-    candidates/report path so a re-run with the same artifact overwrites rather
-    than duplicates. Carries the tool metadata (root + commit + version) and the
-    full hot-kernel list the run surfaced.
+    One item per discovery invocation (tracelens / bypass / roofline scan),
+    keyed by the candidates/report path so a re-run with the same artifact
+    overwrites rather than duplicates. Carries the full hot-kernel list the run
+    surfaced.
+
+    ``source`` is the discovery *route* label the dashboard groups by
+    (``tracelens`` / ``bypass`` / ...). ``tool`` is the underlying tool whose
+    authoritative version lands in the top-level ``versions`` map; it defaults
+    to ``source`` but is decoupled because routes can share one toolchain — the
+    deterministic ``bypass`` route runs the same TraceLens toolchain, so its
+    version provenance is still ``tracelens`` (passing ``tool="tracelens"``
+    avoids minting an empty ``versions["bypass"]`` entry).
     """
     if not session_dir:
         return
@@ -612,9 +621,11 @@ def record_kernel_discovery(
             "kernel_discovery", payload, key=key,
         )
         # The discovery tool's authoritative version lands in the top-level
-        # ``versions`` map (keyed by tool name), not inline per run.
+        # ``versions`` map (keyed by tool name), not inline per run. The version
+        # provenance follows the underlying ``tool`` (defaults to ``source``),
+        # so route aliases like ``bypass`` reuse the real toolchain's version.
         record_tool_version(
-            session_dir, tool=source, root=tool_root,
+            session_dir, tool=(tool or source), root=tool_root,
             root_env=tool_root_env, version=tool_version, producer=producer,
         )
     except Exception:  # noqa: BLE001
