@@ -490,7 +490,7 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
 
 @pytest.mark.asyncio
 async def test_explore_not_denied_before_profile(session_dir):
-    """P2_10: after baseline, ``explore`` is no longer blocked on empty ``last_profile_trace``."""
+    """After baseline, ``explore`` is no longer blocked on empty ``last_profile_trace``."""
     propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
         "action_name": "explore", "predicted_gain_pct": 5.0,
     })
@@ -594,24 +594,28 @@ async def test_coordinator_kill_task_by_robustness(session_dir):
 async def test_coordinator_prune_branch_cancels_family_and_records_advisory(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:
-        a = await c.tasks.create(kind="deep_kernel_analysis", params={}, idempotency_key="ka")
-        b = await c.tasks.create(kind="deep_kernel_analysis", params={}, idempotency_key="kb")
+        # ``baseline`` is a non-kernel-owned action that flows through the normal
+        # Critic/pending-proposal path — the prune-advisory mechanism under test
+        # is family-agnostic. (Kernel-owned families are REQUEST-only and can no
+        # longer be proposed at all.)
+        a = await c.tasks.create(kind="baseline", params={}, idempotency_key="ka")
+        b = await c.tasks.create(kind="baseline", params={}, idempotency_key="kb")
 
         await c._handle_intent("robustness", Intent(
             type=IntentType.PRUNE_BRANCH,
-            payload={"family": "deep_kernel_analysis", "reason": "3 fails"},
+            payload={"family": "baseline", "reason": "3 fails"},
         ))
         a_after = await c.tasks.get(a.task_id)
         b_after = await c.tasks.get(b.task_id)
         # Active queue still gets cancelled — the prune kills work in flight.
         assert a_after.state == "cancelled"
         assert b_after.state == "cancelled"
-        assert "deep_kernel_analysis" in c.shared_state.pruned_families
+        assert "baseline" in c.shared_state.pruned_families
 
         # Future propose_action carries an advisory observation but is not dropped.
         await c._handle_intent("orchestration", Intent(
             type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": "deep_kernel_analysis", "predicted_gain_pct": 5.0},
+            payload={"action_name": "baseline", "predicted_gain_pct": 5.0},
         ))
         assert c.state.pending_proposals
         obs = await c.bus.tail(topic="observation")
