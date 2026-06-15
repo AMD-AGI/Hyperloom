@@ -31,6 +31,8 @@ from .trace.parse_usage import parse_geak_usage, parse_oob_json_usage
 
 log = logging.getLogger(__name__)
 _BACKGROUND_ROCPROF_TASKS: set[asyncio.Task[Any]] = set()
+STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
+KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 
 # kernel_optimization attempt backends whose stdout log we mine for token
 # usage. ``geak`` uses litellm (OpenAI-shape usage); ``oob`` runs ``oob run
@@ -946,12 +948,9 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
             resolved["source_file"] = str(last_kernel["source_file"])
 
     # Multi-KEEP queue fallback: ``last_kernel_opt`` holds only the strongest pending KEEP, so pull patch_path/source_file from the per-kernel ledger for other queued KEEPs.
-    if (
-        kernel_id
-        and not resolved.get("patch_path")
-    ):
+    if kernel_id:
         attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
-        if attempt.get("last_artifact_path"):
+        if not resolved.get("patch_path") and attempt.get("last_artifact_path"):
             resolved["patch_path"] = str(attempt["last_artifact_path"])
         if not resolved.get("source_file") and attempt.get("last_source_file"):
             resolved["source_file"] = str(attempt["last_source_file"])
@@ -1327,6 +1326,15 @@ async def trace_analyze_handler(
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
+    # Forward the analysis route switch (deterministic vs agent). Coerce to str
+    # first (mirrors steady_state_mode) so a non-string payload value (e.g. a
+    # bool/list emitted by the LLM) cannot raise AttributeError here.
+    analysis_route = str(
+        payload.get("analysis_route")
+        or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")
+    ).strip().lower()
+    if analysis_route in ("deterministic", "agent"):
+        cmd += ["--analysis-route", analysis_route]
     # ``--roofline-json`` CLI param retired with the ``pmc_roofline`` action; a stale payload key is silently ignored.
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
@@ -2923,8 +2931,27 @@ async def integrate_handler(
     new_tput = float(bench_result.get("output_throughput") or 0.0)
     # base_tput > 0 already guaranteed by the early guard above.
     gain_pct = (new_tput - base_tput) / base_tput * 100.0
+    stack_positive_keep = False
+    stack_incremental_gain_pct: float | None = None
+    try:
+        from .shared_state import SharedState
+        state = SharedState.load_or_init(session_dir)
+        current_best = state.current_best or {}
+        current_best_tput = float(current_best.get("tput") or 0.0)
+        if current_best_tput > 0:
+            stack_incremental_gain_pct = (
+                (new_tput - current_best_tput) / current_best_tput * 100.0
+            )
+        stack_positive_keep = (
+            bool(state.optimization_stack)
+            and str(current_best.get("action") or "") == "integrate"
+            and current_best_tput > 0
+            and stack_incremental_gain_pct >= STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
+        )
+    except Exception:  # noqa: BLE001 - fall back to the original threshold
+        stack_positive_keep = False
     decision = (
-        "KEEP" if gain_pct > keep_threshold_pct
+        "KEEP" if (gain_pct > keep_threshold_pct or stack_positive_keep)
         else ("REVERT" if gain_pct < -keep_threshold_pct
               else "NEEDS_REVIEW")
     )
@@ -2960,6 +2987,12 @@ async def integrate_handler(
         "revert_result": revert_result,
         "rebuild_check": rebuild_check,
     }
+    if stack_positive_keep and gain_pct <= keep_threshold_pct:
+        result["decision_reason"] = "stack_positive_increment"
+        result["stack_incremental_gain_pct"] = stack_incremental_gain_pct
+        result["stack_incremental_keep_threshold_pct"] = (
+            STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
+        )
     if rocprof_after_info:
         result["rocprof_after_kernel_opt"] = rocprof_after_info
     return result
