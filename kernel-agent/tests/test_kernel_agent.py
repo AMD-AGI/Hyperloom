@@ -251,7 +251,7 @@ class KernelAgentToolTests(unittest.TestCase):
             'python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${GEAK_ROOT}"',
             install_text,
         )
-        # GEAK v3.2.0 ships 4 MCP tool folders (metrix-mcp removed; transitive via profiler-mcp).
+        # GEAK v3.2.1 ships 4 MCP tool folders (metrix-mcp removed; transitive via profiler-mcp).
         for _mcp in (
             "rag-mcp",
             "profiler-mcp",
@@ -259,7 +259,7 @@ class KernelAgentToolTests(unittest.TestCase):
             "automated-test-discovery",
         ):
             self.assertIn(_mcp, install_text)
-        # Pin the v3.2.0 install-loop ordering so re-adding metrix-mcp regresses this.
+        # Pin the v3.2.1 install-loop ordering so re-adding metrix-mcp regresses this.
         self.assertIn(
             "for _geak_mcp in rag-mcp profiler-mcp \\\n"
             "                    cross-session-memory-mcp automated-test-discovery; do",
