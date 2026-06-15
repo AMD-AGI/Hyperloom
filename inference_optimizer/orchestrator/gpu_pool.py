@@ -185,6 +185,20 @@ class SpecialistGpuPool:
                 params,
             )
 
+    async def reap_expired(self) -> int:
+        """Actively delete TTL-expired GPU leases; returns rows reaped.
+
+        ``try_acquire`` already clears expired rows opportunistically, but a
+        multi-day run may go long stretches without an acquire (e.g. an idle
+        EXPLORE phase), leaking capacity. The reaper tick calls this so stale
+        leases never pin a GPU id indefinitely."""
+        now_iso = _now_iso()
+        async with self.db.transaction() as cur:
+            cur.execute(
+                "DELETE FROM gpu_leases WHERE expires_at <= ?", (now_iso,),
+            )
+            return int(cur.rowcount or 0)
+
 
 __all__ = [
     "DEFAULT_GPU_LEASE_TTL_SEC",
