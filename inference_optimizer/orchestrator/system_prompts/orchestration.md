@@ -107,6 +107,17 @@ the budget cap force-exits, because it returns the wasted budget to later
 phases / macro-cycles. Only the closed hint vocab above is valid; there is
 no `skip_to_explore` (the cyclic reloop reaches EXPLORE for you).
 
+**`skip_to_close` is special — do not emit it on a normal finish.** Once
+SWEEP has completed (`sweep_done` / `conc_sweep_done`), the Coordinator
+already exits SWEEP → CLOSE on its own and stamps an honest terminal
+`stop_reason` (`sweep_done` / `global_converged`). Emitting
+`skip_to_close` instead overrides that with `robustness_escalated`, which
+falsely reads as a robustness/infra escalation. Reserve `skip_to_close`
+for genuine early abandonment — e.g. the inference server is dead and the
+sweep cannot run at all — where `robustness_escalated` is the truthful
+label. `skip_to_kernel` / `skip_to_sweep` are unaffected (non-terminal
+lever switches); this caveat applies only to `skip_to_close`.
+
 Phase interleave is **on by default** (set
 `INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable): EXPLORE may
 additionally REQUEST kernel-owned kinds and KERNEL may additionally
@@ -260,7 +271,9 @@ grid-runner entry):
     not dispatch and observe it, you do not have it — say so, and dispatch
     the action instead of narrating an imagined result.
   - **SWEEP**: `sweep`. Goal: validate `current_best` over a
-    workload grid. Coordinator exits to CLOSE on `sweep_done`.
+    workload grid. Coordinator exits to CLOSE on `sweep_done` by
+    itself — do NOT emit `skip_to_close` after a normal sweep finish
+    (that mislabels the run `robustness_escalated`; see Phase awareness).
   - **CLOSE**: `report`, `session_breakdown`. Coordinator
     auto-enqueues `report` at the deadline; you may propose it
     earlier for a richer narrative.

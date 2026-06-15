@@ -215,6 +215,13 @@ def _section_phase_semantics(
         "(no longer robustness-only) when you judge the current phase",
         "exhausted; the Coordinator validates the hint vocab and routes",
         "the transition on the next tick.",
+        "EXCEPTION — normal SWEEP convergence: do NOT emit `skip_to_close`",
+        "once the sweep has completed (sweep_done / conc_sweep_done). The",
+        "Coordinator exits SWEEP → CLOSE on its own with an honest terminal",
+        "stop_reason (`sweep_done` / `global_converged`). `skip_to_close`",
+        "is reserved for genuine early abandonment (e.g. infra is dead and",
+        "the sweep cannot run at all) — it stamps `robustness_escalated`,",
+        "so emitting it on a normal finish mislabels the run.",
     ])
     if interleave:
         lines.extend([
@@ -561,7 +568,12 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "   'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}`` (no",
         "   longer robustness-only). Otherwise the Coordinator advances",
         "   only on IR-6 force-exit, phase-budget exhaustion, or a",
-        "   terminal stop_reason.",
+        "   terminal stop_reason. EXCEPTION: after a normal sweep finish",
+        "   (sweep_done / conc_sweep_done) do NOT emit ``skip_to_close`` —",
+        "   let the Coordinator wind SWEEP → CLOSE with its own terminal",
+        "   stop_reason. Reserve ``skip_to_close`` for genuine early",
+        "   abandonment (infra dead, sweep cannot run); it stamps",
+        "   ``robustness_escalated`` and mislabels an otherwise clean run.",
         "7. **Sweep / report tail**: once EXPLORE / KERNEL exit, the",
         "   Coordinator routes the run to SWEEP (or directly to it under",
         "   --no-kernel). When SWEEP completes, propose `report` for the",
