@@ -24,13 +24,13 @@ def session_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _seed_conductor_db(
+def _seed_coordinator_db(
     session_dir: Path,
     rows: list[dict],
     *,
     schema: str = "v6",
 ) -> Path:
-    db = session_dir / "storage" / "conductor.db"
+    db = session_dir / "storage" / "coordinator.db"
     conn = sqlite3.connect(db)
     if schema == "v6":
         conn.execute(
@@ -85,7 +85,7 @@ def _seed_conductor_db(
 
 @pytest.mark.asyncio
 async def test_local_probe_reads_v6_events_schema(session_dir: Path):
-    _seed_conductor_db(
+    _seed_coordinator_db(
         session_dir,
         [
             {"agent": "orchestration", "topic": "heartbeat", "payload": {"x": 1}},
@@ -104,7 +104,7 @@ async def test_local_probe_reads_v6_events_schema(session_dir: Path):
 
 @pytest.mark.asyncio
 async def test_local_probe_reads_legacy_events_schema(session_dir: Path):
-    _seed_conductor_db(
+    _seed_coordinator_db(
         session_dir,
         [{"agent": "kernel", "intent_type": "alert", "topic": "alert", "timestamp": 1.0}],
         schema="legacy",
@@ -160,7 +160,7 @@ async def test_local_probe_unavailable_when_no_data(monkeypatch, tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_local_probe_handles_missing_conductor_db(tmp_path: Path):
+async def test_local_probe_handles_missing_coordinator_db(tmp_path: Path):
     cfg = LocalProbeConfig(
         session_dir=tmp_path,
         disk_mountpoints=(str(tmp_path),),

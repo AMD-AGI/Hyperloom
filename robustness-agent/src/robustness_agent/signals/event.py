@@ -353,7 +353,7 @@ def _normalise_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Normalise raw coordinator events to the common event-dict shape.
 
     Args:
-        events (list[dict[str, Any]]): Raw events read from conductor.db.
+        events (list[dict[str, Any]]): Raw events read from coordinator.db.
 
     Returns:
         list[dict[str, Any]]: Event dicts with ``agent``/``topic``/``payload``/

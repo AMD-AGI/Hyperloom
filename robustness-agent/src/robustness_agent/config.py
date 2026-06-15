@@ -44,7 +44,7 @@ class Config:
 
     Attributes:
         session_dir (Path): Directory containing the session's storage
-            (including ``conductor.db``).
+            (including ``coordinator.db``).
         robustness_server_url (str): Primary M1 data source endpoint;
             empty means skip the server and use only the local probe.
         llm_model (str): Model name used for LLM-driven root-cause
@@ -68,13 +68,13 @@ class Config:
     robustness_server_url: str = ""
 
     @property
-    def conductor_db_path(self) -> Path:
-        """Filesystem path to the session's conductor SQLite database.
+    def coordinator_db_path(self) -> Path:
+        """Filesystem path to the session's Coordinator SQLite database.
 
         Returns:
-            Path: ``session_dir/storage/conductor.db``.
+            Path: ``session_dir/storage/coordinator.db``.
         """
-        return self.session_dir / "storage" / "conductor.db"
+        return self.session_dir / "storage" / "coordinator.db"
 
     # -- thresholds --
     gpu_temp_warn_c: float = 85.0
@@ -336,7 +336,7 @@ def _discover_session_dir() -> Path:
 
     Checks the ``SESSION_DIR`` environment variable, then the known
     candidate paths and the current working directory for a
-    ``storage/conductor.db`` marker.
+    ``storage/coordinator.db`` marker.
 
     Returns:
         Path: The discovered session directory, or the last candidate
@@ -349,13 +349,13 @@ def _discover_session_dir() -> Path:
             return p
 
     for candidate in SESSION_DIR_CANDIDATES:
-        db = candidate / "storage" / "conductor.db"
+        db = candidate / "storage" / "coordinator.db"
         if db.exists():
             log.info("Session dir discovered at: %s", candidate)
             return candidate
 
     cwd = Path.cwd()
-    db = cwd / "storage" / "conductor.db"
+    db = cwd / "storage" / "coordinator.db"
     if db.exists():
         log.info("Session dir is cwd: %s", cwd)
         return cwd

@@ -24,9 +24,9 @@ def config(tmp_path: Path) -> Config:
 
 
 @pytest.fixture
-def conductor_db(config: Config) -> Path:
-    """Create a minimal Conductor SQLite DB for testing."""
-    db_path = config.conductor_db_path
+def coordinator_db(config: Config) -> Path:
+    """Create a minimal Coordinator SQLite DB for testing."""
+    db_path = config.coordinator_db_path
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""

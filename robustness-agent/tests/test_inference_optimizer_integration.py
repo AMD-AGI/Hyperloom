@@ -288,13 +288,13 @@ async def test_gpu_memory_leaked_silent_when_live_owner_present(tmp_path):
 async def test_repeated_failure_emits_prune_branch_passing_gate(tmp_path):
     from robustness_agent.config import Config
 
-    # Inbox can't carry delegated_result, so inject a fake conductor.db with state=failed twice on the same family.
+    # Inbox can't carry delegated_result, so inject a fake coordinator.db with state=failed twice on the same family.
     import json
     import sqlite3
 
     storage = tmp_path / "storage"
     storage.mkdir()
-    db = storage / "conductor.db"
+    db = storage / "coordinator.db"
     conn = sqlite3.connect(db)
     conn.execute(
         "CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, msg_id TEXT,"

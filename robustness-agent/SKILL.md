@@ -45,7 +45,7 @@ robustness_agent/
 ├── sources/
 │   ├── base.py             # Source / SourceData / DegradeRouter
 │   ├── server_client.py    # robustness-server REST + Source adapter
-│   └── local_probe.py      # local fallback (conductor.db, ps, df, parsed rocm-smi, http probes, log error patterns)
+│   └── local_probe.py      # local fallback (coordinator.db, ps, df, parsed rocm-smi, http probes, log error patterns)
 ├── findings/sink.py        # JSONL append sink for Findings
 ├── factory.py              # Config -> ReactorBundle (build_reactor_components)
 ├── config.py               # discovery + tunables
@@ -111,7 +111,7 @@ host -> subprocess -> envelope -> upstream PolicyGate path.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `SESSION_DIR` | no | scan known paths | Path containing `storage/conductor.db`; the FindingSink writes under `{session_dir}/agents/robustness/findings/{session_id}.jsonl`. |
+| `SESSION_DIR` | no | scan known paths | Path containing `storage/coordinator.db`; the FindingSink writes under `{session_dir}/agents/robustness/findings/{session_id}.jsonl`. |
 | `ROBUSTNESS_SERVER_URL` | no | scan known DNS | M1 primary data source; empty disables the primary path and forces local-only mode. |
 | `OPENAI_BASE_URL` | no | — | LLM endpoint for RCA (used as `llm_base_url`). |
 | `SAFE_API_KEY` | no | — | API key for the LLM proxy (used as `llm_api_key`). |
@@ -149,7 +149,7 @@ Cooldown: identical `(symptom_name, subject)` keys are silenced for
   * `/api/v1/sessions/{id}/events`
   * `/api/v1/sessions/{id}/summary`
 * **Fallback:** local probes
-  * `conductor.db` (read-only) for Coordinator events
+  * `coordinator.db` (read-only) for Coordinator events
   * `shutil.disk_usage`, `ps`, parsed `rocm-smi --csv` / `nvidia-smi`
   * `Config.health_probe_targets[]` — local HTTP `/health` probes for
     inference servers running on the same host (M1.5)

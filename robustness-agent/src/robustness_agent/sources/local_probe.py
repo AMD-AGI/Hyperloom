@@ -178,16 +178,16 @@ class LocalProbeConfig:
     external_gateway_probe_url: str = ""
 
     @property
-    def conductor_db_path(self) -> Path | None:
+    def coordinator_db_path(self) -> Path | None:
         """Path to the Coordinator session DB under ``session_dir``.
 
         Returns:
-            Path | None: ``<session_dir>/storage/conductor.db`` when a
+            Path | None: ``<session_dir>/storage/coordinator.db`` when a
             session directory is configured, else ``None``.
         """
         if self.session_dir is None:
             return None
-        return self.session_dir / "storage" / "conductor.db"
+        return self.session_dir / "storage" / "coordinator.db"
 
 
 @dataclass
@@ -245,7 +245,7 @@ class LocalProbeSource:
         cfg = self._config
         coordinator_events = await asyncio.to_thread(
             _read_coordinator_events,
-            cfg.conductor_db_path,
+            cfg.coordinator_db_path,
             cfg.coordinator_event_limit,
         )
         local_disk = await asyncio.to_thread(_sample_disk, cfg.disk_mountpoints)
@@ -387,7 +387,7 @@ def _read_coordinator_events(
     (missing file, open failure, bad query) yields an empty list.
 
     Args:
-        db_path (Path | None): Path to ``conductor.db``; ``None`` or a
+        db_path (Path | None): Path to ``coordinator.db``; ``None`` or a
             missing file short-circuits to ``[]``.
         limit (int): Maximum number of most-recent events to return.
 
