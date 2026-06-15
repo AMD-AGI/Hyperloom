@@ -3583,7 +3583,10 @@ class Coordinator:
                 },
                 idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
             )
-            bench_result = await BaselineExecutor(session_dir=self.session_dir)(
+            bench_result = await BaselineExecutor(
+                session_dir=self.session_dir,
+                shared_state=self.shared_state,
+            )(
                 RunnerContext(task=fake_task, lease=None)
             )
             if not is_valid_measurement(bench_result):

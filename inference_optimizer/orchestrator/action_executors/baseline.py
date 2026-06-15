@@ -523,6 +523,7 @@ class BaselineExecutor:
         magpie_python: str | None = None,
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
+        shared_state: Any | None = None,
         default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
         cwd: Path | str = "/tmp",
     ):
@@ -535,6 +536,9 @@ class BaselineExecutor:
                 path; resolved from ``$FRAMEWORK`` at call time when ``None``.
             session_dir (Path | str | None): Canonical session root for
                 per-task workspaces; resolved automatically when ``None``.
+            shared_state: Optional live SharedState object. When provided, the
+                eager-fallback one-shot is consumed in memory before saving so
+                Coordinator cannot later re-persist a stale True value.
             default_timeout_sec (int): Default (warm-start) subprocess timeout.
             cwd (Path | str): Working directory for the Magpie subprocess.
         """
@@ -545,6 +549,7 @@ class BaselineExecutor:
             Path(default_config_path) if default_config_path else None
         )
         self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
+        self.shared_state = shared_state
         self.default_timeout_sec = default_timeout_sec
         self.cwd = Path(cwd)
 
@@ -570,15 +575,17 @@ class BaselineExecutor:
             return Path(extra["workspace"])
         return runs_dir(self.session_dir, action, ctx.task.task_id)
 
-    def _consume_eager_fallback(self) -> bool:
+    def _consume_eager_fallback(self, shared_state: Any | None = None) -> bool:
         """Consume the one-shot cuda-graph eager fallback flag from SharedState.
 
         Returns True (and clears the flag) when a prior baseline armed it.
         Best-effort: missing/unreadable state reads as no fallback.
         """
         try:
-            from ..shared_state import SharedState
-            state = SharedState.load_or_init(self.session_dir)
+            state = shared_state or self.shared_state
+            if state is None:
+                from ..shared_state import SharedState
+                state = SharedState.load_or_init(self.session_dir)
             if not getattr(state, "baseline_eager_fallback", False):
                 return False
             state.baseline_eager_fallback = False
@@ -688,20 +695,29 @@ class BaselineExecutor:
         # framework-correct disable-cuda-graph flag for this retry and consume
         # the flag so it fires once.
         effective_extra_server_args = read_extra_server_args(params)
-        eager_fallback_applied = self._consume_eager_fallback()
+        extra = getattr(ctx, "extra", None) or {}
+        live_shared_state = extra.get("shared_state") or self.shared_state
+        eager_fallback_applied = self._consume_eager_fallback(live_shared_state)
         if eager_fallback_applied:
             fw = (
                 str(params.get("framework") or "").strip()
                 or os.environ.get("FRAMEWORK", "").strip()
             )
-            cg_flag = _disable_cuda_graph_flag(fw)
-            effective_extra_server_args = _with_cuda_graph_disabled(
-                effective_extra_server_args, fw,
-            )
-            log.warning(
-                "baseline_executor: retrying with %s after a prior cuda-graph "
-                "capture failure (framework=%s)", cg_flag, fw or "?",
-            )
+            if not fw:
+                log.warning(
+                    "baseline_executor: eager fallback was armed, but framework "
+                    "is unknown; skipping disable-cuda-graph injection to avoid "
+                    "passing a framework-specific flag to the wrong backend",
+                )
+            else:
+                cg_flag = _disable_cuda_graph_flag(fw)
+                effective_extra_server_args = _with_cuda_graph_disabled(
+                    effective_extra_server_args, fw,
+                )
+                log.warning(
+                    "baseline_executor: retrying with %s after a prior "
+                    "cuda-graph capture failure (framework=%s)", cg_flag, fw,
+                )
 
         output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)

@@ -216,8 +216,8 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
 
 
 def _run_executor_with_server_log(
-    tmp_path: Path, server_log_text: str, *, framework: str = "sglang",
-    eager_armed: bool = False,
+    tmp_path: Path, server_log_text: str, *, framework: str | None = "sglang",
+    eager_armed: bool = False, shared_state: SharedState | None = None,
 ) -> tuple[dict, dict]:
     """Run BaselineExecutor.__call__ with a mocked Magpie that writes a
     server.log and produces NO benchmark_* workspace (no_workspace path).
@@ -231,7 +231,7 @@ def _run_executor_with_server_log(
     captured: dict = {}
 
     if eager_armed:
-        state = SharedState.load_or_init(tmp_path)
+        state = shared_state or SharedState.load_or_init(tmp_path)
         state.baseline_eager_fallback = True
         state.save(tmp_path)
 
@@ -254,13 +254,16 @@ def _run_executor_with_server_log(
         magpie_python="/opt/venv/bin/python",
         default_config_path=base,
         session_dir=tmp_path,
+        shared_state=shared_state,
     )
-    ctx = _make_ctx({
+    task_params = {
         "output_dir": str(output_dir),
         "timeout_sec": 10,
-        "framework": framework,
         "extra_server_args": "--mem-fraction-static=0.8",
-    })
+    }
+    if framework is not None:
+        task_params["framework"] = framework
+    ctx = _make_ctx(task_params)
     with patch(
         "inference_optimizer.orchestrator.action_executors.baseline."
         "run_with_session_kill",
@@ -295,6 +298,21 @@ def test_executor_consumes_flag_and_injects_disable_flag(tmp_path: Path):
     assert result["status"] == "failed"
     assert "--disable-cuda-graph" in captured["extra_server_args"]
     # One-shot: the flag is consumed (cleared) after this run.
+    assert SharedState.load_or_init(tmp_path).baseline_eager_fallback is False
+
+
+def test_executor_consumes_flag_but_skips_inject_when_framework_unknown(
+    tmp_path: Path, monkeypatch,
+):
+    # Unknown framework must not default to the sglang-only flag: a vLLM retry
+    # with --disable-cuda-graph would fail argument validation.
+    monkeypatch.delenv("FRAMEWORK", raising=False)
+    result, captured = _run_executor_with_server_log(
+        tmp_path, "boot failed\n", framework=None, eager_armed=True,
+    )
+    assert result["status"] == "failed"
+    assert "--disable-cuda-graph" not in captured["extra_server_args"]
+    assert "--enforce-eager" not in captured["extra_server_args"]
     assert SharedState.load_or_init(tmp_path).baseline_eager_fallback is False
 
 
