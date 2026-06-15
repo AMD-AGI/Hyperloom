@@ -4980,7 +4980,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Extra seconds after the wall-clock deadline for Coordinator to "
             "flush a deterministic report task (no LLM). Default: "
-            "min(30, max_hours * 60 * 0.02). Pass 0 to disable closing phase."
+            "min(120, max_hours * 60 * 0.02). Pass 0 to disable closing phase."
         ),
     )
     opt.add_argument("--isl", type=int, default=int(os.environ.get("ISL", "256")),
@@ -5922,8 +5922,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="EXPLORE force-exit: total wall-clock remaining (hours) "
              "below which EXPLORE exits immediately to the next phase, "
-             "regardless of plateau / steward. Default 0.75 (IR-6; "
-             "quartered from 3.0 for short-run state-transition testing).",
+             "regardless of plateau / steward. Default 3.0 (IR-6).",
     )
     opt.add_argument(
         "--explore-force-exit-budget-pct",

@@ -164,7 +164,7 @@ def test_robustness_options_multi_node_defaults(monkeypatch) -> None:
     assert opts["enable_cluster_pod_metrics"] is True
     assert opts["pod_metrics_categories"] == ["gpu", "net"]
     assert opts["auto_probe_inference_server"] is False
-    assert opts["progress_no_levers_min_minutes"] == 15.0
+    assert opts["progress_no_levers_min_minutes"] == 60.0
 
 
 def test_robustness_options_workload_uid_from_env(monkeypatch) -> None:

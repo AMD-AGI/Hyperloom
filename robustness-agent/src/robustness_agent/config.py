@@ -133,16 +133,14 @@ class Config:
     # wind down via delegate(report)).
     budget_warn_pct: float = 0.70
     budget_imminent_pct: float = 0.85
-    # Wall-clock bar quartered (was 30.0) for short-run state-transition testing.
-    budget_min_minutes: float = 7.5
+    budget_min_minutes: float = 30.0
     budget_productive_gain_pct: float = 0.5
     # -- H1 / H2 budget signal extensions (2026-05-18) --
     # strategy_drift_pct (50%) = earliest gate: MEDIUM when half-burnt with no
     # gain. Absolute-time thresholds back-stop very long budgets.
     budget_strategy_drift_pct: float = 0.5
-    # Wall-clock bars quartered (were 30.0 / 5.0) for short-run testing.
-    budget_deadline_warning_minutes: float = 7.5
-    budget_deadline_hard_cutoff_minutes: float = 1.25
+    budget_deadline_warning_minutes: float = 30.0
+    budget_deadline_hard_cutoff_minutes: float = 5.0
 
     # -- same_payload_loop signal (B1, 2026-05-18) --
     # Consecutive identical-payload failures before firing.
@@ -158,8 +156,7 @@ class Config:
     # -- gain_plateau / no_levers_found signals (B2 / B3, 2026-05-18) --
     progress_gain_window_ticks: int = 6
     progress_gain_epsilon_pct: float = 0.5
-    # Wall-clock bar quartered (was 45.0) for short-run state-transition testing.
-    progress_no_levers_min_minutes: float = 11.25
+    progress_no_levers_min_minutes: float = 45.0
     progress_no_levers_min_ticks: int = 8
 
     # -- A3 / A4 disk / shm signals (2026-05-18) --

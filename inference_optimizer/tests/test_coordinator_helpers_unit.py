@@ -51,8 +51,8 @@ def test_closing_grace_explicit():
 
 
 def test_closing_grace_default():
-    # min(30, max_minutes*60*0.02): 200*60*0.02 = 240 -> capped 30 (cap quartered)
-    assert ch.effective_closing_grace_sec(200, None) == 30.0
+    # min(120, max_minutes*60*0.02): 200*60*0.02 = 240 -> capped 120
+    assert ch.effective_closing_grace_sec(200, None) == 120.0
     assert ch.effective_closing_grace_sec(10, None) == 12.0
     assert ch.effective_closing_grace_sec(None, None) == 0.0
 

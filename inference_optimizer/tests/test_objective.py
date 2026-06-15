@@ -235,8 +235,7 @@ async def test_run_stops_on_time_exhausted(session_dir):
 
 
 def test_closing_grace_default_scales_with_max_hours():
-    # Cap quartered 120 -> 30: 120min*60*0.02 = 144s, clamped to the 30s cap.
-    assert effective_closing_grace_sec(120.0, None) == pytest.approx(30.0)
+    assert effective_closing_grace_sec(120.0, None) == pytest.approx(120.0)
     assert effective_closing_grace_sec(0.6, None) == pytest.approx(0.72)
     assert effective_closing_grace_sec(120.0, 30.0) == 30.0
     assert effective_closing_grace_sec(120.0, 0.0) == 0.0

@@ -44,8 +44,7 @@ MAINTENANCE_EVERY_TICKS: int = 50
 # R2: default per-macro-cycle wall-clock window (hours) in cyclic mode. Each
 # phase's budget fraction (DEFAULT_PHASE_BUDGET_PCT) applies to this window
 # rather than the whole run. Env override: INFERENCE_OPTIMIZER_CYCLE_HOURS.
-# Wall-clock bar quartered (was 6.0) for short-run cycle testing.
-DEFAULT_CYCLE_HOURS: float = 1.5
+DEFAULT_CYCLE_HOURS: float = 6.0
 # Trailing window for the crash-rate emergency stop: the threshold counts only
 # crashes within this many seconds so old crashes age out on long runs/resume.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0

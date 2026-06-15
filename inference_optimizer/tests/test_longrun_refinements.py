@@ -99,22 +99,18 @@ def test_suprathreshold_gain_resets_streak(monkeypatch):
 # Absolute per-phase cap + 14-day ceiling for unbounded runs
 # ==========================================================================
 def test_phase_cap_binds_on_session_term_for_short_runs():
-    # 2h bounded run: proportional term (2h*0.45) < reference*0.45 cap → proportional.
+    # 2h bounded run: proportional term (2h*0.45) < 24h*0.45 cap → proportional.
     st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=120)
     cap = ps.phase_cap_seconds(st)
     assert cap == pytest.approx(120 * 60 * 0.45)
 
 
-def test_phase_cap_binds_on_reference_for_unbounded_runs():
+def test_phase_cap_binds_on_24h_reference_for_unbounded_runs():
     import math
     st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=0)
     cap = ps.phase_cap_seconds(st)
-    # PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES * 0.45 (ceil to minutes) is far below
-    # the 14-day proportional term. Reference the constant so it tracks the
-    # quartered (6h) value.
-    assert cap == pytest.approx(
-        math.ceil(ps.PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES * 0.45) * 60
-    )
+    # 24h * 0.45 (ceil to minutes) is far below the 14-day proportional term.
+    assert cap == pytest.approx(math.ceil(24 * 60 * 0.45) * 60)
 
 
 def test_effective_max_minutes_unbounded_is_14_days():

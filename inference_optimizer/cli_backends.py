@@ -264,8 +264,8 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
         # B3 no_levers_found floor — multi-node large-model spends
         # 35-50 min on sglang cold start + baseline + profile +
         # turnaround alone before the first explore family runs, so lift
-        # the elapsed-time floor above the single-node default. Quartered
-        # (was 60.0) alongside the other wall-clock bars for short-run testing.
-        options["progress_no_levers_min_minutes"] = 15.0
+        # the elapsed-time floor from 45 to 60 minutes (single-node
+        # default 45.0 stays untouched).
+        options["progress_no_levers_min_minutes"] = 60.0
 
     return options
