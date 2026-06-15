@@ -437,8 +437,8 @@ def is_cyclic_phases_enabled() -> bool:
 # legacy single-pass chain with whole-run phase budgets, regardless of the
 # (default-on) cyclic env flag — this is the "≤24h behaves exactly as before"
 # contract. Gating only on the env flag (not the budget) silently compressed
-# short-run phase budgets to the 6h cycle window and let SWEEP reloop with as
-# little as 30min remaining.
+# short-run phase budgets to the cycle window (DEFAULT_CYCLE_HOURS) and let
+# SWEEP reloop with as little as 30min remaining.
 DEFAULT_LONGRUN_THRESHOLD_MINUTES: float = 24 * 60
 
 
@@ -695,7 +695,7 @@ def _budget_minutes(state: Any) -> float:
     The per-cycle window only applies to long/unbounded runs (:func:`is_long_run`).
     A short bounded run (``--max-hours ≤ 24``) always anchors its phase budgets
     on the whole session even when ``cycle_minutes`` is set, so its phases are
-    never silently compressed to the 6h cycle window.
+    never silently compressed to the cycle window (DEFAULT_CYCLE_HOURS).
     Note: ``session_remaining_seconds`` deliberately keeps using ``max_minutes``
     — the global deadline is per-run, not per-cycle.
     """
