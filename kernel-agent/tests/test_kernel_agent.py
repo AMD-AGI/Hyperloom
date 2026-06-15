@@ -306,7 +306,7 @@ class KernelAgentToolTests(unittest.TestCase):
             'TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"',
             install_text,
         )
-        self.assertIn('TRACELENS_REF="0ebaa7109992b98b8f747a0fc0973e0f3b65d5d9"', install_text)
+        self.assertIn('TRACELENS_REF="dee7fa3182b1ee0d2085a364a2542d8f49acc0f6"', install_text)
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"', install_text)
         self.assertIn('git clone --depth 1 "$TRACELENS_REPO" "$TRACELENS_ROOT"', install_text)
         self.assertIn('git -C "$TRACELENS_ROOT" fetch --depth 1 origin "$TRACELENS_REF"', install_text)
