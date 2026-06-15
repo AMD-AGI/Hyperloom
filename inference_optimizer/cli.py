@@ -1544,6 +1544,58 @@ def _preflight_unsupported_model_arch(
     return True
 
 
+def _resolve_reference_recipe(
+    args: argparse.Namespace,
+) -> tuple[str, dict[str, str], str, str]:
+    """Resolve the reference launch recipe for a fresh launch (fail-soft).
+
+    Returns ``(server_args, envs, model, source)``. Explicit
+    ``--reference-script`` wins. When omitted, an InferenceX single-node recipe
+    is auto-discovered: only an ``exact`` filename match is applied; a ``fuzzy``
+    match is logged as a candidate but NOT applied (a near-name model mismatch
+    could break a working baseline). All-empty on any failure or no match — the
+    run then behaves byte-for-byte as today (0 degrade).
+    """
+    framework = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
+    from .reference_script import (
+        discover_reference_script,
+        parse_reference_script,
+    )
+    source = (getattr(args, "reference_script", None) or "").strip()
+    if source:
+        recipe = parse_reference_script(source, framework=framework)
+        if recipe.server_args or recipe.envs:
+            print(
+                f"Reference script: {source} "
+                f"({len(recipe.server_args.split())} arg tokens, "
+                f"{len(recipe.envs)} env(s))"
+            )
+        return (recipe.server_args, dict(recipe.envs), recipe.model or "", source)
+
+    # Auto-discovery (no explicit flag).
+    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+    if not inferencex_path:
+        return ("", {}, "", "")
+    path, tier = discover_reference_script(
+        inferencex_path,
+        model_path=str(args.model or ""),
+        precision=(getattr(args, "precision", None) or os.environ.get("PRECISION", "")),
+        gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
+        framework=framework,
+    )
+    if path and tier == "exact":
+        recipe = parse_reference_script(path, framework=framework)
+        print(f"Reference script: {path} (auto-discovered, exact match)")
+        return (recipe.server_args, dict(recipe.envs), recipe.model or "", path)
+    if path and tier == "fuzzy":
+        print(
+            f"Reference script: candidate {path} (fuzzy match — NOT applied; "
+            f"pass --reference-script {path} to use it)",
+            file=sys.stderr,
+        )
+    return ("", {}, "", "")
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
@@ -1695,6 +1747,11 @@ def _seed_shared_state(
     # KB architecture tags from config.json (architectures + model_type); fresh-launch only (resume rehydrates).
     _cfg_tags = _load_model_config_tags(str(args.model))
 
+    # Reference launch recipe (fresh-launch only): explicit --reference-script
+    # wins; else auto-discover an exact-match InferenceX single-node recipe.
+    # Lowest-priority base for the baseline server args; fully fail-soft.
+    _ref_args, _ref_envs, _ref_model, _ref_source = _resolve_reference_recipe(args)
+
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -1730,6 +1787,10 @@ def _seed_shared_state(
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
         cumulative_gain=0.0,
+        reference_server_args=_ref_args,
+        reference_envs=_ref_envs,
+        reference_model=_ref_model,
+        reference_source=_ref_source,
         max_minutes=int((args.max_hours or 0) * 60),
         research_lane_capacity=research_lane_capacity,
         gpu_specialist_capacity=gpu_specialist_capacity,
@@ -4922,6 +4983,20 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Input sequence length (default $ISL or 256)")
     opt.add_argument("--osl", type=int, default=int(os.environ.get("OSL", "256")),
                       help="Output sequence length (default $OSL or 256)")
+    opt.add_argument(
+        "--reference-script",
+        dest="reference_script",
+        type=str,
+        default=None,
+        help=(
+            "Reference launch recipe (.sh path or http(s) URL). Its serve "
+            "flags + whitelisted exports seed the baseline server args at "
+            "lowest priority (EXPLORE can override). Model-gated: ignored if "
+            "the run's model differs from the recipe's. When omitted, a "
+            "matching InferenceX single-node recipe is auto-discovered "
+            "(exact filename match only; fuzzy matches are logged, not used)."
+        ),
+    )
     opt.add_argument("--precision", type=str,
                       default=os.environ.get("PRECISION", "bf16"),
                       help="Model precision (default $PRECISION or bf16)")

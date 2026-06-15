@@ -424,6 +424,12 @@ def build_manifest(
             float(getattr(args, "warm_replay_min_reproduce_pct", 0.8) or 0.8)
             if args is not None else 0.8
         ),
+        # Operator-supplied reference recipe source (audit only). The resolved
+        # server_args / envs / model are authoritative in state.json's
+        # reference_* fact-layer fields (discovery runs after manifest write).
+        "reference_script": (
+            getattr(args, "reference_script", None) if args is not None else None
+        ),
     }
 
 

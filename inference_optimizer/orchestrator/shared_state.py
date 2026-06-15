@@ -374,6 +374,12 @@ class SharedState:
     # Baseline Magpie runtime (s, success path); ExploreExecutor derives overtime-kill deadline. Zero => no-op.
     baseline_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
+    # Reference launch recipe (from --reference-script or auto-discovery): lowest-priority
+    # base server args/envs seeding every baseline. Fact-layer => persisted + restored on resume.
+    reference_server_args: str = ""
+    reference_envs: dict[str, str] = field(default_factory=dict)
+    reference_model: str = ""
+    reference_source: str = ""
     # Full accepted configuration stack across action families; current_best keeps the materialized full args/env.
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
     # Index-aligned with ``optimization_stack``: per-entry incremental gain pct; missing => None.
@@ -771,6 +777,8 @@ class SharedState:
                 "baseline_tput", "baseline_accuracy", "current_best",
                 "cumulative_gain", "cumulative_gain_validated",
                 "optimization_stack",
+                # Reference recipe must survive resume or restarts re-fail baseline.
+                "reference_server_args", "reference_envs",
                 # Steward fields safe to default (missing => no priors).
                 "last_remaining_gaps_assessment",
                 "remaining_gaps_assessments",
@@ -940,6 +948,24 @@ class SharedState:
             from ..breakdown.recorder import instrument
             instrument.snapshot_state_sections(session_dir, self)
         except Exception:  # noqa: BLE001
+            pass
+        # Read-only derived artifact: re-render current_setting.sh from the
+        # current best route so the operator can audit / re-feed it via
+        # --reference-script. Never parsed back (resume restores from state.json).
+        try:
+            cb = self.current_best or {}
+            if cb:
+                from ..reference_script import render_reference_script
+                text = render_reference_script(
+                    framework=os.environ.get("FRAMEWORK", "sglang"),
+                    server_args=str(cb.get("extra_server_args") or ""),
+                    envs=dict(cb.get("extra_envs") or {}),
+                    model=self.reference_model or os.environ.get("MODEL_PATH"),
+                )
+                (Path(session_dir) / "current_setting.sh").write_text(
+                    text, encoding="utf-8",
+                )
+        except Exception:  # noqa: BLE001 — derived artifact, never fatal
             pass
 
     # Mutators (Coordinator only — LLM agents go via intents)

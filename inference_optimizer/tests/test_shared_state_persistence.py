@@ -266,3 +266,47 @@ async def test_coordinator_update_state_drops_unknown_fields(session_dir):
         assert "future_unknown_key" in last.payload["rejected"]
     finally:
         await c.stop()
+
+
+# reference recipe fact-layer (resume survival + current_setting.sh render)
+def test_reference_fields_survive_resume(tmp_path):
+    """R3: reference_* fields persist through save → from_dict (resume)."""
+    s = SharedState(session_id="t", model_name="m", model_path="/x/m")
+    s.reference_server_args = "--block-size 128"
+    s.reference_envs = {"VLLM_USE_BREAKABLE_CUDAGRAPH": "0"}
+    s.reference_model = "minimaxm3"
+    s.reference_source = "/recipes/minimaxm3_fp8_mi300x.sh"
+    restored = SharedState.from_dict(s.to_dict())
+    assert restored.reference_server_args == "--block-size 128"
+    assert restored.reference_envs == {"VLLM_USE_BREAKABLE_CUDAGRAPH": "0"}
+    assert restored.reference_model == "minimaxm3"
+    assert restored.reference_source == "/recipes/minimaxm3_fp8_mi300x.sh"
+
+
+def test_save_renders_current_setting_sh(tmp_path, monkeypatch):
+    """save() emits a re-parseable current_setting.sh from current_best."""
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    sd = tmp_path / "session"
+    sd.mkdir()
+    s = SharedState(session_id="t", model_name="m", model_path="/x/m")
+    s.current_best = {
+        "extra_server_args": "--block-size 128 --attention-backend TRITON_ATTN",
+        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+    }
+    s.save(sd)
+    out = sd / "current_setting.sh"
+    assert out.exists()
+    from inference_optimizer.reference_script import parse_reference_script
+    r = parse_reference_script(str(out), framework="vllm")
+    assert "--block-size 128" in r.server_args
+    assert "TRITON_ATTN" in r.server_args
+    assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
+
+
+def test_save_no_current_setting_when_no_best(tmp_path):
+    """No current_best → no current_setting.sh (0-degrade)."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    s = SharedState(session_id="t", model_name="m", model_path="/x/m")
+    s.save(sd)
+    assert not (sd / "current_setting.sh").exists()

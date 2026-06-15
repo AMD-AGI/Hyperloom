@@ -121,6 +121,43 @@ _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
 
 
+def _resolve_reference_base(
+    session_dir: Path, *, model_path: str,
+) -> tuple[str, dict[str, str]]:
+    """Read the model-gated reference base server args/envs from SharedState.
+
+    Baseline is the single choke point every run funnels through (initial /
+    restart / stack-rebaseline), so reading the reference here makes it seed
+    EVERY baseline — including resume restarts (the reference is a persisted
+    fact-layer field). Model-gated: a recipe captured for a different model is
+    skipped (a near-name mismatch could apply flags that break this model).
+
+    Returns ``("", {})`` on any failure or when no reference is set — the
+    caller then materializes exactly as before (0 degrade).
+    """
+    try:
+        from ..shared_state import SharedState
+        from ...reference_script import models_compatible
+        state = SharedState.load_or_init(session_dir)
+        ref_args = str(getattr(state, "reference_server_args", "") or "").strip()
+        ref_envs = dict(getattr(state, "reference_envs", {}) or {})
+        if not ref_args and not ref_envs:
+            return ("", {})
+        ref_model = str(getattr(state, "reference_model", "") or "").strip()
+        # Same normalized, version-aware gate discovery uses (no drift).
+        if not models_compatible(ref_model, str(model_path or "")):
+            log.warning(
+                "reference recipe is for model %r but run model is %r; "
+                "skipping reference base (flags may not apply).",
+                ref_model, Path(str(model_path or "")).name,
+            )
+            return ("", {})
+        return (ref_args, ref_envs)
+    except Exception as exc:  # noqa: BLE001 — fail-soft, never block baseline
+        log.warning("reference base lookup failed: %s", exc)
+        return ("", {})
+
+
 # #523: filesystem types that can be revoked / unmounted mid-run (e.g. a
 # wekafs/NFS mount flap). A process whose cwd lives on such a mount sees its
 # working directory "vanish underneath it" and any RELATIVE-path write hits
@@ -615,6 +652,15 @@ class BaselineExecutor:
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
+        # Reference recipe base (lowest priority): seeds every baseline incl.
+        # resume restarts. Task params may also pass it through explicitly;
+        # prefer the explicit param, else read the model-gated SharedState value.
+        ref_args = str(params.get("reference_server_args") or "").strip()
+        ref_envs = dict(params.get("reference_envs") or {})
+        if not ref_args and not ref_envs:
+            ref_args, ref_envs = _resolve_reference_base(
+                self.session_dir, model_path=resolved_model,
+            )
         try:
             config_path = materialize_config_with_envs(
                 config_path,
@@ -625,6 +671,8 @@ class BaselineExecutor:
                 gpu_type=resolved_gpu,
                 inferencex_path=effective_inferencex_path,
                 benchmark_script=override_script,
+                reference_server_args=ref_args,
+                reference_envs=ref_envs,
             )
         except FrameworkScriptMismatchError as exc:
             # Cross-framework script override (e.g. sglang_*.sh on a vllm run):
@@ -947,11 +995,31 @@ class BaselineExecutor:
         ctx_extra = getattr(ctx, "extra", None) or {}
         if not ctx_extra.get("mn_round_restarted"):
             try:
+                # Merge the reference base UNDER the per-task args (lowest
+                # priority, last-wins) so a multi-node per-round restart carries
+                # the same reference flags the single-node materialized YAML
+                # does — else exotic-arch models re-fail on every MN round.
+                # Resolve here (separate method from __call__): prefer explicit
+                # params, else the model-gated SharedState value.
+                from ._grid_runner import merge_server_args
+                _mn_ref_args = str(params.get("reference_server_args") or "").strip()
+                _mn_ref_envs = dict(params.get("reference_envs") or {})
+                if not _mn_ref_args and not _mn_ref_envs:
+                    _mn_ref_args, _mn_ref_envs = _resolve_reference_base(
+                        self.session_dir, model_path=resolved_model,
+                    )
+                _mn_task_args = read_extra_server_args(params)
+                _mn_server_args = (
+                    merge_server_args(_mn_ref_args, _mn_task_args)
+                    if _mn_ref_args else _mn_task_args
+                )
+                _mn_env = {str(k): str(v) for k, v in _mn_ref_envs.items()}
                 # PD knobs auto-resolved by the helper from $PD_* env (set
                 # by cli.py), falling back to state.json — call site is
                 # identical between colocated and disaggregated runs.
                 await restart_server_for_round(
-                    extra_server_args=read_extra_server_args(params),
+                    extra_server_args=_mn_server_args,
+                    extra_env=_mn_env or None,
                     framework=os.environ.get("FRAMEWORK") or None,
                     model_path=resolved_model or None,
                     tp=int(os.environ.get("TP") or 0) or None,
