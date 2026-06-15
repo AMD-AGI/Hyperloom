@@ -23,6 +23,10 @@ TOPIC_ALLOWLIST = frozenset({
     "do_postmortem", "do_strategic_review", "do_emergency_rca",
     "synthesize_for_kb", "graceful_stop", "heartbeat",
     "delegated_result", "intent_emitted", "rca_done",
+    # Robustness KILL_TASK audit broadcast (write-only; no consumer keys off
+    # it, but it must be allow-listed or ``append_and_seq`` rejects it as an
+    # unknown topic — siblings prune_branch/force_dispatch ride "event").
+    "kill",
     # Storage-layer events
     "lease_expired", "lease_acquire_failed",
     # Agent-to-agent RPC (REQUEST / RESPONSE intents).
