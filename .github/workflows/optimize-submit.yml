@@ -317,9 +317,9 @@ jobs:
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
           INPUT_PROMPT_PREFIX:    ${{ github.event.inputs.prompt_prefix }}
           # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
-          # Schedule uses a 3:1 weighted pool: a 200-model batch submits
-          # 150 tasks to core42-hyperloom and 50 tasks to core42-sandbox.
-          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event_name == 'schedule' && 'core42-hyperloom,core42-hyperloom,core42-hyperloom,core42-sandbox' || github.event.inputs.submit_workspaces || 'core42-hyperloom,core42-sandbox' }}
+          # Schedule sends the whole 200-model batch to core42-hyperloom ONLY,
+          # leaving core42-sandbox dedicated to the count-filler (optimize-tiny).
+          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event_name == 'schedule' && 'core42-hyperloom' || github.event.inputs.submit_workspaces || 'core42-hyperloom,core42-sandbox' }}
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min }}
