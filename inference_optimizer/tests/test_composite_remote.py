@@ -77,6 +77,67 @@ def test_composite_search_accepts_prefer_and_merges_sources() -> None:
     assert row["_field_sources"]["lessons"] == ["cortex"]
 
 
+def _gbrain_actionable_row() -> dict[str, Any]:
+    return {
+        "canonical_id": CID, "model": "test-model", "hardware": "mi300x",
+        "framework": "sglang", "framework_version": "0.5.11", "precision": "fp8",
+        "authority": "EXPERIENTIAL", "confidence": 0.85,
+        "best_config": {"extra_envs": {"SGLANG_USE_AITER": "1"}},
+        "best_throughput": 0.0,
+    }
+
+
+def _cortex_tput_row() -> dict[str, Any]:
+    return {
+        "canonical_id": CID, "model": "test-model", "hardware": "mi300x",
+        "framework": "sglang", "framework_version": "0.5.11", "precision": "fp8",
+        "authority": "EXPERIENTIAL", "confidence": 0.85,
+        "best_config": {}, "best_throughput": 9868.3,
+        "lessons": [{"statement": "cortex lesson"}],
+    }
+
+
+def test_composite_stamps_source_candidates() -> None:
+    from inference_optimizer.recipe_kb.composite_remote import CompositeRemoteRecipeClient
+
+    gbrain = _FakeSource([_gbrain_actionable_row()])
+    cortex = _FakeSource([_cortex_tput_row()])
+    client = CompositeRemoteRecipeClient([gbrain, cortex], names=["gbrain", "cortex"])
+
+    rows = client.search(label_match={"model": "test-model"}, limit=5)
+
+    assert len(rows) == 1
+    assert rows[0]["_source_candidates"] == {"gbrain": 1, "cortex": 1}
+
+
+def test_dispatcher_audit_surfaces_per_path_provenance(tmp_path) -> None:
+    from inference_optimizer.recipe_kb import RecipeKB
+    from inference_optimizer.recipe_kb.composite_remote import CompositeRemoteRecipeClient
+    from inference_optimizer.recipe_kb.local_store import LocalRecipeStore
+
+    gbrain = _FakeSource([_gbrain_actionable_row()])
+    cortex = _FakeSource([_cortex_tput_row()])
+    composite = CompositeRemoteRecipeClient([gbrain, cortex], names=["gbrain", "cortex"])
+    events: list[dict[str, Any]] = []
+    kb = RecipeKB(
+        local=LocalRecipeStore(root=tmp_path),
+        remote=composite,
+        audit_hook=events.append,
+    )
+
+    row = kb.get_recipe(canonical_id=CID)
+
+    assert row is not None
+    assert events, "expected a recipe-snapshot audit event"
+    ev = events[-1]
+    assert ev["remote"] == "composite"
+    res = ev["result"]
+    assert set(res["sources"]) == {"gbrain", "cortex"}
+    assert res["best_config_source"] == "gbrain"
+    assert res["field_sources"]["best_throughput"] == "cortex"
+    assert res["source_candidates"] == {"gbrain": 1, "cortex": 1}
+
+
 def test_cli_kb_both_mode_builds_composite(tmp_path, monkeypatch) -> None:
     from inference_optimizer.cli_kb import _build_recipe_kb_dispatcher
     from inference_optimizer.recipe_kb.composite_remote import CompositeRemoteRecipeClient

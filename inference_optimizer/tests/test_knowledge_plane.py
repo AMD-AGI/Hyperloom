@@ -483,6 +483,49 @@ def test_collect_kb_provenance_recipe_reads_empty_when_no_audit(
     assert out["recipe_snapshot_reads"]["hits"] == 0
 
 
+def test_collect_kb_provenance_attributes_recipe_reads_per_source(
+    tmp_path: Path,
+):
+    """Composite per-path provenance is aggregated into by_source / best_config_by_source."""
+    from inference_optimizer.breakdown.collectors import collect_kb_provenance
+    from inference_optimizer.session_paths import recipe_snapshot_audit_jsonl
+
+    audit = recipe_snapshot_audit_jsonl(tmp_path)
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text("\n".join(json.dumps(r) for r in [
+        {"method": "get_recipe", "remote": "composite", "resolution": "remote",
+         "hit": True, "result": {
+             "sources": ["gbrain", "cortex"], "best_config_source": "gbrain"}},
+        {"method": "get_recipe", "remote": "composite", "resolution": "remote",
+         "hit": True, "result": {
+             "sources": ["cortex"], "best_config_source": "cortex"}},
+    ]) + "\n", encoding="utf-8")
+
+    out = collect_kb_provenance(tmp_path, state={}, manifest={}, warnings=[])
+    rs = out["recipe_snapshot_reads"]
+    assert rs["by_source"] == {"gbrain": 1, "cortex": 2}
+    assert rs["best_config_by_source"] == {"gbrain": 1, "cortex": 1}
+
+
+def test_collect_kb_provenance_surfaces_warm_start_recipe_source(
+    tmp_path: Path,
+):
+    """The applied warm recipe's KB path is surfaced from its merged provenance."""
+    from inference_optimizer.breakdown.collectors import collect_kb_provenance
+
+    state = {
+        "warm_start_recipe": {
+            "raw": "{}", "tier": "exact",
+            "recipe": {
+                "_sources": ["gbrain", "cortex"],
+                "_field_sources": {"best_config": "cortex"},
+            },
+        },
+    }
+    out = collect_kb_provenance(tmp_path, state=state, manifest={}, warnings=[])
+    assert out["warm_start_recipe_source"] == "cortex"
+
+
 # 4. KB_gaps/Gap-16 — CLI flag plumbing reaches _bootstrap_knowledge_plane
 def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:
     """Pin the dest-name + default contract the bootstrap reads."""

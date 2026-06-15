@@ -77,6 +77,37 @@ def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, A
     return prefer
 
 
+def _warm_recipe_source(row: Mapping[str, Any] | None, kb: Any) -> str:
+    """Resolve which KB path actually supplied the applied warm recipe.
+
+    Under the composite remote, a merged row carries ``_field_sources`` /
+    ``_sources`` recording which backend supplied each field. Prefer the
+    backend that supplied ``best_config`` (the replayable champion), then the
+    first contributing source, and finally fall back to the dispatcher's
+    remote type. This makes the WarmStartContext attribute the FINAL applied
+    recipe to the correct path (gbrain vs cortex) instead of guessing.
+
+    Args:
+        row (Mapping[str, Any] | None): The warm recipe row (may be empty).
+        kb (Any): The RecipeKB dispatcher (for the remote-type fallback).
+
+    Returns:
+        str: A short source tag, e.g. ``gbrain`` / ``cortex`` / ``cortex-kb``.
+    """
+    if isinstance(row, Mapping):
+        field_sources = row.get("_field_sources")
+        if isinstance(field_sources, Mapping):
+            best_config_src = field_sources.get("best_config")
+            if isinstance(best_config_src, str) and best_config_src:
+                return best_config_src
+            if isinstance(best_config_src, list) and best_config_src:
+                return str(best_config_src[0])
+        sources = row.get("_sources")
+        if isinstance(sources, list) and sources:
+            return str(sources[0])
+    return "gbrain" if _remote_is_gbrain(kb) else "cortex-kb"
+
+
 def _remote_is_gbrain(kb: Any) -> bool:
     """Best-effort source tag for the WarmStartContext.
 
@@ -445,7 +476,7 @@ def run_t0_anchor(
         wsc_status = "seed_only"
     else:
         wsc_status = "hit"
-    warm_source = "gbrain" if _remote_is_gbrain(kb) else "cortex-kb"
+    warm_source = _warm_recipe_source(warm_point, kb)
     try:
         shared_state.warm_start_context = _build_warm_start_context(
             status=wsc_status,

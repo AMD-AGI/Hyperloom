@@ -1188,6 +1188,8 @@ class KBProvenance(TypedDict, total=False):
         warm_start_ts (str): ISO UTC timestamp of warm start.
         warm_start_recipe_seen (bool): Whether a warm recipe was seen.
         warm_start_recipe_tier (str): Tier of the seen warm recipe.
+        warm_start_recipe_source (str): KB path that supplied the applied
+            warm recipe (e.g. ``gbrain`` / ``cortex``); empty when none.
         warm_start_pitfall_count (int): Number of pitfalls injected at warm start.
         warm_start_lesson_count (int): Number of lessons injected at warm start.
         warm_replay (WarmReplayOutcome): Operator-visible warm-replay summary.
@@ -1211,6 +1213,8 @@ class KBProvenance(TypedDict, total=False):
     warm_start_ts: str
     warm_start_recipe_seen: bool
     warm_start_recipe_tier: str
+    # Which KB path (e.g. "gbrain" / "cortex") supplied the applied warm recipe.
+    warm_start_recipe_source: str
     warm_start_pitfall_count: int
     warm_start_lesson_count: int
     warm_replay: WarmReplayOutcome

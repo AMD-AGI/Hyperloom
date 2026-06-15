@@ -463,6 +463,23 @@ class RecipeKB:
                 "best_throughput": float(row.get("best_throughput") or 0.0),
                 "best_config_nonempty": bool(row.get("best_config")),
             }
+            # Per-path provenance — only populated when the composite remote
+            # served the read (single-source backends leave these absent).
+            # ``sources``: which backend(s) contributed this merged row;
+            # ``best_config_source``: which path supplied the replayable
+            # champion config; ``field_sources``: per-field attribution;
+            # ``source_candidates``: candidate-row count each path returned.
+            # These let the trace evaluate gbrain vs cortex contribution.
+            field_sources = row.get("_field_sources")
+            if isinstance(field_sources, dict) and field_sources:
+                result["field_sources"] = dict(field_sources)
+                result["best_config_source"] = field_sources.get("best_config")
+            sources = row.get("_sources")
+            if isinstance(sources, list) and sources:
+                result["sources"] = list(sources)
+            source_candidates = row.get("_source_candidates")
+            if isinstance(source_candidates, dict) and source_candidates:
+                result["source_candidates"] = dict(source_candidates)
         return {
             "method": method,
             "remote": self._remote_label(),

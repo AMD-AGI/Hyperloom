@@ -4549,6 +4549,12 @@ def collect_kb_provenance(
     recipe_audit = _read_last_n_audit(_recipe_audit_path(session_dir), n=50)
     recipe_by_resolution: dict[str, int] = {}
     recipe_by_remote: dict[str, int] = {}
+    # Per-path (e.g. gbrain vs cortex) attribution derived from the composite
+    # remote's provenance, emitted by the dispatcher audit. ``by_source``
+    # counts how often each path contributed a returned row; ``best_config_by
+    # _source`` counts which path supplied the replayable champion config.
+    recipe_by_source: dict[str, int] = {}
+    recipe_best_config_by_source: dict[str, int] = {}
     recipe_hits = 0
     for row in recipe_audit:
         recipe_by_resolution[str(row.get("resolution") or "unknown")] = (
@@ -4559,9 +4565,42 @@ def collect_kb_provenance(
         )
         if row.get("hit"):
             recipe_hits += 1
+        result = row.get("result") if isinstance(row.get("result"), dict) else {}
+        for src in (result.get("sources") or []):
+            recipe_by_source[str(src)] = recipe_by_source.get(str(src), 0) + 1
+        best_config_src = result.get("best_config_source")
+        for src in (
+            best_config_src if isinstance(best_config_src, list)
+            else [best_config_src] if best_config_src else []
+        ):
+            recipe_best_config_by_source[str(src)] = (
+                recipe_best_config_by_source.get(str(src), 0) + 1
+            )
 
     cortex_sid = (state.get("cortex_session_id") or "").strip()
     warm = state.get("warm_start_recipe") or {}
+    # FINAL reference attribution: which path supplied the warm recipe that was
+    # actually applied this session. Prefer the merged row's field provenance,
+    # then the WarmStartContext source tag set at T0.
+    warm_recipe_row = warm.get("recipe") if isinstance(warm, dict) else {}
+    warm_start_recipe_source = ""
+    if isinstance(warm_recipe_row, dict):
+        warm_field_sources = warm_recipe_row.get("_field_sources")
+        if isinstance(warm_field_sources, dict):
+            bc_src = warm_field_sources.get("best_config")
+            if isinstance(bc_src, str) and bc_src:
+                warm_start_recipe_source = bc_src
+            elif isinstance(bc_src, list) and bc_src:
+                warm_start_recipe_source = str(bc_src[0])
+        if not warm_start_recipe_source:
+            warm_sources = warm_recipe_row.get("_sources")
+            if isinstance(warm_sources, list) and warm_sources:
+                warm_start_recipe_source = str(warm_sources[0])
+    if not warm_start_recipe_source:
+        wsc = state.get("warm_start_context") or {}
+        warm_start_recipe_source = str(
+            ((wsc.get("match") or {}).get("source") or "")
+        ) if isinstance(wsc, dict) else ""
     pitfalls = state.get("warm_start_pitfalls") or []
     lessons = state.get("warm_start_lessons") or []
     # warm-recipe replay outcome; empty before completion / when --no-warm-replay.
@@ -4572,6 +4611,7 @@ def collect_kb_provenance(
         "warm_start_ts":          state.get("warm_start_ts") or "",
         "warm_start_recipe_seen": bool(warm and warm.get("raw")),
         "warm_start_recipe_tier": str(warm.get("tier") or "") if isinstance(warm, dict) else "",
+        "warm_start_recipe_source": warm_start_recipe_source,
         "warm_start_pitfall_count": len(pitfalls) if isinstance(pitfalls, list) else 0,
         "warm_start_lesson_count": len(lessons) if isinstance(lessons, list) else 0,
         # operator-visible replay summary, passed through verbatim.
@@ -4587,11 +4627,13 @@ def collect_kb_provenance(
         "audit_tail_count":     len(audit_tail),
         "audit_status_counts":  status_counts,
         "recipe_snapshot_reads": {
-            "count":         len(recipe_audit),
-            "hits":          recipe_hits,
-            "by_resolution": recipe_by_resolution,
-            "by_remote":     recipe_by_remote,
-            "tail":          recipe_audit[-10:],
+            "count":                 len(recipe_audit),
+            "hits":                  recipe_hits,
+            "by_resolution":         recipe_by_resolution,
+            "by_remote":             recipe_by_remote,
+            "by_source":             recipe_by_source,
+            "best_config_by_source": recipe_best_config_by_source,
+            "tail":                  recipe_audit[-10:],
         },
         "flusher_status": _collect_flusher_status(
             session_dir,
