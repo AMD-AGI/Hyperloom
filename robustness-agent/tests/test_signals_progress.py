@@ -73,7 +73,7 @@ def test_plateau_with_productive_gain_fires_medium():
 
 
 def test_plateau_with_zero_gain_also_fires_medium():
-    """Loosen P3_19: ``gain_plateau`` is now uniformly MEDIUM advisory (previously HIGH on still-zero validated gain)."""
+    """``gain_plateau`` is now uniformly MEDIUM advisory (previously HIGH on still-zero validated gain)."""
     det = ProgressDetector(ProgressConfig(
         gain_window_ticks=3, gain_epsilon_pct=0.5, productive_gain_pct=0.5,
     ))
@@ -161,7 +161,7 @@ def test_no_levers_silent_before_min_ticks():
 
 
 def test_no_levers_fires_medium_when_quotas_met():
-    """Loosen P3_19: ``no_levers_found`` is MEDIUM advisory once floors met with empty stack; ``explore_started=True`` distinguishes genuine no-lever from cold-start delay."""
+    """``no_levers_found`` is MEDIUM advisory once floors met with empty stack; ``explore_started=True`` distinguishes genuine no-lever from cold-start delay."""
     det = ProgressDetector(ProgressConfig(
         no_levers_min_minutes=45.0, no_levers_min_ticks=8,
     ))

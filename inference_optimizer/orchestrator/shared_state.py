@@ -38,12 +38,17 @@ import json
 import logging
 import os
 import tempfile
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+# Upper bound on retained crash timestamps (trailing-window rate needs only the
+# recent tail; older entries age out of any sane emergency window anyway).
+_CRASH_TIMESTAMP_CAP: int = 200
 
 
 def _now_iso() -> str:
@@ -118,6 +123,19 @@ _ROOFLINE_SNAPSHOTS_CAP = 50
 _GAPS_MAX_ENTRIES = 50
 _GAPS_ATTEMPTS_HISTORY = 20
 
+# Long-run (multi-day) bounded-growth caps for append-only telemetry ledgers.
+# Tail-trim idiom (``list[-CAP:]``) matching phase_history / roofline_snapshots.
+# Any derived totals computed over a trimmed ledger saturate at the cap; that is
+# advisory only — authoritative control counters (e.g.
+# ``consecutive_config_only_rounds``) are tracked separately and never trimmed.
+_INTERVENTION_MIX_CAP = 500
+_SPECIALIST_ROUNDS_CAP = 200
+_SEEN_PR_IDS_CAP = 2000
+_WINNERS_HISTORY_CAP = 200
+# Negative ledger (explore_search["tested"]); dict keyed by fingerprint, oldest
+# insertion-order keys evicted first. Bounds state.json across multi-day runs.
+_EXPLORE_TESTED_CAP = 5000
+
 # Per-action audit trail kinds; kernel-owned actions excluded (dedicated structures).
 _AUDIT_ACTIONS: frozenset[str] = frozenset({
     "baseline", "profile", "sweep", "explore",
@@ -146,6 +164,58 @@ _PHASE4_LEGACY_KEY_RENAMES: dict[str, str] = {
     "candidate_extra_sglang_args": "candidate_extra_server_args",
 }
 
+
+def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
+    """Bound the explore_search negative ledger for multi-day runs.
+
+    ``tested`` is keyed by canonical fingerprint; Python dicts preserve insertion
+    order, so retaining the last ``_EXPLORE_TESTED_CAP`` keys evicts the oldest
+    rejections first. Dropping a stale rejection only risks one re-exploration,
+    which the round-level dedup still catches in-session.
+    """
+    if not isinstance(tested, dict) or len(tested) <= _EXPLORE_TESTED_CAP:
+        return tested if isinstance(tested, dict) else {}
+    keys = list(tested.keys())[-_EXPLORE_TESTED_CAP:]
+    return {k: tested[k] for k in keys}
+
+
+def _stamp_cycle_on_tested(
+    tested: dict[str, Any], cycle: int, bottleneck: str = "",
+) -> dict[str, Any]:
+    """Bucket negative-ledger entries by macro-cycle + bottleneck (R3).
+
+    The executor builds ``tested`` without cycle awareness; SharedState is the
+    single point that knows ``macro_cycle`` and the live ``bottleneck``. Existing
+    ``cycle`` / ``bottleneck`` values are preserved so an entry stays attributed
+    to the cycle + bottleneck that first rejected it, enabling per-cycle /
+    per-bottleneck bucketing of veto fingerprints across bottleneck shifts.
+    """
+    if not isinstance(tested, dict):
+        return {}
+    bn = (bottleneck or "").strip()
+    for v in tested.values():
+        if isinstance(v, dict):
+            if "cycle" not in v:
+                v["cycle"] = int(cycle)
+            if bn and "bottleneck" not in v:
+                v["bottleneck"] = bn
+    return tested
+
+
+def _stamp_cycle_on_rejected(
+    rejected: list[Any], cycle: int, bottleneck: str = "",
+) -> list[Any]:
+    """Bucket rejected entries by macro-cycle + bottleneck (R3)."""
+    if not isinstance(rejected, list):
+        return []
+    bn = (bottleneck or "").strip()
+    for v in rejected:
+        if isinstance(v, dict):
+            if "cycle" not in v:
+                v["cycle"] = int(cycle)
+            if bn and "bottleneck" not in v:
+                v["bottleneck"] = bn
+    return rejected
 
 def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
     """Recursively rewrite legacy ``extra_sglang_args`` field names in-place; returns count rewritten (canonical kept when both present)."""
@@ -325,6 +395,9 @@ class SharedState:
     auto_roofline_pending_task_id: str = ""
     current_action: str = ""
     crash_count: int = 0
+    # Unix timestamps of recent crashes (bounded), used for the trailing-window
+    # emergency-stop rate so old crashes age out instead of accumulating forever.
+    crash_timestamps: list[float] = field(default_factory=list)
     # Last Coordinator-side exception caught by the tick-loop guard (gives postmortems a traceback).
     last_tick_exception: dict[str, Any] = field(default_factory=dict)
     pruned_families: list[str] = field(default_factory=list)
@@ -418,7 +491,14 @@ class SharedState:
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
     # Per-domain "empty proposal_set" streak; reset on non-empty specialist_done. Robustness escalates on persistent emptiness.
     specialist_domain_empty_streak: dict[str, int] = field(default_factory=dict)
-    # Legacy session_steward slots (steward removed in P3_17); kept only for resume + report.py back-compat, never written.
+    # Per-kb_anchor coverage counters (point 1: long-run per-domain lower-bound).
+    # ``rounds_since_last_specialist`` — EXPLORE rounds since a specialist for
+    # that anchor was dispatched; ``rounds_since_last_keep`` — rounds since a
+    # KEEP landed for it. Both ++ once per EXPLORE round (bump_domain_round_counters),
+    # reset on dispatch / KEEP. Threshold consumed by the Coordinator escalation.
+    rounds_since_last_specialist: dict[str, int] = field(default_factory=dict)
+    rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
+    # Legacy session_steward slots (steward removed); kept only for resume + report.py back-compat, never written.
     last_remaining_gaps_assessment: dict[str, Any] = field(default_factory=dict)
     remaining_gaps_assessments: list[dict[str, Any]] = field(default_factory=list)
     steward_continuation_used: bool = False
@@ -498,6 +578,27 @@ class SharedState:
     lifecycle: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget percentages per phase (from CLI flags/defaults); persisted for resume. Empty => library defaults.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
+    # R1 cyclic phase machine: macro-cycle counter. cycle 0 is the first pass
+    # (PRELUDE→…→SWEEP); each SWEEP→EXPLORE loopback increments it. Stamped onto
+    # every phase_history row. 0 for legacy/non-cyclic runs.
+    macro_cycle: int = 0
+    # R2 per-cycle budget: wall-clock minutes allotted to ONE macro-cycle.
+    # When > 0 the per-phase budget math (phase_budget_remaining_seconds /
+    # EXPLORE force-exit) is computed against this window instead of the total
+    # ``max_minutes``. 0 disables (legacy: phase budgets are % of total).
+    cycle_minutes: float = 0.0
+    # R7 global-convergence tracking: validated cumulative gain at the current
+    # macro-cycle's start, and the consecutive no-gain cycle streak. Updated by
+    # the Coordinator on each SWEEP→EXPLORE loopback / terminal close.
+    gain_at_cycle_start: float = 0.0
+    no_gain_cycle_streak: int = 0
+    # R3 (cyclic bottleneck re-direction): set when a cyclic EXPLORE plateau
+    # winds the cycle down with ``switch_bottleneck`` — the next macro-cycle's
+    # orchestration prompt surfaces a redirect advisory steering specialists off
+    # ``last_cycle_bottleneck`` toward the current dominant roofline bottleneck.
+    # Cleared once the live top bottleneck actually drifts off the plateaued one.
+    pending_bottleneck_switch: bool = False
+    last_cycle_bottleneck: str = ""
 
     # Cortex KB integration fields — Coordinator-only writers (CORE_STATE_FIELDS; LLM update_state denied).
     # ``cortex_session_id`` — hyperloom-local id carried into KB fact-write attrs (source_session_id); defaults to session_dir.name.
@@ -1031,6 +1132,7 @@ class SharedState:
             evidence=evidence,
             ts=now_ts,
             ts_unix=now_unix,
+            cycle=int(getattr(self, "macro_cycle", 0) or 0),
         )
         history = list(self.phase_history or [])
         history.append(row)
@@ -1041,6 +1143,52 @@ class SharedState:
         self.phase_started_ts = now_ts
         self.phase_started_unix = now_unix
         return row
+
+    def current_top_bottleneck(self) -> str:
+        """Return the latest roofline snapshot's ``top_bottleneck`` ("" when none).
+
+        Single accessor so the R3 redirect logic and prompt advisory read the
+        same value (latest = ``roofline_snapshots[-1]``).
+        """
+        snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []
+        if not snaps:
+            return ""
+        latest = snaps[-1]
+        if isinstance(latest, dict):
+            return str(latest.get("top_bottleneck") or "")
+        return ""
+
+    def mark_bottleneck_switch(self, prev_bottleneck: str = "") -> None:
+        """Flag that the next macro-cycle should redirect off ``prev_bottleneck`` (R3).
+
+        Called when a cyclic EXPLORE plateau winds the cycle down. Records the
+        bottleneck we plateaued on so the redirect advisory can steer specialists
+        away from it; falls back to the live top bottleneck when not supplied.
+        """
+        self.pending_bottleneck_switch = True
+        pb = (prev_bottleneck or "").strip() or self.current_top_bottleneck()
+        if pb:
+            self.last_cycle_bottleneck = pb
+
+    def clear_bottleneck_switch(self) -> None:
+        """Clear the pending bottleneck-switch handoff (R3)."""
+        self.pending_bottleneck_switch = False
+        self.last_cycle_bottleneck = ""
+
+    def maybe_clear_bottleneck_switch_on_drift(self, new_top_bottleneck: str) -> bool:
+        """Retire a pending switch once the live top bottleneck has drifted (R3).
+
+        Returns True when the flag was cleared. A fresh roofline whose top
+        bottleneck differs from the plateaued one means the redirect succeeded,
+        so the orchestration prompt should stop nagging.
+        """
+        if not bool(getattr(self, "pending_bottleneck_switch", False)):
+            return False
+        nt = (new_top_bottleneck or "").strip()
+        if nt and nt != (self.last_cycle_bottleneck or ""):
+            self.clear_bottleneck_switch()
+            return True
+        return False
 
     def record_lifecycle_event(
         self,
@@ -1124,7 +1272,12 @@ class SharedState:
         return "\n".join(lines)
 
     def increment_crash_count(self, by: int = 1) -> int:
-        """Increment the cumulative crash counter.
+        """Increment the cumulative crash counter and record crash times.
+
+        ``crash_count`` stays a monotonic telemetry total; each crash also
+        appends the current time to :attr:`crash_timestamps` (bounded to the
+        most recent entries) so the emergency stop can use a trailing-window
+        rate instead of the never-decaying total.
 
         Args:
             by (int): Amount to add to :attr:`crash_count` (default 1).
@@ -1133,7 +1286,26 @@ class SharedState:
             int: The post-increment crash count.
         """
         self.crash_count += by
+        now = time.time()
+        for _ in range(max(1, int(by))):
+            self.crash_timestamps.append(now)
+        if len(self.crash_timestamps) > _CRASH_TIMESTAMP_CAP:
+            del self.crash_timestamps[:-_CRASH_TIMESTAMP_CAP]
         return self.crash_count
+
+    def recent_crash_count(self, *, window_sec: float, now: float | None = None) -> int:
+        """Count crashes recorded within the trailing ``window_sec`` seconds.
+
+        Args:
+            window_sec (float): Trailing window width in seconds.
+            now (float | None): Reference time; defaults to ``time.time()``.
+
+        Returns:
+            int: Number of crash timestamps newer than ``now - window_sec``.
+        """
+        ref = time.time() if now is None else now
+        cutoff = ref - float(window_sec)
+        return sum(1 for t in self.crash_timestamps if t >= cutoff)
 
     def record_tick_exception(
         self,
@@ -2322,6 +2494,12 @@ class SharedState:
             if not isinstance(self.roofline_snapshots, list):
                 self.roofline_snapshots = []
             self.roofline_snapshots.append(history_entry)
+            # R3: a fresh roofline whose top bottleneck has drifted off the
+            # plateaued one means the cycle redirect succeeded — retire the
+            # pending switch so the orchestration prompt stops nagging.
+            self.maybe_clear_bottleneck_switch_on_drift(
+                str(history_entry.get("top_bottleneck") or ""),
+            )
             if len(self.roofline_snapshots) > _ROOFLINE_SNAPSHOTS_CAP:
                 # Always keep snapshot #1 so the report's baseline anchor never rotates away.
                 base = self.roofline_snapshots[0]
@@ -2397,6 +2575,7 @@ class SharedState:
                     break
             if not matched:
                 existing.append(dict(entry))
+        self._trim_specialist_rounds()
         # Author-time breakdown capture: one specialist_runs item per round.
         try:
             from ..breakdown.recorder import instrument
@@ -2405,6 +2584,11 @@ class SharedState:
             )
         except Exception:  # noqa: BLE001
             pass
+
+    def _trim_specialist_rounds(self) -> None:
+        """Bound the specialist-round ledger for multi-day runs (keep most recent)."""
+        if len(self.specialist_rounds) > _SPECIALIST_ROUNDS_CAP:
+            self.specialist_rounds = self.specialist_rounds[-_SPECIALIST_ROUNDS_CAP:]
 
     def bump_specialist_domain_empty_streak(
         self, domain: str, *, empty: bool,
@@ -2418,6 +2602,96 @@ class SharedState:
         else:
             self.specialist_domain_empty_streak[d] = 0
         return self.specialist_domain_empty_streak[d]
+
+    # per-anchor coverage counters (point 1)
+    def bump_domain_round_counters(self) -> None:
+        """Increment both per-anchor round counters for every knowledge-domain
+        anchor. Called once per EXPLORE round so a long-idle domain's counters
+        climb until the Coordinator escalation forces a dispatch."""
+        from .specialist_domains import KNOWLEDGE_DOMAIN_TAGS
+
+        for anchor in KNOWLEDGE_DOMAIN_TAGS:
+            self.rounds_since_last_specialist[anchor] = int(
+                self.rounds_since_last_specialist.get(anchor, 0) or 0
+            ) + 1
+            self.rounds_since_last_keep[anchor] = int(
+                self.rounds_since_last_keep.get(anchor, 0) or 0
+            ) + 1
+
+    @staticmethod
+    def _anchor_for(domain_or_anchor: str) -> str:
+        """Resolve a domain key or raw tag to its canonical kb_anchor."""
+        from .specialist_domains import domain_for_tag, get_domain
+
+        s = str(domain_or_anchor or "").strip()
+        if not s:
+            return ""
+        d = get_domain(s)
+        if d and d.kb_anchor:
+            return d.kb_anchor
+        dt = domain_for_tag(s)
+        if dt and dt.kb_anchor:
+            return dt.kb_anchor
+        return s
+
+    def note_specialist_dispatched(self, domain_or_anchor: str) -> None:
+        """Reset ``rounds_since_last_specialist`` for the dispatched anchor."""
+        anchor = self._anchor_for(domain_or_anchor)
+        if anchor:
+            self.rounds_since_last_specialist[anchor] = 0
+
+    def note_domain_keep(self, domain_or_anchor: str) -> None:
+        """Reset ``rounds_since_last_keep`` for the anchor that just KEPT."""
+        anchor = self._anchor_for(domain_or_anchor)
+        if anchor:
+            self.rounds_since_last_keep[anchor] = 0
+
+    def stalled_domains(
+        self, *, specialist_threshold: int, keep_threshold: int,
+    ) -> list[str]:
+        """Return anchors whose ``rounds_since_last_specialist`` ≥
+        ``specialist_threshold`` OR ``rounds_since_last_keep`` ≥
+        ``keep_threshold`` (point 1 lower-bound; point 2 hard-trigger reads
+        this). Deterministically ordered by widest gap first."""
+        anchors = (
+            set(self.rounds_since_last_specialist)
+            | set(self.rounds_since_last_keep)
+        )
+        hits: list[tuple[int, str]] = []
+        for anchor in anchors:
+            spec = int(self.rounds_since_last_specialist.get(anchor, 0) or 0)
+            keep = int(self.rounds_since_last_keep.get(anchor, 0) or 0)
+            if spec >= specialist_threshold or keep >= keep_threshold:
+                hits.append((max(spec, keep), anchor))
+        hits.sort(key=lambda x: (-x[0], x[1]))
+        return [anchor for _, anchor in hits]
+
+    def best_gap_for_anchor(self, anchor: str) -> str:
+        """Return the canonical_id of the most actionable open gap whose
+        ``domain_hint`` resolves to ``anchor`` (or ``""`` when none). Selection:
+        highest severity, then least-attempted, then oldest (point 2 reads this
+        to force-dispatch a stalled domain that still has pending work)."""
+        target = self._anchor_for(anchor)
+        if not target:
+            return ""
+        severity_rank = {"high": 3, "medium": 2, "low": 1}
+        matches: list[tuple[tuple[int, int, str], str]] = []
+        for g in self.gaps:
+            if not isinstance(g, dict):
+                continue
+            cid = str(g.get("canonical_id") or "").strip()
+            if not cid:
+                continue
+            if self._anchor_for(str(g.get("domain_hint") or "")) != target:
+                continue
+            sev = severity_rank.get(str(g.get("severity") or "").lower(), 0)
+            attempts = len(g.get("attempts") or [])
+            first_seen = str(g.get("first_seen_ts") or "")
+            matches.append(((-sev, attempts, first_seen), cid))
+        if not matches:
+            return ""
+        matches.sort(key=lambda m: m[0])
+        return matches[0][1]
 
     # gaps ledger helpers
     def find_gap(self, canonical_id: str) -> dict[str, Any] | None:
@@ -2560,6 +2834,8 @@ class SharedState:
             "ts": _now_iso(),
         }
         self.intervention_mix.append(entry)
+        if len(self.intervention_mix) > _INTERVENTION_MIX_CAP:
+            self.intervention_mix = self.intervention_mix[-_INTERVENTION_MIX_CAP:]
         if ct == "config":
             self.consecutive_config_only_rounds = (
                 int(self.consecutive_config_only_rounds or 0) + 1
@@ -2642,6 +2918,11 @@ class SharedState:
             seen.add(pid)
             self.research_scout_seen_pr_ids.append(pid)
             added += 1
+        if len(self.research_scout_seen_pr_ids) > _SEEN_PR_IDS_CAP:
+            # FIFO eviction of oldest-seen ids; re-surfacing a very old PR is low-harm.
+            self.research_scout_seen_pr_ids = (
+                self.research_scout_seen_pr_ids[-_SEEN_PR_IDS_CAP:]
+            )
         return added
 
     def has_seen_pr_id(self, pr_id: Any) -> bool:
@@ -2727,8 +3008,20 @@ class SharedState:
         prior = self.explore_search if isinstance(self.explore_search, dict) else {}
         merged = dict(prior)
         merged["schema_version"] = int(update.get("schema_version") or 1)
-        merged["tested"] = dict(update.get("tested") or prior.get("tested") or {})
-        merged["rejected"] = list(update.get("rejected") or prior.get("rejected") or [])
+        cur_cycle = int(getattr(self, "macro_cycle", 0) or 0)
+        cur_bottleneck = self.current_top_bottleneck()
+        merged["tested"] = _cap_tested_ledger(
+            _stamp_cycle_on_tested(
+                dict(update.get("tested") or prior.get("tested") or {}),
+                cur_cycle,
+                cur_bottleneck,
+            )
+        )
+        merged["rejected"] = _stamp_cycle_on_rejected(
+            list(update.get("rejected") or prior.get("rejected") or []),
+            cur_cycle,
+            cur_bottleneck,
+        )
         merged["name_index"] = dict(
             update.get("name_index") or prior.get("name_index") or {}
         )
@@ -2739,7 +3032,7 @@ class SharedState:
         for entry in update.get("winners_history") or []:
             if isinstance(entry, dict):
                 wh.append(dict(entry))
-        merged["winners_history"] = wh
+        merged["winners_history"] = wh[-_WINNERS_HISTORY_CAP:]
         sa: set[tuple[str, ...]] = set()
         for src in (prior.get("synergy_attempted"), update.get("synergy_attempted")):
             for c in src or []:
@@ -2788,6 +3081,8 @@ class SharedState:
             "accepted_at_round": str(variant.get("accepted_at_round") or ""),
             "ts": str(variant.get("ts") or _now_iso()),
             "provenance": str(variant.get("provenance") or "llm_direct"),
+            # R3: attribute the win to the macro-cycle it landed in.
+            "cycle": int(getattr(self, "macro_cycle", 0) or 0),
         }
         search = dict(self.explore_search or {})
         search.setdefault("schema_version", 1)
@@ -2816,8 +3111,9 @@ class SharedState:
             "extra_envs": envs,
             "provenance": entry["provenance"],
             "ts": entry["ts"],
+            "cycle": entry["cycle"],
         })
-        search["winners_history"] = wh
+        search["winners_history"] = wh[-_WINNERS_HISTORY_CAP:]
         self.explore_search = search
 
     # search-space expansion bookkeeping
@@ -3331,6 +3627,7 @@ class SharedState:
             f"last_profile_args='{self.last_profile_args}'",
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
             f"last_trace_analyze={self._format_last_trace_analyze()}",
+            f"profiler_digest={self._format_profiler_digest()}",
             # Full TraceLens analysis.md so the LLM grounds propose_action in the actual report.
             f"analysis_md={self._format_analysis_md_full()}",
             # Streak counter is a readable fact (KEEP/REVERT counts allowed); plateau judges also consume it on legacy resume.
@@ -3654,12 +3951,33 @@ class SharedState:
             gain_str = f"{float(gain):.2f}"
         except (TypeError, ValueError):
             gain_str = "?"
+        # When inline injection is disabled, surface the structured digest above
+        # (profiler_digest=) and point at the show_analysis_md tool for the full
+        # report — saves context on long runs. Default keeps the verbatim md.
+        if os.getenv(
+            "INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", "1",
+        ).strip().lower() in ("0", "false", "off", "no"):
+            return (
+                f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
+                "full report not inlined; see profiler_digest above or call the "
+                "show_analysis_md context tool for the verbatim analysis.md.)"
+            )
         return (
             f"\n=== TraceLens Analysis (snapshot #{snap}, "
             f"gain at snapshot = {gain_str}%) ===\n"
             f"{md_text}\n"
             f"=== End TraceLens Analysis ===\n"
         )
+
+    def _format_profiler_digest(self) -> str:
+        """Compact bottleneck-focused profiler block (saturation mix + cross-snapshot delta + hot kernels + lever); ``(none)`` until a snapshot lands."""
+        from .roofline_snapshot import build_profiler_digest
+        digest = build_profiler_digest(
+            self.roofline_snapshots, self.last_trace_analyze,
+        )
+        if not digest:
+            return "(none)"
+        return f"\n{digest}\n"
 
     def _format_last_trace_analyze(self) -> str:
         """Render the most recent trace-analyze blob for the prompt.

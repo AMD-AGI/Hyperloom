@@ -40,7 +40,7 @@ class SessionMeta(TypedDict, total=False):
         created_at_utc (str): ISO UTC timestamp when the session started.
         ended_at_utc (str): ISO UTC timestamp when the session ended.
         stop_reason (str): Why the run stopped (``target_reached`` /
-            ``time_exhausted`` / ``no_more_leverage`` / ``max_ticks`` /
+            ``time_exhausted`` / ``global_converged`` / ``max_ticks`` /
             ``baseline_failed`` / ...).
         max_minutes (int): Configured time budget in minutes.
         elapsed_minutes (float): Wall-clock minutes the session ran.
@@ -56,7 +56,7 @@ class SessionMeta(TypedDict, total=False):
     sandbox_user_id: str | None
     created_at_utc: str
     ended_at_utc: str
-    stop_reason: str              # target_reached / time_exhausted / no_more_leverage / max_ticks / baseline_failed / ...
+    stop_reason: str              # target_reached / time_exhausted / global_converged / max_ticks / baseline_failed / ...
     max_minutes: int
     elapsed_minutes: float
     host: str
