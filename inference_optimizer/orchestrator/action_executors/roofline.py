@@ -214,6 +214,7 @@ class RooflineExecutor:
         profile_result: dict[str, Any] | None = None
         trace_path = ""
         last_error = ""
+        profile_warning: dict[str, Any] | None = None
         # Track the last failure kind so the no-trace contract is preserved
         # (profile_no_trace_failed) instead of collapsing into profile_failed.
         last_phase = "profile"
@@ -240,7 +241,23 @@ class RooflineExecutor:
                     attempt, _PROFILE_MAX_ATTEMPTS, last_error,
                 )
                 continue
+            trace_path = _extract_trace_path(profile_result)
             if profile_result.get("status") != "succeeded":
+                if trace_path:
+                    # SGLang/InferenceX can emit a duplicate stop_profile
+                    # failure after a trace was already flushed successfully.
+                    profile_warning = {
+                        "status": profile_result.get("status"),
+                        "error_class": profile_result.get("error_class"),
+                        "error": profile_result.get("error"),
+                    }
+                    log.warning(
+                        "roofline profile attempt %d/%d returned status=%r "
+                        "but produced trace=%s; continuing to trace_analyze",
+                        attempt, _PROFILE_MAX_ATTEMPTS,
+                        profile_result.get("status"), trace_path,
+                    )
+                    break
                 last_phase = "profile"
                 last_error = str(
                     profile_result.get("error") or "profile sub-step failed"
@@ -250,7 +267,6 @@ class RooflineExecutor:
                     attempt, _PROFILE_MAX_ATTEMPTS, last_error,
                 )
                 continue
-            trace_path = _extract_trace_path(profile_result)
             if not trace_path:
                 last_phase = "profile_no_trace"
                 last_error = (
@@ -454,7 +470,7 @@ class RooflineExecutor:
         except Exception:  # noqa: BLE001 — defensive
             log.debug("roofline: lifecycle emit failed", exc_info=True)
 
-        return {
+        result = {
             "status": "succeeded",
             "executed_at_iso": _now_iso(),
             "snapshot_id": cached.get("roofline_snapshot_id"),
@@ -468,6 +484,10 @@ class RooflineExecutor:
             # appended to trace_health_warnings for the prompt/audit).
             "kernel_attribution_degraded": attribution_degraded,
         }
+        if profile_warning is not None:
+            result["profile_recovered"] = True
+            result["profile_warning"] = profile_warning
+        return result
 
     # Helpers (instance methods so tests can subclass / monkeypatch)
     @staticmethod
