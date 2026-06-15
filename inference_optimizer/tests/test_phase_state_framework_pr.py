@@ -102,7 +102,7 @@ def test_exit_normal_framework_pr_no_force_exit_when_remaining_above_ratio():
 
 
 def test_exit_normal_framework_pr_does_not_exit_on_plateau():
-    """Loosen P3_17: FRAMEWORK_PR plateau is advisory only, never exits the phase."""
+    """FRAMEWORK_PR plateau is advisory only, never exits the phase."""
     batches = [
         {
             "batch_id": "b1",
@@ -236,7 +236,7 @@ def test_compute_next_phase_prelude_to_explore_when_disabled_keeps_prelude_done_
 
 
 def test_compute_next_phase_framework_pr_does_not_advance_on_plateau():
-    """Loosen P3_17: plateau no longer drives FRAMEWORK_PR exit."""
+    """Plateau no longer drives FRAMEWORK_PR exit."""
     state = _State(
         phase=phase_state.PHASE_FRAMEWORK_PR,
         framework_pr_batches=[

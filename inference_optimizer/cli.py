@@ -758,6 +758,12 @@ _VERDICT_VISION_ONLY = "vision_only"
 _TEXT_COERCIBLE_MODEL_TYPES = frozenset({
     "kimi_k25",
     "qwen3_5_moe",
+    # Gemma-4 ships a vision_config (Gemma4ForConditionalGeneration) but its
+    # text decoder (text_config / gemma4_text) is a standard dense causal LM
+    # that vLLM serves text-only (both Gemma4ForCausalLM and
+    # Gemma4ForConditionalGeneration are registered). Text benchmarks never
+    # exercise the vision tower, so route to the degraded text path.
+    "gemma4",
 })
 
 
@@ -2469,6 +2475,30 @@ def _emit_preflight_diagnostics(
     print(f"  aiter jit cache     = {cache_line}")
     print(f"  cold_start_timeout  = {cold_cap}s")
     print(f"  warm_timeout        = {BASELINE_DEFAULT_TIMEOUT_SEC}s")
+    # Surface the hard GPU-reset arming state up front: `recover` (robustness-
+    # delegated) may shell out to `rocm-smi --gpureset` on gpu_memory_leaked.
+    # It is opt-in and scoped to ROCR_VISIBLE_DEVICES (never implicit --gpu=all).
+    _gpureset_on = os.environ.get(
+        "HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    _rocr_scope = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
+    if _gpureset_on and _rocr_scope:
+        print(
+            f"  recover_gpureset    = ARMED — robustness may auto "
+            f"`rocm-smi --gpureset --gpu={_rocr_scope}` on gpu_memory_leaked; "
+            f"WARNING: confirm this session exclusively owns those cards"
+        )
+    elif _gpureset_on:
+        print(
+            "  recover_gpureset    = ARMED but UNSCOPED (ROCR_VISIBLE_DEVICES "
+            "unset) — hard reset will be SKIPPED (refuses implicit --gpu=all)"
+        )
+    else:
+        print(
+            "  recover_gpureset    = disabled (opt-in; set "
+            "HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1 to enable, scoped to "
+            "ROCR_VISIBLE_DEVICES)"
+        )
     if anthropic_base_url:
         print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url} (direct to gateway)")
     else:
@@ -4032,10 +4062,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # CRITICAL: clear leftover stop_reason or Orchestration heartbeats forever thinking work is done.
         prior_crash = state.crash_count
 
-        # Issue-G: no_more_leverage / target_reached are intentional terminal states (SKILL Run-time signals);
-        # require --force-resume to push past them. Other reasons (time_exhausted, max_ticks, crash) auto-clear.
+        # Issue-G: target_reached is an intentional terminal state (SKILL Run-time signals);
+        # require --force-resume to push past it. Other reasons (time_exhausted, max_ticks, crash) auto-clear.
         force_resume = bool(getattr(args, "force_resume", False))
-        gated_terminal = {"no_more_leverage", "target_reached"}
+        gated_terminal = {"target_reached"}
         if prior_stop in gated_terminal and not force_resume:
             print(
                 f"\nERROR: --resume blocked by terminal stop_reason="
@@ -4656,7 +4686,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
     return 0 if stop_reason in (
         "target_reached",
-        "no_more_leverage",
+        "global_converged",
         "time_exhausted",
         "max_ticks",
     ) else 1
@@ -4948,9 +4978,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--force-resume", action="store_true", default=False,
         help=(
             "Allow ``--resume`` to push past a terminal "
-            "``stop_reason='no_more_leverage'`` or ``'target_reached'``. "
+            "``stop_reason='target_reached'``. "
             "Without this flag the resume aborts (Issue-G guard, per "
-            "SKILL.md 'Run-time signals': those terminals require an "
+            "SKILL.md 'Run-time signals': that terminal requires an "
             "operator-side workload / strategy change before resuming). "
             "No-op outside ``--resume``."
         ),
@@ -5018,7 +5048,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--no-kernel", action="store_true", default=False,
                       help="Disable the Kernel agent entirely. The run will "
-                           "only do baseline + params + backends + sweep (pure "
+                           "only do baseline + explore + sweep (pure "
                            "parameter search). Useful when GEAK/OOB/GPU "
                            "compile env is unavailable or you just want the "
                            "quick-win parameter path. Default: kernel enabled.")
@@ -5149,6 +5179,29 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Force disable_local_probe=false (keep the LocalProbe fallback "
              "even in multi-node mode).",
+    )
+    opt.add_argument(
+        "--robustness-disable-server-probe",
+        dest="robustness_disable_server_probe",
+        action="store_true",
+        default=None,
+        help="Force auto_probe_inference_server=false: stop the robustness-agent "
+             "from auto-probing the local inference-server health endpoint "
+             "(http://127.0.0.1:8888/health). Unlike --robustness-disable-local-probe "
+             "this is surgical — the REST of LocalProbe (gpu-leak, gateway 401, "
+             "coordinator-zombie, aiter-JIT, disk/fd) stays active. Use on "
+             "single-node runs where the optimizer restarts the inference server "
+             "between benchmarks: those restart windows otherwise trip "
+             "false-positive local_server_unreachable symptoms (which can escalate "
+             "to a premature skip_to_close / robustness_escalated stop). "
+             "Auto-enabled in multi-node.",
+    )
+    opt.add_argument(
+        "--no-robustness-disable-server-probe",
+        dest="robustness_disable_server_probe",
+        action="store_false",
+        help="Force auto_probe_inference_server=true (keep the 127.0.0.1:8888 "
+             "/health auto-probe even in multi-node mode).",
     )
     opt.add_argument(
         "--robustness-enable-cluster-pod-metrics",
