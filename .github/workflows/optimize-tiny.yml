@@ -1,24 +1,32 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-name: SaFE Optimize Tiny
+name: SaFE Optimize Tiny (count-filler)
 
-# Thin scheduled/manual entrypoint for the 3B-12B Tiny pool.
+# Scheduled/manual entrypoint for the count-filler pool, hosted off-repo at
+#   /wekafs/chenyi/ci-candidates/sub100_lt12b_pulse_notrun_2026-06-15.json
+#   = HF text-generation models with <12B params AND <100 downloads that pulse
+#     has NOT run yet. The goal is breadth ("凑数") — sweep the long tail.
+#
 # It intentionally delegates to `SaFE Optimize Submit` so submission, waiting,
 # artifact collection, summary rendering, webhook, and perf publishing stay
-# byte-for-byte on the same path as the regular SaFE submit workflow.
+# byte-for-byte on the same path as the regular SaFE submit workflow. It runs
+# INDEPENDENTLY of the large-B production cron (optimize-submit.yml's own
+# schedule, which sweeps the gt100 rotate pool twice a day).
+#
+# Cadence: 200 models per batch, 6h optimizer budget each, 4 runs/day (every
+# 6h), all submitted to the sandbox workspace.
+#
+# The candidates JSON lives on /wekafs (RO-mounted on the hyperloom runners)
+# instead of the git repo, so the large pool never bloats git history.
 
 on:
-  # ─── PAUSED 2026-06-03 ───────────────────────────────────────────
-  # Tiny (3B-12B) scheduled rotation is paused per operator request so
-  # the runner pool is dedicated to the large-B production cron. Manual
-  # workflow_dispatch still works for one-off tiny batches. To resume the
-  # rotation, uncomment the schedule block below.
-  # schedule:
-  #   - cron: '0 */4 * * *'
+  # Four times a day (every 6 hours, on the hour, UTC).
+  schedule:
+    - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       batch_index:
-        description: 'Optional 0-based batch override. Empty = derive from the current 4-hour UTC slot.'
+        description: 'Optional 0-based batch override. Empty = derive from the current 6-hour UTC slot.'
         required: false
         default: ''
       dry_run:
@@ -37,18 +45,21 @@ concurrency:
 
 jobs:
   dispatch-submit:
-    name: Dispatch 60-model Tiny submit
+    name: Dispatch 200-model count-filler submit
     runs-on: hyperloom-mh826
     timeout-minutes: 10
     env:
-      CANDIDATES_FILE: candidates/hf_3b_12b_base_inference_2026-06-01.json
-      CANDIDATES_PATH: ci/candidates/hf_3b_12b_base_inference_2026-06-01.json
-      BATCH_SIZE: '60'
-      SUBMIT_WORKSPACES: core42-sandbox,core42-hyperloom
+      # Off-repo pool on /wekafs (absolute path; generate_hf_matrix reads it
+      # as-is, and the hyperloom runners RO-mount /wekafs).
+      CANDIDATES_FILE: /wekafs/chenyi/ci-candidates/sub100_lt12b_pulse_notrun_2026-06-15.json
+      CANDIDATES_PATH: /wekafs/chenyi/ci-candidates/sub100_lt12b_pulse_notrun_2026-06-15.json
+      BATCH_SIZE: '200'
+      # Count-filler runs go to the sandbox workspace only.
+      SUBMIT_WORKSPACES: core42-sandbox
     steps:
       - uses: actions/checkout@v6
 
-      - name: Resolve Tiny batch
+      - name: Resolve count-filler batch
         id: batch
         env:
           INPUT_BATCH_INDEX: ${{ github.event.inputs.batch_index }}
@@ -73,10 +84,12 @@ jobs:
               except ValueError:
                   batch_index = 0
           else:
-              epoch = datetime(2026, 6, 1, tzinfo=timezone.utc)
+              # 4 runs/day -> one of 4 six-hour slots; advance each day so the
+              # whole pool is swept over ~ceil(batches/4) days.
+              epoch = datetime(2026, 6, 15, tzinfo=timezone.utc)
               now = datetime.now(timezone.utc)
               days = max((now.date() - epoch.date()).days, 0)
-              slot = days * 6 + (now.hour // 4)
+              slot = days * 4 + (now.hour // 6)
               batch_index = slot % batches
 
           start = batch_index * batch_size
@@ -95,8 +108,8 @@ jobs:
           batch_index="${{ steps.batch.outputs.batch_index }}"
 
           echo "Dispatching optimize-submit.yml on ref=${ref}"
-          echo "Tiny pool: ${{ steps.batch.outputs.pool_size }} models; batch ${batch_index}/${{ steps.batch.outputs.batches }}; slice ${{ steps.batch.outputs.slice }}"
-          echo "Batch size: ${BATCH_SIZE}; max_parallel=60; submit_workspaces=${SUBMIT_WORKSPACES}"
+          echo "Count-filler pool: ${{ steps.batch.outputs.pool_size }} models; batch ${batch_index}/${{ steps.batch.outputs.batches }}; slice ${{ steps.batch.outputs.slice }}"
+          echo "Batch size: ${BATCH_SIZE}; max_parallel=200; submit_workspaces=${SUBMIT_WORKSPACES}"
 
           payload=$(python3 - <<'PY'
           import json
@@ -111,10 +124,10 @@ jobs:
                   "batch_size": os.environ["BATCH_SIZE"],
                   "exclude_leaderboard": "false",
                   "exclude_active_workflows": "true",
-                  "max_parallel": "60",
+                  "max_parallel": "200",
                   "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
-                  "task_timeout_min": "240",
-                  "max_hours": "4",
+                  "task_timeout_min": "420",
+                  "max_hours": "6",
                   "all_artifacts": "true",
                   "dry_run": os.environ.get("DRY_RUN") or "false",
               },

@@ -34,17 +34,18 @@ name: SaFE Optimize Submit
 #   • Quick HF top-N probe   : `-f hf_top=10 -f min_params=7`
 
 on:
-  # Rolling downloads>100 pool: 200 models three times a day, firing at UTC
-  # 04:00 / 12:00 / 20:00 (Beijing 12:00 / 20:00 / 04:00). Each fire submits the
-  # NEXT sequential 200-model slice of
-  # ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json (ordered not-run
-  # first), stepping batch 0,1,2,... and wrapping at the pool end. Both
+  # Rolling downloads>100 pool: 200 models TWICE a day, firing at UTC
+  # 04:00 / 16:00 (Beijing 12:00 / 00:00). Each fire submits the
+  # NEXT sequential 200-model slice of the rotate pool, now hosted off-repo at
+  # /wekafs/chenyi/ci-candidates/hf_downloads_gt100_rotate_2026-06-11.json
+  # (ordered not-run first; the 449 >12B multimodal models are front-loaded),
+  # stepping batch 0,1,2,... and wrapping at the pool end. Both
   # exclude_leaderboard and exclude_active are OFF on schedule: slices are
   # disjoint, so the whole pool keeps cycling (re-running finished models too).
   # The tail batch is short (not head-wrapped) so consecutive fires never
   # double-submit the head models. Manual workflow_dispatch is unaffected.
   schedule:
-    - cron: '0 4,12,20 * * *'
+    - cron: '0 4,16 * * *'
   workflow_dispatch:
     inputs:
       # ── Model source (priority: models > candidates_file > legacy hf_top) ──────
@@ -212,10 +213,12 @@ jobs:
       # before the already-run tail. With exclude_leaderboard=false (see below)
       # the pool never drains — once the front models finish and are no longer
       # active, the window wraps and the whole 2426-model pool keeps repeating.
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && 'ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json' || github.event.inputs.candidates_file }}
+      # Schedule reads the rotate pool from /wekafs (off-repo, RO-mounted on the
+      # hyperloom runners) so the large candidates JSON never bloats the git repo.
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && '/wekafs/chenyi/ci-candidates/hf_downloads_gt100_rotate_2026-06-11.json' || github.event.inputs.candidates_file }}
       # Schedule leaves batch_index empty so generate_hf_matrix derives a
       # SEQUENTIAL index from the scheduled-fire counter: each cron (UTC
-      # 4/12/20) steps batch 0,1,2,... and wraps, marching the whole pool in
+      # 4/16) steps batch 0,1,2,... and wraps, marching the whole pool in
       # order then repeating. Anchored so the first fire at/after the anchor is
       # batch 0 (= not-run head, since the pool is ordered not-run-first).
       INPUT_BATCH_INDEX:     ${{ github.event_name == 'schedule' && '' || github.event.inputs.batch_index }}
