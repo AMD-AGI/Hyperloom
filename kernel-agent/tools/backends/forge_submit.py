@@ -751,13 +751,16 @@ def _tensor_dim_lists(candidate: dict) -> list[list[int]]:
         if isinstance(s, (list, tuple)) and s and all(isinstance(x, int) for x in s):
             out.append([int(x) for x in s])
         elif isinstance(s, str):
-            # e.g. "(16384,2048) bf16" / "(139199,) i32" -> [16384, 2048] / [139199]
-            m = re.search(r"\(([\d,\s]*)\)", s)
-            if not m:
-                continue
-            dims = [int(x) for x in m.group(1).split(",") if x.strip().isdigit()]
-            if dims:
-                out.append(dims)
+            # One entry may hold a SINGLE shape ("(16384,2048) bf16") or MANY
+            # shapes joined by "<br>" / newlines
+            # ("(16384,2048) bf16<br>(128,1536,2048) bf16<br>(16384,8) fp32..").
+            # findall over every "(...)" group handles both; re.search (first
+            # group only) would drop the expert-weight (E,*,K) and topk (M,t)
+            # tensors and leave _moe_dims with just M/K -> tiny default E/TOPK.
+            for grp in re.findall(r"\(([\d,\s]*)\)", s):
+                dims = [int(x) for x in grp.split(",") if x.strip().isdigit()]
+                if dims:
+                    out.append(dims)
     return out
 
 
@@ -1072,27 +1075,54 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         # orchestrator awaiting it). wait_for bounds each call so the loop records
         # a timeout and moves on instead of stalling the session.
         agent_timeout_s = int(os.environ.get("FORGE_AGENT_TIMEOUT_SEC", "420"))
+        # Retry the fellow on a hung/transient failure. The claude-agent-sdk
+        # streaming query() intermittently hangs (the fellow subprocess stream
+        # never closes) or returns a transient SDK error; a fresh attempt almost
+        # always succeeds. Without retry, every hung iteration burns the full
+        # timeout and produces no edit -> a single flaky call can sink the whole
+        # run. FORGE_AGENT_RETRIES = extra attempts after the first (default 2).
+        agent_retries = max(0, int(os.environ.get("FORGE_AGENT_RETRIES", "2")))
+        _TRANSIENT = (
+            "error result: success", "Reached maximum number of turns",
+            "Fatal error in message reader", "message reader",
+            "Connection", "connection reset", "stream", "EOF", "broken pipe",
+        )
 
         async def _logged_agent_fn(kernel_path: str, history: str) -> str:
             import asyncio as _aio
             import traceback as _tb
-            call_ts = time.strftime("%H:%M:%S", time.gmtime())
-            try:
-                result = await _aio.wait_for(
-                    raw_agent_fn(kernel_path, history), timeout=agent_timeout_s)
-                with open(forge_log, "a") as f:
-                    f.write(f"[{call_ts}] agent_fn OK: {result[:120]}\n")
-                return result
-            except _aio.TimeoutError:
-                with open(forge_log, "a") as f:
-                    f.write(f"[{call_ts}] agent_fn TIMEOUT after {agent_timeout_s}s "
-                            f"(fellow hung; loop continues)\n")
-                raise
-            except Exception as exc:
-                detail = _tb.format_exc()
-                with open(forge_log, "a") as f:
-                    f.write(f"[{call_ts}] agent_fn ERROR: {exc}\n{detail}\n")
-                raise
+            last_exc: Exception | None = None
+            for attempt in range(agent_retries + 1):
+                call_ts = time.strftime("%H:%M:%S", time.gmtime())
+                tag = f"attempt {attempt + 1}/{agent_retries + 1}"
+                try:
+                    result = await _aio.wait_for(
+                        raw_agent_fn(kernel_path, history), timeout=agent_timeout_s)
+                    with open(forge_log, "a") as f:
+                        f.write(f"[{call_ts}] agent_fn OK ({tag}): {result[:120]}\n")
+                    return result
+                except _aio.TimeoutError as exc:
+                    last_exc = exc
+                    with open(forge_log, "a") as f:
+                        f.write(f"[{call_ts}] agent_fn TIMEOUT after {agent_timeout_s}s "
+                                f"({tag}; fellow hung) -> "
+                                f"{'retrying' if attempt < agent_retries else 'giving up'}\n")
+                    # Transient stream hang: a fresh query() usually reconnects.
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    detail = _tb.format_exc()
+                    transient = any(s.lower() in str(exc).lower() for s in _TRANSIENT)
+                    with open(forge_log, "a") as f:
+                        f.write(f"[{call_ts}] agent_fn ERROR ({tag}; "
+                                f"{'transient->retry' if transient and attempt < agent_retries else 'fatal'}): "
+                                f"{exc}\n{detail}\n")
+                    if transient and attempt < agent_retries:
+                        continue
+                    raise
+            # All attempts hung/failed transiently; surface to the loop (it records
+            # the failed iteration and moves on).
+            raise last_exc if last_exc else RuntimeError("agent_fn exhausted retries")
 
         # The fellow runs the claude CLI with bypassPermissions, which refuses to
         # start under root unless IS_SANDBOX=1. Hyperloom backends commonly run as
