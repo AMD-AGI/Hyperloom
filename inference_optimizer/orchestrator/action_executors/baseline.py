@@ -81,19 +81,66 @@ _ARG_ERROR_CONTEXT_PATTERNS = (
 )
 
 
-# cuda-graph capture failures recoverable by retrying with --enforce-eager.
-# Markers appear in server.log, not the Magpie stdout/stderr tail.
-_CUDA_GRAPH_CAPTURE_MARKERS = (
+# Strong cuda-graph capture markers: stream-capture incompatibility, reliably
+# recoverable by disabling cuda-graph. Markers live in server.log, not the
+# Magpie stdout/stderr tail.
+_CUDA_GRAPH_STRONG_MARKERS = (
     "operation not permitted when stream is capturing",
-    "hipErrorStreamCaptureUnsupported",
-    "Capture cuda graph failed",
+    "hiperrorstreamcaptureunsupported",
 )
+# Weak marker: bare "Capture cuda graph failed" carries no root cause. Trust it
+# only when the nearby context is neither OOM nor a compile/lowering error,
+# both of which disabling cuda-graph cannot recover.
+_CUDA_GRAPH_WEAK_MARKER = "capture cuda graph failed"
+
+# OOM-rooted capture failures are NOT recoverable by disabling cuda-graph
+# (eager peaks can be higher); compile/lowering errors are not either.
+_OOM_MARKERS = (
+    "out of memory",
+    "outofmemoryerror",
+)
+_NON_RECOVERABLE_MARKERS = (
+    "loweringexception",
+    "assertionerror",
+    "compilationerror",
+)
+# Strong markers are high-confidence stream-capture incompatibilities, so OOM
+# exclusion is scoped tight (±1 line): only an OOM on/adjacent to the marker
+# line demotes it, an unrelated startup OOM warning nearby does not (false
+# negative guard). The bare weak marker is unreliable, so it keeps the
+# whole-blob OOM/compile exclusion to avoid wasting the one-shot retry.
+_STRONG_OOM_CONTEXT_RADIUS = 1
 
 
 def _is_cuda_graph_capture_failure(*texts: str) -> bool:
-    """True when any text carries a cuda-graph capture marker."""
-    blob = "\n".join(t for t in texts if t)
-    return any(m in blob for m in _CUDA_GRAPH_CAPTURE_MARKERS)
+    """True when a cuda-graph capture marker is recoverable by disabling graph.
+
+    A strong stream-capture marker arms the fallback unless an OOM sits on its
+    ±1-line context (tight, since the marker itself is high confidence). The
+    bare ``Capture cuda graph failed`` is a weak signal: the WHOLE blob must
+    carry neither OOM nor a compile/lowering error, both unrecoverable by
+    disabling cuda-graph. Strong wins on a line that also matches weak, so the
+    compile/OOM whole-blob gate never demotes a genuine stream-capture failure.
+    """
+    lines = "\n".join(t for t in texts if t).splitlines()
+    lowered = [ln.lower() for ln in lines]
+    blob = "\n".join(lowered)
+    blob_has_oom = any(m in blob for m in _OOM_MARKERS)
+    blob_has_non_recoverable = any(m in blob for m in _NON_RECOVERABLE_MARKERS)
+    saw_pure_weak = False
+    for idx, line in enumerate(lowered):
+        is_strong = any(m in line for m in _CUDA_GRAPH_STRONG_MARKERS)
+        if is_strong:
+            lo = max(0, idx - _STRONG_OOM_CONTEXT_RADIUS)
+            hi = min(len(lowered), idx + _STRONG_OOM_CONTEXT_RADIUS + 1)
+            if not any(m in "\n".join(lowered[lo:hi]) for m in _OOM_MARKERS):
+                return True
+            continue
+        if _CUDA_GRAPH_WEAK_MARKER in line:
+            saw_pure_weak = True
+    if saw_pure_weak and not blob_has_oom and not blob_has_non_recoverable:
+        return True
+    return False
 
 
 # Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph
@@ -112,9 +159,13 @@ def _disable_cuda_graph_flag(framework: str) -> str:
 
 
 def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
-    """Append the framework-correct disable-cuda-graph flag once (idempotent)."""
+    """Append the framework-correct disable-cuda-graph flag once (idempotent).
+
+    Token-level dedup so a longer flag (e.g. ``--disable-cuda-graph-extra``)
+    is not mistaken for an existing ``--disable-cuda-graph``.
+    """
     flag = _disable_cuda_graph_flag(framework)
-    if flag in (extra_server_args or ""):
+    if flag in (extra_server_args or "").split():
         return extra_server_args or ""
     return f"{extra_server_args} {flag}".strip()
 
@@ -633,8 +684,9 @@ class BaselineExecutor:
             raise FileNotFoundError(f"baseline config not found: {config_path}")
 
         # One-shot cuda-graph eager fallback: a prior baseline hit a cuda-graph
-        # capture failure and armed state.baseline_eager_fallback. Inject
-        # --enforce-eager for this retry and consume the flag so it fires once.
+        # capture failure and armed state.baseline_eager_fallback. Inject the
+        # framework-correct disable-cuda-graph flag for this retry and consume
+        # the flag so it fires once.
         effective_extra_server_args = read_extra_server_args(params)
         eager_fallback_applied = self._consume_eager_fallback()
         if eager_fallback_applied:
@@ -1146,7 +1198,8 @@ class BaselineExecutor:
             "see server.log"
         )
 
-        # Detect cuda-graph capture failures (recoverable via --enforce-eager).
+        # Detect cuda-graph capture failures (recoverable by disabling
+        # cuda-graph capture; OOM-rooted ones are excluded).
         # Markers live in server.log; read a bounded tail for classification.
         server_log_tail = ""
         try:
@@ -1204,6 +1257,18 @@ class BaselineExecutor:
                     )
             if stderr_log_path:
                 failure_extras["stderr_log_path"] = stderr_log_path
+            # cuda-graph capture failures take priority over server_init_dead:
+            # the marker may co-occur with a server-death marker, but only this
+            # class arms the one-shot disable-cuda-graph retry.
+            if cuda_graph_capture_failed:
+                return {
+                    "status": "failed",
+                    "error_class": "cuda_graph_capture_failed",
+                    "returncode": proc_returncode,
+                    "error": server_init_dead_error if server_init_dead
+                    else (proc_stderr or proc_stdout or "")[-2000:],
+                    **failure_extras,
+                }
             if server_init_dead:
                 return {
                     "status": "failed",
@@ -1214,12 +1279,8 @@ class BaselineExecutor:
                 }
             if proc_returncode != 0:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
-                err_class = (
-                    "cuda_graph_capture_failed"
-                    if cuda_graph_capture_failed
-                    else _classify_subprocess_error(
-                        subprocess_runtime_sec, tail,
-                    )
+                err_class = _classify_subprocess_error(
+                    subprocess_runtime_sec, tail,
                 )
                 return {
                     "status": "failed",
@@ -1258,17 +1319,21 @@ class BaselineExecutor:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
         if not measurement.get("valid_measurement"):
-            if server_init_dead:
+            # cuda-graph capture failure wins over server_init_dead so the
+            # one-shot disable-cuda-graph retry is armed even when both markers
+            # co-occur (see the no_workspace branch above).
+            if cuda_graph_capture_failed:
+                error_class = "cuda_graph_capture_failed"
+                error = server_init_dead_error if server_init_dead else (
+                    (proc_stderr or proc_stdout or "")[-2000:]
+                )
+            elif server_init_dead:
                 error_class = "server_init_dead"
                 error = server_init_dead_error
             elif proc_returncode != 0:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
-                error_class = (
-                    "cuda_graph_capture_failed"
-                    if cuda_graph_capture_failed
-                    else _classify_subprocess_error(
-                        subprocess_runtime_sec, tail,
-                    )
+                error_class = _classify_subprocess_error(
+                    subprocess_runtime_sec, tail,
                 )
                 error = tail
             elif not report_path.exists():

@@ -889,6 +889,53 @@ async def test_handle_unpromotable_kernel_action_records_global_only(
 
 
 @pytest.mark.asyncio
+async def test_handle_unpromotable_baseline_capture_failure_arms_eager_fallback(
+    session_dir,
+):
+    """cuda_graph_capture_failed (no baseline yet) must arm the one-shot
+    eager fallback flag through the real coordinator failure handler."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        assert c.shared_state.baseline_eager_fallback is False
+        await c._handle_unpromotable_result(
+            _mk_task("baseline", "t-cg-1"),
+            {"status": "failed", "error_class": "cuda_graph_capture_failed",
+             "error": "operation not permitted when stream is capturing"},
+        )
+        assert c.shared_state.baseline_eager_fallback is True
+        # One-shot: a second capture failure must not re-arm (already set).
+        await c._handle_unpromotable_result(
+            _mk_task("baseline", "t-cg-2"),
+            {"status": "failed", "error_class": "cuda_graph_capture_failed",
+             "error": "operation not permitted when stream is capturing"},
+        )
+        assert c.shared_state.baseline_eager_fallback is True
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_capture_failure_no_arm_when_baseline_promoted(
+    session_dir,
+):
+    """Resume case: with an existing baseline (tput > 0) the coordinator must
+    NOT arm the eager fallback on a later cuda-graph capture failure."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 1234.0
+        await c._handle_unpromotable_result(
+            _mk_task("baseline", "t-cg-resume"),
+            {"status": "failed", "error_class": "cuda_graph_capture_failed",
+             "error": "operation not permitted when stream is capturing"},
+        )
+        assert c.shared_state.baseline_eager_fallback is False
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_handle_unpromotable_roofline_increments_failure_streak(
     session_dir, caplog,
 ):
