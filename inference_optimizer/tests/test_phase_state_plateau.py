@@ -17,6 +17,7 @@ from inference_optimizer.orchestrator.phase_state import (
     ESCALATE_HINT_SKIP_TO_SWEEP,
     ESCALATE_HINT_VOCAB,
     PHASE_CLOSE,
+    PHASE_KERNEL,
     PHASE_SWEEP,
     STOP_REASON_VOCAB,
     apply_escalate_budget_bump,
@@ -216,8 +217,9 @@ def test_plateau_kernel_empty_attempts_dict_with_no_entries_does_not_trigger():
 
 
 # 4. exit_normal_explore / exit_normal_kernel — wired to real plateau
-def test_exit_normal_explore_does_not_exit_on_plateau():
-    """P3_17: plateau is advisory only; a bare plateau signal must NOT exit EXPLORE."""
+def test_exit_normal_explore_does_not_exit_on_plateau(monkeypatch):
+    """With cyclic off, plateau is advisory only; a bare plateau signal must NOT exit EXPLORE."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "0")
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=0.0,
@@ -254,7 +256,7 @@ def test_exit_normal_explore_skip_to_kernel_hint_short_circuits():
 
 
 def test_exit_normal_kernel_does_not_exit_on_plateau():
-    """P3_17: KERNEL plateau is advisory only; only the skip_to_sweep hint or budget exhaustion may exit KERNEL."""
+    """KERNEL plateau is advisory only; only the skip_to_sweep hint or budget exhaustion may exit KERNEL."""
     state = SimpleNamespace(
         phase="KERNEL",
         phase_started_unix=0.0,
@@ -272,7 +274,7 @@ def test_exit_normal_kernel_does_not_exit_on_plateau():
 
 
 def test_exit_normal_kernel_after_gemm_does_not_exit():
-    """P3_17: the GEMM-completed shortcut is removed; GEMM completion alone never advances KERNEL → SWEEP."""
+    """The GEMM-completed shortcut is removed; GEMM completion alone never advances KERNEL → SWEEP."""
     state = SimpleNamespace(
         phase="KERNEL",
         phase_started_unix=0.0,
@@ -336,21 +338,21 @@ def _skip_to_sweep_state(phase: str) -> SimpleNamespace:
 
 
 def test_exit_normal_explore_skip_to_sweep_is_non_terminal():
-    # skip_to_sweep is the non-terminal "no more leverage" signal.
+    # skip_to_sweep exhausts the explore lever (non-terminal).
     out = exit_normal_explore(_skip_to_sweep_state("EXPLORE"))
     assert out is not None
     reason, evidence = out
-    assert reason == "no_more_leverage"
+    assert reason == "explore_no_more_leverage"
     assert evidence.get("hint") == ESCALATE_HINT_SKIP_TO_SWEEP
 
 
-def test_compute_next_phase_skip_to_sweep_from_explore_skips_kernel():
-    # no_more_leverage routes EXPLORE -> SWEEP (no KERNEL hop), non-terminal.
+def test_compute_next_phase_skip_to_sweep_from_explore_routes_to_kernel():
+    # Exhausted explore leverage switches lever (EXPLORE -> KERNEL), non-terminal.
     out = compute_next_phase(_skip_to_sweep_state("EXPLORE"), kernel_enabled=True)
     assert out is not None
     target, reason, evidence = out
-    assert target == PHASE_SWEEP
-    assert reason == "no_more_leverage"
+    assert target == PHASE_KERNEL
+    assert reason == "explore_no_more_leverage"
     assert evidence.get("terminal") is not True
 
 
@@ -359,7 +361,7 @@ def test_compute_next_phase_skip_to_sweep_from_kernel_routes_to_sweep():
     assert out is not None
     target, reason, _ = out
     assert target == PHASE_SWEEP
-    assert reason == "no_more_leverage"
+    assert reason == "kernel_no_more_leverage"
 
 
 # 5. apply_escalate_budget_bump
@@ -456,8 +458,9 @@ def test_stop_reason_vocab_has_v08_additions():
 
 
 # 7. plateau is advisory only — pure compute_plateau_* still works
-def test_compute_next_phase_does_not_advance_on_plateau():
-    """P3_17: even when the EXPLORE plateau judge fires, compute_next_phase returns None without an explicit hint or budget gate."""
+def test_compute_next_phase_does_not_advance_on_plateau(monkeypatch):
+    """With cyclic off, even when the EXPLORE plateau judge fires, compute_next_phase returns None without an explicit hint or budget gate."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "0")
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=0.0,

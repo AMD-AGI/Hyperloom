@@ -2,8 +2,8 @@
 
 """Post-PR-321 review Finding 1 regression — Coordinator sequence-denial hints must not steer the LLM toward proposing ``profile`` / ``roofline``.
 
-Pins that ``_sequence_denial_for_action`` (P2_10) and
-``_sequence_denial_for_request`` (P2_11) no longer block on an empty
+Pins that ``_sequence_denial_for_action`` and
+``_sequence_denial_for_request`` no longer block on an empty
 ``last_profile_trace``.
 """
 
@@ -50,7 +50,7 @@ def coord(tmp_path: Path) -> Coordinator:
 def test_sequence_denial_action_no_longer_blocks_on_profile(
     coord: Coordinator, action: str,
 ):
-    """P2_10: with baseline done and empty ``last_profile_trace``, explore-family actions are no longer sequence-denied."""
+    """With baseline done and empty ``last_profile_trace``, explore-family actions are no longer sequence-denied."""
     coord.shared_state.last_profile_trace = ""
     coord.shared_state.baseline_tput = 100.0
     assert coord._sequence_denial_for_action(action) is None
@@ -62,7 +62,7 @@ def test_sequence_denial_action_no_longer_blocks_on_profile(
 def test_sequence_denial_request_no_longer_blocks_on_profile(
     coord: Coordinator, req_kind: str,
 ):
-    """P2_11: the request-layer profile-prereq deny was demoted into ``run_optimization_handler``, so kernel requests aren't pre-denied on an empty ``last_profile_trace``."""
+    """The request-layer profile-prereq deny was demoted into ``run_optimization_handler``, so kernel requests aren't pre-denied on an empty ``last_profile_trace``."""
     coord.shared_state.last_profile_trace = ""
     coord.shared_state.baseline_tput = 100.0
     assert coord._sequence_denial_for_request("kernel", req_kind) is None

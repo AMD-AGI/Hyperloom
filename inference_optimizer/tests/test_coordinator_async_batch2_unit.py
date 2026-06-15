@@ -698,6 +698,10 @@ async def test_plateau_advisory_explore_triggered(coord: Coordinator, monkeypatc
                                                 "empty_streak": 3}))
     out = coord._plateau_advisory_block()
     assert "EXPLORE plateau detected" in out
+    # Cyclic mode (default): footer must state the deterministic EXPLORE→KERNEL
+    # advance, not the stale "informational only" claim.
+    assert "advances EXPLORE" in out and "KERNEL" in out
+    assert "informational" not in out
 
 
 @pytest.mark.asyncio

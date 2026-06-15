@@ -165,11 +165,23 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset({
     "phase_started_unix",
     "phase_history",
     "phase_budget_pct",
+    # R1/R2/R7 cyclic phase-machine state (Coordinator-only writers); mirrors
+    # upstream. Locked so an LLM update_state cannot forge macro-cycle /
+    # convergence / per-cycle budget state.
+    "macro_cycle",
+    "cycle_minutes",
+    "gain_at_cycle_start",
+    "no_gain_cycle_streak",
+    "pending_bottleneck_switch",
+    "last_cycle_bottleneck",
     # operator-facing lifecycle event log (#266); Coordinator-only writer.
     "lifecycle",
     # specialist sub-agent ledger.
     "specialist_rounds",
     "specialist_domain_empty_streak",
+    # per-kb_anchor coverage counters (point 1); Coordinator-only writers.
+    "rounds_since_last_specialist",
+    "rounds_since_last_keep",
     "last_specialist",
     "research_lane_capacity",
     "gpu_specialist_capacity",

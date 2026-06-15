@@ -340,7 +340,9 @@ async def test_run_stops_on_signal_via_stop_event(session_dir):
 async def test_run_stops_on_emergency_crash_count(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        c.shared_state.crash_count = 30
+        # Record crashes through the counter so the trailing-window rate sees them.
+        for _ in range(30):
+            c.shared_state.increment_crash_count()
         reason = await c.run(max_ticks=10)
         assert reason == "emergency"
     finally:
@@ -431,7 +433,8 @@ async def test_run_finally_labels_residual_escape_as_coordinator_exception(
 async def test_run_emergency_threshold_can_be_lowered_per_call(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        c.shared_state.crash_count = 4
+        for _ in range(4):
+            c.shared_state.increment_crash_count()
         reason = await c.run(max_ticks=10, crash_emergency_threshold=3)
         assert reason == "emergency"
     finally:

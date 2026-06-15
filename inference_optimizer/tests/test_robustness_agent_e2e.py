@@ -126,7 +126,7 @@ async def test_robustness_agent_real_runtime_heartbeat(
 async def test_robustness_agent_real_runtime_emits_alert_on_high_crash(
     session_dir: Path, robustness_agent_root: Path,
 ):
-    """P3_19: ``crash_count >= 10`` emits ``alert(high)`` only (no auto-escalate); Coordinator mirrors it from=robustness."""
+    """``crash_count >= 10`` emits ``alert(high)`` only (no auto-escalate); Coordinator mirrors it from=robustness."""
     _seed_state(session_dir, crash_count=10)
 
     backend = RobustnessAgentBackend(

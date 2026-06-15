@@ -23,19 +23,19 @@ MODE B: ``--mode local``
 Examples
 --------
     # Single file -- write to perf_runs_dev via SSH+kubectl
-    python scripts/import_session_breakdown.py /path/to/session_breakdown.json
+    python ci/import_session_breakdown.py /path/to/session_breakdown.json
 
-    # Batch import everything we just pulled with fetch_remote_sessions.py
-    python scripts/import_session_breakdown.py --dir ./remote_sessions
+    # Batch import a directory of pulled session_breakdown.json files
+    python ci/import_session_breakdown.py --dir ./remote_sessions
 
     # Dry-run: parse + print row, do not write to DB
-    python scripts/import_session_breakdown.py --dry-run file.json
+    python ci/import_session_breakdown.py --dry-run file.json
 
     # Use a different table or DB
-    python scripts/import_session_breakdown.py --table perf_runs_dev file.json
+    python ci/import_session_breakdown.py --table perf_runs_dev file.json
 
     # Local psycopg2 mode (requires tunnel above)
-    python scripts/import_session_breakdown.py --mode local file.json
+    python ci/import_session_breakdown.py --mode local file.json
 
 Environment variables (used as defaults)
 ---------------------------------------
