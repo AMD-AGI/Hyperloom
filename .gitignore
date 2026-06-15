@@ -76,3 +76,8 @@ atom_boost_tutorials.md
 ./code-cleansing-plan
 code_cleansing.MD
 stall_code.md
+
+# Large HF candidate pools are hosted off-repo on /wekafs (read by the cron at
+# runtime) — keep only the small InferenceX daily set tracked in git.
+ci/candidates/*.json
+!ci/candidates/inferencex_daily_fixed.json
