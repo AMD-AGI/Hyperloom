@@ -36,7 +36,7 @@ Schema (DESIGN §16.2)::
                                       # cost_minutes_p50.
     verdict_class:       "archival" | "exploration" | "promotion"
                                       # routes Critic prompt rule set;
-                                      # never a hidden gate (P3_20).
+                                      # never a hidden gate.
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
 })
 
 # Per-action verdict policy class — selects which Critic prompt rule set
-# applies; never a hidden hard gate (loosen P3_20).
+# applies; never a hidden hard gate.
 VALID_VERDICT_CLASSES: frozenset[str] = frozenset({
     "archival", "exploration", "promotion",
 })
@@ -143,7 +143,7 @@ class ActionMetadata:
     description: str = ""
     pipeline_phase: str = "explore"
     typical_runtime_min: float = 0.0
-    # Routes Critic prompt rules only, never a hidden hard gate (loosen P3_20).
+    # Routes Critic prompt rules only, never a hidden hard gate.
     verdict_class: str = ""
 
     @classmethod
