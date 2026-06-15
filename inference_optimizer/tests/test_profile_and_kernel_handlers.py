@@ -1182,6 +1182,178 @@ async def test_trace_analyze_handler_tolerates_non_string_analysis_route(session
 
 
 @pytest.mark.asyncio
+async def test_trace_analyze_handler_records_bypass_discovery_success(
+    session_dir, monkeypatch,
+):
+    """Deterministic route surfaces a kernel_journey discovery run labelled
+    source="bypass" (with the real hot kernels), while version provenance stays
+    under the tracelens toolchain (no junk versions["bypass"])."""
+    from inference_optimizer.breakdown.recorder import assemble_parts
+
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        payload = {
+            "status": "ok",
+            "orchestrator_mode": "deterministic",
+            "hot_kernels": [
+                {"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 42.0,
+                 "bottleneck": "memory", "reusable_native_kernel": True},
+                {"kernel_id": "k002", "name": "rms_norm", "gpu_pct": 7.5},
+            ],
+            "artifact_paths": {"kernel_candidates": "/tmp/kc.json"},
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "analysis_route": "deterministic",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    # The deterministic route flag is forwarded to the tool.
+    assert "--analysis-route" in captured["cmd"]
+    assert "deterministic" in captured["cmd"]
+
+    out = assemble_parts(session_dir)
+    runs = out["kernel_journey"]["discovery_runs"]
+    assert len(runs) == 1
+    run = runs[0]
+    assert run["source"] == "bypass"
+    assert run["status"] == "ok"
+    assert run["hot_kernel_count"] == 2
+    assert {k["name"] for k in run["hot_kernels"]} == {"fused_moe", "rms_norm"}
+    assert run["scan"]["analysis_route"] == "bypass"
+    # Underlying toolchain is still tracelens; no empty versions["bypass"].
+    assert "bypass" not in out.get("versions", {})
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_records_bypass_discovery_failed(
+    session_dir, monkeypatch,
+):
+    """Fail-loud deterministic pipeline -> discovery run status=failed with the
+    error text and an empty hot-kernel list, still labelled source="bypass"."""
+    from inference_optimizer.breakdown.recorder import assemble_parts
+
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "failed",
+            "orchestrator_mode": "deterministic",
+            "error": "deterministic: category script for gemm exited rc=1",
+            "hot_kernels": [],
+        }
+        return 1, json.dumps(payload), "boom"
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "analysis_route": "deterministic",
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] == "failed"
+
+    out = assemble_parts(session_dir)
+    run = out["kernel_journey"]["discovery_runs"][0]
+    assert run["source"] == "bypass"
+    assert run["status"] == "failed"
+    assert run["hot_kernel_count"] == 0
+    assert run["error"]
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
+    session_dir, monkeypatch,
+):
+    """High-idle gate suppresses hot kernels but the run still succeeds -> a
+    bypass discovery run with status=ok and hot_kernel_count=0."""
+    from inference_optimizer.breakdown.recorder import assemble_parts
+
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "ok",
+            "orchestrator_mode": "deterministic",
+            "hot_kernels": [],
+            "trace_health_warnings": [
+                {"code": "high_gpu_idle", "severity": "warning"},
+            ],
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "analysis_route": "deterministic",
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+
+    out = assemble_parts(session_dir)
+    run = out["kernel_journey"]["discovery_runs"][0]
+    assert run["source"] == "bypass"
+    assert run["status"] == "ok"
+    assert run["hot_kernel_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_agent_route_stays_tracelens(
+    session_dir, monkeypatch,
+):
+    """The LLM/agent route keeps source="tracelens" (regression guard for the
+    bypass relabel)."""
+    from inference_optimizer.breakdown.recorder import assemble_parts
+
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "ok",
+            "orchestrator_mode": "claude_agent_sdk",
+            "hot_kernels": [
+                {"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 30.0},
+            ],
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "analysis_route": "agent",
+        },
+        session_dir=session_dir,
+    )
+
+    out = assemble_parts(session_dir)
+    run = out["kernel_journey"]["discovery_runs"][0]
+    assert run["source"] == "tracelens"
+    assert run["scan"]["analysis_route"] == "tracelens"
+
+
+@pytest.mark.asyncio
 async def test_trace_analyze_handler_surfaces_candidates_path(session_dir, monkeypatch):
     captured: dict = {}
 
