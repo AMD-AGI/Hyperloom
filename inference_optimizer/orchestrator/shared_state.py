@@ -23,7 +23,9 @@ Fields::
     cumulative_gain     float — % over baseline
     stop_reason         str   — set when graceful stop fires (§9)
     current_action      str   — what's running right now (set by Orchestration)
-    crash_count         int   — incremented by Robustness on real failures
+    crash_count         int   — incremented by the Coordinator when a tick/agent
+                                exception is recorded; also appends to
+                                crash_timestamps (Robustness only reads it)
     pruned_families     list[str]  — set by Robustness via PRUNE_BRANCH
     start_ts            str   — ISO timestamp
     max_minutes         int   — wall-clock budget (0 = unlimited)
