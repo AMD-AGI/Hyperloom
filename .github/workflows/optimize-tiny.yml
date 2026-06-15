@@ -3,7 +3,7 @@
 name: SaFE Optimize Tiny (count-filler)
 
 # Scheduled/manual entrypoint for the count-filler pool, hosted off-repo at
-#   /wekafs/chenyi/ci-candidates/sub100_lt12b_pulse_notrun_2026-06-15.json
+#   $WEKAFS_CHENYI_DIR/ci-candidates/sub100_lt12b_pulse_notrun_2026-06-15.json
 #   = HF text-generation models with <12B params AND <100 downloads that pulse
 #     has NOT run yet. The goal is breadth -- sweep the long tail.
 #
@@ -49,10 +49,11 @@ jobs:
     runs-on: hyperloom-mh826
     timeout-minutes: 10
     env:
-      # Off-repo pool on /wekafs (absolute path; generate_hf_matrix reads it
-      # as-is, and the hyperloom runners RO-mount /wekafs).
-      CANDIDATES_FILE: /wekafs/chenyi/ci-candidates/sub100_lt12b_pulse_notrun_2026-06-15.json
-      CANDIDATES_PATH: /wekafs/chenyi/ci-candidates/sub100_lt12b_pulse_notrun_2026-06-15.json
+      # Off-repo pool on /wekafs (the /wekafs root lives in the WEKAFS_CHENYI_DIR
+      # secret; generate_hf_matrix reads the absolute path as-is, and the
+      # hyperloom runners RO-mount /wekafs).
+      CANDIDATES_FILE: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun_2026-06-15.json', secrets.WEKAFS_CHENYI_DIR) }}
+      CANDIDATES_PATH: ${{ format('{0}/ci-candidates/sub100_lt12b_pulse_notrun_2026-06-15.json', secrets.WEKAFS_CHENYI_DIR) }}
       BATCH_SIZE: '200'
       # Count-filler runs go to the sandbox workspace only.
       SUBMIT_WORKSPACES: core42-sandbox
