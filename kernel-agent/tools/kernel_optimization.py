@@ -546,6 +546,16 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
             ``geak_without_benchmark`` flag, cursor key presence, etc.).
     """
     user_backends = parse_backends(args.backends)
+    # Honor the coordinator's KERNEL_OPT_BACKEND_ORDER / KERNEL_OPT_BACKENDS env
+    # when no explicit --backends was passed: the single-kernel subprocess used to
+    # ignore it and fall back to the full default ladder, so a forge-only run
+    # (KERNEL_OPT_BACKEND_ORDER=forge) still fired geak/claude/codex. Mirror the
+    # handler's _backend_order precedence here so the subprocess agrees.
+    if not user_backends:
+        env_order = (os.environ.get("KERNEL_OPT_BACKEND_ORDER")
+                     or os.environ.get("KERNEL_OPT_BACKENDS") or "").strip()
+        if env_order:
+            user_backends = parse_backends(env_order)
     benchmark_available = has_benchmark(args, candidate)
     source_type = str(candidate.get("source_type") or "unknown")
     # Skip cursor from auto-selected defaults when CURSOR_API_KEY is unset (explicit --backends still wins).

@@ -112,12 +112,13 @@ def _git_toplevel(path: str) -> str:
 
 
 def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path,
-                      branch: str) -> tuple[str, str] | None:
+                      branch: str) -> tuple[str, str, str] | None:
     """Create a git worktree of kernel_repo at output_dir/worktree (R1/W1).
 
-    Returns (worktree_dir, worktree_kernel_file) or None when the repo is not a
-    clean git checkout / source_file is not tracked (forge then skips, never
-    mutating the live repo).
+    Returns (worktree_dir, worktree_kernel_file, base_commit) or None when the
+    repo is not a clean git checkout / source_file is not tracked (forge then
+    skips, never mutating the live repo). base_commit is the commit the worktree
+    was created at (HEAD); export diffs the best state against it.
     """
     repo = kernel_repo or _git_toplevel(source_file)
     if not repo or not (Path(repo) / ".git").exists():
@@ -135,6 +136,7 @@ def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path,
         shutil.rmtree(wt, ignore_errors=True)
     _run(["git", "-C", repo, "worktree", "prune"], timeout=60)
 
+    base_commit = _run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip()
     add = _run(["git", "-C", repo, "worktree", "add", "-b", branch, str(wt), "HEAD"], timeout=120)
     if add.returncode != 0:
         return None
@@ -144,7 +146,7 @@ def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path,
     _run(["git", "-C", str(wt), "config", "user.name", "forge-bot"], timeout=30)
     _run(["git", "-C", str(wt), "config", "user.email", "forge-bot@local"], timeout=30)
 
-    return str(wt), str(wt / rel)
+    return str(wt), str(wt / rel), base_commit
 
 
 def _editable_roots() -> list[str]:
@@ -343,54 +345,84 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
         cb = _run(["git", "-C", repo, "checkout", "-b", branch], timeout=60)
         if cb.returncode != 0:
             return _skip()
+        # Snapshot any pre-existing dirty TRACKED files as a baseline commit.
+        # The loop now stages every tracked edit (`git add -u`), so without this
+        # the first iteration's commit would absorb pre-forge modifications and a
+        # later revert would destroy them. base_commit is the pre-forge tree;
+        # agent edits stack on top of it, and export/restore diff against it so
+        # pre-existing dirty files are preserved untouched. When the tree is
+        # clean, base_commit == orig_head.
+        _run(["git", "-C", repo, "add", "-u"], timeout=60)
+        dirty = _run(["git", "-C", repo, "diff", "--cached", "--quiet"], timeout=30)
+        if dirty.returncode != 0:
+            _run(["git", "-C", repo, "commit", "-m",
+                  "forge: pre-existing dirty baseline"], timeout=60)
+            base_commit = _run(["git", "-C", repo, "rev-parse", "HEAD"],
+                               timeout=30).stdout.strip() or orig_head
+        else:
+            base_commit = orig_head
     except Exception:
         _release_repo_lock(lock_fd)
         raise
 
     restore = {"repo": repo, "orig_branch": orig_branch, "orig_head": orig_head,
                "branch": branch, "source_file": source_file, "backup": backup,
-               "relpath": relpath, "lock_fd": lock_fd}
+               "relpath": relpath, "lock_fd": lock_fd, "base_commit": base_commit}
     return repo, source_file, restore
 
 
 def _restore_inplace(restore: dict) -> None:
-    """Restore the live repo after in-place editing: write back the original
-    source_file bytes, return to the original branch/HEAD, and drop the temp
-    branch. Only the source_file is touched — other dirty files in the working
-    tree are never modified (no ``reset --hard``).
+    """Restore the live repo after in-place editing: revert EVERY file the agent
+    changed back to its pre-forge content, return to the original branch/HEAD,
+    and drop the temp branch.
+
+    Restores the full changed-file set (not just ``source_file``): the agent may
+    have edited a sibling tracked file (e.g. a config defaults module), and the
+    loop's ``git add -u`` commits mean those edits live on the temp branch.
+    ``base_commit`` holds the exact pre-forge tree (including any pre-existing
+    dirty content snapshotted at prepare time), so checking files out of it
+    restores precisely what was there before forge ran. Untracked files (build
+    artifacts) are never touched (no ``reset --hard``).
     """
     if not restore:
         return
     repo = restore["repo"]
-    relpath = restore.get("relpath") or ""
     # Abort any in-progress revert the loop may have left.
     _run(["git", "-C", repo, "revert", "--abort"], timeout=30)
     orig_branch = restore.get("orig_branch") or ""
     orig_head = restore.get("orig_head") or ""
-    # Step 1: move HEAD back to the original ref WITHOUT touching the working
-    # tree or index.
+    base_commit = restore.get("base_commit") or orig_head
+    # Step 1: restore every file that differs from the pre-forge baseline back to
+    # its base_commit content (working tree + index). This undoes ALL the agent's
+    # tracked edits, including sibling files outside source_file. Done while still
+    # on the temp branch so base_commit is reachable.
+    if base_commit:
+        diff = _run(["git", "-C", repo, "diff", "--name-only", base_commit], timeout=60)
+        for rel in (diff.stdout or "").splitlines():
+            rel = rel.strip()
+            if rel:
+                _run(["git", "-C", repo, "checkout", base_commit, "--", rel], timeout=30)
+    # Step 2: move HEAD back to the original ref WITHOUT touching the working tree.
     if orig_branch and orig_branch != "HEAD":
-        # Was on a named branch: point HEAD back at it via symbolic-ref (no
-        # working-tree changes).
+        # Was on a named branch: point HEAD back at it via symbolic-ref.
         _run(["git", "-C", repo, "symbolic-ref", "HEAD", f"refs/heads/{orig_branch}"], timeout=30)
     elif orig_head:
-        # Was on detached HEAD: `git checkout --detach <commit>` correctly
-        # detaches HEAD at the original commit. `update-ref HEAD` alone would
-        # leave HEAD still pointing at the forge temp branch ref, so `git
-        # branch -D` later fails and `git status` shows the wrong branch.
-        _run(["git", "-C", repo, "checkout", "--detach", orig_head], timeout=30)
-    # Step 2: reset the index to match orig_head (without touching working tree)
+        # Was on detached HEAD: detach via `update-ref --no-deref HEAD` so the
+        # working tree is NOT touched (a plain `checkout --detach` would reset
+        # tracked files to orig_head and clobber pre-existing dirty; a plain
+        # `update-ref HEAD` would follow the symref and move the temp branch).
+        _run(["git", "-C", repo, "update-ref", "--no-deref", "HEAD", orig_head], timeout=30)
+    # Step 3: reset the index to match orig_head (without touching working tree)
     # so `git status` reflects the same dirty state as before forge ran.
     if orig_head:
         _run(["git", "-C", repo, "reset", orig_head, "--", "."], timeout=30)
-    # Step 3: write the original source bytes back to disk AFTER the index
-    # reset. Forge may have edited the file; this restores the exact pre-forge
-    # content (including any dirty modifications the repo had before).
+    # Step 4: belt-and-suspenders — ensure the primary source_file is exactly the
+    # pre-forge bytes even if the git restore above raced or partially applied.
     try:
         Path(restore["source_file"]).write_bytes(restore["backup"])
     except OSError:
         pass
-    # Step 4: delete the temp branch (safe now that HEAD points elsewhere).
+    # Step 5: delete the temp branch (safe now that HEAD points elsewhere).
     if restore.get("branch"):
         _run(["git", "-C", repo, "branch", "-D", restore["branch"]], timeout=30)
     # Release the per-repo in-place lock last, after the repo is fully restored.
@@ -704,15 +736,28 @@ def _autogen_forge_driver(candidate: dict, worktree_kernel: str, output_dir: Pat
 def _tensor_dim_lists(candidate: dict) -> list[list[int]]:
     """Extract per-tensor integer dim lists from candidate['input_shapes'].
 
-    TraceLens emits input_shapes as ``[{"call_num": N, "shape": [d0, d1, ...]}, ...]``
-    (one entry per tensor argument). Returns the list of ``shape`` dim-lists,
-    skipping non-integer / empty entries. Bare lists are also accepted.
+    TraceLens emits input_shapes either as integer lists
+    ``[{"call_num": N, "shape": [d0, d1, ...]}, ...]`` OR as dtype-tagged strings
+    ``[{"shape": "(16384,2048) bf16"}, ...]`` (the format the kernel-agent passes
+    through from the rendered trace). Without parsing the string form, every dim
+    list is dropped, _shapes_from_candidate returns {}, and the auto-gen driver
+    falls back to its tiny default shape (M=512) — which benches a memory-bound
+    regime and yields a near-1.0x speedup instead of the real prefill gain. Parse
+    both forms here.
     """
     out: list[list[int]] = []
     for e in candidate.get("input_shapes") or []:
         s = e.get("shape") if isinstance(e, dict) else e
         if isinstance(s, (list, tuple)) and s and all(isinstance(x, int) for x in s):
             out.append([int(x) for x in s])
+        elif isinstance(s, str):
+            # e.g. "(16384,2048) bf16" / "(139199,) i32" -> [16384, 2048] / [139199]
+            m = re.search(r"\(([\d,\s]*)\)", s)
+            if not m:
+                continue
+            dims = [int(x) for x in m.group(1).split(",") if x.strip().isdigit()]
+            if dims:
+                out.append(dims)
     return out
 
 
@@ -822,14 +867,66 @@ def _write_report(output_dir: Path, baseline_ms: float | None, best_ms: float | 
     return report
 
 
-def _export_best_source(worktree_kernel_file: str, source_file: str, output_dir: Path) -> str:
-    """Copy the worktree's best kernel state to optimized_versions/v1_forge.<ext>."""
-    ext = Path(source_file).suffix or ".py"
+def _export_best_artifacts(workspace: str, base_commit: str, worktree_kernel_file: str,
+                           source_file: str, output_dir: Path) -> tuple[str, list[str]]:
+    """Export the best-kept state — ALL files the agent changed, not just the kernel.
+
+    The loop now commits every tracked edit (``runner._git_commit`` uses
+    ``git add -u``), so the agent's winning change may live in a sibling tracked
+    file (e.g. a ``*_config.py`` defaults module) rather than ``source_file``.
+    Exporting only ``source_file`` would yield a byte-identical artifact that
+    carries none of the optimization (the in-place bench measured it, but it
+    would not transfer on integration), and the sibling file would be left dirty.
+
+    This:
+      - copies the primary kernel to ``optimized_versions/v1_forge.<ext>`` (the
+        Hyperloom report scan's drop-in-replacement contract), and
+      - copies EVERY file changed since ``base_commit`` under
+        ``optimized_versions/files/<repo-relative-path>``, and
+      - writes a single ``optimized_versions/forge.patch`` (``git diff
+        base_commit``) so a multi-file change can be applied at integration time.
+
+    Returns (primary_artifact_path, changed_relpaths).
+    """
     dst_dir = output_dir / "optimized_versions"
     dst_dir.mkdir(parents=True, exist_ok=True)
-    dst = dst_dir / f"v1_forge{ext}"
-    shutil.copy2(worktree_kernel_file, dst)
-    return str(dst)
+
+    # Primary kernel artifact (drop-in replacement contract).
+    ext = Path(source_file).suffix or ".py"
+    primary = dst_dir / f"v1_forge{ext}"
+    try:
+        shutil.copy2(worktree_kernel_file, primary)
+    except OSError:
+        pass
+
+    # Every file changed vs the pre-forge baseline (best-kept state == the
+    # current worktree tree). Compare base_commit to the working tree so both
+    # committed and any residual uncommitted edits are captured.
+    changed: list[str] = []
+    diff = _run(["git", "-C", workspace, "diff", "--name-only", base_commit], timeout=60)
+    for rel in (diff.stdout or "").splitlines():
+        rel = rel.strip()
+        if not rel:
+            continue
+        changed.append(rel)
+        srcp = Path(workspace) / rel
+        if not srcp.is_file():
+            continue
+        dstp = dst_dir / "files" / rel
+        dstp.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(srcp, dstp)
+        except OSError:
+            pass
+
+    # Full multi-file patch (agent's net optimization, excludes pre-existing dirty).
+    patch = _run(["git", "-C", workspace, "diff", base_commit], timeout=60)
+    try:
+        (dst_dir / "forge.patch").write_text(patch.stdout or "")
+    except OSError:
+        pass
+
+    return str(primary), changed
 
 
 def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float,
@@ -887,12 +984,13 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
             return _normalized(2, "", "forge: editable-finder package but repo is not a usable git "
                                "checkout; skipping", time.time() - started)
         workspace, worktree_kernel, restore_info = prep
+        base_commit = restore_info.get("base_commit") or ""
     else:
         wt_info = _prepare_worktree(source_file, kernel_repo, output_dir, branch)
         if wt_info is None:
             return _normalized(2, "", "forge: kernel_repo is not a clean git checkout or source_file "
                                "not tracked; skipping (live repo untouched)", time.time() - started)
-        workspace, worktree_kernel = wt_info
+        workspace, worktree_kernel, base_commit = wt_info
 
     try:
         # Locate the Kernel-Forge code via $FORGE_PATH (like OOB_PATH for oob),
@@ -967,15 +1065,29 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         # detail in the tracker. This wrapper logs each call + error to a file
         # so post-mortem analysis can see exactly which iterations failed and why.
         forge_log = output_dir / "forge_loop.log"
+        # Hard timeout per agent call. The claude-agent-sdk's query() awaits the
+        # fellow subprocess's message stream; if that subprocess dies uncleanly
+        # (observed in-loop: an iteration errors, the next call's stream never
+        # closes), query() hangs forever and freezes the whole loop (and the
+        # orchestrator awaiting it). wait_for bounds each call so the loop records
+        # a timeout and moves on instead of stalling the session.
+        agent_timeout_s = int(os.environ.get("FORGE_AGENT_TIMEOUT_SEC", "420"))
 
         async def _logged_agent_fn(kernel_path: str, history: str) -> str:
+            import asyncio as _aio
             import traceback as _tb
             call_ts = time.strftime("%H:%M:%S", time.gmtime())
             try:
-                result = await raw_agent_fn(kernel_path, history)
+                result = await _aio.wait_for(
+                    raw_agent_fn(kernel_path, history), timeout=agent_timeout_s)
                 with open(forge_log, "a") as f:
                     f.write(f"[{call_ts}] agent_fn OK: {result[:120]}\n")
                 return result
+            except _aio.TimeoutError:
+                with open(forge_log, "a") as f:
+                    f.write(f"[{call_ts}] agent_fn TIMEOUT after {agent_timeout_s}s "
+                            f"(fellow hung; loop continues)\n")
+                raise
             except Exception as exc:
                 detail = _tb.format_exc()
                 with open(forge_log, "a") as f:
@@ -991,12 +1103,28 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
             os.environ.setdefault("IS_SANDBOX", "1")
 
         # The claude-agent-sdk's streaming transport needs the /api/v1/llm-proxy
-        # endpoint, not /llm-gateway (which only serves the non-streaming
-        # `claude -p` path). Rewrite when we detect the gateway suffix so the
-        # fellow's query() calls don't 401.
-        _base = os.environ.get("ANTHROPIC_BASE_URL", "")
-        if _base.rstrip("/").endswith("/llm-gateway"):
-            os.environ["ANTHROPIC_BASE_URL"] = _base.rstrip("/").rsplit("/llm-gateway", 1)[0] + "/api/v1/llm-proxy"
+        # endpoint. The OOB path commonly exports ANTHROPIC_BASE_URL=.../llm-gateway
+        # (which only serves the non-streaming `claude -p` path -> 401 in
+        # streaming) or an OpenAI-style URL. Ensure the fellow's query() calls hit
+        # a streaming proxy: keep an explicit proxy, rewrite a known /llm-gateway
+        # suffix, else fall back to the claude CLI's own validated config.json
+        # customApiUrl.
+        _base = os.environ.get("ANTHROPIC_BASE_URL", "").rstrip("/")
+        if "/api/v1/llm-proxy" not in _base:
+            _proxy = ""
+            if _base.endswith("/llm-gateway"):
+                _proxy = _base.rsplit("/llm-gateway", 1)[0] + "/api/v1/llm-proxy"
+            if not _proxy:
+                try:
+                    import json as _json
+                    _cfg = _json.loads((Path.home() / ".claude" / "config.json").read_text())
+                    _cu = str(_cfg.get("customApiUrl") or "").rstrip("/")
+                    if "/api/v1/llm-proxy" in _cu:
+                        _proxy = _cu
+                except Exception:
+                    _proxy = ""
+            if _proxy:
+                os.environ["ANTHROPIC_BASE_URL"] = _proxy
 
         # Redirect the loop's print output to a log file so the full iteration
         # timeline (baseline, agent rationale, validation stages, keep/revert
@@ -1027,10 +1155,17 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         # do we report a KEEP-worthy speedup + correctness pass.
         improved = bool(baseline_ms and best_ms and best_ms < baseline_ms)
 
-        # Export + report BEFORE _restore_inplace (in finally) overwrites the
-        # source_file with the backup bytes. The optimized kernel on disk right
-        # now is the best iteration's version.
-        _export_best_source(worktree_kernel, source_file, output_dir)
+        # Export + report BEFORE _restore_inplace (in finally) reverts the
+        # changed files. The best-kept state is on disk right now; capture ALL
+        # files the agent touched (not just source_file) + a forge.patch.
+        _, changed_files = _export_best_artifacts(
+            workspace, base_commit, worktree_kernel, source_file, output_dir)
+        if changed_files:
+            try:
+                (output_dir / "optimized_versions" / "changed_files.txt").write_text(
+                    "\n".join(changed_files) + "\n")
+            except OSError:
+                pass
         _write_report(output_dir, baseline_ms, best_ms, improved)
 
         if loop_exc:
