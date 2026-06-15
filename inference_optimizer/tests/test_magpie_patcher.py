@@ -192,7 +192,6 @@ def _write_sglang_script(root: Path, src: str = _UPSTREAM_SGLANG_MI300X_SH) -> P
     script.chmod(0o755)
     return script
 
-
 # Basic shape / sanity
 def test_legacy_block_is_present_in_fixture():
     """Sanity: the fixture must contain the exact block the patcher matches."""

@@ -724,15 +724,52 @@ class ExploreExecutor:
                 dict(entry.get("extra_envs") or {}),
             )
 
+        # Conditional dedup. KEEP'd variants are permanently blocked (never
+        # re-proposed). A variant that ran but did not promote (REVERT /
+        # KEEP_UNSTABLE / no_promote) only stays blocked while its prior measured
+        # gain is below the current KEEP bar; once the (decaying) bar drops to or
+        # below that gain the variant unblocks so a later cycle can re-test it.
+        # Infra failures (KILLED_OVERTIME / FAILED) stay blocked regardless of
+        # gain. Unblocking only lifts the hard skip — the variant still re-runs
+        # the full KEEP + stack-rebench gate, so a stale measurement can't
+        # promote on its own.
+        gain_unlockable = {"REVERT", "KEEP_UNSTABLE", "no_promote"}
+
+        def _is_blocked(entry: Any) -> bool:
+            if not isinstance(entry, dict):
+                return True
+            if str(entry.get("outcome") or "") in gain_unlockable:
+                try:
+                    prior_gain = float(entry.get("gain_pct"))
+                except (TypeError, ValueError):
+                    return True
+                return prior_gain < keep_threshold_pct
+            return True
+
         tested_dict = search.get("tested") or {}
-        seen_fps: set[str] = set(tested_dict.keys())
-        for v in tested_dict.values():
-            seen_fps.add(_entry_fp(v))
+        seen_fps: set[str] = set()
+        unlocked_reference: list[dict[str, Any]] = []
+        for fp_key, v in tested_dict.items():
+            if _is_blocked(v):
+                seen_fps.add(str(fp_key))
+                seen_fps.add(_entry_fp(v))
+            elif isinstance(v, dict):
+                unlocked_reference.append(v)
+        # accepted == KEEP'd: always blocked.
         for v in search.get("accepted") or []:
             seen_fps.add(_entry_fp(v))
         for v in search.get("rejected") or []:
-            seen_fps.add(_entry_fp(v))
+            if _is_blocked(v):
+                seen_fps.add(_entry_fp(v))
+            elif isinstance(v, dict):
+                unlocked_reference.append(v)
         seen_fps.discard("")
+        if unlocked_reference:
+            log.info(
+                "explore: %d prior sub-threshold variant(s) unblocked at "
+                "keep_threshold=%.3f%% for re-test",
+                len(unlocked_reference), keep_threshold_pct,
+            )
         name_index = dict(search.get("name_index") or {})
 
         # Attach the per-variant fingerprint as an attribute so the result
