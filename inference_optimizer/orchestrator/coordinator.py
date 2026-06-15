@@ -7683,6 +7683,18 @@ class Coordinator:
                 self.shared_state.baseline_arg_error_streak = 0
                 if self.shared_state.baseline_failure_streak >= 3:
                     self.shared_state.set_stop_reason("baseline_failed")
+            # One-shot eager fallback: a cuda-graph capture failure is often
+            # recoverable by retrying with --enforce-eager. Arm the flag once.
+            if (
+                err_class == "cuda_graph_capture_failed"
+                and not self.shared_state.baseline_eager_fallback
+            ):
+                self.shared_state.baseline_eager_fallback = True
+                log.warning(
+                    "baseline %s hit cuda-graph capture failure; arming "
+                    "--enforce-eager fallback for the next baseline retry",
+                    task.task_id,
+                )
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,

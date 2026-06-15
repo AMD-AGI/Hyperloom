@@ -81,6 +81,44 @@ _ARG_ERROR_CONTEXT_PATTERNS = (
 )
 
 
+# cuda-graph capture failures recoverable by retrying with --enforce-eager.
+# Markers appear in server.log, not the Magpie stdout/stderr tail.
+_CUDA_GRAPH_CAPTURE_MARKERS = (
+    "operation not permitted when stream is capturing",
+    "hipErrorStreamCaptureUnsupported",
+    "Capture cuda graph failed",
+)
+
+
+def _is_cuda_graph_capture_failure(*texts: str) -> bool:
+    """True when any text carries a cuda-graph capture marker."""
+    blob = "\n".join(t for t in texts if t)
+    return any(m in blob for m in _CUDA_GRAPH_CAPTURE_MARKERS)
+
+
+# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph
+# (it rejects vLLM's --enforce-eager), vllm uses --enforce-eager.
+_DISABLE_CUDA_GRAPH_FLAGS = {
+    "sglang": "--disable-cuda-graph",
+    "vllm": "--enforce-eager",
+}
+
+
+def _disable_cuda_graph_flag(framework: str) -> str:
+    """Return the framework-correct flag that disables cuda-graph capture."""
+    return _DISABLE_CUDA_GRAPH_FLAGS.get(
+        (framework or "").strip().lower(), "--disable-cuda-graph",
+    )
+
+
+def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
+    """Append the framework-correct disable-cuda-graph flag once (idempotent)."""
+    flag = _disable_cuda_graph_flag(framework)
+    if flag in (extra_server_args or ""):
+        return extra_server_args or ""
+    return f"{extra_server_args} {flag}".strip()
+
+
 def _classify_subprocess_error(
     elapsed_sec: float, stderr_tail: str,
 ) -> str:
@@ -481,6 +519,27 @@ class BaselineExecutor:
             return Path(extra["workspace"])
         return runs_dir(self.session_dir, action, ctx.task.task_id)
 
+    def _consume_eager_fallback(self) -> bool:
+        """Consume the one-shot cuda-graph eager fallback flag from SharedState.
+
+        Returns True (and clears the flag) when a prior baseline armed it.
+        Best-effort: missing/unreadable state reads as no fallback.
+        """
+        try:
+            from ..shared_state import SharedState
+            state = SharedState.load_or_init(self.session_dir)
+            if not getattr(state, "baseline_eager_fallback", False):
+                return False
+            state.baseline_eager_fallback = False
+            state.save(self.session_dir)
+            return True
+        except Exception:  # noqa: BLE001 — fallback must never break baseline
+            log.debug(
+                "baseline_executor: eager-fallback flag check failed",
+                exc_info=True,
+            )
+            return False
+
     def _resolve_timeout(self, params: dict[str, Any]) -> int:
         """Pick the subprocess timeout for this baseline launch.
 
@@ -573,6 +632,25 @@ class BaselineExecutor:
         if not config_path.exists():
             raise FileNotFoundError(f"baseline config not found: {config_path}")
 
+        # One-shot cuda-graph eager fallback: a prior baseline hit a cuda-graph
+        # capture failure and armed state.baseline_eager_fallback. Inject
+        # --enforce-eager for this retry and consume the flag so it fires once.
+        effective_extra_server_args = read_extra_server_args(params)
+        eager_fallback_applied = self._consume_eager_fallback()
+        if eager_fallback_applied:
+            fw = (
+                str(params.get("framework") or "").strip()
+                or os.environ.get("FRAMEWORK", "").strip()
+            )
+            cg_flag = _disable_cuda_graph_flag(fw)
+            effective_extra_server_args = _with_cuda_graph_disabled(
+                effective_extra_server_args, fw,
+            )
+            log.warning(
+                "baseline_executor: retrying with %s after a prior cuda-graph "
+                "capture failure (framework=%s)", cg_flag, fw or "?",
+            )
+
         output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -626,7 +704,7 @@ class BaselineExecutor:
             config_path = materialize_config_with_envs(
                 config_path,
                 output_dir,
-                extra_server_args=read_extra_server_args(params),
+                extra_server_args=effective_extra_server_args,
                 extra_envs=dict(params.get("extra_envs") or {}),
                 model_path=resolved_model,
                 gpu_type=resolved_gpu,
@@ -669,6 +747,7 @@ class BaselineExecutor:
             "resolved_model": resolved_model,
             "materialized_config_path": materialized_config_path,
             "inferencex_path": effective_inferencex_path,
+            "effective_extra_server_args": effective_extra_server_args,
             "params": params,
             "ctx": ctx,
         }
@@ -903,6 +982,7 @@ class BaselineExecutor:
         resolved_model: str,
         materialized_config_path: Path,
         inferencex_path: str,
+        effective_extra_server_args: str,
         params: dict[str, Any],
         ctx: RunnerContext,
     ) -> dict[str, Any]:
@@ -958,7 +1038,7 @@ class BaselineExecutor:
                 # by cli.py), falling back to state.json — call site is
                 # identical between colocated and disaggregated runs.
                 await restart_server_for_round(
-                    extra_server_args=read_extra_server_args(params),
+                    extra_server_args=effective_extra_server_args,
                     framework=os.environ.get("FRAMEWORK") or None,
                     model_path=resolved_model or None,
                     tp=int(os.environ.get("TP") or 0) or None,
@@ -1066,6 +1146,23 @@ class BaselineExecutor:
             "see server.log"
         )
 
+        # Detect cuda-graph capture failures (recoverable via --enforce-eager).
+        # Markers live in server.log; read a bounded tail for classification.
+        server_log_tail = ""
+        try:
+            slog = output_dir / "server.log"
+            if slog.exists():
+                with open(slog, "rb") as f:
+                    f.seek(0, 2)
+                    sz = f.tell()
+                    f.seek(max(0, sz - 65536))
+                    server_log_tail = f.read().decode("utf-8", "replace")
+        except OSError:
+            server_log_tail = ""
+        cuda_graph_capture_failed = _is_cuda_graph_capture_failure(
+            server_log_tail, proc_stderr or "", proc_stdout or "",
+        )
+
         # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
         candidates = sorted(output_dir.glob("benchmark_*"))
         # Always-on artifact harvest: copy wrapper-side leaks hardcoded
@@ -1117,11 +1214,16 @@ class BaselineExecutor:
                 }
             if proc_returncode != 0:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
+                err_class = (
+                    "cuda_graph_capture_failed"
+                    if cuda_graph_capture_failed
+                    else _classify_subprocess_error(
+                        subprocess_runtime_sec, tail,
+                    )
+                )
                 return {
                     "status": "failed",
-                    "error_class": _classify_subprocess_error(
-                        subprocess_runtime_sec, tail,
-                    ),
+                    "error_class": err_class,
                     "returncode": proc_returncode,
                     "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
                     "error": tail,
@@ -1161,8 +1263,12 @@ class BaselineExecutor:
                 error = server_init_dead_error
             elif proc_returncode != 0:
                 tail = (proc_stderr or proc_stdout or "")[-2000:]
-                error_class = _classify_subprocess_error(
-                    subprocess_runtime_sec, tail,
+                error_class = (
+                    "cuda_graph_capture_failed"
+                    if cuda_graph_capture_failed
+                    else _classify_subprocess_error(
+                        subprocess_runtime_sec, tail,
+                    )
                 )
                 error = tail
             elif not report_path.exists():
