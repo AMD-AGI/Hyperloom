@@ -102,7 +102,7 @@ The reactor pipeline (M1) on each tick:
 | `kill_task{task_id, reason, scope:"task"}` | scope MUST be `"task"` | Cancel queued/running task. Used by I3 `stale_lease` (resource-safety only). Server kills go through `delegate(recover)` (IR-5). |
 | `force_dispatch{task_id, reason}` | — | Bump queued task to head of dispatcher queue. |
 | `prune_branch{family, reason}` | family ∈ {baseline, profile, explore, sweep, kernel_opt, integrate, ...} | Allowed by PolicyGate but not auto-emitted by the ladder. Reserved for explicit operator / Orchestration drives. |
-| `escalate_strategy_change{reason, next_action_hint, severity}` | — | Priority-0 broadcast hint. Allowed by PolicyGate but not auto-emitted by the ladder. Orchestration owns the phase-advance decision (P3_18 widened the source allowlist). |
+| `escalate_strategy_change{reason, next_action_hint, severity}` | — | Priority-0 broadcast hint. Allowed by PolicyGate but not auto-emitted by the ladder. Orchestration owns the phase-advance decision. |
 | `delegate(recover, params={force_gpu_cleanup:bool})` | — | Self-healing GPU/server cleanup. Owner = `recover_executor.py`. Auto-emitted on `gpu_memory_leaked`. |
 | `delegate(server_lifecycle, params={...})` | — | Spawn `patch_applier` for managed server restart. |
 | `delegate(accuracy_gate, params={...})` | — | Spawn `eval_runner` benchmark; FAIL → notify `needs_revert`. |
