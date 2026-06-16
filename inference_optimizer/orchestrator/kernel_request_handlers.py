@@ -27,6 +27,7 @@ from typing import Any, Awaitable, Callable
 
 from .trace.llm_trace import LLMCallRecord, append_llm_call
 from .trace.parse_usage import (
+    parse_forge_steps,
     parse_forge_usage,
     parse_geak_usage,
     parse_oob_json_usage,
@@ -2311,10 +2312,14 @@ async def _run_optimization_single(
             result["kernel_id"] = str(payload["kernel_id"])
         if not result.get("source_file") and payload.get("source_file"):
             result["source_file"] = str(payload["source_file"])
-    # Full-trace: mine each geak/oob attempt's stdout log for token usage and
-    # append an ``llm_calls.jsonl`` row. Best-effort; a no-op when the backend
-    # emits no usage block (claude/codex/cursor account spend elsewhere).
+    # Full-trace: mine each geak/oob/forge attempt's stdout log for token usage
+    # and append an ``llm_calls.jsonl`` row. Best-effort; a no-op when the
+    # backend emits no usage block (claude/codex/cursor account spend elsewhere).
     _trace_kernel_attempt_usage(result, session_dir=session_dir)
+    # Full-trace: record each forge attempt's key-step timeline (rationale /
+    # validation / keep-revert + summary) as a forge_steps audit, backfilled
+    # into the trace as forge:* spans. Best-effort; no-op without a step marker.
+    _trace_kernel_attempt_steps(result, session_dir=session_dir)
     return result
 
 
@@ -2380,6 +2385,67 @@ def _trace_kernel_attempt_usage(
                 "full-trace: kernel attempt usage append failed "
                 "(backend=%s, log=%s)", backend, log_path, exc_info=True,
             )
+
+
+def _trace_kernel_attempt_steps(
+    result: Any, *, session_dir: Path,
+) -> None:
+    """Record each forge attempt's key-step timeline to the forge_steps audit.
+
+    Reads the ``FORGE_STEPS`` marker off each forge attempt's stdout log
+    (``optimized_path``) — the per-iteration rationale / validation / bench /
+    keep-revert steps plus a run summary — and appends one audit row per step to
+    ``reports/trace/forge_steps.jsonl``, keyed by kernel id. The Langfuse emitter
+    backfills these as ``forge:iter:<n>`` / ``forge:summary`` spans so a trace
+    shows forge's decision process. Best-effort end to end: any read/parse/write
+    failure degrades to a debug log and is swallowed.
+    """
+    if not isinstance(result, dict):
+        return
+    attempts = result.get("attempts")
+    if not isinstance(attempts, list):
+        return
+    from datetime import datetime, timezone
+    from ..session_paths import forge_steps_path
+    kernel_id = str(result.get("kernel_id") or "") or None
+    rows: list[dict[str, Any]] = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        if str(attempt.get("backend") or "").strip().lower() != "forge":
+            continue
+        log_path = str(attempt.get("optimized_path") or "").strip()
+        if not log_path:
+            continue
+        try:
+            stdout_text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+        payload = parse_forge_steps(stdout_text)
+        if not payload:
+            continue
+        ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        for step in payload.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            rows.append({
+                "kernel_id": kernel_id, "kind": "iteration", "ts": ts, **step,
+            })
+        summary = payload.get("summary")
+        if isinstance(summary, dict):
+            rows.append({
+                "kernel_id": kernel_id, "kind": "summary", "ts": ts, **summary,
+            })
+    if not rows:
+        return
+    try:
+        path = forge_steps_path(session_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, sort_keys=True) + "\n")
+    except OSError:
+        log.debug("full-trace: forge_steps append failed", exc_info=True)
 
 
 def _shape_tool_result(rc: int, stdout: str, stderr: str) -> HandlerResult:

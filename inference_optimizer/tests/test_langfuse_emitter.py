@@ -672,6 +672,32 @@ def test_flush_backfills_specialist_intel(tmp_path, monkeypatch):
     assert persisted["counts"]["specialist_intel_read"] == 2
 
 
+def test_flush_backfills_forge_steps(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    from inference_optimizer.session_paths import forge_steps_path
+    steps = forge_steps_path(sd)
+    steps.parent.mkdir(parents=True, exist_ok=True)
+    steps.write_text("\n".join(json.dumps(r) for r in [
+        {"ts": "2026-06-09T15:14:54Z", "kind": "iteration", "kernel_id": "k1",
+         "iteration": 1, "decision": "KEEP", "wall_ms": 88.1},
+        {"ts": "2026-06-09T15:14:55Z", "kind": "iteration", "kernel_id": "k1",
+         "iteration": 2, "decision": "REVERT", "wall_ms": 90.0},
+        {"ts": "2026-06-09T15:14:56Z", "kind": "summary", "kernel_id": "k1",
+         "iterations": 2, "kept": 1, "termination_reason": "plateaued"},
+    ]) + "\n", encoding="utf-8")
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+    assert client.span_named("forge:iter:1") is not None
+    assert client.span_named("forge:iter:2") is not None
+    assert client.span_named("forge:summary") is not None
+    assert client.span_named("agent:forge") is not None
+    persisted = lfe.read_receipt(sd)
+    assert persisted["counts"]["forge_steps_read"] == 3
+
+
 def test_generation_uses_latency_for_duration(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()

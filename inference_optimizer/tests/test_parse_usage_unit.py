@@ -67,6 +67,39 @@ def test_parse_forge_usage_skips_malformed_marker():
     assert pu.parse_forge_usage(stdout)["input_tokens"] == 7
 
 
+# ---- parse_forge_steps ----
+
+def test_parse_forge_steps_none_without_marker():
+    assert pu.parse_forge_steps("") is None
+    assert pu.parse_forge_steps("forge done") is None
+
+
+def test_parse_forge_steps_extracts_timeline_and_summary():
+    payload = {
+        "steps": [
+            {"iteration": 1, "decision": "KEEP", "wall_ms": 88.1, "snr_db": 35.0,
+             "rationale": "fuse epilogue"},
+            {"iteration": 2, "decision": "REVERT", "wall_ms": 90.0},
+        ],
+        "summary": {"iterations": 2, "kept": 1, "speedup": 1.05,
+                    "termination_reason": "plateaued"},
+    }
+    stdout = "noise\nFORGE_STEPS " + json.dumps(payload) + "\ntail\n"
+    out = pu.parse_forge_steps(stdout)
+    assert [s["iteration"] for s in out["steps"]] == [1, 2]
+    assert out["steps"][0]["decision"] == "KEEP"
+    assert out["summary"]["termination_reason"] == "plateaued"
+
+
+def test_parse_forge_steps_last_marker_wins_and_skips_malformed():
+    stdout = (
+        "FORGE_STEPS not-json\n"
+        'FORGE_STEPS {"steps": [{"iteration": 1}], "summary": {"iterations": 1}}\n'
+    )
+    out = pu.parse_forge_steps(stdout)
+    assert out["summary"]["iterations"] == 1
+
+
 # ---- parse_claude_stream_json_turn_usages ----
 
 def test_parse_turn_usages_missing(tmp_path):

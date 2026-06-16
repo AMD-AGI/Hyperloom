@@ -253,6 +253,16 @@ def proposal_task_map_path(session_dir: Path) -> Path:
     return trace_dir(session_dir) / "proposal_task_map.jsonl"
 
 
+def forge_steps_path(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/forge_steps.jsonl`` — append-only audit of the
+    Kernel-Forge autonomous loop's key steps (per-iteration rationale /
+    validation / bench / keep-revert + a run summary), recovered from the forge
+    kernel-backend stdout. Backfilled into the trace as ``forge:iter:<n>`` /
+    ``forge:summary`` spans so a trace shows forge's decision process, not just
+    its token total."""
+    return trace_dir(session_dir) / "forge_steps.jsonl"
+
+
 def specialist_intel_path(session_dir: Path) -> Path:
     """``<sd>/reports/trace/specialist_intel.jsonl`` — append-only audit of the
     intel/tool calls each specialist made (WebSearch / WebFetch / pr_monitor /
@@ -650,6 +660,7 @@ __all__ = [
     "cortex_warm_json",
     "decision_trace_path",
     "proposal_task_map_path",
+    "forge_steps_path",
     "kernel_agent_runs_dir",
     "kernel_workspace",
     "llm_calls_path",

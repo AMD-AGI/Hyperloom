@@ -412,6 +412,37 @@ def parse_forge_usage(stdout: str) -> dict[str, int | None] | None:
     return normalize_usage(last_usage)
 
 
+def parse_forge_steps(stdout: str) -> dict[str, Any] | None:
+    """Extract the Kernel-Forge loop's key-step timeline from its stdout log.
+
+    ``forge_submit`` prints one canonical marker carrying the per-iteration step
+    timeline (rationale / validation / bench / keep-revert) plus a run summary::
+
+        FORGE_STEPS {"steps": [{"iteration": 1, "decision": "KEEP", ...}, ...],
+                     "summary": {"iterations": ..., "termination_reason": ...}}
+
+    Returns the parsed ``{"steps": [...], "summary": {...}}`` dict from the last
+    marker, or ``None`` when no marker is present (older Forge / no-result run).
+    """
+    if not stdout or "FORGE_STEPS" not in stdout:
+        return None
+    last: dict[str, Any] | None = None
+    for line in stdout.splitlines():
+        marker = line.partition("FORGE_STEPS")
+        if not marker[1]:
+            continue
+        blob = marker[2].strip()
+        if not blob:
+            continue
+        try:
+            obj = json.loads(blob)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("steps"), list):
+            last = obj
+    return last
+
+
 def parse_geak_usage(
     payload: dict[str, Any] | str | None,
 ) -> dict[str, int | None] | None:
@@ -483,5 +514,6 @@ __all__ = [
     "parse_claude_stream_json_tool_calls",
     "parse_claude_stream_json_turn_usages",
     "parse_claude_stream_json_usage",
+    "parse_forge_steps",
     "parse_forge_usage",
 ]

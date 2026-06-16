@@ -973,6 +973,52 @@ def _export_best_artifacts(workspace: str, base_commit: str, worktree_kernel_fil
     return str(primary), changed
 
 
+def _forge_steps_payload(loop_runner, baseline_ms, best_ms, improved) -> dict | None:
+    """Build the key-step timeline + summary from the loop's IterationResults.
+
+    Each result captures one optimization step (the agent's rationale, whether
+    the change validated, its bench/SNR, and the keep/revert verdict); the
+    summary records the run outcome + why the loop stopped. Returns ``None`` when
+    the loop exposes no results (older Forge / nothing ran), so the marker — and
+    the Hyperloom span backfill — stay a no-op.
+    """
+    results = getattr(loop_runner, "results", None)
+    if not results:
+        return None
+    steps: list[dict] = []
+    kept = 0
+    for r in results:
+        is_kept = bool(getattr(r, "kept", False))
+        kept += 1 if is_kept else 0
+        steps.append({
+            "iteration": getattr(r, "iteration", None),
+            "rationale": (getattr(r, "agent_rationale", "") or "")[:300],
+            "validation_passed": bool(getattr(r, "validation_passed", False)),
+            "validation_summary": (getattr(r, "validation_summary", "") or "")[:200],
+            "snr_db": getattr(r, "snr_db", None),
+            "wall_ms": getattr(r, "wall_ms", None),
+            "pmc_diagnosis": getattr(r, "pmc_diagnosis", "") or "",
+            "vgpr": getattr(r, "vgpr", None),
+            "decision": "KEEP" if is_kept else "REVERT",
+        })
+    speedup = None
+    try:
+        if baseline_ms and best_ms and best_ms > 0:
+            speedup = round(baseline_ms / best_ms, 4)
+    except (TypeError, ZeroDivisionError):
+        speedup = None
+    summary = {
+        "iterations": len(steps),
+        "kept": kept,
+        "baseline_wall_ms": baseline_ms,
+        "best_wall_ms": best_ms,
+        "speedup": speedup,
+        "improved": bool(improved),
+        "termination_reason": getattr(loop_runner, "termination_reason", "") or "",
+    }
+    return {"steps": steps, "summary": summary}
+
+
 def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float,
                 gpu_ids: str = "") -> dict:
     """Shape the result like oob_submit/geak_submit return dicts."""
@@ -1287,9 +1333,20 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         if isinstance(_llm_usage, dict) and _llm_usage.get("calls"):
             import json as _json_usage
             msg += "\nFORGE_LLM_USAGE " + _json_usage.dumps(_llm_usage, sort_keys=True)
+        # Emit the loop's key-step timeline (per-iteration rationale / validation
+        # / bench / keep-revert + a run summary) as a machine-parseable marker so
+        # the Hyperloom tracer can surface forge's decision process as spans —
+        # not just its token total. Built from the in-process IterationResult
+        # list; absent on older Forge / no-result runs.
+        _steps = _forge_steps_payload(loop_runner, baseline_ms, best_ms, improved)
+        if _steps is not None:
+            import json as _json_steps
+            msg += "\nFORGE_STEPS " + _json_steps.dumps(_steps, sort_keys=True)
         res = _normalized(0, msg + "\n" + loop_output[-3000:], "", time.time() - started)
         if isinstance(_llm_usage, dict) and _llm_usage.get("calls"):
             res["llm_usage"] = _llm_usage
+        if _steps is not None:
+            res["steps"] = _steps
         # Expose output_dir as cli_workspace so run_attempt's report scan finds
         # <output_dir>/optimization_report.md + optimized_versions/ (same path
         # convention as the OOB backend). Without this, build_verification reads

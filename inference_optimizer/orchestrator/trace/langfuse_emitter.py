@@ -36,6 +36,7 @@ from typing import Any
 
 from ...session_paths import (
     decision_trace_path,
+    forge_steps_path,
     recipe_snapshot_audit_jsonl,
     specialist_intel_path,
     trace_dir,
@@ -343,6 +344,7 @@ class LangfuseEmitter:
             "kb_spans_sent": 0,         # KB trace spans (assess/priors/recipe)
             "recipe_audit_read": 0,     # recipe_snapshot/.audit.jsonl rows swept
             "specialist_intel_read": 0, # specialist_intel.jsonl rows swept
+            "forge_steps_read": 0,      # forge_steps.jsonl rows swept
             "errors": 0,                # swallowed send failures
         }
         self._flushed = False
@@ -619,6 +621,7 @@ class LangfuseEmitter:
             self._flush_pending_halves()
             self._flush_recipe_kb_audit()
             self._flush_specialist_intel()
+            self._flush_forge_steps()
             self._flush_decision_scores()
             self._close_spans()
         except Exception:  # noqa: BLE001
@@ -777,6 +780,48 @@ class LangfuseEmitter:
                     "query": row.get("query"),
                 },
                 ts=row.get("ts"),
+            )
+
+    def _flush_forge_steps(self) -> None:
+        """Backfill the Kernel-Forge loop's key steps as ``forge:*`` spans.
+
+        ``kernel_request_handlers`` records each forge attempt's per-iteration
+        steps (rationale / validation / bench / keep-revert) and a run summary
+        to ``reports/trace/forge_steps.jsonl``. Each row becomes a
+        ``forge:iter:<n>`` (or ``forge:summary``) span under the ``forge`` agent
+        so a trace shows forge's decision process, not just its token total.
+        Read out-of-band at session end (mirrors :meth:`_flush_specialist_intel`);
+        idempotent via the ``flush_session`` guard.
+        """
+        for row in _load_jsonl(forge_steps_path(self.session_dir)):
+            self._counts["forge_steps_read"] += 1
+            kind = str(row.get("kind") or "iteration")
+            if kind == "summary":
+                name = "forge:summary"
+                metadata = {
+                    "kind": "forge_summary",
+                    "kernel_id": row.get("kernel_id"),
+                    "iterations": row.get("iterations"),
+                    "kept": row.get("kept"),
+                    "speedup": row.get("speedup"),
+                    "improved": row.get("improved"),
+                    "termination_reason": row.get("termination_reason"),
+                }
+            else:
+                name = f"forge:iter:{row.get('iteration')}"
+                metadata = {
+                    "kind": "forge_iteration",
+                    "kernel_id": row.get("kernel_id"),
+                    "iteration": row.get("iteration"),
+                    "decision": row.get("decision"),
+                    "wall_ms": row.get("wall_ms"),
+                    "snr_db": row.get("snr_db"),
+                    "validation_passed": row.get("validation_passed"),
+                    "pmc_diagnosis": row.get("pmc_diagnosis"),
+                }
+            self.record_kb_span(
+                name=name, agent="forge", output=row,
+                metadata=metadata, ts=row.get("ts"),
             )
 
     def _flush_decision_scores(self) -> None:
