@@ -10,6 +10,13 @@ import sys
 import threading
 import time
 
+import pytest
+
+# Live smoke test (run manually via main()); depends on the optional sseclient
+# package that the unit-test CI image does not install. Skip cleanly at
+# collection time instead of erroring out the whole pytest run.
+pytest.importorskip("sseclient")
+
 sys.path.insert(0, ".")
 from claw_client import ClawClient
 
