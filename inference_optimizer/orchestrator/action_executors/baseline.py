@@ -138,6 +138,16 @@ def _resolve_reference_base(
     try:
         from ..shared_state import SharedState
         from ...reference_script import models_compatible
+        # The baseline executor is a module-level singleton instantiated at
+        # import time — before $INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR is
+        # pinned — so its cached session_dir can resolve to the workspace root
+        # instead of the live session dir whose state.json carries the
+        # reference_* fields. Prefer the live pin when present; otherwise honor
+        # the caller-supplied path (direct-instantiation tests, explicit calls).
+        from ...paths import ENV_CURRENT_SESSION_DIR
+        _pinned = os.environ.get(ENV_CURRENT_SESSION_DIR)
+        if _pinned:
+            session_dir = Path(_pinned)
         state = SharedState.load_or_init(session_dir)
         ref_args = str(getattr(state, "reference_server_args", "") or "").strip()
         ref_envs = dict(getattr(state, "reference_envs", {}) or {})
