@@ -370,6 +370,18 @@ def materialize_config_with_envs(
             _shape_disc = os.environ.get(
                 "HYPERLOOM_PROFILE_SHAPE_DISCOVERY", "1",
             ).strip().lower() not in {"0", "false", "no", "off"}
+            # Gemma2 + shape-discovery crashes CUDA-graph capture (host
+            # torch.tensor in forward during HIP stream capture). Disable
+            # shape-discovery for Gemma2 so capture/roofline still run.
+            if _shape_disc:
+                from ...cli import _model_is_gemma2
+                if _model_is_gemma2(str(bench.get("model") or "")):
+                    _shape_disc = False
+                    log.info(
+                        "Gemma2 roofline: disabling shape-discovery to avoid "
+                        "CUDA-graph capture crash (hipErrorStreamCapture"
+                        "Unsupported); CUDA graph + profiling kept.",
+                    )
             extra_body["shape_discovery"] = _shape_disc
             extra_body.setdefault("roofline_annotations", True)
             envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
