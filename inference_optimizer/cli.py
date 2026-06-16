@@ -47,6 +47,11 @@ from .cli_backends import (  # noqa: F401 - re-exported for callers/tests
 )
 from .orchestrator.backends import ClaudeBackend
 from .manifest import load_manifest, write_manifest
+from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
+    _config_architectures,
+    _load_model_config_dict,
+    _model_is_gemma2,
+)
 from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
 from .orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS
@@ -670,41 +675,6 @@ def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
     return data
 
 
-def _load_model_config_dict(model_path: str) -> dict | None:
-    """Best-effort parse of ``<model_path>/config.json`` into a dict; returns ``None`` on any failure."""
-    if not model_path:
-        return None
-    cfg_path = Path(model_path) / "config.json"
-    try:
-        raw = cfg_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        logging.warning("model_config_unreadable: %s (%s)", cfg_path, exc)
-        return None
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError) as exc:
-        logging.warning("model_config_invalid_json: %s (%s)", cfg_path, exc)
-        return None
-    if not isinstance(data, dict):
-        logging.warning(
-            "model_config_not_a_dict: %s (got %s)", cfg_path, type(data).__name__,
-        )
-        return None
-    return data
-
-
-def _config_architectures(config: dict) -> list[str]:
-    """Normalise ``config["architectures"]`` to a list of non-empty strings (scalar wrapped; absent -> [])."""
-    arches_raw = config.get("architectures")
-    if isinstance(arches_raw, list):
-        return [str(a).strip() for a in arches_raw if str(a or "").strip()]
-    if isinstance(arches_raw, str) and arches_raw.strip():
-        return [arches_raw.strip()]
-    return []
-
-
 def _load_model_config_tags(model_path: str) -> dict:
     """Best-effort loader for KB architecture-identity tags (``architectures`` + ``model_type``) from config.json.
 
@@ -1091,32 +1061,6 @@ def _model_is_moe(model_path: str) -> bool:
         if "moe" in str(cfg.get("model_type") or "").lower():
             return True
         if any("moe" in arch.lower() for arch in _config_architectures(cfg)):
-            return True
-    return False
-
-
-# Gemma2 forward builds ``normalizer = torch.tensor(...)`` (a host scalar) on
-# every call. The TraceLens kernel_shape_profiler patch activates inside the
-# CUDA-graph capture critical section, so that host construct runs during HIP
-# stream capture and raises ``hipErrorStreamCaptureUnsupported`` -> capture
-# fails -> roofline produces no ceiling. Callers skip shape-discovery for
-# Gemma2 to keep CUDA graph while avoiding the crash.
-_GEMMA2_ARCH_MARKERS = frozenset({"gemma2forcausallm"})
-
-
-def _model_is_gemma2(model_path: str) -> bool:
-    """Best-effort detect a Gemma2 model from config.json (top level or text_config)."""
-    data = _load_model_config_dict(model_path)
-    if data is None:
-        return False
-    candidates = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        candidates.append(nested)
-    for cfg in candidates:
-        if str(cfg.get("model_type") or "").strip().lower() == "gemma2":
-            return True
-        if any(a.lower() in _GEMMA2_ARCH_MARKERS for a in _config_architectures(cfg)):
             return True
     return False
 
