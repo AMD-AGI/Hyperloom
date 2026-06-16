@@ -57,6 +57,14 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     ``port`` (int) and ``reason`` (str, populated when ineligible).
     Reuse is single-node only, requires a Magpie built-in script, and is
     incompatible with torch_profiler.
+
+    Args:
+        materialized_config_path: Path to the materialized benchmark YAML to
+            inspect.
+
+    Returns:
+        A dict with ``eligible`` (bool), ``framework`` (str), ``port`` (int)
+        and ``reason`` (str, populated when ineligible).
     """
     info: dict[str, Any] = {
         "eligible": False,
@@ -111,6 +119,13 @@ def inject_lifecycle(
 
     Both rounds share ``pid_dir`` + ``port`` so round 2 re-attaches; only
     ``cleanup`` differs (round 1 persists, round 2 tears down).
+
+    Args:
+        bench: The benchmark config dict to mutate in place.
+        cleanup: Whether this round tears the server down (``False`` for round
+            1, ``True`` for round 2).
+        pid_dir: Shared directory for the server pid/meta files.
+        port: HTTP port pinned for the persistent server.
     """
     ready_timeout = int(os.environ.get(
         "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC",
@@ -135,6 +150,11 @@ def teardown_lifecycle_server(
 
     Idempotent and never raises (safe in ``finally``); a no-op on the happy
     path, real work only on abnormal paths.
+
+    Args:
+        pid_dir: Directory holding the server pid/meta files.
+        framework: Framework name used to key the pid/meta filenames.
+        port: HTTP port used to key the pid/meta filenames.
     """
     base = Path(pid_dir)
     tag = f"{framework}_{port}"

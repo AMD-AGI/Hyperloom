@@ -412,6 +412,17 @@ def ingest(plan: dict[str, Any]) -> int:
     # orchestration); normalise it back to a span-attachable agent so the score
     # still lands under a real agent span. operation_kind rides in score metadata.
     def _span_agent_for(proposer: str) -> str:
+        """Normalize a resolved proposer name to a span-attachable agent name.
+
+        Args:
+            proposer: The resolved proposer (e.g. ``specialist:<domain>`` /
+                ``grid`` / ``orchestration``).
+
+        Returns:
+            The agent name to attach the score under (``specialist`` for any
+            ``specialist:*``, ``orchestration`` for ``grid``, else the proposer
+            or the unknown-agent fallback).
+        """
         p = (proposer or "").strip()
         if p.startswith("specialist:"):
             return "specialist"

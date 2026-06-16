@@ -205,6 +205,12 @@ def breakdown_parts_dir(session_dir: Path) -> Path:
     fragments. Each owner writes its own files here (atomic + uniquely named);
     the exporter assembles them into ``session_breakdown.json``. Single-owner
     per section, so there is no cross-producer write contention.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/runtime/breakdown/parts``.
     """
     return Path(session_dir) / "runtime" / "breakdown" / "parts"
 
