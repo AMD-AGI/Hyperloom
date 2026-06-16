@@ -816,6 +816,12 @@ class ProfileExecutor(BaselineExecutor):
         _prof_started = {"v": False}
 
         async def _bounded_profile_window() -> None:
+            """Run a warmup-then-bounded engine profiling window.
+
+            Sleeps for the warmup period, starts engine profiling, holds it
+            open for the configured window, then stops it; updates the shared
+            ``_prof_started`` flag around the active window.
+            """
             await _asyncio.sleep(warmup_s)
             await trigger_dynamo_engine_profile("start", prof_body)
             _prof_started["v"] = True
@@ -870,6 +876,15 @@ class ProfileExecutor(BaselineExecutor):
                     # untouched — it never produces a competing CPU-only
                     # batch.
                     def _safe_size(p: Path) -> int:
+                        """Return ``p``'s size in bytes, or 0 on stat() failure.
+
+                        Args:
+                            p (Path): Path to stat.
+
+                        Returns:
+                            int: The file size in bytes, or ``0`` if ``stat()``
+                            fails.
+                        """
                         try:
                             return p.stat().st_size
                         except OSError:
