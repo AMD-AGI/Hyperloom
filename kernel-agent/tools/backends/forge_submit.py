@@ -988,25 +988,27 @@ def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float,
     }
 
 
-def _setup_fellow_env() -> None:
-    """Bake fellow (claude CLI / claude-agent-sdk) stability defaults into env.
+def _apply_fellow_env(env: dict) -> None:
+    """Apply fellow (claude CLI / claude-agent-sdk) stability defaults to ``env``.
 
-    The forge-loop subprocess inherits ``os.environ`` and, inside it, the fellow
-    drives the claude CLI streaming transport. Without these defaults a headless
-    container run fails every iteration. ``setdefault`` keeps operator overrides
-    authoritative.
+    Mutates the given child-process env dict ONLY -- never the parent
+    ``os.environ`` -- so the rewrite (notably the ANTHROPIC_BASE_URL streaming
+    proxy) cannot leak to sibling backends (claude/codex) that run in the same
+    orchestrator process after forge in the ladder. The forge-loop subprocess
+    inherits this env; inside it the fellow drives the claude CLI streaming
+    transport. ``setdefault`` keeps operator overrides authoritative.
     """
     # bypassPermissions refuses to start under root unless IS_SANDBOX=1.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
-        os.environ.setdefault("IS_SANDBOX", "1")
+        env.setdefault("IS_SANDBOX", "1")
     # The AMD SaFE proxy presents an internal/self-signed cert; without skipping
     # TLS the Node CLI handshake fails and the streaming query() hangs.
-    os.environ.setdefault("ANTHROPIC_SKIP_TLS_VERIFY", "true")
-    os.environ.setdefault("NODE_TLS_REJECT_UNAUTHORIZED", "0")
+    env.setdefault("ANTHROPIC_SKIP_TLS_VERIFY", "true")
+    env.setdefault("NODE_TLS_REJECT_UNAUTHORIZED", "0")
     # The streaming transport needs the /api/v1/llm-proxy endpoint. Rewrite a
     # known /llm-gateway suffix, else fall back to the claude CLI's validated
     # config.json customApiUrl.
-    _base = os.environ.get("ANTHROPIC_BASE_URL", "").rstrip("/")
+    _base = env.get("ANTHROPIC_BASE_URL", "").rstrip("/")
     if "/api/v1/llm-proxy" not in _base:
         _proxy = ""
         if _base.endswith("/llm-gateway"):
@@ -1021,7 +1023,7 @@ def _setup_fellow_env() -> None:
             except Exception:
                 _proxy = ""
         if _proxy:
-            os.environ["ANTHROPIC_BASE_URL"] = _proxy
+            env["ANTHROPIC_BASE_URL"] = _proxy
 
 
 def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
@@ -1047,8 +1049,9 @@ def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
     if forge_root:
         env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
     env["GPU_TARGET"] = gpu_target
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
-        env.setdefault("IS_SANDBOX", "1")
+    # Fellow stability defaults (IS_SANDBOX/TLS/llm-proxy) scoped to THIS child
+    # env only, so they never leak to sibling ladder backends (claude/codex).
+    _apply_fellow_env(env)
     cmd = [
         sys.executable, "-m", "kernel_agents.cli", "forge-loop",
         "--kernel", worktree_kernel,
@@ -1196,9 +1199,8 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
 
         # Run the loop in an isolated, hard-killable subprocess (like GEAK) so a
         # hung fellow can never freeze the orchestrator: the subprocess timeout
-        # kills the whole tree. Bake the fellow's stability env defaults first so
-        # the child (and the claude CLI it drives) inherits a working config.
-        _setup_fellow_env()
+        # kills the whole tree. The fellow's stability env defaults are applied
+        # inside _run_loop_via_cli, scoped to the child env only.
         baseline_ms, best_ms, improved, loop_output, loop_exc = _run_loop_via_cli(
             worktree_kernel=worktree_kernel, driver=driver, workspace=workspace,
             shapes=shapes, snr_threshold=snr_threshold, max_iters=max_iters,

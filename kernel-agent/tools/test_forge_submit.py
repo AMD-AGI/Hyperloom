@@ -236,3 +236,38 @@ def test_run_loop_via_cli_timeout_returns_exc(tmp_path, monkeypatch):
         forge_log=tmp_path / "forge_loop.log", timeout_s=1)
 
     assert exc is not None and baseline is None and improved is False
+
+
+def test_apply_fellow_env_rewrites_gateway_to_proxy():
+    """/llm-gateway is rewritten to the streaming /api/v1/llm-proxy endpoint."""
+    env = {"ANTHROPIC_BASE_URL": "https://host/llm-gateway"}
+    forge_submit._apply_fellow_env(env)
+    assert env["ANTHROPIC_BASE_URL"] == "https://host/api/v1/llm-proxy"
+    assert env["ANTHROPIC_SKIP_TLS_VERIFY"] == "true"
+    assert env["NODE_TLS_REJECT_UNAUTHORIZED"] == "0"
+
+
+def test_apply_fellow_env_keeps_existing_proxy_and_operator_overrides():
+    """An already-proxy URL is left as-is; operator-set TLS values are kept."""
+    env = {
+        "ANTHROPIC_BASE_URL": "https://host/api/v1/llm-proxy",
+        "ANTHROPIC_SKIP_TLS_VERIFY": "false",
+    }
+    forge_submit._apply_fellow_env(env)
+    assert env["ANTHROPIC_BASE_URL"] == "https://host/api/v1/llm-proxy"
+    # setdefault must not clobber an explicit operator value.
+    assert env["ANTHROPIC_SKIP_TLS_VERIFY"] == "false"
+
+
+def test_apply_fellow_env_does_not_mutate_os_environ(monkeypatch):
+    """Finding-1 regression guard: the rewrite is scoped to the passed child env
+    dict and never leaks into the parent os.environ (which sibling ladder
+    backends claude/codex read)."""
+    import os as _os
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://host/llm-gateway")
+    env = dict(_os.environ)
+    forge_submit._apply_fellow_env(env)
+    # child env rewritten...
+    assert env["ANTHROPIC_BASE_URL"] == "https://host/api/v1/llm-proxy"
+    # ...but the process-global env is untouched (no leak to claude/codex).
+    assert _os.environ["ANTHROPIC_BASE_URL"] == "https://host/llm-gateway"
