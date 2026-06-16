@@ -310,7 +310,11 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
     restore_info) or None when the repo is not a usable git checkout.
 
     Safety:
-      - refuse if HEAD is already on a forge/ temp branch (prior crashed run),
+      - if HEAD is already on a forge/ temp branch (a prior crashed/SIGKILL'd
+        run that never restored), AUTO-RECOVER: force-checkout the repo's
+        default branch and delete the stale temp branch, then proceed from a
+        pristine baseline (falls back to skip only if the default branch can't
+        be resolved),
       - hold a per-repo lock so concurrent forge runs never interleave,
       - dirty working trees are allowed: restore only touches the source_file
         (per-file write-back, no ``reset --hard``), so other uncommitted changes
