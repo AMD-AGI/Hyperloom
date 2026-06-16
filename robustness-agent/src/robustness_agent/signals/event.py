@@ -192,6 +192,13 @@ def _idempotency_replay_symptoms(
     Coordinator dedup keys only off ``idempotency_key``, so an LLM minting fresh keys
     per attempt with identical payload slips through. Fire when one action+payload hash
     carries ``>= idempotency_replay_threshold`` distinct keys within a tick.
+
+    Args:
+        ctx: Reactor context (supplies the inbox).
+        cfg: Event configuration (replay threshold).
+
+    Returns:
+        Symptoms for offending action+payload groups, possibly empty.
     """
     if not ctx.inbox:
         return []
@@ -260,9 +267,19 @@ def _recover_unsuccessful_symptoms(
     events: list[dict[str, Any]],
     cfg: EventConfig,
 ) -> list[Symptom]:
-    """Emit ``recover_unsuccessful`` (HIGH → delegate(report)) when the latest recover
-    hit ``state == "needs_review"`` — cleanup failed to free VRAM, terminal for this budget.
-    Inspects only the latest recover ``delegated_result``; earlier successes are not second-guessed.
+    """Emit ``recover_unsuccessful`` when the latest recover needs review.
+
+    Fires (HIGH → delegate(report)) when the latest recover hit
+    ``state == "needs_review"`` — cleanup failed to free VRAM, terminal for
+    this budget. Inspects only the latest recover ``delegated_result``;
+    earlier successes are not second-guessed.
+
+    Args:
+        events: Coordinator event dicts in chronological order.
+        cfg: Event configuration (recover lookback window).
+
+    Returns:
+        A list with one :class:`Symptom` when it fires, else empty.
     """
     head = events[-cfg.recover_lookback_events:] if events else []
     latest: dict[str, Any] | None = None
@@ -311,7 +328,17 @@ def _recover_unsuccessful_symptoms(
 
 
 def _is_recover_payload(payload: dict[str, Any]) -> bool:
-    """Best-effort check that a ``delegated_result`` came from ``recover`` (via ``kind`` or recover-only fields)."""
+    """Best-effort check that a ``delegated_result`` came from ``recover``.
+
+    Recognized via ``kind`` / ``action_name`` / ``family`` or recover-only
+    executor fields.
+
+    Args:
+        payload: A ``delegated_result`` payload.
+
+    Returns:
+        ``True`` if the payload appears to be from a recover action.
+    """
     if str(payload.get("kind") or "").strip() == "recover":
         return True
     if str(payload.get("action_name") or "").strip() == "recover":
@@ -373,7 +400,14 @@ def _normalise_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _family_of(payload: dict[str, Any]) -> str:
-    """Best-effort family inference from a delegated_result payload; falls back to ``kind``."""
+    """Infer the action family from a ``delegated_result`` payload.
+
+    Args:
+        payload: A ``delegated_result`` payload.
+
+    Returns:
+        The family string, falling back to ``kind`` and then ``""``.
+    """
     family = payload.get("family")
     if isinstance(family, str) and family.strip():
         return family.strip()
