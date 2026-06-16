@@ -1,21 +1,110 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Model-gate helpers for the CLI: arch / config loading + unsupported-model detection.
+"""Model / GPU gate for the CLI: GPU-type resolution, arch / config loading,
+unsupported-model detection, and the pre-flight gates that run before a session
+is born.
 
-Extracted from ``cli.py`` (phase 4). Pure helpers that read a model's
-config.json and decide whether it is a supported text-generation model on AMD.
-Imports stdlib + cli_gpu only; must not import ``cli`` (one-way dependency).
+Extracted from ``cli.py`` (phase 4) and consolidated in phase 6D: the former
+``cli_gpu.py`` (GPU-type resolution) and ``cli_preflight.py`` (context-window +
+model-config compatibility gates) were folded back in — they answer the same
+"can this model run on this hardware?" question. Imports stdlib only; must not
+import ``cli`` (one-way dependency, mirroring cli_kb / cli_backends).
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
+import os
+import subprocess
+import sys
 from pathlib import Path
 
-from .cli_gpu import _resolve_amd_gpu_type
-
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# GPU-type resolution (folded back from cli_gpu.py; phase 6D). Pure helpers
+# that detect / normalize the AMD GPU type from args, env, and ``rocm-smi``.
+# ---------------------------------------------------------------------------
+_AMD_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x", "mi355x"})
+
+_GFX_TO_RUNNER: dict[str, str] = {
+    # Mirror Magpie/modes/benchmark/image_selector.py:138-140 so we can log resolved value at session start.
+    "gfx942":  "mi300x",
+    "gfx950":  "mi355x",
+}
+
+
+def _gpu_runner_type(gpu_type: str) -> str:
+    """Return the Magpie runner label for a resolved real GPU type.
+
+    MI308X and MI325X share the gfx942 / CDNA3 die with MI300X and reuse
+    the same Magpie benchmark scripts (sglang_mi300x.sh / vllm_mi300x.sh).
+    """
+    normalized = str(gpu_type or "").strip().lower()
+    if normalized in ("mi325x", "mi308x"):
+        return "mi300x"
+    return normalized
+
+def _resolve_gpu_type(
+    user_specified: str,
+    probed: str,
+) -> tuple[str, list[str]]:
+    """Resolve effective gpu_type from a user hint and a hardware probe; pure for unit testing.
+
+    Probe always wins on disagreement (wrong --gpu-type corrupts baseline+KB rows); user value kept
+    only on probe failure. Returns ``(effective_gpu_type, warnings)``; warnings go to stderr to keep
+    the ``HYPERLOOM_LAUNCH`` stdout sentinel clean.
+    """
+    warnings: list[str] = []
+    if probed and user_specified and probed != user_specified:
+        warnings.append(
+            f"WARN: --gpu-type={user_specified!r} disagrees with probed "
+            f"{probed!r}; using probed {probed!r}. The probe wins because "
+            f"Magpie runner_type + KB recipe rows must match the actual "
+            f"hardware to keep baseline numbers comparable across sessions."
+        )
+        return probed, warnings
+    return (probed or user_specified), warnings
+
+def _autodetect_gpu_type() -> str | None:
+    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort)."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["rocm-smi", "--showproductname"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.upper()
+        for tag in ("MI355X", "MI325X", "MI308X", "MI300X"):
+            if tag in out:
+                return tag.lower()
+    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
+        pass
+    try:
+        import torch
+        arch = torch.cuda.get_device_properties(0).gcnArchName
+        gfx = arch.split(":", 1)[0].lower()
+        return _GFX_TO_RUNNER.get(gfx)
+    except Exception:  # noqa: BLE001
+        return None
+
+def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
+    """Resolve the current AMD GPU type, or None when not on AMD/unknown.
+
+    Resolution order (most authoritative first): an explicit ``gpu_type``
+    argument, the ``GPU_TYPE`` env, then a best-effort runtime autodetect.
+    Returning the resolved value only when it names a known AMD runner lets
+    callers gate AMD-specific behaviour on real hardware while still honouring
+    a launcher/CI-supplied ``gpu_type`` even if ``rocm-smi``/torch probing is
+    unavailable at the call site.
+    """
+    for cand in (explicit, os.environ.get("GPU_TYPE")):
+        norm = str(cand or "").strip().lower()
+        if norm in _AMD_GPU_TYPES:
+            return norm
+    detected = (_autodetect_gpu_type() or "").strip().lower()
+    return detected if detected in _AMD_GPU_TYPES else None
 
 _SUPPORTED_ARCH_MARKERS = (
     "ForCausalLM",
@@ -667,4 +756,273 @@ def _detect_incompatible_model_config(
             "(NVIDIA Hopper); no compatible backend exists for AMD/ROCm."
         )
     return None
+
+
+# ===========================================================================
+# Pre-flight gates (folded back from cli_preflight.py; phase 6D). Validate the
+# requested context window + model-config compatibility before a run is born.
+# They drive the detectors above (same "can this model run?" concern), so they
+# live here too. Each persists a stop reason and returns True when the caller
+# should exit.
+# ===========================================================================
+_CONTEXT_HEADROOM_ENV = "HYPERLOOM_CONTEXT_HEADROOM_TOKENS"
+
+_CONTEXT_HEADROOM_DEFAULT = 512
+
+_MAX_MODEL_LEN_HEADROOM = 4096
+
+def _context_headroom_tokens() -> int:
+    """Resolve the context headroom (tokens); env override, else default."""
+    raw = os.environ.get(_CONTEXT_HEADROOM_ENV, "").strip()
+    if not raw:
+        return _CONTEXT_HEADROOM_DEFAULT
+    try:
+        val = int(raw)
+    except ValueError:
+        return _CONTEXT_HEADROOM_DEFAULT
+    return val if val >= 0 else _CONTEXT_HEADROOM_DEFAULT
+
+def _resolve_max_model_len(isl: int, osl: int, model_path: str) -> int:
+    """Resolve ``MAX_MODEL_LEN`` = ISL+OSL+headroom, clamped to ``max_position_embeddings`` (never stretch context)."""
+    desired = int(isl) + int(osl) + _MAX_MODEL_LEN_HEADROOM
+    maxpos = _load_model_max_position_embeddings(model_path)
+    if maxpos:
+        return min(desired, maxpos)
+    return desired
+
+def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bool:
+    """Fail fast when ``max_position_embeddings < ISL+OSL+headroom`` (no --context-length stretch by policy).
+
+    Persists a stop reason and returns True (caller should exit) when the workload does NOT fit; False
+    when it fits or the model's max length is unknown.
+    """
+    isl = int(getattr(args, "isl", 0) or 0)
+    osl = int(getattr(args, "osl", 0) or 0)
+    if isl <= 0 or osl <= 0:
+        return False
+    maxpos = _load_model_max_position_embeddings(str(getattr(args, "model", "") or ""))
+    if not maxpos:
+        return False
+    headroom = _context_headroom_tokens()
+    required = isl + osl + headroom
+    if maxpos >= required:
+        return False
+
+    reason = (
+        f"model max_position_embeddings={maxpos} < required {required} "
+        f"(ISL={isl} + OSL={osl} + headroom={headroom}). The workload exceeds "
+        f"the model context window; every request would 400. Refusing to run "
+        f"(no --context-length override by policy). Lower ISL/OSL for this "
+        f"model, or lower {_CONTEXT_HEADROOM_ENV} if the headroom is too "
+        f"conservative (it is added to `required`, so raising it makes "
+        f"admission stricter, not looser)."
+    )
+    # Persist the stop reason so CI / the robustness monitor read it from state.json instead of the log.
+    try:
+        from .orchestrator.shared_state import SharedState
+        from .orchestrator.action_executors.report import (
+            _build_summary_dict,
+            _format_md,
+        )
+        from .session_paths import reports_dir
+
+        state = SharedState.load_or_init(session_dir)
+        # Validated writer keeps the vocab-closed invariant Inv-8.3 (term registered in STOP_REASON_VOCAB).
+        state.set_stop_reason("model_context_window_too_small")
+        state.closing_phase = True
+        state.save(session_dir)
+        summary = _build_summary_dict(state, {}, [], external_baseline=None)
+        summary["stop_detail"] = reason
+        rdir = reports_dir(session_dir)
+        rdir.mkdir(parents=True, exist_ok=True)
+        (rdir / "final.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8",
+        )
+        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
+        print(
+            f"WARNING: failed to persist context-window stop report: {exc!r}",
+            file=sys.stderr,
+        )
+    # Delivery-artifact parity: emit session_breakdown.json here too since fail-fast exits before
+    # coordinator.run()'s finally, so CI's delivery contract sees a clean skip not "Missing artifacts".
+    try:
+        from .breakdown import write_breakdown_json
+        write_breakdown_json(session_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
+        print(
+            f"WARNING: failed to write session_breakdown.json on context "
+            f"fail-fast: {exc!r}",
+            file=sys.stderr,
+        )
+    print(f"ERROR: {reason}", file=sys.stderr)
+    return True
+
+def _preflight_model_config_compat(
+    args: argparse.Namespace, session_dir: Path,
+) -> bool:
+    """Fail fast when the model config is statically known to be incompatible.
+
+    Catches configs that crash vLLM/transformers at load (corrupt config.json,
+    or a RoPE block without any max-position field) so we persist a clear stop
+    reason instead of booting a server that dies cryptically in engine init.
+
+    Returns True when incompatible (caller should exit); False otherwise.
+    """
+    model = str(getattr(args, "model", "") or "")
+    detail = _detect_incompatible_model_config(
+        model, str(getattr(args, "gpu_type", "") or "") or None,
+    )
+    if detail is None:
+        return False
+    name = Path(model).name or model
+    reason = (
+        f"Model '{name}' has an incompatible config: {detail} Refusing to run "
+        f"before the heavy server bring-up. Upgrade the framework/transformers "
+        f"to a version that supports this model, or skip it on this hardware."
+    )
+    try:
+        from .orchestrator.shared_state import SharedState
+        from .orchestrator.action_executors.report import (
+            _build_summary_dict,
+            _format_md,
+        )
+        from .session_paths import reports_dir
+
+        state = SharedState.load_or_init(session_dir)
+        state.set_stop_reason("model_config_incompatible")
+        state.closing_phase = True
+        state.save(session_dir)
+        summary = _build_summary_dict(state, {}, [], external_baseline=None)
+        summary["stop_detail"] = reason
+        rdir = reports_dir(session_dir)
+        rdir.mkdir(parents=True, exist_ok=True)
+        (rdir / "final.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8",
+        )
+        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
+        print(
+            f"WARNING: failed to persist model-config stop report: {exc!r}",
+            file=sys.stderr,
+        )
+    try:
+        from .breakdown import write_breakdown_json
+        write_breakdown_json(session_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
+        print(
+            f"WARNING: failed to write session_breakdown.json on config "
+            f"fail-fast: {exc!r}",
+            file=sys.stderr,
+        )
+    print(f"ERROR: {reason}", file=sys.stderr)
+    return True
+
+def _preflight_unsupported_model_arch(
+    args: argparse.Namespace, session_dir: Path,
+) -> bool:
+    """Gate multimodal/vision models before expensive bring-up.
+
+    Best-effort (an unreadable config.json is not a hard block). Three outcomes:
+
+    * plain text model → returns False (run proceeds normally).
+    * ``text_coercible`` (multimodal signal but a text decoder exists) →
+      when ``--allow-mm-text-fallback`` is on (default), records a degraded-mode
+      warning on SharedState, emits a loud stderr/log warning, and returns False
+      so the run proceeds on the text path. When the flag is off, falls through
+      to fail-fast.
+    * ``vision_only`` (true VLM / unclassifiable) → persists
+      ``stop_reason=unsupported_model_arch`` and returns True (caller exits).
+    """
+    model = str(getattr(args, "model", "") or "")
+    hit = _detect_unsupported_model(model)
+    if hit is None:
+        return False
+
+    name = Path(model).name or model
+    arch = hit.get("architecture") or "<unknown>"
+    mt = hit.get("model_type") or "<unknown>"
+    verdict = str(hit.get("verdict") or _VERDICT_VISION_ONLY)
+    allow_fallback = bool(getattr(args, "allow_mm_text_fallback", True))
+
+    if verdict == _VERDICT_TEXT_COERCIBLE and allow_fallback:
+        warning = (
+            f"DEGRADED MODE: model '{name}' carries a multimodal signal "
+            f"({hit.get('signal', 'multimodal config')}; architecture '{arch}', "
+            f"model_type '{mt}') but exposes a text-generation path. Hyperloom "
+            f"is running it on the TEXT path only — any image/audio inputs are "
+            f"ignored, so benchmark numbers reflect the text decoder alone. "
+            f"Pass --no-allow-mm-text-fallback to fail-fast instead."
+        )
+        print(f"WARNING: {warning}", file=sys.stderr)
+        log.warning(warning)
+        try:
+            from .orchestrator.shared_state import SharedState
+
+            state = SharedState.load_or_init(session_dir)
+            state.degraded_mode = True
+            state.model_warnings = list(state.model_warnings or []) + [{
+                "kind": "multimodal_text_fallback",
+                "model_name": name,
+                "architecture": arch,
+                "model_type": mt,
+                "signal": str(hit.get("signal") or ""),
+                "detail": warning,
+            }]
+            state.save(session_dir)
+        except Exception as exc:  # noqa: BLE001 — never block the run on advisory write
+            print(
+                f"WARNING: failed to persist degraded-mode marker: {exc!r}",
+                file=sys.stderr,
+            )
+        return False
+
+    reason = (
+        f"Unsupported model '{name}': architecture '{arch}' (model_type "
+        f"'{mt}') is not a supported text-generation model. Hyperloom only "
+        f"supports decoder-only causal LM models (architectures containing "
+        f"ForCausalLM or LMHeadModel). Rejected because: "
+        f"{hit.get('signal', 'unknown architecture')}. Submit a "
+        f"text-generation checkpoint instead."
+    )
+    # Persist the stop reason so CI / the robustness monitor read it from state.json instead of the log.
+    try:
+        from .orchestrator.shared_state import SharedState
+        from .orchestrator.action_executors.report import (
+            _build_summary_dict,
+            _format_md,
+        )
+        from .session_paths import reports_dir
+
+        state = SharedState.load_or_init(session_dir)
+        # Validated writer keeps the vocab-closed invariant Inv-8.3 (term registered in STOP_REASON_VOCAB).
+        state.set_stop_reason("unsupported_model_arch")
+        state.closing_phase = True
+        state.save(session_dir)
+        summary = _build_summary_dict(state, {}, [], external_baseline=None)
+        summary["stop_detail"] = reason
+        rdir = reports_dir(session_dir)
+        rdir.mkdir(parents=True, exist_ok=True)
+        (rdir / "final.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8",
+        )
+        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
+        print(
+            f"WARNING: failed to persist unsupported-model stop report: {exc!r}",
+            file=sys.stderr,
+        )
+    # Delivery-artifact parity: emit session_breakdown.json here too since fail-fast exits before
+    # coordinator.run()'s finally, so CI's delivery contract sees a clean skip not "Missing artifacts".
+    try:
+        from .breakdown import write_breakdown_json
+        write_breakdown_json(session_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
+        print(
+            f"WARNING: failed to write session_breakdown.json on unsupported-"
+            f"model fail-fast: {exc!r}",
+            file=sys.stderr,
+        )
+    print(f"ERROR: {reason}", file=sys.stderr)
+    return True
 
