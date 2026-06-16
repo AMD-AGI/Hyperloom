@@ -17,6 +17,7 @@ import re
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import time
@@ -1094,6 +1095,32 @@ def _model_is_moe(model_path: str) -> bool:
     return False
 
 
+# Gemma2 forward builds ``normalizer = torch.tensor(...)`` (a host scalar) on
+# every call. The TraceLens kernel_shape_profiler patch activates inside the
+# CUDA-graph capture critical section, so that host construct runs during HIP
+# stream capture and raises ``hipErrorStreamCaptureUnsupported`` -> capture
+# fails -> roofline produces no ceiling. Callers skip shape-discovery for
+# Gemma2 to keep CUDA graph while avoiding the crash.
+_GEMMA2_ARCH_MARKERS = frozenset({"gemma2forcausallm"})
+
+
+def _model_is_gemma2(model_path: str) -> bool:
+    """Best-effort detect a Gemma2 model from config.json (top level or text_config)."""
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return False
+    candidates = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    for cfg in candidates:
+        if str(cfg.get("model_type") or "").strip().lower() == "gemma2":
+            return True
+        if any(a.lower() in _GEMMA2_ARCH_MARKERS for a in _config_architectures(cfg)):
+            return True
+    return False
+
+
 def _context_headroom_tokens() -> int:
     """Resolve the context headroom (tokens); env override, else default."""
     raw = os.environ.get(_CONTEXT_HEADROOM_ENV, "").strip()
@@ -1216,9 +1243,14 @@ _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 # mimo_v2_flash: confirmed from XiaomiMiMo-MiMo-V2-Flash server.log ("model of
 # type mimo_v2_flash to instantiate a model of type ." + Unknown attention
 # backend TRITON) — the unrecognized arch leaves an empty model type.
-_UNRECOGNIZED_MODEL_TYPES = frozenset({"glm4_moe_lite", "mimo_v2_flash"})
+# deepseek_v4: confirmed from DeepSeek-V4-Flash server.log ModelConfig
+# validation failure. ministral3: vLLM registry raises KeyError('ministral3').
+_UNRECOGNIZED_MODEL_TYPES = frozenset({
+    "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash", "ministral3",
+})
 _UNRECOGNIZED_ARCHITECTURES = frozenset({
-    "glm4moeliteforcausallm", "mimov2flashforcausallm",
+    "deepseekv4forcausallm", "glm4moeliteforcausallm",
+    "mimov2flashforcausallm",
 })
 
 # Phi-3 su/longrope rope_scaling: Phi3Config._rope_scaling_validation() requires
@@ -1370,19 +1402,87 @@ def _detect_unrecognized_architecture(data: dict) -> str | None:
     Hardware-agnostic: the ModelConfig pydantic validation rejects the unknown
     model_type with a ValidationError in engine init on any GPU vendor.
     """
-    model_type = str(data.get("model_type") or "").strip().lower()
-    arches = {a.lower() for a in _config_architectures(data)}
-    if (
-        model_type in _UNRECOGNIZED_MODEL_TYPES
-        or arches & _UNRECOGNIZED_ARCHITECTURES
-    ):
-        label = model_type or (next(iter(arches), "") if arches else "?")
-        return (
-            f"model type '{label}' is not recognized by Transformers/sglang's "
-            f"ModelConfig; engine init raises a pydantic ValidationError "
-            f"('does not recognize this architecture'). Needs a framework "
-            f"upgrade or a registered architecture mapping."
-        )
+    scopes = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        scopes.append(nested)
+    for scope in scopes:
+        model_type = str(scope.get("model_type") or "").strip().lower()
+        arches = {a.lower() for a in _config_architectures(scope)}
+        if (
+            model_type in _UNRECOGNIZED_MODEL_TYPES
+            or arches & _UNRECOGNIZED_ARCHITECTURES
+        ):
+            label = model_type or (next(iter(arches), "") if arches else "?")
+            return (
+                f"model type '{label}' is not recognized by Transformers/"
+                f"sglang/vLLM's ModelConfig or model registry; engine init "
+                f"raises a validation/registry error. Needs a framework "
+                f"upgrade or a registered architecture mapping."
+            )
+    return None
+
+
+_VOCAB_WEIGHT_NAMES = (
+    "embed_tokens.weight",
+    "wte.weight",
+    "word_embeddings.weight",
+    "lm_head.weight",
+)
+_SAFETENSORS_HEADER_LIMIT = 64 * 1024 * 1024
+
+
+def _read_safetensors_header(path: Path) -> dict | None:
+    """Read only the safetensors JSON header; never materialize tensor data."""
+    try:
+        with path.open("rb") as f:
+            raw_len = f.read(8)
+            if len(raw_len) != 8:
+                return None
+            header_len = struct.unpack("<Q", raw_len)[0]
+            if header_len <= 0 or header_len > _SAFETENSORS_HEADER_LIMIT:
+                return None
+            header = json.loads(f.read(header_len))
+    except (OSError, json.JSONDecodeError, ValueError, struct.error):
+        return None
+    return header if isinstance(header, dict) else None
+
+
+def _detect_vocab_weight_shape_mismatch(model_path: str, data: dict) -> str | None:
+    """Return a reason when config vocab_size disagrees with model weights."""
+    expected = data.get("vocab_size")
+    nested = data.get("text_config")
+    if not isinstance(expected, int) and isinstance(nested, dict):
+        expected = nested.get("vocab_size")
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected <= 0:
+        return None
+
+    mdir = Path(model_path)
+    for st_path in sorted(mdir.glob("*.safetensors")):
+        header = _read_safetensors_header(st_path)
+        if not header:
+            continue
+        for name, meta in header.items():
+            if name == "__metadata__" or not isinstance(meta, dict):
+                continue
+            if not any(name.endswith(suffix) for suffix in _VOCAB_WEIGHT_NAMES):
+                continue
+            shape = meta.get("shape")
+            if not (
+                isinstance(shape, list)
+                and shape
+                and isinstance(shape[0], int)
+                and not isinstance(shape[0], bool)
+            ):
+                continue
+            actual = shape[0]
+            if actual != expected:
+                return (
+                    f"config.json vocab_size={expected} but {st_path.name}:"
+                    f"{name} has vocab dimension {actual}; sglang asserts "
+                    f"loaded_weight.shape[output_dim] matches org_vocab_size "
+                    f"during weight loading."
+                )
     return None
 
 
@@ -1492,6 +1592,9 @@ def _detect_incompatible_model_config(
     unrecognized_reason = _detect_unrecognized_architecture(data)
     if unrecognized_reason is not None:
         return unrecognized_reason
+    vocab_shape_reason = _detect_vocab_weight_shape_mismatch(model_path, data)
+    if vocab_shape_reason is not None:
+        return vocab_shape_reason
     # Missing tokenizer artifacts: hardware-agnostic; the degraded fallback
     # tokenizer's empty-prompt warmup triggers an aiter M=0 SIGFPE.
     tokenizer_reason = _detect_missing_tokenizer_files(model_path, data)
