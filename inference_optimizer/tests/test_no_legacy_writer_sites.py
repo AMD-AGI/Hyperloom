@@ -42,6 +42,10 @@ ALLOWED_FILES: dict[str, str] = {
         "GridVariant(extra_sglang_args=...) back-compat kwarg",
     "inference_optimizer/orchestrator/shared_state.py":
         "_migrate_legacy_extra_sglang_args_keys walker + state.json transform",
+    "inference_optimizer/orchestrator/shared_state_kernel.py":
+        "kernel-decision write-owner functions extracted verbatim from "
+        "shared_state.py (phase 2); same legacy extra_sglang_args read surface "
+        "as the SharedState methods they came from",
     "inference_optimizer/orchestrator/action_executors/_explore_roofline_filter.py":
         "roofline filter reads canonical extra_server_args with a "
         "read-only legacy extra_sglang_args fallback for pre-rename "
