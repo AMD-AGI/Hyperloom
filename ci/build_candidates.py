@@ -318,9 +318,6 @@ def classify_candidate(
         return None
 
     pipeline_tag = (info.get("pipeline_tag") or "").strip()
-    if pipeline_tag and pipeline_tag != "text-generation":
-        log.info("skip %s: pipeline_tag=%s", repo_id, pipeline_tag)
-        return None
 
     try:
         config = hf.model_config(repo_id)
