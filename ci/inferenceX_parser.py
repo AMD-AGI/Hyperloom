@@ -198,7 +198,17 @@ def synthesize_entry_from_ci_config(model_cfg: dict) -> dict:
 
 
 def parse_model_entry(entry: dict) -> dict:
-    """Extract structured config from an amd-master.yaml model entry."""
+    """Extract structured config from an amd-master.yaml model entry.
+
+    Supports both ``seq-len-configs`` (old) and
+    ``scenarios.fixed-seq-len`` (new) layouts.
+
+    Args:
+        entry: A single model entry from the InferenceX YAML.
+
+    Returns:
+        A structured config dict (model name, seq-len pairs, search space).
+    """
     # Support both seq-len-configs (old) and scenarios.fixed-seq-len (new).
     seq_configs = (
         entry.get("seq-len-configs")
