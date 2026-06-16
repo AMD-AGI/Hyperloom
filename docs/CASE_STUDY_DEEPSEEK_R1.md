@@ -58,7 +58,7 @@ All values in total tok/s/GPU. ISL=1024, OSL=1024, TP=8, FP8.
 
 ## Getting Faster Over Time
 
-Part of the agent's speed on DeepSeek-R1 came from prior runs. The knowledge base already contained entries like "torch.compile is incompatible with MLA+FP8" and "GEAK yields 0% E2E on vendor aiter kernels despite +44% micro-benchmark gains" — both learned from earlier models. These eliminated two entire optimization branches upfront, letting the agent focus immediately on config-space exploration and speculative decoding.
+Part of the agent's speed on DeepSeek-R1 came from prior runs. The recipe knowledge base (KB) already contained entries like "torch.compile is incompatible with MLA+FP8" and "GEAK yields 0% E2E on vendor aiter kernels despite +44% micro-benchmark gains" — both learned from earlier models. These eliminated two entire optimization branches upfront, letting the agent focus immediately on config-space exploration and speculative decoding.
 
 DeepSeek-R1's findings fed back: the MTP scheduling interaction (TTFT spike under speculative decoding at high concurrency, resolved by scheduler tuning) and the observation that `--num-continuous-decode-steps` is model-dependent (+13.9% on R1, 0% on gpt-oss) are now in the KB. The next MoE+MLA model will start with these priors baked in.
 
@@ -76,5 +76,5 @@ bash scripts/run_sweep.sh                          # Full concurrency sweep
 ## Further Reading
 
 - [DeepSeek-R1 README](https://github.com/AMD-AGI/Agentic-InferenceX/tree/main/DeepSeek-R1-0528-optimized) — full reproduction guide with ISL/OSL sweeps
-- [Optimization Report](https://github.com/AMD-AGI/Agentic-InferenceX/blob/main/DeepSeek-R1-0528-optimized/docs/OPTIMIZATION_REPORT_MTP.md) — complete DFS action stack with every config tested
+- [Optimization Report](https://github.com/AMD-AGI/Agentic-InferenceX/blob/main/DeepSeek-R1-0528-optimized/docs/OPTIMIZATION_REPORT_MTP.md) — complete action stack with every config tested
 - [B200 Comparison](https://github.com/AMD-AGI/Agentic-InferenceX/blob/main/DeepSeek-R1-0528-optimized/docs/NVIDIA_B200_COMPARISON.md) — detailed side-by-side analysis
