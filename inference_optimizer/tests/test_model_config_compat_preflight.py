@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import struct
 from pathlib import Path
 
 import pytest
@@ -146,6 +147,39 @@ def test_detect_mimo_v2_flash_unrecognized_blocked(tmp_path):
     )
     reason = cli._detect_incompatible_model_config(str(m))
     assert reason is not None and "not recognized" in reason
+
+
+def test_detect_deepseek_v4_unrecognized_blocked(tmp_path):
+    # DeepSeek-V4 currently fails sglang ModelConfig validation during server init.
+    m = tmp_path / "deepseek_v4"
+    _write_config(
+        m,
+        model_type="deepseek_v4",
+        architectures=["DeepseekV4ForCausalLM"],
+        max_position_embeddings=1048576,
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "not recognized" in reason
+
+
+def test_detect_nested_ministral3_unrecognized_blocked(tmp_path):
+    # Mistral3 wrapper exposes text_config.model_type=ministral3; vLLM raises KeyError.
+    m = tmp_path / "mistral3"
+    _write_config(
+        m,
+        model_type="mistral3",
+        architectures=["Mistral3ForConditionalGeneration"],
+        image_token_index=10,
+        text_config={
+            "model_type": "ministral3",
+            "max_position_embeddings": 393216,
+            "vocab_size": 131072,
+            "hidden_size": 5120,
+            "num_hidden_layers": 40,
+        },
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "ministral3" in reason
 
 
 def test_detect_glm4_moe_not_blocked(tmp_path):
@@ -458,6 +492,40 @@ def test_detect_amd_native_fp8_not_blocked(tmp_path):
         quantization_config={"quant_method": "fp8"},
     )
     assert cli._detect_incompatible_model_config(str(m), gpu_type="mi300x") is None
+
+
+def _write_safetensors_header(model_dir: Path, tensors: dict) -> None:
+    header = json.dumps(tensors).encode("utf-8")
+    with (model_dir / "model.safetensors").open("wb") as f:
+        f.write(struct.pack("<Q", len(header)))
+        f.write(header)
+
+
+def test_detect_vocab_shape_mismatch_blocks(tmp_path):
+    m = tmp_path / "qwen_vocab_mismatch"
+    _write_config(
+        m,
+        model_type="qwen2",
+        architectures=["Qwen2ForCausalLM"],
+        max_position_embeddings=4096,
+        vocab_size=152064,
+    )
+    _write_safetensors_header(m, {
+        "model.embed_tokens.weight": {
+            "dtype": "BF16",
+            "shape": [151936, 1536],
+            "data_offsets": [0, 0],
+        },
+        "lm_head.weight": {
+            "dtype": "BF16",
+            "shape": [151936, 1536],
+            "data_offsets": [0, 0],
+        },
+    })
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None
+    assert "vocab_size=152064" in reason
+    assert "151936" in reason
 
 
 def test_detect_unregistered_custom_config_blocks(tmp_path):
