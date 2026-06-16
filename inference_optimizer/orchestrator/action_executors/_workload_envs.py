@@ -374,7 +374,7 @@ def materialize_config_with_envs(
             # torch.tensor in forward during HIP stream capture). Disable
             # shape-discovery for Gemma2 so capture/roofline still run.
             if _shape_disc:
-                from ...cli import _model_is_gemma2
+                from ...model_config_utils import _model_is_gemma2
                 if _model_is_gemma2(str(bench.get("model") or "")):
                     _shape_disc = False
                     log.info(
