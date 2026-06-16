@@ -767,6 +767,19 @@ class ExploreExecutor:
         gain_unlockable = {"REVERT", "KEEP_UNSTABLE", "no_promote"}
 
         def _is_blocked(entry: Any) -> bool:
+            """Whether a tested-ledger entry should still be skipped this round.
+
+            KEEP'd and infra-failed entries stay blocked; gain-unlockable
+            outcomes (REVERT / KEEP_UNSTABLE / no_promote) unblock once the
+            current KEEP bar drops to or below their prior measured gain.
+
+            Args:
+                entry (Any): A ``tested`` ledger entry (expected dict).
+
+            Returns:
+                bool: ``True`` when the variant should remain skipped, ``False``
+                when it may be re-tested this round.
+            """
             if not isinstance(entry, dict):
                 return True
             if str(entry.get("outcome") or "") in gain_unlockable:

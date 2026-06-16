@@ -193,7 +193,16 @@ def _compute_within_and_gap(
     peak: float,
     achieved: float,
 ) -> tuple[float | None, float | None]:
-    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both ``None`` when either input is non-positive."""
+    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both ``None`` when either input is non-positive.
+
+    Args:
+        peak: The theoretical peak throughput (tok/s).
+        achieved: The achieved throughput (tok/s).
+
+    Returns:
+        A ``(within_roofline_pct, gap_to_roofline_pct)`` tuple, both ``None``
+        when either input is non-positive.
+    """
     if peak <= 0 or achieved <= 0:
         return None, None
     within = round(achieved / peak * 100.0, 2)
@@ -214,6 +223,22 @@ def build_roofline_snapshot(
     """Materialise one side (baseline or latest) of the comparison.
 
     ``theoretical_peak_tok_per_sec`` is the primary decode roofline ceiling (from ``roofline_ceiling.compute_roofline_breakdown_from_state``); mem/cmp sides + ``roofline_bound_kind`` persist which side dominated, and ``achieved_tok_per_sec`` is the snapshot-time ``output_throughput``. All default to 0/"unknown" so legacy callers yield ``None`` in derived pct fields.
+
+    Args:
+        snapshot_id: The snapshot identifier, or ``None``.
+        ts: The capture timestamp string.
+        analysis_md_path: Path to the TraceLens ``analysis.md``; when empty the
+            workload/top-kernel fields are left unset.
+        theoretical_peak_tok_per_sec: Primary decode roofline ceiling (tok/s).
+        achieved_tok_per_sec: Snapshot-time ``output_throughput`` (tok/s).
+        mem_ceiling_tok_per_sec: Memory-side roofline ceiling (tok/s).
+        cmp_ceiling_tok_per_sec: Compute-side roofline ceiling (tok/s).
+        bound_kind: Which side dominated (e.g. ``memory`` / ``compute``).
+
+    Returns:
+        A snapshot dict with the ceiling, achieved throughput, derived
+        within/gap percentages, and workload/top-kernel fields parsed from the
+        analysis.md when available.
     """
     within, gap = _compute_within_and_gap(
         peak=theoretical_peak_tok_per_sec,
@@ -309,6 +334,14 @@ def build_roofline_comparison_from_history(
 
     Append-only: ``snapshots[0]`` is baseline, ``snapshots[-1]`` the latest refresh.
     Same snapshot_id → single_snapshot mode; distinct ids → before_after with ``delta``. ``None`` when history empty.
+
+    Args:
+        snapshots: The append-only snapshot history, or ``None``.
+
+    Returns:
+        The ``roofline_comparison`` block (``mode`` / ``baseline`` / ``latest``
+        and, in before_after mode, a ``delta``), or ``None`` when the history
+        is empty.
     """
     snapshots = list(snapshots or [])
     if not snapshots:
@@ -399,7 +432,16 @@ def _fmt_pct_cell(v: float | None) -> str:
 
 
 def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
-    """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns)."""
+    """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns).
+
+    Args:
+        cmp: The roofline-comparison dict built by
+            :func:`build_roofline_comparison_from_history`.
+
+    Returns:
+        The markdown table lines; ``single_snapshot`` mode renders a single
+        Metric/Value table while ``before_after`` renders Base/Opt/Δ columns.
+    """
 
     def cell(v: float | None) -> str:
         """Format a percentage value for a table cell.
@@ -525,6 +567,13 @@ def dominant_direction(snapshot: dict[str, Any] | None) -> tuple[str, float]:
 
     Reads compute/idle/comm percentages and folds a ``memory`` bound kind in as
     a tie-breaker; returns ``("", 0.0)`` when no usable numbers are present.
+
+    Args:
+        snapshot: A single roofline snapshot dict, or ``None``.
+
+    Returns:
+        A ``(direction, pct)`` tuple for the most-saturated direction, or
+        ``("", 0.0)`` when no usable numbers are present.
     """
     if not isinstance(snapshot, dict):
         return "", 0.0
@@ -558,6 +607,16 @@ def build_profiler_digest(
     previous snapshot, the hottest kernels, a suggested specialist lever for the
     dominant direction, and the reusable native kernel ids. Returns ``""`` when
     no profiler data is available; never raises.
+
+    Args:
+        snapshots: The roofline snapshot history, or ``None``.
+        trace_analyze: The latest ``trace_analyze`` payload (hot kernels +
+            reusable kernel ids), or ``None``.
+        top_n: Maximum number of hot kernels to surface.
+
+    Returns:
+        The rendered profiler block, or ``""`` when no profiler data is
+        available.
     """
     try:
         snaps = [s for s in (snapshots or []) if isinstance(s, dict)]
@@ -567,6 +626,14 @@ def build_profiler_digest(
         latest = snaps[-1] if snaps else {}
 
         def _pct(v: Any) -> str:
+            """Format a value as a one-decimal percentage, or ``—`` when not numeric.
+
+            Args:
+                v (Any): The candidate percentage value.
+
+            Returns:
+                str: The formatted percentage, or ``"—"`` when not numeric.
+            """
             return f"{float(v):.1f}%" if isinstance(v, (int, float)) else "—"
 
         bound_kind = str(latest.get("roofline_bound_kind") or "").strip() or "unknown"
