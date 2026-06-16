@@ -4,11 +4,10 @@
 
 This is the *second* of the two parallel trace sinks. The first -- the
 local ``reports/trace/*.jsonl`` ledger -- is always written and its format
-is unchanged. This module mirrors each in-process LLM call into Langfuse as
-a Generation *while the run is live*, plus a session-end ``flush_session``
-that backfills the out-of-process children (geak / oob / robustness /
-specialist subprocess, which only surface their tokens in ``ext/*.jsonl``
-after the parent parses them) and the KEEP/REVERT decision Scores.
+is unchanged. This module mirrors each LLM call into Langfuse as a Generation
+*while the run is live*, plus a session-end ``flush_session`` that backfills
+the recipe-KB / specialist-intel audit spans and the KEEP/REVERT decision
+Scores.
 
 Three gates decide whether anything is sent (all must pass, else no-op):
 
@@ -38,8 +37,8 @@ from typing import Any
 from ...session_paths import (
     decision_trace_path,
     recipe_snapshot_audit_jsonl,
+    specialist_intel_path,
     trace_dir,
-    trace_ext_dir,
 )
 from . import langfuse_mapping as lfmap
 from .trace_env import (
@@ -340,10 +339,10 @@ class LangfuseEmitter:
             "generations_token_only": 0,
             "scores_sent": 0,           # decision Scores created (span + trace)
             "spans_opened": 0,          # phase + agent spans created
-            "ext_shards_read": 0,       # out-of-process ext/*.jsonl files swept
             "breakdown_recorded": 0,    # 1 once the full SBD JSON was attached
             "kb_spans_sent": 0,         # KB trace spans (assess/priors/recipe)
             "recipe_audit_read": 0,     # recipe_snapshot/.audit.jsonl rows swept
+            "specialist_intel_read": 0, # specialist_intel.jsonl rows swept
             "errors": 0,                # swallowed send failures
         }
         self._flushed = False
@@ -561,7 +560,14 @@ class LangfuseEmitter:
         base = token_row or conv_row or {}
         phase = lfmap.phase_of(base)
         agent = lfmap.agent_of(base)
-        start = lfmap.parse_ts(base.get("ts"))
+        # ``ts`` is stamped at write time (just after the model call returns),
+        # so it approximates the call END. When the token row carries a
+        # measured ``latency_ms`` we backdate the generation start to
+        # ``ts - latency`` and end at ``ts`` so the leaf shows a real duration
+        # instead of a zero-width point. Without a latency we fall back to the
+        # legacy behaviour (start == end == ts).
+        end = lfmap.parse_ts(base.get("ts"))
+        start = lfmap.generation_start(end, (token_row or {}).get("latency_ms"))
         has_text = conv_row is not None
         try:
             parent = self._ensure_agent_span(phase, agent, start)
@@ -576,7 +582,7 @@ class LangfuseEmitter:
                 metadata=lfmap.generation_metadata(base, phase=phase, has_text=has_text),
                 usage_details=lfmap.usage_details(token_row or {}),
             )
-            _end_obs(gen, start)
+            _end_obs(gen, end)
             self._counts["generations_sent"] += 1
             if token_row is not None and conv_row is not None:
                 self._counts["generations_paired"] += 1
@@ -590,15 +596,15 @@ class LangfuseEmitter:
 
     # -- session-end reconcile ------------------------------------------
     def flush_session(self) -> None:
-        """Emit leftovers + out-of-process Generations + decision Scores, then flush.
+        """Emit leftover halves + audit spans + decision Scores, then flush.
 
         Run once at session end (from the Coordinator/CLI). Safe to call when
         disabled (no-op). **Idempotent**: a second call is a no-op for the
         push side -- it only re-writes the receipt. Without this guard a
-        re-run would re-scan ``ext/*.jsonl`` + ``decision_trace`` and re-emit
-        the same out-of-process Generations / Scores, producing duplicates in
-        Langfuse (the derived trace_id keeps re-runs on one trace, but the
-        children would still double up).
+        re-run would re-scan the audit logs + ``decision_trace`` and re-emit
+        the same audit spans / Scores, producing duplicates in Langfuse (the
+        derived trace_id keeps re-runs on one trace, but the children would
+        still double up).
         """
         if not self._enabled:
             # Still drop a receipt so the breakdown can report *why* nothing
@@ -611,8 +617,8 @@ class LangfuseEmitter:
             return
         try:
             self._flush_pending_halves()
-            self._flush_ext_shards()
             self._flush_recipe_kb_audit()
+            self._flush_specialist_intel()
             self._flush_decision_scores()
             self._close_spans()
         except Exception:  # noqa: BLE001
@@ -715,22 +721,6 @@ class LangfuseEmitter:
                 conv_row=parts.get("conv"),
             )
 
-    def _flush_ext_shards(self) -> None:
-        """Backfill out-of-process children's token rows from ext/*.jsonl.
-
-        Children (geak / oob / robustness / specialist subprocess) never
-        connect to Langfuse; their tokens land in ``ext/<component>-<pid>.
-        jsonl`` once the parent parses them. We emit those as text-less
-        Generations here so the trace still accounts their spend.
-        """
-        ext_dir = trace_ext_dir(self.session_dir)
-        if not ext_dir.is_dir():
-            return
-        for shard in sorted(ext_dir.glob("*.jsonl")):
-            self._counts["ext_shards_read"] += 1
-            for row in _load_jsonl(shard):
-                self._emit_generation(token_row=row, conv_row=None)
-
     def _flush_recipe_kb_audit(self) -> None:
         """Backfill recipe-snapshot / gbrain remote reads from the audit log.
 
@@ -739,8 +729,7 @@ class LangfuseEmitter:
         design). Each row becomes a ``kb:recipe_snapshot:<method>`` span under
         the ``recipe_kb`` agent so the trace shows which backend served the
         warm-start recipe, the request, and how it resolved. Read out-of-band
-        at session end (mirrors :meth:`_flush_ext_shards`); idempotent via the
-        ``flush_session`` guard.
+        at session end; idempotent via the ``flush_session`` guard.
         """
         rows = _load_jsonl(recipe_snapshot_audit_jsonl(self.session_dir))
         for row in rows:
@@ -756,6 +745,36 @@ class LangfuseEmitter:
                     "remote": row.get("remote"),
                     "resolution": row.get("resolution"),
                     "hit": bool(row.get("hit")),
+                },
+                ts=row.get("ts"),
+            )
+
+    def _flush_specialist_intel(self) -> None:
+        """Backfill specialist intel/tool calls as per-call ``intel:<tool>`` spans.
+
+        The specialist runner appends one row per recovered tool call to
+        ``reports/trace/specialist_intel.jsonl`` (the production specialist is a
+        subprocess with no Langfuse handle, so the parent persists the audit).
+        Each row becomes an ``intel:<tool>`` span under the ``specialist`` agent
+        so the trace shows what a specialist actually read (WebSearch / WebFetch
+        / pr_monitor / cortex_kb / Read / Grep / ...), not just its token total.
+        Read out-of-band at session end (mirrors :meth:`_flush_recipe_kb_audit`);
+        idempotent via the ``flush_session`` guard.
+        """
+        rows = _load_jsonl(specialist_intel_path(self.session_dir))
+        for row in rows:
+            self._counts["specialist_intel_read"] += 1
+            tool = str(row.get("tool") or "tool")
+            self.record_kb_span(
+                name=f"intel:{tool}",
+                agent="specialist",
+                output=row,
+                metadata={
+                    "kind": "specialist_intel",
+                    "tool": tool,
+                    "task_id": row.get("task_id"),
+                    "turn": row.get("turn"),
+                    "query": row.get("query"),
                 },
                 ts=row.get("ts"),
             )
@@ -822,6 +841,18 @@ class LangfuseEmitter:
             return None
         dec = drow.get("decision") or {}
         op_kind = str(dec.get("operation_kind") or "decision")
+        # Per-decision token cost (incl. the specialist + scorer spend now
+        # keyed to this task) so a trace can rank decisions by what they cost.
+        tokens = drow.get("tokens") if isinstance(drow.get("tokens"), dict) else {}
+        cost_total = None
+        try:
+            cost_total = (
+                int(tokens.get("total_in", 0) or 0)
+                + int(tokens.get("total_out", 0) or 0)
+                + int(tokens.get("total_cache", 0) or 0)
+            ) or None
+        except (TypeError, ValueError):
+            cost_total = None
         md = {
             "operation_kind": op_kind,
             "proposer": dec.get("component"),
@@ -837,6 +868,8 @@ class LangfuseEmitter:
             "tick": drow.get("tick"),
             "metrics": dec.get("metrics"),
             "proposal_scores": dec.get("proposal_scores"),
+            "cost_tokens_total": cost_total,
+            "cost_calls": (tokens.get("calls") or None),
         }
         md = {k: v for k, v in md.items() if v is not None}
         try:

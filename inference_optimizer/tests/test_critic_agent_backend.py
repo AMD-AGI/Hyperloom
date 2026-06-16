@@ -24,6 +24,7 @@ from inference_optimizer.orchestrator.backends import (
 from inference_optimizer.orchestrator.backends.base import BackendError
 from inference_optimizer.orchestrator.backends.critic_agent import (
     _extract_review_json,
+    _reviewed_msg_ids_from_bundle,
     _verdict_references_kb,
 )
 from inference_optimizer.protocol.intent import IntentType
@@ -379,6 +380,20 @@ def test_construct_no_creds_no_factory_raises(monkeypatch, tmp_path: Path):
         )
 
 
+def test_reviewed_msg_ids_from_bundle_dedups_and_orders():
+    bundle = {"proposals": [
+        {"msg_id": "m1"}, {"msg_id": "m2"}, {"msg_id": "m1"},  # dup dropped
+        {"no_id": True}, {"msg_id": ""},                        # skipped
+    ]}
+    assert _reviewed_msg_ids_from_bundle(bundle) == ["m1", "m2"]
+
+
+def test_reviewed_msg_ids_from_bundle_none_when_empty():
+    assert _reviewed_msg_ids_from_bundle({"proposals": []}) is None
+    assert _reviewed_msg_ids_from_bundle({}) is None
+    assert _reviewed_msg_ids_from_bundle({"proposals": "nope"}) is None
+
+
 # Case 1: Single proposal → one approve verdict matching the msg_id
 @pytest.mark.asyncio
 async def test_single_proposal_yields_matching_verdict(
@@ -441,6 +456,20 @@ async def test_single_proposal_yields_matching_verdict(
     assert (fake_session_dir / "critic-workdir" / "000000" / "judge_bundle.json").is_file()
     assert (fake_session_dir / "critic-workdir" / "000000" / "review.json").is_file()
     assert (fake_session_dir / "critic-workdir" / "000000" / "emit.json").is_file()
+
+    # Item 2: the critic's token row records the reviewed proposal msg_id(s)
+    # so the collector can attribute the review cost to that decision.
+    import json as _json
+    from inference_optimizer.session_paths import llm_calls_path
+    token_rows = [
+        _json.loads(line)
+        for line in llm_calls_path(fake_session_dir)
+        .read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    critic_rows = [r for r in token_rows if r["component"] == "critic"]
+    assert critic_rows
+    assert critic_rows[0]["reviewed_msg_ids"] == ["abc1"]
 
     # Default kb_mode injected into the runtime env.
     env = runtime_calls[0].env

@@ -352,7 +352,7 @@ def build(
                                         warnings,
                                         default={}))
     # Full-trace: unified token + decision timeline. Joins the per-call
-    # token ledger (reports/trace/llm_calls.jsonl + ext/*.jsonl) with the
+    # token ledger (reports/trace/llm_calls.jsonl) with the
     # KEEP/REVERT journal + dynamic_action dispatch history. Empty (zeroed
     # rollup) on sessions that predate the trace subsystem. Also writes
     # reports/trace/decision_trace.jsonl as a side effect.

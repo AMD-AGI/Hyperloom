@@ -4951,7 +4951,20 @@ class Coordinator:
                 pass
         sys_prompt = await self._load_system_prompt(agent_name)
         tools = self.policy.allowed_tools_for_agent(agent_name)
+        # Stamp the timeline keys onto backends that self-write their trace row
+        # (critic writes its own llm_calls row from inside run()). No-op for
+        # backends without the hook. Best-effort: never block the turn.
+        _set_trace_ctx = getattr(backend, "set_trace_context", None)
+        if callable(_set_trace_ctx):
+            try:
+                _set_trace_ctx(
+                    tick=int(self.shared_state.tick or 0),
+                    phase=(self.shared_state.phase or "") or None,
+                )
+            except Exception:  # noqa: BLE001
+                pass
         # max_turns=0 → backend default; ClaudeBackend needs ≥2 for tool_use→tool_result→final-text.
+        _t0 = time.perf_counter()
         try:
             result: BackendTurnResult = await backend.run(
                 prompt=prompt, system_prompt=sys_prompt, tools=tools, max_turns=0,
@@ -4994,7 +5007,8 @@ class Coordinator:
         # role (orchestration / kernel) whose backend reports usage on
         # metadata (ClaudeBackend + CodexBackend). Best-effort: a trace
         # failure must never affect intent routing.
-        self._trace_reactor_llm_call(agent_name, result)
+        latency_ms = int((time.perf_counter() - _t0) * 1000)
+        self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace (conversations): persist the full, redacted
         # prompt+response for this reactor turn. Separate file from the
         # token ledger; same best-effort posture.
@@ -5007,6 +5021,7 @@ class Coordinator:
 
     def _trace_reactor_llm_call(
         self, agent_name: str, result: BackendTurnResult,
+        *, latency_ms: int | None = None,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a reactor turn.
 
@@ -5041,6 +5056,7 @@ class Coordinator:
                 metadata=metadata,
                 tick=int(self.shared_state.tick or 0),
                 phase=(self.shared_state.phase or "") or None,
+                latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break the loop
@@ -6015,6 +6031,13 @@ class Coordinator:
     ) -> None:
         """Promote an approved proposal into a TaskRegistry entry. Grid executors get current best tput as base_tput (DESIGN §16); approved_variant_names filters the explore grid (None keeps full)."""
         params = dict(pending.payload.get("params") or {})
+        # Carry the proposer's predicted gain onto the task so the post-run
+        # journal write can persist predicted-vs-realized for calibration.
+        # setdefault keeps an explicit per-variant prediction intact.
+        if pending.predicted_gain_pct:
+            params.setdefault(
+                "predicted_gain_pct", float(pending.predicted_gain_pct),
+            )
         # Filter the grid to the Critic-approved subset.
         if (
             pending.action_name == "explore"
@@ -6109,6 +6132,36 @@ class Coordinator:
              "action_name": pending.action_name, "from_agent": pending.from_agent,
              "proposal_msg_id": pending.proposal_msg_id},
         ))
+        # Trace attribution (item 2): record proposal_msg_id -> task_id so the
+        # decision-trace collector can attribute the Critic review call (which
+        # only knows the msg_id) to this decision. Best-effort; never blocks.
+        self._record_proposal_task_map(pending.proposal_msg_id, task.task_id)
+
+    def _record_proposal_task_map(self, proposal_msg_id: str, task_id: str) -> None:
+        """Append one ``{proposal_msg_id -> task_id}`` row to the trace map.
+
+        Lets the collector recover which decision a Critic review served. No-op
+        on empty ids; OSError swallowed so a trace write never breaks the loop.
+        """
+        if not proposal_msg_id or not task_id:
+            return
+        try:
+            from .trace.llm_trace import _now_iso
+            from ..session_paths import proposal_task_map_path
+            path = proposal_task_map_path(self.session_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            row = {
+                "ts": _now_iso(),
+                "proposal_msg_id": str(proposal_msg_id),
+                "task_id": str(task_id),
+            }
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, sort_keys=True) + "\n")
+        except Exception:  # noqa: BLE001 — trace must never break the loop
+            log.debug(
+                "full-trace: proposal_task_map append failed for "
+                "msg_id=%s task_id=%s", proposal_msg_id, task_id, exc_info=True,
+            )
 
     # DELEGATE
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
@@ -7035,6 +7088,9 @@ class Coordinator:
                         "summary": done_payload.get("summary", ""),
                     },
                     proposals=proposals,
+                    task_id=task.task_id,
+                    tick=int(getattr(self.shared_state, "tick", 0) or 0),
+                    phase=(getattr(self.shared_state, "phase", "") or "") or None,
                 )
                 if scores and scores.get("models"):
                     round_entry["ensemble_scores"] = scores
@@ -9103,6 +9159,9 @@ class Coordinator:
             reason=reason,
             task_id=task.task_id,
             tick=int(self.shared_state.tick or 0),
+            predicted_gain_pct=self._predicted_gain(
+                result_dict, getattr(task, "params", None),
+            ),
         ))
 
         if self.cortex_kb is None:
@@ -9206,6 +9265,31 @@ class Coordinator:
         # Strip None for compactness (prompt section uses .get).
         return {k: v for k, v in out.items() if v is not None}
 
+    @staticmethod
+    def _predicted_gain(
+        *sources: dict[str, Any] | None,
+    ) -> float | None:
+        """First parseable ``predicted_gain_pct`` across ordered sources.
+
+        Sources are checked in order (e.g. variant_outcome → variant attrs →
+        task params); a non-zero prediction wins. Returns ``None`` when none
+        carry a usable value so the journal row stays ``predicted``-free for
+        unpredicted (default-grid) changes rather than recording a fake 0.
+        """
+        for src in sources:
+            if not isinstance(src, dict):
+                continue
+            raw = src.get("predicted_gain_pct")
+            if raw is None:
+                continue
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if val != 0.0:
+                return val
+        return None
+
     def _record_fact_per_variant(
         self,
         *,
@@ -9282,6 +9366,11 @@ class Coordinator:
             fingerprint=str(variant_outcome.get("fingerprint") or ""),
             metrics=detail_metrics,
             tick=int(self.shared_state.tick or 0),
+            predicted_gain_pct=self._predicted_gain(
+                variant_outcome,
+                variant_attrs if isinstance(variant_attrs, dict) else None,
+                getattr(task, "params", None),
+            ),
         ))
 
         if self.cortex_kb is None:

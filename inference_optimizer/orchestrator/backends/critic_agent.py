@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
@@ -221,6 +222,29 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
 
 
 # Cross-domain enrichment helper for cross-domain (scope=domains) proposals.
+def _reviewed_msg_ids_from_bundle(judge_bundle: dict[str, Any]) -> list[str] | None:
+    """Pull the proposal ``msg_id``s out of a judge bundle, or ``None``.
+
+    The bundle's ``proposals`` is a list of proposal dicts each carrying a
+    ``msg_id`` (see critic-agent ``inbox_parser.Proposal``). Returns the
+    de-duplicated, order-preserving list of non-empty ids, or ``None`` when the
+    bundle carries none — so a non-review turn leaves the trace field unset.
+    """
+    proposals = judge_bundle.get("proposals") if isinstance(judge_bundle, dict) else None
+    if not isinstance(proposals, list):
+        return None
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in proposals:
+        if not isinstance(p, dict):
+            continue
+        mid = str(p.get("msg_id") or "").strip()
+        if mid and mid not in seen:
+            seen.add(mid)
+            out.append(mid)
+    return out or None
+
+
 def _proposal_scope_literal(proposal: dict[str, Any]) -> str:
     """Read the ``scope`` dial off a proposal (top-level or nested ``params``)."""
     if not isinstance(proposal, dict):
@@ -354,6 +378,18 @@ class CriticAgentBackend:
     # of a module-level function as a method.
     _client: Any = field(default=None, init=False, repr=False)
     _turn_idx: int = field(default=0, init=False, repr=False)
+    # Trace context (tick / phase) the Coordinator sets before each reactor
+    # ``run()`` so the critic's self-written llm_calls row carries the same
+    # timeline keys the in-process reactor trace would have stamped, instead of
+    # relying on ts-window backfill.
+    _trace_tick: int | None = field(default=None, init=False, repr=False)
+    _trace_phase: str | None = field(default=None, init=False, repr=False)
+    # Proposal msg_ids reviewed by the current turn, snapshotted from the
+    # judge bundle so the self-written llm_calls row can be attributed (via
+    # proposal_task_map) to the decision the reviewed proposal became.
+    _trace_reviewed_msg_ids: list[str] | None = field(
+        default=None, init=False, repr=False,
+    )
     _skill_preamble: str | None = field(default=None, init=False, repr=False)
     _static_context: dict[str, Any] = field(
         default_factory=dict, init=False, repr=False,
@@ -611,6 +647,11 @@ class CriticAgentBackend:
                 f"CriticAgentBackend: failed to read judge_bundle from "
                 f"{judge_path}: {exc}"
             ) from exc
+
+        # Snapshot the reviewed proposal msg_ids for trace attribution: the
+        # reasoning loop writes its token row mid-``run()`` (before the verdict
+        # intents exist), so we stash them here for ``_trace_critic_llm_call``.
+        self._trace_reviewed_msg_ids = _reviewed_msg_ids_from_bundle(judge_bundle)
 
         # Layer per-action verdict policy onto review_constraints.
         if self.action_verdict_policy:
@@ -1145,6 +1186,9 @@ class CriticAgentBackend:
         # this reasoning loop (initial + tool-use rounds + forced final).
         # OpenAI has no prompt-cache split, so only in/out counters move.
         usage_acc = {"input_tokens": 0, "output_tokens": 0}
+        # Sum the wall-clock of every Codex call in this reasoning loop so the
+        # trace reports the critic's real end-to-end latency (tool turns incl.).
+        latency_ms_acc = 0
 
         for turn in range(max_turns + 1):
             kwargs: dict[str, Any] = {
@@ -1156,12 +1200,14 @@ class CriticAgentBackend:
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"
 
+            _t0 = time.perf_counter()
             try:
                 resp = await self._client.chat.completions.create(**kwargs)
             except Exception as exc:  # noqa: BLE001
                 raise BackendError(
                     f"Codex API call failed (critic-agent reasoning): {exc!r}",
                 ) from exc
+            latency_ms_acc += int((time.perf_counter() - _t0) * 1000)
 
             self._accumulate_usage(usage_acc, getattr(resp, "usage", None))
             choice = resp.choices[0]
@@ -1170,7 +1216,7 @@ class CriticAgentBackend:
             tool_calls = getattr(msg, "tool_calls", None) or []
 
             if not tool_calls:
-                self._trace_critic_llm_call(usage_acc)
+                self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms_acc)
                 return msg.content or "", finish
 
             log.info(
@@ -1188,6 +1234,7 @@ class CriticAgentBackend:
                 })
 
         # Exhausted max_turns mid-tool-use: force a final no-tool reply.
+        _t0 = time.perf_counter()
         try:
             resp = await self._client.chat.completions.create(
                 model=self.codex_model,
@@ -1198,8 +1245,9 @@ class CriticAgentBackend:
             raise BackendError(
                 f"Codex API call failed (critic-agent reasoning final turn): {exc!r}",
             ) from exc
+        latency_ms_acc += int((time.perf_counter() - _t0) * 1000)
         self._accumulate_usage(usage_acc, getattr(resp, "usage", None))
-        self._trace_critic_llm_call(usage_acc)
+        self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms_acc)
         final = resp.choices[0]
         return final.message.content or "", getattr(final, "finish_reason", None)
 
@@ -1226,13 +1274,32 @@ class CriticAgentBackend:
         except (TypeError, ValueError):
             pass
 
-    def _trace_critic_llm_call(self, usage_acc: dict[str, int]) -> None:
+    def set_trace_context(
+        self, *, tick: int | None = None, phase: str | None = None,
+    ) -> None:
+        """Stamp the timeline keys for the next reactor turn's trace row.
+
+        The Coordinator calls this before ``run()`` (it owns ``shared_state``)
+        so the critic's self-written ``llm_calls`` row carries the same
+        tick/phase the in-process reactor trace would have. Best-effort: a
+        bad value degrades to ``None`` rather than raising.
+        """
+        try:
+            self._trace_tick = int(tick) if tick is not None else None
+        except (TypeError, ValueError):
+            self._trace_tick = None
+        self._trace_phase = (str(phase) or None) if phase else None
+
+    def _trace_critic_llm_call(
+        self, usage_acc: dict[str, int], *, latency_ms: int | None = None,
+    ) -> None:
         """Append one ``llm_calls.jsonl`` row for a critic reasoning loop.
 
-        Records the accumulated Codex token spend under
-        ``component=critic``. tick/phase are unknown to the critic backend
-        (it runs as its own reactor) — the collector backfills from the ts
-        window. Best-effort: never raises into the review path.
+        Records the accumulated Codex token spend (and summed wall-clock
+        ``latency_ms``) under ``component=critic``. tick/phase come from the
+        trace context the Coordinator stamped via :meth:`set_trace_context`
+        before the reactor ``run()`` (``None`` when unset → collector ts-window
+        backfill). Best-effort: never raises into the review path.
         """
         try:
             record = LLMCallRecord(
@@ -1240,8 +1307,12 @@ class CriticAgentBackend:
                 component="critic",
                 role="critic",
                 model=self.codex_model,
+                tick=self._trace_tick,
+                phase=self._trace_phase,
                 input_tokens=usage_acc.get("input_tokens"),
                 output_tokens=usage_acc.get("output_tokens"),
+                latency_ms=latency_ms,
+                reviewed_msg_ids=self._trace_reviewed_msg_ids,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break review

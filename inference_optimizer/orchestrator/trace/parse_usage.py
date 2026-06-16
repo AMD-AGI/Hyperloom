@@ -208,6 +208,134 @@ def parse_claude_stream_json_response(
     return None
 
 
+def parse_claude_stream_json_turn_usages(
+    log_path: str | Path,
+) -> list[dict[str, int | None]]:
+    """Recover *per-assistant-turn* usage from a Claude CLI stream-json log.
+
+    Sibling of :func:`parse_claude_stream_json_usage`, which collapses a
+    multi-turn ``claude`` session into ONE cumulative usage row. This one
+    instead returns the per-message usage carried on each
+    ``{"type":"assistant", "message": {..., "usage": {...}}}`` line, in order,
+    so a multi-turn specialist subprocess can be traced as one ledger row per
+    model turn (B1 granularity) instead of a single ``turn=1`` lump.
+
+    Each assistant message in the Claude Messages API carries its OWN usage
+    (not cumulative), so the rows can be summed to reconstruct the session
+    total. Lines without a usage block are skipped; a terminal ``result`` row
+    (cumulative) is intentionally ignored here to avoid double counting.
+
+    Returns the normalized four-key dicts in stream order, or ``[]`` when the
+    file is missing / truncated / carries no per-message usage. Tolerant by
+    contract: never raises into the trace path.
+    """
+    path = Path(log_path)
+    usages: list[dict[str, int | None]] = []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(obj, dict) or obj.get("type") != "assistant":
+                    continue
+                message = obj.get("message")
+                usage = message.get("usage") if isinstance(message, dict) else None
+                normalized = normalize_usage(usage if isinstance(usage, dict) else None)
+                if normalized is not None:
+                    usages.append(normalized)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        log.warning(
+            "parse_usage: failed reading stream-json log %s: %r", path, exc
+        )
+        return []
+    return usages
+
+
+def parse_claude_stream_json_tool_calls(
+    log_path: str | Path,
+) -> list[dict[str, Any]]:
+    """Recover the intel/tool calls a specialist made from its stream-json log.
+
+    Sibling of :func:`parse_claude_stream_json_usage` /
+    :func:`parse_claude_stream_json_response`: those recover the *tokens* and
+    the *reply*; this one recovers the **tool plumbing** — every ``tool_use``
+    block the agent emitted — so the trace can surface what the specialist
+    actually read (WebSearch / WebFetch / ``mcp__pr_monitor__*`` /
+    ``mcp__cortex_kb__*`` / Grep / Read / ...) instead of only its token total.
+    This is the data behind the per-call ``intel:<tool>`` spans.
+
+    Each returned entry is ``{"tool": <name>, "query": <short input summary>}``,
+    in call order. The input summary prefers the common query-ish keys
+    (``query`` / ``url`` / ``pattern`` / ``path`` / ``prompt``) and otherwise
+    falls back to a compact JSON of the input, clipped to keep the trace small.
+
+    Tolerant by contract: a missing file, malformed lines, or a stream with no
+    tool calls returns ``[]`` so the best-effort trace path never raises.
+    """
+    path = Path(log_path)
+    calls: list[dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(obj, dict) or obj.get("type") != "assistant":
+                    continue
+                message = obj.get("message")
+                if not isinstance(message, dict):
+                    continue
+                for block in message.get("content") or []:
+                    if (
+                        not isinstance(block, dict)
+                        or block.get("type") != "tool_use"
+                    ):
+                        continue
+                    name = str(block.get("name") or "").strip()
+                    if not name:
+                        continue
+                    calls.append({
+                        "tool": name,
+                        "query": _summarize_tool_input(block.get("input")),
+                    })
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        log.warning(
+            "parse_usage: failed reading stream-json log %s: %r", path, exc
+        )
+        return []
+    return calls
+
+
+def _summarize_tool_input(value: Any, *, limit: int = 240) -> str:
+    """Compact, clipped one-line summary of a tool_use ``input`` block."""
+    if isinstance(value, dict):
+        for key in ("query", "url", "pattern", "path", "prompt", "command"):
+            v = value.get(key)
+            if isinstance(v, str) and v.strip():
+                s = v.strip()
+                return s if len(s) <= limit else (s[:limit] + "…")
+        try:
+            s = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            s = str(value)
+    else:
+        s = "" if value is None else str(value)
+    return s if len(s) <= limit else (s[:limit] + "…")
+
+
 def parse_oob_json_usage(stdout: str) -> dict[str, int | None] | None:
     """Extract ``usage`` from ``oob run --json`` stdout.
 
@@ -317,5 +445,7 @@ def _find_usage_in_obj(obj: Any, _depth: int = 0) -> dict[str, Any] | None:
 __all__ = [
     "normalize_usage",
     "parse_claude_stream_json_response",
+    "parse_claude_stream_json_tool_calls",
+    "parse_claude_stream_json_turn_usages",
     "parse_claude_stream_json_usage",
 ]

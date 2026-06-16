@@ -216,12 +216,14 @@ def report_file(session_dir: Path, ts: str, suffix: str = "md") -> Path:
 # Layout (see FULL_TRACE_DESIGN §3.3):
 #
 #   <sd>/reports/trace/
-#     llm_calls.jsonl              # in-process components append directly
-#     ext/<component>-<pid>.jsonl  # each out-of-process child writes its own
+#     llm_calls.jsonl              # every LLM call's token row (single writer)
 #     decision_trace.jsonl         # collector join product (token+decision)
 #
 # All trace writers are best-effort and swallow OSError; these helpers only
-# compute paths (callers mkdir the parent before writing).
+# compute paths (callers mkdir the parent before writing). The parent process
+# is the sole writer of llm_calls.jsonl: out-of-process children (specialist /
+# geak / oob) surface their tokens by having the parent parse their logs and
+# append, so there is no concurrent-writer fan-in to coordinate.
 def trace_dir(session_dir: Path) -> Path:
     """``<sd>/reports/trace/`` — root of the unified token+decision trace."""
     return reports_dir(session_dir) / "trace"
@@ -229,37 +231,35 @@ def trace_dir(session_dir: Path) -> Path:
 
 def llm_calls_path(session_dir: Path) -> Path:
     """``<sd>/reports/trace/llm_calls.jsonl`` — append-only ledger of every
-    in-process LLM call (orchestration / kernel / specialist
-    in-process fallback / codex / critic / proposal_scorer).
-
-    Out-of-process children write to :func:`ext_trace_path` instead; the
-    collector merges both streams.
-    """
+    LLM call (orchestration / kernel / specialist / codex / critic /
+    proposal_scorer / robustness). The parent process is the single writer;
+    out-of-process children's tokens are parsed from their logs and appended
+    here by the parent."""
     return trace_dir(session_dir) / "llm_calls.jsonl"
-
-
-def trace_ext_dir(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/ext/`` — parent of every out-of-process child's
-    own ``<component>-<pid>.jsonl`` shard."""
-    return trace_dir(session_dir) / "ext"
-
-
-def ext_trace_path(session_dir: Path, component: str, pid: int) -> Path:
-    """``<sd>/reports/trace/ext/<component>-<pid>.jsonl``.
-
-    Each independent agent process (geak / oob / robustness / critic-agent
-    CLI / tracelens) writes its own shard so concurrent children never
-    contend on a shared file; the collector globs ``ext/*.jsonl`` and merges.
-    The ``pid`` keeps shards disjoint across re-spawns of the same component.
-    """
-    comp = str(component or "").strip() or "unknown"
-    return trace_ext_dir(session_dir) / f"{comp}-{int(pid)}.jsonl"
 
 
 def decision_trace_path(session_dir: Path) -> Path:
     """``<sd>/reports/trace/decision_trace.jsonl`` — collector output joining
     every decision to its LLM token spend along the phase→tick timeline."""
     return trace_dir(session_dir) / "decision_trace.jsonl"
+
+
+def proposal_task_map_path(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/proposal_task_map.jsonl`` — append-only map of
+    ``{proposal_msg_id -> task_id}`` stamped when an approved proposal is
+    materialized into a task. Lets the decision-trace collector attribute a
+    Critic review call (which only knows the proposal ``msg_id`` at review
+    time) to the decision the proposal eventually became."""
+    return trace_dir(session_dir) / "proposal_task_map.jsonl"
+
+
+def specialist_intel_path(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/specialist_intel.jsonl`` — append-only audit of the
+    intel/tool calls each specialist made (WebSearch / WebFetch / pr_monitor /
+    cortex_kb / Read / Grep / ...), recovered from the subprocess stream-json
+    log. Backfilled into the trace as per-call ``intel:<tool>`` spans so a
+    trace shows what a specialist *read*, not just its token total."""
+    return trace_dir(session_dir) / "specialist_intel.jsonl"
 
 
 def conversations_path(session_dir: Path) -> Path:
@@ -649,7 +649,7 @@ __all__ = [
     "cortex_sid_file",
     "cortex_warm_json",
     "decision_trace_path",
-    "ext_trace_path",
+    "proposal_task_map_path",
     "kernel_agent_runs_dir",
     "kernel_workspace",
     "llm_calls_path",
@@ -670,5 +670,4 @@ __all__ = [
     "target_analysis_report_md",
     "target_baseline_json",
     "trace_dir",
-    "trace_ext_dir",
 ]

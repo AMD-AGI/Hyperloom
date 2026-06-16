@@ -38,6 +38,85 @@ def test_normalize_usage_valid():
     }
 
 
+# ---- parse_claude_stream_json_turn_usages ----
+
+def test_parse_turn_usages_missing(tmp_path):
+    assert pu.parse_claude_stream_json_turn_usages(tmp_path / "no.log") == []
+
+
+def test_parse_turn_usages_per_message_in_order(tmp_path):
+    log = tmp_path / "p.log"
+    log.write_text(
+        '{"type": "assistant", "message": {"usage": {"input_tokens": 10, "output_tokens": 3}}}\n'
+        "garbled\n"
+        '{"type": "assistant", "message": {"usage": {"input_tokens": 20, "output_tokens": 7}}}\n'
+        # The terminal cumulative result row is intentionally ignored here.
+        '{"type": "result", "usage": {"input_tokens": 30, "output_tokens": 10}}\n',
+        encoding="utf-8",
+    )
+    usages = pu.parse_claude_stream_json_turn_usages(log)
+    assert len(usages) == 2
+    assert usages[0]["input_tokens"] == 10 and usages[0]["output_tokens"] == 3
+    assert usages[1]["input_tokens"] == 20 and usages[1]["output_tokens"] == 7
+
+
+def test_parse_turn_usages_none_when_no_per_message_usage(tmp_path):
+    log = tmp_path / "p.log"
+    log.write_text(
+        '{"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}}\n'
+        '{"type": "result", "usage": {"input_tokens": 5}}\n',
+        encoding="utf-8",
+    )
+    assert pu.parse_claude_stream_json_turn_usages(log) == []
+
+
+# ---- parse_claude_stream_json_tool_calls ----
+
+def test_parse_tool_calls_missing(tmp_path):
+    assert pu.parse_claude_stream_json_tool_calls(tmp_path / "no.log") == []
+
+
+def test_parse_tool_calls_extracts_in_order(tmp_path):
+    log = tmp_path / "p.log"
+    log.write_text(
+        '{"type": "assistant", "message": {"content": ['
+        '{"type": "text", "text": "thinking"},'
+        '{"type": "tool_use", "name": "WebSearch", "input": {"query": "rocm flash attn"}},'
+        '{"type": "tool_use", "name": "mcp__cortex_kb__lookup", "input": {"q": "x"}}'
+        ']}}\n'
+        "garbled\n"
+        '{"type": "assistant", "message": {"content": ['
+        '{"type": "tool_use", "name": "Read", "input": {"path": "/a/b.py"}}'
+        ']}}\n'
+        '{"type": "result", "result": "done"}\n',
+        encoding="utf-8",
+    )
+    calls = pu.parse_claude_stream_json_tool_calls(log)
+    assert [c["tool"] for c in calls] == [
+        "WebSearch", "mcp__cortex_kb__lookup", "Read",
+    ]
+    assert calls[0]["query"] == "rocm flash attn"
+    assert calls[2]["query"] == "/a/b.py"
+    # No recognised query key -> compact JSON fallback.
+    assert '"q"' in calls[1]["query"]
+
+
+def test_parse_tool_calls_none_when_no_tools(tmp_path):
+    log = tmp_path / "p.log"
+    log.write_text(
+        '{"type": "assistant", "message": {"content": ['
+        '{"type": "text", "text": "no tools here"}]}}\n',
+        encoding="utf-8",
+    )
+    assert pu.parse_claude_stream_json_tool_calls(log) == []
+
+
+def test_summarize_tool_input_clips_long():
+    out = pu._summarize_tool_input({"query": "a" * 500})
+    assert out.endswith("…")
+    assert len(out) <= 241
+
+
 # ---- parse_claude_stream_json_usage ----
 
 def test_parse_claude_usage_missing(tmp_path):

@@ -96,6 +96,69 @@ async def test_llm_engine_calls_chat_server_and_returns_text():
 
 
 @pytest.mark.asyncio
+async def test_drain_usage_accumulates_and_resets():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 4},
+            },
+        )
+
+    engine = _engine(
+        handler,
+        throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
+    )
+    try:
+        engine.set_tick(1)
+        await engine.summarize(_sym())
+        await engine.summarize(_sym(name="other_symptom"))
+    finally:
+        await engine.aclose()
+    usage = engine.drain_usage()
+    assert usage is not None
+    assert usage["calls"] == 2
+    assert usage["input_tokens"] == 22      # 11 * 2
+    assert usage["output_tokens"] == 8      # 4 * 2
+    assert usage["model"] == "claude-opus-4-7"
+    assert usage["latency_ms"] >= 0
+    # Draining resets the accumulator.
+    assert engine.drain_usage() is None
+
+
+@pytest.mark.asyncio
+async def test_drain_usage_none_without_calls():
+    engine = _engine(lambda r: httpx.Response(200, json={"choices": []}))
+    try:
+        assert engine.drain_usage() is None
+    finally:
+        await engine.aclose()
+
+
+def test_noop_engine_drain_usage_is_none():
+    assert NoopRcaEngine().drain_usage() is None
+
+
+@pytest.mark.asyncio
+async def test_drain_usage_counts_call_even_without_usage_block():
+    # Provider omits a usage block: the call is still counted (with latency)
+    # so the trace reflects that an RCA LLM call happened.
+    engine = _engine(
+        lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]}),
+    )
+    try:
+        engine.set_tick(1)
+        await engine.summarize(_sym())
+    finally:
+        await engine.aclose()
+    usage = engine.drain_usage()
+    assert usage is not None
+    assert usage["calls"] == 1
+    assert usage["input_tokens"] == 0 and usage["output_tokens"] == 0
+
+
+@pytest.mark.asyncio
 async def test_llm_engine_truncates_to_max_chars():
     long_text = "abcd" * 1000
 

@@ -10,8 +10,8 @@ pin:
 * default OFF -> emitter is a no-op, builds no client;
 * all gates on (with a fake SDK) -> token + conversation rows pair into one
   Generation with correctly mapped usage and input/output text;
-* session-end flush emits unpaired halves, backfills ext/*.jsonl
-  out-of-process token rows, and turns decision_trace rows into Scores;
+* session-end flush emits unpaired halves, backfills the recipe-KB /
+  specialist-intel audit spans, and turns decision_trace rows into Scores;
 * every send is best-effort: a client that raises never propagates.
 """
 
@@ -39,6 +39,7 @@ class _FakeObservation:
         self.kind = kind
         self.kwargs = kwargs
         self.ended = False
+        self.end_time = None
         self.trace_update: dict | None = None
         self.observation_scores: list[dict] = []
 
@@ -55,6 +56,7 @@ class _FakeObservation:
 
     def end(self, **kwargs):
         self.ended = True
+        self.end_time = kwargs.get("end_time")
 
 
 class _FakeClient:
@@ -411,11 +413,11 @@ def test_module_record_session_breakdown_reads_file(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# flush_session: leftovers + ext shards + decision scores
+# flush_session: leftovers + audit spans + decision scores
 # ---------------------------------------------------------------------------
 def _seed_trace_dir(tmp_path: Path) -> Path:
     sd = tmp_path / "SID"
-    (sd / "reports" / "trace" / "ext").mkdir(parents=True)
+    (sd / "reports" / "trace").mkdir(parents=True)
     _write_manifest(sd)
     return sd
 
@@ -434,41 +436,15 @@ def test_flush_emits_unpaired_token_only_generation(tmp_path, monkeypatch):
     assert client.flushed == 1
 
 
-def test_flush_backfills_ext_shards(tmp_path, monkeypatch):
-    _enable_env(monkeypatch)
-    client = _FakeClient()
-    _install_fake_sdk(monkeypatch, client)
-    sd = _seed_trace_dir(tmp_path)
-    shard = sd / "reports" / "trace" / "ext" / "geak-123.jsonl"
-    shard.write_text(
-        json.dumps(_llm_row(component="geak", role=None, input_tokens=500,
-                            output_tokens=60)) + "\n",
-        encoding="utf-8",
-    )
-    em = lfe.LangfuseEmitter(sd)
-    em.flush_session()
-    geak_gens = [
-        g for g in client.generations
-        if g.kwargs["metadata"]["component"] == "geak"
-    ]
-    assert len(geak_gens) == 1
-    assert geak_gens[0].kwargs["usage_details"]["input"] == 500
-    assert geak_gens[0].kwargs["metadata"]["has_text"] is False
-
-
 def test_flush_session_is_idempotent_no_duplicate_reemit(tmp_path, monkeypatch):
-    """A second flush_session() must NOT re-scan ext shards / decision_trace
+    """A second flush_session() must NOT re-scan the leftovers / decision_trace
     and re-emit -- otherwise Langfuse gets duplicate Generations/Scores."""
     _enable_env(monkeypatch)
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    (sd / "reports" / "trace" / "ext" / "geak-1.jsonl").write_text(
-        json.dumps(_llm_row(component="geak", role=None, input_tokens=500,
-                            output_tokens=60)) + "\n",
-        encoding="utf-8",
-    )
     em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row())  # unpaired token half, flushed once
 
     em.flush_session()
     gens_after_first = len(client.generations)
@@ -528,6 +504,74 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # KB trace spans (record_kb_span + recipe-snapshot audit flush)
 # ---------------------------------------------------------------------------
+def test_flush_emits_proposal_score_calibration(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    dtrace = sd / "reports" / "trace" / "decision_trace.jsonl"
+    dtrace.write_text(
+        json.dumps({
+            "decision": {
+                "change": "tp_sweep", "component": "specialist:perf",
+                "operation_kind": "param", "outcome": "KEEP",
+                "gain_pct": 8.0, "task_id": "spec-1",
+                "variant_name": "v1",
+                "proposal_scores": [
+                    {"rater": "gpt-5.5", "score": 7.0, "reason": "ok"},
+                    {"rater": "claude", "score": 9.0, "reason": "good"},
+                ],
+            },
+            "phase": "EXPLORE", "tick": 5, "ts": "2026-06-09T16:00:00Z",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    em = lfe.LangfuseEmitter(sd)
+    # Seed a specialist agent span so the decision step span has a parent.
+    em.record_llm_call(
+        _llm_row(phase="EXPLORE", component="specialist", role="specialist")
+    )
+    em.flush_session()
+    names = sorted(s["name"] for s in client.observation_scores)
+    assert "proposal_score" in names
+    pscore = [s for s in client.observation_scores
+              if s["name"] == "proposal_score"][0]
+    assert pscore["value"] == 8.0           # mean(7, 9)
+    assert pscore["data_type"] == "NUMERIC"
+    # Realized gain emitted alongside so a trace can compute calibration error.
+    assert "gain_pct" in names
+
+
+def test_flush_emits_predicted_gain_calibration(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    dtrace = sd / "reports" / "trace" / "decision_trace.jsonl"
+    dtrace.write_text(
+        json.dumps({
+            "decision": {
+                "change": "tp_sweep", "component": "specialist:perf",
+                "operation_kind": "param", "outcome": "KEEP",
+                "gain_pct": 6.0, "predicted_gain_pct": 12.5,
+                "task_id": "spec-1",
+            },
+            "phase": "EXPLORE", "tick": 5, "ts": "2026-06-09T16:00:00Z",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(
+        _llm_row(phase="EXPLORE", component="specialist", role="specialist")
+    )
+    em.flush_session()
+    by_name = {s["name"]: s for s in client.observation_scores}
+    # predicted + realized both emitted as NUMERIC on the same decision.
+    assert "predicted_gain_pct" in by_name and "gain_pct" in by_name
+    assert by_name["predicted_gain_pct"]["value"] == 12.5
+    assert by_name["gain_pct"]["value"] == 6.0
+
+
 def test_record_kb_span_disabled_is_noop(tmp_path, monkeypatch):
     monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
     em = lfe.LangfuseEmitter(tmp_path)
@@ -603,6 +647,49 @@ def test_flush_recipe_audit_idempotent(tmp_path, monkeypatch):
     n2 = len([s for s in client.spans
               if s.kwargs.get("name", "").startswith("kb:recipe_snapshot")])
     assert n == 1 and n2 == 1
+
+
+def test_flush_backfills_specialist_intel(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    from inference_optimizer.session_paths import specialist_intel_path
+    intel = specialist_intel_path(sd)
+    intel.parent.mkdir(parents=True, exist_ok=True)
+    intel.write_text("\n".join(json.dumps(r) for r in [
+        {"ts": "2026-06-09T15:14:54Z", "tool": "WebSearch",
+         "task_id": "t1", "turn": 1, "query": "rocm flash attn"},
+        {"ts": "2026-06-09T15:14:55Z", "tool": "mcp__cortex_kb__lookup",
+         "task_id": "t1", "turn": 1, "query": "x"},
+    ]) + "\n", encoding="utf-8")
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+    assert client.span_named("intel:WebSearch") is not None
+    assert client.span_named("intel:mcp__cortex_kb__lookup") is not None
+    assert client.span_named("agent:specialist") is not None
+    persisted = lfe.read_receipt(sd)
+    assert persisted["counts"]["specialist_intel_read"] == 2
+
+
+def test_generation_uses_latency_for_duration(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    em = lfe.LangfuseEmitter(sd)
+    row = _llm_row()
+    row["latency_ms"] = 2000
+    em.record_llm_call(row)
+    em.flush_session()
+    gen = client.generations[0] if client.generations else None
+    assert gen is not None
+    # start = ts - latency; end = ts -> non-zero duration.
+    start = gen.kwargs.get("start_time")
+    end = getattr(gen, "end_time", None)
+    assert start is not None and end is not None
+    assert (end - start).total_seconds() == pytest.approx(2.0, abs=0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -685,10 +772,8 @@ def test_flush_writes_receipt_file_with_final_counts(tmp_path, monkeypatch):
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    # one ext shard (out-of-process) + one decision so flush counts move.
-    (sd / "reports" / "trace" / "ext" / "geak-1.jsonl").write_text(
-        json.dumps(_llm_row(component="geak", role=None)) + "\n", encoding="utf-8",
-    )
+    # one unpaired token half (flushed as a token-only generation) + one
+    # decision so the flush counts move.
     (sd / "reports" / "trace" / "decision_trace.jsonl").write_text(
         json.dumps({
             "decision": {"change": "x", "component": "kernel", "outcome": "KEEP",
@@ -697,12 +782,12 @@ def test_flush_writes_receipt_file_with_final_counts(tmp_path, monkeypatch):
         }) + "\n", encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row())  # unpaired token half
     em.flush_session()
 
     persisted = lfe.read_receipt(sd)
     assert persisted is not None
     assert persisted["counts_final"] is True
-    assert persisted["counts"]["ext_shards_read"] == 1
     assert persisted["counts"]["generations_sent"] >= 1
     assert persisted["counts"]["scores_sent"] >= 1
 

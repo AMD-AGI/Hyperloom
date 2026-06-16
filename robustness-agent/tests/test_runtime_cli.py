@@ -270,3 +270,62 @@ async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
     assert config.pod_metrics_categories == ("gpu", "memory")
     assert config.workload_uid == "wl-123"
     assert config.nodes == 4
+
+
+@pytest.mark.asyncio
+async def test_run_tick_surfaces_rca_llm_usage(tmp_path: Path, monkeypatch):
+    """A drained RCA usage block is surfaced on the emit payload."""
+    from robustness_agent import runtime as runtime_pkg
+    real_build = runtime_pkg.cli.build_reactor_components  # type: ignore[attr-defined]
+
+    usage = {"input_tokens": 12, "output_tokens": 5, "calls": 1,
+             "latency_ms": 30, "model": "claude-opus-4-7"}
+
+    def _spy_build(config, *, rca=None, session_id=None):
+        bundle = real_build(config, rca=rca, session_id=session_id)
+        # Replace the rca engine with a stub that reports usage once.
+        class _StubRca:
+            def drain_usage(self_inner):
+                return usage
+        bundle.components.rca = _StubRca()
+        return bundle
+
+    async def _zero_tick(_self, _ctx):
+        return []
+
+    monkeypatch.setattr(runtime_pkg.cli, "build_reactor_components", _spy_build)
+    from robustness_agent.role.reactor import Reactor
+    monkeypatch.setattr(Reactor, "tick", _zero_tick, raising=True)
+
+    from robustness_agent.runtime.cli import _coerce_request, _run_tick
+    request = _coerce_request({
+        **_REQUEST_HEARTBEAT,
+        "options": {"session_dir": str(tmp_path), "robustness_server_url": ""},
+    })
+    emit = await _run_tick(request)
+    assert emit["llm_usage"] == usage
+
+
+@pytest.mark.asyncio
+async def test_run_tick_omits_llm_usage_when_none(tmp_path: Path, monkeypatch):
+    """No RCA call → no ``llm_usage`` key on the emit payload."""
+    from robustness_agent import runtime as runtime_pkg
+    real_build = runtime_pkg.cli.build_reactor_components  # type: ignore[attr-defined]
+
+    def _spy_build(config, *, rca=None, session_id=None):
+        return real_build(config, rca=rca, session_id=session_id)
+
+    async def _zero_tick(_self, _ctx):
+        return []
+
+    monkeypatch.setattr(runtime_pkg.cli, "build_reactor_components", _spy_build)
+    from robustness_agent.role.reactor import Reactor
+    monkeypatch.setattr(Reactor, "tick", _zero_tick, raising=True)
+
+    from robustness_agent.runtime.cli import _coerce_request, _run_tick
+    request = _coerce_request({
+        **_REQUEST_HEARTBEAT,
+        "options": {"session_dir": str(tmp_path), "robustness_server_url": ""},
+    })
+    emit = await _run_tick(request)
+    assert "llm_usage" not in emit

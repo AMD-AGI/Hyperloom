@@ -161,7 +161,7 @@ async def test_scoring_call_writes_full_conversation_trace(tmp_path: Path):
         client_factory=lambda: client,
         session_dir=session_dir,
     )
-    await scorer.score(gap=_GAP, proposals=_PROPOSALS)
+    await scorer.score(gap=_GAP, proposals=_PROPOSALS, task_id="spec-7")
 
     conv_rows = _read_jsonl(conversations_path(session_dir))
     assert len(conv_rows) == 1
@@ -169,18 +169,22 @@ async def test_scoring_call_writes_full_conversation_trace(tmp_path: Path):
     assert row["component"] == "proposal_scorer"
     assert row["role"] == "proposal_scorer"
     assert row["model"] == "claude-opus-4-7"
+    # task_id threads onto the conversation row so its pair key matches the
+    # token row (and the collector can attribute the scoring spend).
+    assert row["task_id"] == "spec-7"
     # The prompt carries the scoring instructions + proposals; the reply is
     # the model's verbatim (fenced) scores JSON.
     assert "cuda_graph_bs_512" in row["prompt"]
     assert "cuda_graph_bs_512" in row["response"]
 
     token_rows = _read_jsonl(llm_calls_path(session_dir))
-    assert any(
-        r["component"] == "proposal_scorer"
-        and r["input_tokens"] == 120
-        and r["output_tokens"] == 30
-        for r in token_rows
-    )
+    scorer_rows = [r for r in token_rows if r["component"] == "proposal_scorer"]
+    assert scorer_rows
+    r = scorer_rows[0]
+    assert r["input_tokens"] == 120 and r["output_tokens"] == 30
+    # Attribution key + measured latency now land on the token row.
+    assert r["task_id"] == "spec-7"
+    assert r["latency_ms"] is not None and r["latency_ms"] >= 0
 
 
 @pytest.mark.asyncio
