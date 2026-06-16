@@ -94,9 +94,8 @@ filterwarnings = [
 # Coverage configuration: limit coverage measurement to first-party
 # ``source`` trees. The ``ci/*`` pipeline is omitted from measurement and is
 # not part of default pytest ``testpaths`` here. ``OOB/`` and
-# ``quantization_agent/`` are included; combined line coverage is gated by
-# ``fail_under`` in ``[tool.coverage.report]`` (CI can relax enforcement via
-# repository variable named in ``[tool.hyperloom.tests_coverage]``).
+# ``quantization_agent/`` are included. CI reports line coverage but does not
+# enforce a minimum percentage (no ``fail_under`` gate).
 #
 # omit patterns exclude:
 #   * tests / __init__.py / __main__.py — non-source

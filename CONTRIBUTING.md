@@ -58,13 +58,11 @@ These GitHub jobs are optional from a default merge-policy perspective; skipping
 
 ### Coverage (source of truth)
 
-**Authoritative UT coverage** for this repository comes only from the GitHub Actions workflow [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml). **Policy lives in `pyproject.toml`**: `[tool.coverage.run]` / `[tool.coverage.report]` (measured trees and `fail_under`), and `[tool.hyperloom.tests_coverage]` (full CI `pytest` argv: marker filter + pytest-cov flags, plus the documented name of the optional relax variable for `fail_under`). The workflow writes the job Summary from the same ``source`` list (no duplicate script under ``ci/``). Default pytest **does not** collect ``ci/*.py``; the ``ci/*`` tree is **omitted** from coverage measurement. When **`OOB/`** is present in the clone, the workflow runs `pip install -e "./OOB"` so `agent_mcp_server` tests run; mirror that locally when working on [`inference_optimizer/tests/test_oob_units.py`](inference_optimizer/tests/test_oob_units.py).
-
-Setting the repository variable **`COVERAGE_RELAX_FAIL_UNDER`** to `1` / `true` / `yes` / `on` disables `fail_under` enforcement in CI (pytest uses `--cov-fail-under=0` and the strict coverage gate is skipped). Default is strict when the variable is unset.
+**Authoritative UT coverage** for this repository comes only from the GitHub Actions workflow [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml). **Policy lives in `pyproject.toml`**: `[tool.coverage.run]` / `[tool.coverage.report]` (measured trees and report options), and `[tool.hyperloom.tests_coverage]` (full CI `pytest` argv: marker filter + pytest-cov flags). The workflow writes the job Summary from the same ``source`` list (no duplicate script under ``ci/``). There is **no** minimum line-coverage percentage enforced in CI. Default pytest **does not** collect ``ci/*.py``; the ``ci/*`` tree is **omitted** from coverage measurement. When **`OOB/`** is present in the clone, the workflow runs `pip install -e "./OOB"` so `agent_mcp_server` tests run; mirror that locally when working on [`inference_optimizer/tests/test_oob_units.py`](inference_optimizer/tests/test_oob_units.py).
 
 The default pytest **`testpaths`** include **`quantization_agent/tests`** so quantization driver code is exercised in CI, not only via inference_optimizer tests.
 
-Open the workflow run, then the **Summary** tab on the *Tests with Coverage* job for per-tree line coverage. **Combined line coverage across all configured source trees must meet `fail_under`** (90% today, `[tool.coverage.report]` in `pyproject.toml`); the job fails if the threshold is not met.
+Open the workflow run, then the **Summary** tab on the *Tests with Coverage* job for per-tree line coverage (informational only).
 
 Do not treat ad hoc local `pytest --cov=...` invocations or any other workflow as the canonical headline metric unless that workflow is explicitly documented here. If you add a second CI job that prints coverage, keep it non-authoritative or remove it to avoid conflicting percentages.
 
