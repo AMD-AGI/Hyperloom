@@ -81,7 +81,10 @@ testpaths = [
     "kernel-agent/tools/test_rocprof_roofline.py",
     "kernel-agent/tools/test_harness_generator.py",
 ]
-pythonpath = [".", "robustness-agent/src", "critic-agent", "framework-agent/src"]
+# ``ci`` is on the import path (so tests that exercise ``ci/`` helpers can
+# import them) but is NOT collected for tests and is omitted from coverage
+# (see ``[tool.coverage.run].omit``), so it never affects the fail_under target.
+pythonpath = [".", "ci", "robustness-agent/src", "critic-agent", "framework-agent/src"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
@@ -92,10 +95,11 @@ filterwarnings = [
 ]
 
 # Coverage configuration: limit coverage measurement to first-party
-# ``source`` trees. The ``ci/*`` pipeline is omitted from measurement and is
-# not part of default pytest ``testpaths`` here. ``OOB/`` and
-# ``quantization_agent/`` are included. CI reports line coverage but does not
-# enforce a minimum percentage (no ``fail_under`` gate).
+# ``source`` trees. The ``ci/*`` benchmark pipeline is OMITTED from coverage
+# measurement (even when a test imports a ``ci/`` helper, those lines are not
+# counted) and is not part of default pytest ``testpaths``, so ci never affects
+# the ``fail_under`` (90%) settlement. ``OOB/`` and ``quantization_agent/`` are
+# included and measured.
 #
 # omit patterns exclude:
 #   * tests / __init__.py / __main__.py — non-source
