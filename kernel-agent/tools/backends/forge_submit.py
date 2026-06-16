@@ -988,6 +988,42 @@ def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float,
     }
 
 
+def _setup_fellow_env() -> None:
+    """Bake fellow (claude CLI / claude-agent-sdk) stability defaults into env.
+
+    The forge-loop subprocess inherits ``os.environ`` and, inside it, the fellow
+    drives the claude CLI streaming transport. Without these defaults a headless
+    container run fails every iteration. ``setdefault`` keeps operator overrides
+    authoritative.
+    """
+    # bypassPermissions refuses to start under root unless IS_SANDBOX=1.
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        os.environ.setdefault("IS_SANDBOX", "1")
+    # The AMD SaFE proxy presents an internal/self-signed cert; without skipping
+    # TLS the Node CLI handshake fails and the streaming query() hangs.
+    os.environ.setdefault("ANTHROPIC_SKIP_TLS_VERIFY", "true")
+    os.environ.setdefault("NODE_TLS_REJECT_UNAUTHORIZED", "0")
+    # The streaming transport needs the /api/v1/llm-proxy endpoint. Rewrite a
+    # known /llm-gateway suffix, else fall back to the claude CLI's validated
+    # config.json customApiUrl.
+    _base = os.environ.get("ANTHROPIC_BASE_URL", "").rstrip("/")
+    if "/api/v1/llm-proxy" not in _base:
+        _proxy = ""
+        if _base.endswith("/llm-gateway"):
+            _proxy = _base.rsplit("/llm-gateway", 1)[0] + "/api/v1/llm-proxy"
+        if not _proxy:
+            try:
+                import json as _json
+                _cfg = _json.loads((Path.home() / ".claude" / "config.json").read_text())
+                _cu = str(_cfg.get("customApiUrl") or "").rstrip("/")
+                if "/api/v1/llm-proxy" in _cu:
+                    _proxy = _cu
+            except Exception:
+                _proxy = ""
+        if _proxy:
+            os.environ["ANTHROPIC_BASE_URL"] = _proxy
+
+
 def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
                       shapes: dict, snr_threshold: float, max_iters: int,
                       max_hours: float, branch: str, gpu_target: str,
@@ -1083,9 +1119,11 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
            kernel_repo: str = "") -> dict:
     """Run Forge's autonomous loop on one kernel; emit Hyperloom-contract artifacts.
 
-    Stage 1 runs the loop in-process inside a git worktree (Ray wrapping is a
-    follow-up to match OOB GPU leasing). Returns a normalized result dict and
-    writes optimized_versions/ + optimization_report.md under output_dir.
+    Hyperloom prepares an isolated git worktree / in-place edit, then runs the
+    Forge IterationLoop in a hard-killable CLI subprocess (`kernel-agents
+    forge-loop`) so a hung fellow can never freeze the orchestrator. Returns a
+    normalized result dict and writes optimized_versions/ +
+    optimization_report.md under output_dir.
     """
     started = time.time()
     candidate = candidate or {}
@@ -1126,23 +1164,10 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
 
     try:
         # Locate the Kernel-Forge code via $FORGE_PATH (like OOB_PATH for oob),
-        # falling back to whatever `kernel_agents` is importable in the env.
+        # falling back to whatever `kernel_agents` is importable in the env. The
+        # loop always runs in a hard-killable subprocess (CLI), so kernel_agents
+        # need not be importable in THIS process.
         _ensure_forge_on_path()
-        # CLI mode (default) runs the loop in a subprocess, so kernel_agents need
-        # not be importable in THIS process. in-process mode needs the imports.
-        loop_mode = os.environ.get("FORGE_LOOP_MODE", "cli").strip().lower()
-        if loop_mode != "cli":
-            try:
-                from kernel_agents.config import Config
-                from kernel_agents.loop import IterationLoop
-                from kernel_agents.loop.runner import IterationConfig
-                from kernel_agents.tracker import ExperimentTracker
-                from kernel_agents.orchestrator.agent import make_agent_fn
-            except ImportError as exc:
-                return _normalized(127, "", f"kernel_agents (Forge) not importable: {exc}",
-                                   time.time() - started)
-
-        import asyncio
 
         # Driver: use the Hyperloom harness when present; otherwise auto-generate
         # a Forge-native driver from the candidate's operation + input_shapes.
@@ -1169,209 +1194,18 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         max_iters = int(os.environ.get("FORGE_MAX_ITERS", "8"))
         snr_threshold = float((candidate.get("targets") or {}).get("snr_db", 30.0))
 
-        # ── CLI mode (default): run the loop in an isolated, hard-killable
-        # subprocess (like GEAK). A hung fellow can't freeze the orchestrator. ──
-        if loop_mode == "cli":
-            baseline_ms, best_ms, improved, loop_output, loop_exc = _run_loop_via_cli(
-                worktree_kernel=worktree_kernel, driver=driver, workspace=workspace,
-                shapes=shapes, snr_threshold=snr_threshold, max_iters=max_iters,
-                max_hours=max(0.05, timeout_s / 3600.0), branch=branch,
-                gpu_target=gpu_target, fellow=fellow,
-                program_md_file=str(prompt_file), experiments_dir=experiments_dir,
-                forge_log=forge_log, timeout_s=timeout_s)
-            _, changed_files = _export_best_artifacts(
-                workspace, base_commit, worktree_kernel, source_file, output_dir)
-            if changed_files:
-                try:
-                    (output_dir / "optimized_versions" / "changed_files.txt").write_text(
-                        "\n".join(changed_files) + "\n")
-                except OSError:
-                    pass
-            _write_report(output_dir, baseline_ms, best_ms, improved)
-            if loop_exc and baseline_ms is None:
-                # Hard failure with no measurement -> surface as forge failure.
-                return _normalized(1, "", f"forge cli loop failed: {loop_exc}",
-                                   time.time() - started)
-            msg = (f"forge done (cli): baseline={baseline_ms} best={best_ms} "
-                   f"improved={improved} fellow={fellow} gpu={gpu_target}")
-            res = _normalized(0, msg + "\n" + (loop_output or "")[-3000:], "",
-                              time.time() - started)
-            res["cli_workspace"] = str(output_dir)
-            res["output_dir"] = str(output_dir)
-            return res
-
-        # ── in-process mode (FORGE_LOOP_MODE=inproc): legacy path ──
-        config = Config.from_env(gpu_target=gpu_target, workspace=workspace)
-        # X5: redirect Forge experiment state under the run's output dir, not the
-        # Forge package tree (Config.from_env does not wire experiments_dir).
-        config.experiments_dir = experiments_dir
-        # Derive Forge budget from Hyperloom's timeout_s (Y1). Default 8 iters:
-        # agent_fn errors consume iterations silently (recorded in self.results
-        # but not in the experiment tracker), so a higher budget ensures enough
-        # successful iterations actually run validation + bench.
-        per_iter = max(60, timeout_s // max(1, max_iters))
-        iter_config = IterationConfig(
-            kernel_file=worktree_kernel,
-            driver_script=driver,
-            shapes=shapes,
-            snr_threshold=snr_threshold,
-            max_iterations=max_iters,
-            max_time_hours=max(0.05, timeout_s / 3600.0),
-            time_per_iteration_sec=per_iter,
-            git_branch=branch,
-            workspace_dir=workspace,
-        )
-
-        tracker = ExperimentTracker(config.experiments_dir)
-        loop_runner = IterationLoop(iter_config, tracker, config)
-
-        # Reuse the Hyperloom-rendered prompt (hypothesis_block + rocprof_before)
-        # as the Forge program text driving the fellow.
-        program_md = Path(prompt_file).read_text(errors="replace") if Path(prompt_file).exists() else ""
-        raw_agent_fn = make_agent_fn(config=config, program_md=program_md, fellow_name=fellow)
-
-        # Wrap agent_fn to persist errors: the runner's except branch only
-        # prints to stdout (lost) and appends a bare IterationResult with no
-        # detail in the tracker. This wrapper logs each call + error to a file
-        # so post-mortem analysis can see exactly which iterations failed and why.
-        forge_log = output_dir / "forge_loop.log"
-        # Hard timeout per agent call. The claude-agent-sdk's query() awaits the
-        # fellow subprocess's message stream; if that subprocess dies uncleanly
-        # (observed in-loop: an iteration errors, the next call's stream never
-        # closes), query() hangs forever and freezes the whole loop (and the
-        # orchestrator awaiting it). wait_for bounds each call so the loop records
-        # a timeout and moves on instead of stalling the session.
-        agent_timeout_s = int(os.environ.get("FORGE_AGENT_TIMEOUT_SEC", "900"))
-        # Clamp to a safe floor. A successful agent_fn legitimately takes ~5-8 min
-        # (it reads the kernel + TraceLens context before making its single edit;
-        # a warm 1.795x reference run measured 5-8 min/call). A too-low value
-        # (observed: FORGE_AGENT_TIMEOUT_SEC=300) is SHORTER than a normal call, so
-        # every attempt is false-killed as "fellow hung", every retry restarts from
-        # scratch and re-times-out, and the run never lands a real optimization.
-        # The floor makes the loop robust even if the env is misconfigured.
-        agent_timeout_s = max(agent_timeout_s, 600)
-        # Retry the fellow on a hung/transient failure. The claude-agent-sdk
-        # streaming query() intermittently hangs (the fellow subprocess stream
-        # never closes) or returns a transient SDK error; a fresh attempt almost
-        # always succeeds. Without retry, every hung iteration burns the full
-        # timeout and produces no edit -> a single flaky call can sink the whole
-        # run. FORGE_AGENT_RETRIES = extra attempts after the first (default 2).
-        agent_retries = max(0, int(os.environ.get("FORGE_AGENT_RETRIES", "2")))
-        _TRANSIENT = (
-            "error result: success", "Reached maximum number of turns",
-            "Fatal error in message reader", "message reader",
-            "Connection", "connection reset", "stream", "EOF", "broken pipe",
-        )
-
-        async def _logged_agent_fn(kernel_path: str, history: str) -> str:
-            import asyncio as _aio
-            import traceback as _tb
-            last_exc: Exception | None = None
-            for attempt in range(agent_retries + 1):
-                call_ts = time.strftime("%H:%M:%S", time.gmtime())
-                tag = f"attempt {attempt + 1}/{agent_retries + 1}"
-                try:
-                    result = await _aio.wait_for(
-                        raw_agent_fn(kernel_path, history), timeout=agent_timeout_s)
-                    with open(forge_log, "a") as f:
-                        f.write(f"[{call_ts}] agent_fn OK ({tag}): {result[:120]}\n")
-                    return result
-                except _aio.TimeoutError as exc:
-                    last_exc = exc
-                    with open(forge_log, "a") as f:
-                        f.write(f"[{call_ts}] agent_fn TIMEOUT after {agent_timeout_s}s "
-                                f"({tag}; fellow hung) -> "
-                                f"{'retrying' if attempt < agent_retries else 'giving up'}\n")
-                    # Transient stream hang: a fresh query() usually reconnects.
-                    continue
-                except Exception as exc:  # noqa: BLE001
-                    last_exc = exc
-                    detail = _tb.format_exc()
-                    transient = any(s.lower() in str(exc).lower() for s in _TRANSIENT)
-                    with open(forge_log, "a") as f:
-                        f.write(f"[{call_ts}] agent_fn ERROR ({tag}; "
-                                f"{'transient->retry' if transient and attempt < agent_retries else 'fatal'}): "
-                                f"{exc}\n{detail}\n")
-                    if transient and attempt < agent_retries:
-                        continue
-                    raise
-            # All attempts hung/failed transiently; surface to the loop (it records
-            # the failed iteration and moves on).
-            raise last_exc if last_exc else RuntimeError("agent_fn exhausted retries")
-
-        # The fellow runs the claude CLI with bypassPermissions, which refuses to
-        # start under root unless IS_SANDBOX=1. Hyperloom backends commonly run as
-        # root in containers, so inject it (only when root + unset) to keep the
-        # agent from silently failing every iteration. The agent subprocess
-        # inherits this env.
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            os.environ.setdefault("IS_SANDBOX", "1")
-
-        # TLS defaults for the claude CLI fellow. The AMD SaFE proxy presents an
-        # internal/self-signed certificate; without these the Node-based CLI's
-        # TLS handshake to the proxy fails and the streaming query() hangs or
-        # errors every iteration (observed as "fellow hung"). setdefault so an
-        # explicit operator value always wins, but a bare run (no setup_env.sh
-        # exporting them) still works out of the box.
-        os.environ.setdefault("ANTHROPIC_SKIP_TLS_VERIFY", "true")
-        os.environ.setdefault("NODE_TLS_REJECT_UNAUTHORIZED", "0")
-
-        # The claude-agent-sdk's streaming transport needs the /api/v1/llm-proxy
-        # endpoint. The OOB path commonly exports ANTHROPIC_BASE_URL=.../llm-gateway
-        # (which only serves the non-streaming `claude -p` path -> 401 in
-        # streaming) or an OpenAI-style URL. Ensure the fellow's query() calls hit
-        # a streaming proxy: keep an explicit proxy, rewrite a known /llm-gateway
-        # suffix, else fall back to the claude CLI's own validated config.json
-        # customApiUrl.
-        _base = os.environ.get("ANTHROPIC_BASE_URL", "").rstrip("/")
-        if "/api/v1/llm-proxy" not in _base:
-            _proxy = ""
-            if _base.endswith("/llm-gateway"):
-                _proxy = _base.rsplit("/llm-gateway", 1)[0] + "/api/v1/llm-proxy"
-            if not _proxy:
-                try:
-                    import json as _json
-                    _cfg = _json.loads((Path.home() / ".claude" / "config.json").read_text())
-                    _cu = str(_cfg.get("customApiUrl") or "").rstrip("/")
-                    if "/api/v1/llm-proxy" in _cu:
-                        _proxy = _cu
-                except Exception:
-                    _proxy = ""
-            if _proxy:
-                os.environ["ANTHROPIC_BASE_URL"] = _proxy
-
-        # Redirect the loop's print output to a log file so the full iteration
-        # timeline (baseline, agent rationale, validation stages, keep/revert
-        # decisions, budget exhaustion) is preserved for post-mortem — the
-        # runner prints to stdout which is otherwise lost inside asyncio.run.
-        import contextlib, io
-        loop_stdout = io.StringIO()
-        loop_exc = None
-        try:
-            with contextlib.redirect_stdout(loop_stdout):
-                asyncio.run(loop_runner.run(agent_fn=_logged_agent_fn))
-        except Exception as _loop_err:
-            loop_exc = _loop_err
-        loop_output = loop_stdout.getvalue()
-        try:
-            with open(forge_log, "a") as f:
-                f.write("\n=== forge loop stdout ===\n")
-                f.write(loop_output)
-                if loop_exc:
-                    f.write(f"\n=== loop exception ===\n{loop_exc}\n")
-        except OSError:
-            pass
-
-        baseline_ms = getattr(loop_runner.ic, "baseline_wall_ms", None)
-        best_ms = getattr(loop_runner, "best_wall_ms", None)
-        # `improved` = a validated kernel strictly faster than baseline was kept
-        # (the loop only keeps iterations that pass 5-stage validation). Only then
-        # do we report a KEEP-worthy speedup + correctness pass.
-        improved = bool(baseline_ms and best_ms and best_ms < baseline_ms)
-
-        # Export + report BEFORE _restore_inplace (in finally) reverts the
-        # changed files. The best-kept state is on disk right now; capture ALL
-        # files the agent touched (not just source_file) + a forge.patch.
+        # Run the loop in an isolated, hard-killable subprocess (like GEAK) so a
+        # hung fellow can never freeze the orchestrator: the subprocess timeout
+        # kills the whole tree. Bake the fellow's stability env defaults first so
+        # the child (and the claude CLI it drives) inherits a working config.
+        _setup_fellow_env()
+        baseline_ms, best_ms, improved, loop_output, loop_exc = _run_loop_via_cli(
+            worktree_kernel=worktree_kernel, driver=driver, workspace=workspace,
+            shapes=shapes, snr_threshold=snr_threshold, max_iters=max_iters,
+            max_hours=max(0.05, timeout_s / 3600.0), branch=branch,
+            gpu_target=gpu_target, fellow=fellow,
+            program_md_file=str(prompt_file), experiments_dir=experiments_dir,
+            forge_log=forge_log, timeout_s=timeout_s)
         _, changed_files = _export_best_artifacts(
             workspace, base_commit, worktree_kernel, source_file, output_dir)
         if changed_files:
@@ -1381,17 +1215,14 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
             except OSError:
                 pass
         _write_report(output_dir, baseline_ms, best_ms, improved)
-
-        if loop_exc:
-            raise loop_exc
-
-        msg = (f"forge done: baseline={baseline_ms} best={best_ms} "
+        if loop_exc and baseline_ms is None:
+            # Hard failure with no measurement -> surface as forge failure.
+            return _normalized(1, "", f"forge cli loop failed: {loop_exc}",
+                               time.time() - started)
+        msg = (f"forge done (cli): baseline={baseline_ms} best={best_ms} "
                f"improved={improved} fellow={fellow} gpu={gpu_target}")
-        res = _normalized(0, msg + "\n" + loop_output[-3000:], "", time.time() - started)
-        # Expose output_dir as cli_workspace so run_attempt's report scan finds
-        # <output_dir>/optimization_report.md + optimized_versions/ (same path
-        # convention as the OOB backend). Without this, build_verification reads
-        # no report and falls back to default_unmeasured.
+        res = _normalized(0, msg + "\n" + (loop_output or "")[-3000:], "",
+                          time.time() - started)
         res["cli_workspace"] = str(output_dir)
         res["output_dir"] = str(output_dir)
         return res
@@ -1403,3 +1234,5 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
             _restore_inplace(restore_info)
         else:
             _remove_worktree(kernel_repo, source_file, workspace, branch)
+
+
