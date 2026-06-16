@@ -110,9 +110,20 @@ jobs:
                       return parts[-1] if parts else "unknown"
               return "unknown"
 
+          # ``[tool.coverage.run].source`` mixes import-package names and
+          # on-disk paths; coverage data keys are file paths, so per-tree
+          # narrowing uses ``--include`` globs (``coverage report`` has no
+          # ``--source``). Only ``robustness_agent`` differs from its path.
+          _SOURCE_GLOBS = {
+              "robustness_agent": "robustness-agent/src/robustness_agent/*",
+          }
+
+          def _glob_for(source: str) -> str:
+              return _SOURCE_GLOBS.get(source, f"{source}/*")
+
           def narrow_total(source: str) -> str:
               proc = subprocess.run(
-                  ["coverage", "report", "--skip-empty", f"--source={source}"],
+                  ["coverage", "report", "--skip-empty", "--include", _glob_for(source)],
                   capture_output=True,
                   text=True,
                   check=False,
