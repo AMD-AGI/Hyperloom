@@ -110,8 +110,12 @@ def _reusable_source_roots() -> tuple[str, ...]:
             out.append(default)
     return tuple(out)
 _APPLY_TOOL_MODULE: Any | None = None
-# GEAK FIRST per SKILL.md §"choose_backends" "Default ladder"; Cursor last (dropped when CURSOR_API_KEY is unset).
-_DEFAULT_KERNEL_BACKEND_ORDER = ("geak", "claude", "codex", "cursor")
+# Default ladder: forge first, then geak. claude/codex/cursor are NOT in the
+# default anymore — they only run when explicitly requested via
+# KERNEL_OPT_BACKEND_ORDER / KERNEL_OPT_BACKENDS (or payload backend_order).
+# They remain in `allowed` (see _backend_order) so env-opt-in still works.
+# Cursor is additionally key-gated (dropped when CURSOR_API_KEY is unset).
+_DEFAULT_KERNEL_BACKEND_ORDER = ("forge", "geak")
 # Soft cap on concurrent kernel-backend coroutines (legacy MI300X 8-GPU fallback; pin with KERNEL_OPT_MAX_PARALLEL).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_OOB_BUDGET_MINUTES = 60.0
@@ -1399,14 +1403,28 @@ async def trace_analyze_handler(
             )
 
         # kernel_journey stage 1 (hot-kernel discovery): additive, best-effort.
-        # Records the tracelens run + its hot-kernel list + tool provenance so
+        # Records the discovery run + its hot-kernel list + tool provenance so
         # the journey can thread discovery -> dispatch -> backends -> e2e.
         try:
             from ..breakdown.recorder import instrument
             _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
+            # Discovery source = the route that actually ran. The tool reports
+            # the authoritative mode (``orchestrator_mode``); the deterministic
+            # (no-LLM) route is surfaced to the dashboard as ``bypass`` while the
+            # LLM route stays ``tracelens``. Fall back to the requested
+            # ``analysis_route`` when the tool didn't echo a mode (e.g. early
+            # failure). Both routes drive the same TraceLens toolchain, so the
+            # version provenance (``tool``) stays ``tracelens`` either way.
+            _orch_mode = str(result.get("orchestrator_mode") or "").strip().lower()
+            _is_bypass = (
+                _orch_mode == "deterministic"
+                or analysis_route == "deterministic"
+            )
+            _disc_source = "bypass" if _is_bypass else "tracelens"
             instrument.record_kernel_discovery(
                 session_dir,
-                source="tracelens",
+                source=_disc_source,
+                tool="tracelens",
                 status=str(result.get("status") or ""),
                 hot_kernels=_hot if isinstance(_hot, list) else [],
                 scan={
@@ -1414,6 +1432,7 @@ async def trace_analyze_handler(
                     "trace_dir":          str(trace_input),
                     "candidates_path":    str(result.get("candidates_path") or ""),
                     "trace_report_path":  str(result.get("trace_report_path") or ""),
+                    "analysis_route":     _disc_source,
                 },
                 # tracelens version/commit is read from $TRACELENS_ROOT (its
                 # own checkout), resolved by the recorder's tool registry; we
@@ -1610,7 +1629,10 @@ def _backend_order(payload: dict) -> list[str]:
         # Ignore legacy payload["backends"]; the default ladder (GEAK first) mirrors ``kernel_optimization.choose_backends`` so single/batch agree.
         order = list(_DEFAULT_KERNEL_BACKEND_ORDER)
         explicit = False
-    allowed = {"claude", "codex", "cursor", "geak"}
+    # `forge` (Kernel-Forge autonomous-loop backend) is first in
+    # _DEFAULT_KERNEL_BACKEND_ORDER; keep it in `allowed` so it survives the
+    # filter for both the default and any explicit backend_order.
+    allowed = {"claude", "codex", "cursor", "geak", "forge"}
     selected = [backend for backend in order if backend in allowed]
     # Drop cursor from the auto-derived ladder when CURSOR_API_KEY is unset (explicit order still wins).
     if not explicit and not os.environ.get("CURSOR_API_KEY", "").strip():
@@ -1995,10 +2017,32 @@ async def _run_kernel_backend_sequence(
     """
     kernel_id = str(candidate.get("kernel_id") or base_payload.get("kernel_id") or "")
     order = _backend_order(base_payload)
-    geak_group = [b for b in order if b == "geak"]
-    oob_group = [b for b in order if b != "geak"]
 
-    if parallel_backends and geak_group and oob_group:
+    # Forge edits the live repo in-place (temp branch + per-file restore) and
+    # must NOT race with other backends that read/write the same repo. Run it
+    # sequentially first; if it KEEPs, short-circuit. Otherwise continue with
+    # the geak / oob parallel split on the remaining backends.
+    forge_group = [b for b in order if b == "forge"]
+    remaining = [b for b in order if b != "forge"]
+    forge_best: dict | None = None
+    forge_attempts: list = []
+    best: dict | None = None
+    attempts: list = []
+    if forge_group:
+        forge_best, forge_attempts = await _run_backend_ladder(
+            base_payload, candidate, kernel_id, forge_group,
+            session_dir=session_dir,
+        )
+        if forge_best and _kernel_result_rank(forge_best)[0] > 0:
+            best = forge_best
+            attempts = forge_attempts
+
+    geak_group = [b for b in remaining if b == "geak"]
+    oob_group = [b for b in remaining if b != "geak"]
+
+    if best is not None:
+        pass
+    elif parallel_backends and geak_group and oob_group:
         (geak_best, geak_attempts), (oob_best, oob_attempts) = await asyncio.gather(
             _run_backend_ladder(
                 base_payload, candidate, kernel_id, geak_group,
@@ -2009,7 +2053,7 @@ async def _run_kernel_backend_sequence(
                 session_dir=session_dir,
             ),
         )
-        attempts = geak_attempts + oob_attempts
+        attempts = forge_attempts + geak_attempts + oob_attempts
         best = max(
             (r for r in (geak_best, oob_best) if r is not None),
             key=_kernel_result_rank,
@@ -2017,8 +2061,11 @@ async def _run_kernel_backend_sequence(
         )
     else:
         best, attempts = await _run_backend_ladder(
-            base_payload, candidate, kernel_id, order, session_dir=session_dir,
+            base_payload, candidate, kernel_id, remaining, session_dir=session_dir,
         )
+        attempts = forge_attempts + attempts
+        if best is None and forge_best is not None:
+            best = forge_best
 
     if best is None:
         best = {
@@ -2051,6 +2098,13 @@ async def _run_optimization_batch(
         or _default_kernel_batch_parallel()
     )
     max_parallel = max(1, max_parallel)
+    # Forge edits framework sources in-place. The per-repo lock protects one
+    # forge run, but if multiple kernels are processed concurrently a second
+    # kernel can miss the lock, skip forge, and race another backend against the
+    # first kernel's live-tree edits. Keep the whole kernel batch serial whenever
+    # forge is in the backend ladder.
+    if "forge" in _backend_order(payload):
+        max_parallel = 1
     # GPU-rich mode: when the node can fit a kernel's GEAK + OOB ladder
     # side-by-side (see :func:`_should_parallelize_backends`), race them per
     # kernel and keep the stronger result instead of short-circuiting on

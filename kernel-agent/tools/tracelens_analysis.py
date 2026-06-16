@@ -2652,7 +2652,7 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
         return []
     # GEAK first; append cursor only when CURSOR_API_KEY is provisioned.
     cursor_tail = ["cursor"] if os.environ.get("CURSOR_API_KEY", "").strip() else []
-    return ["geak", "claude", "codex"] + cursor_tail
+    return ["forge", "geak", "claude", "codex"] + cursor_tail
 
 
 def build_notes(candidate: dict[str, Any]) -> str:

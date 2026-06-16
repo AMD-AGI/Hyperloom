@@ -701,7 +701,9 @@ class TestBatchParallelConcurrencyCap:
             for i in range(10)
         ]
         out = asyncio.run(krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy", "max_parallel": 10},
+            payload={"candidates_path": "/dummy",
+                     "backend_order": "geak,claude,codex",
+                     "max_parallel": 10},
             candidates=candidates,
             session_dir=tmp_path,
         ))
@@ -736,7 +738,9 @@ class TestBatchParallelConcurrencyCap:
             for i in range(3)
         ]
         out = asyncio.run(krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy", "max_parallel": 7},
+            payload={"candidates_path": "/dummy",
+                     "backend_order": "geak,claude,codex",
+                     "max_parallel": 7},
             candidates=candidates,
             session_dir=tmp_path,
         ))

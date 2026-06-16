@@ -37,8 +37,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from optimize_submit import HuggingFaceClient   # noqa: E402
 
-DEFAULT_CRON_CANDIDATES_FILE = (
-    "ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json"
+# The schedule always sets INPUT_CANDIDATES_FILE explicitly (built from the
+# WEKAFS_CHENYI_DIR secret), so this is only the empty-env fallback. Keep the
+# personal /wekafs root out of source; allow a CRON_CANDIDATES_FILE env override.
+DEFAULT_CRON_CANDIDATES_FILE = os.environ.get(
+    "CRON_CANDIDATES_FILE",
+    "ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json",
 )
 
 
@@ -498,21 +502,24 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
 
 # UTC hours at which the schedule cron fires (keep in sync with the
 # ``schedule: cron`` expression at the top of optimize-submit.yml).
-_CRON_FIRE_HOURS_UTC = (4, 12, 20)
+# 2026-06-15: dropped to twice a day (UTC 04:00 / 16:00 = Beijing 12:00 / 00:00).
+_CRON_FIRE_HOURS_UTC = (4, 16)
 
 # Anchor fire: the first scheduled run at/after this instant maps to batch 0.
 # The rotation pool is ordered not-run-first, so batch 0 hits the not-yet-run
 # head. Merge the candidate-pool change before this fire so the very next cron
 # starts at batch 0; bump this if the merge slips to a later fire.
-_CRON_ANCHOR_UTC = datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc)
+# 2026-06-15: re-anchored to the next 16:00 UTC fire so the freshly front-loaded
+# 449 >12B multimodal NOT-run models are swept starting at batch 0.
+_CRON_ANCHOR_UTC = datetime(2026, 6, 15, 16, 0, tzinfo=timezone.utc)
 
 
 def _cron_fire_counter(now_utc: datetime) -> int:
     """Map a UTC instant to a strictly increasing scheduled-fire counter.
 
-    Each scheduled cron fire (UTC 4/12/20) advances the counter by exactly one,
+    Each scheduled cron fire (UTC 4/16) advances the counter by exactly one,
     so consecutive cron runs step through batch 0, 1, 2, ... in order (unlike a
-    half-day slot, which collapsed the 12:00 and 20:00 fires onto one index).
+    half-day slot, which would collapse multiple fires onto one index).
     """
     idx = bisect.bisect_right(_CRON_FIRE_HOURS_UTC, now_utc.hour) - 1
     if idx < 0:
@@ -525,7 +532,7 @@ def _cron_fire_counter(now_utc: datetime) -> int:
 
 
 def _cron_batch_index(pool_size: int, batch_size: int) -> int:
-    """Sequential production-pool rotation for the thrice-daily cron.
+    """Sequential production-pool rotation for the twice-daily cron.
 
     Each scheduled fire advances the batch index by one (0, 1, 2, ... wrapping
     at the batch count), so the cron marches the whole pool in order and then

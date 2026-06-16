@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import struct
 from pathlib import Path
 
 import pytest
@@ -21,9 +22,13 @@ from inference_optimizer import cli
 from inference_optimizer import cli_model_gate
 
 
-def _write_config(model_dir: Path, **fields) -> None:
+def _write_config(model_dir: Path, *, with_tokenizer: bool = True, **fields) -> None:
     model_dir.mkdir(parents=True, exist_ok=True)
     (model_dir / "config.json").write_text(json.dumps(fields), encoding="utf-8")
+    # Most config-compat tests are unrelated to the tokenizer-artifact check;
+    # ship a tokenizer by default so they exercise only the field they target.
+    if with_tokenizer:
+        (model_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
 
 
 def _args(model: str, *, gpu_type: str | None = None) -> argparse.Namespace:
@@ -65,6 +70,162 @@ def test_detect_rope_with_maxpos_ok(tmp_path):
     _write_config(
         m, model_type="llama", max_position_embeddings=8192,
         rope_scaling={"type": "yarn", "factor": 4.0},
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_missing_tokenizer_blocks(tmp_path):
+    # Gensyn-Swarm fine-tune class: weights + config, no tokenizer artifacts.
+    m = tmp_path / "no_tok"
+    _write_config(
+        m, with_tokenizer=False,
+        model_type="qwen2", max_position_embeddings=32768,
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None
+    assert "tokenizer" in reason.lower()
+
+
+def test_detect_with_tokenizer_ok(tmp_path):
+    m = tmp_path / "with_tok"
+    _write_config(
+        m, with_tokenizer=False,
+        model_type="qwen2", max_position_embeddings=32768,
+    )
+    (m / "tokenizer.json").write_text("{}", encoding="utf-8")
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_missing_tokenizer_but_auto_map_ok(tmp_path):
+    # A custom AutoTokenizer in auto_map can supply the tokenizer at load time.
+    m = tmp_path / "auto_tok"
+    _write_config(
+        m, with_tokenizer=False,
+        model_type="custom", max_position_embeddings=4096,
+        auto_map={"AutoTokenizer": ["x.TokClass", None]},
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_minimax_m1_blocked_on_amd(tmp_path):
+    # minimax_m1 lightning-attention kernel needs 128KB LDS > MI300X 64KB.
+    m = tmp_path / "minimax"
+    _write_config(
+        m, model_type="minimax_m1",
+        architectures=["MiniMaxM1ForCausalLM"], max_position_embeddings=80000,
+    )
+    reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    assert reason is not None
+    assert "AMD/ROCm" in reason
+
+
+def test_detect_minimax_m1_not_blocked_off_amd(tmp_path):
+    # AMD-specific LDS limit; do not block on non-AMD hardware.
+    m = tmp_path / "minimax_non_amd"
+    _write_config(
+        m, model_type="minimax_m1",
+        architectures=["MiniMaxM1ForCausalLM"], max_position_embeddings=80000,
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_unrecognized_arch_blocked_hardware_agnostic(tmp_path):
+    # glm4_moe_lite: Transformers does not recognize → ValidationError on any GPU.
+    m = tmp_path / "glm47flash"
+    _write_config(
+        m, model_type="glm4_moe_lite",
+        architectures=["Glm4MoeLiteForCausalLM"], max_position_embeddings=131072,
+    )
+    reason_amd = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
+    reason_off = cli._detect_incompatible_model_config(str(m))
+    assert reason_amd is not None and "not recognized" in reason_amd
+    assert reason_off is not None and "not recognized" in reason_off
+
+
+def test_detect_mimo_v2_flash_unrecognized_blocked(tmp_path):
+    # mimo_v2_flash: unrecognized arch + Unknown attention backend TRITON.
+    m = tmp_path / "mimo"
+    _write_config(
+        m, model_type="mimo_v2_flash",
+        architectures=["MiMoV2FlashForCausalLM"], max_position_embeddings=131072,
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "not recognized" in reason
+
+
+def test_detect_deepseek_v4_unrecognized_blocked(tmp_path):
+    # DeepSeek-V4 currently fails sglang ModelConfig validation during server init.
+    m = tmp_path / "deepseek_v4"
+    _write_config(
+        m,
+        model_type="deepseek_v4",
+        architectures=["DeepseekV4ForCausalLM"],
+        max_position_embeddings=1048576,
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "not recognized" in reason
+
+
+def test_detect_nested_ministral3_unrecognized_blocked(tmp_path):
+    # Mistral3 wrapper exposes text_config.model_type=ministral3; vLLM raises KeyError.
+    m = tmp_path / "mistral3"
+    _write_config(
+        m,
+        model_type="mistral3",
+        architectures=["Mistral3ForConditionalGeneration"],
+        image_token_index=10,
+        text_config={
+            "model_type": "ministral3",
+            "max_position_embeddings": 393216,
+            "vocab_size": 131072,
+            "hidden_size": 5120,
+            "num_hidden_layers": 40,
+        },
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "ministral3" in reason
+
+
+def test_detect_pure_nested_ministral3_blocked(tmp_path):
+    # Parent model_type is NOT ministral3 (a generic wrapper); only the nested
+    # text_config carries ministral3. Verifies the nested-only gate in isolation
+    # from the parent scope.
+    m = tmp_path / "wrapper_nested_ministral3"
+    _write_config(
+        m,
+        model_type="some_wrapper",
+        architectures=["SomeWrapperForConditionalGeneration"],
+        text_config={
+            "model_type": "ministral3",
+            "max_position_embeddings": 32768,
+            "vocab_size": 131072,
+        },
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "ministral3" in reason
+
+
+def test_detect_top_level_ministral3_not_blocked(tmp_path):
+    # A bare top-level model_type=ministral3 (no Mistral3 wrapper) is left to the
+    # framework; only the nested text_config form is a confirmed failure.
+    m = tmp_path / "bare_ministral3"
+    _write_config(
+        m,
+        model_type="ministral3",
+        architectures=["Ministral3ForCausalLM"],
+        max_position_embeddings=32768,
+        vocab_size=131072,
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_glm4_moe_not_blocked(tmp_path):
+    # glm4_moe (GLM-4.5/4.6 mainline) is a supported arch; must NOT be blocked
+    # by the unrecognized-arch rule (only glm4_moe_lite is unrecognized).
+    m = tmp_path / "glm4moe"
+    _write_config(
+        m, model_type="glm4_moe",
+        architectures=["Glm4MoeForCausalLM"], max_position_embeddings=131072,
     )
     assert cli._detect_incompatible_model_config(str(m)) is None
 
@@ -368,6 +529,130 @@ def test_detect_amd_native_fp8_not_blocked(tmp_path):
         quantization_config={"quant_method": "fp8"},
     )
     assert cli._detect_incompatible_model_config(str(m), gpu_type="mi300x") is None
+
+
+def _write_safetensors_header(model_dir: Path, tensors: dict) -> None:
+    header = json.dumps(tensors).encode("utf-8")
+    with (model_dir / "model.safetensors").open("wb") as f:
+        f.write(struct.pack("<Q", len(header)))
+        f.write(header)
+
+
+def test_detect_vocab_shape_mismatch_blocks(tmp_path):
+    m = tmp_path / "qwen_vocab_mismatch"
+    _write_config(
+        m,
+        model_type="qwen2",
+        architectures=["Qwen2ForCausalLM"],
+        max_position_embeddings=4096,
+        vocab_size=152064,
+    )
+    _write_safetensors_header(m, {
+        "model.embed_tokens.weight": {
+            "dtype": "BF16",
+            "shape": [151936, 1536],
+            "data_offsets": [0, 0],
+        },
+        "lm_head.weight": {
+            "dtype": "BF16",
+            "shape": [151936, 1536],
+            "data_offsets": [0, 0],
+        },
+    })
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None
+    assert "vocab_size=152064" in reason
+    assert "151936" in reason
+
+
+def test_detect_vocab_shape_match_not_blocked(tmp_path):
+    # config vocab_size matches the weight output dim -> must NOT block.
+    m = tmp_path / "qwen_vocab_ok"
+    _write_config(
+        m,
+        model_type="qwen2",
+        architectures=["Qwen2ForCausalLM"],
+        max_position_embeddings=4096,
+        vocab_size=151936,
+    )
+    _write_safetensors_header(m, {
+        "model.embed_tokens.weight": {
+            "dtype": "BF16", "shape": [151936, 1536], "data_offsets": [0, 0],
+        },
+    })
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_read_safetensors_header_parses_and_rejects(tmp_path):
+    # Valid header round-trips; truncated / oversized headers return None.
+    good = tmp_path / "model.safetensors"
+    _write_safetensors_header(tmp_path, {"x.weight": {"shape": [4, 4]}})
+    assert cli._read_safetensors_header(good) == {"x.weight": {"shape": [4, 4]}}
+
+    truncated = tmp_path / "trunc.safetensors"
+    truncated.write_bytes(struct.pack("<Q", 999) + b"{")  # claims 999, has 1
+    assert cli._read_safetensors_header(truncated) is None
+
+    short = tmp_path / "short.safetensors"
+    short.write_bytes(b"\x01\x02")  # < 8-byte length prefix
+    assert cli._read_safetensors_header(short) is None
+
+
+# ---------------------------------------------------------------------------
+# Gemma2 detection helpers (model_config_utils)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("gemma2", True),
+        ("gemma2-9b", True),
+        ("google-gemma-2-9b-it", True),
+        ("gemma_2_2b", True),
+        ("llama-gemma2-test", True),
+        ("gemma-3-12b", False),
+        ("gemma3-12b", False),
+        ("gemma25", False),
+        ("notgemma2", False),
+        ("mygemma2", False),
+        ("gemma12-model", False),
+        ("", False),
+    ],
+)
+def test_path_looks_like_gemma2(name, expected):
+    from inference_optimizer import model_config_utils as mcu
+    assert mcu._path_looks_like_gemma2(name) is expected
+
+
+def test_model_is_gemma2_falls_back_to_path_on_residual_config(tmp_path):
+    # config.json present but empty (no model_type/architectures) -> the path
+    # heuristic decides; a gemma-2 path is still detected.
+    from inference_optimizer import model_config_utils as mcu
+    m = tmp_path / "google-gemma-2-9b-it"
+    m.mkdir()
+    (m / "config.json").write_text("{}", encoding="utf-8")
+    assert mcu._model_is_gemma2(str(m)) is True
+
+
+def test_model_is_gemma2_trusts_identified_non_gemma_config(tmp_path):
+    # config clearly identifies llama; even a gemma-2 path must NOT override it.
+    from inference_optimizer import model_config_utils as mcu
+    m = tmp_path / "gemma-2-distill-llama"
+    m.mkdir()
+    (m / "config.json").write_text(json.dumps({
+        "model_type": "llama", "architectures": ["LlamaForCausalLM"],
+    }), encoding="utf-8")
+    assert mcu._model_is_gemma2(str(m)) is False
+
+
+def test_model_is_gemma2_detects_nested_text_config(tmp_path):
+    from inference_optimizer import model_config_utils as mcu
+    m = tmp_path / "wrapper"
+    m.mkdir()
+    (m / "config.json").write_text(json.dumps({
+        "model_type": "wrapper",
+        "text_config": {"model_type": "gemma2"},
+    }), encoding="utf-8")
+    assert mcu._model_is_gemma2(str(m)) is True
 
 
 def test_detect_unregistered_custom_config_blocks(tmp_path):

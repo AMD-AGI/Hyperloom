@@ -655,6 +655,171 @@ def test_materialize_profile_sglang_does_not_duplicate_shape_discovery(
     assert extra.count("--enable-shape-discovery-for-cuda-graph-profile") == 1, extra
 
 
+def _profile_yaml_model(tmp_path, framework: str, model: str, envs: dict) -> Path:
+    """Like _profile_yaml but with an explicit model path (for Gemma2 gating)."""
+    import yaml as _yaml
+    src = tmp_path / f"src_{framework}_model.yaml"
+    src.write_text(_yaml.safe_dump({
+        "benchmark": {
+            "framework": framework,
+            "model": model,
+            "envs": {"PROFILE": "1", **envs},
+            "profiler": {"torch_profiler": {"enabled": True}},
+        },
+    }))
+    return src
+
+
+def test_materialize_profile_sglang_skips_shape_discovery_for_gemma2(
+    tmp_path, monkeypatch,
+):
+    """Gemma2 + patched SGLang must NOT inject shape-discovery (it crashes
+    CUDA-graph capture); --enable-profile-cuda-graph still applies."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    model = tmp_path / "gemma2_model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({
+        "model_type": "gemma2", "architectures": ["Gemma2ForCausalLM"],
+    }), encoding="utf-8")
+    src = _profile_yaml_model(
+        tmp_path, "sglang", str(model), {"CONC": 32, "ISL": 256, "OSL": 1024},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
+    assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
+
+
+def test_materialize_profile_sglang_keeps_shape_discovery_for_non_gemma2(
+    tmp_path, monkeypatch,
+):
+    """A non-Gemma2 model still gets shape-discovery when patched."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    model = tmp_path / "llama_model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({
+        "model_type": "llama", "architectures": ["LlamaForCausalLM"],
+    }), encoding="utf-8")
+    src = _profile_yaml_model(
+        tmp_path, "sglang", str(model), {"CONC": 32, "ISL": 256, "OSL": 1024},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
+        "EXTRA_SGLANG_ARGS", "",
+    )
+    assert "--enable-shape-discovery-for-cuda-graph-profile" in extra, extra
+
+
+def test_materialize_profile_sglang_skips_shape_discovery_gemma2_by_path(
+    tmp_path, monkeypatch,
+):
+    """No config.json but a gemma-2 path -> heuristic skips shape-discovery."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    # Path looks like Gemma2 but ships no config.json (not-yet-materialized).
+    model = "/wekafs/models/google-gemma-2-9b-it"
+    src = _profile_yaml_model(
+        tmp_path, "sglang", model, {"CONC": 32, "ISL": 256, "OSL": 1024},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
+    assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
+
+
+def test_materialize_profile_sglang_no_config_non_gemma_keeps_shape_discovery(
+    tmp_path, monkeypatch,
+):
+    """No config.json and a non-Gemma2 path -> shape-discovery stays on."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    model = "/wekafs/models/meta-llama-3-8b-instruct"
+    src = _profile_yaml_model(
+        tmp_path, "sglang", model, {"CONC": 32, "ISL": 256, "OSL": 1024},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
+        "EXTRA_SGLANG_ARGS", "",
+    )
+    assert "--enable-shape-discovery-for-cuda-graph-profile" in extra, extra
+
+
+def test_materialize_profile_sglang_skips_shape_discovery_nested_gemma2(
+    tmp_path, monkeypatch,
+):
+    """Gemma2 declared only in text_config still trips the shape-discovery gate."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    model = tmp_path / "wrapper_model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({
+        "model_type": "wrapper",
+        "text_config": {"model_type": "gemma2"},
+    }), encoding="utf-8")
+    src = _profile_yaml_model(
+        tmp_path, "sglang", str(model), {"CONC": 32, "ISL": 256, "OSL": 1024},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
+    assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
+
+
+def test_materialize_profile_sglang_residual_config_gemma2_path(
+    tmp_path, monkeypatch,
+):
+    """Empty config.json + gemma-2 path -> heuristic still skips shape-discovery."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    model = tmp_path / "google-gemma-2-9b-it"
+    model.mkdir()
+    (model / "config.json").write_text("{}", encoding="utf-8")
+    src = _profile_yaml_model(
+        tmp_path, "sglang", str(model), {"CONC": 32, "ISL": 256, "OSL": 1024},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
+    assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
+
+
+def test_materialize_profile_sglang_force_overrides_gemma2_gate(
+    tmp_path, monkeypatch,
+):
+    """HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 keeps shape-discovery on for
+    Gemma2 (escape hatch for debugging the TraceLens root-cause fix)."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", "1")
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    model = tmp_path / "gemma2_model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({
+        "model_type": "gemma2", "architectures": ["Gemma2ForCausalLM"],
+    }), encoding="utf-8")
+    src = _profile_yaml_model(
+        tmp_path, "sglang", str(model), {"CONC": 32, "ISL": 256, "OSL": 1024},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert "--enable-shape-discovery-for-cuda-graph-profile" in envs.get(
+        "EXTRA_SGLANG_ARGS", "",
+    ), envs
+    assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is True
+
+
 def test_profile_executor_calls_benchmark_lib_patcher():
     """ProfileExecutor must patch the materialized InferenceX checkout before launching Magpie (else the computed profile window is stomped and the trace is empty)."""
     import inference_optimizer.orchestrator.action_executors.profile as profile_mod
@@ -1179,6 +1344,178 @@ async def test_trace_analyze_handler_tolerates_non_string_analysis_route(session
         res = await krh.trace_analyze_handler(payload, session_dir=session_dir)
         # Must return a structured result, never raise AttributeError.
         assert res["status"] in ("ok", "succeeded", "failed")
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_records_bypass_discovery_success(
+    session_dir, monkeypatch,
+):
+    """Deterministic route surfaces a kernel_journey discovery run labelled
+    source="bypass" (with the real hot kernels), while version provenance stays
+    under the tracelens toolchain (no junk versions["bypass"])."""
+    from inference_optimizer.breakdown.recorder import assemble_parts
+
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+
+    captured: dict = {}
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        captured["cmd"] = list(cmd)
+        payload = {
+            "status": "ok",
+            "orchestrator_mode": "deterministic",
+            "hot_kernels": [
+                {"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 42.0,
+                 "bottleneck": "memory", "reusable_native_kernel": True},
+                {"kernel_id": "k002", "name": "rms_norm", "gpu_pct": 7.5},
+            ],
+            "artifact_paths": {"kernel_candidates": "/tmp/kc.json"},
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "analysis_route": "deterministic",
+            "top_k": 5,
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+    # The deterministic route flag is forwarded to the tool.
+    assert "--analysis-route" in captured["cmd"]
+    assert "deterministic" in captured["cmd"]
+
+    out = assemble_parts(session_dir)
+    runs = out["kernel_journey"]["discovery_runs"]
+    assert len(runs) == 1
+    run = runs[0]
+    assert run["source"] == "bypass"
+    assert run["status"] == "ok"
+    assert run["hot_kernel_count"] == 2
+    assert {k["name"] for k in run["hot_kernels"]} == {"fused_moe", "rms_norm"}
+    assert run["scan"]["analysis_route"] == "bypass"
+    # Underlying toolchain is still tracelens; no empty versions["bypass"].
+    assert "bypass" not in out.get("versions", {})
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_records_bypass_discovery_failed(
+    session_dir, monkeypatch,
+):
+    """Fail-loud deterministic pipeline -> discovery run status=failed with the
+    error text and an empty hot-kernel list, still labelled source="bypass"."""
+    from inference_optimizer.breakdown.recorder import assemble_parts
+
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "failed",
+            "orchestrator_mode": "deterministic",
+            "error": "deterministic: category script for gemm exited rc=1",
+            "hot_kernels": [],
+        }
+        return 1, json.dumps(payload), "boom"
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "analysis_route": "deterministic",
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] == "failed"
+
+    out = assemble_parts(session_dir)
+    run = out["kernel_journey"]["discovery_runs"][0]
+    assert run["source"] == "bypass"
+    assert run["status"] == "failed"
+    assert run["hot_kernel_count"] == 0
+    assert run["error"]
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
+    session_dir, monkeypatch,
+):
+    """High-idle gate suppresses hot kernels but the run still succeeds -> a
+    bypass discovery run with status=ok and hot_kernel_count=0."""
+    from inference_optimizer.breakdown.recorder import assemble_parts
+
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "ok",
+            "orchestrator_mode": "deterministic",
+            "hot_kernels": [],
+            "trace_health_warnings": [
+                {"code": "high_gpu_idle", "severity": "warning"},
+            ],
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    res = await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "analysis_route": "deterministic",
+        },
+        session_dir=session_dir,
+    )
+    assert res["status"] == "ok"
+
+    out = assemble_parts(session_dir)
+    run = out["kernel_journey"]["discovery_runs"][0]
+    assert run["source"] == "bypass"
+    assert run["status"] == "ok"
+    assert run["hot_kernel_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_trace_analyze_handler_agent_route_stays_tracelens(
+    session_dir, monkeypatch,
+):
+    """The LLM/agent route keeps source="tracelens" (regression guard for the
+    bypass relabel)."""
+    from inference_optimizer.breakdown.recorder import assemble_parts
+
+    fake_trace = session_dir / "fake_trace_dir"
+    fake_trace.mkdir()
+
+    async def fake_run_subprocess(cmd, *, timeout_sec):
+        payload = {
+            "status": "ok",
+            "orchestrator_mode": "claude_agent_sdk",
+            "hot_kernels": [
+                {"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 30.0},
+            ],
+        }
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    await krh.trace_analyze_handler(
+        {
+            "trace_input": str(fake_trace),
+            "session_id": session_dir.name,
+            "analysis_route": "agent",
+        },
+        session_dir=session_dir,
+    )
+
+    out = assemble_parts(session_dir)
+    run = out["kernel_journey"]["discovery_runs"][0]
+    assert run["source"] == "tracelens"
+    assert run["scan"]["analysis_route"] == "tracelens"
 
 
 @pytest.mark.asyncio
@@ -2319,7 +2656,9 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
     with patch.object(krh, "_run_kernel_backend_sequence",
                        side_effect=fake_sequence):
         await krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy", "max_parallel": 3},
+            payload={"candidates_path": "/dummy",
+                     "backend_order": "geak,claude,codex",
+                     "max_parallel": 3},
             candidates=candidates,
             session_dir=session_dir,
             record_partial=record_partial,
@@ -2396,7 +2735,8 @@ async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
     }
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy"},
+            {"candidates_path": "/dummy",
+             "backend_order": "geak,claude,codex"},
             candidate,
             session_dir=session_dir,
         )
@@ -2429,7 +2769,8 @@ async def test_backend_ladder_breaks_on_first_keep(session_dir):
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy"},
+            {"candidates_path": "/dummy",
+             "backend_order": "geak,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py",
              "reusable_native_kernel": True},
             session_dir=session_dir,
@@ -2472,7 +2813,8 @@ async def test_backend_ladder_falls_back_to_highest_micro_when_no_keep(
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy"},
+            {"candidates_path": "/dummy",
+             "backend_order": "geak,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py",
              "reusable_native_kernel": True},
             session_dir=session_dir,
@@ -2514,7 +2856,8 @@ async def test_backend_sequence_parallel_runs_oob_even_when_geak_keeps(session_d
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy"},
+            {"candidates_path": "/dummy",
+             "backend_order": "geak,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py",
              "reusable_native_kernel": True},
             session_dir=session_dir,
@@ -2563,7 +2906,8 @@ async def test_backend_sequence_parallel_keeps_geak_when_oob_lower(session_dir):
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy"},
+            {"candidates_path": "/dummy",
+             "backend_order": "geak,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py",
              "reusable_native_kernel": True},
             session_dir=session_dir,
@@ -2609,7 +2953,8 @@ async def test_backend_sequence_parallel_oob_ladder_still_falls_back(session_dir
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy"},
+            {"candidates_path": "/dummy",
+             "backend_order": "geak,claude,codex"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py",
              "reusable_native_kernel": True},
             session_dir=session_dir,
@@ -2654,6 +2999,89 @@ async def test_backend_sequence_parallel_noop_without_geak(session_dir):
     # No geak in the ladder -> sequential break-on-KEEP: only claude runs.
     assert calls == ["claude"]
     assert (best.get("verification") or {}).get("micro_speedup") == 1.2
+
+
+@pytest.mark.asyncio
+async def test_backend_sequence_forge_keep_short_circuits(session_dir):
+    """Forge runs first and a KEEP short-circuits before GEAK/OOB.
+
+    Regression coverage for Bugbot: _kernel_result_rank() returns a tuple, so
+    the short-circuit must inspect the KEEP slot instead of comparing the tuple
+    directly to int 0.
+    """
+    calls: list[str] = []
+
+    async def fake_single(child, *, session_dir):
+        backend = child["backends"]
+        calls.append(backend)
+        if backend == "forge":
+            return {
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "KEEP", "reasons": []},
+                "verification": {"micro_speedup": 1.05,
+                                 "best_artifact_path": "/tmp/forge.py"},
+            }
+        raise AssertionError(f"forge KEEP must short-circuit before {backend!r}")
+
+    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
+        best = await krh._run_kernel_backend_sequence(
+            {"candidates_path": "/dummy",
+             "backend_order": "forge,geak,claude,codex"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py",
+             "reusable_native_kernel": True},
+            session_dir=session_dir,
+            parallel_backends=True,
+        )
+
+    assert calls == ["forge"]
+    assert (best.get("proposal") or {}).get("decision") == "KEEP"
+    assert best["batch_kernel_id"] == "k004"
+    assert {a["backend"] for a in best["backend_fallback_attempts"]} == {"forge"}
+
+
+@pytest.mark.asyncio
+async def test_batch_serializes_when_forge_in_ladder(session_dir, monkeypatch):
+    """Forge in-place editing is repo-global, so batch concurrency is capped at 1.
+
+    Even when GPU-rich mode says parallel backends are available, multiple
+    kernels must not race forge against other backends in the same live repo.
+    """
+    active = 0
+    max_active = 0
+    seen_flags: list[bool] = []
+
+    async def fake_sequence(base_payload, candidate, *, session_dir, parallel_backends=False):
+        nonlocal active, max_active
+        seen_flags.append(parallel_backends)
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {
+            "status": "ok",
+            "kernel_id": candidate["kernel_id"],
+            "proposal": {"decision": "REVERT", "reasons": []},
+            "verification": {"micro_speedup": 1.0},
+        }
+
+    monkeypatch.setattr(krh, "_should_parallelize_backends", lambda payload, n: True)
+    monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
+
+    out = await krh._run_optimization_batch(
+        {"candidates_path": "/dummy",
+         "backend_order": "forge,geak,claude,codex",
+         "max_parallel": 8},
+        [
+            {"kernel_id": "k001", "source_file": "/p/a.py"},
+            {"kernel_id": "k002", "source_file": "/p/b.py"},
+        ],
+        session_dir=session_dir,
+    )
+
+    assert max_active == 1
+    assert seen_flags == [True, True]
+    assert out["parallel_backends"] is True
 
 
 @pytest.mark.asyncio

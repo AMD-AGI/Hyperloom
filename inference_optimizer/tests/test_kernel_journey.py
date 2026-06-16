@@ -190,6 +190,33 @@ def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
     assert "tool" not in out["kernel_journey"]["kernels"][0]["backend_attempts"][0]
 
 
+def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
+    # forge is its own backend (NOT folded into oob): a forge attempt keeps
+    # backend="forge" in the journey and mints a distinct versions["forge"]
+    # provenance entry (via _TOOL_PROVENANCE), so A8b can group by forge version.
+    sha = _init_git_repo(tmp_path)
+    instrument.record_kernel_discovery(
+        tmp_path, source="tracelens", status="success",
+        hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 10.0}],
+        scan={},
+    )
+    instrument.record_kernel_backend_result(tmp_path, {
+        "kernel_id": "k1", "run_id": "r1", "attempts": [
+            {"attempt_id": "a1", "backend": "forge", "status": "completed",
+             "metadata": {"root_dir": str(tmp_path)}},
+        ],
+    })
+    out = assemble_parts(tmp_path)
+    # The attempt keeps its own backend label in the journey.
+    atts = out["kernel_journey"]["kernels"][0]["backend_attempts"]
+    assert atts[0]["backend"] == "forge"
+    # Distinct provenance entry, NOT merged into oob.
+    versions = out["versions"]
+    assert versions["forge"]["tool"] == "forge"
+    assert versions["forge"]["version"] == sha
+    assert "oob" not in versions
+
+
 def test_discovery_run_carries_duration(tmp_path: Path) -> None:
     instrument.record_kernel_discovery(
         tmp_path, source="tracelens", status="success",
@@ -198,6 +225,40 @@ def test_discovery_run_carries_duration(tmp_path: Path) -> None:
     )
     out = assemble_parts(tmp_path)
     assert out["kernel_journey"]["discovery_runs"][0]["duration_sec"] == 4.2
+
+
+def test_bypass_discovery_decouples_source_from_version_tool(tmp_path: Path) -> None:
+    # The deterministic (no-LLM) route surfaces as source="bypass" for the
+    # dashboard, but it runs the same TraceLens toolchain -> version provenance
+    # must stay under "tracelens" and NOT mint an empty versions["bypass"].
+    instrument.record_kernel_discovery(
+        tmp_path, source="bypass", tool="tracelens", status="success",
+        hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 12.0}],
+        scan={"analysis_route": "bypass", "candidates_path": str(tmp_path / "c.json")},
+        duration_sec=1.5,
+    )
+    out = assemble_parts(tmp_path)
+    runs = out["kernel_journey"]["discovery_runs"]
+    assert len(runs) == 1
+    assert runs[0]["source"] == "bypass"
+    assert runs[0]["hot_kernel_count"] == 1
+    assert runs[0]["scan"]["analysis_route"] == "bypass"
+    # Version provenance follows the underlying tool, not the route alias.
+    versions = out["versions"]
+    assert "tracelens" in versions
+    assert "bypass" not in versions
+
+
+def test_discovery_tool_defaults_to_source(tmp_path: Path) -> None:
+    # Back-compat: callers that omit ``tool`` keep version provenance keyed by
+    # ``source`` (the historical behavior for the tracelens route).
+    instrument.record_kernel_discovery(
+        tmp_path, source="tracelens", status="success",
+        hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 9.0}],
+        scan={},
+    )
+    out = assemble_parts(tmp_path)
+    assert "tracelens" in out["versions"]
 
 
 def test_tool_version_probe_git_strategies(tmp_path: Path) -> None:
@@ -209,6 +270,11 @@ def test_tool_version_probe_git_strategies(tmp_path: Path) -> None:
     # tracelens -> git describe (--always falls back to the short sha here).
     meta_tl = instrument._tool_metadata("tracelens", root=str(tmp_path))
     assert meta_tl["version"]  # non-empty describe output
+    # forge -> git short SHA (own backend, $FORGE_PATH-rooted); same strategy
+    # as geak so a real session mints a populated versions["forge"].
+    meta_forge = instrument._tool_metadata("forge", root=str(tmp_path))
+    assert meta_forge["commit"] == sha
+    assert meta_forge["version"] == sha
     # A caller-supplied version always wins over the probe.
     meta_explicit = instrument._tool_metadata(
         "geak", root=str(tmp_path), version="v9.9",

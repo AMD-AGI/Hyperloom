@@ -34,10 +34,14 @@ log = logging.getLogger(__name__)
 PRODUCER_COORDINATOR = "coordinator"
 PRODUCER_KERNEL_AGENT = "kernel-agent"
 
-# kernel-agent backend -> invocation section. geak is its own lane; the
-# out-of-band LLM backends (claude/codex) share the oob lane.
+# kernel-agent backend -> invocation section. Three independent lanes: geak,
+# the out-of-band LLM backends (claude/codex) on the oob lane, and forge
+# (Kernel-Forge autonomous loop) on its own lane. forge is NOT folded into oob
+# — it is a distinct backend, so it gets a distinct ``forge_invocations``
+# section (and a distinct capability/attribution row downstream).
 _GEAK_BACKENDS = frozenset({"geak"})
 _OOB_BACKENDS = frozenset({"claude", "codex"})
+_FORGE_BACKENDS = frozenset({"forge"})
 
 _FAILED_STATUSES = frozenset({"failed", "error", "crashed", "timeout"})
 
@@ -288,6 +292,8 @@ def _invocation_section(backend: str) -> str | None:
     b = str(backend or "").lower()
     if b in _GEAK_BACKENDS:
         return "geak_invocations"
+    if b in _FORGE_BACKENDS:
+        return "forge_invocations"
     if b in _OOB_BACKENDS:
         return "oob_invocations"
     return None
@@ -424,6 +430,10 @@ _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     "geak":         {"root_env": "GEAK_ROOT",                 "version": "git_short"},
     "mini":         {"root_env": "GEAK_ROOT",                 "version": "git_short"},
     "geak-gaagent": {"root_env": "GEAK_ROOT",                 "version": "git_short"},
+    # forge (Kernel-Forge autonomous loop) is its own backend; it locates its
+    # repo via $FORGE_PATH (forge_submit also accepts $KERNEL_FORGE_ROOT /
+    # $KERNEL_FORGE_PATH, but root resolution here pins the primary env var).
+    "forge":        {"root_env": "FORGE_PATH",               "version": "git_short"},
     "claude":       {"root_env": "",                          "version": ("cmd", ("claude", "--version"))},
     "codex":        {"root_env": "",                          "version": ("cmd", ("codex", "--version"))},
     "oob":          {"root_env": "",                          "version": ("dist", ("oob-mcp-server",))},
@@ -572,6 +582,7 @@ def record_kernel_discovery(
     status: str,
     hot_kernels: list[Any] | None = None,
     scan: dict[str, Any] | None = None,
+    tool: str | None = None,
     tool_root: str | None = None,
     tool_root_env: str | None = None,
     tool_version: str | None = None,
@@ -581,10 +592,18 @@ def record_kernel_discovery(
 ) -> None:
     """Record one hot-kernel discovery run (stage 1 of ``kernel_journey``).
 
-    One item per discovery invocation (tracelens / roofline scan), keyed by the
-    candidates/report path so a re-run with the same artifact overwrites rather
-    than duplicates. Carries the tool metadata (root + commit + version) and the
-    full hot-kernel list the run surfaced.
+    One item per discovery invocation (tracelens / bypass / roofline scan),
+    keyed by the candidates/report path so a re-run with the same artifact
+    overwrites rather than duplicates. Carries the full hot-kernel list the run
+    surfaced.
+
+    ``source`` is the discovery *route* label the dashboard groups by
+    (``tracelens`` / ``bypass`` / ...). ``tool`` is the underlying tool whose
+    authoritative version lands in the top-level ``versions`` map; it defaults
+    to ``source`` but is decoupled because routes can share one toolchain — the
+    deterministic ``bypass`` route runs the same TraceLens toolchain, so its
+    version provenance is still ``tracelens`` (passing ``tool="tracelens"``
+    avoids minting an empty ``versions["bypass"]`` entry).
     """
     if not session_dir:
         return
@@ -612,9 +631,11 @@ def record_kernel_discovery(
             "kernel_discovery", payload, key=key,
         )
         # The discovery tool's authoritative version lands in the top-level
-        # ``versions`` map (keyed by tool name), not inline per run.
+        # ``versions`` map (keyed by tool name), not inline per run. The version
+        # provenance follows the underlying ``tool`` (defaults to ``source``),
+        # so route aliases like ``bypass`` reuse the real toolchain's version.
         record_tool_version(
-            session_dir, tool=source, root=tool_root,
+            session_dir, tool=(tool or source), root=tool_root,
             root_env=tool_root_env, version=tool_version, producer=producer,
         )
     except Exception:  # noqa: BLE001

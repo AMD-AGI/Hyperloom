@@ -17,9 +17,16 @@ import argparse
 import json
 import logging
 import os
+import struct
 import subprocess
 import sys
 from pathlib import Path
+
+from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
+    GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
+    _config_architectures,
+    _load_model_config_dict,
+)
 
 log = logging.getLogger(__name__)
 
@@ -203,15 +210,45 @@ _MAXPOS_CONFIG_KEYS = (
 
 _ROPE_CONFIG_KEYS = ("rope_scaling", "rope_parameters", "rope_theta")
 
-_AMD_UNSUPPORTED_MODEL_TYPES = frozenset({"deepseek_v32"})
+# minimax_m1: its lightning-attention kernel needs 128KB LDS (Required: 131072)
+# but MI300X's per-CU shared-memory limit is 64KB → "out of resource: shared
+# memory" → engine core init failed. Confirmed from MiniMax-M1-80k server.log.
+_AMD_UNSUPPORTED_MODEL_TYPES = frozenset({"deepseek_v32", "minimax_m1"})
 
-_AMD_UNSUPPORTED_ARCHITECTURES = frozenset({"deepseekv32forcausallm"})
+_AMD_UNSUPPORTED_ARCHITECTURES = frozenset({
+    "deepseekv32forcausallm", "minimaxm1forcausallm",
+})
 
 _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 
+# Architectures Transformers/sglang's ModelConfig does not recognize at all
+# (hardware-agnostic). The pydantic ModelConfig validation raises
+# "model type `X` but Transformers does not recognize this architecture"
+# → ValidationError in engine init regardless of GPU vendor. Matched
+# case-insensitively against model_type and architectures.
+# glm4_moe_lite: confirmed from zai-org-GLM-4.7-Flash server.log.
+# mimo_v2_flash: confirmed from XiaomiMiMo-MiMo-V2-Flash server.log ("model of
+# type mimo_v2_flash to instantiate a model of type ." + Unknown attention
+# backend TRITON) — the unrecognized arch leaves an empty model type.
+# deepseek_v4: confirmed from DeepSeek-V4-Flash server.log ModelConfig
+# validation failure.
+_UNRECOGNIZED_MODEL_TYPES = frozenset({
+    "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash",
+})
+_UNRECOGNIZED_ARCHITECTURES = frozenset({
+    "deepseekv4forcausallm", "glm4moeliteforcausallm",
+    "mimov2flashforcausallm",
+})
+# ministral3 only fails inside a Mistral3 multimodal wrapper (Surpem-Supertron2
+# server.log: vLLM registry raises KeyError('ministral3') for text_config.
+# model_type). A bare top-level ministral3 is left to the framework to judge, so
+# this is checked only against the nested text_config scope.
+_NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset({"ministral3"})
+
 _PHI3_ROPE_TYPES = frozenset({"su", "longrope"})
 
-_GEMMA2_ARCHITECTURES = frozenset({"gemma2forcausallm"})
+# ``_GEMMA2_ARCHITECTURES`` is imported from model_config_utils (single source
+# of truth) at module top.
 
 _AMD_UNSUPPORTED_QUANT_ALGOS = frozenset({"nvfp4", "fp4"})
 
@@ -257,39 +294,6 @@ def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
         )
         return {}
     return data
-
-def _load_model_config_dict(model_path: str) -> dict | None:
-    """Best-effort parse of ``<model_path>/config.json`` into a dict; returns ``None`` on any failure."""
-    if not model_path:
-        return None
-    cfg_path = Path(model_path) / "config.json"
-    try:
-        raw = cfg_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        logging.warning("model_config_unreadable: %s (%s)", cfg_path, exc)
-        return None
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError) as exc:
-        logging.warning("model_config_invalid_json: %s (%s)", cfg_path, exc)
-        return None
-    if not isinstance(data, dict):
-        logging.warning(
-            "model_config_not_a_dict: %s (got %s)", cfg_path, type(data).__name__,
-        )
-        return None
-    return data
-
-def _config_architectures(config: dict) -> list[str]:
-    """Normalise ``config["architectures"]`` to a list of non-empty strings (scalar wrapped; absent -> [])."""
-    arches_raw = config.get("architectures")
-    if isinstance(arches_raw, list):
-        return [str(a).strip() for a in arches_raw if str(a or "").strip()]
-    if isinstance(arches_raw, str) and arches_raw.strip():
-        return [arches_raw.strip()]
-    return []
 
 def _load_model_config_tags(model_path: str) -> dict:
     """Best-effort loader for KB architecture-identity tags (``architectures`` + ``model_type``) from config.json.
@@ -649,6 +653,143 @@ def _detect_gemma2_missing_hidden_act(data: dict) -> str | None:
         "in engine init."
     )
 
+# Local tokenizer artifacts sglang/HF need to build a real tokenizer. A
+# checkpoint shipping only weights + config (no tokenizer) loads a degraded
+# fallback whose warmup encodes an empty prompt → empty (M=0) batch → aiter
+# rotary_embedding SIGFPE on MI300X. Confirmed by repro: adding the official
+# Qwen2.5 tokenizer to such a model removes the M:0 crash entirely.
+_TOKENIZER_ARTIFACT_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "tokenizer.model",
+    "vocab.json",
+    "merges.txt",
+    "spiece.model",
+)
+
+
+def _detect_unrecognized_architecture(data: dict) -> str | None:
+    """Return a reason when the architecture is unknown to Transformers/sglang.
+
+    Hardware-agnostic: the ModelConfig pydantic validation rejects the unknown
+    model_type with a ValidationError in engine init on any GPU vendor.
+    """
+    scopes = [(data, False)]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        scopes.append((nested, True))
+    for scope, is_nested in scopes:
+        model_type = str(scope.get("model_type") or "").strip().lower()
+        arches = {a.lower() for a in _config_architectures(scope)}
+        unrecognized_types = _UNRECOGNIZED_MODEL_TYPES
+        if is_nested:
+            unrecognized_types = (
+                _UNRECOGNIZED_MODEL_TYPES | _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES
+            )
+        if (
+            model_type in unrecognized_types
+            or arches & _UNRECOGNIZED_ARCHITECTURES
+        ):
+            label = model_type or (next(iter(arches), "") if arches else "?")
+            return (
+                f"model type '{label}' is not recognized by Transformers/"
+                f"sglang/vLLM's ModelConfig or model registry; engine init "
+                f"raises a validation/registry error. Needs a framework "
+                f"upgrade or a registered architecture mapping."
+            )
+    return None
+
+
+_VOCAB_WEIGHT_NAMES = (
+    "embed_tokens.weight",
+    "wte.weight",
+    "word_embeddings.weight",
+    "lm_head.weight",
+)
+_SAFETENSORS_HEADER_LIMIT = 64 * 1024 * 1024
+
+
+def _read_safetensors_header(path: Path) -> dict | None:
+    """Read only the safetensors JSON header; never materialize tensor data."""
+    try:
+        with path.open("rb") as f:
+            raw_len = f.read(8)
+            if len(raw_len) != 8:
+                return None
+            header_len = struct.unpack("<Q", raw_len)[0]
+            if header_len <= 0 or header_len > _SAFETENSORS_HEADER_LIMIT:
+                return None
+            header = json.loads(f.read(header_len))
+    except (OSError, json.JSONDecodeError, ValueError, struct.error):
+        return None
+    return header if isinstance(header, dict) else None
+
+
+def _detect_vocab_weight_shape_mismatch(model_path: str, data: dict) -> str | None:
+    """Return a reason when config vocab_size disagrees with model weights.
+
+    Best-effort and safetensors-only: reads just the JSON header (never tensor
+    data) of ``*.safetensors`` shards. Legacy ``*.bin``/``pytorch_model.bin``
+    checkpoints are not inspected; truncated/corrupt headers are skipped
+    silently (return None) and left to the downstream loader.
+    """
+    expected = data.get("vocab_size")
+    nested = data.get("text_config")
+    if not isinstance(expected, int) and isinstance(nested, dict):
+        expected = nested.get("vocab_size")
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected <= 0:
+        return None
+
+    mdir = Path(model_path)
+    for st_path in sorted(mdir.glob("*.safetensors")):
+        header = _read_safetensors_header(st_path)
+        if not header:
+            continue
+        for name, meta in header.items():
+            if name == "__metadata__" or not isinstance(meta, dict):
+                continue
+            if not any(name.endswith(suffix) for suffix in _VOCAB_WEIGHT_NAMES):
+                continue
+            shape = meta.get("shape")
+            if not (
+                isinstance(shape, list)
+                and shape
+                and isinstance(shape[0], int)
+                and not isinstance(shape[0], bool)
+            ):
+                continue
+            actual = shape[0]
+            if actual != expected:
+                return (
+                    f"config.json vocab_size={expected} but {st_path.name}:"
+                    f"{name} has vocab dimension {actual}; sglang asserts "
+                    f"loaded_weight.shape[output_dim] matches org_vocab_size "
+                    f"during weight loading."
+                )
+    return None
+
+
+def _detect_missing_tokenizer_files(model_path: str, data: dict) -> str | None:
+    """Return a reason when a local checkpoint ships no tokenizer artifacts.
+
+    Conservative: only fires when NONE of the known tokenizer files exist AND
+    the config carries no custom AutoTokenizer (auto_map) that could supply one.
+    """
+    auto_map = data.get("auto_map")
+    if isinstance(auto_map, dict) and auto_map.get("AutoTokenizer"):
+        return None
+    mdir = Path(model_path)
+    if any((mdir / f).is_file() for f in _TOKENIZER_ARTIFACT_FILES):
+        return None
+    return (
+        "model directory ships weights + config but no tokenizer artifacts "
+        f"({', '.join(_TOKENIZER_ARTIFACT_FILES)}); sglang loads a degraded "
+        "fallback tokenizer whose warmup encodes an empty prompt, producing an "
+        "empty (M=0) batch that crashes the aiter rotary_embedding kernel with "
+        "SIGFPE on MI300X (Gensyn-Swarm fine-tune class)."
+    )
+
+
 def _detect_incompatible_model_config(
     model_path: str, gpu_type: str | None = None,
 ) -> str | None:
@@ -729,6 +870,19 @@ def _detect_incompatible_model_config(
     gemma2_reason = _detect_gemma2_missing_hidden_act(data)
     if gemma2_reason is not None:
         return gemma2_reason
+    # Unrecognized architecture (e.g. glm4_moe_lite): hardware-agnostic
+    # ModelConfig ValidationError in engine init.
+    unrecognized_reason = _detect_unrecognized_architecture(data)
+    if unrecognized_reason is not None:
+        return unrecognized_reason
+    vocab_shape_reason = _detect_vocab_weight_shape_mismatch(model_path, data)
+    if vocab_shape_reason is not None:
+        return vocab_shape_reason
+    # Missing tokenizer artifacts: hardware-agnostic; the degraded fallback
+    # tokenizer's empty-prompt warmup triggers an aiter M=0 SIGFPE.
+    tokenizer_reason = _detect_missing_tokenizer_files(model_path, data)
+    if tokenizer_reason is not None:
+        return tokenizer_reason
     # Custom AutoConfig with unregistered model_type: sglang/vLLM fall
     # back to PreTrainedConfig (no max_position_embeddings attr) → crash.
     auto_map = data.get("auto_map")
