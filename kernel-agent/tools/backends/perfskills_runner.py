@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""PerfSkills e2e optimizer submission.
+"""e2e optimizer submission (formerly PerfSkills; now GEAK@GEAK_v4).
 
-PerfSkills is a WHOLE-pipeline e2e optimizer (not a per-kernel backend like
-GEAK). Hyperloom invokes it ONCE at the KERNEL phase via the stable
-``interface/run_e2e.py`` contract: we write a ``handoff.json`` (Hyperloom best
-config + workload), call the runner, and read back a ``result.json`` (optimized
-launch script + bench script + throughput + per-kernel report).
+This is a WHOLE-pipeline e2e optimizer (not a per-kernel backend like GEAK's
+single-kernel loop). Its code lives in GEAK on the GEAK_v4 branch
+(``interface/run_e2e.py`` + ``e2e_workflow/``). Hyperloom invokes it ONCE at the
+KERNEL phase via the stable ``interface/run_e2e.py`` contract: we write a
+``handoff.json`` (Hyperloom best config + workload), call the runner, and read
+back a ``result.json`` (optimized launch script + bench script + throughput +
+per-kernel report).
 
-All Claude-SDK / Workflow / ``--effort`` detail lives INSIDE PerfSkills'
+All Claude-SDK / Workflow / ``--effort`` detail lives INSIDE the optimizer's
 ``interface/run_e2e.py``; this module only marshals the two JSON files and the
-subprocess. See PerfSkills/interface/run_e2e.md for the contract.
+subprocess. See <GEAK_v4>/interface/run_e2e.md for the contract. The
+PERFSKILLS_* env-var / function names are kept as the stable handle.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ HANDOFF_SCHEMA_VERSION = 1
 
 
 def _resolve_runner() -> str:
-    """Resolve PerfSkills' run_e2e.py from $PERFSKILLS_E2E_RUNNER / $PERFSKILLS_ROOT."""
+    """Resolve run_e2e.py from $PERFSKILLS_E2E_RUNNER / $PERFSKILLS_ROOT (GEAK@GEAK_v4)."""
     runner = os.environ.get("PERFSKILLS_E2E_RUNNER", "").strip()
     if runner and Path(runner).is_file():
         return runner
@@ -37,8 +40,8 @@ def _resolve_runner() -> str:
         if cand.is_file():
             return str(cand)
     raise FileNotFoundError(
-        "PerfSkills runner not found. Set PERFSKILLS_E2E_RUNNER to "
-        "<PerfSkills>/interface/run_e2e.py (the installer exports it)."
+        "e2e runner not found. Set PERFSKILLS_E2E_RUNNER to "
+        "<GEAK_v4 checkout>/interface/run_e2e.py (the installer exports it)."
     )
 
 
