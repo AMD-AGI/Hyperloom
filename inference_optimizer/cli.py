@@ -1549,30 +1549,43 @@ def _resolve_reference_recipe(
 ) -> tuple[str, dict[str, str], str, str]:
     """Resolve the reference launch recipe for a fresh launch (fail-soft).
 
-    Returns ``(server_args, envs, model, source)``. Explicit
-    ``--reference-script`` wins. When omitted, an InferenceX single-node recipe
-    is auto-discovered: only an ``exact`` filename match is applied; a ``fuzzy``
-    match is logged as a candidate but NOT applied (a near-name model mismatch
-    could break a working baseline). All-empty on any failure or no match — the
-    run then behaves byte-for-byte as today (0 degrade).
+    Returns ``(server_args, envs, model, source)``. Discovery is gated on the
+    operator opting in via ``--reference-script``:
+
+    - **No ``--reference-script``** → return empty and do NOT auto-discover. The
+      run is byte-for-byte identical to a build without this feature (0 degrade);
+      this preserves the original behavior.
+    - **``--reference-script`` resolves to a usable recipe** → use it.
+    - **``--reference-script`` given but unreadable / yields no flags** → fall
+      back to auto-discovering an ``exact`` InferenceX single-node match (a
+      ``fuzzy`` match is logged as a candidate but NOT applied — a near-name
+      model mismatch could break a working baseline).
     """
+    source = (getattr(args, "reference_script", None) or "").strip()
+    # No flag → original behavior; never auto-discover.
+    if not source:
+        return ("", {}, "", "")
+
     framework = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
     from .reference_script import (
         discover_reference_script,
         parse_reference_script,
     )
-    source = (getattr(args, "reference_script", None) or "").strip()
-    if source:
-        recipe = parse_reference_script(source, framework=framework)
-        if recipe.server_args or recipe.envs:
-            print(
-                f"Reference script: {source} "
-                f"({len(recipe.server_args.split())} arg tokens, "
-                f"{len(recipe.envs)} env(s))"
-            )
+    recipe = parse_reference_script(source, framework=framework)
+    if recipe.server_args or recipe.envs:
+        print(
+            f"Reference script: {source} "
+            f"({len(recipe.server_args.split())} arg tokens, "
+            f"{len(recipe.envs)} env(s))"
+        )
         return (recipe.server_args, dict(recipe.envs), recipe.model or "", source)
 
-    # Auto-discovery (no explicit flag).
+    # Explicit source unreadable / yielded nothing → auto-discover instead.
+    print(
+        f"Reference script: {source} not usable (unreadable or no flags "
+        f"lifted); falling back to auto-discovery",
+        file=sys.stderr,
+    )
     inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if not inferencex_path:
         return ("", {}, "", "")
@@ -4992,9 +5005,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "Reference launch recipe (.sh path or http(s) URL). Its serve "
             "flags + whitelisted exports seed the baseline server args at "
             "lowest priority (EXPLORE can override). Model-gated: ignored if "
-            "the run's model differs from the recipe's. When omitted, a "
-            "matching InferenceX single-node recipe is auto-discovered "
-            "(exact filename match only; fuzzy matches are logged, not used)."
+            "the run's model differs from the recipe's. If the given path is "
+            "unreadable / yields no flags, a matching InferenceX single-node "
+            "recipe is auto-discovered (exact filename match only; fuzzy "
+            "matches are logged, not used). When this flag is omitted, no "
+            "discovery runs and the baseline is unchanged."
         ),
     )
     opt.add_argument("--precision", type=str,

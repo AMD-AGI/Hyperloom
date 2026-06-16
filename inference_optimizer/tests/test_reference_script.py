@@ -227,3 +227,59 @@ def test_models_compatible_version_mismatch_blocked():
 
 def test_models_compatible_empty_is_ungated():
     assert models_compatible("", "/wekafs/models/anything") is True
+
+
+# ── _resolve_reference_recipe gating (discovery only when flag is given) ──────
+from types import SimpleNamespace
+
+from inference_optimizer.cli import _resolve_reference_recipe
+
+
+def test_resolve_no_flag_does_not_discover(tmp_path, monkeypatch):
+    """No --reference-script → empty, and discovery never runs (0 degrade)."""
+    root = _mk_tree(tmp_path, ["dsr1_fp8_mi300x.sh"])
+    monkeypatch.setenv("INFERENCEX_PATH", str(root))
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    args = SimpleNamespace(
+        reference_script=None, model="/wekafs/models/dsr1",
+        precision="fp8", gpu_type="mi300x",
+    )
+    server_args, envs, model, source = _resolve_reference_recipe(args)
+    # Even though an EXACT recipe exists on disk, omitting the flag must NOT use it.
+    assert (server_args, envs, model, source) == ("", {}, "", "")
+
+
+def test_resolve_valid_flag_is_used(tmp_path, monkeypatch):
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    src = _write(tmp_path, _M3_RECIPE, "explicit.sh")
+    args = SimpleNamespace(
+        reference_script=src, model="/wekafs/models/whatever",
+        precision="fp8", gpu_type="mi300x",
+    )
+    server_args, envs, model, source = _resolve_reference_recipe(args)
+    assert "--block-size 128" in server_args
+    assert source == src
+
+
+def test_resolve_invalid_flag_falls_back_to_discovery(tmp_path, monkeypatch):
+    """Given but unreadable path → auto-discover an exact match instead."""
+    root = _mk_tree(tmp_path, ["dsr1_fp8_mi300x.sh"])
+    monkeypatch.setenv("INFERENCEX_PATH", str(root))
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    args = SimpleNamespace(
+        reference_script="/no/such/recipe.sh", model="/wekafs/models/dsr1",
+        precision="fp8", gpu_type="mi300x",
+    )
+    server_args, envs, model, source = _resolve_reference_recipe(args)
+    assert source.endswith("dsr1_fp8_mi300x.sh")  # discovered exact match
+
+
+def test_resolve_invalid_flag_no_inferencex_returns_empty(tmp_path, monkeypatch):
+    """Given but unreadable + no INFERENCEX_PATH → empty (still 0 degrade)."""
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    args = SimpleNamespace(
+        reference_script="/no/such/recipe.sh", model="/wekafs/models/dsr1",
+        precision="fp8", gpu_type="mi300x",
+    )
+    assert _resolve_reference_recipe(args) == ("", {}, "", "")
