@@ -1237,28 +1237,28 @@ class SharedState:
         return applied
 
     def _format_last_kernel_opt(self) -> str:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m._format_last_kernel_opt(self)
 
     def _resolve_kernel_patch_identity(
         self, payload: dict[str, Any] | None,
     ) -> tuple[str, str, str, str]:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m._resolve_kernel_patch_identity(self, payload)
 
     def kernel_patch_key(self, payload: dict[str, Any] | None) -> str:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m.kernel_patch_key(self, payload)
 
     def find_rejected_kernel_patch(
         self,
         payload: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m.find_rejected_kernel_patch(self, payload)
 
     def record_kernel_integrate_result(
@@ -1268,61 +1268,61 @@ class SharedState:
         max_attempts: int = 3,
         keep_threshold_pct: float = 1.0,
     ) -> dict[str, Any] | None:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m.record_kernel_integrate_result(self, result, max_attempts=max_attempts, keep_threshold_pct=keep_threshold_pct)
 
     def record_kernel_opt(self, result: dict[str, Any]) -> None:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m.record_kernel_opt(self, result)
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m.record_gemm_tuning(self, result)
 
     # Multi-KEEP integrate queue helpers.
     def _kernel_ids_in_optimization_stack(self) -> set[str]:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m._kernel_ids_in_optimization_stack(self)
 
     def _source_files_in_optimization_stack(self) -> set[str]:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m._source_files_in_optimization_stack(self)
 
     def _kernel_ids_with_integrate_attempts(self) -> set[str]:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m._kernel_ids_with_integrate_attempts(self)
 
     def _kernel_trace_impact_pct(self, kernel_id: str) -> float:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m._kernel_trace_impact_pct(self, kernel_id)
 
     def next_pending_keep_kernel_id(self) -> str:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m.next_pending_keep_kernel_id(self)
 
     def pending_keep_kernel_ids(self) -> list[str]:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m.pending_keep_kernel_ids(self)
 
     @property
     def has_keep_pending_integrate(self) -> bool:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m.has_keep_pending_integrate(self)
 
     @property
     def kernel_opt_attempts_count(self) -> int:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m.kernel_opt_attempts_count(self)
 
     # Hot-kernel report gate: report blocked until meaningful reusable hot kernels are attempted/rejected.
@@ -1332,8 +1332,8 @@ class SharedState:
         min_gpu_pct: float | None = None,
         top_n: int | None = None,
     ) -> list[str]:
-        """Forwarding shim — implementation in :mod:`.shared_state_kernel` (phase 2 behavior-offload)."""
-        from . import shared_state_kernel as _m
+        """Forwarding shim — implementation in :mod:`.kernel_request_handlers` (folded back in phase 6C)."""
+        from . import kernel_request_handlers as _m
         return _m.untried_hot_reusable_kernels(self, min_gpu_pct=min_gpu_pct, top_n=top_n)
 
     # Per-action audit (kernel parity for non-kernel actions)

@@ -42,10 +42,6 @@ ALLOWED_FILES: dict[str, str] = {
         "GridVariant(extra_sglang_args=...) back-compat kwarg",
     "inference_optimizer/orchestrator/shared_state.py":
         "_migrate_legacy_extra_sglang_args_keys walker + state.json transform",
-    "inference_optimizer/orchestrator/shared_state_kernel.py":
-        "kernel-decision write-owner functions extracted verbatim from "
-        "shared_state.py (phase 2); same legacy extra_sglang_args read surface "
-        "as the SharedState methods they came from",
     "inference_optimizer/orchestrator/action_executors/_explore_roofline_filter.py":
         "roofline filter reads canonical extra_server_args with a "
         "read-only legacy extra_sglang_args fallback for pre-rename "
@@ -114,7 +110,10 @@ ALLOWED_FILES: dict[str, str] = {
         "that merges the legacy KB best_config arg stacks",
     "inference_optimizer/orchestrator/kernel_request_handlers.py":
         "comments explain the read_extra_server_args call at the "
-        "integrate_patch sub-agent envelope read boundary",
+        "integrate_patch sub-agent envelope read boundary; also holds the "
+        "kernel-decision write-owner functions folded back from the former "
+        "shared_state_kernel.py (phase 6C), carrying the same legacy "
+        "extra_sglang_args read surface",
     "robustness-agent/tests/test_signals_repeated_payload.py":
         "regression test that legacy + canonical envelopes hash to "
         "the same fingerprint",
