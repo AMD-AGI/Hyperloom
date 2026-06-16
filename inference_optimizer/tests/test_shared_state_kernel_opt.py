@@ -400,3 +400,143 @@ def test_untried_hot_kernels_caps_at_top_n(state: SharedState, monkeypatch):
     _set_trace(state, hot_kernels=hot)
     untried = state.untried_hot_reusable_kernels()
     assert len(untried) == 3
+
+
+# Issue 3: record_kernel_integrate_result distinguishes integration faults from
+# genuine gate REVERTs and gives faults an independent bounded retry budget.
+def _integrate_result(
+    kernel_id: str,
+    *,
+    decision: str | None = None,
+    status: str = "ok",
+    error_class: str | None = None,
+    patch_path: str = "",
+    target_file: str = "",
+    gain_pct: float | None = None,
+    new_tput: float | None = None,
+) -> dict:
+    """Build an integrate E2E result envelope (kernel integrate path)."""
+    return {
+        "status": status,
+        "decision": decision,
+        "kernel_id": kernel_id,
+        "patch_path": patch_path or f"/tmp/{kernel_id}_opt.py",
+        "target_file": target_file,
+        "error_class": error_class,
+        "gain_pct": gain_pct,
+        "new_tput": new_tput,
+    }
+
+
+def test_integrate_fault_does_not_consume_revert_quota(state: SharedState):
+    """An integration fault marks the entry retryable, never entering rejected."""
+    entry = state.record_kernel_integrate_result(
+        _integrate_result(
+            "k001", decision="REVERT", status="failed",
+            error_class="rebaseline_exception",
+        ),
+    )
+    assert entry is not None
+    assert entry["fault_count"] == 1
+    assert entry["verdict_attempt_count"] == 0
+    assert entry.get("retryable") is True
+    assert "rejected" not in entry
+    assert state.rejected_kernel_patches == []
+    assert "k001" not in state.rejected_kernel_ids
+
+
+def test_integrate_fault_rejected_after_budget_exhausted(state: SharedState):
+    """The first fault stays retryable; the second exhausts the budget and rejects."""
+    entry = state.record_kernel_integrate_result(
+        _integrate_result(
+            "k001", decision="REVERT", status="failed",
+            error_class="bench_exception",
+        ),
+    )
+    assert entry.get("retryable") is True
+    assert "rejected" not in entry
+
+    entry = state.record_kernel_integrate_result(
+        _integrate_result(
+            "k001", decision="REVERT", status="failed",
+            error_class="bench_exception",
+        ),
+    )
+    assert entry.get("retryable") is not True
+    assert entry["rejected"]["reason"] == "fault_retries_exhausted_2"
+    assert "k001" in state.rejected_kernel_ids
+
+
+def test_integrate_genuine_revert_rejects_immediately(state: SharedState):
+    """A real gate REVERT (no fault error_class) is terminal on the first attempt."""
+    entry = state.record_kernel_integrate_result(
+        _integrate_result(
+            "k001", decision="REVERT", status="ok", gain_pct=-3.0,
+        ),
+    )
+    assert entry["fault_count"] == 0
+    assert entry["verdict_attempt_count"] == 1
+    assert entry.get("retryable") is not True
+    assert entry["rejected"]["reason"] == "revert_decision"
+    assert "k001" in state.rejected_kernel_ids
+
+
+def test_integrate_keep_is_terminal_and_not_rejected(state: SharedState):
+    """A KEEP returns without rejecting or marking retryable."""
+    entry = state.record_kernel_integrate_result(
+        _integrate_result(
+            "k001", decision="KEEP", status="ok", gain_pct=5.0, new_tput=105.0,
+        ),
+    )
+    assert "rejected" not in entry
+    assert entry.get("retryable") is not True
+    assert state.rejected_kernel_patches == []
+
+
+def test_pending_keep_includes_kernel_with_unexhausted_fault(state: SharedState):
+    """A kernel whose only integrate attempt is an un-exhausted fault stays queueable."""
+    state.record_kernel_opt(_ok_result(
+        "k001", "KEEP", 3.0, source_file="/p/a.py", artifact="/tmp/k001_opt.py",
+    ))
+    assert state.pending_keep_kernel_ids() == ["k001"]
+
+    # An integration fault must NOT remove it from the pending queue (retryable).
+    state.record_kernel_integrate_result(
+        _integrate_result(
+            "k001", decision="REVERT", status="failed",
+            error_class="apply_failed", patch_path="/tmp/k001_opt.py",
+        ),
+    )
+    assert "k001" not in state._kernel_ids_with_integrate_attempts()
+    assert state.pending_keep_kernel_ids() == ["k001"]
+
+
+def test_pending_keep_drops_kernel_after_fault_budget_exhausted(state: SharedState):
+    """Once the fault budget is spent and the kernel is rejected, it leaves the queue."""
+    state.record_kernel_opt(_ok_result(
+        "k001", "KEEP", 3.0, source_file="/p/a.py", artifact="/tmp/k001_opt.py",
+    ))
+    for _ in range(3):
+        state.record_kernel_integrate_result(
+            _integrate_result(
+                "k001", decision="REVERT", status="failed",
+                error_class="apply_failed", patch_path="/tmp/k001_opt.py",
+            ),
+        )
+    assert "k001" in state.rejected_kernel_ids
+    assert state.pending_keep_kernel_ids() == []
+
+
+def test_pending_keep_drops_kernel_on_genuine_revert(state: SharedState):
+    """A real gate REVERT on the integrate attempt removes the kernel immediately."""
+    state.record_kernel_opt(_ok_result(
+        "k001", "KEEP", 3.0, source_file="/p/a.py", artifact="/tmp/k001_opt.py",
+    ))
+    state.record_kernel_integrate_result(
+        _integrate_result(
+            "k001", decision="REVERT", status="ok", gain_pct=-3.0,
+            patch_path="/tmp/k001_opt.py",
+        ),
+    )
+    assert "k001" in state._kernel_ids_with_integrate_attempts()
+    assert state.pending_keep_kernel_ids() == []

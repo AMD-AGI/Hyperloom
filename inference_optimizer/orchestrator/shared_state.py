@@ -96,6 +96,31 @@ def render_model_arch_compact(arch: dict | None) -> str:
 _DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
 # Backend ladder without a KEEP retires the kernel; override via ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` (>=1).
 _DEFAULT_KERNEL_OPT_MAX_FAILURES = 1
+# Integration faults (environment / apply / bench crashes) are distinct from a
+# genuine gate REVERT (measured gain below threshold / accuracy regression). A
+# fault means the patch was never fairly measured, so it must not burn the
+# ``max_attempts`` REVERT quota; it gets its own small retry budget instead.
+# ``integrate_handler`` stamps these via ``error_class`` (it also tags fault
+# results with ``decision:"REVERT"`` for backward-compat, so error_class is the
+# only reliable fault signal).
+_INTEGRATE_FAULT_ERROR_CLASSES = frozenset({
+    "missing_integration_inputs",
+    "patch_not_applied",
+    "apply_failed",
+    "mn_server_restart_failed_post_patch",
+    "rebaseline_exception",
+    "cpp_itfs_rebuild_not_verified",
+    "framework_script_mismatch",
+    "bench_exception",
+    "subtask_exception",
+    "handler_exception",
+    "subprocess_timeout",
+})
+# Independent bounded retry budget for integration faults (separate from the
+# REVERT ``max_attempts`` quota). Total retries are still capped globally by the
+# crash-rate emergency stop in the coordinator.
+_MAX_INTEGRATE_FAULT_RETRIES = 2
+
 # Hot-kernel report gate: reusable hot kernels >= this GPU share need a kernel_opt attempt/rejection before ``report``.
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 3.0
 # Only the top-N reusable hot kernels are enforced.
@@ -1462,30 +1487,65 @@ class SharedState:
                 return entry
         return None
 
+    @staticmethod
+    def _is_integrate_fault(result: dict[str, Any]) -> bool:
+        """True when an integrate result is an integration *fault*, not a verdict.
+
+        A fault is an environment/apply/bench crash that prevented the patch
+        from being fairly measured (``error_class`` in
+        :data:`_INTEGRATE_FAULT_ERROR_CLASSES`). ``integrate_handler`` also
+        stamps these with ``decision:"REVERT"`` for backward-compat, so the
+        ``error_class`` is the only reliable fault discriminator. A genuine
+        gate REVERT (gain below threshold / accuracy regression) carries no
+        fault ``error_class`` and so returns ``False`` here.
+        """
+        err_class = str(result.get("error_class") or "").strip()
+        if err_class in _INTEGRATE_FAULT_ERROR_CLASSES:
+            return True
+        # Defensive: a status-failed result with no decision and no recognised
+        # error_class is still an unmeasured fault, never a gate verdict.
+        status = str(result.get("status") or "").strip().lower()
+        decision = str(result.get("decision") or "").strip().upper()
+        return status == "failed" and decision not in {"KEEP", "REVERT"}
+
     def record_kernel_integrate_result(
         self,
         result: dict[str, Any],
         *,
         max_attempts: int = 3,
         keep_threshold_pct: float = 1.0,
+        max_fault_retries: int = _MAX_INTEGRATE_FAULT_RETRIES,
     ) -> dict[str, Any] | None:
         """Persist one integrate E2E result and reject exhausted patch attempts.
 
         Appends the attempt to the per-key ``kernel_integrate_attempts``
-        ledger and, on a REVERT decision or once ``max_attempts`` is hit
-        without a KEEP, moves the patch into ``rejected_kernel_patches`` and
-        records its ``kernel_id`` in ``rejected_kernel_ids``.
+        ledger. Two terminal paths are kept distinct:
+
+        * **Gate verdict** — a genuine REVERT (gain below threshold / accuracy
+          regression), or ``max_attempts`` non-fault attempts without a KEEP,
+          moves the patch into ``rejected_kernel_patches`` and records its
+          ``kernel_id`` in ``rejected_kernel_ids`` (terminal).
+        * **Integration fault** — an environment/apply/bench crash (see
+          :meth:`_is_integrate_fault`) that never fairly measured the patch.
+          Faults do *not* consume the REVERT quota; they get an independent
+          ``max_fault_retries`` budget and are marked ``retryable`` so the
+          pending-integrate driver re-enqueues them, only being rejected once
+          that fault budget is exhausted.
 
         Args:
             result (dict[str, Any]): The integrate E2E result envelope.
-            max_attempts (int): Max attempts before rejecting a non-KEEP
-                patch (default 3).
+            max_attempts (int): Max non-fault attempts before rejecting a
+                non-KEEP patch (default 3).
             keep_threshold_pct (float): The gain threshold recorded on the
                 rejection row for context (default 1.0).
+            max_fault_retries (int): Independent retry budget for integration
+                faults before they are rejected as
+                ``fault_retries_exhausted``.
 
         Returns:
             dict[str, Any] | None: The updated attempts entry (carrying a
-                ``rejected`` sub-dict when rejection fired), or ``None`` when
+                ``rejected`` sub-dict when rejection fired, or
+                ``retryable=True`` for an un-exhausted fault), or ``None`` when
                 ``result`` is not a dict or its patch key is unresolvable.
         """
         if not isinstance(result, dict):
@@ -1496,11 +1556,14 @@ class SharedState:
         kernel_id, patch_path, target_file, extra_args = (
             self._resolve_kernel_patch_identity(result)
         )
+        is_fault = self._is_integrate_fault(result)
         entry = dict(self.kernel_integrate_attempts.get(key) or {})
         attempts = list(entry.get("attempts") or [])
         attempt = {
             "decision": result.get("decision"),
             "status": result.get("status"),
+            "error_class": result.get("error_class"),
+            "is_fault": is_fault,
             "new_tput": result.get("new_tput"),
             "gain_pct": result.get("gain_pct"),
             "workspace": result.get("workspace"),
@@ -1516,6 +1579,11 @@ class SharedState:
             ),
             default=0.0,
         )
+        # Quota accounting: faults and gate verdicts draw from separate budgets.
+        fault_count = sum(
+            1 for a in attempts if isinstance(a, dict) and a.get("is_fault")
+        )
+        verdict_attempt_count = len(attempts) - fault_count
         entry.update({
             "key": key,
             "kernel_id": kernel_id,
@@ -1524,11 +1592,17 @@ class SharedState:
             "extra_server_args": extra_args,
             "attempts": attempts,
             "attempt_count": len(attempts),
+            "fault_count": fault_count,
+            "verdict_attempt_count": verdict_attempt_count,
             "best_gain_pct": best_gain,
             "last_decision": result.get("decision"),
             "last_status": result.get("status"),
+            "last_error_class": result.get("error_class"),
+            "last_was_fault": is_fault,
             "updated_at": _now_iso(),
         })
+        # Clear any stale retryable flag; re-set below only for un-exhausted faults.
+        entry.pop("retryable", None)
         self.kernel_integrate_attempts[key] = entry
 
         # kernel_journey stage 4 (end-to-end integrate outcome): additive,
@@ -1555,18 +1629,29 @@ class SharedState:
         if result.get("decision") == "KEEP":
             return entry
 
-        should_reject = (
-            result.get("decision") == "REVERT"
-            or len(attempts) >= max_attempts
-        )
-        if not should_reject:
-            return entry
-
-        reason = (
-            "revert_decision"
-            if result.get("decision") == "REVERT"
-            else f"max_e2e_attempts_{max_attempts}_without_keep"
-        )
+        # Integration fault: never measured fairly. Don't burn the REVERT quota
+        # — retry on its own budget and let the pending-integrate driver pick it
+        # back up, only rejecting once the fault budget is exhausted.
+        if is_fault:
+            if fault_count < max_fault_retries:
+                entry["retryable"] = True
+                self.kernel_integrate_attempts[key] = entry
+                return entry
+            reason = f"fault_retries_exhausted_{max_fault_retries}"
+        else:
+            # Gate verdict path: a genuine REVERT, or too many non-fault attempts
+            # without a KEEP. Faults never count toward this quota.
+            should_reject = (
+                result.get("decision") == "REVERT"
+                or verdict_attempt_count >= max_attempts
+            )
+            if not should_reject:
+                return entry
+            reason = (
+                "revert_decision"
+                if result.get("decision") == "REVERT"
+                else f"max_e2e_attempts_{max_attempts}_without_keep"
+            )
         rejected = {
             "key": key,
             "kernel_id": kernel_id,
@@ -1574,9 +1659,11 @@ class SharedState:
             "target_file": target_file,
             "extra_server_args": extra_args,
             "attempt_count": len(attempts),
+            "fault_count": fault_count,
             "best_gain_pct": best_gain,
             "keep_threshold_pct": keep_threshold_pct,
             "last_decision": result.get("decision"),
+            "last_error_class": result.get("error_class"),
             "reason": reason,
             "ts": _now_iso(),
         }
@@ -1832,15 +1919,58 @@ class SharedState:
         return sources
 
     def _kernel_ids_with_integrate_attempts(self) -> set[str]:
-        """kernel_ids that already received an E2E integrate verdict."""
-        ids: set[str] = set()
+        """kernel_ids that already received a *terminal* E2E integrate verdict.
+
+        A kernel_id whose only integrate attempts are un-exhausted integration
+        faults (``retryable``) is intentionally excluded so the pending-integrate
+        driver re-enqueues it for a fault retry. A kernel_id is treated as
+        attempted once *any* of its entries reached a non-retryable terminal
+        state (KEEP / real REVERT / fault budget exhausted); a terminal entry on
+        one patch key wins over a retryable entry on another.
+        """
+        terminal: set[str] = set()
         for entry in (self.kernel_integrate_attempts or {}).values():
             if not isinstance(entry, dict):
                 continue
             kid = str(entry.get("kernel_id") or "").strip()
-            if kid:
-                ids.add(kid)
-        return ids
+            if not kid:
+                continue
+            if entry.get("retryable") and not entry.get("rejected"):
+                continue
+            terminal.add(kid)
+        return terminal
+
+    def integrate_attempt_count_for_kernel(self, kernel_id: str) -> int:
+        """Total *recorded* integrate attempts for a kernel_id.
+
+        Sums ``attempt_count`` across every ``kernel_integrate_attempts`` entry
+        sharing this ``kernel_id`` (one kernel may produce more than one patch
+        key). The count only advances inside
+        :meth:`record_kernel_integrate_result`, so it is a reliable
+        in-flight signal for the KERNEL-phase auto-integrate driver: an
+        unchanged count means a dispatched integrate has not yet been recorded
+        (still in flight), an advanced count means it completed.
+
+        Args:
+            kernel_id (str): The kernel identifier to total attempts for.
+
+        Returns:
+            int: Recorded integrate attempts (0 when unknown/blank).
+        """
+        kid = str(kernel_id or "").strip()
+        if not kid:
+            return 0
+        total = 0
+        for entry in (self.kernel_integrate_attempts or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("kernel_id") or "").strip() != kid:
+                continue
+            try:
+                total += int(entry.get("attempt_count") or 0)
+            except (TypeError, ValueError):
+                continue
+        return total
 
     def _kernel_trace_impact_pct(self, kernel_id: str) -> float:
         """Return TraceLens gpu_pct for a kernel_id; unknown kernels sort last."""
