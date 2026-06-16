@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from inference_optimizer import cli
+from inference_optimizer import cli_gpu
 
 
 def _write_config(model_dir: Path, **fields) -> None:
@@ -44,7 +45,10 @@ def _seed_state(session_dir: Path, monkeypatch):
 def _default_non_amd_gpu(monkeypatch):
     """Keep config checks hermetic unless a test passes gpu_type explicitly."""
     monkeypatch.delenv("GPU_TYPE", raising=False)
-    monkeypatch.setattr(cli, "_autodetect_gpu_type", lambda: None)
+    # _detect_incompatible_model_config -> _resolve_amd_gpu_type ->
+    # _autodetect_gpu_type all live in cli_gpu after the phase-4 split; patch
+    # the real call site (cli re-exports the same object).
+    monkeypatch.setattr(cli_gpu, "_autodetect_gpu_type", lambda: None)
 
 
 # ---------------------------------------------------------------------------
