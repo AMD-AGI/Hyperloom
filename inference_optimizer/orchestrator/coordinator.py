@@ -140,7 +140,16 @@ _OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome")
 
 
 def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
-    """Return ``d[k]`` for the first ``k`` in ``keys`` present + non-None."""
+    """Return ``d[k]`` for the first ``k`` in ``keys`` present + non-None.
+
+    Args:
+        d: Mapping to look up; a non-dict argument yields ``None``.
+        keys: Candidate keys checked in order; the first whose value is
+            non-None wins.
+
+    Returns:
+        The first present, non-None value, or ``None`` if none match.
+    """
     if not isinstance(d, dict):
         return None
     for k in keys:
@@ -151,7 +160,16 @@ def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
 
 
 def _format_inbox_event(m: "Message") -> str:
-    """Render one inbox ``Message`` as a compact, high-signal line (Path A/A1)."""
+    """Render one inbox ``Message`` as a compact, high-signal line (Path A/A1).
+
+    Args:
+        m: The inbox message to render; its topic selects a per-topic
+            formatting branch (delegated_result, policy_denial, review_verdict,
+            observation) with a generic fallback.
+
+    Returns:
+        A single-line string summarising the message header and payload.
+    """
     topic = (m.topic or "").strip()
     payload = m.payload if isinstance(m.payload, dict) else {}
     # DESIGN §13.1: canonical inbox header ordering downstream parsers anchor on.
@@ -246,7 +264,15 @@ _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
 def _lifecycle_paths(payload: Any) -> dict[str, str]:
     """Extract present, non-empty path-like fields from a kernel handler
     payload or result dict (#266). Best-effort: a non-dict argument yields
-    an empty mapping so callers never have to guard the type."""
+    an empty mapping so callers never have to guard the type.
+
+    Args:
+        payload: A kernel handler payload or result; non-dict inputs are
+            tolerated and produce an empty mapping.
+
+    Returns:
+        Mapping of recognised path-like key to its non-empty string value.
+    """
     if not isinstance(payload, dict):
         return {}
     out: dict[str, str] = {}
@@ -585,7 +611,12 @@ class Coordinator:
 
     # Context-pull tools (plan Step 2)
     def _orchestration_conversational(self) -> bool:
-        """True when the orchestration backend runs in persistent-conversation mode (plan Step 1)."""
+        """True when the orchestration backend runs in persistent-conversation mode (plan Step 1).
+
+        Returns:
+            ``True`` if the orchestration backend exposes a truthy
+            ``conversational`` attribute, else ``False``.
+        """
         backend = self.backends.get("orchestration")
         return bool(getattr(backend, "conversational", False))
 
@@ -601,7 +632,14 @@ class Coordinator:
         self._orchestration_seeded = False
 
     def _conversation_progress_signal(self) -> dict[str, Any]:
-        """Compute the no-progress circuit-breaker signal (plan Step 6)."""
+        """Compute the no-progress circuit-breaker signal (plan Step 6).
+
+        Returns:
+            A dict with ``ticks_without_progress``, ``threshold``,
+            ``severity`` ("ok" or "high"), and ``last_progress_tick``;
+            progress is detected from stack growth, validated gain,
+            current-best signature, or phase change.
+        """
         state = self.shared_state
         cur_tick = int(getattr(state, "tick", 0) or 0)
         try:
@@ -665,6 +703,14 @@ class Coordinator:
         unbounded. Best-effort — every step is independently guarded so one
         failure never aborts the run loop. Returns a summary dict when it ran,
         else ``None``.
+
+        Args:
+            tick: The current coordinator tick; maintenance only runs when it
+                is positive and a multiple of the configured cadence.
+
+        Returns:
+            A summary dict of work performed (leases reaped, tasks reclaimed,
+            rows pruned, disk status) when the cadence fired, else ``None``.
         """
         every = int(getattr(self, "_maintenance_every_ticks", 0) or 0)
         if every <= 0 or tick <= 0 or (tick % every) != 0:
@@ -787,6 +833,17 @@ class Coordinator:
         Returns True when a checkpoint was taken. Best-effort. ``force`` bypasses
         the throttle policy (used by the R6 cycle-boundary soft restart) but
         still requires a seeded conversational backend.
+
+        Args:
+            tick: The current coordinator tick, recorded on the checkpoint
+                tracker and emitted in the observation.
+            phase_changed: Whether the phase changed this tick; influences the
+                throttle policy's decision to checkpoint.
+            force: Bypass the throttle policy and checkpoint regardless of
+                cadence (still requires a seeded conversational backend).
+
+        Returns:
+            ``True`` if a checkpoint was taken, else ``False``.
         """
         if not self._checkpoint_enabled:
             return False
@@ -894,7 +951,16 @@ class Coordinator:
             log.exception("Coordinator: failed to attach orchestration context tools")
 
     def _context_inbox_reader(self, since_seq: int = 0) -> str:
-        """Synchronous projection of the orchestration inbox tail (sync SQLite path)."""
+        """Synchronous projection of the orchestration inbox tail (sync SQLite path).
+
+        Args:
+            since_seq: Only events with a sequence number greater than this are
+                included; defaults to ``0`` (all events).
+
+        Returns:
+            A newline-joined rendering of the last 40 matching inbox events, or
+            a placeholder string when none are available.
+        """
         try:
             rows = self.bus.db.fetchall_sync(
                 "SELECT * FROM events WHERE seq > ? AND "
@@ -911,7 +977,16 @@ class Coordinator:
         return "\n".join(lines)
 
     def _context_recent_outcomes_reader(self, top_k: int = 8) -> str:
-        """Synchronous projection of recent action outcomes (Path A / A2)."""
+        """Synchronous projection of recent action outcomes (Path A / A2).
+
+        Args:
+            top_k: Number of recent outcome events to project; clamped to the
+                range 1..50 (defaults to 8).
+
+        Returns:
+            A newline-joined, chronological (newest-last) rendering of recent
+            delegated_result/review_verdict events, or a placeholder string.
+        """
         try:
             k = max(1, min(int(top_k or 8), 50))
         except (TypeError, ValueError):
@@ -940,7 +1015,12 @@ class Coordinator:
     })
 
     def _inline_action_whitelist(self) -> frozenset[str]:
-        """Derive the set of actions safe to run inline (A3): lane-light, registered executor, not in _INLINE_ACTION_DENY. PolicyGate remains the real security boundary."""
+        """Derive the set of actions safe to run inline (A3): lane-light, registered executor, not in _INLINE_ACTION_DENY. PolicyGate remains the real security boundary.
+
+        Returns:
+            A frozenset of action names eligible for inline execution; empty
+            when no action registry is loaded.
+        """
         reg = getattr(self, "action_registry", None)
         if reg is None:
             return frozenset()
@@ -965,7 +1045,17 @@ class Coordinator:
     def _run_action_now_sync(
         self, action_name: str, params: dict[str, Any] | None = None,
     ) -> str:
-        """Bridge callable for the ``run_action_now`` context tool (A3): marshals the executor coroutine onto the Coordinator loop and blocks with a timeout."""
+        """Bridge callable for the ``run_action_now`` context tool (A3): marshals the executor coroutine onto the Coordinator loop and blocks with a timeout.
+
+        Args:
+            action_name: Name of the action to run inline; must be
+                inline-eligible per :meth:`_inline_action_whitelist`.
+            params: Optional parameter mapping forwarded to the executor.
+
+        Returns:
+            A human-readable status string describing the inline run outcome,
+            disablement, ineligibility, timeout, or error.
+        """
         if not self._inline_fast_actions_enabled:
             return (
                 "(run_action_now disabled: set "
@@ -1019,7 +1109,16 @@ class Coordinator:
     async def _run_action_now(
         self, action_name: str, params: dict[str, Any],
     ) -> str:
-        """Coordinator-loop coroutine that runs a whitelisted action inline through PolicyGate + SubAgentRunner, publishing a delegated_result for audit/inbox parity."""
+        """Coordinator-loop coroutine that runs a whitelisted action inline through PolicyGate + SubAgentRunner, publishing a delegated_result for audit/inbox parity.
+
+        Args:
+            action_name: Name of the action to execute.
+            params: Parameter mapping forwarded to the task/executor.
+
+        Returns:
+            A status string: a policy/sequence denial message, an
+            already-in-flight notice, or the rendered delegated_result line.
+        """
         from .message_bus import Message
         # PolicyGate parity (R1): validate synthetic delegate intent so phase/role/paths/red-line gates apply.
         intent = Intent(
@@ -1088,7 +1187,12 @@ class Coordinator:
         return f"inline run complete: {rendered}"
 
     def _context_analysis_reader(self) -> str:
-        """Return the latest TraceLens analysis.md snapshot text."""
+        """Return the latest TraceLens analysis.md snapshot text.
+
+        Returns:
+            The formatted analysis.md snapshot, the text read from the recorded
+            ``analysis_md_path``, or a placeholder when none is available.
+        """
         try:
             blob = self.shared_state._format_analysis_md_full()
             if blob and blob.strip():
@@ -1108,7 +1212,12 @@ class Coordinator:
 
     # Resume
     def _detect_resume_state(self) -> dict[str, Any]:
-        """Synchronously inspect persistence to determine if this is a resume (non-blocking)."""
+        """Synchronously inspect persistence to determine if this is a resume (non-blocking).
+
+        Returns:
+            A dict with ``is_resume``, ``event_count``, ``state_json_present``
+            and ``rebuilt`` (the last set later by :meth:`replay_for_resume`).
+        """
         ev_count = self.bus.db.fetchone_sync("SELECT COUNT(*) AS c FROM events")
         events_present = (int(ev_count["c"]) if ev_count else 0) > 0
         state_path = SharedState.state_path(self.session_dir)
@@ -1120,7 +1229,13 @@ class Coordinator:
         }
 
     async def replay_for_resume(self) -> dict[str, Any]:
-        """Walk the event log to reconstruct ``CoordinatorState.pending_proposals``. Idempotent; a proposal is undecided when no review_verdict targets it."""
+        """Walk the event log to reconstruct ``CoordinatorState.pending_proposals``. Idempotent; a proposal is undecided when no review_verdict targets it.
+
+        Returns:
+            A dict summarising the replay: ``is_resume``, ``event_count``,
+            ``state_json_present``, ``pending_restored`` (count rebuilt) and
+            ``verdicts_seen``.
+        """
         proposal_msgs = await self.bus.tail(topic="proposal", n=10_000)
         verdicts = await self.bus.tail(topic="review_verdict", n=10_000)
 
@@ -1164,7 +1279,12 @@ class Coordinator:
 
     @property
     def resumed_from(self) -> dict[str, Any]:
-        """Read-only snapshot of resume detection (set by ``__init__``)."""
+        """Read-only snapshot of resume detection (set by ``__init__``).
+
+        Returns:
+            A copy of the resume-detection dict so callers cannot mutate
+            internal state.
+        """
         return dict(self._resumed_from)
 
     # Lifecycle
@@ -1441,6 +1561,11 @@ class Coordinator:
         so the new cycle gets a fresh budget / plateau evaluation. The explore
         ledger is preserved; its already-KEEP entries stay blocked while
         sub-threshold ones may unblock as the KEEP bar decays.
+
+        Args:
+            evidence: The loopback evidence dict from ``compute_next_phase``;
+                may carry ``no_gain_cycle_streak_effective`` which is persisted
+                onto the new cycle.
         """
         state = self.shared_state
         prior_cycle = int(getattr(state, "macro_cycle", 0) or 0)
@@ -1500,6 +1625,14 @@ class Coordinator:
 
         Best-effort: every step is independently guarded so one failure never
         aborts the run loop. Returns a summary dict when it ran, else ``None``.
+
+        Args:
+            prior_cycle: The macro-cycle number that just finished.
+            new_cycle: The macro-cycle number being entered.
+
+        Returns:
+            A summary dict of the restart steps performed, or ``None`` when the
+            soft restart is disabled.
         """
         if not getattr(self, "_cycle_soft_restart", False):
             return None
@@ -1595,7 +1728,13 @@ class Coordinator:
         _kill_stale_servers()
 
     async def _on_phase_entered(self, *, from_phase: str, to_phase: str) -> None:
-        """Fire per-phase entry side effects (pure dispatcher; hooks catch + log internally). CLOSE runs the 5-step sequencer (KB_design §3.2 §5.5 + KB_gaps/Gap-06; sets close_sequence_done)."""
+        """Fire per-phase entry side effects (pure dispatcher; hooks catch + log internally). CLOSE runs the 5-step sequencer (KB_design §3.2 §5.5 + KB_gaps/Gap-06; sets close_sequence_done).
+
+        Args:
+            from_phase: The phase being left.
+            to_phase: The phase being entered; selects which per-phase entry
+                hook fires.
+        """
         # Orchestration checkpoint at the phase seam (plan Step 4); runs before per-phase side effects.
         try:
             await self._maybe_checkpoint_orchestration(
@@ -1618,7 +1757,12 @@ class Coordinator:
             await self._on_enter_close(from_phase=from_phase)
 
     async def _on_enter_explore(self, *, from_phase: str) -> None:
-        """Warm ``KnowledgePlane.pr_feed`` across specialist domains (best-effort) on EXPLORE entry. Roofline lives in PRELUDE, not here (except the R3 per-cycle reprofile below)."""
+        """Warm ``KnowledgePlane.pr_feed`` across specialist domains (best-effort) on EXPLORE entry. Roofline lives in PRELUDE, not here (except the R3 per-cycle reprofile below).
+
+        Args:
+            from_phase: The phase being left; a SWEEP origin in cyclic mode
+                triggers the R3 per-cycle forced reprofile.
+        """
         # R3: at the start of each macro-cycle (cyclic loopback SWEEP→EXPLORE),
         # force a fresh roofline/profile so the new cycle re-targets the current
         # bottleneck instead of reusing the prior cycle's stale picture. The
@@ -1659,7 +1803,11 @@ class Coordinator:
             )
 
     async def _on_enter_framework_pr(self, *, from_phase: str) -> None:
-        """FRAMEWORK_PR entry hook: trigger the per-batch pump once on entry (best-effort; later batches driven from the main tick)."""
+        """FRAMEWORK_PR entry hook: trigger the per-batch pump once on entry (best-effort; later batches driven from the main tick).
+
+        Args:
+            from_phase: The phase being left, used only for logging.
+        """
         log.info(
             "FRAMEWORK_PR entry (from=%s): pumping initial batch",
             from_phase or "<unknown>",
@@ -1775,7 +1923,13 @@ class Coordinator:
                 )
 
     async def _framework_pr_authoring_inflight(self) -> bool:
-        """True while a FRAMEWORK_PR-authored patch is still in flight (specialist/integrate_patch task or pending integrate_patch proposal); pump waits before advancing."""
+        """True while a FRAMEWORK_PR-authored patch is still in flight (specialist/integrate_patch task or pending integrate_patch proposal); pump waits before advancing.
+
+        Returns:
+            ``True`` if a specialist/integrate_patch task is queued or running,
+            or an integrate_patch proposal is pending Critic review; else
+            ``False``.
+        """
         try:
             queued = await self.tasks.queued()
             running = await self.tasks.running()
@@ -1796,7 +1950,13 @@ class Coordinator:
     async def _enqueue_framework_pr_authoring_specialist(
         self, candidate: dict[str, Any],
     ) -> None:
-        """Dispatch a write-capable specialist seeded with ``candidate`` (Inv-5.1: flows through autosubmit → Critic → integrate_patch → bench → KEEP/REVERT)."""
+        """Dispatch a write-capable specialist seeded with ``candidate`` (Inv-5.1: flows through autosubmit → Critic → integrate_patch → bench → KEEP/REVERT).
+
+        Args:
+            candidate: The discovered FRAMEWORK_PR candidate (PR url, title,
+                diff url, batch/candidate ids) used to seed the specialist's
+                authoring task and provenance markers.
+        """
         state = self.shared_state
         cand_id = str(
             candidate.get("candidate_id")
@@ -1881,7 +2041,12 @@ class Coordinator:
         )
 
     def _select_next_framework_pr_candidate(self) -> dict[str, Any] | None:
-        """Return the next unprocessed candidate in the latest batch (processed = has progress entry)."""
+        """Return the next unprocessed candidate in the latest batch (processed = has progress entry).
+
+        Returns:
+            The next candidate dict not yet recorded in the phase progress, or
+            ``None`` when no batch exists or all are processed.
+        """
         state = self.shared_state
         batches = getattr(state, "framework_pr_batches", None) or []
         if not batches:
@@ -1911,7 +2076,12 @@ class Coordinator:
         return None
 
     def _framework_pr_known_candidate_ids(self) -> set[str]:
-        """All candidate ids already discovered into any prior batch (dedup for new batches)."""
+        """All candidate ids already discovered into any prior batch (dedup for new batches).
+
+        Returns:
+            A set of candidate ids drawn from every prior batch plus PR ids the
+            research scout has already mined.
+        """
         state = self.shared_state
         ids: set[str] = set()
         batches = getattr(state, "framework_pr_batches", None) or []
@@ -1939,7 +2109,11 @@ class Coordinator:
         return ids
 
     def _framework_pr_tried_refs(self) -> list[str]:
-        """Refs already discovered this phase (fed to compose_gap to bias away from prior PR categories)."""
+        """Refs already discovered this phase (fed to compose_gap to bias away from prior PR categories).
+
+        Returns:
+            A list of already-known candidate id refs.
+        """
         refs: list[str] = []
         for cid in self._framework_pr_known_candidate_ids():
             if cid:
@@ -1947,7 +2121,14 @@ class Coordinator:
         return refs
 
     def _framework_pr_discover_repo_urls(self, framework: str) -> list[str]:
-        """Repo URLs to query for the FRAMEWORK_PR batch: framework's own repo + pr_intel_specialist cross-repo set, dedup preserving order."""
+        """Repo URLs to query for the FRAMEWORK_PR batch: framework's own repo + pr_intel_specialist cross-repo set, dedup preserving order.
+
+        Args:
+            framework: The framework name whose own repo seeds the query.
+
+        Returns:
+            An order-preserving, deduped list of repo URLs to query.
+        """
         from . import framework_agent_client as _fa_client
 
         urls: list[str] = []
@@ -1988,7 +2169,12 @@ class Coordinator:
     def _record_framework_pr_phase_done(
         self, *, reason: str, failure_count: int,
     ) -> None:
-        """Append a framework_pr_phase_done row to phase_history describing why the pump gave up."""
+        """Append a framework_pr_phase_done row to phase_history describing why the pump gave up.
+
+        Args:
+            reason: Human-readable reason the phase ended.
+            failure_count: Number of consecutive discover failures recorded.
+        """
         state = self.shared_state
         try:
             history = getattr(state, "phase_history", None)
@@ -2007,7 +2193,13 @@ class Coordinator:
             pass
 
     async def _discover_next_framework_pr_batch(self) -> bool:
-        """Call ``fa phase-discover`` and append a batch to SharedState. Returns True iff a non-empty batch was appended; transient failures return False (see DISCOVER_FAILURE_RETRY_LIMIT)."""
+        """Call ``fa phase-discover`` and append a batch to SharedState. Returns True iff a non-empty batch was appended; transient failures return False (see DISCOVER_FAILURE_RETRY_LIMIT).
+
+        Returns:
+            ``True`` if a non-empty, deduped batch of new candidates was
+            appended to SharedState; ``False`` on transient failure or when no
+            new candidates were found.
+        """
         from . import framework_agent_client as _fa_client
 
         state = self.shared_state
@@ -2246,7 +2438,13 @@ class Coordinator:
     _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
 
     def _collect_framework_pr_priors(self) -> dict[str, Any]:
-        """Return compact session-local priors for the Critic gate (recent_decisions + recent_outcomes); best-effort."""
+        """Return compact session-local priors for the Critic gate (recent_decisions + recent_outcomes); best-effort.
+
+        Returns:
+            A dict with ``recent_decisions`` (recent critic verdicts) and
+            ``recent_outcomes`` (recent terminal apply/bench results), each
+            bounded to a short tail.
+        """
         state = self.shared_state
         decisions: list[dict[str, Any]] = []
         try:
@@ -2286,6 +2484,14 @@ class Coordinator:
 
         Returns {"verdict": "approve"|"reject"|"abstain", "rationale": str}. abstain is the safe degraded
         path (treated as approve by caller); decisions cached in framework_pr_critic_decisions for resume.
+
+        Args:
+            candidate: The discovered PR candidate to review.
+
+        Returns:
+            A dict with ``verdict`` (one of "approve", "reject", "abstain") and
+            ``rationale``; abstain is the safe degraded path treated as approve
+            by the caller.
         """
         state = self.shared_state
         cand_id = str(
@@ -2396,7 +2602,11 @@ class Coordinator:
         return verdict_row
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
-        """Run deterministic KERNEL-entry setup before LLM kernel work (FP8 GEMM tuning gate)."""
+        """Run deterministic KERNEL-entry setup before LLM kernel work (FP8 GEMM tuning gate).
+
+        Args:
+            from_phase: The phase being left, used only for logging.
+        """
         if not self._kernel_enabled():
             # Should not happen — --no-kernel routes EXPLORE → SWEEP.
             log.info(
@@ -2596,7 +2806,12 @@ class Coordinator:
     _ROOFLINE_WATERMARK_RATIO: float = 1.10   # 10% step over last roofline
 
     def _current_tput_from_validated_gain(self) -> float:
-        """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed)."""
+        """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).
+
+        Returns:
+            The projected current throughput, or ``0.0`` when the baseline is
+            unknown.
+        """
         state = self.shared_state
         try:
             base = float(state.baseline_tput or 0.0)
@@ -2611,7 +2826,13 @@ class Coordinator:
         return base * (1.0 + gain / 100.0)
 
     def _needs_roofline_for_watermark(self) -> bool:
-        """True iff projected tput crossed the 10% watermark over ``last_roofline_tput`` (bootstrap guard: False until PRELUDE roofline ran; re-arm guard: False while auto_roofline_pending_task_id is in-flight)."""
+        """True iff projected tput crossed the 10% watermark over ``last_roofline_tput`` (bootstrap guard: False until PRELUDE roofline ran; re-arm guard: False while auto_roofline_pending_task_id is in-flight).
+
+        Returns:
+            ``True`` when a fresh roofline is warranted because projected tput
+            crossed the watermark ratio; ``False`` otherwise (including the
+            bootstrap and in-flight re-arm guards).
+        """
         state = self.shared_state
         try:
             last_rl = float(state.last_roofline_tput or 0.0)
@@ -2642,7 +2863,14 @@ class Coordinator:
     async def _maybe_enqueue_watermark_roofline(
         self, *, reason: str,
     ) -> bool:
-        """Enqueue a fresh roofline if the watermark crossed; idempotency-keyed via ``reason``, stamps auto_roofline_pending_task_id. Returns True when enqueued."""
+        """Enqueue a fresh roofline if the watermark crossed; idempotency-keyed via ``reason``, stamps auto_roofline_pending_task_id. Returns True when enqueued.
+
+        Args:
+            reason: Tag used in the task's idempotency key and logging.
+
+        Returns:
+            ``True`` if a roofline task was enqueued, else ``False``.
+        """
         if not self._needs_roofline_for_watermark():
             return False
         try:
@@ -2664,13 +2892,25 @@ class Coordinator:
         return True
 
     def _internal_analysis_kind(self) -> str:
-        """Pick the kind for the next Coordinator-internal analysis task: roofline (composite) when enable_roofline else profile. Both absent from PHASE_LLM_PROPOSABLE_ACTIONS (PolicyGate R1 denies LLM proposals)."""
+        """Pick the kind for the next Coordinator-internal analysis task: roofline (composite) when enable_roofline else profile. Both absent from PHASE_LLM_PROPOSABLE_ACTIONS (PolicyGate R1 denies LLM proposals).
+
+        Returns:
+            ``"roofline"`` when roofline is enabled, else ``"profile"``.
+        """
         return "roofline" if bool(
             getattr(self.shared_state, "enable_roofline", True),
         ) else "profile"
 
     def _registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
-        """Resolve ``(requires_lanes, lease_ttl_sec)`` from the ActionRegistry; lanes filtered to KNOWN_LANES, returns ([], 0) for unknown actions."""
+        """Resolve ``(requires_lanes, lease_ttl_sec)`` from the ActionRegistry; lanes filtered to KNOWN_LANES, returns ([], 0) for unknown actions.
+
+        Args:
+            kind: The action name to resolve.
+
+        Returns:
+            A ``(requires_lanes, lease_ttl_sec)`` tuple; ``([], 0)`` when the
+            action is unknown or no registry is loaded.
+        """
         reg = getattr(self, "action_registry", None)
         if reg is None:
             return [], 0
@@ -2684,7 +2924,12 @@ class Coordinator:
         return lanes, int(getattr(meta, "lease_ttl_sec", 0) or 0)
 
     def _warm_recipe_proven_items(self) -> list[dict[str, str]]:
-        """Summarise warm-start ``what_worked`` items the scout can skip ({name, source}); fail-soft."""
+        """Summarise warm-start ``what_worked`` items the scout can skip ({name, source}); fail-soft.
+
+        Returns:
+            A list of ``{"name", "source"}`` dicts for proven warm-start items;
+            empty when no warm recipe is present.
+        """
         state = self.shared_state
         warm = getattr(state, "warm_start_recipe", None) or {}
         if not isinstance(warm, dict) or not warm:
@@ -2705,7 +2950,11 @@ class Coordinator:
         return out
 
     def _inject_warm_recipe_history_into_ledger(self) -> int:
-        """GAP 1 — pre-fill ``explore_search.rejected`` with the warm recipe's ``what_failed`` rows (fingerprinted so the dedup gate denies re-tests). Idempotent via warm_history_injected; returns rows added."""
+        """GAP 1 — pre-fill ``explore_search.rejected`` with the warm recipe's ``what_failed`` rows (fingerprinted so the dedup gate denies re-tests). Idempotent via warm_history_injected; returns rows added.
+
+        Returns:
+            The number of new rejected rows injected into the explore ledger.
+        """
         state = self.shared_state
         if getattr(state, "warm_history_injected", False):
             return 0
@@ -2785,6 +3034,14 @@ class Coordinator:
 
         Skips on --no-warm-replay/resume/low-confidence/empty best_config; otherwise mints an internal
         task running the baseline workload contract with the KB config applied. Idempotent via warm-replay-prelude.
+
+        Args:
+            baseline_tput: The baseline throughput captured at enqueue time,
+                carried forward as the replay's comparison anchor.
+
+        Returns:
+            The created (or existing) ``replay_warm_recipe`` task, or ``None``
+            when the replay is skipped.
         """
         state = self.shared_state
         if not getattr(self, "_warm_replay_enabled", True):
@@ -2926,7 +3183,14 @@ class Coordinator:
     def _promote_warm_replay(
         self, result: dict, *, task: "Task | None" = None,
     ) -> None:
-        """GAP 1 — interpret a ``replay_warm_recipe`` result: any measured uplift pushes warm config onto optimization_stack + current_best; failures set status and never propagate."""
+        """GAP 1 — interpret a ``replay_warm_recipe`` result: any measured uplift pushes warm config onto optimization_stack + current_best; failures set status and never propagate.
+
+        Args:
+            result: The ``replay_warm_recipe`` task result dict (status,
+                throughput, workspace, etc.).
+            task: The originating task, used to recover the warm args/envs and
+                the baseline anchor; may be ``None`` (degraded path).
+        """
         state = self.shared_state
         outcome = dict(state.warm_replay_outcome or {})
         expected_gain = float(outcome.get("expected_gain_pct") or 0.0)
@@ -3114,7 +3378,12 @@ class Coordinator:
         *,
         baseline_tput: float | None = None,
     ) -> None:
-        """Enqueue the PRELUDE-bootstrap roofline/profile task after baseline; skipped while warm-replay is in_flight (GPU/port contention)."""
+        """Enqueue the PRELUDE-bootstrap roofline/profile task after baseline; skipped while warm-replay is in_flight (GPU/port contention).
+
+        Args:
+            baseline_tput: The baseline throughput; ``None`` reads it from
+                SharedState. A non-positive value short-circuits the enqueue.
+        """
         state = self.shared_state
         if _phase_state.warm_replay_in_flight(state):
             log.info(
@@ -3154,12 +3423,23 @@ class Coordinator:
 
         Without this, a later macro-cycle's sweep/roofline/profile would dedupe
         to the first cycle's already-succeeded task and never re-run.
+
+        Returns:
+            ``"-c<cycle>"`` for macro-cycle > 0, else an empty string.
         """
         cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
         return f"-c{cycle}" if cycle > 0 else ""
 
     async def _enqueue_internal_analysis_task(self, *, reason: str) -> Task:
-        """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Kind-agnostic idempotency key internal-analysis-<reason>; omits baseline_config_path so ProfileExecutor enables torch_profiler."""
+        """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Kind-agnostic idempotency key internal-analysis-<reason>; omits baseline_config_path so ProfileExecutor enables torch_profiler.
+
+        Args:
+            reason: Tag distinguishing the enqueue site; used in the
+                idempotency key and to select baseline vs current-best args.
+
+        Returns:
+            The created (or existing idempotent) analysis :class:`Task`.
+        """
         state = self.shared_state
         kind = self._internal_analysis_kind()
         params: dict[str, Any] = {
@@ -3206,7 +3486,12 @@ class Coordinator:
         return task
 
     def _record_phase_entry_evidence(self, **kvs: Any) -> None:
-        """Merge ``kvs`` into the latest phase_history row's evidence dict (Gap-04; no-op when empty)."""
+        """Merge ``kvs`` into the latest phase_history row's evidence dict (Gap-04; no-op when empty).
+
+        Args:
+            **kvs: Arbitrary key/value pairs merged into the latest
+                phase_history row's evidence dict.
+        """
         history = self.shared_state.phase_history or []
         if not history:
             return
@@ -3275,7 +3560,12 @@ class Coordinator:
             )
 
     def _positive_needs_review_integrates(self) -> list[dict[str, Any]]:
-        """Return positive NEEDS_REVIEW integrate entries eligible for stack validation."""
+        """Return positive NEEDS_REVIEW integrate entries eligible for stack validation.
+
+        Returns:
+            Integrate-attempt entries with a positive best gain that are not
+            yet stack-resolved or in progress, sorted by gain descending.
+        """
         out: list[dict[str, Any]] = []
         stack_resolved_ids = self._stack_resolved_kernel_ids()
         for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
@@ -3304,7 +3594,11 @@ class Coordinator:
         return out
 
     def _stack_resolved_kernel_ids(self) -> set[str]:
-        """Kernel ids already covered by a kept stack validation."""
+        """Kernel ids already covered by a kept stack validation.
+
+        Returns:
+            The set of kernel ids resolved by kept ``integrate`` stack entries.
+        """
         resolved: set[str] = set()
         for item in self.shared_state.optimization_stack or []:
             if not isinstance(item, dict):
@@ -3325,7 +3619,13 @@ class Coordinator:
         entries: list[dict[str, Any]],
         result: dict[str, Any],
     ) -> None:
-        """Mark component NEEDS_REVIEW entries as handled by a kept stack."""
+        """Mark component NEEDS_REVIEW entries as handled by a kept stack.
+
+        Args:
+            entries: The component integrate entries that formed the stack.
+            result: The stack-validation result; only a ``KEEP`` decision with
+                a stack kernel id triggers marking.
+        """
         stack_id = str(result.get("kernel_id") or "")
         decision = str(result.get("decision") or "").upper()
         if decision != "KEEP" or not stack_id:
@@ -3359,7 +3659,14 @@ class Coordinator:
     def _stack_component_identities(
         self, entries: list[dict[str, Any]],
     ) -> set[tuple[str, str, str]]:
-        """Return (kernel_id, patch_path, target_file) tuples for stack members."""
+        """Return (kernel_id, patch_path, target_file) tuples for stack members.
+
+        Args:
+            entries: The stack component integrate entries.
+
+        Returns:
+            A set of ``(kernel_id, patch_path, target_file)`` identity tuples.
+        """
         return {
             (
                 str(entry.get("kernel_id") or ""),
@@ -3375,7 +3682,12 @@ class Coordinator:
         entries: list[dict[str, Any]],
         stack_id: str,
     ) -> None:
-        """Persist an in-flight stack guard before applying patches."""
+        """Persist an in-flight stack guard before applying patches.
+
+        Args:
+            entries: The component integrate entries to guard.
+            stack_id: The combined stack kernel id stamped onto each entry.
+        """
         now = datetime.now(timezone.utc).isoformat()
         wanted = self._stack_component_identities(entries)
         for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
@@ -3395,7 +3707,12 @@ class Coordinator:
     def _clear_stack_validation_in_progress(
         self, entries: list[dict[str, Any]],
     ) -> None:
-        """Clear the in-flight stack guard for component integrate entries."""
+        """Clear the in-flight stack guard for component integrate entries.
+
+        Args:
+            entries: The component integrate entries whose in-progress guard
+                should be cleared.
+        """
         wanted = self._stack_component_identities(entries)
         for entry in (self.shared_state.kernel_integrate_attempts or {}).values():
             if not isinstance(entry, dict):
@@ -3415,7 +3732,12 @@ class Coordinator:
         self.shared_state.pending_stack_validation_apply_results = []
 
     async def _recover_interrupted_stack_validation(self) -> bool:
-        """Resume or abort a stack validation interrupted by crash."""
+        """Resume or abort a stack validation interrupted by crash.
+
+        Returns:
+            ``True`` if an interrupted stack validation was finalized or rolled
+            back, ``False`` when there was nothing to recover.
+        """
         from .kernel_request_handlers import _maybe_revert_kernel_patch
 
         pending = self.shared_state.pending_stack_validation_result
@@ -3457,7 +3779,16 @@ class Coordinator:
         *,
         stack_id: str = "",
     ) -> list[dict[str, Any]]:
-        """Rebuild component integrate ledger rows for a stack id."""
+        """Rebuild component integrate ledger rows for a stack id.
+
+        Args:
+            kernel_ids: The component kernel ids to recover.
+            stack_id: Fallback ``+``-joined stack id parsed for component ids
+                when ``kernel_ids`` is empty.
+
+        Returns:
+            The matching integrate-attempt entries, sorted by kernel id.
+        """
         wanted_ids = {str(kid) for kid in kernel_ids if str(kid)}
         if not wanted_ids and stack_id:
             wanted_ids = {kid for kid in stack_id.split("+") if kid}
@@ -3476,7 +3807,13 @@ class Coordinator:
         stack: list[dict[str, Any]],
         result: dict[str, Any],
     ) -> None:
-        """Record stack validation, promote KEEP, and clear recovery checkpoints."""
+        """Record stack validation, promote KEEP, and clear recovery checkpoints.
+
+        Args:
+            stack: The component integrate entries that formed the stack.
+            result: The stack-validation result; a ``KEEP`` decision promotes
+                the stack and marks entries resolved.
+        """
         self.shared_state.record_kernel_integrate_result(result)
         decision = str(result.get("decision") or "").upper()
         if decision == "KEEP":
@@ -3528,7 +3865,16 @@ class Coordinator:
     async def _run_kernel_stack_validation_e2e(
         self, entries: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Apply multiple kernel patches, run one E2E benchmark, then keep or revert the stack."""
+        """Apply multiple kernel patches, run one E2E benchmark, then keep or revert the stack.
+
+        Args:
+            entries: The component integrate entries whose patches are applied
+                together for the combined benchmark.
+
+        Returns:
+            A result dict with the KEEP/REVERT decision, measured throughput,
+            incremental gain, apply/revert sub-results and stack metadata.
+        """
         from .action_executors.baseline import BaselineExecutor
         from .action_executors.benchmark_result import is_valid_measurement
         from .kernel_request_handlers import (
@@ -3676,7 +4022,11 @@ class Coordinator:
             }
 
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
-        """Auto-enqueue a ``sweep`` task on SWEEP entry (§3.2 §5.4). Idempotent via internal-sweep-phase_entry (Inv-2.1); PolicyGate's sweep_phase_singleton then denies LLM-emitted sweep (OOM race)."""
+        """Auto-enqueue a ``sweep`` task on SWEEP entry (§3.2 §5.4). Idempotent via internal-sweep-phase_entry (Inv-2.1); PolicyGate's sweep_phase_singleton then denies LLM-emitted sweep (OOM race).
+
+        Args:
+            from_phase: The phase being left, used only for logging.
+        """
         state = self.shared_state
         # Bug #7 fix: drain pending KEEP integrates from prior KERNEL so sweep measures full current_best.
         if getattr(state, "has_keep_pending_integrate", False):
@@ -3717,7 +4067,15 @@ class Coordinator:
     async def _enqueue_internal_conc_sweep_task(
         self, *, reason: str,
     ) -> Task | None:
-        """Build + enqueue a Coordinator-internal ``conc_sweep`` task (caller checks conc_sweep_enabled). Idempotency key + PolicyGate singleton ensure ≤1 per SWEEP; returns None on error."""
+        """Build + enqueue a Coordinator-internal ``conc_sweep`` task (caller checks conc_sweep_enabled). Idempotency key + PolicyGate singleton ensure ≤1 per SWEEP; returns None on error.
+
+        Args:
+            reason: Tag used in the task's idempotency key and logging.
+
+        Returns:
+            The created (or existing) ``conc_sweep`` task, or ``None`` on
+            enqueue error.
+        """
         state = self.shared_state
         params: dict[str, Any] = {
             "source": "coordinator_internal",
@@ -3758,7 +4116,14 @@ class Coordinator:
     async def _enqueue_internal_sweep_task(
         self, *, reason: str,
     ) -> Task:
-        """Build + enqueue a Coordinator-internal ``sweep`` task. Grid priority: warm_start_recipe.sweep_grid then SKILL.md defaults. Idempotency key internal-sweep-<reason>."""
+        """Build + enqueue a Coordinator-internal ``sweep`` task. Grid priority: warm_start_recipe.sweep_grid then SKILL.md defaults. Idempotency key internal-sweep-<reason>.
+
+        Args:
+            reason: Tag used in the task's idempotency key and logging.
+
+        Returns:
+            The created (or existing idempotent) ``sweep`` :class:`Task`.
+        """
         state = self.shared_state
         grid_params = self._build_sweep_params_from_recipe(state)
         params: dict[str, Any] = {
@@ -3795,7 +4160,17 @@ class Coordinator:
 
     @staticmethod
     def _build_sweep_params_from_recipe(state: SharedState) -> dict[str, Any]:
-        """Pick a sweep grid (§3.14 R-13): warm_start_recipe.sweep_grid takes precedence over SKILL.md defaults; per-field fallback. Returns source/conc_values/isl_osl_configs/num_prompts_factor."""
+        """Pick a sweep grid (§3.14 R-13): warm_start_recipe.sweep_grid takes precedence over SKILL.md defaults; per-field fallback. Returns source/conc_values/isl_osl_configs/num_prompts_factor.
+
+        Args:
+            state: The session SharedState whose ``warm_start_recipe`` may carry
+                a ``sweep_grid`` override.
+
+        Returns:
+            A dict with ``source`` (``"cortex_recipe"`` or
+            ``"skill_md_default"``), ``conc_values``, ``isl_osl_configs`` and
+            ``num_prompts_factor``.
+        """
         from .action_executors.sweep import (
             DEFAULT_CONC_VALUES,
             DEFAULT_ISL_OSL,
@@ -3899,7 +4274,12 @@ class Coordinator:
     CLOSE_NDJSON_DRAIN_TIMEOUT_SEC: float = 60.0
 
     def _derive_close_stop_reason(self) -> str:
-        """Best-effort ``stop_reason`` for a CLOSE reached blank: recover from the newest CLOSE-bound phase_history row, else time_exhausted."""
+        """Best-effort ``stop_reason`` for a CLOSE reached blank: recover from the newest CLOSE-bound phase_history row, else time_exhausted.
+
+        Returns:
+            A valid stop reason recovered from the newest CLOSE-bound
+            phase_history row, or ``"time_exhausted"`` as the fallback.
+        """
         history = self.shared_state.phase_history or []
         for row in reversed(history):
             if not isinstance(row, dict):
@@ -3915,7 +4295,11 @@ class Coordinator:
         return "time_exhausted"
 
     async def _on_enter_close(self, *, from_phase: str) -> None:
-        """CLOSE 5-step sequencer (fixed order): report → session_breakdown → fact_finalize → ndjson_drain (no-op) → mark close_sequence_done + stop_reason. Best-effort steps; final done step always runs."""
+        """CLOSE 5-step sequencer (fixed order): report → session_breakdown → fact_finalize → ndjson_drain (no-op) → mark close_sequence_done + stop_reason. Best-effort steps; final done step always runs.
+
+        Args:
+            from_phase: The phase being left, used only for logging.
+        """
         log.info("CLOSE entered (from=%s); starting 5-step close sequence",
                  from_phase or "<unknown>")
         await self._record_close_step("sequencer_started", status="running")
@@ -4112,6 +4496,12 @@ class Coordinator:
         """Build + enqueue a Coordinator-internal ``report`` task (idempotency_key internal-report-<reason>).
 
         Reuses closing_report_task_id when set so the wall-clock + CLOSE-sequencer paths don't race.
+
+        Args:
+            reason: Tag used in the task's idempotency key and logging.
+
+        Returns:
+            The created or reused ``report`` :class:`Task`.
         """
         existing_id = (self.shared_state.closing_report_task_id or "").strip()
         if existing_id:
@@ -4161,7 +4551,17 @@ class Coordinator:
     async def _enqueue_internal_research_scout_task(
         self, *, reason: str, round_id: int,
     ) -> "Task | None":
-        """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round, returns None on existing/failure (fail-soft)."""
+        """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round, returns None on existing/failure (fail-soft).
+
+        Args:
+            reason: Tag distinguishing the enqueue site, recorded on the task.
+            round_id: The EXPLORE round (or 0 for PRELUDE) scoping the
+                idempotency key.
+
+        Returns:
+            The created (or existing) specialist :class:`Task`, or ``None`` when
+            the scout is disabled or enqueue fails.
+        """
         if not bool(getattr(self.shared_state, "research_scout_enabled", True)):
             return None
         idempotency_key = f"internal-research-scout-round{int(round_id)}"
@@ -4269,6 +4669,11 @@ class Coordinator:
         self-throttles by zeroing the per-anchor counter on dispatch. Routes
         through ``_handle_intent`` exactly as an LLM delegate would; at most one
         forced dispatch per tick.
+
+        Note:
+            Side-effecting: may dispatch a domain specialist via
+            ``_handle_intent`` and mutate per-anchor throttle counters on
+            ``shared_state``. Returns nothing.
         """
         state = self.shared_state
         if str(getattr(state, "phase", "") or "").upper() != "EXPLORE":
@@ -4421,7 +4826,12 @@ class Coordinator:
             )
 
     def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
-        """Persist scout output (hints, competitor target, gap seeds, dedup); all steps fail-soft."""
+        """Persist scout output (hints, competitor target, gap seeds, dedup); all steps fail-soft.
+
+        Args:
+            done_payload: The completed research-scout task payload; its
+                ``research`` block carries hints, competitor target and PR ids.
+        """
         from . import research_hints as _research_hints
 
         block = done_payload.get("research")
@@ -4494,7 +4904,15 @@ class Coordinator:
     async def _enqueue_internal_session_breakdown_task(
         self, *, reason: str,
     ) -> Task:
-        """Build + enqueue a Coordinator-internal ``session_breakdown`` task; same idempotency contract as the report helper."""
+        """Build + enqueue a Coordinator-internal ``session_breakdown`` task; same idempotency contract as the report helper.
+
+        Args:
+            reason: Tag used in the task's idempotency key and logging.
+
+        Returns:
+            The created (or existing idempotent) ``session_breakdown``
+            :class:`Task`.
+        """
         params: dict[str, Any] = {
             "source":      "coordinator_internal",
             "reason":      str(reason),
@@ -4562,7 +4980,15 @@ class Coordinator:
         task_id: str = "",
         detail: str = "",
     ) -> None:
-        """Append one row to ``phase_history[-1].evidence.close_steps`` (best-effort, per-step persist)."""
+        """Append one row to ``phase_history[-1].evidence.close_steps`` (best-effort, per-step persist).
+
+        Args:
+            step: The close-step name.
+            status: The step's status (e.g. "running", "done", "failed",
+                "skipped").
+            task_id: Optional task id associated with the step.
+            detail: Optional free-text detail recorded on the row.
+        """
         history = self.shared_state.phase_history or []
         if not history:
             return
@@ -4602,14 +5028,23 @@ class Coordinator:
         await self.replay_for_resume()
 
     async def _pump_framework_pr_phase_safely(self, *, caller: str) -> None:
-        """Best-effort FRAMEWORK_PR pump wrapper shared by tick and run."""
+        """Best-effort FRAMEWORK_PR pump wrapper shared by tick and run.
+
+        Args:
+            caller: Label identifying the caller ("tick" / "run"), used only in
+                the failure log.
+        """
         try:
             await self._pump_framework_pr_phase()
         except Exception:  # noqa: BLE001 — defensive
             log.exception("FRAMEWORK_PR pump (%s) failed", caller)
 
     async def tick(self, n: int = 1) -> None:
-        """Run exactly ``n`` reactor passes for every agent (P0-3/P0-5/P1-4 tests); dispatcher pumps at pass end, lazy resume replay on tick 1."""
+        """Run exactly ``n`` reactor passes for every agent (P0-3/P0-5/P1-4 tests); dispatcher pumps at pass end, lazy resume replay on tick 1.
+
+        Args:
+            n: Number of full reactor+dispatcher passes to run (default 1).
+        """
         await self._replay_resume_if_needed()
         for _ in range(n):
             self.shared_state.increment_tick()
@@ -4629,7 +5064,15 @@ class Coordinator:
         tick: int | None = None,
         agent: str = "",
     ) -> None:
-        """Record a Coordinator-side exception without killing the session."""
+        """Record a Coordinator-side exception without killing the session.
+
+        Args:
+            stage: The pipeline stage where the exception occurred.
+            exc: The caught exception, recorded with type/message/traceback.
+            tick: Optional tick number; defaults to the current SharedState
+                tick when ``None``.
+            agent: Optional agent role associated with the failure.
+        """
         try:
             self.shared_state.record_tick_exception(
                 tick=int(tick if tick is not None else self.shared_state.tick or 0),
@@ -4659,7 +5102,27 @@ class Coordinator:
         crash_emergency_threshold: int = 25,
         closing_grace_sec: float | None = None,
     ) -> str:
-        """Run reactor + dispatcher until a stop condition fires (DESIGN §9.1, priority order): signal, target_reached, time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason."""
+        """Run reactor + dispatcher until a stop condition fires (DESIGN §9.1, priority order): signal, target_reached, time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
+
+        Args:
+            objective: Stop objective; ``None`` uses a :class:`TimeOnlyObjective`.
+            max_minutes: Wall-clock budget in minutes; ``None``/falsy runs
+                unbounded (capped at the container lifetime).
+            tick_interval_sec: Sleep between ticks; ``0.0`` keeps tests fast.
+            max_ticks: Optional hard cap on the number of ticks.
+            stop_when: Optional custom predicate (sync or async) evaluated each
+                tick; a truthy result stops the run.
+            install_signal_handlers: Whether to install SIGINT/SIGTERM handlers
+                that set the stop event.
+            crash_emergency_threshold: Recent-crash count within the emergency
+                window that triggers an emergency stop.
+            closing_grace_sec: Grace window for the closing report phase;
+                ``None`` derives a default from ``max_minutes``.
+
+        Returns:
+            The persisted ``shared_state.stop_reason`` describing why the run
+            stopped.
+        """
         objective = objective or TimeOnlyObjective()
         # Stash so _compose_prompt can update target_gap_pct.
         self._current_objective = objective
@@ -4852,7 +5315,15 @@ class Coordinator:
         return self.shared_state.stop_reason
 
     async def _enter_closing_phase(self, *, grace_sec: float) -> float:
-        """Enter report-flush phase after the wall-clock deadline (enqueue deterministic report task)."""
+        """Enter report-flush phase after the wall-clock deadline (enqueue deterministic report task).
+
+        Args:
+            grace_sec: Seconds the closing phase may run before the report task
+                is abandoned.
+
+        Returns:
+            The monotonic deadline by which the closing phase must complete.
+        """
         closing_started = time.time()
         closing_deadline = time.monotonic() + float(grace_sec)
         self.shared_state.closing_phase = True
@@ -5020,6 +5491,11 @@ class Coordinator:
         Wrapped in a broad ``try`` so any unexpected error in trace
         assembly degrades to a logged warning rather than breaking the
         tick loop.
+
+        Args:
+            agent_name: The reactor role; doubles as trace component and role.
+            result: The backend turn result whose metadata carries token
+                counters.
         """
         try:
             metadata = result.metadata or {}
@@ -5062,6 +5538,11 @@ class Coordinator:
 
         Best-effort: any failure degrades to a logged warning rather than
         breaking the tick loop.
+
+        Args:
+            agent_name: The reactor role; doubles as trace component and role.
+            result: The backend turn result whose metadata carries the redacted
+                prompt/response text.
         """
         try:
             metadata = result.metadata or {}
@@ -5089,7 +5570,12 @@ class Coordinator:
     async def _track_backend_error_streak(
         self, agent_name: str, exc: BackendError,
     ) -> None:
-        """Increment the per-agent ``BackendError`` streak; emit one backend_unhealthy event on crossing the threshold (re-arms only after a successful turn)."""
+        """Increment the per-agent ``BackendError`` streak; emit one backend_unhealthy event on crossing the threshold (re-arms only after a successful turn).
+
+        Args:
+            agent_name: The agent role whose error streak is incremented.
+            exc: The backend error; its repr is included in the emitted event.
+        """
         new_value = self._backend_error_streak.get(agent_name, 0) + 1
         self._backend_error_streak[agent_name] = new_value
         threshold = self._backend_error_streak_threshold
@@ -5117,7 +5603,12 @@ class Coordinator:
             )
 
     async def _scan_stale_specialists(self) -> list[dict[str, Any]]:
-        """Return specialist task rows running longer than ``_specialist_stale_sec`` (v0.8 §3.3 §4.4); never raises, returns [] on failure."""
+        """Return specialist task rows running longer than ``_specialist_stale_sec`` (v0.8 §3.3 §4.4); never raises, returns [] on failure.
+
+        Returns:
+            A list of stale specialist task row dicts; empty on failure or when
+            none are stale.
+        """
         try:
             running = await self.tasks.running()
         except Exception:  # noqa: BLE001 — defensive
@@ -5144,7 +5635,15 @@ class Coordinator:
         return stale
 
     async def _compose_prompt(self, agent_name: str) -> str:
-        """v0.6 §8.3 prompt: SharedState summary + inbox tail (with canonical msg_id per inbox row)."""
+        """v0.6 §8.3 prompt: SharedState summary + inbox tail (with canonical msg_id per inbox row).
+
+        Args:
+            agent_name: The agent role to compose the per-tick prompt for;
+                selects which advisory/telemetry sections are included.
+
+        Returns:
+            The assembled prompt string for this agent's reactor turn.
+        """
         sections: list[str] = []
 
         # 0. SESSION_DIR contract — literal path for every agent (pairs with PolicyGate path containment).
@@ -5475,7 +5974,12 @@ class Coordinator:
 
     # Execution order guard
     def _target_analysis_baseline_exists(self) -> bool:
-        """True iff target_analysis produced ``target_baseline.json`` (file existence is a sufficient gate signal)."""
+        """True iff target_analysis produced ``target_baseline.json`` (file existence is a sufficient gate signal).
+
+        Returns:
+            ``True`` when the target baseline file exists (or the helper is
+            unavailable, treated as done); ``False`` otherwise.
+        """
         try:
             from ..session_paths import target_baseline_json
             return target_baseline_json(self.session_dir).exists()
@@ -5483,7 +5987,11 @@ class Coordinator:
             return True
 
     def _kernel_opt_keep_pending(self) -> str:
-        """Return the next kernel_id awaiting integrate, or "" if none (delegates to SharedState.next_pending_keep_kernel_id)."""
+        """Return the next kernel_id awaiting integrate, or "" if none (delegates to SharedState.next_pending_keep_kernel_id).
+
+        Returns:
+            The next kernel id pending integrate, or ``""`` when none.
+        """
         return self.shared_state.next_pending_keep_kernel_id()
 
     def _sequence_denial_for_action(
@@ -5491,7 +5999,17 @@ class Coordinator:
         action_name: str,
         proposed_params: dict[str, Any] | None = None,
     ) -> PolicyDenied | None:
-        """Reject orchestration action/delegate attempts before baseline. Only invariant: nothing runs until baseline_tput > 0 (a data-dependency). proposed_params kept for signature compat."""
+        """Reject orchestration action/delegate attempts before baseline. Only invariant: nothing runs until baseline_tput > 0 (a data-dependency). proposed_params kept for signature compat.
+
+        Args:
+            action_name: The proposed/delegated action name.
+            proposed_params: Optional action params; kept for signature
+                compatibility and not currently inspected.
+
+        Returns:
+            A :class:`PolicyDenied` when the action must wait for baseline, else
+            ``None``.
+        """
         action = str(action_name or "").strip()
         sequence_actions = {
             "target_analysis",
@@ -5516,7 +6034,18 @@ class Coordinator:
     def _sequence_denial_for_request(
         self, target_agent: str, kind: str,
     ) -> PolicyDenied | None:
-        """Reject kernel requests that skip the baseline prerequisite (invariant: nothing kernel-side runs before baseline_tput > 0)."""
+        """Reject kernel requests that skip the baseline prerequisite (invariant: nothing kernel-side runs before baseline_tput > 0).
+
+        Args:
+            target_agent: The request's target agent; only ``"kernel"`` is
+                gated.
+            kind: The kernel request kind; ``trace_analyze`` and unknown kinds
+                are exempt.
+
+        Returns:
+            A :class:`PolicyDenied` when the kernel request must wait for
+            baseline, else ``None``.
+        """
         target = str(target_agent or "").strip()
         req_kind = str(kind or "").strip()
         if target != "kernel" or self.shared_state.stop_reason:
@@ -5707,7 +6236,15 @@ class Coordinator:
         self.state.pending_proposals[msg.msg_id] = pending
 
     def _resolve_issue_canonical(self, pending: PendingProposal) -> str:
-        """Find the issue_node canonical_id this proposal addresses. Priority: payload gap_canonical_id → params gap_canonical_id → _gap_anchor_canonical_id (Gap-09)."""
+        """Find the issue_node canonical_id this proposal addresses. Priority: payload gap_canonical_id → params gap_canonical_id → _gap_anchor_canonical_id (Gap-09).
+
+        Args:
+            pending: The pending proposal whose payload/params are searched for
+                a gap canonical id.
+
+        Returns:
+            The resolved gap canonical id, falling back to the workload anchor.
+        """
         payload = pending.payload or {}
         explicit_top = str(payload.get("gap_canonical_id") or "").strip()
         if explicit_top:
@@ -5720,7 +6257,12 @@ class Coordinator:
         return self._gap_anchor_canonical_id()
 
     def _workload_canonical_id(self) -> str:
-        """Canonical 5-tuple recipe id for the current workload. MUST match cortex_t0.run_t0_anchor's derivation so warm-start and KEEP/REVERT/CLOSE writes target the same row."""
+        """Canonical 5-tuple recipe id for the current workload. MUST match cortex_t0.run_t0_anchor's derivation so warm-start and KEEP/REVERT/CLOSE writes target the same row.
+
+        Returns:
+            The canonical recipe id derived from model, hardware, framework,
+            framework version and precision.
+        """
         ss = self.shared_state
         workload = ss.model_name or "unknown_model"
         hw = ss.gpu_type or "unknown_gpu"
@@ -5738,7 +6280,11 @@ class Coordinator:
         )
 
     def _gap_anchor_canonical_id(self) -> str:
-        """M1 gap anchor: delegates to _workload_canonical_id so anchor and write target never diverge."""
+        """M1 gap anchor: delegates to _workload_canonical_id so anchor and write target never diverge.
+
+        Returns:
+            The workload canonical recipe id used as the gap anchor.
+        """
         return self._workload_canonical_id()
 
     def _kb_amend_recipe(
@@ -5749,7 +6295,16 @@ class Coordinator:
         recipe_overrides: dict[str, Any] | None = None,
         provenance_details: dict[str, Any] | None = None,
     ) -> None:
-        """Read-modify-write helper for the v2 recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Best-effort; lesson/pitfall appended without dedup (commit 4d)."""
+        """Read-modify-write helper for the v2 recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Best-effort; lesson/pitfall appended without dedup (commit 4d).
+
+        Args:
+            append_lesson: Optional lesson dict appended to the recipe.
+            append_pitfall: Optional pitfall dict appended to the recipe.
+            recipe_overrides: Optional recipe field overrides merged in (unset
+                fields preserved).
+            provenance_details: Optional provenance metadata recorded with the
+                amendment.
+        """
         if self.cortex_kb is None:
             return
         try:
@@ -5870,7 +6425,13 @@ class Coordinator:
             )
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
-        """Apply a Critic ``review_verdict`` to its target proposal; legacy verdict_map collapsed (approve > reject > needs_review)."""
+        """Apply a Critic ``review_verdict`` to its target proposal; legacy verdict_map collapsed (approve > reject > needs_review).
+
+        Args:
+            source: The agent (Critic) emitting the verdict.
+            intent: The REVIEW_VERDICT intent; payload carries
+                ``target_proposal_msg_id`` and ``verdict``/``verdict_map``.
+        """
         target = intent.payload["target_proposal_msg_id"]
         pending = self.state.pending_proposals.get(target)
         verdict_map = intent.payload.get("verdict_map")
@@ -5912,7 +6473,14 @@ class Coordinator:
         verdict: str,
         reasoning: str,
     ) -> None:
-        """Legacy v0.6 single-verdict handler (approve materialises proposal as-is); mirrors integrate_patch/specialist verdicts onto specialist_patch_verdicts for PolicyGate."""
+        """Legacy v0.6 single-verdict handler (approve materialises proposal as-is); mirrors integrate_patch/specialist verdicts onto specialist_patch_verdicts for PolicyGate.
+
+        Args:
+            source: The agent emitting the verdict.
+            pending: The pending proposal the verdict targets.
+            verdict: The collapsed verdict (approve / reject / needs_review).
+            reasoning: Free-text reasoning recorded with the verdict.
+        """
         pending.decided = True
         pending.verdict = verdict
         await self.bus.append_and_seq(Message.new(
@@ -5954,7 +6522,12 @@ class Coordinator:
             await self._materialize_approved_proposal(pending)
 
     def _inject_explore_runtime_params(self, params: dict) -> None:
-        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides. Knobs: baseline_runtime_sec + explore_overtime_kill_ratio (Fix E soft_deadline), variant_timeout_sec, variant_timeout_safety_margin, roofline_saturation_snapshot (advisory)."""
+        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides. Knobs: baseline_runtime_sec + explore_overtime_kill_ratio (Fix E soft_deadline), variant_timeout_sec, variant_timeout_safety_margin, roofline_saturation_snapshot (advisory).
+
+        Args:
+            params: The explore-task params dict mutated in place; existing keys
+                are preserved (``setdefault``).
+        """
         br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
         if br > 0:
             params.setdefault("baseline_runtime_sec", br)
@@ -5998,6 +6571,10 @@ class Coordinator:
         curve as macro-cycles accrue. Returns ``None`` off cyclic mode so short /
         non-cyclic runs fall back to the executor's fixed default (no regression);
         first cycle (N=1) reproduces that same default value anyway.
+
+        Returns:
+            The decayed per-cycle KEEP threshold percentage, or ``None`` off
+            cyclic mode (keep executor defaults).
         """
         if not _phase_state.is_cyclic_phases_enabled():
             return None
@@ -6013,7 +6590,13 @@ class Coordinator:
         *,
         approved_variant_names: set[str] | None = None,
     ) -> None:
-        """Promote an approved proposal into a TaskRegistry entry. Grid executors get current best tput as base_tput (DESIGN §16); approved_variant_names filters the explore grid (None keeps full)."""
+        """Promote an approved proposal into a TaskRegistry entry. Grid executors get current best tput as base_tput (DESIGN §16); approved_variant_names filters the explore grid (None keeps full).
+
+        Args:
+            pending: The approved proposal to materialise into a task.
+            approved_variant_names: When set, restricts an explore grid to these
+                Critic-approved variant names; ``None`` keeps the full grid.
+        """
         params = dict(pending.payload.get("params") or {})
         # Filter the grid to the Critic-approved subset.
         if (
@@ -6264,7 +6847,14 @@ class Coordinator:
     def _record_framework_pr_authored_outcome(
         self, *, task: "Task", result: Any,
     ) -> None:
-        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK_PR progress ledger (else the gain is invisible). Attributed to the latest batch; only kept/reverted rows."""
+        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK_PR progress ledger (else the gain is invisible). Attributed to the latest batch; only kept/reverted rows.
+
+        Args:
+            task: The integrate_patch task carrying the FRAMEWORK_PR authoring
+                provenance markers.
+            result: The task result; only ``kept``/``reverted`` statuses are
+                recorded.
+        """
         res = getattr(result, "result", None)
         if not isinstance(res, dict):
             return
@@ -6334,7 +6924,13 @@ class Coordinator:
         normal ``_handle_delegate`` path (warm + idempotency + TaskRegistry +
         lease + reap), preserving the low-cost wide-net recon the retired
         dynamic_specialist channel provided. Per-task idempotency keys derive
-        from the wave key; non-dict / empty-description entries are skipped."""
+        from the wave key; non-dict / empty-description entries are skipped.
+
+        Args:
+            source: The agent issuing the wave delegate.
+            intent: The originating specialist DELEGATE intent.
+            params: The delegate params carrying the ``tasks`` list to fan out.
+        """
         tasks = params.get("tasks") or []
         shared = {k: v for k, v in params.items() if k != "tasks"}
         base_key = str(intent.payload.get("idempotency_key") or "").strip()
@@ -6383,7 +6979,17 @@ class Coordinator:
         (timeout / crash / stale-heartbeat, per ``classify_specialist_failure``)
         are retried, capped at :data:`SPECIALIST_AUTO_RETRY_MAX`; the failure
         reason is injected into the retry prompt. Disabled when
-        ``INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY`` is set to ``0``."""
+        ``INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY`` is set to ``0``.
+
+        Args:
+            task: The specialist task whose attempt just failed.
+            result: The sub-agent result classified for infra-failure
+                eligibility.
+
+        Returns:
+            ``True`` when a retry was scheduled (caller must skip this
+            attempt's bookkeeping); ``False`` otherwise.
+        """
         flag = os.environ.get(
             "INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", "1",
         ).strip().lower()
@@ -6464,7 +7070,12 @@ class Coordinator:
 
     # specialist pre-dispatch warmup
     async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
-        """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); all best-effort, missing fields stay empty."""
+        """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); all best-effort, missing fields stay empty.
+
+        Args:
+            params: The specialist task params dict mutated in place with PR
+                feed, warm-start, hardware/workload and gap/roofline context.
+        """
         state = self.shared_state
         plane = self.knowledge_plane
 
@@ -6661,7 +7272,15 @@ class Coordinator:
 
     @staticmethod
     def _pr_summary_to_dict(pr: Any) -> dict[str, Any]:
-        """Flatten a PRSummary into the dict SpecialistPromptBuilder expects."""
+        """Flatten a PRSummary into the dict SpecialistPromptBuilder expects.
+
+        Args:
+            pr: A PRSummary-like object exposing repo/number/title/url/state/
+                labels/author attributes.
+
+        Returns:
+            A flat dict of the PR's summary fields.
+        """
         return {
             "repo":   str(getattr(pr, "repo", "")),
             "number": int(getattr(pr, "number", 0) or 0),
@@ -6674,7 +7293,11 @@ class Coordinator:
 
     # gaps[] ledger refresh
     async def _refresh_gaps(self, *, reason: str) -> None:
-        """Refresh :attr:`SharedState.gaps` from observable signals (Coordinator is sole writer, Inv-1). Additive upsert deduped by canonical_id; best-effort."""
+        """Refresh :attr:`SharedState.gaps` from observable signals (Coordinator is sole writer, Inv-1). Additive upsert deduped by canonical_id; best-effort.
+
+        Args:
+            reason: Tag describing the refresh trigger, used only in logging.
+        """
         state = self.shared_state
         try:
             for entry in self._extract_gaps_from_baseline():
@@ -6713,7 +7336,12 @@ class Coordinator:
         )
 
     def _extract_gaps_from_baseline(self) -> list[dict[str, Any]]:
-        """Derive initial gap rows from the baseline snapshot (throughput_below_target, baseline_unstable); reuse the M1 anchor canonical_id so traverse rows align."""
+        """Derive initial gap rows from the baseline snapshot (throughput_below_target, baseline_unstable); reuse the M1 anchor canonical_id so traverse rows align.
+
+        Returns:
+            A list of gap row dicts derived from the baseline; empty when no
+            baseline throughput is recorded.
+        """
         state = self.shared_state
         gaps: list[dict[str, Any]] = []
         if state.baseline_tput <= 0:
@@ -6754,7 +7382,12 @@ class Coordinator:
         return gaps
 
     def _extract_gaps_from_attempts(self) -> list[dict[str, Any]]:
-        """Derive gaps from rolling failures + winners history (recurring (action, error_class) + explore plateau)."""
+        """Derive gaps from rolling failures + winners history (recurring (action, error_class) + explore plateau).
+
+        Returns:
+            A list of gap row dicts derived from recurring action failures and
+            an explore-plateau signal.
+        """
         state = self.shared_state
         anchor = self._gap_anchor_canonical_id()
         gaps: list[dict[str, Any]] = []
@@ -6814,7 +7447,14 @@ class Coordinator:
 
     @staticmethod
     def _gap_layer_for_action(action: str) -> tuple[str, str]:
-        """Map an action name → (layer, domain_hint) for gap rows (fallback ("framework", "serving_specialist"))."""
+        """Map an action name → (layer, domain_hint) for gap rows (fallback ("framework", "serving_specialist")).
+
+        Args:
+            action: The action name to classify.
+
+        Returns:
+            A ``(layer, domain_hint)`` tuple for the action.
+        """
         a = str(action or "").strip().lower()
         if a in {"kernel_opt", "integrate", "trace_analyze", "run_gemm_tuning", "run_optimization"}:
             return ("kernel", "kernel_switch_specialist")
@@ -6829,7 +7469,14 @@ class Coordinator:
     def _record_explore_round_gaps(
         self, *, task: "Task | None", result: dict[str, Any],
     ) -> None:
-        """Append per-variant KEEP/REVERT outcomes to the matching gap (or the anchor gap as fallback)."""
+        """Append per-variant KEEP/REVERT outcomes to the matching gap (or the anchor gap as fallback).
+
+        Args:
+            task: The explore task whose params carry the gap canonical id;
+                ``None`` is a no-op.
+            result: The explore result; its ``per_variant_outcomes`` drive the
+                appended gap attempts.
+        """
         if task is None:
             return
         per_variant = result.get("per_variant_outcomes")
@@ -6865,7 +7512,12 @@ class Coordinator:
     async def _handle_specialist_done(
         self, source: str, intent: Intent,
     ) -> None:
-        """Handle a ``specialist_done`` intent (source ``specialist:<task_id>`` per Inv-5.3 / R3); bookkeeping in _record_specialist_result."""
+        """Handle a ``specialist_done`` intent (source ``specialist:<task_id>`` per Inv-5.3 / R3); bookkeeping in _record_specialist_result.
+
+        Args:
+            source: The emitting agent, expected as ``specialist:<task_id>``.
+            intent: The SPECIALIST_DONE intent carrying the done payload.
+        """
         payload = dict(intent.payload or {})
         task_id = self._task_id_from_specialist_source(source)
         task: Task | None = None
@@ -6889,7 +7541,14 @@ class Coordinator:
 
     @staticmethod
     def _task_id_from_specialist_source(source: str) -> str:
-        """Extract the task_id from a ``specialist:<task_id>`` source ("" when prefix is absent)."""
+        """Extract the task_id from a ``specialist:<task_id>`` source ("" when prefix is absent).
+
+        Args:
+            source: The from-agent string to parse.
+
+        Returns:
+            The task id when the specialist prefix is present, else ``""``.
+        """
         if not source:
             return ""
         if source.startswith(SPECIALIST_FROM_AGENT_PREFIX):
@@ -6933,6 +7592,13 @@ class Coordinator:
         on the same content collapses to the same row (no double-bench),
         and its per-variant KEEP/REVERT gain gate is the safety net
         (no critic dependency).
+
+        Args:
+            task: The completed specialist task whose id seeds the explore
+                idempotency key.
+            domain: The specialist domain, stamped onto variant provenance.
+            proposals: The specialist ``proposal_set`` entries materialised into
+                the explore grid (capped at ``_MN_AUTO_EXPLORE_GRID_CAP``).
         """
         from .action_executors._multi_node_env import is_multi_node
         if not is_multi_node() or not proposals:
@@ -7010,7 +7676,14 @@ class Coordinator:
         done_payload: dict[str, Any],
         source: str,
     ) -> None:
-        """Common bookkeeping for any specialist task termination (dispatcher loop + intent routing); idempotent on round_id, failures logged not raised."""
+        """Common bookkeeping for any specialist task termination (dispatcher loop + intent routing); idempotent on round_id, failures logged not raised.
+
+        Args:
+            task: The terminated specialist task.
+            done_payload: The specialist's done payload (proposal_set, domain,
+                summary, etc.).
+            source: The emitting agent string (``specialist:<task_id>``).
+        """
         domain = str(done_payload.get("domain") or "").strip()
         proposals = done_payload.get("proposal_set") or []
         if not isinstance(proposals, list):
@@ -7197,6 +7870,10 @@ class Coordinator:
         mode (default) it deterministically advances EXPLORE → KERNEL via
         ``explore_no_more_leverage`` (a non-terminal lever switch); the rendered
         footer states which regime is active.
+
+        Returns:
+            The rendered plateau advisory text, or ``""`` when no plateau
+            signal is active for the current phase.
         """
         state = self.shared_state
         phase = (getattr(state, "phase", "") or "").strip().upper()
@@ -7307,7 +7984,12 @@ class Coordinator:
 
     def _dominant_roofline_direction(self) -> tuple[str, float]:
         """Return ``(direction, pct)`` for the most-saturated roofline direction
-        in the latest snapshot; ``("", 0.0)`` when no snapshot is available."""
+        in the latest snapshot; ``("", 0.0)`` when no snapshot is available.
+
+        Returns:
+            A ``(direction, pct)`` tuple for the dominant roofline direction, or
+            ``("", 0.0)`` when no snapshot exists.
+        """
         from .roofline_snapshot import dominant_direction
         snaps = getattr(self.shared_state, "roofline_snapshots", None) or []
         if not snaps or not isinstance(snaps[-1], dict):
@@ -7321,6 +8003,10 @@ class Coordinator:
         ``pending_bottleneck_switch``. Names the bottleneck we plateaued on, the
         current dominant roofline direction, and a suggested specialist domain so
         Orchestration redirects the new cycle's dispatch. Advisory, never gates.
+
+        Returns:
+            The rendered bottleneck-redirect advisory text, or ``""`` when not
+            applicable.
         """
         state = self.shared_state
         if not _phase_state.is_cyclic_phases_enabled():
@@ -7370,6 +8056,10 @@ class Coordinator:
         stack-stable thresholds and lists prior sub-threshold variants whose
         measured gain now meets the decayed bar (unblocked for re-test) plus a
         few still below it (reference only). Advisory; never gates dispatch.
+
+        Returns:
+            The rendered acceptance-threshold advisory text, or ``""`` when not
+            applicable (non-cyclic mode or first cycle).
         """
         state = self.shared_state
         keep = self._decaying_keep_threshold_pct()
@@ -7422,7 +8112,12 @@ class Coordinator:
         return "\n".join(lines)
 
     def _target_gap_advisory_block(self) -> str:
-        """Build the advisory "External target gap" prompt block (current-best vs competitor target; never gates)."""
+        """Build the advisory "External target gap" prompt block (current-best vs competitor target; never gates).
+
+        Returns:
+            The rendered external-target-gap advisory text, or ``""`` when
+            disabled or no competitor target/current-best is available.
+        """
         state = self.shared_state
         if not bool(getattr(state, "target_advisory_enabled", True)):
             return ""
@@ -7453,7 +8148,12 @@ class Coordinator:
         return _research_hints.full_gap_summary(gap)
 
     def _current_primary_gap(self) -> str | None:
-        """Resolve the dominant external gap direction ('latency'/'throughput') from the competitor target, or None when advisory is off / no target. Fail-soft."""
+        """Resolve the dominant external gap direction ('latency'/'throughput') from the competitor target, or None when advisory is off / no target. Fail-soft.
+
+        Returns:
+            The primary gap direction string, or ``None`` when the advisory is
+            off, no target exists, or analysis fails.
+        """
         state = self.shared_state
         if not bool(getattr(state, "target_advisory_enabled", True)):
             return None
@@ -7494,7 +8194,15 @@ class Coordinator:
     def _recent_proposed_variants(
         self, *, max_rounds: int = 2,
     ) -> list[dict[str, Any]]:
-        """Collect proposal_set rows from the most recent specialist rounds (deduped by name; fail-soft)."""
+        """Collect proposal_set rows from the most recent specialist rounds (deduped by name; fail-soft).
+
+        Args:
+            max_rounds: Number of most-recent specialist rounds to scan
+                (default 2).
+
+        Returns:
+            A name-deduped list of proposal variant dicts.
+        """
         rounds = [
             r for r in (getattr(self.shared_state, "specialist_rounds", []) or [])
             if isinstance(r, dict) and isinstance(r.get("proposal_set"), list)
@@ -7512,7 +8220,12 @@ class Coordinator:
         return out
 
     def _priors_match_advisory_block(self) -> str:
-        """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering, fail-soft)."""
+        """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering, fail-soft).
+
+        Returns:
+            The rendered priors-match advisory text, or ``""`` when there are no
+            recent variants or rendering fails.
+        """
         try:
             from . import research_hints as _research_hints
 
@@ -7530,7 +8243,14 @@ class Coordinator:
     async def _maybe_autosubmit_specialist_patches(
         self, *, task: "Task", done_payload: dict[str, Any],
     ) -> None:
-        """B3: auto-surface a specialist's source patches to the Critic via a synthetic integrate_patch proposal; idempotent per specialist."""
+        """B3: auto-surface a specialist's source patches to the Critic via a synthetic integrate_patch proposal; idempotent per specialist.
+
+        Args:
+            task: The completed specialist task whose worktree patches are
+                surfaced.
+            done_payload: The specialist done payload carrying
+                ``patches_written`` and proposal metadata.
+        """
         patches = done_payload.get("patches_written") or []
         if not isinstance(patches, list) or not patches:
             return
@@ -7629,7 +8349,18 @@ class Coordinator:
         done_payload: dict[str, Any],
         source: str,
     ) -> dict[str, Any]:
-        """Translate a specialist done payload into a SharedState.specialist_rounds[] row; round_id defaults to task_id for idempotent overwrite (M5)."""
+        """Translate a specialist done payload into a SharedState.specialist_rounds[] row; round_id defaults to task_id for idempotent overwrite (M5).
+
+        Args:
+            task: The completed specialist task.
+            done_payload: The specialist done payload (proposal_set, domain,
+                tags, summary, etc.).
+            source: The emitting agent string, recorded on the row.
+
+        Returns:
+            A specialist-round row dict suitable for
+            ``SharedState.record_specialist_round``.
+        """
         proposals = done_payload.get("proposal_set") or []
         if not isinstance(proposals, list):
             proposals = []
@@ -7689,6 +8420,13 @@ class Coordinator:
 
         Best-effort by design: operator-facing logging must never break the
         orchestration loop, so any failure is swallowed at debug level.
+
+        Args:
+            step: The machine step name (resolved to a human label downstream).
+            status: The lifecycle status (e.g. START / END / ERROR / ENTER).
+            artifacts: Optional mapping of produced artifact paths.
+            detail: Optional free-text detail.
+            duration_s: Optional elapsed seconds for the step.
         """
         try:
             self.shared_state.record_lifecycle_event(
@@ -7952,7 +8690,16 @@ class Coordinator:
                 )
 
     def _cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        """Return a cached programmatic_handler result if applicable (cache key last_trace_analyze)."""
+        """Return a cached programmatic_handler result if applicable (cache key last_trace_analyze).
+
+        Args:
+            kind: The kernel request kind; only ``trace_analyze`` is cacheable.
+            payload: The merged request payload; its ``trace_input`` /
+                ``trace_dir`` must match the cached entry for a hit.
+
+        Returns:
+            A synthesized cached result dict on a cache hit, else ``None``.
+        """
         if kind != "trace_analyze":
             return None
         cached = self.shared_state.last_trace_analyze or {}
@@ -8066,7 +8813,13 @@ class Coordinator:
         ))
 
     async def _handle_escalate_strategy_change(self, source: str, intent: Intent) -> None:
-        """Process ``escalate_strategy_change`` (KB_design §3.8 §7.3 + §3.13 M7 §5.3); broadcasts strategy_change, acts on closed-vocab hints, drops unknown (Inv-8.2)."""
+        """Process ``escalate_strategy_change`` (KB_design §3.8 §7.3 + §3.13 M7 §5.3); broadcasts strategy_change, acts on closed-vocab hints, drops unknown (Inv-8.2).
+
+        Args:
+            source: The agent issuing the escalation.
+            intent: The ESCALATE_STRATEGY_CHANGE intent; ``payload`` may carry a
+                closed-vocab ``next_action_hint``.
+        """
         payload = dict(intent.payload or {})
         # Always emit the broadcast first (back-compat with legacy contract tests).
         await self.bus.append_and_seq(Message.new(
@@ -8307,7 +9060,11 @@ class Coordinator:
             self._auto_integrate_dispatched.add(kid)
 
     def _record_kernel_opt_partial(self, result: dict[str, Any]) -> None:
-        """Streaming callback for ``_run_optimization_batch`` sub-attempts: write each per-kernel entry to kernel_opt_attempts immediately so the next-tick prompt is accurate mid-batch."""
+        """Streaming callback for ``_run_optimization_batch`` sub-attempts: write each per-kernel entry to kernel_opt_attempts immediately so the next-tick prompt is accurate mid-batch.
+
+        Args:
+            result: One sub-attempt's per-kernel result dict.
+        """
         try:
             self.shared_state.record_kernel_opt(result)
             self.shared_state.save(self.session_dir)
@@ -8456,7 +9213,12 @@ class Coordinator:
     def _record_intervention_for_task(
         self, task: "Task", result: Any,
     ) -> None:
-        """PR-A8: log a completed task's change_type into SharedState.intervention_mix (explore → config; integrate_patch → code_patch_attempt or code_patch when kept). Best-effort."""
+        """PR-A8: log a completed task's change_type into SharedState.intervention_mix (explore → config; integrate_patch → code_patch_attempt or code_patch when kept). Best-effort.
+
+        Args:
+            task: The completed task whose kind selects the intervention class.
+            result: The task result dict; non-dict results are ignored.
+        """
         if not isinstance(result, dict):
             return
         kind = (task.kind or "").strip()
@@ -8505,7 +9267,13 @@ class Coordinator:
     async def _handle_unpromotable_result(
         self, task: Task, result: dict[str, Any] | None,
     ) -> None:
-        """Record a failed / unpromotable task result into SharedState: append to last_action_failures (+ a failed attempts row for _AUDIT_ACTIONS); keep baseline failure_streak/stop_reason logic intact."""
+        """Record a failed / unpromotable task result into SharedState: append to last_action_failures (+ a failed attempts row for _AUDIT_ACTIONS); keep baseline failure_streak/stop_reason logic intact.
+
+        Args:
+            task: The failed/unpromotable task.
+            result: The task result payload; ``None`` is treated as an empty
+                result.
+        """
         result_payload = result or {}
         any_changed = False
         # Per-action audit (failed attempt) for the 6 in-scope kinds.
@@ -8660,6 +9428,14 @@ class Coordinator:
         (possibly empty). Pure dispatch — per-task completion bookkeeping is
         handled by :meth:`_reap_dispatched_task`. Mirrors the prior capacity /
         GPU-specialist-lease logic exactly. Inv-7.3: lease bound to task_id.
+
+        Args:
+            exclude_ids: Task ids already dispatched this pump pass; skipped so
+                a task is never dispatched twice.
+
+        Returns:
+            The ``(task, asyncio_task, gpu_lease)`` tuples spawned this pass
+            (possibly empty).
         """
         queued = await self.tasks.queued()
         if not queued:
@@ -8773,6 +9549,11 @@ class Coordinator:
         shared-state promotion, fact-write, explore-gap refresh). The
         single-element loop preserves the original body unchanged — ``continue``
         acts as an early return for this task.
+
+        Args:
+            task: The finished dispatched task.
+            maybe_result: The task's result, or the exception it raised.
+            gpu_lease: The GPU specialist lease to release, or ``None``.
         """
         for (task, _, gpu_lease), maybe_result in zip(
             [(task, None, gpu_lease)], [maybe_result],
@@ -8942,7 +9723,17 @@ class Coordinator:
         holders: dict[str, int],
         capacities: dict[str, int],
     ) -> bool:
-        """Local-view headroom hint for the concurrent dispatcher (authoritative gate is try_acquire_many)."""
+        """Local-view headroom hint for the concurrent dispatcher (authoritative gate is try_acquire_many).
+
+        Args:
+            expanded_lanes: The fully-expanded lanes the task requires.
+            holders: Current per-lane holder counts (local view).
+            capacities: Per-lane capacities.
+
+        Returns:
+            ``True`` when every requested lane has local headroom, else
+            ``False``.
+        """
         for lane in expanded_lanes:
             cap = int(capacities.get(lane, 1))
             used = int(holders.get(lane, 0))
@@ -8955,6 +9746,10 @@ class Coordinator:
         """Return the hyperloom-local session id used as source_session_id on KB fact writes.
 
         NOT a KB-side session id; prefers cortex_session_id, falls back to session_dir.name.
+
+        Returns:
+            The hyperloom-local session id (cortex_session_id when set, else
+            ``session_dir.name``).
         """
         return (
             str(getattr(self.shared_state, "cortex_session_id", "") or "")
@@ -8968,7 +9763,13 @@ class Coordinator:
         result: Any,
         kept: bool,
     ) -> None:
-        """Per-task fact-write entry point (per_variant for explore grids, else per-task); best-effort, never raises."""
+        """Per-task fact-write entry point (per_variant for explore grids, else per-task); best-effort, never raises.
+
+        Args:
+            task: The completed task being recorded.
+            result: The task's :class:`SubAgentResult` (or result dict).
+            kept: Whether the task's result was KEEP-promoted.
+        """
         result_dict = result.result if hasattr(result, "result") else (result or {})
         if not isinstance(result_dict, dict):
             result_dict = {}
@@ -9011,7 +9812,12 @@ class Coordinator:
     # Fact-write surface — journal + direct KB lesson/pitfall/recipe writes (the fact side of KB integration).
     PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0  # gain_pct ≤ this → pitfall
     def _ensure_journal(self) -> Journal:
-        """Lazy-instantiate the per-session :class:`Journal` (load_or_create reads an existing file on resume)."""
+        """Lazy-instantiate the per-session :class:`Journal` (load_or_create reads an existing file on resume).
+
+        Returns:
+            The per-session :class:`Journal` instance (created on first call,
+            with the baseline backfilled on subsequent calls).
+        """
         existing = getattr(self, "_journal", None)
         if existing is None:
             ss = self.shared_state
@@ -9035,7 +9841,15 @@ class Coordinator:
     def _pitfall_severity_for(
         self, result_dict: dict[str, Any] | None,
     ) -> str | None:
-        """Decide whether a failed result warrants a pitfall row (Threshold-B): crash/oom/hang → SEVERITY_CRASH; gain_pct ≤ -5% → SEVERITY_REGRESS; else None."""
+        """Decide whether a failed result warrants a pitfall row (Threshold-B): crash/oom/hang → SEVERITY_CRASH; gain_pct ≤ -5% → SEVERITY_REGRESS; else None.
+
+        Args:
+            result_dict: The failed task's result dict; non-dict yields ``None``.
+
+        Returns:
+            The pitfall severity (``SEVERITY_CRASH`` / ``SEVERITY_REGRESS``), or
+            ``None`` when no pitfall is warranted.
+        """
         if not isinstance(result_dict, dict):
             return None
         error_class = str(result_dict.get("error_class") or "").lower()
@@ -9069,7 +9883,16 @@ class Coordinator:
         result_dict: dict[str, Any],
         kept: bool,
     ) -> None:
-        """Per-task fact write — one journal row + maybe one KB fact (source_session_id is hyperloom-local)."""
+        """Per-task fact write — one journal row + maybe one KB fact (source_session_id is hyperloom-local).
+
+        Args:
+            task: The completed task being recorded.
+            source_session_id: The hyperloom-local session id stamped on the
+                fact provenance.
+            result_dict: The task result dict.
+            kept: Whether the result was KEEP-promoted (KEEP → lesson, else
+                pitfall/REVERT).
+        """
         journal = self._ensure_journal()
         gain_raw = result_dict.get("gain_pct")
         try:
@@ -9173,7 +9996,19 @@ class Coordinator:
         gain_pct: float | None = None,  # kept for backward call-signature compat
         severity: str | None = None,
     ) -> str:
-        """Build the lesson statement / pitfall description hashed into the KB canonical_id; MUST exclude volatile fields (e.g. gain_pct) so N sessions merge instead of producing N rows. Identity = framework + change + model/hw."""
+        """Build the lesson statement / pitfall description hashed into the KB canonical_id; MUST exclude volatile fields (e.g. gain_pct) so N sessions merge instead of producing N rows. Identity = framework + change + model/hw.
+
+        Args:
+            change: The summarized change description.
+            kind: ``"lesson"`` or ``"pitfall"`` — selects the rendered form.
+            gain_pct: Kept for backward call-signature compat; intentionally not
+                included in the statement.
+            severity: The pitfall severity, rendered only when ``kind`` is
+                ``"pitfall"``.
+
+        Returns:
+            The identity-stable statement / description string.
+        """
         framework = str(getattr(self.shared_state, "framework", "") or "").strip()
         fw_tag = f"[{framework or '?'}] "
         model = self.shared_state.model_name or "?"
@@ -9193,7 +10028,18 @@ class Coordinator:
         measured_at: str,
         throughput_before: float | None = None,
     ) -> dict[str, Any]:
-        """GAP 3 — structured ``measured_impact`` payload (dict not legacy string so consumers parse without regex); stack_depth = stack length before this lesson lands."""
+        """GAP 3 — structured ``measured_impact`` payload (dict not legacy string so consumers parse without regex); stack_depth = stack length before this lesson lands.
+
+        Args:
+            gain_pct: The measured gain percent, or ``None``.
+            throughput_after: Throughput after the change, or ``None``.
+            stack_depth: Optimization-stack length before this lesson lands.
+            measured_at: ISO timestamp of the measurement.
+            throughput_before: Throughput before the change, or ``None``.
+
+        Returns:
+            A compact ``measured_impact`` dict with ``None`` fields stripped.
+        """
         out: dict[str, Any] = {
             "gain_pct": float(gain_pct) if gain_pct is not None else None,
             "stack_depth_at_apply": int(stack_depth),
@@ -9213,7 +10059,15 @@ class Coordinator:
         source_session_id: str,
         variant_outcome: dict[str, Any],
     ) -> None:
-        """Per-variant fact write — mirror of _record_fact_per_task for explore per-variant decisions."""
+        """Per-variant fact write — mirror of _record_fact_per_task for explore per-variant decisions.
+
+        Args:
+            task: The completed explore task.
+            source_session_id: The hyperloom-local session id stamped on the
+                fact provenance.
+            variant_outcome: One per-variant outcome row (name, outcome,
+                metrics).
+        """
         journal = self._ensure_journal()
         outcome_raw = str(variant_outcome.get("outcome") or "")
         if outcome_raw == "KEEP":
@@ -9355,7 +10209,13 @@ class Coordinator:
             )
 
     def _collect_workload_tags(self) -> dict[str, Any]:
-        """Return the workload-shape KB tag dict for the current session (GAP 5); shared by recipe attrs + lesson/pitfall writes so the warm-start reader filters symmetrically."""
+        """Return the workload-shape KB tag dict for the current session (GAP 5); shared by recipe attrs + lesson/pitfall writes so the warm-start reader filters symmetrically.
+
+        Returns:
+            A dict of workload-shape KB tags (framework, model, parallelism,
+            runtime versions, baseline workload extras) with empty values
+            omitted.
+        """
         ss = self.shared_state
         out: dict[str, Any] = {}
         framework = str(getattr(ss, "framework", "") or "").strip()
@@ -9432,7 +10292,12 @@ class Coordinator:
         return out
 
     def _build_kernel_optimizations_from_state(self) -> list[dict[str, Any]]:
-        """Collect KEEP'd kernel optimizations + their E2E verdict by joining kernel_opt_attempts (micro) and kernel_integrate_attempts (E2E) on kernel_id; non-integrated KEEPs surface integrated=False. Returns KernelOptimization-shaped dicts."""
+        """Collect KEEP'd kernel optimizations + their E2E verdict by joining kernel_opt_attempts (micro) and kernel_integrate_attempts (E2E) on kernel_id; non-integrated KEEPs surface integrated=False. Returns KernelOptimization-shaped dicts.
+
+        Returns:
+            A list of KernelOptimization-shaped dicts for each KEEP'd kernel,
+            joined with its E2E integrate verdict where available.
+        """
         ss = self.shared_state
         opt_attempts = getattr(ss, "kernel_opt_attempts", {}) or {}
         integ_attempts = getattr(ss, "kernel_integrate_attempts", {}) or {}
@@ -9500,7 +10365,13 @@ class Coordinator:
     def _collect_attempt_provenance(
         self,
     ) -> tuple[dict[str, str], dict[str, str], list[dict[str, Any]]]:
-        """Map proven optimizations to their research-hint origin from the gaps[] attempts ledger; returns (kept_sources by name/kernel, kept_by_gap by canonical_id, reverted_rows). Fail-soft."""
+        """Map proven optimizations to their research-hint origin from the gaps[] attempts ledger; returns (kept_sources by name/kernel, kept_by_gap by canonical_id, reverted_rows). Fail-soft.
+
+        Returns:
+            A ``(kept_sources, kept_by_gap, reverted_rows)`` tuple: KEEP'd
+            provenance keyed by variant/kernel name, KEEP'd provenance keyed by
+            gap canonical_id, and reverted-attempt rows.
+        """
         kept_sources: dict[str, str] = {}
         kept_by_gap: dict[str, str] = {}
         reverted_rows: list[dict[str, Any]] = []
@@ -9535,7 +10406,13 @@ class Coordinator:
         return kept_sources, kept_by_gap, reverted_rows
 
     def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
-        """Materialise the recipe-shaped view of :class:`SharedState` (kg-usage-guide §7.4; defensive getattr)."""
+        """Materialise the recipe-shaped view of :class:`SharedState` (kg-usage-guide §7.4; defensive getattr).
+
+        Returns:
+            A recipe-shaped attrs dict (best_config, what_worked, what_failed,
+            kernel_optimizations, workload tags, session row) for KB recipe
+            writes.
+        """
         ss = self.shared_state
         current_best = getattr(ss, "current_best", {}) or {}
         opt_stack = getattr(ss, "optimization_stack", []) or []
@@ -9797,7 +10674,16 @@ class Coordinator:
         self, task_kind: str, best_tput: float, bv: dict[str, Any],
         *, gap_canonical_id: str = "",
     ) -> None:
-        """Update SharedState.current_best + recompute cumulative_gain; gap_canonical_id (when known) is stamped onto the stack entry so provenance resolves by gap id not name."""
+        """Update SharedState.current_best + recompute cumulative_gain; gap_canonical_id (when known) is stamped onto the stack entry so provenance resolves by gap id not name.
+
+        Args:
+            task_kind: The action kind that produced the winner (stamped on the
+                stack entry / current_best).
+            best_tput: The winning variant's measured throughput.
+            bv: The winning variant dict (args, envs, metrics, provenance).
+            gap_canonical_id: When known, stamped onto the stack entry so
+                provenance resolves by gap id rather than name.
+        """
         previous = self.shared_state.current_best or {}
         if not self.shared_state.optimization_stack:
             self.shared_state.seed_stack_from_current_best()
@@ -9924,7 +10810,14 @@ class Coordinator:
         *,
         task: "Task | None" = None,
     ) -> None:
-        """Lift specific action-result fields into the persistent SharedState (baseline/profile/roofline/grid)."""
+        """Lift specific action-result fields into the persistent SharedState (baseline/profile/roofline/grid).
+
+        Args:
+            task_kind: The settled task's kind, selecting the promote branch.
+            result: The task result dict; non-dict results are ignored.
+            task: The originating task, used for audit fingerprints and
+                pending-roofline gating.
+        """
         if not isinstance(result, dict):
             return
         changed = False
