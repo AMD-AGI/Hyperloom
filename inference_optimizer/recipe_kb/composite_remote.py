@@ -381,6 +381,33 @@ class CompositeRemoteRecipeClient:
         lookup on gbrain) over the expensive ``search`` scan. Falls back
         to label-match search only when all fast-paths miss.
         """
+        # Fast path: per-source get_recipe (slug-based, O(1) on gbrain).
+        hits: list[dict[str, Any]] = []
+        for name, source in self._active():
+            try:
+                row = source.get_recipe(canonical_id=canonical_id, version=version)
+            except (RemoteRecipeClientError, Exception) as exc:  # noqa: BLE001
+                log.debug("composite get_recipe fast-path %s failed: %s", name, exc)
+                continue
+            if row is not None and isinstance(row, dict):
+                arbor = _v2_to_arbor(row)
+                if arbor:
+                    arbor["_source"] = name
+                    hits.append(arbor)
+        if hits:
+            if len(hits) == 1:
+                return hits[0]
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for h in hits:
+                grouped.setdefault(h.get("canonical_id") or "", []).append(h)
+            merged = [_merge_group(rows) for rows in grouped.values()]
+            merged.sort(key=_precedence_key, reverse=True)
+            for row in merged:
+                if row.get("canonical_id") == canonical_id:
+                    return row
+            return merged[0] if merged else None
+        # Slow fallback: label-match search (covers cortex kb-service which
+        # does not expose a direct get_recipe by slug).
         try:
             labels = _labels_from_canonical_id(canonical_id)
         except InvalidCanonicalIdError as exc:

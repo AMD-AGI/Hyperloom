@@ -729,17 +729,33 @@ class RecipeKB:
         resolution = "local"
         if version is None and self._remote_active():
             try:
+                # Fast path: delegate to the remote's get_recipe (slug-based
+                # O(1) on gbrain/composite) rather than the expensive search
+                # scan that chokes on large legacy page corpora.
+                try:
+                    direct = self.remote.get_recipe(  # type: ignore[union-attr]
+                        canonical_id=canonical_id, version=version,
+                    )
+                except (RemoteRecipeClientError, Exception):  # noqa: BLE001
+                    direct = None
+                if direct is not None and isinstance(direct, dict) and direct:
+                    normalized = self._normalize_remote_row(direct)
+                    if normalized and normalized.get("canonical_id"):
+                        self._emit_audit(self._read_audit_event(
+                            method="get_recipe", resolution="remote",
+                            row=normalized, canonical_id=canonical_id,
+                            prefer=prefer, candidates=1,
+                        ))
+                        return normalized
+                # Fast path miss — try label-match search with prefer rerank.
                 labels = _labels_from_canonical_id(canonical_id)
-                # With prefer hints we pull a candidate window so the
-                # client-side rerank has rows to reorder; otherwise the
-                # single top (server-ranked) row is enough.
                 candidate_limit = 25 if prefer else 1
                 rows = self.remote.search(  # type: ignore[union-attr]
                     label_match=labels, limit=candidate_limit, prefer=prefer,
                 )
                 if rows:
-                    normalized = [self._normalize_remote_row(r) for r in rows]
-                    ranked = _rerank_by_prefer(normalized, prefer)
+                    normalized_rows = [self._normalize_remote_row(r) for r in rows]
+                    ranked = _rerank_by_prefer(normalized_rows, prefer)
                     self._emit_audit(self._read_audit_event(
                         method="get_recipe", resolution="remote",
                         row=ranked[0], canonical_id=canonical_id,
@@ -752,8 +768,6 @@ class RecipeKB:
                 self._note_failure("get_recipe", exc)
                 resolution = "remote_error"
             except InvalidCanonicalIdError as exc:
-                # Can't build label_match from a malformed cid; the
-                # local store applies the same parse, so just degrade.
                 log.warning("get_recipe: %s; local-only read", exc)
                 resolution = "remote_error"
         local_row = self.local.get_recipe(
