@@ -752,6 +752,49 @@ def test_materialize_profile_sglang_no_config_non_gemma_keeps_shape_discovery(
     assert "--enable-shape-discovery-for-cuda-graph-profile" in extra, extra
 
 
+def test_materialize_profile_sglang_skips_shape_discovery_nested_gemma2(
+    tmp_path, monkeypatch,
+):
+    """Gemma2 declared only in text_config still trips the shape-discovery gate."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    model = tmp_path / "wrapper_model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({
+        "model_type": "wrapper",
+        "text_config": {"model_type": "gemma2"},
+    }), encoding="utf-8")
+    src = _profile_yaml_model(
+        tmp_path, "sglang", str(model), {"CONC": 32, "ISL": 256, "OSL": 1024},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
+    assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
+
+
+def test_materialize_profile_sglang_residual_config_gemma2_path(
+    tmp_path, monkeypatch,
+):
+    """Empty config.json + gemma-2 path -> heuristic still skips shape-discovery."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    model = tmp_path / "google-gemma-2-9b-it"
+    model.mkdir()
+    (model / "config.json").write_text("{}", encoding="utf-8")
+    src = _profile_yaml_model(
+        tmp_path, "sglang", str(model), {"CONC": 32, "ISL": 256, "OSL": 1024},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
+    assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
+
+
 def test_materialize_profile_sglang_force_overrides_gemma2_gate(
     tmp_path, monkeypatch,
 ):
