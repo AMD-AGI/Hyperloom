@@ -42,7 +42,14 @@ _DEFAULT_DIST_INIT_PORT = 29500
 
 
 def _pd_decode_dist_init_port(prefill_dist_init_port: int) -> int:
-    """Derive the decode rendezvous port as ``prefill + 1`` so an override shifts both endpoints in lock-step."""
+    """Derive the decode rendezvous port as ``prefill + 1`` so an override shifts both endpoints in lock-step.
+
+    Args:
+        prefill_dist_init_port: The prefill group's rendezvous port.
+
+    Returns:
+        int: The decode group's rendezvous port.
+    """
     return prefill_dist_init_port + 1
 # sglang PD bootstrap (KV transfer rendezvous) port; override via --pd-bootstrap-port.
 _PD_DEFAULT_BOOTSTRAP_PORT = 8998
@@ -53,7 +60,11 @@ _HEALTH_PROBE_TIMEOUT_SEC = int(os.environ.get('SGLANG_HEALTH_PROBE_TIMEOUT_SEC'
 
 
 def _log(msg: str) -> None:
-    """Stderr line with timestamp (no logging module to avoid handler surprises as a dashboard entry-point)."""
+    """Stderr line with timestamp (no logging module to avoid handler surprises as a dashboard entry-point).
+
+    Args:
+        msg: The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[launch_multinode {ts}] {msg}\n")
     sys.stderr.flush()
@@ -92,7 +103,15 @@ def _wait_for_nodes(target_n: int, timeout_s: int) -> list[dict]:
 
 
 def _pick_head_first(nodes: list[dict]) -> list[dict]:
-    """Reorder so the local (driver) node is rank 0 and the rest follow in NodeManagerAddress order."""
+    """Reorder so the local (driver) node is rank 0 and the rest follow in NodeManagerAddress order.
+
+    Args:
+        nodes: The alive GPU node rows from ``ray.nodes()``.
+
+    Returns:
+        list[dict]: The nodes reordered with the local node first, or all
+        nodes sorted by address when the driver is not on a GPU node.
+    """
     local_addr = ray.util.get_node_ip_address()
     local = [n for n in nodes if n.get("NodeManagerAddress") == local_addr]
     others = sorted(
@@ -125,8 +144,25 @@ def _build_sglang_cmd(
 
     Only rank 0 gets ``--host``/``--port`` (workers serve no HTTP).
     ``--trust-remote-code`` is default-on (custom modeling.py models need
-    it). ``ep > 1`` emits ``--expert-parallel-size N`` for true expert
+    it).     ``ep > 1`` emits ``--expert-parallel-size N`` for true expert
     parallelism (the older ``--enable-ep-moe`` pair was removed upstream).
+
+    Args:
+        model: Model path passed to the launcher.
+        tp: Tensor-parallel size.
+        nnodes: Total node count for this server group.
+        node_rank: This node's rank within the group.
+        dist_init_addr: Collective rendezvous ``host:port``.
+        extra_args: Extra args appended verbatim to the launcher.
+        ep: Expert-parallel size; ``> 1`` enables expert parallelism.
+        pd_role: PD disaggregation role (``prefill``/``decode``) or empty.
+        pd_port: HTTP port bound by rank 0.
+        pd_transfer_backend: KV-transfer backend for PD mode.
+        pd_ib_device: IB/RoCE device list for PD KV transfer.
+        pd_bootstrap_port: sglang PD bootstrap rendezvous port.
+
+    Returns:
+        list[str]: The sglang launch argv.
     """
     cmd = [
         "python3", "-m", "sglang.launch_server",
@@ -172,6 +208,20 @@ def _build_vllm_cmd(
 
     ``--tensor-parallel-size`` = total cluster GPUs; ``ep > 1`` adds
     ``--enable-expert-parallel`` (vllm infers ep_size = tp_size).
+
+    Args:
+        model: Model path passed to ``vllm serve``.
+        tp: Tensor-parallel size (total cluster GPUs).
+        extra_args: Extra args appended verbatim to the launcher.
+        ep: Expert-parallel size; ``> 1`` enables expert parallelism.
+        pd_role: PD disaggregation role (``prefill``/``decode``) or empty.
+        pd_port: HTTP port bound by the server.
+        pd_transfer_backend: KV connector name for PD mode.
+        pd_kv_rank: This group's KV rank in PD mode.
+        pd_kv_parallel_size: Total KV parallel size in PD mode.
+
+    Returns:
+        list[str]: The vLLM launch argv.
     """
     cmd = [
         "vllm", "serve", model,
@@ -203,7 +253,12 @@ def _build_vllm_cmd(
 
 
 def _probe_mec_firmware_lt_177() -> bool:
-    """Return True iff rocm-smi reports MEC firmware < 177 (gate for the HSA_NO_SCRATCH_RECLAIM workaround); False on any failure."""
+    """Return True iff rocm-smi reports MEC firmware < 177 (gate for the HSA_NO_SCRATCH_RECLAIM workaround); False on any failure.
+
+    Returns:
+        bool: ``True`` if MEC firmware is below 177; ``False`` on any probe
+        failure or higher firmware.
+    """
     try:
         proc = subprocess.run(
             ["rocm-smi", "--showfw"],
@@ -232,6 +287,9 @@ def _subprocess_env() -> dict[str, str]:
     Sets the MI300X tuning trio (SGLANG_USE_AITER / SGLANG_AITER_MLA_PERSIST,
     and HSA_NO_SCRATCH_RECLAIM when MEC firmware < 177) without clobbering
     caller-set values.
+
+    Returns:
+        dict[str, str]: The environment mapping for the launcher subprocess.
     """
     env = dict(os.environ)
     # Strip Ray's empty *_VISIBLE_DEVICES mask (num_gpus=0 actors) so the
@@ -261,7 +319,22 @@ def _detach_framework_launch(
     sub_env: dict[str, str],
     node_rank: int,
 ) -> int:
-    """Start ``cmd`` detached from the Ray worker via bash+nohup+setsid (reparents under init, PYTHONUNBUFFERED logs, fails fast with log tail)."""
+    """Start ``cmd`` detached from the Ray worker via bash+nohup+setsid (reparents under init, PYTHONUNBUFFERED logs, fails fast with log tail).
+
+    Args:
+        cmd: The framework launcher argv.
+        log_file: Path the launcher's stdout/stderr is appended to.
+        pid_file: Path the spawned launcher PID is written to.
+        sub_env: Environment passed to the spawn shell.
+        node_rank: This node's rank, used in log/error messages.
+
+    Returns:
+        int: The PID of the detached framework process.
+
+    Raises:
+        RuntimeError: If the spawn shell fails, the PID file is missing or
+            invalid, or the process exits within 0.5s of launch.
+    """
     sub_env = dict(sub_env)
     sub_env.setdefault("PYTHONUNBUFFERED", "1")
     log_q = shlex.quote(str(log_file))
@@ -344,6 +417,36 @@ def _spawn_remote(
 
     ``torch_profiler_dir`` (if set) is exported as
     ``SGLANG_TORCH_PROFILER_DIR`` for shared-path traces.
+
+    Args:
+        framework: ``sglang`` or ``vllm``.
+        model: Model path passed to the launcher.
+        tp: Tensor-parallel size.
+        nnodes: Total node count for this server group.
+        node_rank: This node's rank within the group.
+        head_ip: Rendezvous head IP.
+        dist_init_port: Collective rendezvous port.
+        pid_dir: Directory the PID file is written to.
+        log_dir: Directory the log file is written to.
+        extra_args: Extra args appended verbatim to the launcher.
+        torch_profiler_dir: Optional shared dir exported as
+            ``SGLANG_TORCH_PROFILER_DIR``.
+        ep: Expert-parallel size.
+        pd_role: PD disaggregation role (``prefill``/``decode``) or empty.
+        pd_port: HTTP port bound in PD mode.
+        pd_transfer_backend: KV-transfer backend for PD mode.
+        pd_ib_device: IB/RoCE device list for PD KV transfer.
+        pd_bootstrap_port: sglang PD bootstrap rendezvous port.
+        pd_kv_rank: vLLM KV rank for PD mode.
+        pd_kv_parallel_size: vLLM total KV parallel size for PD mode.
+        pid_file_name: Optional role-tagged PID file name.
+
+    Returns:
+        int: The spawned framework PID, or ``0`` for a no-op vLLM worker rank.
+
+    Raises:
+        RuntimeError: If ``framework`` is unsupported, or the detached launch
+            fails.
     """
     Path(pid_dir).mkdir(parents=True, exist_ok=True)
     Path(log_dir).mkdir(parents=True, exist_ok=True)
@@ -462,7 +565,15 @@ _FATAL_SCAN_TAIL_BYTES = 256 * 1024
 
 
 def _scan_rank0_log_for_fatal(log_dir: str) -> str | None:
-    """Scan rank_0.log tail for a fatal traceback / framework error; returns the matched line or ``None``."""
+    """Scan rank_0.log tail for a fatal traceback / framework error; returns the matched line or ``None``.
+
+    Args:
+        log_dir: Directory containing ``rank_0.log``.
+
+    Returns:
+        str | None: The first matched fatal line, or ``None`` if none found
+        or the log cannot be read.
+    """
     try:
         lf = Path(log_dir) / "rank_0.log"
         if not lf.is_file():
@@ -492,7 +603,18 @@ def _wait_health(
     rank0_pid: int | None = None,
     log_dir: str | None = None,
 ) -> bool:
-    """Poll rank-0 ``/health``; True on first 200, False on timeout / rank-0 death / fatal ``rank_0.log`` error."""
+    """Poll rank-0 ``/health``; True on first 200, False on timeout / rank-0 death / fatal ``rank_0.log`` error.
+
+    Args:
+        timeout_s: Maximum seconds to poll before giving up.
+        rank0_pid: Optional rank-0 PID; the wait aborts early if it dies.
+        log_dir: Optional directory whose ``rank_0.log`` is scanned for fatal
+            errors to abort early.
+
+    Returns:
+        bool: ``True`` on a first healthy response; ``False`` on timeout,
+        confirmed rank-0 death, or a fatal log error.
+    """
     import urllib.request
     import urllib.error
     started = time.monotonic()
@@ -546,7 +668,12 @@ def _emit_rank0_log_tail(log_dir: Path) -> None:
 
 
 def _log_rank0_post_spawn(log_dir: Path, rank0_pid: int | None) -> None:
-    """Emit rank-0 diagnostics after a short settle (a ``rank_0.log`` tail for early weight-load exits)."""
+    """Emit rank-0 diagnostics after a short settle (a ``rank_0.log`` tail for early weight-load exits).
+
+    Args:
+        log_dir: Directory containing ``rank_0.log``.
+        rank0_pid: The rank-0 PID to probe, or ``None`` to skip.
+    """
     if rank0_pid is None or rank0_pid <= 0:
         return
     time.sleep(3)

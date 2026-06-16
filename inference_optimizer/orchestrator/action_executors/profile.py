@@ -67,7 +67,14 @@ _PROFILE_UNSAFE_VALUE_FLAGS = frozenset({
 
 
 def _sanitize_profile_server_args(args: str) -> str:
-    """Drop server flags known to conflict with profiler/shape discovery."""
+    """Drop server flags known to conflict with profiler/shape discovery.
+
+    Args:
+        args: Raw server-args string to sanitize.
+
+    Returns:
+        The args string with profiler-unsafe flags (and their values) removed.
+    """
     raw = str(args or "").strip()
     if not raw:
         return ""
@@ -98,6 +105,17 @@ def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) ->
 
     Confirmation pass when :func:`_sample_trace_text` finds zero
     occurrences. Returns ``False`` on any IO/decode error (never raises).
+
+    Args:
+        path: The gzipped trace file to scan.
+        substring: The marker substring to search for.
+        max_bytes: Maximum decompressed bytes to read; defaults to the
+            ``INFERENCE_OPTIMIZER_TRACE_CONFIRM_BYTES`` env value or
+            :data:`_TRACE_CONFIRM_BYTES`.
+
+    Returns:
+        True if ``substring`` is found within ``max_bytes``, False otherwise
+        (including on any IO/decode error).
     """
     if not substring:
         return False
@@ -134,7 +152,14 @@ def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) ->
 def _sample_trace_text(path: Path) -> str | None:
     """Read up to ``_TRACE_INSPECT_BYTES`` of decompressed text from a
     gzipped trace. Returns ``None`` (debug-logged) on IO/decode error so the
-    check is skipped rather than failing the profile path."""
+    check is skipped rather than failing the profile path.
+
+    Args:
+        path: The gzipped trace file to sample.
+
+    Returns:
+        The decompressed leading text, or ``None`` on IO/decode error.
+    """
     try:
         with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
             return fh.read(_TRACE_INSPECT_BYTES)
@@ -148,7 +173,16 @@ def _sample_trace_text(path: Path) -> str | None:
 
 def _count_substring_occurrences(text: str, substring: str) -> int:
     """Count non-overlapping ``substring`` occurrences as a cheap
-    lower-bound event count (avoids full JSON parsing)."""
+    lower-bound event count (avoids full JSON parsing).
+
+    Args:
+        text: The text to scan.
+        substring: The substring to count.
+
+    Returns:
+        The number of non-overlapping occurrences (0 when ``substring`` is
+        empty).
+    """
     if not substring:
         return 0
     return text.count(substring)
@@ -180,6 +214,17 @@ def _validate_trace_structure(
     Read-only; each check warns independently so partial signals stay actionable.
 
     Returns a structured ``trace_health`` dict (#431): ``per_kernel_attribution_degraded`` (no execute_*/user_annotation events -> cuda-graph folds per-kernel time, 0 hot kernels -> triggers eager re-profile), ``capture_traces_present``, and ``issues`` (logged warning strings).
+
+    Args:
+        trace_dir: The profile workspace trace directory to inspect.
+        framework: The framework name (e.g. ``"sglang"``) gating
+            framework-specific checks.
+        expected_pieces: Expected split-piece count (reserved for future
+            checks).
+
+    Returns:
+        A ``trace_health`` dict with ``issues``,
+        ``per_kernel_attribution_degraded``, and ``capture_traces_present``.
     """
     issues: list[str] = []
     per_kernel_attribution_degraded = False
@@ -359,7 +404,14 @@ PROFILE_DEFAULT_TIMEOUT_SEC = 14400    # 4 h wall cap; Qwen3-32B TP=1 profile ne
 
 def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
     """Return ``*.trace.json.gz`` files under ``trace_dir`` (recursive,
-    stable order)."""
+    stable order).
+
+    Args:
+        trace_dir: The directory to scan recursively.
+
+    Returns:
+        Sorted ``*.trace.json.gz`` paths found under ``trace_dir``.
+    """
     return sorted(trace_dir.rglob("*.trace.json.gz"))
 
 
@@ -369,6 +421,13 @@ def _preferred_main_trace_path(trace_dir: Path, trace_files: list[Path]) -> Path
     Prefer the ``merged-*`` trace (the large annotated trace the splitter
     wants); otherwise pass the trace dir so kernel-agent picks its own order
     rather than pinning a tiny single-rank slice.
+
+    Args:
+        trace_dir: The trace directory, returned as the fallback path.
+        trace_files: Candidate trace files discovered under ``trace_dir``.
+
+    Returns:
+        The preferred ``merged-*`` trace path, else ``trace_dir`` itself.
     """
     merged = sorted(p for p in trace_files if p.name.startswith("merged-"))
     return merged[0] if merged else trace_dir
@@ -413,6 +472,9 @@ def _default_profile_config() -> Path:
     wrapper script from the YAML's ``benchmark.framework`` (not $FRAMEWORK);
     falling through to the sglang yaml on FRAMEWORK=atom would launch the
     wrong wrapper.
+
+    Returns:
+        The path to the framework-specific profile YAML config.
     """
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
     if fw == "atom":
@@ -481,6 +543,13 @@ class ProfileExecutor(BaselineExecutor):
            last-resort so concurrent sandboxes never share a dir.
 
         The resolved dir is mkdir'd best-effort.
+
+        Args:
+            ctx: Action context (unused beyond multi-node detection).
+
+        Returns:
+            The resolved shared torch-trace base dir, or ``""`` when not
+            running multi-node.
         """
         from ._multi_node_env import is_multi_node, rayjob_id_from_state
         if not is_multi_node():
@@ -516,6 +585,14 @@ class ProfileExecutor(BaselineExecutor):
         `benchmark.inferencex_path` to its own sibling checkout); patch the
         path resolved from the materialized YAML so NUM_PROMPTS /
         PROFILE_EXTRA_BODY aren't applied to a different checkout.
+
+        Args:
+            config_path: The materialized profile YAML config to read.
+            output_dir: The run output directory (unused here).
+
+        Returns:
+            ``None`` when the InferenceX checkout is patched correctly,
+            otherwise a failure result dict describing the patch gap.
         """
         try:
             cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
