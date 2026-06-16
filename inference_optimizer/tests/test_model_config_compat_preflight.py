@@ -182,6 +182,20 @@ def test_detect_nested_ministral3_unrecognized_blocked(tmp_path):
     assert reason is not None and "ministral3" in reason
 
 
+def test_detect_top_level_ministral3_not_blocked(tmp_path):
+    # A bare top-level model_type=ministral3 (no Mistral3 wrapper) is left to the
+    # framework; only the nested text_config form is a confirmed failure.
+    m = tmp_path / "bare_ministral3"
+    _write_config(
+        m,
+        model_type="ministral3",
+        architectures=["Ministral3ForCausalLM"],
+        max_position_embeddings=32768,
+        vocab_size=131072,
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
 def test_detect_glm4_moe_not_blocked(tmp_path):
     # glm4_moe (GLM-4.5/4.6 mainline) is a supported arch; must NOT be blocked
     # by the unrecognized-arch rule (only glm4_moe_lite is unrecognized).
@@ -526,6 +540,39 @@ def test_detect_vocab_shape_mismatch_blocks(tmp_path):
     assert reason is not None
     assert "vocab_size=152064" in reason
     assert "151936" in reason
+
+
+def test_detect_vocab_shape_match_not_blocked(tmp_path):
+    # config vocab_size matches the weight output dim -> must NOT block.
+    m = tmp_path / "qwen_vocab_ok"
+    _write_config(
+        m,
+        model_type="qwen2",
+        architectures=["Qwen2ForCausalLM"],
+        max_position_embeddings=4096,
+        vocab_size=151936,
+    )
+    _write_safetensors_header(m, {
+        "model.embed_tokens.weight": {
+            "dtype": "BF16", "shape": [151936, 1536], "data_offsets": [0, 0],
+        },
+    })
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_read_safetensors_header_parses_and_rejects(tmp_path):
+    # Valid header round-trips; truncated / oversized headers return None.
+    good = tmp_path / "model.safetensors"
+    _write_safetensors_header(tmp_path, {"x.weight": {"shape": [4, 4]}})
+    assert cli._read_safetensors_header(good) == {"x.weight": {"shape": [4, 4]}}
+
+    truncated = tmp_path / "trunc.safetensors"
+    truncated.write_bytes(struct.pack("<Q", 999) + b"{")  # claims 999, has 1
+    assert cli._read_safetensors_header(truncated) is None
+
+    short = tmp_path / "short.safetensors"
+    short.write_bytes(b"\x01\x02")  # < 8-byte length prefix
+    assert cli._read_safetensors_header(short) is None
 
 
 def test_detect_unregistered_custom_config_blocks(tmp_path):
