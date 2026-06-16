@@ -70,8 +70,15 @@ testpaths = [
     "kernel-agent/tools/test_gemm_tuning.py",
     "kernel-agent/tools/test_rocprof_roofline.py",
     "kernel-agent/tools/test_harness_generator.py",
+    # ci/ inference-optimization pipeline: the genuine unit tests
+    # (test_submit_body.py + the new test_ci_*.py suites) were never
+    # collected before because ci/ was absent from testpaths. The two
+    # live smoke scripts (test_claw_flow.py / test_tool4.py) define only a
+    # module-level main()/run_test() and no ``test_`` functions, so pytest
+    # collects zero items from them and never hits their network calls.
+    "ci",
 ]
-pythonpath = [".", "robustness-agent/src", "critic-agent"]
+pythonpath = [".", "robustness-agent/src", "critic-agent", "ci"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
@@ -102,6 +109,7 @@ source = [
     "inference_optimizer",
     "robustness_agent",
     "kernel-agent/tools",
+    "ci",
 ]
 omit = [
     "*/tests/*",
@@ -176,6 +184,32 @@ omit = [
     "robustness-agent/src/robustness_agent/providers/hybrid.py",
     "robustness-agent/src/robustness_agent/providers/robust.py",
     "robustness-agent/src/robustness_agent/providers/local.py",
+    # ── ci/ inference-optimization pipeline ──
+    # The measured ci/ set is the library-shaped logic modules
+    # (generate_hf_matrix, generate_matrix, progress, build_rolling_pool,
+    # inferenceX_parser, artifact_normalizer, transform_to_session_summary_v2,
+    # build_summary, report_generator). Everything below is a SaFE/Claw/HF/
+    # GitHub network client or a subprocess-driven CLI driver — the same
+    # "subprocess plumbing dominated" reasoning that omits inference_optimizer
+    # cli.py and the kernel-agent tool CLIs. Each is exercised end-to-end by
+    # the live optimize-submit / optimize-tiny workflows, not unit tests.
+    "ci/optimize_submit.py",
+    "ci/tiny_submit.py",
+    "ci/orchestrator.py",
+    "ci/pipeline_run.py",
+    "ci/import_session_breakdown.py",
+    "ci/claw_client.py",
+    "ci/post_perf_runs.py",
+    "ci/prewarm_models.py",
+    "ci/send_webhook.py",
+    "ci/publish_results.py",
+    "ci/publish_artifacts.py",
+    "ci/download_ab_stitched_session_logs.py",
+    "ci/run_llm_batch.py",
+    "ci/build_candidates.py",
+    "ci/build_production_hf_pool.py",
+    # In-tree CLI test scripts / live smoke scripts (treated as test files).
+    "ci/test_*.py",
 ]
 
 [tool.coverage.report]
