@@ -13,11 +13,21 @@ def winner_decision(
     accuracy: float | None,
     completed: str,
 ) -> tuple[bool, str]:
-    """Apply throughput / accuracy / completed gates, short-circuiting on first miss; returns ``(is_winner, reason)`` with ``reason`` always set for audit.
+    """Apply throughput / accuracy / completed gates for a candidate.
 
-    Gates: (1) throughput > 0 and ratio >= min_throughput_ratio;
-    (2) when baseline accuracy set, accuracy present and drop <=
-    max_accuracy_drop; (3) ``completed`` "K/N" must have K == N.
+    Short-circuits on the first failing gate: (1) throughput > 0 and ratio
+    >= ``min_throughput_ratio``; (2) when baseline accuracy is set, accuracy
+    present and drop <= ``max_accuracy_drop``; (3) ``completed`` "K/N" must
+    have K == N.
+
+    Args:
+        req: The explore request carrying baseline and thresholds.
+        throughput: Candidate throughput, or ``None`` if unmeasured.
+        accuracy: Candidate accuracy, or ``None`` if unmeasured.
+        completed: Benchmark completion marker in ``"K/N"`` form.
+
+    Returns:
+        A ``(is_winner, reason)`` tuple; ``reason`` is always set for audit.
     """
     if throughput is None or throughput <= 0:
         return False, "missing throughput"
@@ -52,7 +62,20 @@ def candidate_score(
     throughput: float | None,
     accuracy: float | None,
 ) -> float:
-    """Sortable ranking score = ``throughput_ratio - accuracy_drop_penalty`` (higher is better); missing throughput scores 0 so failed candidates sort to the tail."""
+    """Compute a sortable ranking score for a candidate.
+
+    The score is ``throughput_ratio - accuracy_drop_penalty`` (higher is
+    better); missing throughput scores ``0.0`` so failed candidates sort to
+    the tail.
+
+    Args:
+        req: The explore request carrying baseline and thresholds.
+        throughput: Candidate throughput, or ``None`` if unmeasured.
+        accuracy: Candidate accuracy, or ``None`` if unmeasured.
+
+    Returns:
+        The ranking score as a float.
+    """
     if throughput is None or throughput <= 0 or req.baseline.throughput <= 0:
         return 0.0
     ratio = throughput / req.baseline.throughput

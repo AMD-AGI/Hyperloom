@@ -134,6 +134,12 @@ def merge_gpu_snapshots(
 
     Later writes win on field clashes per (pod, gpu_id); distinct pods
     stay distinct so signal evidence keeps the GPU's namespace / name.
+
+    Args:
+        snapshots: Per-pod GPU snapshot mappings.
+
+    Returns:
+        A merged ``local_gpu`` mapping.
     """
 
     rows: list[dict[str, Any]] = []
