@@ -184,7 +184,7 @@ def _max_session_gain(row: Mapping[str, Any]) -> float:
         try:
             best = max(best, float(row.get("validated_gain_pct") or row.get("gain_pct") or 0.0))
         except (TypeError, ValueError):
-            pass
+            pass  # non-numeric gain field; fall through with best=0.0
     return best
 
 
