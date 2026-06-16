@@ -35,7 +35,12 @@ def _capture_body(client: SafeOptimizeClient) -> dict:
     """Call submit_task with minimal args and return the POST body."""
     captured: dict = {}
 
-    def fake_request(_method: str, _path: str, body: dict | None = None) -> dict:
+    def fake_request(
+        _method: str,
+        _path: str,
+        body: dict | None = None,
+        timeout: float | None = None,
+    ) -> dict:
         captured.update(body or {})
         return {"id": "task-123"}
 
@@ -69,7 +74,7 @@ def test_explicit_inferencex_path_forwarded():
     client = _make_client()
     captured: dict = {}
 
-    def fake_request(_method, _path, body=None):
+    def fake_request(_method, _path, body=None, timeout=None):
         captured.update(body or {})
         return {"id": "task-456"}
 
@@ -94,7 +99,7 @@ def test_empty_string_inferencex_path_stays_empty():
     client = _make_client()
     captured: dict = {}
 
-    def fake_request(_method, _path, body=None):
+    def fake_request(_method, _path, body=None, timeout=None):
         captured.update(body or {})
         return {"id": "task-789"}
 
@@ -119,7 +124,7 @@ def test_none_inferencex_path_becomes_empty():
     client = _make_client()
     captured: dict = {}
 
-    def fake_request(_method, _path, body=None):
+    def fake_request(_method, _path, body=None, timeout=None):
         captured.update(body or {})
         return {"id": "task-000"}
 
