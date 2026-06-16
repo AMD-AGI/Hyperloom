@@ -190,6 +190,33 @@ def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
     assert "tool" not in out["kernel_journey"]["kernels"][0]["backend_attempts"][0]
 
 
+def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
+    # forge is its own backend (NOT folded into oob): a forge attempt keeps
+    # backend="forge" in the journey and mints a distinct versions["forge"]
+    # provenance entry (via _TOOL_PROVENANCE), so A8b can group by forge version.
+    sha = _init_git_repo(tmp_path)
+    instrument.record_kernel_discovery(
+        tmp_path, source="tracelens", status="success",
+        hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 10.0}],
+        scan={},
+    )
+    instrument.record_kernel_backend_result(tmp_path, {
+        "kernel_id": "k1", "run_id": "r1", "attempts": [
+            {"attempt_id": "a1", "backend": "forge", "status": "completed",
+             "metadata": {"root_dir": str(tmp_path)}},
+        ],
+    })
+    out = assemble_parts(tmp_path)
+    # The attempt keeps its own backend label in the journey.
+    atts = out["kernel_journey"]["kernels"][0]["backend_attempts"]
+    assert atts[0]["backend"] == "forge"
+    # Distinct provenance entry, NOT merged into oob.
+    versions = out["versions"]
+    assert versions["forge"]["tool"] == "forge"
+    assert versions["forge"]["version"] == sha
+    assert "oob" not in versions
+
+
 def test_discovery_run_carries_duration(tmp_path: Path) -> None:
     instrument.record_kernel_discovery(
         tmp_path, source="tracelens", status="success",
@@ -243,6 +270,11 @@ def test_tool_version_probe_git_strategies(tmp_path: Path) -> None:
     # tracelens -> git describe (--always falls back to the short sha here).
     meta_tl = instrument._tool_metadata("tracelens", root=str(tmp_path))
     assert meta_tl["version"]  # non-empty describe output
+    # forge -> git short SHA (own backend, $FORGE_PATH-rooted); same strategy
+    # as geak so a real session mints a populated versions["forge"].
+    meta_forge = instrument._tool_metadata("forge", root=str(tmp_path))
+    assert meta_forge["commit"] == sha
+    assert meta_forge["version"] == sha
     # A caller-supplied version always wins over the probe.
     meta_explicit = instrument._tool_metadata(
         "geak", root=str(tmp_path), version="v9.9",
