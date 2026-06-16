@@ -714,6 +714,69 @@ def test_materialize_profile_sglang_keeps_shape_discovery_for_non_gemma2(
     assert "--enable-shape-discovery-for-cuda-graph-profile" in extra, extra
 
 
+def test_materialize_profile_sglang_skips_shape_discovery_gemma2_by_path(
+    tmp_path, monkeypatch,
+):
+    """No config.json but a gemma-2 path -> heuristic skips shape-discovery."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    # Path looks like Gemma2 but ships no config.json (not-yet-materialized).
+    model = "/wekafs/models/google-gemma-2-9b-it"
+    src = _profile_yaml_model(
+        tmp_path, "sglang", model, {"CONC": 32, "ISL": 256, "OSL": 1024},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
+    assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
+
+
+def test_materialize_profile_sglang_no_config_non_gemma_keeps_shape_discovery(
+    tmp_path, monkeypatch,
+):
+    """No config.json and a non-Gemma2 path -> shape-discovery stays on."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    model = "/wekafs/models/meta-llama-3-8b-instruct"
+    src = _profile_yaml_model(
+        tmp_path, "sglang", model, {"CONC": 32, "ISL": 256, "OSL": 1024},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
+        "EXTRA_SGLANG_ARGS", "",
+    )
+    assert "--enable-shape-discovery-for-cuda-graph-profile" in extra, extra
+
+
+def test_materialize_profile_sglang_force_overrides_gemma2_gate(
+    tmp_path, monkeypatch,
+):
+    """HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 keeps shape-discovery on for
+    Gemma2 (escape hatch for debugging the TraceLens root-cause fix)."""
+    import yaml
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", "1")
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    model = tmp_path / "gemma2_model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({
+        "model_type": "gemma2", "architectures": ["Gemma2ForCausalLM"],
+    }), encoding="utf-8")
+    src = _profile_yaml_model(
+        tmp_path, "sglang", str(model), {"CONC": 32, "ISL": 256, "OSL": 1024},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert "--enable-shape-discovery-for-cuda-graph-profile" in envs.get(
+        "EXTRA_SGLANG_ARGS", "",
+    ), envs
+    assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is True
+
+
 def test_profile_executor_calls_benchmark_lib_patcher():
     """ProfileExecutor must patch the materialized InferenceX checkout before launching Magpie (else the computed profile window is stomped and the trace is empty)."""
     import inference_optimizer.orchestrator.action_executors.profile as profile_mod
