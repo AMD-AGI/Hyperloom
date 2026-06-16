@@ -1555,6 +1555,7 @@ def collect_capability_summary(
     geak_invocations: list[dict[str, Any]],
     oob_invocations: list[dict[str, Any]],
     warnings: list[str],
+    forge_invocations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Summarize kernel-optimization capability outcomes for the breakdown.
 
@@ -1563,10 +1564,12 @@ def collect_capability_summary(
         geak_invocations: GEAK backend invocation records.
         oob_invocations: Out-of-box backend invocation records.
         warnings: Mutable list that collected warnings are appended to.
+        forge_invocations: Forge backend invocation records (own lane).
 
     Returns:
         A capability-summary dict (per-kernel status, attempt and keep counts).
     """
+    forge_invocations = forge_invocations or []
     # Integrate (e2e) outcome per kernel: a kernel-opt KEEP REVERTED at
     # integrate is not a real adoption, so don't inflate the geak/oob tally.
     integ = state.get("kernel_integrate_attempts") or {}
@@ -1630,6 +1633,7 @@ def collect_capability_summary(
 
     geak_cap = _from_invocations(geak_invocations)
     oob_cap = _from_invocations(oob_invocations)
+    forge_cap = _from_invocations(forge_invocations)
 
     # Legacy capability rows for archived (pre-merge) sessions; current
     # sessions leave these not_attempted and carry activity under ``explore``.
@@ -1707,6 +1711,7 @@ def collect_capability_summary(
     return {
         "geak":           geak_cap,
         "oob":            oob_cap,
+        "forge":          forge_cap,
         # primary post-merge row; backends/params/validate_stack are compat rows.
         "explore":        explore,
         "backends":       backends,
@@ -2066,8 +2071,8 @@ def _infer_run_dir_kernel_id(run_dir: Path) -> str:
 def collect_kernel_invocations(
     session_dir: Path,
     warnings: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return ``(geak_invocations, oob_invocations)`` from each run dir's ``optimization_attempts.jsonl``, split by ``backend``."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return ``(geak_invocations, oob_invocations, forge_invocations)`` from each run dir's ``optimization_attempts.jsonl``, split by ``backend`` into three independent lanes."""
     all_invocations: list[dict[str, Any]] = []
     run_dirs = _kernel_agent_run_dirs(session_dir)
     for run_dir in run_dirs:
@@ -2102,17 +2107,22 @@ def collect_kernel_invocations(
 
     geak: list[dict[str, Any]] = []
     oob: list[dict[str, Any]] = []
+    forge: list[dict[str, Any]] = []
     for inv in all_invocations:
         backend = inv.get("backend") or ""
         if backend == "geak":
             geak.append(inv)
+        elif backend == "forge":
+            forge.append(inv)
         elif backend in ("claude", "codex"):
             oob.append(inv)
         else:
+            # Unknown / legacy backends fall back to the oob lane (forge keeps
+            # its own lane above so it is never mislabeled as oob).
             oob.append(inv)
-    geak.sort(key=lambda e: (e.get("kernel_id") or "", e.get("ts") or ""))
-    oob.sort(key=lambda e: (e.get("kernel_id") or "", e.get("ts") or ""))
-    return geak, oob
+    for lane in (geak, oob, forge):
+        lane.sort(key=lambda e: (e.get("kernel_id") or "", e.get("ts") or ""))
+    return geak, oob, forge
 
 
 # §9 Kernel lifecycle
@@ -2227,15 +2237,17 @@ def _collect_detected_kernels(
     oob: list[dict[str, Any]],
     warnings: list[str],
     *,
+    forge: list[dict[str, Any]] | None = None,
     cap: int | None = None,
 ) -> list[dict[str, Any]]:
     """Build the canonical per-kernel lifecycle row, keyed by ``kernel_id``.
 
     Merges static profile fields (from ``kernel_candidates.json``,
     preferred, else ``benchmark_report.kernel_summary``),
-    ``selected_for_optimization``, per-lane ``geak`` / ``oob`` summaries,
-    ``adopted_by`` (from integrate KEEPs), and ``final_decision``.
+    ``selected_for_optimization``, per-lane ``geak`` / ``oob`` / ``forge``
+    summaries, ``adopted_by`` (from integrate KEEPs), and ``final_decision``.
     """
+    forge = forge or []
     by_kid: dict[str, dict[str, Any]] = {}
 
     # 1) candidates.json (preferred: has call_count / duration_us).
@@ -2354,6 +2366,7 @@ def _collect_detected_kernels(
     }
     geak_idx = _index_invocations_by_kernel(geak)
     oob_idx = _index_invocations_by_kernel(oob)
+    forge_idx = _index_invocations_by_kernel(forge)
 
     integ = state.get("kernel_integrate_attempts") or {}
     adopted_kids: set[str] = set()
@@ -2381,24 +2394,23 @@ def _collect_detected_kernels(
         entry["selected_for_optimization"] = kid in selected_ids
         entry["geak"] = geak_idx.get(kid)  # None if lane never touched this kid
         entry["oob"] = oob_idx.get(kid)
+        entry["forge"] = forge_idx.get(kid)
         # e2e (integrate) gain so the table shows why a micro-KEPT kernel reverted.
         if kid in integ_gain_by_kid:
             entry["integrate_gain_pct"] = integ_gain_by_kid[kid]
         if kid in adopted_kids:
-            # Disambiguate which lane's patch was kept.
-            g_kept = bool(entry["geak"] and entry["geak"]["decision"] in ("KEEP", "PARTIAL"))
-            o_kept = bool(entry["oob"] and entry["oob"]["decision"] in ("KEEP", "PARTIAL"))
-            if g_kept and not o_kept:
-                entry["adopted_by"] = "geak"
-            elif o_kept and not g_kept:
-                entry["adopted_by"] = "oob"
-            elif g_kept and o_kept:
-                # Prefer the lane with higher micro-speedup.
-                g_spd = (entry["geak"] or {}).get("best_speedup") or 0.0
-                o_spd = (entry["oob"] or {}).get("best_speedup") or 0.0
-                entry["adopted_by"] = "geak" if g_spd >= o_spd else "oob"
+            # Disambiguate which lane's patch was kept. With three lanes, pick
+            # the KEPT lane with the highest micro-speedup; fall back to
+            # 'kernel_agent' when integrate KEPT but no single lane shows a KEEP.
+            kept_lanes: list[tuple[str, float]] = []
+            for lane in ("geak", "oob", "forge"):
+                row = entry.get(lane)
+                if row and row.get("decision") in ("KEEP", "PARTIAL"):
+                    kept_lanes.append((lane, row.get("best_speedup") or 0.0))
+            if kept_lanes:
+                entry["adopted_by"] = max(kept_lanes, key=lambda t: t[1])[0]
             else:
-                # Integrate KEEP but neither lane KEPT: record 'kernel_agent', don't guess.
+                # Integrate KEEP but no lane KEPT: record 'kernel_agent', don't guess.
                 entry["adopted_by"] = "kernel_agent"
             entry["final_decision"] = "kept"
         elif kid in reverted_kids:
@@ -2407,7 +2419,7 @@ def _collect_detected_kernels(
         elif kid in rejected_kids:
             entry["adopted_by"] = None
             entry["final_decision"] = "rejected"
-        elif entry["geak"] or entry["oob"]:
+        elif entry["geak"] or entry["oob"] or entry["forge"]:
             entry["adopted_by"] = None
             entry["final_decision"] = "attempted"
         else:
@@ -2461,10 +2473,11 @@ def _collect_optimized_kernels(
     geak: list[dict[str, Any]],
     oob: list[dict[str, Any]],
     state: dict[str, Any],
+    forge: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Fold per-attempt invocations into per-kernel optimization summaries.
 
-    Aggregates both lanes' attempts per kernel (counts, best micro-speedup,
+    Aggregates all lanes' attempts per kernel (counts, best micro-speedup,
     best artifact, decision history) and cross-references
     ``state.kernel_opt_attempts`` to recover decisions whose on-disk
     verification was rotated away.
@@ -2473,13 +2486,14 @@ def _collect_optimized_kernels(
         geak (list[dict[str, Any]]): GEAK-lane invocations.
         oob (list[dict[str, Any]]): OOB-lane invocations.
         state (dict[str, Any]): Parsed ``state.json``.
+        forge (list[dict[str, Any]] | None): Forge-lane invocations.
 
     Returns:
         list[dict[str, Any]]: Per-kernel optimization summaries sorted by
         ``kernel_id``.
     """
     by_kid: dict[str, dict[str, Any]] = {}
-    for invs in (geak, oob):
+    for invs in (geak, oob, forge or []):
         for inv in invs:
             kid = inv.get("kernel_id") or ""
             if not kid:
@@ -2621,6 +2635,7 @@ def collect_kernel_lifecycle(
     geak: list[dict[str, Any]],
     oob: list[dict[str, Any]],
     warnings: list[str],
+    forge: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Collect the §9 kernel-lifecycle section.
 
@@ -2633,15 +2648,17 @@ def collect_kernel_lifecycle(
         geak (list[dict[str, Any]]): GEAK-lane invocations.
         oob (list[dict[str, Any]]): OOB-lane invocations.
         warnings (list[str]): Shared warnings list (mutated in place).
+        forge (list[dict[str, Any]] | None): Forge-lane invocations (own lane).
 
     Returns:
         dict[str, Any]: ``{"detected", "recommended", "optimized", "adopted",
         "rejected"}`` lists.
     """
+    forge = forge or []
     return {
-        "detected":    _collect_detected_kernels(session_dir, state, geak, oob, warnings),
+        "detected":    _collect_detected_kernels(session_dir, state, geak, oob, warnings, forge=forge),
         "recommended": _collect_recommended_kernels(state),
-        "optimized":   _collect_optimized_kernels(geak, oob, state),
+        "optimized":   _collect_optimized_kernels(geak, oob, state, forge),
         "adopted":     _collect_adopted_kernels(state),
         "rejected":    _collect_rejected_kernels(state),
     }
@@ -3496,6 +3513,7 @@ def collect_attribution(
     oob_invocations: list[dict[str, Any]],
     adopted_kernels: list[dict[str, Any]],
     warnings: list[str],
+    forge_invocations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Attribute end-to-end gains to individual optimization-stack entries.
 
@@ -3508,10 +3526,12 @@ def collect_attribution(
         oob_invocations: Out-of-box backend invocation records.
         adopted_kernels: Kernels adopted into the optimized stack.
         warnings: Mutable list that collected warnings are appended to.
+        forge_invocations: Forge backend invocation records (own lane).
 
     Returns:
         An attribution dict mapping stack entries to their measured gains.
     """
+    forge_invocations = forge_invocations or []
     # Prefer the authoritative ``gain_per_stack_entry`` ledger; else reconstruct from optimization_stack.
     state_entries = state.get("gain_per_stack_entry")
     state_provided = isinstance(state_entries, list) and len(state_entries) > 0
@@ -3569,20 +3589,24 @@ def collect_attribution(
         fam = _action_family(str(e.get("action") or ""))
         family_totals[fam] = family_totals.get(fam, 0.0) + max(delta, 0.0)
 
-    # Split "kernel" between GEAK / OOB based on adopted KEEP entries' backend
+    # Split "kernel" between GEAK / OOB / Forge based on adopted KEEP entries' backend
     geak_kept_kids = {inv.get("kernel_id") for inv in geak_invocations if inv.get("decision") == "KEEP"}
     oob_kept_kids  = {inv.get("kernel_id") for inv in oob_invocations  if inv.get("decision") == "KEEP"}
+    forge_kept_kids = {inv.get("kernel_id") for inv in forge_invocations if inv.get("decision") == "KEEP"}
     kernel_total = family_totals.get("kernel", 0.0)
     geak_total = 0.0
     oob_total = 0.0
+    forge_total = 0.0
     for k in adopted_kernels:
         kid = k.get("kernel_id")
         gain = _to_float(k.get("e2e_gain_pct")) or 0.0
         if kid in geak_kept_kids:
             geak_total += gain
+        elif kid in forge_kept_kids:
+            forge_total += gain
         elif kid in oob_kept_kids:
             oob_total += gain
-    if geak_total + oob_total == 0.0 and kernel_total > 0.0:
+    if geak_total + oob_total + forge_total == 0.0 and kernel_total > 0.0:
         # Default all-OOB when no KEEP'd adopt entry is on disk.
         oob_total = kernel_total
 
@@ -3609,6 +3633,7 @@ def collect_attribution(
         "source_breakdown": {
             "geak_pct_of_total":     round(geak_total, 2),
             "oob_pct_of_total":      round(oob_total, 2),
+            "forge_pct_of_total":    round(forge_total, 2),
             # primary row.
             "explore_pct_of_total":  round(family_totals.get("explore", 0.0), 2),
             # FRAMEWORK_PR row; always emitted (0.0 when disabled/empty).

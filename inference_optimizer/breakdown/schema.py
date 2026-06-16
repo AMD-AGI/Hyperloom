@@ -1731,6 +1731,8 @@ class SessionBreakdown(TypedDict, total=False):
         capability_summary (CapabilitySummary): Per-capability roll-up.
         geak_invocations (list[Invocation]): GEAK backend invocations.
         oob_invocations (list[Invocation]): Out-of-box backend invocations.
+        forge_invocations (list[Invocation]): Forge (Kernel-Forge) backend
+            invocations — its own lane, NOT folded into ``oob_invocations``.
         kernel_lifecycle (KernelLifecycle): Kernels grouped by lifecycle stage.
         param_search (ParamSearch): v1-reader compat alias for ``explore_search``.
         explore_search (ParamSearch): Merged explore-search ledger.
@@ -1766,6 +1768,7 @@ class SessionBreakdown(TypedDict, total=False):
     capability_summary: CapabilitySummary
     geak_invocations: list[Invocation]
     oob_invocations: list[Invocation]
+    forge_invocations: list[Invocation]
     kernel_lifecycle: KernelLifecycle
     # explore_search is the native merged ledger; param_search is a v1 alias.
     param_search: ParamSearch
