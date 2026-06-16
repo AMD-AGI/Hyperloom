@@ -40,6 +40,7 @@ from ._server_patcher import (
     ensure_sglang_patched_for_tracelens,
     ensure_vllm_patched_for_tracelens,
 )
+from ...model_config_utils import _load_model_config_dict, _model_is_gemma2
 
 log = logging.getLogger(__name__)
 
@@ -373,15 +374,27 @@ def materialize_config_with_envs(
             # Gemma2 + shape-discovery crashes CUDA-graph capture (host
             # torch.tensor in forward during HIP stream capture). Disable
             # shape-discovery for Gemma2 so capture/roofline still run.
-            if _shape_disc:
-                from ...model_config_utils import _model_is_gemma2
-                if _model_is_gemma2(str(bench.get("model") or "")):
+            # Escape hatch HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 keeps it on
+            # (for debugging the TraceLens root-cause fix).
+            _force_shape_disc = os.environ.get(
+                "HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", "0",
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if _shape_disc and not _force_shape_disc:
+                _model = str(bench.get("model") or "")
+                if _model_is_gemma2(_model):
                     _shape_disc = False
                     log.info(
                         "Gemma2 roofline: disabling shape-discovery to avoid "
                         "CUDA-graph capture crash (hipErrorStreamCapture"
-                        "Unsupported); CUDA graph + profiling kept.",
+                        "Unsupported); CUDA graph + profiling kept. Set "
+                        "HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 to override.",
                     )
+                    if _load_model_config_dict(_model) is None:
+                        log.warning(
+                            "Gemma2 detected via path heuristic (no readable "
+                            "config.json at %r); shape-discovery skip may be "
+                            "imprecise.", _model,
+                        )
             extra_body["shape_discovery"] = _shape_disc
             extra_body.setdefault("roofline_annotations", True)
             envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
