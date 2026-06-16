@@ -1018,13 +1018,13 @@ class SharedState:
         tick: int,
         intent_payload: dict[str, Any] | None = None,
     ) -> int:
-        """Forwarding shim — implementation in :mod:`.shared_state_policy` (phase 2 behavior-offload)."""
-        from . import shared_state_policy as _m
+        """Forwarding shim — implementation in :mod:`.policy` (folded back in phase 6A)."""
+        from . import policy as _m
         return _m.record_policy_denial(self, action_name=action_name, rule=rule, hint=hint, intent_type=intent_type, tick=tick, intent_payload=intent_payload)
 
     def reset_policy_denial_streak(self, action_name: str) -> None:
-        """Forwarding shim — implementation in :mod:`.shared_state_policy` (phase 2 behavior-offload)."""
-        from . import shared_state_policy as _m
+        """Forwarding shim — implementation in :mod:`.policy` (folded back in phase 6A)."""
+        from . import policy as _m
         return _m.reset_policy_denial_streak(self, action_name)
 
     # stop_reason ENUM validator
@@ -1161,8 +1161,8 @@ class SharedState:
         return _m.record_lifecycle_event(self, step=step, status=status, phase=phase, label=label, artifacts=artifacts, detail=detail, duration_s=duration_s, ts=ts)
 
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
-        """Forwarding shim — implementation in :mod:`.shared_state_policy` (phase 2 behavior-offload)."""
-        from . import shared_state_policy as _m
+        """Forwarding shim — implementation in :mod:`.policy` (folded back in phase 6A)."""
+        from . import policy as _m
         return _m.to_policy_denial_summary(self, top_k=top_k)
 
     def increment_crash_count(self, by: int = 1) -> int:
