@@ -111,6 +111,25 @@ def _git_toplevel(path: str) -> str:
     return ""
 
 
+def _default_branch(repo: str) -> str:
+    """Best-effort default branch name for `repo` (e.g. 'main'/'master').
+
+    Used to auto-recover a repo stranded on a leftover ``forge/`` temp branch by
+    a hard-killed prior run. Prefers the remote's advertised default, then falls
+    back to common local branch names.
+    """
+    p = _run(["git", "-C", repo, "symbolic-ref", "--short",
+              "refs/remotes/origin/HEAD"], timeout=30)
+    ref = (p.stdout or "").strip()
+    if ref.startswith("origin/"):
+        return ref[len("origin/"):]
+    for name in ("main", "master"):
+        if _run(["git", "-C", repo, "rev-parse", "--verify", name],
+                timeout=30).returncode == 0:
+            return name
+    return ""
+
+
 def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path,
                       branch: str) -> tuple[str, str, str] | None:
     """Create a git worktree of kernel_repo at output_dir/worktree (R1/W1).
@@ -291,7 +310,11 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
     restore_info) or None when the repo is not a usable git checkout.
 
     Safety:
-      - refuse if HEAD is already on a forge/ temp branch (prior crashed run),
+      - if HEAD is already on a forge/ temp branch (a prior crashed/SIGKILL'd
+        run that never restored), AUTO-RECOVER: force-checkout the repo's
+        default branch and delete the stale temp branch, then proceed from a
+        pristine baseline (falls back to skip only if the default branch can't
+        be resolved),
       - hold a per-repo lock so concurrent forge runs never interleave,
       - dirty working trees are allowed: restore only touches the source_file
         (per-file write-back, no ``reset --hard``), so other uncommitted changes
@@ -322,10 +345,28 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
         orig_head = _run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip()
         if not orig_head:
             return _skip()
-        # Guard: never edit a repo already on a forge temp branch (a prior crashed
-        # run left it mutated -> orig_head would be a non-pristine baseline).
+        # Auto-recover from a leftover forge temp branch. A prior forge run that
+        # was hard-killed (SIGKILL) before _restore_inplace could switch back
+        # leaves the repo stranded on its `forge/<ts>/...` branch, after which
+        # EVERY subsequent run fails with "repo is not a usable git checkout"
+        # (orig_head would be a non-pristine baseline). Recover by forcing the
+        # repo back onto its default branch and deleting the stale temp branch so
+        # the snapshot below reflects a pristine baseline again.
         if orig_branch.startswith("forge/"):
-            return _skip()
+            default_branch = _default_branch(repo)
+            if not default_branch:
+                return _skip()
+            stale = orig_branch
+            co = _run(["git", "-C", repo, "checkout", "-f", default_branch],
+                      timeout=120)
+            if co.returncode != 0:
+                return _skip()
+            _run(["git", "-C", repo, "branch", "-D", stale], timeout=30)
+            orig_branch = default_branch
+            orig_head = _run(["git", "-C", repo, "rev-parse", "HEAD"],
+                             timeout=30).stdout.strip()
+            if not orig_head:
+                return _skip()
         # Preflight: drop any stale temp branch from a prior crashed run so the
         # snapshot below reflects a clean baseline, not leftover mutations.
         _run(["git", "-C", repo, "branch", "-D", branch], timeout=30)
@@ -1074,7 +1115,15 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         # closes), query() hangs forever and freezes the whole loop (and the
         # orchestrator awaiting it). wait_for bounds each call so the loop records
         # a timeout and moves on instead of stalling the session.
-        agent_timeout_s = int(os.environ.get("FORGE_AGENT_TIMEOUT_SEC", "420"))
+        agent_timeout_s = int(os.environ.get("FORGE_AGENT_TIMEOUT_SEC", "900"))
+        # Clamp to a safe floor. A successful agent_fn legitimately takes ~5-8 min
+        # (it reads the kernel + TraceLens context before making its single edit;
+        # a warm 1.795x reference run measured 5-8 min/call). A too-low value
+        # (observed: FORGE_AGENT_TIMEOUT_SEC=300) is SHORTER than a normal call, so
+        # every attempt is false-killed as "fellow hung", every retry restarts from
+        # scratch and re-times-out, and the run never lands a real optimization.
+        # The floor makes the loop robust even if the env is misconfigured.
+        agent_timeout_s = max(agent_timeout_s, 600)
         # Retry the fellow on a hung/transient failure. The claude-agent-sdk
         # streaming query() intermittently hangs (the fellow subprocess stream
         # never closes) or returns a transient SDK error; a fresh attempt almost
@@ -1131,6 +1180,15 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         # inherits this env.
         if hasattr(os, "geteuid") and os.geteuid() == 0:
             os.environ.setdefault("IS_SANDBOX", "1")
+
+        # TLS defaults for the claude CLI fellow. The AMD SaFE proxy presents an
+        # internal/self-signed certificate; without these the Node-based CLI's
+        # TLS handshake to the proxy fails and the streaming query() hangs or
+        # errors every iteration (observed as "fellow hung"). setdefault so an
+        # explicit operator value always wins, but a bare run (no setup_env.sh
+        # exporting them) still works out of the box.
+        os.environ.setdefault("ANTHROPIC_SKIP_TLS_VERIFY", "true")
+        os.environ.setdefault("NODE_TLS_REJECT_UNAUTHORIZED", "0")
 
         # The claude-agent-sdk's streaming transport needs the /api/v1/llm-proxy
         # endpoint. The OOB path commonly exports ANTHROPIC_BASE_URL=.../llm-gateway
