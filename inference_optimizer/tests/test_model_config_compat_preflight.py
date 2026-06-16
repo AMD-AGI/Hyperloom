@@ -182,6 +182,25 @@ def test_detect_nested_ministral3_unrecognized_blocked(tmp_path):
     assert reason is not None and "ministral3" in reason
 
 
+def test_detect_pure_nested_ministral3_blocked(tmp_path):
+    # Parent model_type is NOT ministral3 (a generic wrapper); only the nested
+    # text_config carries ministral3. Verifies the nested-only gate in isolation
+    # from the parent scope.
+    m = tmp_path / "wrapper_nested_ministral3"
+    _write_config(
+        m,
+        model_type="some_wrapper",
+        architectures=["SomeWrapperForConditionalGeneration"],
+        text_config={
+            "model_type": "ministral3",
+            "max_position_embeddings": 32768,
+            "vocab_size": 131072,
+        },
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "ministral3" in reason
+
+
 def test_detect_top_level_ministral3_not_blocked(tmp_path):
     # A bare top-level model_type=ministral3 (no Mistral3 wrapper) is left to the
     # framework; only the nested text_config form is a confirmed failure.
@@ -573,6 +592,63 @@ def test_read_safetensors_header_parses_and_rejects(tmp_path):
     short = tmp_path / "short.safetensors"
     short.write_bytes(b"\x01\x02")  # < 8-byte length prefix
     assert cli._read_safetensors_header(short) is None
+
+
+# ---------------------------------------------------------------------------
+# Gemma2 detection helpers (model_config_utils)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("gemma2", True),
+        ("gemma2-9b", True),
+        ("google-gemma-2-9b-it", True),
+        ("gemma_2_2b", True),
+        ("llama-gemma2-test", True),
+        ("gemma-3-12b", False),
+        ("gemma3-12b", False),
+        ("gemma25", False),
+        ("notgemma2", False),
+        ("mygemma2", False),
+        ("gemma12-model", False),
+        ("", False),
+    ],
+)
+def test_path_looks_like_gemma2(name, expected):
+    from inference_optimizer import model_config_utils as mcu
+    assert mcu._path_looks_like_gemma2(name) is expected
+
+
+def test_model_is_gemma2_falls_back_to_path_on_residual_config(tmp_path):
+    # config.json present but empty (no model_type/architectures) -> the path
+    # heuristic decides; a gemma-2 path is still detected.
+    from inference_optimizer import model_config_utils as mcu
+    m = tmp_path / "google-gemma-2-9b-it"
+    m.mkdir()
+    (m / "config.json").write_text("{}", encoding="utf-8")
+    assert mcu._model_is_gemma2(str(m)) is True
+
+
+def test_model_is_gemma2_trusts_identified_non_gemma_config(tmp_path):
+    # config clearly identifies llama; even a gemma-2 path must NOT override it.
+    from inference_optimizer import model_config_utils as mcu
+    m = tmp_path / "gemma-2-distill-llama"
+    m.mkdir()
+    (m / "config.json").write_text(json.dumps({
+        "model_type": "llama", "architectures": ["LlamaForCausalLM"],
+    }), encoding="utf-8")
+    assert mcu._model_is_gemma2(str(m)) is False
+
+
+def test_model_is_gemma2_detects_nested_text_config(tmp_path):
+    from inference_optimizer import model_config_utils as mcu
+    m = tmp_path / "wrapper"
+    m.mkdir()
+    (m / "config.json").write_text(json.dumps({
+        "model_type": "wrapper",
+        "text_config": {"model_type": "gemma2"},
+    }), encoding="utf-8")
+    assert mcu._model_is_gemma2(str(m)) is True
 
 
 def test_detect_unregistered_custom_config_blocks(tmp_path):
