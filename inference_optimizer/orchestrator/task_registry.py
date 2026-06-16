@@ -396,6 +396,15 @@ class TaskRegistry:
 
         Idempotent: a second call finds the rows already ``failed`` and is a
         no-op. Returns the reclaimed task_ids.
+
+        Args:
+            now_unix: Reference unix time for lease-age comparison; defaults to
+                the current time.
+            reason: Reason label recorded in the transition history evidence.
+
+        Returns:
+            The task ids whose expired running lease was reclaimed to
+            ``failed`` (empty when none expired).
         """
         import time as _time
 

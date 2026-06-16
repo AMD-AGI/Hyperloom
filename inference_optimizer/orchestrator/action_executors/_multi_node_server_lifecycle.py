@@ -590,7 +590,14 @@ DEFAULT_DYN_SYSTEM_PORT = 9090
 
 
 def _dynamo_gpu_pod_ips(state: dict | None = None) -> list[str]:
-    """Return the dynamo GPU worker pod IPs (prefill + decode + worker)."""
+    """Return the dynamo GPU worker pod IPs (prefill + decode + worker).
+
+    Args:
+        state: Pre-read state mapping, or ``None`` to read ``state.json``.
+
+    Returns:
+        The deduplicated prefill + decode + worker pod IPs, in that order.
+    """
     st = state if state is not None else (_read_state() or {})
     ips: list[str] = []
     seen: set[str] = set()
@@ -622,6 +629,11 @@ async def trigger_dynamo_engine_profile(
     JSON payload to ``start_profile`` (e.g. the optimizer-computed
     ``PROFILE_EXTRA_BODY`` carrying start_step / num_steps); ignored for
     stop.
+
+    Args:
+        action: ``"start"`` or ``"stop"`` — selects the engine profile route.
+        body: Optional JSON payload forwarded to ``start_profile``; ignored
+            for ``stop``.
     """
     if not is_multi_node():
         return

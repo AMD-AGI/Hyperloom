@@ -52,6 +52,11 @@ _DEFAULT_DYN_SYSTEM_PORT = 9090
 
 
 def _log(msg: str) -> None:
+    """Write a timestamped launcher log line to stderr.
+
+    Args:
+        msg: The message to log.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[launch_dynamo_node {ts}] {msg}\n")
     sys.stderr.flush()
@@ -84,6 +89,10 @@ def _recover_container_env() -> dict[str, str]:
     (``NATS_SERVER`` / ``DYN_*``) live only in the container's pid1 env. We
     read ``/proc/1/environ`` (same uid — we SSH as root, pid1 is root) and
     overlay the relevant keys onto ``os.environ``.
+
+    Returns:
+        The current environment merged with pid1's recovered keys, with
+        ``/opt/venv/bin`` ensured at the front of ``PATH``.
     """
     env = dict(os.environ)
     try:
@@ -124,6 +133,12 @@ def _resolve_pod_ip(env: dict[str, str]) -> str:
     Resolution order: ``$POD_IP`` (downward API) -> egress-route probe ->
     hostname lookup. Falls back to ``127.0.0.1`` only if every method yields a
     loopback / fails (single-pod aggregated runs still work in that case).
+
+    Args:
+        env: The (recovered) environment, consulted for ``$POD_IP``.
+
+    Returns:
+        The pod's routable IP, or ``127.0.0.1`` when none can be resolved.
     """
     import socket
 
@@ -157,6 +172,9 @@ def _kill_prior(pid_file: Path) -> None:
 
     IR-5: never ``pkill -f`` — only the PID we launched. Missing / stale PID
     files are a no-op so callers can use this idempotently before launch.
+
+    Args:
+        pid_file: Path to the pid file recording the prior server's PID.
     """
     if not pid_file.is_file():
         return
@@ -195,7 +213,16 @@ def _kill_prior(pid_file: Path) -> None:
 
 
 def _build_sglang_cmd(a: argparse.Namespace, node_rank: int, leader: str) -> list[str]:
-    """dynamo.sglang multi-node command for this pod's rank."""
+    """dynamo.sglang multi-node command for this pod's rank.
+
+    Args:
+        a: Parsed launcher arguments.
+        node_rank: This pod's node rank.
+        leader: torch.distributed rendezvous leader address.
+
+    Returns:
+        The ``dynamo.sglang`` command argv for this pod's rank.
+    """
     cmd = [
         "python3", "-m", "dynamo.sglang",
         "--model-path", a.model,
@@ -221,7 +248,14 @@ def _build_sglang_cmd(a: argparse.Namespace, node_rank: int, leader: str) -> lis
 
 
 def _build_vllm_cmd(a: argparse.Namespace) -> list[str]:
-    """dynamo.vllm command (rank 0 only; workers just join the ray cluster)."""
+    """dynamo.vllm command (rank 0 only; workers just join the ray cluster).
+
+    Args:
+        a: Parsed launcher arguments.
+
+    Returns:
+        The ``dynamo.vllm`` command argv for rank 0.
+    """
     cmd = [
         "python3", "-m", "dynamo.vllm",
         "--model", a.model,
@@ -240,6 +274,19 @@ def _detach_launch(cmd: list[str], log_file: Path, pid_file: Path,
 
     Reparents the server under init so it survives the SSH session closing,
     and fails fast (with a log tail) if the child dies within 0.5s.
+
+    Args:
+        cmd: The server command argv to launch.
+        log_file: Path the detached server's stdout/stderr is written to.
+        pid_file: Path the launched PID is recorded in.
+        env: Environment for the launched process.
+
+    Returns:
+        The PID of the launched server.
+
+    Raises:
+        RuntimeError: If the detach spawn fails or the child exits within
+            0.5s of launch.
     """
     log_file.parent.mkdir(parents=True, exist_ok=True)
     pid_file.parent.mkdir(parents=True, exist_ok=True)
@@ -287,6 +334,11 @@ def _ray_start(role: str, leader: str, env: dict[str, str]) -> None:
     rank 0 -> ``ray start --head``; workers -> ``ray start --address``. vllm
     on rank 0 then discovers the workers via the GCS
     (``--distributed-executor-backend ray``).
+
+    Args:
+        role: ``"head"`` for rank 0, otherwise a worker that joins the leader.
+        leader: Leader address workers connect to.
+        env: Environment for the ``ray start`` subprocess.
     """
     if role == "head":
         ray_cmd = f"ray start --head --port {_RAY_GCS_PORT} --disable-usage-stats"
@@ -300,7 +352,17 @@ def _ray_start(role: str, leader: str, env: dict[str, str]) -> None:
 
 
 def _wait_health(port: int, timeout_s: int, pid: int | None) -> bool:
-    """Poll http://127.0.0.1:<port>/health until 200 or the pid dies."""
+    """Poll http://127.0.0.1:<port>/health until 200 or the pid dies.
+
+    Args:
+        port: Local health endpoint port to poll.
+        timeout_s: Maximum seconds to wait for a healthy response.
+        pid: Optional server PID; polling stops early if the process dies.
+
+    Returns:
+        ``True`` when the endpoint returned a 2xx status before the timeout,
+        else ``False``.
+    """
     import urllib.error
     import urllib.request
     started = time.monotonic()
@@ -326,6 +388,17 @@ def _wait_health(port: int, timeout_s: int, pid: int | None) -> bool:
 
 
 def main() -> int:
+    """Launch (or kill) this pod's Dynamo multi-node server rank.
+
+    Recovers the container env, resolves this pod's rank and rendezvous
+    leader, kills any prior server, then launches ``dynamo.sglang`` /
+    ``dynamo.vllm`` for this rank (optionally waiting for leader readiness).
+    With ``--kill-only`` it just tears down the prior server and exits.
+
+    Returns:
+        ``0`` on success, or ``2`` when required ``--model`` / ``--tp`` args
+        are missing.
+    """
     p = argparse.ArgumentParser(prog="launch_dynamo_node.py")
     p.add_argument("--framework", required=True, choices=("sglang", "vllm"))
     p.add_argument("--model", default="")

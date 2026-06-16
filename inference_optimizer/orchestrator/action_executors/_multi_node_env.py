@@ -107,6 +107,10 @@ def dynamo_ssh_env_from_state() -> dict[str, str]:
     Returns ``{}`` for the RayJob backend and single-node so the Ray placement
     path (``ray_gcs_address_from_state`` / ``RAY_ADDRESS``) is left untouched —
     this is the isolation seam that keeps the SSH path Dynamo-only.
+
+    Returns:
+        A ``{KERNEL_AGENT_GPU_PLACEMENT, MN_SSH_HOST/PORT/KEY}`` mapping for the
+        Dynamo backend when a GPU pod IP and ssh key are known, else ``{}``.
     """
     state = _read_state()
     if state.get("backend") != "dynamo":

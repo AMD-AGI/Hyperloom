@@ -1250,6 +1250,13 @@ def _normalize_profiler_op_name(name: str) -> str:
     leading C++ return-type token, a trailing ``(... Op)`` annotation, and a
     trailing ``.kd`` HSA code-object suffix. Already-clean names (e.g.
     ``sglang_profiler::...`` or ``aten::mm``) pass through unchanged.
+
+    Args:
+        name: The raw TraceLens op symbol to normalize.
+
+    Returns:
+        The normalized op symbol with capture wrappers, leading return-type
+        tokens, trailing op annotations and ``.kd`` suffixes removed.
     """
     s = (name or "").strip()
     if not s:
@@ -1398,6 +1405,16 @@ def _rank_paths(paths: list[Path], keyword: str = "") -> list[Path]:
     kw_lower = keyword.lower()
 
     def score(path: Path) -> tuple[int, int, int, int]:
+        """Relevance sort key for a candidate source path (lower sorts first).
+
+        Args:
+            path (Path): A candidate source path to rank.
+
+        Returns:
+            tuple[int, int, int, int]: ``(name_match, kind_score, ext_score,
+            depth_penalty)`` so keyword-stem matches, impl source kinds,
+            implementation extensions, and shallower paths rank ahead.
+        """
         s = str(path)
         depth_penalty = s.count("/")
         kind_score = 0
@@ -1915,7 +1932,16 @@ _SGL_KERNEL_DEVICE_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 
 def upgrade_sgl_kernel_launcher(source_file: str, kernel_name: str) -> str:
-    """Promote known sgl-kernel Python launchers to reusable HIP source."""
+    """Promote known sgl-kernel Python launchers to reusable HIP source.
+
+    Args:
+        source_file: The candidate's resolved source path.
+        kernel_name: The kernel name used for pattern matching.
+
+    Returns:
+        The promoted reusable HIP source path, or ``source_file`` unchanged
+        when no promotion applies.
+    """
     if not source_file or not kernel_name:
         return source_file
     source_posix = source_file.replace(os.sep, "/")
@@ -3009,7 +3035,17 @@ def _category_analysis_command(
     tier: str,
     output_dir: Path,
 ) -> list[str] | None:
-    """Return the TraceLens category-analysis command for one manifest category."""
+    """Return the TraceLens category-analysis command for one manifest category.
+
+    Args:
+        cat_name: The manifest category name (e.g. ``sdpa_fwd`` / ``norm_bwd``).
+        tier: The category tier; only ``compute_kernel`` produces a command.
+        output_dir: The analysis output directory passed to the tool.
+
+    Returns:
+        The TraceLens command argv for the category, or ``None`` when the
+        category is skipped or unroutable.
+    """
     if tier != "compute_kernel":
         return None
     if cat_name in _SKIP_DETERMINISTIC_CATEGORIES:
@@ -3051,7 +3087,15 @@ def _category_analysis_command(
 def _raise_on_failed_deterministic_pipeline(
     det_rc: int,
 ) -> None:
-    """Fail deterministic route on any TraceLens deterministic toolchain error."""
+    """Fail deterministic route on any TraceLens deterministic toolchain error.
+
+    Args:
+        det_rc: Return code from the deterministic TraceLens pipeline.
+
+    Raises:
+        RuntimeError: When ``det_rc`` is non-zero, to avoid returning partial
+            ``hot_kernels[]``.
+    """
     if det_rc == 0:
         return
     raise RuntimeError(
@@ -3077,6 +3121,20 @@ def _run_deterministic_tracelens_steps(
 
     Invokes the CLI tools as subprocesses so they run in the TraceLens
     package environment. Returns 0 on success.
+
+    Args:
+        trace_path: Path to the trace fed into the pipeline.
+        output_dir: Directory the pipeline writes its artifacts into.
+        tl_root: TraceLens package root used as the subprocess cwd.
+        platform: GPU arch platform string passed to the tools.
+        analysis_mode: The analysis mode selector.
+        framework: The serving framework name.
+        capture_folder: Optional TraceLens capture folder.
+        log_path: Log file the subprocess output is appended to.
+        budget_minutes: Time budget used to derive the subprocess timeout.
+
+    Returns:
+        ``0`` on success, else the first non-zero subprocess return code.
     """
     timeout_s = max(120, int(budget_minutes * 60))
 
@@ -3163,7 +3221,16 @@ def _run_deterministic_tracelens_steps(
 
 
 def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
-    """Read GPU idle percentage directly from gpu_timeline.csv."""
+    """Read GPU idle percentage directly from gpu_timeline.csv.
+
+    Args:
+        output_dir: The analysis output directory holding
+            ``perf_report_csvs/gpu_timeline.csv``.
+
+    Returns:
+        The GPU idle percentage, or ``None`` when the CSV is absent or has no
+        idle-time row.
+    """
     csv_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
     if not csv_path.exists():
         return None
@@ -3180,7 +3247,16 @@ def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
 
 
 def _extract_total_time_us_from_gpu_timeline(output_dir: Path) -> float | None:
-    """Read the trace total_time from gpu_timeline.csv (ms -> us)."""
+    """Read the trace total_time from gpu_timeline.csv (ms -> us).
+
+    Args:
+        output_dir: The analysis output directory holding
+            ``perf_report_csvs/gpu_timeline.csv``.
+
+    Returns:
+        The trace total time in microseconds, or ``None`` when the CSV is
+        absent or has no total-time row.
+    """
     csv_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
     if not csv_path.exists():
         return None
@@ -3209,6 +3285,15 @@ def _match_op_by_time(
     Returns an empty dict when no candidate is within
     ``_MATCH_OP_MAX_DELTA_MS`` milliseconds, preventing silent
     mis-association of launcher paths and shapes.
+
+    Args:
+        ops: Operation rows from a ``*_metrics.json`` file.
+        name: The operation name to match.
+        time_ms: The operation time in milliseconds to match against.
+
+    Returns:
+        The best-matching operation row, or ``{}`` when none is within
+        ``_MATCH_OP_MAX_DELTA_MS``.
     """
     best: dict[str, Any] = {}
     best_delta = float("inf")
@@ -3228,7 +3313,14 @@ def _match_op_by_time(
 
 
 def _resolve_source_file_from_kernel_path(kernel_path: str) -> str:
-    """Resolve a TraceLens launcher path to an existing absolute source file."""
+    """Resolve a TraceLens launcher path to an existing absolute source file.
+
+    Args:
+        kernel_path: The TraceLens launcher path (possibly relative).
+
+    Returns:
+        The resolved absolute source-file path, or ``""`` when none exists.
+    """
     raw_path, _, _ = _parse_launcher_path(kernel_path)
     if not raw_path:
         return ""
@@ -3267,6 +3359,21 @@ def deterministic_extract_hot_kernels(
 
     Each candidate maps to the same schema that ``_finalize_candidates``
     expects downstream (name, duration_us, efficiency_percent, etc.).
+
+    Args:
+        output_dir: The deterministic-pipeline output directory.
+        top_k: Maximum number of candidates to return.
+        log_path: Optional log file for skip/parse diagnostics.
+        fail_on_corrupt_priority: When ``True``, raise instead of returning
+            ``[]`` on a corrupt ``priority_data.json``.
+
+    Returns:
+        The hot-kernel candidate dicts, sorted by GPU time and truncated to
+        ``top_k``; ``[]`` when no priority data is available.
+
+    Raises:
+        RuntimeError: When ``priority_data.json`` cannot be parsed and
+            ``fail_on_corrupt_priority`` is ``True``.
     """
     priority_path = output_dir / "priority_data.json"
     if not priority_path.exists():
@@ -3474,6 +3581,14 @@ def generate_minimal_analysis_md(
     Deterministic hot-kernel extraction uses structured ``*_metrics.json`` and
     ``priority_data.json`` directly. This Markdown report is intentionally not
     the parser contract used by the LLM-agent route.
+
+    Args:
+        output_dir: Directory the ``analysis.md`` report is written into.
+        candidates: The finalized hot-kernel candidates to tabulate.
+        idle_pct: Optional GPU idle percentage to include in the summary.
+
+    Returns:
+        The path to the written ``analysis.md``.
     """
     report_path = output_dir / "analysis.md"
     lines: list[str] = []
@@ -3517,6 +3632,16 @@ def generate_minimal_analysis_md(
     # LLM-written recommendations — here we expose only the underlying numbers.
     if gpu_rows:
         def _timeline_pct(row_type: str) -> float | None:
+            """Return the GPU-timeline percentage for a given row type.
+
+            Args:
+                row_type (str): The timeline row ``type`` to match (e.g.
+                    ``idle_time``).
+
+            Returns:
+                float | None: The row's ``percent`` value, or ``None`` when the
+                row is absent or its percent is unparseable.
+            """
             for row in gpu_rows:
                 if (row.get("type") or "").strip().lower() == row_type:
                     try:
