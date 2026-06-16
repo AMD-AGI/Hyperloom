@@ -177,7 +177,7 @@ def test_coordinator_source_has_no_scoreboard_callers():
 
 def test_pruned_family_advisory_observation_has_no_scoreboard_vocab():
     """KB_gaps/Dead-B §B.4 — the pruned-family advisory string must not mention "Action scores"."""
-    from inference_optimizer.orchestrator import coordinator as _c
+    from inference_optimizer.orchestrator import intent_router as _c
 
     src = Path(_c.__file__).read_text(encoding="utf-8")
     advisory_idx = src.find('"delegate_pruned_advisory"')
