@@ -335,7 +335,16 @@ _PATCH_DEV_NULL = "/dev/null"
 
 
 def _strip_path_prefix(path: str, level: int) -> str:
-    """Drop ``level`` leading path components (mimics ``git apply -p<level>``)."""
+    """Drop ``level`` leading path components (mimics ``git apply -p<level>``).
+
+    Args:
+        path: The diff-header path to strip.
+        level: The number of leading components to drop (``<= 0`` is a no-op).
+
+    Returns:
+        The path with ``level`` leading components removed (or the basename
+        when there are not enough components).
+    """
     if level <= 0:
         return path
     parts = path.split("/")
@@ -349,6 +358,13 @@ def _commit_strip_level(
 
     The patch has already been applied, so modify/create targets exist in the
     tree; the level that maximises those hits is the one the forward apply used.
+
+    Args:
+        framework_root: The git checkout the patch was applied into.
+        pairs: ``(old_path, new_path)`` header pairs from the patch.
+
+    Returns:
+        The ``-p`` strip level resolving the most targets to existing files.
     """
     best_lvl, best_hits = 1, -1
     for lvl in _P_LEVELS:
@@ -378,6 +394,14 @@ def _patch_touched_paths(
     commit. Only paths that exist post-apply are emitted (pure deletions, the
     rare KEEP shape, are skipped) so the subsequent ``git add`` pathspec can
     never miss and silently stage nothing for the whole set.
+
+    Args:
+        framework_root: The git checkout the patches were applied into.
+        patches: The applied patch files to inspect.
+
+    Returns:
+        The repo-relative paths the patches modified/created that exist
+        post-apply.
     """
     out: list[str] = []
     for patch in patches:
@@ -418,6 +442,15 @@ def _git_commit_kept(
     dirty framework tree is not folded into the win commit. Best-effort: a
     commit failure (e.g. nothing staged) is non-fatal — the KEEP still stands in
     the working tree exactly as before.
+
+    Args:
+        framework_root: The git checkout to commit in.
+        message: The commit message for the KEEP.
+        paths: The repo-relative patch-touched paths to stage and commit.
+
+    Returns:
+        A ``(ok, note)`` tuple; ``ok`` is ``True`` on a successful commit or a
+        benign no-op (nothing to commit), and ``note`` carries any detail.
     """
     if not paths:
         return True, "no patch-touched paths to commit"

@@ -141,6 +141,10 @@ def _is_multi_node_sandbox() -> bool:
 
     Single-node (``is_multi_node() == False``) is unaffected — the sandbox
     IS the GPU pod, so local rocm-smi / gpureset are meaningful.
+
+    Returns:
+        ``True`` when running in multi-node mode (nodes >= 2); ``False`` for
+        single-node or when the mode cannot be determined.
     """
     try:
         from ._multi_node_env import is_multi_node

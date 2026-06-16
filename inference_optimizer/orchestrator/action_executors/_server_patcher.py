@@ -761,6 +761,13 @@ def _rollback_applied(
     Used both when a later patch fails mid-transaction and when the post-apply
     sentinel check rejects an otherwise-clean apply, so ``_apply_atomic`` never
     leaves the framework tree modified while returning ``False``.
+
+    Args:
+        applied: The ``(patch, mode)`` pairs already applied, in apply order.
+        plan: The resolved patch plan (provides ``apply_root`` / strip).
+        git: Path to the ``git`` executable.
+        patch_bin: Path to the ``patch`` executable, or ``None``.
+        strip_arg: The ``-p<N>`` strip argument string.
     """
     for prev, prev_mode in reversed(applied):
         if prev_mode == "git":
@@ -834,6 +841,15 @@ def _patch_reverse_dry_run(
     Symmetric counterpart to :func:`_patch_dry_run` for detecting patches
     that were previously applied via fuzzy ``patch`` (where ``git apply -R
     --check`` would fail due to fuzz-shifted hunks).
+
+    Args:
+        patch_bin: Path to the ``patch`` executable.
+        patch_file: The patch file to reverse dry-run.
+        cwd: Working directory the patch is tested relative to.
+        strip: The ``-p<N>`` strip count.
+
+    Returns:
+        True iff the reverse dry-run exits with return code 0.
     """
     try:
         with patch_file.open("rb") as fh:

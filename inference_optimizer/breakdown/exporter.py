@@ -31,6 +31,12 @@ def _phase_event_key(ev: dict[str, Any]) -> tuple[str, str, str]:
     ``(action, ts-to-second, change|task_id)`` with the timestamp canonicalised
     to ``...Z`` so a recorder fragment row and the collector's audit-list row
     for the same attempt collapse to one event.
+
+    Args:
+        ev: A phase-timeline event dict.
+
+    Returns:
+        The ``(action, ts-to-second, change|task_id)`` dedupe key.
     """
     return (
         str(ev.get("action") or ""),
@@ -51,6 +57,15 @@ def _merge_phase_timeline(
     the base and only append fragment rows whose dedupe key is missing (the
     crash-survivable audit rows the on-disk state may have lost). Result stays
     sorted by ``ts`` like the collector's own output.
+
+    Args:
+        fragment: The recorder ``phase_timeline`` fragment (may be any type).
+        collector_value: The collector-computed phase timeline used as the
+            base.
+
+    Returns:
+        The merged timeline (collector base plus missing fragment rows),
+        sorted by ``ts``.
     """
     base: list[dict[str, Any]] = (
         list(collector_value) if isinstance(collector_value, list) else []
@@ -139,6 +154,10 @@ def _attach_kernel_roofline(
     surfaced empty (roofline enrichment happens after discovery records). Pure
     best-effort: a missing/empty roofline table or kernel just leaves the
     journey untouched.
+
+    Args:
+        kernel_journey: The kernel-journey view mutated in place.
+        kernel_roofline: The per-kernel roofline table to merge from.
     """
     if not isinstance(kernel_journey, dict) or not isinstance(
         kernel_roofline, dict,
@@ -226,7 +245,17 @@ def build(
     schema_version = SCHEMA_VERSION_V3 if assembled else SCHEMA_VERSION
 
     def _pick(section: str, collector_value: Any) -> Any:
-        """Fragment value if recorded and non-empty, else the collector value."""
+        """Fragment value if recorded and non-empty, else the collector value.
+
+        Args:
+            section: The breakdown section name to look up in the recorder
+                fragments.
+            collector_value: The fallback collector-computed value.
+
+        Returns:
+            The recorder fragment value when present and non-empty, else
+            ``collector_value``.
+        """
         frag = assembled.get(section)
         if isinstance(frag, list) and frag:
             return frag
@@ -496,7 +525,16 @@ def _load_assembled(
 ) -> dict[str, Any]:
     """Assemble recorder fragments into ``{section: value}`` (empty on opt-out
     or when no fragments exist). Never raises — a recorder bug must not poison
-    the export; it just falls back to collectors."""
+    the export; it just falls back to collectors.
+
+    Args:
+        session_dir: The hyperloom session directory.
+        warnings: Accumulator appended to when assembly fails.
+
+    Returns:
+        The assembled ``{section: value}`` mapping, or an empty dict when the
+        recorder is disabled, no fragments exist, or assembly fails.
+    """
     disabled = os.environ.get(
         "INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER", "",
     ).strip().lower() in ("1", "true", "yes")
