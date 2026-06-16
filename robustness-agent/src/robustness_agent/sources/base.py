@@ -97,7 +97,14 @@ class SourceData:
     degraded_reason: str | None = None
 
     def merge_from(self, other: "SourceData") -> None:
-        """Merge another snapshot in, preserving non-empty existing fields."""
+        """Merge another snapshot into this one in place.
+
+        Existing non-empty fields are preserved; only empty slots are
+        filled from ``other``.
+
+        Args:
+            other: The snapshot to merge fields from.
+        """
         for slot in (
             "session_pods",
             "session_events",
