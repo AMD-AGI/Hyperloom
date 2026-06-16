@@ -635,9 +635,18 @@ class RobustnessServerSource:
         """Fan out cluster pod metrics across the session's pods.
 
         Decodes each per-pod response into the LocalProbe ``local_gpu``
-        schema and merges them into one snapshot. A 5xx / transport
-        failure on any pod re-raises :class:`SourceUnavailable` so the
-        DegradeRouter degrades.
+        schema and merges them into one snapshot.
+
+        Args:
+            pods: Session pod rows to fetch metrics for.
+            window: Metrics time window to request.
+
+        Returns:
+            A merged ``local_gpu`` snapshot mapping (empty when no pods).
+
+        Raises:
+            SourceUnavailable: On a 5xx / transport failure for any pod, so
+                the DegradeRouter degrades.
         """
 
         refs = _unique_pod_refs(pods)
@@ -678,11 +687,17 @@ def _extract_session_id(ctx: Any) -> str:
 
 
 def _unique_pod_refs(pods: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    """Distinct (namespace, name) tuples from session_pods.
+    """Return the distinct ``(namespace, name)`` tuples from session pods.
 
     Rows carry the pod under ``pod.namespace`` / ``pod.name``; a pod may
     recur across open/close cycles so we collapse to the unique set to
     avoid duplicating the cluster-metrics fan-out.
+
+    Args:
+        pods: Session pod rows.
+
+    Returns:
+        The unique ``(namespace, name)`` tuples in first-seen order.
     """
 
     seen: set[tuple[str, str]] = set()
@@ -711,6 +726,12 @@ def _extract_hierarchy_pods(
     Accepts ``pods`` (documented), ``children`` / ``items`` (mirrors),
     and a single ``pod`` (degraded response) so an upstream schema nudge
     does not silently disable multi-node fan-out.
+
+    Args:
+        hierarchy: The workload hierarchy response, if any.
+
+    Returns:
+        The extracted pod row dicts (empty when none found).
     """
 
     if not isinstance(hierarchy, dict):
@@ -734,6 +755,13 @@ def _merge_pods(
     Hierarchy rows are wrapped in the session-pod envelope
     (``{"pod": {...}}``) so downstream consumers see a uniform shape.
     Session entries win on conflicts (richer phase / role metadata).
+
+    Args:
+        session_pods: Pods reported by the session source.
+        extra_pods: Pods derived from the workload hierarchy.
+
+    Returns:
+        The merged, de-duplicated pod list.
     """
 
     out: list[dict[str, Any]] = list(session_pods or [])

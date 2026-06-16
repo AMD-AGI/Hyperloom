@@ -30,7 +30,11 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
 def _log(msg: str) -> None:
-    """Stderr-only timestamped log line (stdout is reserved for the final JSON)."""
+    """Stderr-only timestamped log line (stdout is reserved for the final JSON).
+
+    Args:
+        msg: The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[kernel_patch_multinode {ts}] {msg}\n")
     sys.stderr.flush()
@@ -84,7 +88,23 @@ def _apply_remote(
     backup_dir: str,
     kernel_id: str,
 ) -> dict:
-    """Apply a single patch on this pod; raises on any error (surfaced via ``ray.get``)."""
+    """Apply a single patch on this pod; raises on any error (surfaced via ``ray.get``).
+
+    Args:
+        target_path: Absolute path of the file to overwrite on the pod.
+        patch_b64: Base64-encoded new file contents.
+        backup_dir: Directory where the pre-patch original is saved.
+        kernel_id: Optional id used to construct the backup filename.
+
+    Returns:
+        dict: Per-host result with the target path, backup path, byte count,
+        and compile status.
+
+    Raises:
+        FileNotFoundError: If ``target_path`` does not exist on the pod.
+        ValueError: If ``patch_b64`` is not valid base64, or if a ``.py``
+            target fails to compile (it is auto-reverted first).
+    """
     host = socket.gethostname()
     target = Path(target_path)
     if not target.is_file():
@@ -127,7 +147,16 @@ def _revert_remote(
     target_path: str,
     backup_path: str,
 ) -> dict:
-    """Restore ``target_path`` from ``backup_path`` on this pod; noop when the backup is missing."""
+    """Restore ``target_path`` from ``backup_path`` on this pod; noop when the backup is missing.
+
+    Args:
+        target_path: Absolute path of the file to restore on the pod.
+        backup_path: Path of the saved pre-patch backup.
+
+    Returns:
+        dict: Per-host result with ``status`` of ``restored`` or
+        ``noop_missing_backup``.
+    """
     host = socket.gethostname()
     target = Path(target_path)
     backup = Path(backup_path)

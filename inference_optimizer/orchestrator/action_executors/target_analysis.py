@@ -93,7 +93,14 @@ class TargetAnalysisExecutor:
     def _resolve_session_dir(self, ctx: RunnerContext) -> Path | None:
         """Resolve session_dir: ``ctx.extra["session_dir"]`` >
         ``task.params["session_dir"]`` > constructor arg >
-        ``paths.session_dir()``; ``None`` when nothing resolves."""
+        ``paths.session_dir()``; ``None`` when nothing resolves.
+
+        Args:
+            ctx: The runner context carrying ``task.params`` and ``extra``.
+
+        Returns:
+            The resolved session directory, or ``None`` when nothing resolves.
+        """
         extra = getattr(ctx, "extra", None) or {}
         cand = extra.get("session_dir")
         if cand:
@@ -202,7 +209,17 @@ class TargetAnalysisExecutor:
         session_dir: Path,
     ) -> dict[str, Any]:
         """Build the small bus-friendly result payload (pointer + status;
-        the heavy JSON stays on disk)."""
+        the heavy JSON stays on disk).
+
+        Args:
+            ctx: The runner context (supplies ``task.kind``).
+            summary: The baseline comparison summary object.
+            session_dir: Session directory the report artefacts live under.
+
+        Returns:
+            The bus-friendly result dict with status, pointers, and best-point
+            metrics when available.
+        """
         from ...session_paths import target_analysis_report_md, target_baseline_json
         json_path = target_baseline_json(session_dir)
         md_path = target_analysis_report_md(session_dir)
