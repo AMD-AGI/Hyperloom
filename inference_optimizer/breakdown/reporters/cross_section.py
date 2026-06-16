@@ -109,6 +109,13 @@ def _gain_attribution_lines(
 
     Priority: validated ``source_breakdown`` split, then single-entry
     ``final.action_path``, then best-effort ``optimization_stack``.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        A tuple of the human-readable attribution lines and a label
+        describing the method used to derive them.
     """
     attribution = breakdown.get("attribution") or {}
     sb = attribution.get("source_breakdown") or {}
@@ -180,7 +187,15 @@ def _data_quality_flags(
     breakdown: dict[str, Any],
     rendered: list[RenderedSection],
 ) -> list[str]:
-    """Collect de-duplicated data-quality warnings from renderers + global cross-section checks."""
+    """Collect de-duplicated data-quality warnings from renderers + global cross-section checks.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+        rendered: Rendered sections whose warnings are folded in.
+
+    Returns:
+        A de-duplicated list of data-quality flag strings.
+    """
     flags: list[str] = []
     seen: set[str] = set()
 
