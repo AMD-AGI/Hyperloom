@@ -100,11 +100,35 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _resolve_framework_root(explicit: str | None) -> Path | None:
+def _root_contains_patch_targets(root: Path, patch_paths: list[Path]) -> bool:
+    """True when *every* supplied patch has all its modify/delete targets
+    present under ``root`` (at some ``-p`` strip level).
+
+    A patch only applies in the package tree that actually contains the files
+    it edits; ``vllm/...`` patches can never apply under the ``aiter`` root.
+    Returns False if any patch is unreadable or has a missing target here.
+    """
+    if not patch_paths:
+        return False
+    for patch in patch_paths:
+        try:
+            text = patch.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        if patch_targets_missing(text, root):
+            return False
+    return True
+
+
+def _resolve_framework_root(
+    explicit: str | None, patch_paths: list[Path] | None = None,
+) -> Path | None:
     """Pick the framework source root for patches.
 
-    Precedence: explicit param → first existing
-    ``resolve_source_file_allowlist()`` entry. None when nothing resolves.
+    Precedence: explicit param → first allowlist root whose tree actually
+    contains the patch targets (target-aware: a ``vllm/...`` patch must apply
+    under the vllm root, not the first allowlist entry which is ``aiter``) →
+    first existing git root → first existing dir. None when nothing resolves.
     """
     if explicit:
         p = Path(explicit)
@@ -114,13 +138,17 @@ def _resolve_framework_root(explicit: str | None) -> Path | None:
             "integrate_patch: framework_source_root override %r does not "
             "exist; falling back to allowlist", explicit,
         )
-    for root in resolve_source_file_allowlist():
-        p = Path(root)
+    roots = [Path(r) for r in resolve_source_file_allowlist()]
+    # Target-aware: prefer the root that actually holds the patch's targets.
+    if patch_paths:
+        for p in roots:
+            if p.is_dir() and _root_contains_patch_targets(p, patch_paths):
+                return p
+    for p in roots:
         if p.is_dir() and (p / ".git").exists():
             return p
     # Last resort: a non-git dir (prefer surfacing as clean apply_failed).
-    for root in resolve_source_file_allowlist():
-        p = Path(root)
+    for p in roots:
         if p.is_dir():
             return p
     return None
@@ -659,6 +687,7 @@ class IntegratePatchExecutor:
 
         framework_root = _resolve_framework_root(
             params.get("framework_source_root") or None,
+            patch_paths=patch_paths,
         )
         # Pure config_changes path works without a framework root.
         if patch_paths and framework_root is None:
