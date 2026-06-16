@@ -16,7 +16,7 @@ This repository treats **documentation-only** pushes and pull requests the same 
 
 | Check (concept) | Implemented in Actions | Skipped for doc-only events? |
 |-----------------|------------------------|------------------------------|
-| **Pytest** (full suite with coverage reporting) | [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml) (invokes `pytest` with flags from `pyproject.toml` via `ci/coverage_summary.py`) | Yes (`paths-ignore` on `push` / `pull_request` for all branches) |
+| **Pytest** (full suite with coverage reporting) | [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml) (reads ``[tool.hyperloom.tests_coverage]`` / coverage config from ``pyproject.toml`` via inline Python) | Yes (`paths-ignore` on `push` / `pull_request` for all branches) |
 | **CodeQL** | [`.github/workflows/codeql.yml`](.github/workflows/codeql.yml) | Yes on **PR and push** when doc-only (`paths-ignore`); **no** — the **weekly schedule** on the default branch still runs a full analysis |
 | **Ruff** (lint + format check) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`ruff check` / `ruff format --check`; steps use `continue-on-error: true` until backlog is cleared) | Yes (same `paths-ignore` as tests / CodeQL) |
 | **Pylint** (errors-only) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`pylint --errors-only` on `inference_optimizer`, `robustness_agent`, `framework_agent`, critic `runtime`, `quantization_agent`; advisory `continue-on-error`) | Yes (same `paths-ignore`) |
@@ -44,8 +44,8 @@ These GitHub jobs are optional from a default merge-policy perspective; skipping
 - Create and activate a virtual environment.
 - Install dependencies (including test extras):  
   `pip install -e .[test]`
-- To mirror the coverage CI job locally (pytest-cov + same flags as Actions):  
-  `pip install -e ".[test,ci]"` then run `pytest` with the arguments printed by `python3 ci/coverage_summary.py --pytest-ci-args` (they match the `[tool.hyperloom.tests_coverage]` table in `pyproject.toml`).
+- To mirror the coverage CI job locally:  
+  `pip install -e ".[test,ci]"` then run `pytest` with the same arguments as in the `[tool.hyperloom.tests_coverage]` table in `pyproject.toml` (see ``tests-coverage.yml`` for the exact list: marker filter + ``--cov`` flags).
 - If you plan to run lint/type checks, install tools:  
   `pip install ruff mypy`
 
@@ -58,7 +58,7 @@ These GitHub jobs are optional from a default merge-policy perspective; skipping
 
 ### Coverage (source of truth)
 
-**Authoritative UT coverage** for this repository comes only from the GitHub Actions workflow [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml). **Policy lives in `pyproject.toml`**: `[tool.coverage.run]` / `[tool.coverage.report]` (measured trees and `fail_under`), and `[tool.hyperloom.tests_coverage]` (full CI `pytest` argv: marker filter + pytest-cov flags, plus the documented name of the optional relax variable for `fail_under`). The workflow runs `ci/coverage_summary.py` so the Summary table tracks **`[tool.coverage.run].source`** without duplicating that list in YAML. Measured code includes **`ci/`** (alongside `OOB/`, `quantization_agent/`, etc.). The workflow installs **`OOB/`** (`pip install -e OOB/.`) so `agent_mcp_server` tests run; mirror that locally when working on [`inference_optimizer/tests/test_oob_units.py`](inference_optimizer/tests/test_oob_units.py).
+**Authoritative UT coverage** for this repository comes only from the GitHub Actions workflow [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml). **Policy lives in `pyproject.toml`**: `[tool.coverage.run]` / `[tool.coverage.report]` (measured trees and `fail_under`), and `[tool.hyperloom.tests_coverage]` (full CI `pytest` argv: marker filter + pytest-cov flags, plus the documented name of the optional relax variable for `fail_under`). The workflow writes the job Summary from the same ``source`` list (no duplicate script under ``ci/``). Default pytest **does not** collect ``ci/*.py``; the ``ci/*`` tree is **omitted** from coverage measurement. When **`OOB/`** is present in the clone, the workflow runs `pip install -e "./OOB"` so `agent_mcp_server` tests run; mirror that locally when working on [`inference_optimizer/tests/test_oob_units.py`](inference_optimizer/tests/test_oob_units.py).
 
 Setting the repository variable **`COVERAGE_RELAX_FAIL_UNDER`** to `1` / `true` / `yes` / `on` disables `fail_under` enforcement in CI (pytest uses `--cov-fail-under=0` and the strict coverage gate is skipped). Default is strict when the variable is unset.
 

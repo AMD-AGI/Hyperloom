@@ -33,15 +33,14 @@ test = [
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
     "respx>=0.21",
+    "requests>=2.28",
 ]
-# CI / local mirror of the coverage job: ``pip install -e ".[test,ci]"`` then
-# ``pytest $(python3 ci/coverage_summary.py --pytest-ci-args | tr '\n' ' ')`` or
-# use ``readarray`` as in ``tests-coverage.yml``. ``tomli`` is only required on
-# Python <3.11 for ``ci/coverage_summary.py``.
+# CI / local mirror of the coverage job: ``pip install -e ".[test,ci]"``.
+# ``tomli`` is only required on Python <3.11 when inline scripts read
+# ``pyproject.toml`` with the same loader as Actions.
 ci = [
     "pytest-cov>=5.0",
     "coverage>=7.0",
-    "requests>=2.28",
     "tomli>=2.0.1; python_version < '3.11'",
 ]
 # Optional live-Langfuse trace push (HYPERLOOM_LANGFUSE_ENABLE=1). The local
@@ -76,14 +75,13 @@ testpaths = [
     "robustness-agent/tests",
     "critic-agent/runtime/tests",
     "quantization_agent/tests",
-    "ci/test_submit_body.py",
     "kernel-agent/tools/test_tracelens_arch_benchmark.py",
     "kernel-agent/tools/test_ray_fd_limit.py",
     "kernel-agent/tools/test_gemm_tuning.py",
     "kernel-agent/tools/test_rocprof_roofline.py",
     "kernel-agent/tools/test_harness_generator.py",
 ]
-pythonpath = [".", "ci", "robustness-agent/src", "critic-agent", "framework-agent/src"]
+pythonpath = [".", "robustness-agent/src", "critic-agent", "framework-agent/src"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
@@ -94,8 +92,8 @@ filterwarnings = [
 ]
 
 # Coverage configuration: limit coverage measurement to first-party
-# ``source`` trees (including ``ci/`` for ``optimize_submit`` and related
-# helpers exercised by ``ci/test_submit_body.py``). ``OOB/`` and
+# ``source`` trees. The ``ci/*`` pipeline is omitted from measurement and is
+# not part of default pytest ``testpaths`` here. ``OOB/`` and
 # ``quantization_agent/`` are included; combined line coverage is gated by
 # ``fail_under`` in ``[tool.coverage.report]`` (CI can relax enforcement via
 # repository variable named in ``[tool.hyperloom.tests_coverage]``).
@@ -121,9 +119,9 @@ source = [
     "kernel-agent/tools",
     "quantization_agent",
     "OOB",
-    "ci",
 ]
 omit = [
+    "ci/*",
     "*/tests/*",
     "*/__init__.py",
     "*/__main__.py",
@@ -210,8 +208,8 @@ precision = 2
 # Line coverage across all ``[tool.coverage.run].source`` trees (UT run in CI).
 fail_under = 90
 
-# GitHub Actions ``tests-coverage.yml`` reads this table via ``ci/coverage_summary.py``
-# so the CI ``pytest`` argv (markers + pytest-cov) stays out of workflow YAML.
+# GitHub Actions ``tests-coverage.yml`` reads ``pytest_ci_args`` from this table
+# using inline Python (no separate helper script under ``ci/``).
 [tool.hyperloom.tests_coverage]
 # Full trailing argv for ``pytest`` in ``tests-coverage.yml`` (marker filter + cov).
 pytest_ci_args = [
