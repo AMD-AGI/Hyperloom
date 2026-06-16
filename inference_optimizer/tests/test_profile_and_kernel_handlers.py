@@ -655,6 +655,67 @@ def test_materialize_profile_sglang_does_not_duplicate_shape_discovery(
     assert extra.count("--enable-shape-discovery-for-cuda-graph-profile") == 1, extra
 
 
+def _profile_yaml_model(tmp_path, framework: str, model: str, envs: dict) -> Path:
+    """Like _profile_yaml but with an explicit model path (for Gemma2 gating)."""
+    import yaml as _yaml
+    src = tmp_path / f"src_{framework}_model.yaml"
+    src.write_text(_yaml.safe_dump({
+        "benchmark": {
+            "framework": framework,
+            "model": model,
+            "envs": {"PROFILE": "1", **envs},
+            "profiler": {"torch_profiler": {"enabled": True}},
+        },
+    }))
+    return src
+
+
+def test_materialize_profile_sglang_skips_shape_discovery_for_gemma2(
+    tmp_path, monkeypatch,
+):
+    """Gemma2 + patched SGLang must NOT inject shape-discovery (it crashes
+    CUDA-graph capture); --enable-profile-cuda-graph still applies."""
+    import json
+    import yaml
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    model = tmp_path / "gemma2_model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({
+        "model_type": "gemma2", "architectures": ["Gemma2ForCausalLM"],
+    }), encoding="utf-8")
+    src = _profile_yaml_model(
+        tmp_path, "sglang", str(model), {"CONC": 32, "ISL": 256, "OSL": 1024},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert "shape-discovery" not in envs.get("EXTRA_SGLANG_ARGS", ""), envs
+    assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is False
+
+
+def test_materialize_profile_sglang_keeps_shape_discovery_for_non_gemma2(
+    tmp_path, monkeypatch,
+):
+    """A non-Gemma2 model still gets shape-discovery when patched."""
+    import json
+    import yaml
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    model = tmp_path / "llama_model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({
+        "model_type": "llama", "architectures": ["LlamaForCausalLM"],
+    }), encoding="utf-8")
+    src = _profile_yaml_model(
+        tmp_path, "sglang", str(model), {"CONC": 32, "ISL": 256, "OSL": 1024},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
+        "EXTRA_SGLANG_ARGS", "",
+    )
+    assert "--enable-shape-discovery-for-cuda-graph-profile" in extra, extra
+
+
 def test_profile_executor_calls_benchmark_lib_patcher():
     """ProfileExecutor must patch the materialized InferenceX checkout before launching Magpie (else the computed profile window is stomped and the trace is empty)."""
     import inference_optimizer.orchestrator.action_executors.profile as profile_mod
