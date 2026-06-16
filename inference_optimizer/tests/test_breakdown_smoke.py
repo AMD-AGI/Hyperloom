@@ -276,6 +276,7 @@ def test_envelope(fixture_session: Path) -> None:
     for key in (
         "session", "workload", "baseline", "final", "phase_timeline",
         "capability_summary", "geak_invocations", "oob_invocations",
+        "forge_invocations",
         "kernel_lifecycle", "param_search", "sweep", "critic_robustness",
         "telemetry", "attribution", "warnings", "source_files",
     ):

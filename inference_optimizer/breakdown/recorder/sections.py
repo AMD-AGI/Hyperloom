@@ -31,6 +31,7 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "phase_timeline":              "item",
     "geak_invocations":            "item",
     "oob_invocations":             "item",
+    "forge_invocations":           "item",
     "kernel_lifecycle":            "singleton",
     "explore_search":              "singleton",
     "sweep":                       "singleton",

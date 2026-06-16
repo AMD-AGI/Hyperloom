@@ -34,10 +34,14 @@ log = logging.getLogger(__name__)
 PRODUCER_COORDINATOR = "coordinator"
 PRODUCER_KERNEL_AGENT = "kernel-agent"
 
-# kernel-agent backend -> invocation section. geak is its own lane; the
-# out-of-band LLM backends (claude/codex) share the oob lane.
+# kernel-agent backend -> invocation section. Three independent lanes: geak,
+# the out-of-band LLM backends (claude/codex) on the oob lane, and forge
+# (Kernel-Forge autonomous loop) on its own lane. forge is NOT folded into oob
+# — it is a distinct backend, so it gets a distinct ``forge_invocations``
+# section (and a distinct capability/attribution row downstream).
 _GEAK_BACKENDS = frozenset({"geak"})
 _OOB_BACKENDS = frozenset({"claude", "codex"})
+_FORGE_BACKENDS = frozenset({"forge"})
 
 _FAILED_STATUSES = frozenset({"failed", "error", "crashed", "timeout"})
 
@@ -288,6 +292,8 @@ def _invocation_section(backend: str) -> str | None:
     b = str(backend or "").lower()
     if b in _GEAK_BACKENDS:
         return "geak_invocations"
+    if b in _FORGE_BACKENDS:
+        return "forge_invocations"
     if b in _OOB_BACKENDS:
         return "oob_invocations"
     return None
@@ -424,6 +430,10 @@ _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     "geak":         {"root_env": "GEAK_ROOT",                 "version": "git_short"},
     "mini":         {"root_env": "GEAK_ROOT",                 "version": "git_short"},
     "geak-gaagent": {"root_env": "GEAK_ROOT",                 "version": "git_short"},
+    # forge (Kernel-Forge autonomous loop) is its own backend; it locates its
+    # repo via $FORGE_PATH (forge_submit also accepts $KERNEL_FORGE_ROOT /
+    # $KERNEL_FORGE_PATH, but root resolution here pins the primary env var).
+    "forge":        {"root_env": "FORGE_PATH",               "version": "git_short"},
     "claude":       {"root_env": "",                          "version": ("cmd", ("claude", "--version"))},
     "codex":        {"root_env": "",                          "version": ("cmd", ("codex", "--version"))},
     "oob":          {"root_env": "",                          "version": ("dist", ("oob-mcp-server",))},
