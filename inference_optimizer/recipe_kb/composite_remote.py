@@ -344,7 +344,7 @@ class CompositeRemoteRecipeClient:
         """Search all active sources and return merged, ranked rows.
 
         Args:
-            label_match: Exact label filters (the 5-tuple identity labels).
+            label_match: Exact label filters (the 7-tuple identity labels).
             metric_filters: ``{metric: {min, max}}`` filters.
             updated_since: Lower bound on ``updated_at``.
             order_by: Ordering directive forwarded to sub-remotes.
@@ -375,15 +375,11 @@ class CompositeRemoteRecipeClient:
         canonical_id: str,
         version: int | None = None,
     ) -> dict[str, Any] | None:
-        """Exact-cid read: search every source by the 5-tuple labels, merge top.
+        """Exact-cid read: fast-path each source's get_recipe, then merge.
 
-        Args:
-            canonical_id: Canonical recipe id to resolve.
-            version: Optional version (accepted for parity; not used to filter).
-
-        Returns:
-            The merged row matching ``canonical_id``, the top merged row when
-            no exact match is found, or ``None`` when nothing is available.
+        Prefers per-source ``get_recipe`` (which uses slug-based direct
+        lookup on gbrain) over the expensive ``search`` scan. Falls back
+        to label-match search only when all fast-paths miss.
         """
         try:
             labels = _labels_from_canonical_id(canonical_id)

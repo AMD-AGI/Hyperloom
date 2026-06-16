@@ -107,7 +107,7 @@ class _Spec:
 
     def cortex_v2_row(self) -> dict[str, Any]:
         """Render as a central kb-service v2-nested recipe row."""
-        model_s, hw_s, fw_s, fwv_s, prec_s = cid_to_path_components(self.cid)
+        model_s, hw_s, fw_s, mt_s, arch_s, fwv_s, prec_s = cid_to_path_components(self.cid)
         return {
             "canonical_id": self.cid,
             "version": 1,
@@ -117,6 +117,8 @@ class _Spec:
                 "framework": fw_s,
                 "framework_version": fwv_s,
                 "precision": prec_s,
+                "model_type": mt_s,
+                "architectures": arch_s,
             },
             "body": {
                 "best_config": self.best_config,
@@ -346,7 +348,7 @@ def test_gbrain_transport_error_falls_back_to_local(tmp_path) -> None:
     )
 
     spec = SPECS[0]
-    model_s, hw_s, fw_s, fwv_s, prec_s = cid_to_path_components(spec.cid)
+    model_s, hw_s, fw_s, _mt, _arch, fwv_s, prec_s = cid_to_path_components(spec.cid)
     local = LocalRecipeStore(root=tmp_path)
     local.put_recipe(
         canonical_id=spec.cid,

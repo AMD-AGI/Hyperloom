@@ -45,7 +45,7 @@ def _cid(
 def test_cid_to_path_components_roundtrip() -> None:
     cid = _cid(model="qwen3-30b-a3b", precision="bf16")
     parts = cid_to_path_components(cid)
-    assert parts == ("qwen3-30b-a3b", "mi300x", "sglang", "0.4.5", "bf16")
+    assert parts == ("qwen3-30b-a3b", "mi300x", "sglang", "unknown_model_type", "unknown_arch", "0.4.5", "bf16")
 
 
 def test_cid_to_path_components_rejects_legacy_4_segment_id() -> None:
@@ -54,15 +54,21 @@ def test_cid_to_path_components_rejects_legacy_4_segment_id() -> None:
         cid_to_path_components("inference:m:fw:hw")
 
 
+def test_cid_to_path_components_accepts_legacy_6_segment() -> None:
+    """Legacy 5-tuple (6-segment) ids are padded with defaults."""
+    parts = cid_to_path_components("inference:model:hw:fw:ver:prec")
+    assert parts == ("model", "hw", "fw", "unknown_model_type", "unknown_arch", "ver", "prec")
+
+
 def test_cid_to_path_components_rejects_wrong_prefix() -> None:
     with pytest.raises(InvalidCanonicalIdError) as ei:
-        cid_to_path_components("recipe:m:hw:fw:v:p")
+        cid_to_path_components("recipe:m:hw:fw:v:p:mt:arch")
     assert "prefix" in ei.value.reason
 
 
 def test_cid_to_path_components_rejects_empty_segment() -> None:
     with pytest.raises(InvalidCanonicalIdError):
-        cid_to_path_components("inference:m::fw:v:p")
+        cid_to_path_components("inference:m::fw:v:p:mt:arch")
 
 
 def test_canonical_id_for_path_inverse_of_cid_decomposition(
@@ -100,9 +106,8 @@ def test_put_recipe_first_call_creates_live_at_version_1(
     assert live["best_config"]     == {"tp": "8"}
     assert live["best_throughput"] == 24300.5
     assert live["created_at"] == live["updated_at"]
-    # Live row sits at the documented 5-level depth.
-    rel = (tmp_path / "deepseek-r1" / "mi300x" / "sglang" / "0.4.5" / "fp8"
-           / RECIPE_FILENAME)
+    # Live row sits at the documented 7-level depth.
+    rel = (tmp_path / "deepseek-r1" / "mi300x" / "sglang" / "unknown_model_type" / "unknown_arch" / "0.4.5" / "fp8" / RECIPE_FILENAME)
     assert rel.is_file()
 
 
@@ -633,7 +638,7 @@ def test_recipe_payload_carries_canonical_id_and_version(tmp_path: Path) -> None
 
 def test_history_dir_lives_at_six_levels_below_root(tmp_path: Path) -> None:
     """``history/`` is the only directory that may sit below the
-    5-level recipe dir; the walker MUST NOT recurse into it."""
+    7-level recipe dir; the walker MUST NOT recurse into it."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(canonical_id=cid)
@@ -643,4 +648,4 @@ def test_history_dir_lives_at_six_levels_below_root(tmp_path: Path) -> None:
     )
     assert history_dir.is_dir()
     rel = history_dir.relative_to(tmp_path).parts
-    assert len(rel) == 6
+    assert len(rel) == 8  # 7 identity levels + history dir
