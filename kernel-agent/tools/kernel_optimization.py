@@ -576,10 +576,12 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
         return [], notes
 
     # Unified ladder: forge FIRST (Kernel-Forge autonomous loop; falls through to
-    # geak/claude/codex when forge skips a non-triton candidate or misses a KEEP),
-    # then GEAK, then claude/codex. Without a benchmark GEAK still attempts but flags
+    # geak when forge skips a non-triton candidate or misses a KEEP), then GEAK.
+    # claude/codex are NOT auto-selected anymore — enable them only via explicit
+    # --backends or KERNEL_OPT_BACKEND_ORDER/KERNEL_OPT_BACKENDS env (handled
+    # above). Without a benchmark GEAK still attempts but flags
     # geak_without_benchmark=True so KEEP gates know confidence is reduced.
-    selected = ["forge", "geak", "claude", "codex"]
+    selected = ["forge", "geak"]
     if not benchmark_available:
         notes["geak_without_benchmark"] = True
     return selected, notes
