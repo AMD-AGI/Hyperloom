@@ -377,6 +377,41 @@ def parse_oob_json_usage(stdout: str) -> dict[str, int | None] | None:
     return normalize_usage(last_usage)
 
 
+def parse_forge_usage(stdout: str) -> dict[str, int | None] | None:
+    """Extract the run's LLM usage from a Kernel-Forge backend's stdout log.
+
+    Kernel-Forge's autonomous loop drives the claude-agent-sdk in-process, so
+    (unlike GEAK/OOB) there is no single SDK ``usage`` envelope on stdout.
+    Instead ``forge_submit`` aggregates the per-query ``ResultMessage`` token
+    spend (via Kernel-Forge's ``UsageAccumulator``) and prints one canonical
+    marker line::
+
+        FORGE_LLM_USAGE {"input_tokens": ..., "output_tokens": ...,
+                         "cache_creation_input_tokens": ..., ...}
+
+    This parser recovers the *last* such marker (the authoritative run total).
+    The four canonical counters come straight from the claude usage shape.
+    Returns ``None`` when no marker is present (older Forge / no-agent run).
+    """
+    if not stdout or "FORGE_LLM_USAGE" not in stdout:
+        return None
+    last_usage: dict[str, Any] | None = None
+    for line in stdout.splitlines():
+        marker = line.partition("FORGE_LLM_USAGE")
+        if not marker[1]:
+            continue
+        blob = marker[2].strip()
+        if not blob:
+            continue
+        try:
+            obj = json.loads(blob)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict) and obj:
+            last_usage = obj
+    return normalize_usage(last_usage)
+
+
 def parse_geak_usage(
     payload: dict[str, Any] | str | None,
 ) -> dict[str, int | None] | None:
@@ -448,4 +483,5 @@ __all__ = [
     "parse_claude_stream_json_tool_calls",
     "parse_claude_stream_json_turn_usages",
     "parse_claude_stream_json_usage",
+    "parse_forge_usage",
 ]

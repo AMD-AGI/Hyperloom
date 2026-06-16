@@ -55,6 +55,7 @@ VALID_COMPONENTS: frozenset[str] = frozenset({
     "proposal_scorer",
     "geak",
     "oob",
+    "forge",
     "tracelens",
     "breakdown",
 })

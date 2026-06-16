@@ -26,7 +26,11 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .trace.llm_trace import LLMCallRecord, append_llm_call
-from .trace.parse_usage import parse_geak_usage, parse_oob_json_usage
+from .trace.parse_usage import (
+    parse_forge_usage,
+    parse_geak_usage,
+    parse_oob_json_usage,
+)
 
 
 log = logging.getLogger(__name__)
@@ -36,9 +40,11 @@ KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 
 # kernel_optimization attempt backends whose stdout log we mine for token
 # usage. ``geak`` uses litellm (OpenAI-shape usage); ``oob`` runs ``oob run
-# --json`` whose envelope may carry a ``usage`` block. The other backends
-# (claude/codex/cursor) already account their spend via their own paths.
-_TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"geak", "oob"})
+# --json`` whose envelope may carry a ``usage`` block; ``forge`` (Kernel-Forge
+# autonomous loop) prints a ``FORGE_LLM_USAGE {json}`` marker aggregated from
+# its claude-agent-sdk ResultMessages. The other backends (claude/codex/cursor)
+# already account their spend via their own paths.
+_TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"geak", "oob", "forge"})
 
 
 # Where the kernel-agent shell tools live; read lazily so cli.py's late env injection wins.
@@ -2321,7 +2327,8 @@ def _trace_kernel_attempt_usage(
     ``optimized_path`` (the backend's full ``*_stdout.log``). For the
     token-traced backends (:data:`_TOKEN_TRACED_KERNEL_BACKENDS`) we read that
     log and run the matching usage parser (``geak`` → :func:`parse_geak_usage`,
-    ``oob`` → :func:`parse_oob_json_usage`). A row is appended only when a
+    ``oob`` → :func:`parse_oob_json_usage`, ``forge`` →
+    :func:`parse_forge_usage`). A row is appended only when a
     usage block is actually recovered — backends that don't emit usage stay a
     silent no-op rather than logging fabricated zeros.
 
@@ -2350,6 +2357,8 @@ def _trace_kernel_attempt_usage(
         try:
             if backend == "geak":
                 usage = parse_geak_usage(stdout_text)
+            elif backend == "forge":
+                usage = parse_forge_usage(stdout_text)
             else:
                 usage = parse_oob_json_usage(stdout_text)
             if not usage:

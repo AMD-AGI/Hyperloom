@@ -104,6 +104,51 @@ def test_oob_attempt_usage_lands_token_row(tmp_path: Path) -> None:
     assert rows[0]["output_tokens"] == 12
 
 
+def test_forge_attempt_usage_lands_token_row(tmp_path: Path) -> None:
+    """A forge attempt whose stdout carries the FORGE_LLM_USAGE marker yields a
+    forge row (the Kernel-Forge loop aggregates its claude-agent-sdk spend)."""
+    session_dir = tmp_path / "SESSION"
+    session_dir.mkdir()
+    log = tmp_path / "forge-xy_stdout.log"
+    stdout = (
+        "forge done: baseline=92.3 best=85.1 improved=True fellow=ck gpu=gfx942\n"
+        + "FORGE_LLM_USAGE " + json.dumps({
+            "input_tokens": 5000, "output_tokens": 1200,
+            "cache_creation_input_tokens": 400, "cache_read_input_tokens": 3000,
+            "total_cost_usd": 18.5, "calls": 7,
+        }) + "\n"
+        + "Autonomous loop complete\n"
+    )
+    result = {
+        "kernel_id": "k042",
+        "attempts": [_attempt("forge", log, write=stdout)],
+    }
+    _trace_kernel_attempt_usage(result, session_dir=session_dir)
+    rows = _read_rows(session_dir)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["component"] == "forge"
+    assert row["task_id"] == "k042"
+    assert row["input_tokens"] == 5000
+    assert row["output_tokens"] == 1200
+    # claude usage carries the prompt-cache split, so forge preserves it.
+    assert row["cache_creation_input_tokens"] == 400
+    assert row["cache_read_input_tokens"] == 3000
+
+
+def test_forge_attempt_without_marker_is_noop(tmp_path: Path) -> None:
+    """An older Forge build (no FORGE_LLM_USAGE marker) writes no row."""
+    session_dir = tmp_path / "SESSION"
+    session_dir.mkdir()
+    log = tmp_path / "forge-old_stdout.log"
+    result = {
+        "kernel_id": "k043",
+        "attempts": [_attempt("forge", log, write="forge done: baseline=1 best=1\n")],
+    }
+    _trace_kernel_attempt_usage(result, session_dir=session_dir)
+    assert _read_rows(session_dir) == []
+
+
 def test_no_usage_block_is_silent_noop(tmp_path: Path) -> None:
     """A geak/oob attempt with no recoverable usage writes no row (no zeros)."""
     session_dir = tmp_path / "SESSION"

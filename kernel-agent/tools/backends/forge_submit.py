@@ -1102,7 +1102,22 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         # Reuse the Hyperloom-rendered prompt (hypothesis_block + rocprof_before)
         # as the Forge program text driving the fellow.
         program_md = Path(prompt_file).read_text(errors="replace") if Path(prompt_file).exists() else ""
-        raw_agent_fn = make_agent_fn(config=config, program_md=program_md, fellow_name=fellow)
+        # Token-usage accounting (full-trace): when the installed Kernel-Forge
+        # exposes a UsageAccumulator (newer versions), thread it through the
+        # agent + loop so the run's LLM token spend is recoverable. Older Forge
+        # builds lack the API -> degrade to no accounting (a silent no-op), never
+        # a crash. ``inspect`` gates the kwargs so an old signature still works.
+        import inspect as _inspect
+        _usage_acc = None
+        try:
+            from kernel_agents.tracker import UsageAccumulator as _UsageAcc
+            _usage_acc = _UsageAcc()
+        except Exception:  # noqa: BLE001 — optional/older Forge: no accounting
+            _usage_acc = None
+        _mk_kwargs = dict(config=config, program_md=program_md, fellow_name=fellow)
+        if _usage_acc is not None and "usage" in _inspect.signature(make_agent_fn).parameters:
+            _mk_kwargs["usage"] = _usage_acc
+        raw_agent_fn = make_agent_fn(**_mk_kwargs)
 
         # Wrap agent_fn to persist errors: the runner's except branch only
         # prints to stdout (lost) and appends a bare IterationResult with no
@@ -1221,9 +1236,12 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         import contextlib, io
         loop_stdout = io.StringIO()
         loop_exc = None
+        _run_kwargs = {"agent_fn": _logged_agent_fn}
+        if _usage_acc is not None and "usage" in _inspect.signature(loop_runner.run).parameters:
+            _run_kwargs["usage"] = _usage_acc
         try:
             with contextlib.redirect_stdout(loop_stdout):
-                asyncio.run(loop_runner.run(agent_fn=_logged_agent_fn))
+                asyncio.run(loop_runner.run(**_run_kwargs))
         except Exception as _loop_err:
             loop_exc = _loop_err
         loop_output = loop_stdout.getvalue()
@@ -1261,7 +1279,17 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
 
         msg = (f"forge done: baseline={baseline_ms} best={best_ms} "
                f"improved={improved} fellow={fellow} gpu={gpu_target}")
+        # Emit the run's LLM token spend as a machine-parseable token so the
+        # Hyperloom tracer can attribute forge's cost (mirrors the geak/oob
+        # usage-from-stdout contract). Empty/absent on older Forge or no-agent
+        # runs -> no token emitted, parser stays a no-op.
+        _llm_usage = getattr(loop_runner, "llm_usage", None) or {}
+        if isinstance(_llm_usage, dict) and _llm_usage.get("calls"):
+            import json as _json_usage
+            msg += "\nFORGE_LLM_USAGE " + _json_usage.dumps(_llm_usage, sort_keys=True)
         res = _normalized(0, msg + "\n" + loop_output[-3000:], "", time.time() - started)
+        if isinstance(_llm_usage, dict) and _llm_usage.get("calls"):
+            res["llm_usage"] = _llm_usage
         # Expose output_dir as cli_workspace so run_attempt's report scan finds
         # <output_dir>/optimization_report.md + optimized_versions/ (same path
         # convention as the OOB backend). Without this, build_verification reads
