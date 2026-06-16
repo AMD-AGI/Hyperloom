@@ -306,3 +306,307 @@ def test_safe_client_init_requires_base(monkeypatch):
 
     with pytest.raises(ValueError, match="SAFE_API_BASE"):
         SaFEClient("k", base_url=None)
+
+
+# ── task_manager: pure helpers ────────────────────────────────────
+
+def _make_task_manager(monkeypatch, tmp_path):
+    """Construct a TaskManager with an isolated NFS base path."""
+    from agent_mcp_server.config import get_settings
+    from agent_mcp_server.task_manager import TaskManager
+
+    monkeypatch.setenv("NFS_BASE_PATH", str(tmp_path))
+    get_settings.cache_clear()
+    return TaskManager()
+
+
+def test_task_manager_map_status():
+    from agent_mcp_server.task_manager import TaskManager
+
+    m = TaskManager._map_status
+    assert m("", "succeeded") == "completed"
+    assert m("", "completed") == "completed"
+    assert m("", "failed") == "failed"
+    assert m("", "running") == "running"
+    assert m("succeeded", "") == "completed"
+    assert m("failed", "") == "failed"
+    assert m("pending", "") == "running"
+    assert m("unknown", "unknown") is None
+
+
+def test_task_manager_default_prompt_and_runtime_config(monkeypatch, tmp_path):
+    tm = _make_task_manager(monkeypatch, tmp_path)
+
+    assert "Optimize" in tm._get_default_prompt()
+
+    cfg = tm._get_runtime_config({"cpu": 16, "gpu_count": None})
+    assert cfg["cpu"] == 16          # override applied
+    assert "image" in cfg            # default preserved
+    # None override does not clobber the default.
+    assert cfg["gpu_count"] == tm.settings.default_gpu_count
+
+
+def test_task_manager_build_env_vars(monkeypatch, tmp_path):
+    tm = _make_task_manager(monkeypatch, tmp_path)
+    monkeypatch.setenv("CLAW_SESSION_ID", "sess-1")
+    env = tm._build_env_vars("task-9")
+    assert env["TASK_ID"] == "task-9"
+    assert env["TRACE_COMPONENT"] == "oob"
+    assert env["CLAW_SESSION_ID"] == "sess-1"
+
+
+def test_task_manager_default_system_prompt(monkeypatch, tmp_path):
+    tm = _make_task_manager(monkeypatch, tmp_path)
+    # The packaged template exists, so a non-empty prompt comes back.
+    assert tm._get_default_system_prompt().strip()
+
+
+@pytest.mark.parametrize("agent", ["codex", "cursor", "claude"])
+def test_task_manager_build_local_cmd(monkeypatch, tmp_path, agent):
+    tm = _make_task_manager(monkeypatch, tmp_path)
+    cmd = tm._build_local_cmd(
+        agent=agent,
+        prompt="do it",
+        model="m-1",
+        max_turns=5,
+        system_prompt="be careful",
+        workspace_dir=tmp_path / "ws",
+        task_dir=tmp_path / "task",
+    )
+    assert isinstance(cmd, list) and cmd
+    if agent == "codex":
+        assert cmd[0] == "codex"
+    elif agent == "cursor":
+        assert any("cursor_backend" in c for c in cmd)
+    else:
+        assert cmd[0] == "claude"
+        assert "--system-prompt" in cmd
+
+
+@pytest.mark.parametrize(
+    "agent, key_env",
+    [("codex", "OPENAI_API_KEY"), ("cursor", "CURSOR_API_KEY"), ("claude", "ANTHROPIC_API_KEY")],
+)
+def test_task_manager_build_local_env(monkeypatch, tmp_path, agent, key_env):
+    tm = _make_task_manager(monkeypatch, tmp_path)
+    env = tm._build_local_env(agent, "secret-key", "task-3", system_prompt="sp")
+    assert env[key_env] == "secret-key"
+    assert env["OOB_SYSTEM_PROMPT"] == "sp"
+    assert env["TASK_ID"] == "task-3"
+
+
+def test_task_manager_parse_llm_proxy(monkeypatch, tmp_path):
+    from agent_mcp_server.config import get_settings
+    from agent_mcp_server.task_manager import TaskManager
+
+    monkeypatch.setenv("NFS_BASE_PATH", str(tmp_path))
+    monkeypatch.setenv("LLM_PROXY_URL", "https://proxy.test:8443/api/v1")
+    get_settings.cache_clear()
+    tm = TaskManager()
+    proxy = tm._parse_llm_proxy()
+    assert proxy["scheme"] == "https"
+    assert proxy["host"] == "proxy.test"
+    assert proxy["port"] == "8443"
+    assert proxy["path"] == "/api/v1"
+    # trailing /v1 stripped for the anthropic base.
+    assert proxy["anthropic_path"] == "/api"
+
+
+@pytest.mark.parametrize("agent", ["claude", "codex", "cursor"])
+def test_task_manager_build_execution_command(monkeypatch, tmp_path, agent):
+    tm = _make_task_manager(monkeypatch, tmp_path)
+    script = tm._build_execution_command(
+        task_id="t-1",
+        task_dir=tmp_path / "task",
+        workspace_dir=tmp_path / "ws",
+        config={"agent": agent, "model": "m-x"},
+        api_key="key-1",
+    )
+    assert isinstance(script, str) and "Multi-round optimization loop" in script
+    if agent == "codex":
+        assert "codex exec" in script
+    elif agent == "claude":
+        assert "claude" in script and "auth_proxy.py" in script
+    else:
+        assert "@cursor/sdk" in script
+
+
+def test_task_manager_summarize_usage_none(monkeypatch, tmp_path):
+    tm = _make_task_manager(monkeypatch, tmp_path)
+    # No workspace dir at all.
+    assert tm._summarize_task_usage("u", "t") is None
+    # Workspace exists but no trajectory files.
+    ws = tm._get_workspace_dir("u", "t")
+    ws.mkdir(parents=True)
+    assert tm._summarize_task_usage("u", "t") is None
+
+
+def test_task_manager_summarize_usage_claude_and_codex(monkeypatch, tmp_path):
+    import json as _json
+
+    tm = _make_task_manager(monkeypatch, tmp_path)
+    ws = tm._get_workspace_dir("u", "t")
+    ws.mkdir(parents=True)
+
+    # Round 1: Claude-format usage inside message.
+    r1 = ws / "trajectory_round_1.jsonl"
+    r1.write_text(
+        _json.dumps({
+            "message": {
+                "model": "claude-x",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_creation_input_tokens": 2,
+                    "cache_read_input_tokens": 1,
+                },
+            },
+            "total_cost_usd": 0.5,
+        }) + "\n" + "not-json\n",
+        encoding="utf-8",
+    )
+    # Round 2: Codex-format usage on turn.completed.
+    r2 = ws / "trajectory_round_2.jsonl"
+    r2.write_text(
+        _json.dumps({
+            "type": "turn.completed",
+            "usage": {"input_tokens": 20, "output_tokens": 4},
+            "cost_usd": 1.0,
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    summary = tm._summarize_task_usage("u", "t")
+    assert summary is not None
+    assert summary["input_tokens"] == 30
+    assert summary["output_tokens"] == 9
+    assert summary["events_with_usage"] == 2
+    assert summary["cost_available"] is True
+    assert summary["cost_usd"] == 1.5
+    assert "claude-x" in summary["models"]
+    assert len(summary["rounds"]) == 2
+
+
+# ── benchmark_tools: handlers via mocked SaFEClient ───────────────
+
+@pytest.mark.asyncio
+async def test_benchmark_handle_requires_key_and_base(monkeypatch):
+    import agent_mcp_server.tools.benchmark_tools as bt
+
+    out = await bt.handle_benchmark_tool("benchmark_status", api_key=None)
+    assert "API key required" in out["error"]
+
+    monkeypatch.setattr(bt, "SAFE_API_BASE", "")
+    out = await bt.handle_benchmark_tool("benchmark_status", api_key="k")
+    assert "SAFE_API_BASE" in out["error"]
+
+    monkeypatch.setattr(bt, "SAFE_API_BASE", "https://safe.test")
+    out = await bt.handle_benchmark_tool("nope", api_key="k")
+    assert "Unknown benchmark tool" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_benchmark_submit_status_result_cancel(monkeypatch, tmp_path):
+    import agent_mcp_server.tools.benchmark_tools as bt
+
+    monkeypatch.setattr(bt, "SAFE_API_BASE", "https://safe.test")
+    monkeypatch.setattr(bt, "SAFE_NFS_PATH", str(tmp_path / "bench"))
+
+    client = MagicMock()
+    client.get_default_workspace_id = AsyncMock(return_value="ws-1")
+    client.resolve_workspace_id = AsyncMock(return_value="ws-2")
+    client.create_workload = AsyncMock(return_value={"id": "wl-1"})
+    client.get_workload = AsyncMock(return_value={"status": "running", "phase": "running"})
+    client.stop_workload = AsyncMock(return_value={})
+    monkeypatch.setattr(bt, "SaFEClient", lambda *a, **k: client)
+
+    submit = await bt.handle_benchmark_tool(
+        "benchmark_submit",
+        api_key="k",
+        files=[{"filename": "a.py", "content": "print(1)"}],
+        command="python a.py",
+    )
+    bid = submit["benchmark_id"]
+    assert submit["workload_id"] == "wl-1"
+    assert submit["status"] == "submitted"
+
+    status = await bt.handle_benchmark_tool("benchmark_status", api_key="k", benchmark_id=bid)
+    assert status["status"] == "running"
+
+    # benchmark.log was not written by the (mocked) workload → file-not-found
+    # branch returns available_files list.
+    result = await bt.handle_benchmark_tool("benchmark_result", api_key="k", benchmark_id=bid)
+    assert "available_files" in result or "content" in result
+
+    cancel = await bt.handle_benchmark_tool("benchmark_cancel", api_key="k", benchmark_id=bid)
+    assert cancel["status"] == "cancelled"
+
+    missing = await bt.handle_benchmark_tool("benchmark_status", api_key="k", benchmark_id="nope")
+    assert "not found" in missing["error"]
+
+
+# ── task_manager: async lifecycle (db + filesystem, mocked SaFE) ───
+
+@pytest.mark.asyncio
+async def test_task_manager_create_get_outputs_lifecycle(monkeypatch, tmp_path):
+    from agent_mcp_server.database import init_db
+
+    tm = _make_task_manager(monkeypatch, tmp_path)
+    await init_db()
+
+    with pytest.raises(ValueError, match="Unsupported agent"):
+        await tm.create_task(user_id="u", agent="bogus", workspace_id="ws")
+
+    with pytest.raises(ValueError, match="workspace_id is required"):
+        await tm.create_task(user_id="u", agent="claude", workspace_id=None)
+
+    task = await tm.create_task(
+        user_id="u",
+        agent="claude",
+        workspace_id="ws-x",
+        files=[{"filename": "k.py", "content": "print(1)"}],
+        prompt="optimize",
+    )
+    tid = task["id"]
+    assert task["status"] == "pending"
+
+    got = await tm.get_task(tid)
+    assert got is not None and got["user_id"] == "u"
+
+    outs = await tm.get_outputs(tid)
+    assert any(f["path"] == "k.py" for f in outs["files"])
+
+    content = await tm.get_file_content(tid, "k.py")
+    assert content["content"] == "print(1)"
+
+    missing = await tm.get_file_content(tid, "nope.py")
+    assert "File not found" in missing["error"]
+
+    traversal = await tm.get_file_content(tid, "../../etc/passwd")
+    assert traversal["error"] == "Path traversal not allowed"
+
+    cancelled = await tm.cancel_task(tid, api_key="k")
+    assert cancelled["status"] == "cancelled"
+
+    assert await tm.get_task("nope") is None
+    with pytest.raises(ValueError, match="Task not found"):
+        await tm.get_outputs("nope")
+
+
+@pytest.mark.asyncio
+async def test_task_manager_submit_remote(monkeypatch, tmp_path):
+    import agent_mcp_server.task_manager as tmmod
+    from agent_mcp_server.database import init_db
+
+    tm = _make_task_manager(monkeypatch, tmp_path)
+    await init_db()
+    task = await tm.create_task(user_id="u", agent="claude", workspace_id="ws-x")
+    tid = task["id"]
+
+    client = MagicMock()
+    client.create_workload = AsyncMock(return_value={"id": "wl-9"})
+    monkeypatch.setattr(tmmod, "SaFEClient", lambda *a, **k: client)
+
+    out = await tm._submit_remote(tid, api_key="k")
+    assert out["status"] == "running"
+    assert out["safe_workload_id"] == "wl-9"
