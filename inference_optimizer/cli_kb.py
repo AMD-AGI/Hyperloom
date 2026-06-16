@@ -77,6 +77,11 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
     audit_path = recipe_snapshot_audit_jsonl(Path(session_dir))
 
     def _hook(event: dict[str, Any]) -> None:
+        """Append a timestamped recipe-snapshot read event to the audit log.
+
+        Args:
+            event (dict[str, Any]): The remote-read trace event to record.
+        """
         try:
             audit_path.parent.mkdir(parents=True, exist_ok=True)
             row = {

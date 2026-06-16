@@ -810,7 +810,14 @@ _SHAPE_ARG_RE = re.compile(
 
 
 def _split_shape_fragments(shape_text: Any) -> list[str]:
-    """Split TraceLens ``Args`` text into per-argument shape fragments."""
+    """Split TraceLens ``Args`` text into per-argument shape fragments.
+
+    Args:
+        shape_text: The raw TraceLens ``Args`` text (any type; coerced to str).
+
+    Returns:
+        The non-empty per-argument shape fragments.
+    """
     text = str(shape_text or "").strip()
     if not text:
         return []
@@ -822,7 +829,16 @@ def _split_shape_fragments(shape_text: Any) -> list[str]:
 
 
 def _parse_shape_arg(raw: Any, *, index: int) -> dict[str, Any]:
-    """Parse one shape fragment such as ``(15360,8,768) bf16``."""
+    """Parse one shape fragment such as ``(15360,8,768) bf16``.
+
+    Args:
+        raw: The raw shape fragment text (any type; coerced to str).
+        index: The argument index recorded on the parsed result.
+
+    Returns:
+        A dict with ``index`` / ``raw`` and, when parseable, ``shape`` (dims)
+        and ``dtype``.
+    """
     text = str(raw or "").strip()
     out: dict[str, Any] = {"index": index, "raw": text}
     match = _SHAPE_ARG_RE.match(text)
@@ -852,7 +868,17 @@ def _shape_case_from_value(
     call_count: Any = None,
     primary: bool = False,
 ) -> dict[str, Any]:
-    """Build one structured benchmark shape case from TraceLens shape data."""
+    """Build one structured benchmark shape case from TraceLens shape data.
+
+    Args:
+        value: The shape data (dict, list/tuple, or scalar) to convert.
+        call_count: Fallback call count when the value carries none.
+        primary: Whether this case is the primary benchmark case.
+
+    Returns:
+        A shape-case dict with ``primary`` / ``call_count`` / ``raw`` / ``args``
+        keys.
+    """
     if isinstance(value, dict):
         structured_args = value.get("args")
         raw_shape = value.get("shape") or value.get("Args") or value.get("args") or ""
@@ -896,7 +922,15 @@ def _shape_case_from_value(
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Coerce a TraceLens numeric field, returning ``default`` on drift."""
+    """Coerce a TraceLens numeric field, returning ``default`` on drift.
+
+    Args:
+        value: The value to coerce to ``float``.
+        default: Fallback returned when ``value`` cannot be parsed.
+
+    Returns:
+        The parsed float, or ``default`` on any failure.
+    """
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -904,7 +938,16 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 
 def _structured_benchmark_shape_cases(candidate: dict[str, Any]) -> dict[str, Any]:
-    """Expose primary/supplementary serving shapes in machine-readable form."""
+    """Expose primary/supplementary serving shapes in machine-readable form.
+
+    Args:
+        candidate: The kernel candidate dict, possibly carrying a
+            ``task_group`` or ``input_shapes``.
+
+    Returns:
+        A dict with ``primary_shape`` and ``supplementary_shapes``, or ``{}``
+        when no usable shapes are present.
+    """
     group = candidate.get("task_group")
     rows = group.get("rows") if isinstance(group, dict) else None
     cases: list[dict[str, Any]] = []

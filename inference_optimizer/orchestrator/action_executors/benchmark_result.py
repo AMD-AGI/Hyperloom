@@ -744,7 +744,14 @@ def _find_server_logs(slot: Path) -> list[Path]:
         return []
 
     def _size(path: Path) -> int:
-        """Best-effort byte size used to rank candidate logs (0 on error)."""
+        """Best-effort byte size used to rank candidate logs (0 on error).
+
+        Args:
+            path: The log file whose byte size to read.
+
+        Returns:
+            The file size in bytes, or ``0`` on stat error.
+        """
         try:
             return path.stat().st_size
         except OSError:
