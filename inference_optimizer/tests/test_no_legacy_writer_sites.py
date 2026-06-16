@@ -146,6 +146,9 @@ _SKIP_DIRECTORIES: tuple[str, ...] = (
     ".git/",
     "node_modules/",
     "__pycache__/",
+    # Local build / venv trees (not source of truth for writer-site policy).
+    "build/",
+    ".venv/",
     # setuptools build metadata (regenerated SOURCES.txt mirrors file
     # names, not source content — not a real writer site).
     "hyperloom_inference_optimizer.egg-info/",

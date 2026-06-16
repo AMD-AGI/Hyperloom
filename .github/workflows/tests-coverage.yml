@@ -2,11 +2,32 @@
 
 name: Tests with Coverage
 
+# Runs on push and pull_request for all branches. Skips when every changed file
+# matches paths-ignore (documentation-only and repo-metadata edits).
+#
+# Pytest markers, coverage ``source`` roots, ``fail_under``, and pytest-cov CLI
+# flags are defined in ``pyproject.toml``. This workflow installs deps and calls
+# ``ci/coverage_summary.py`` so the per-tree summary stays aligned with
+# ``[tool.coverage.run].source``. ``pip install -e OOB/.`` is required for
+# ``agent_mcp_server`` UTs (``inference_optimizer/tests/test_oob_units.py``).
+# Two matrix legs (Python 3.10 + 3.11); each runs the full suite + coverage.
 on:
   push:
-    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE*"
+      - "COPYRIGHT"
+      - "CODEOWNERS"
+      - ".gitattributes"
   pull_request:
-    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE*"
+      - "COPYRIGHT"
+      - "CODEOWNERS"
+      - ".gitattributes"
 
 permissions:
   contents: read
@@ -14,30 +35,58 @@ permissions:
 
 jobs:
   test:
+    name: test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+    env:
+      # When ``1``/``true``/``yes``/``on``: pytest uses ``--cov-fail-under=0`` and
+      # the optional fail_under gate is skipped (see ``pyproject.toml`` table
+      # ``[tool.hyperloom.tests_coverage]``).
+      COVERAGE_RELAX_FAIL_UNDER: ${{ vars.COVERAGE_RELAX_FAIL_UNDER }}
     steps:
       - uses: actions/checkout@v6
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -e .[test] pytest pytest-cov coverage
+          pip install -e ".[test,ci]"
+          pip install -e OOB/.
 
+      # continue-on-error so the Summary step always runs; "Enforce test success"
+      # restores a failing job when pytest fails.
       - name: Run tests with coverage
+        id: pytest
+        continue-on-error: true
         run: |
-          pytest --cov=. --cov-report=xml --cov-report=term
+          set -euo pipefail
+          readarray -t PARGS < <(python3 ci/coverage_summary.py --pytest-ci-args)
+          RELAX="${COVERAGE_RELAX_FAIL_UNDER:-}"
+          EXTRA=()
+          if echo "$RELAX" | grep -qiE '^(1|true|yes|on)$'; then
+            EXTRA=(--cov-fail-under=0)
+            echo "::notice::COVERAGE_RELAX_FAIL_UNDER is set: fail_under not enforced by pytest-cov."
+          fi
+          pytest "${PARGS[@]}" "${EXTRA[@]}"
 
       - name: Coverage summary
+        if: always()
+        env:
+          PYTEST_OUTCOME: ${{ steps.pytest.outcome }}
+        run: python3 ci/coverage_summary.py
+
+      - name: Enforce coverage fail_under (strict mode)
+        if: always() && steps.pytest.outcome == 'success'
+        run: python3 ci/coverage_summary.py --enforce-fail-under
+
+      - name: Enforce test success
+        if: always() && steps.pytest.outcome == 'failure'
         run: |
-          coverage report --skip-empty | tee /tmp/coverage.txt
-          TOTAL_LINE=$(grep -E '^TOTAL ' /tmp/coverage.txt | tail -1)
-          TOTAL=$(echo "$TOTAL_LINE" | awk '{print $NF}')
-          {
-            echo "## Coverage";
-            echo "";
-            echo "Total: ${TOTAL:-unknown}";
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Tests failed (see the \"Run tests with coverage\" step log)."
+          exit 1
