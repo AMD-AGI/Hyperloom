@@ -2643,7 +2643,12 @@ def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
 def _record_kernel_roofline_sidecar(session_dir: Path) -> None:
     """Transcribe ``reports/kernel_roofline.json`` (written by the external
     kernel-agent tool) into the breakdown recorder as a ``kernel_roofline``
-    singleton. Best-effort; never raises."""
+    singleton. Best-effort; never raises.
+
+    Args:
+        session_dir: Session directory holding the ``reports/kernel_roofline.json``
+            sidecar to transcribe.
+    """
     try:
         sidecar_path = Path(session_dir) / "reports" / "kernel_roofline.json"
         if not sidecar_path.is_file():

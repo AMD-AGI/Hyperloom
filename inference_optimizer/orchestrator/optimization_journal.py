@@ -406,6 +406,13 @@ def operation_kind_for(action: str, kind: str = "") -> str:
     ``kernel_integrate``; ``baseline`` / ``profile`` / ``roofline`` / ``sweep``.
     Prefers the fine change-kind, falling back to the action when the kind is
     absent or ``other``.
+
+    Args:
+        action: The action name, used as the fallback label.
+        kind: The fine change-kind; preferred when present and not ``other``.
+
+    Returns:
+        The stable ``operation_kind`` label.
     """
     k = (kind or "").lower()
     if k and k != KIND_OTHER:
@@ -424,6 +431,12 @@ def proposer_for(provenance: str) -> str:
     ``specialist:<domain>`` is kept verbatim (so a trace can filter on the exact
     specialist); ``llm_direct`` / ``legacy:*`` / empty collapse to
     ``orchestration``; ``default_grid`` becomes ``grid``.
+
+    Args:
+        provenance: The explore provenance label to map.
+
+    Returns:
+        The stable proposer/component name.
     """
     p = (provenance or "").strip()
     if not p or p == "llm_direct" or p.startswith("legacy:"):
