@@ -18,8 +18,8 @@ installed by `pip install hyperloom-inference_optimizer`.
 * **[../README.md](../README.md)** — repository-level overview,
   hosted and local quickstart, results table, and migration notes.
 * **[../docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md](../docs/HOW_THE_OPTIMIZATION_LOOP_WORKS.md)**
-  — DFS scoring, dynamic branching, and KB-driven priors with a
-  worked example.
+  — the conversational orchestration loop, phase chain, and KB-driven
+  priors with a worked example.
 * **[../docs/ENV_AND_AUTH.md](../docs/ENV_AND_AUTH.md)** — credential
   and environment configuration.
 * **[../docs/CONFIGURATION_REFERENCE.md](../docs/CONFIGURATION_REFERENCE.md)**

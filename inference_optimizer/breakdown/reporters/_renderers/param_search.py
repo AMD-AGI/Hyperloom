@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Parameter / backend DFS state renderer."""
+"""Parameter / backend explore-search state renderer."""
 
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ from ..base import RenderedSection, md_table, register_renderer
 
 @register_renderer("param_search")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the parameter / backend DFS-search section.
+    """Render the parameter / backend explore-search section.
 
-    Summarizes the backends and params depth-first search (tested vs.
+    Summarizes the backends and params explore search (tested vs.
     accepted counts), discovered framework flags, backend-winner history
     and attempted synergy combos. Skipped when no search data exists.
 
@@ -45,10 +45,10 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     facts: list[str] = []
     facts.append(
-        f"backends DFS: tested={backends_tested}, accepted={backends_accepted}"
+        f"backends search: tested={backends_tested}, accepted={backends_accepted}"
     )
     facts.append(
-        f"params DFS: tested={params_tested}, accepted={params_accepted}"
+        f"params search: tested={params_tested}, accepted={params_accepted}"
     )
     if has_explore:
         facts.append(
@@ -71,7 +71,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 )
 
     md_parts: list[str] = []
-    md_parts.append("**Backends DFS:**")
+    md_parts.append("**Backends search:**")
     md_parts.append(md_table(
         ["accepted", "tested", "cursor", "last_round"],
         [[backends_accepted, backends_tested,
@@ -79,7 +79,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
           (backends.get("last_round") if isinstance(backends, dict) else None)]],
     ))
     md_parts.append("")
-    md_parts.append("**Params DFS:**")
+    md_parts.append("**Params search:**")
     md_parts.append(md_table(
         ["accepted", "tested", "cursor", "last_round"],
         [[params_accepted, params_tested,
