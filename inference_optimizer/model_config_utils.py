@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 
@@ -59,38 +60,69 @@ GEMMA2_MODEL_TYPE = "gemma2"
 GEMMA2_ARCHITECTURES = frozenset({"gemma2forcausallm"})
 
 
+# ``gemma`` then an optional single separator then ``2`` as a standalone token
+# (start/separator on the left, separator/end on the right). Matches gemma2 /
+# gemma-2 / gemma_2 but not gemma3, gemma25, or notgemma2.
+_GEMMA2_PATH_RE = re.compile(r"(?:^|[-_.])gemma[-_.]?2(?:[-_.]|$)")
+
+
 def _path_looks_like_gemma2(model_path: str) -> bool:
     """Heuristic Gemma2 detection from the path when config.json is absent.
 
-    Matches a ``gemma-2`` / ``gemma2`` directory name while excluding Gemma3, so
-    a not-yet-materialized Hub-id style path still gets the workaround.
+    Word-boundary match on the directory name (gemma2 / gemma-2 / gemma_2),
+    so a not-yet-materialized Hub-id style path still gets the workaround
+    without false-positives on names like notgemma2 / gemma25.
     """
     if not model_path:
         return False
-    compact = (
-        Path(model_path).name.lower()
-        .replace("-", "").replace("_", "").replace(".", "")
-    )
-    if "gemma3" in compact:
-        return False
-    return "gemma2" in compact
+    return _GEMMA2_PATH_RE.search(Path(model_path).name.lower()) is not None
 
 
-def _model_is_gemma2(model_path: str) -> bool:
-    """Best-effort detect a Gemma2 model from config.json (top level or text_config).
-
-    Falls back to a path heuristic when config.json is missing/unreadable.
-    """
-    data = _load_model_config_dict(model_path)
-    if data is None:
-        return _path_looks_like_gemma2(model_path)
-    candidates = [data]
+def _config_gemma2_scopes(data: dict) -> list[dict]:
+    """Return [top-level, text_config?] scopes for Gemma2 inspection."""
+    scopes = [data]
     nested = data.get("text_config")
     if isinstance(nested, dict):
-        candidates.append(nested)
-    for cfg in candidates:
+        scopes.append(nested)
+    return scopes
+
+
+def _config_is_gemma2(data: dict) -> bool:
+    """True when a parsed config dict declares Gemma2 (top level or text_config)."""
+    for cfg in _config_gemma2_scopes(data):
         if str(cfg.get("model_type") or "").strip().lower() == GEMMA2_MODEL_TYPE:
             return True
         if any(a.lower() in GEMMA2_ARCHITECTURES for a in _config_architectures(cfg)):
             return True
     return False
+
+
+def _config_has_model_identity(data: dict) -> bool:
+    """True when the config carries any recognizable model_type/architectures.
+
+    Used to decide whether a non-Gemma2 verdict is trustworthy: a config that
+    clearly identifies another model (e.g. llama) must NOT fall back to the path
+    heuristic, while an empty/residual config (``{}``, no model_type) should.
+    """
+    for cfg in _config_gemma2_scopes(data):
+        if str(cfg.get("model_type") or "").strip():
+            return True
+        if _config_architectures(cfg):
+            return True
+    return False
+
+
+def _model_is_gemma2(model_path: str) -> bool:
+    """Best-effort detect a Gemma2 model from config.json (top level or text_config).
+
+    Falls back to a path heuristic when config.json is missing/unreadable OR
+    present-but-unidentifiable (empty dict / no model_type/architectures). A
+    config that clearly identifies a non-Gemma2 model is trusted as-is.
+    """
+    data = _load_model_config_dict(model_path)
+    if data is not None:
+        if _config_is_gemma2(data):
+            return True
+        if _config_has_model_identity(data):
+            return False
+    return _path_looks_like_gemma2(model_path)
