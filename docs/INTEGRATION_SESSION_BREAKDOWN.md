@@ -4,7 +4,7 @@
 the `inference_optimizer` runtime (producer) and any downstream
 consumer (`claw-stats-service`, results service, notebooks, custom
 dashboards). One file per session, written to
-`$USER_DATA_PATH/session_breakdown.json` at session end (and on
+`$SESSION_DIR/session_breakdown.json` at session end (and on
 operator demand via [`scripts/dump_session_breakdown.py`](OPERATOR_SCRIPTS.md)).
 
 The authoritative source of truth for the wire shape is
@@ -76,6 +76,7 @@ The `exporter_version` field carries the producing Hyperloom version
   "capability_summary": { /* §8  Capability cards */ },
   "geak_invocations":   [ /* §9  Invocation[] */ ],
   "oob_invocations":    [ /* §10 Invocation[] */ ],
+  "forge_invocations":  [ /* §9–10 Invocation[] — Kernel-Forge lane */ ],
   "kernel_lifecycle":   { /* §11 4+1-stage kernel lifecycle */ },
   "param_search":       { /* §12 ParamSearch */ },
   "sweep":              { /* §13 Sweep */ },
@@ -110,7 +111,7 @@ started, …).
 | `host`             | string  | Hostname of the Coordinator pod.                                                              |
 | `code_revision`    | string  | Hyperloom git SHA.                                                                            |
 | `pid`              | int     | Coordinator PID.                                                                              |
-| `session_dir`      | string  | `$USER_DATA_PATH` for this session.                                                          |
+| `session_dir`      | string  | Concrete session directory, typically `$USER_DATA_PATH/<model_basename>/<timestamp>/`.       |
 | `tick_count`       | int     | Number of Coordinator ticks.                                                                  |
 | `image`            | string \| null | Container image fully-qualified, if configured.                                       |
 
@@ -196,11 +197,13 @@ Drives the per-session UI cards in PrimusClaw.
 
 ---
 
-## 9–10. `geak_invocations` / `oob_invocations` — `Invocation[]`
+## 9–10. `geak_invocations` / `oob_invocations` / `forge_invocations` — `Invocation[]`
 
-Same shape; `backend` distinguishes (`geak` / `claude` / `codex` /
-`cursor`). One entry per attempt-on-a-kernel. The
-`decision` enum is `KEEP` / `PARTIAL` / `REVERT` / `FAILED`.
+Same `Invocation` shape across all three lists; `backend` distinguishes
+(`geak` / `claude` / `codex` / `cursor` / `forge`). `forge_invocations` is the
+Kernel-Forge lane and is kept separate — it is **not** folded into
+`oob_invocations`. One entry per attempt-on-a-kernel. The `decision` enum is
+`KEEP` / `PARTIAL` / `REVERT` / `FAILED`.
 
 ---
 
@@ -390,7 +393,7 @@ investigation than the breakdown summarises.
     "baseline_report": "runs/baseline/report.json",
     "profile_reports": ["runs/profile/report.json"],
     "sweep_reports": ["runs/sweep/grid.json"],
-    "kernel_attempts": ["agents/kernel/runs/sess-20260517-1130/optimization_attempts.jsonl"],
+    "kernel_attempts": ["kernel-agent/runs/sess-20260517-1130/optimization_attempts.jsonl"],
     "critic_workdir": "critic-workdir",
     "robustness_workdir": "agents/robustness"
   }

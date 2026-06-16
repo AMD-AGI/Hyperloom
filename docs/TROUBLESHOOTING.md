@@ -193,9 +193,9 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
 
 **Fix.**
 
-1. Re-run `install.sh` (it clones AMD-AGI/TraceLens to
-   `$HYPERLOOM_RUNTIME_DIR/source-mirrors/TraceLens`, pins it to a fixed
-   SHA, runs `pip install -e`, and smokes the CLI):
+1. Re-run `install.sh` (it clones AMD-AGI/TraceLens into the pod-local
+   open-source checkout root, pins it to a fixed SHA, runs `pip install -e`,
+   and smokes the CLI):
    ```bash
    bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
    ```
@@ -205,7 +205,7 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
    explicit operator override — that skips both the clone and the SHA
    pin:
    ```bash
-   export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime}/source-mirrors/TraceLens}"
+   export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-${TMPDIR:-/tmp}/hyperloom/open-source-repos}/TraceLens}"
    cd "$TRACELENS_ROOT"
    pip install -e .
    TraceLens_generate_perf_report_pytorch_inference --help
@@ -227,14 +227,14 @@ and requires a separate `crsr_...` key.
 
 **Fix.**
 
-* If you don't have a Cursor account: stop trying — Hyperloom auto-skips
-  `cursor` when `CURSOR_API_KEY` is unset. The default ladder of
-  `geak,claude,codex` is fully functional without it. If you explicitly
-  requested `--backends cursor` and don't have a key, remove the flag.
+* If you don't have a Cursor account: do not include `cursor` in
+  `KERNEL_OPT_BACKEND_ORDER`. The default `forge,geak` ladder is fully
+  functional without it. If you explicitly requested `--backends cursor` and
+  don't have a key, remove the flag.
 * If you do have a Cursor account:
   ```bash
   export CURSOR_API_KEY=crsr_...
-  bash "$REPO_ROOT/kernel-agent/scripts/install.sh"   # picks up the new key
+  bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"   # picks up the new key
   ```
 
 See [`ENV_AND_AUTH.md`](ENV_AND_AUTH.md) §3 for the Cursor key
@@ -271,29 +271,29 @@ original session, or the session never reached the point of writing
 
 ## KB writes silently failing
 
-**Symptom.** `judge_bundle.kb_read_skipped_reason` is `kb_unreachable`
-in Critic emit JSONs; new lessons don't appear in
-`$INFERENCE_OPTIMIZER_KB_ROOT/*.jsonl`.
+**Symptom.** Recipe KB warm-start is empty, `--cortex-kb-url` enrichment is
+missing, or new local KB records do not appear under the selected local KB root.
 
-**Cause.** The KB root is unset, on a read-only mount, full, or
-permission-denied.
+**Cause.** The local recipe KB root is on a read-only/full mount, permission is
+denied, or the optional remote Cortex KB URL is unreachable.
 
 **Fix.**
 
-1. Verify the env:
+1. Resolve and test the local KB root:
    ```bash
-   echo "$INFERENCE_OPTIMIZER_KB_ROOT"
-   touch "$INFERENCE_OPTIMIZER_KB_ROOT/.write-test" && rm "$INFERENCE_OPTIMIZER_KB_ROOT/.write-test"
+   KB_ROOT="${HYPERLOOM_LOCAL_KB_ROOT:-${USER_DATA_PATH:-/workspace/hyperloom}/kb}"
+   echo "$KB_ROOT"
+   mkdir -p "$KB_ROOT"
+   touch "$KB_ROOT/.write-test" && rm "$KB_ROOT/.write-test"
    ```
-2. If unset, decide: ship with a seed KB
-   ([`KB_GUIDE.md`](KB_GUIDE.md) §2 option A) or set `=skip` to
-   suppress the warning.
-3. If read-only, the agent will degrade gracefully (priors are read,
-   writes log warnings, optimisation continues).
+2. If you passed `--cortex-kb-url` or exported `CORTEX_KB_URL`, verify the URL
+   from inside the same pod. If it is intentionally unavailable, remove the URL
+   and run local-only.
+3. To skip KB hooks deliberately for a diagnosis run, pass `--degraded-kb`.
 
-KB unreachability is **never** fatal. Critic falls back to
-packet-only evidence. See [`KB_GUIDE.md`](KB_GUIDE.md) §4 for the
-detailed behaviour.
+KB unreachability is **never** fatal. Hyperloom continues with local-only or
+degraded KB behaviour. See [`KB_GUIDE.md`](KB_GUIDE.md) for the detailed
+resolver order.
 
 ---
 
@@ -349,7 +349,7 @@ Three commands give you a fast situation report:
 python -m inference_optimizer.scripts.event_counts
 
 # 2. What was the last action's outcome?
-jq '.optimization_stack | last' "$USER_DATA_PATH/state.json"
+jq '.optimization_stack | last' "$SESSION_DIR/state.json"
 
 # 3. Any Robustness findings since the last tick?
 tail -n 5 "$USER_DATA_PATH"/agents/robustness/findings/*.jsonl 2>/dev/null
