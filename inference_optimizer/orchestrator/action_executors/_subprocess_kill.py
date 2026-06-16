@@ -33,6 +33,10 @@ _TERM_GRACE_SECONDS = 5.0
 def new_session_kwargs() -> dict:
     """``Popen`` kwargs so the child gets its own POSIX session (killable via
     ``os.killpg``). Returns ``{}`` on non-POSIX.
+
+    Returns:
+        A kwargs dict to splat into ``Popen``; ``{"start_new_session": True}``
+        on POSIX, otherwise an empty dict.
     """
     if os.name == "posix":
         return {"start_new_session": True}
@@ -44,6 +48,13 @@ def _process_group_alive(pgid: int) -> bool:
 
     ``killpg(pgid, 0)`` raises ``ProcessLookupError`` once the group is empty;
     any other ``OSError`` (e.g. sandbox ``EPERM``) is treated as "still alive".
+
+    Args:
+        pgid: The POSIX process-group id to probe.
+
+    Returns:
+        True if the group still has at least one member (or liveness is
+        indeterminate), False once the group is empty or on non-POSIX.
     """
     if os.name != "posix":
         return False
@@ -88,6 +99,12 @@ def kill_my_spawned_server(
     warning on unexpected signalling failure). Requires the child to have been
     launched with :func:`new_session_kwargs` so its pgid is distinct from
     Hyperloom's own; asserted defensively below.
+
+    Args:
+        proc: The spawned process whose tree should be reaped; ``None`` is a
+            no-op.
+        grace_seconds: Seconds to wait after SIGTERM before SIGKILLing
+            survivors.
     """
     if proc is None:
         return
@@ -306,6 +323,13 @@ def _server_log_shows_death(path: str) -> bool:
 
     Best-effort and never raises: a missing / unreadable log (server hasn't
     written yet) reads as "not dead" so a slow cold start is never misjudged.
+
+    Args:
+        path: Filesystem path to the server's ``server.log``.
+
+    Returns:
+        True if the log tail contains a terminal engine/worker-init marker,
+        False otherwise (including when the log is missing or unreadable).
     """
     try:
         with open(path, "rb") as fh:
@@ -330,6 +354,15 @@ def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
     excerpt keeps a couple of lines of context around the marker so the
     operator-facing ``error`` field is actionable. Best-effort: a missing /
     unreadable log reads as "no marker" (returns ``None``).
+
+    Args:
+        path: Filesystem path to the server's ``server.log``.
+        max_chars: Maximum length of the returned excerpt; the tail is kept
+            when the excerpt is longer.
+
+    Returns:
+        A short multi-line excerpt around the first terminal init marker, or
+        ``None`` when no fatal marker is present.
     """
     try:
         with open(path, "rb") as fh:
@@ -385,6 +418,30 @@ def run_with_session_kill(
     ``returncode = SERVER_DEAD_RETURNCODE`` is returned (does NOT raise). This
     turns a crashed-but-hung server (parent never exits, ``/health`` polled
     forever) into a fast fail instead of a ~2h hard-timeout stall.
+
+    Args:
+        cmd: The command and arguments to execute.
+        env: Optional environment mapping for the child process.
+        cwd: Optional working directory for the child process.
+        timeout: Hard timeout in seconds; ``TimeoutExpired`` is re-raised on
+            elapse, as with ``subprocess.run``.
+        text: Whether to capture stdout/stderr as ``str`` (vs ``bytes``).
+        soft_deadline_sec: Optional deadline firing before ``timeout``; on
+            elapse the tree is reaped and ``OVERTIME_KILL_RETURNCODE`` is
+            returned without raising.
+        server_log_path: Optional path to the spawned server's ``server.log``
+            to enable the server-liveness watchdog.
+        server_dead_grace_sec: Grace period a terminal init marker must persist
+            before the watchdog reaps the tree; defaults to the
+            ``INFERENCE_OPTIMIZER_SERVER_DEAD_GRACE_SEC`` env value or 120s.
+
+    Returns:
+        A ``CompletedProcess`` carrying the child's returncode (or one of the
+        sentinel returncodes when a soft deadline or the watchdog fired) plus
+        its captured stdout/stderr.
+
+    Raises:
+        subprocess.TimeoutExpired: When the hard ``timeout`` elapses.
     """
     if server_dead_grace_sec is None:
         try:
@@ -542,6 +599,28 @@ def _communicate_with_soft_deadline(
 
     The ``hard_timeout`` is always honoured so a stuck child can't dodge the
     gates.
+
+    Args:
+        proc: The running child process to wait on.
+        hard_timeout: Hard timeout in seconds; always enforced.
+        soft_deadline_sec: Optional soft deadline that trips before the hard
+            timeout.
+        server_log_path: Optional path to the server's ``server.log`` enabling
+            the liveness watchdog.
+        server_dead_grace_sec: Grace period a terminal init marker must persist
+            before the watchdog trips.
+        capture: Optional stream capture whose threads are joined to assemble
+            the returned output.
+
+    Returns:
+        A ``(stdout, stderr)`` tuple (``str`` or ``bytes`` per the capture
+        mode).
+
+    Raises:
+        _SoftDeadlineExceeded: When the soft deadline elapses.
+        _ServerDeadDetected: When a terminal init marker persists past the
+            grace window.
+        subprocess.TimeoutExpired: When the hard timeout elapses.
     """
     watchdog_active = bool(server_log_path) and (
         server_dead_grace_sec is not None and float(server_dead_grace_sec) > 0.0

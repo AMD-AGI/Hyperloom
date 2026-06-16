@@ -156,7 +156,12 @@ class SqliteConnection:
 
     @contextlib.contextmanager
     def transaction_sync(self) -> Iterator[sqlite3.Cursor]:
-        """Synchronous BEGIN IMMEDIATE -> COMMIT/ROLLBACK."""
+        """Synchronous BEGIN IMMEDIATE -> COMMIT/ROLLBACK.
+
+        Yields:
+            An open cursor inside the immediate write transaction; the
+            transaction commits on clean exit and rolls back on exception.
+        """
         with self._sync_lock:
             cur = self._conn.cursor()
             try:
@@ -233,6 +238,10 @@ class SqliteConnection:
             async with conn.transaction() as cur:
                 cur.execute("INSERT INTO events (...) VALUES (...)", row)
                 cur.execute("UPDATE cursors SET ...", row2)
+
+        Yields:
+            An open cursor inside the immediate write transaction; the
+            transaction commits on clean exit and rolls back on exception.
         """
         await self._async_lock.acquire()
         try:
