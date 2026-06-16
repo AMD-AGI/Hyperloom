@@ -383,8 +383,9 @@ class HuggingFaceClient:
         """Return top-N text-generation repos by downloads, optionally size-filtered.
 
         Pool-then-filter: the listing API matches on tags only, so re-validate
-        per-repo on pipeline_tag == "text-generation" AND a generative
-        architectures[0] suffix; either failing (or a gated 401) → skip.
+        per-repo on a generative architectures[0] suffix; failing that (or a
+        gated 401) → skip. The pipeline_tag != text-generation gate has been
+        removed so multimodal/other heads are allowed through.
         """
         pool_size = max(limit * 10, 100)
         listing = self._get(
@@ -403,12 +404,6 @@ class HuggingFaceClient:
                 info = self.model_info(repo)
             except Exception:
                 continue  # gated / network error
-
-            pipeline_tag = (info.get("pipeline_tag") or "").strip()
-            if pipeline_tag and pipeline_tag != "text-generation":
-                log.info("skip %s: pipeline_tag=%s (not text-generation)",
-                         repo, pipeline_tag)
-                continue
 
             if min_params_b > 0:
                 total = (info.get("safetensors") or {}).get("total", 0)
@@ -679,11 +674,6 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str,
                   "suffix). Skipping — pass an actual causal-LM repo, or override "
                   "with --manual --framework vllm if you really want to try.",
                   repo_id, arch)
-        return None
-    pipeline_tag = (info.get("pipeline_tag") or "").strip()
-    if pipeline_tag and pipeline_tag != "text-generation":
-        log.error("[%s] pipeline_tag=%s is not 'text-generation' — skipping",
-                  repo_id, pipeline_tag)
         return None
 
     framework = detect_framework(config)
