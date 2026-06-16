@@ -48,6 +48,7 @@ from .cli_backends import (  # noqa: F401 - re-exported for callers/tests
 from .orchestrator.backends import ClaudeBackend
 from .manifest import load_manifest, write_manifest
 from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
+    GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
     _config_architectures,
     _load_model_config_dict,
     _model_is_gemma2,
@@ -1188,14 +1189,19 @@ _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 # type mimo_v2_flash to instantiate a model of type ." + Unknown attention
 # backend TRITON) — the unrecognized arch leaves an empty model type.
 # deepseek_v4: confirmed from DeepSeek-V4-Flash server.log ModelConfig
-# validation failure. ministral3: vLLM registry raises KeyError('ministral3').
+# validation failure.
 _UNRECOGNIZED_MODEL_TYPES = frozenset({
-    "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash", "ministral3",
+    "deepseek_v4", "glm4_moe_lite", "mimo_v2_flash",
 })
 _UNRECOGNIZED_ARCHITECTURES = frozenset({
     "deepseekv4forcausallm", "glm4moeliteforcausallm",
     "mimov2flashforcausallm",
 })
+# ministral3 only fails inside a Mistral3 multimodal wrapper (Surpem-Supertron2
+# server.log: vLLM registry raises KeyError('ministral3') for text_config.
+# model_type). A bare top-level ministral3 is left to the framework to judge, so
+# this is checked only against the nested text_config scope.
+_NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset({"ministral3"})
 
 # Phi-3 su/longrope rope_scaling: Phi3Config._rope_scaling_validation() requires
 # rope_scaling to be a dict of EXACTLY 3 keys (type/short_factor/long_factor).
@@ -1208,8 +1214,8 @@ _PHI3_ROPE_TYPES = frozenset({"su", "longrope"})
 # Gemma2 missing hidden_act: sglang's gemma2 runtime reads config.hidden_act
 # unconditionally. Some checkpoints ship only hidden_activation (the HF field
 # name), so config.hidden_act is absent and the model crashes with
-# AttributeError in engine init. Hardware-agnostic.
-_GEMMA2_ARCHITECTURES = frozenset({"gemma2forcausallm"})
+# AttributeError in engine init. Hardware-agnostic. ``_GEMMA2_ARCHITECTURES`` is
+# imported from model_config_utils (single source of truth) at module top.
 
 # Quantization formats with no ROCm/AMD runtime path. NVIDIA ModelOpt FP8/NVFP4
 # use vendor-specific scale packing (no sglang ROCm loader); bitsandbytes ships
@@ -1346,15 +1352,20 @@ def _detect_unrecognized_architecture(data: dict) -> str | None:
     Hardware-agnostic: the ModelConfig pydantic validation rejects the unknown
     model_type with a ValidationError in engine init on any GPU vendor.
     """
-    scopes = [data]
+    scopes = [(data, False)]
     nested = data.get("text_config")
     if isinstance(nested, dict):
-        scopes.append(nested)
-    for scope in scopes:
+        scopes.append((nested, True))
+    for scope, is_nested in scopes:
         model_type = str(scope.get("model_type") or "").strip().lower()
         arches = {a.lower() for a in _config_architectures(scope)}
+        unrecognized_types = _UNRECOGNIZED_MODEL_TYPES
+        if is_nested:
+            unrecognized_types = (
+                _UNRECOGNIZED_MODEL_TYPES | _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES
+            )
         if (
-            model_type in _UNRECOGNIZED_MODEL_TYPES
+            model_type in unrecognized_types
             or arches & _UNRECOGNIZED_ARCHITECTURES
         ):
             label = model_type or (next(iter(arches), "") if arches else "?")
@@ -1393,7 +1404,13 @@ def _read_safetensors_header(path: Path) -> dict | None:
 
 
 def _detect_vocab_weight_shape_mismatch(model_path: str, data: dict) -> str | None:
-    """Return a reason when config vocab_size disagrees with model weights."""
+    """Return a reason when config vocab_size disagrees with model weights.
+
+    Best-effort and safetensors-only: reads just the JSON header (never tensor
+    data) of ``*.safetensors`` shards. Legacy ``*.bin``/``pytorch_model.bin``
+    checkpoints are not inspected; truncated/corrupt headers are skipped
+    silently (return None) and left to the downstream loader.
+    """
     expected = data.get("vocab_size")
     nested = data.get("text_config")
     if not isinstance(expected, int) and isinstance(nested, dict):
