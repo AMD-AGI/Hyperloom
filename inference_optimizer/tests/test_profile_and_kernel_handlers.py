@@ -675,7 +675,6 @@ def test_materialize_profile_sglang_skips_shape_discovery_for_gemma2(
 ):
     """Gemma2 + patched SGLang must NOT inject shape-discovery (it crashes
     CUDA-graph capture); --enable-profile-cuda-graph still applies."""
-    import json
     import yaml
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=True)
@@ -697,7 +696,6 @@ def test_materialize_profile_sglang_keeps_shape_discovery_for_non_gemma2(
     tmp_path, monkeypatch,
 ):
     """A non-Gemma2 model still gets shape-discovery when patched."""
-    import json
     import yaml
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=True)
