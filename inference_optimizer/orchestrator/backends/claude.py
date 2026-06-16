@@ -289,12 +289,27 @@ class ClaudeBackend:
         # Bounded retry/backoff (R6) absorbs transient stalls / blips across a
         # multi-day run; a per-attempt wall-clock cap still bounds each try.
         async def _one_attempt() -> tuple[Any, ...]:
+            """Run one bounded SDK invocation under the per-attempt timeout.
+
+            Returns:
+                The collected ``_invoke_and_collect`` result tuple.
+
+            Raises:
+                asyncio.TimeoutError: If the attempt exceeds ``call_timeout_s``.
+            """
             return await asyncio.wait_for(
                 self._invoke_and_collect(full_prompt, options),
                 timeout=self.call_timeout_s,
             )
 
         def _note_retry(attempt: int, exc: BaseException, delay: float) -> None:
+            """Record a transient-failure retry warning into the call log.
+
+            Args:
+                attempt: The 1-based attempt number that failed.
+                exc: The transient exception raised by the attempt.
+                delay: Seconds to wait before the next retry.
+            """
             self.calls.append({
                 "warn": (
                     f"claude SDK transient failure (attempt {attempt}): {exc!r}; "

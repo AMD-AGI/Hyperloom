@@ -60,7 +60,14 @@ _BENIGN_FAILURE_PATTERNS: tuple[str, ...] = (
 
 
 def _is_benign_failure_text(text: str) -> bool:
-    """Return True when ``text`` matches a known-benign upstream WARN pattern."""
+    """Return True when ``text`` matches a known-benign upstream WARN pattern.
+
+    Args:
+        text: The candidate error/warning text to test.
+
+    Returns:
+        ``True`` when ``text`` contains any known-benign upstream WARN pattern.
+    """
     blob = str(text or "")
     return any(pat in blob for pat in _BENIGN_FAILURE_PATTERNS)
 
@@ -73,6 +80,13 @@ def _highlight_is_benign(highlight: dict[str, Any]) -> bool:
     a highlight whose summary describes a real fault (e.g. ``EngineCore failed
     to start``) is never suppressed even if its payload also references a benign
     file (#465).
+
+    Args:
+        highlight: A highlight record whose one-line ``summary`` is judged.
+
+    Returns:
+        ``True`` when the highlight's ``summary`` is only a benign upstream
+        WARN.
     """
     return _is_benign_failure_text(str(highlight.get("summary", "")))
 
@@ -83,6 +97,13 @@ def _partition_benign_lines(text: str) -> tuple[list[str], list[str]]:
     Drops only the lines matching a benign upstream WARN pattern and preserves
     every other line, so a mixed blob (benign WARN + real HIP OOM) keeps its
     real root cause instead of being wiped wholesale (#465).
+
+    Args:
+        text: The raw error blob to partition line-by-line.
+
+    Returns:
+        A ``(kept_lines, suppressed_benign_lines)`` tuple; suppressed lines are
+        stripped and truncated to 200 characters.
     """
     kept: list[str] = []
     suppressed: list[str] = []
@@ -101,6 +122,13 @@ def _classify_root_cause_type(error_class: str, error_text: str) -> str:
 
     Returns one of ``oom`` / ``benchmark_timeout`` / ``engine_core_init`` /
     ``worker_crash`` / ``unknown`` for the dashboard / ops contract.
+
+    Args:
+        error_class: The attempt's recorded error class.
+        error_text: The attempt's error message / excerpt.
+
+    Returns:
+        The coarse root-cause enum string for the dashboard / ops contract.
     """
     blob = f"{error_class} {error_text}".lower()
     if "out of memory" in blob or "hip oom" in blob:
@@ -125,6 +153,12 @@ def _pick_failure_headline(text: str) -> str:
 
     Prefers terminal fault lines (OOM / FATAL / engine-core markers) over the
     last line, so the headline points at the real root cause.
+
+    Args:
+        text: The server.log excerpt to scan.
+
+    Returns:
+        The most informative single line, or ``""`` when ``text`` is empty.
     """
     lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
     if not lines:
@@ -147,6 +181,13 @@ def _last_failed_baseline_attempt(state: SharedState) -> dict[str, Any] | None:
     by ``record_action_attempt``) and falls back to the matching
     ``last_action_failures`` row. Both are persisted in ``state.json`` — there
     is no on-disk ``runs/baseline/<task_id>/result.json`` to scan.
+
+    Args:
+        state: The session's shared state to read attempt records from.
+
+    Returns:
+        The most recent failed baseline attempt record, or ``None`` when none
+        is found.
     """
     attempts = getattr(state, "baseline_attempts", None) or []
     failed = [
@@ -169,6 +210,13 @@ def _resolve_attempt_server_log(attempt: dict[str, Any]) -> Path | None:
     The audit row stores the ``benchmark_*`` workspace; ``server.log`` is
     written one level up (``output_dir/server.log``). Also honours an explicit
     ``stderr_log_path`` when present.
+
+    Args:
+        attempt: A baseline attempt audit record.
+
+    Returns:
+        The path to an existing ``server.log``, or ``None`` when none of the
+        candidates exist.
     """
     candidates: list[Path] = []
     workspace = attempt.get("workspace")
@@ -203,6 +251,15 @@ def _build_failure_summary(
     Best-effort: only fires for ``baseline_failed`` and returns ``None`` on any
     error so the report still writes. ``session_dir`` is used only to render a
     session-relative ``server_log`` path.
+
+    Args:
+        state: The session's shared state.
+        session_dir: Session root used only to render a session-relative
+            ``server_log`` path; ``None`` leaves the path absolute.
+
+    Returns:
+        A compact ``failure_summary`` dict, or ``None`` when the stop reason is
+        not ``baseline_failed``, no failed attempt exists, or any error occurs.
     """
     if str(getattr(state, "stop_reason", "") or "") != "baseline_failed":
         return None
