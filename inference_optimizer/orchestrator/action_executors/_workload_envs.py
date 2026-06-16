@@ -374,8 +374,9 @@ def materialize_config_with_envs(
             # Gemma2 + shape-discovery crashes CUDA-graph capture (host
             # torch.tensor in forward during HIP stream capture). Disable
             # shape-discovery for Gemma2 so capture/roofline still run.
-            # Escape hatch HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 keeps it on
-            # (for debugging the TraceLens root-cause fix).
+            # Escape hatch HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 only skips
+            # the Gemma2 gate (for debugging the TraceLens root-cause fix); it
+            # does NOT override a global HYPERLOOM_PROFILE_SHAPE_DISCOVERY=0.
             _force_shape_disc = os.environ.get(
                 "HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", "0",
             ).strip().lower() in {"1", "true", "yes", "on"}
