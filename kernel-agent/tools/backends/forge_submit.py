@@ -1187,9 +1187,10 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
                     "benchmark/test_command or an op template)",
                     time.time() - started)
         gpu_target = _resolve_gpu_target(candidate)
-        # Export GPU_TARGET so Kernel-Forge's MCP server tools (build/bench/pmc)
-        # pick up the resolved target instead of falling back to their own default.
-        os.environ["GPU_TARGET"] = gpu_target
+        # GPU_TARGET is passed to Kernel-Forge's MCP server tools (build/bench/pmc)
+        # via the forge-loop child env (_run_loop_via_cli sets env["GPU_TARGET"]),
+        # so it is NOT written to the parent os.environ -- that would leak to the
+        # sibling ladder backends (claude/codex) running in the same process.
         shapes = _shapes_from_candidate(candidate)
         forge_log = output_dir / "forge_loop.log"
         experiments_dir = output_dir / "forge_experiments"
