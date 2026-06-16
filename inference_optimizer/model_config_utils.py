@@ -54,21 +54,43 @@ def _config_architectures(config: dict) -> list[str]:
 # stream capture and raises ``hipErrorStreamCaptureUnsupported`` -> capture
 # fails -> roofline produces no ceiling. Callers skip shape-discovery for
 # Gemma2 to keep CUDA graph while avoiding the crash.
-_GEMMA2_ARCH_MARKERS = frozenset({"gemma2forcausallm"})
+# Single source of truth: ``cli`` reuses these for its preflight checks too.
+GEMMA2_MODEL_TYPE = "gemma2"
+GEMMA2_ARCHITECTURES = frozenset({"gemma2forcausallm"})
+
+
+def _path_looks_like_gemma2(model_path: str) -> bool:
+    """Heuristic Gemma2 detection from the path when config.json is absent.
+
+    Matches a ``gemma-2`` / ``gemma2`` directory name while excluding Gemma3, so
+    a not-yet-materialized Hub-id style path still gets the workaround.
+    """
+    if not model_path:
+        return False
+    compact = (
+        Path(model_path).name.lower()
+        .replace("-", "").replace("_", "").replace(".", "")
+    )
+    if "gemma3" in compact:
+        return False
+    return "gemma2" in compact
 
 
 def _model_is_gemma2(model_path: str) -> bool:
-    """Best-effort detect a Gemma2 model from config.json (top level or text_config)."""
+    """Best-effort detect a Gemma2 model from config.json (top level or text_config).
+
+    Falls back to a path heuristic when config.json is missing/unreadable.
+    """
     data = _load_model_config_dict(model_path)
     if data is None:
-        return False
+        return _path_looks_like_gemma2(model_path)
     candidates = [data]
     nested = data.get("text_config")
     if isinstance(nested, dict):
         candidates.append(nested)
     for cfg in candidates:
-        if str(cfg.get("model_type") or "").strip().lower() == "gemma2":
+        if str(cfg.get("model_type") or "").strip().lower() == GEMMA2_MODEL_TYPE:
             return True
-        if any(a.lower() in _GEMMA2_ARCH_MARKERS for a in _config_architectures(cfg)):
+        if any(a.lower() in GEMMA2_ARCHITECTURES for a in _config_architectures(cfg)):
             return True
     return False
