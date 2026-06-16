@@ -1779,6 +1779,9 @@ def _seed_shared_state(
         osl=_int_env_or_arg("osl", "OSL"),
         max_model_len=_int_env_or_arg("max_model_len", "MAX_MODEL_LEN"),
         kernel_enabled=not getattr(args, "no_kernel", False),
+        kernel_optimizer=str(
+            getattr(args, "kernel_optimizer", "native") or "native"
+        ).strip().lower(),
         continue_kernel_after_gemm=bool(
             getattr(args, "continue_kernel_after_gemm", True)
         ),
@@ -4910,6 +4913,15 @@ def _build_parser() -> argparse.ArgumentParser:
                            "parameter search). Useful when GEAK/OOB/GPU "
                            "compile env is unavailable or you just want the "
                            "quick-win parameter path. Default: kernel enabled.")
+    opt.add_argument(
+        "--kernel-optimizer", type=str, default="native",
+        choices=["native", "perfskills"],
+        help="Which optimizer owns the KERNEL phase. 'native' (default) uses "
+             "the built-in GEAK/per-kernel loop. 'perfskills' delegates the "
+             "whole KERNEL phase to the cloned PerfSkills e2e optimizer "
+             "(interface/run_e2e.py) once, seeded with the EXPLORE best config; "
+             "SWEEP then reuses PerfSkills' final_launch.sh + bench_e2e.sh. "
+             "Requires PERFSKILLS_E2E_RUNNER (set by the installer).")
     opt.add_argument("--no-explore", action="store_true", default=False,
                       help="Skip the EXPLORE phase entirely. PRELUDE (and "
                            "FRAMEWORK_PR, if enabled) route straight to KERNEL "

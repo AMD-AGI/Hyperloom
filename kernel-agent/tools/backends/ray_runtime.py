@@ -264,6 +264,10 @@ SAFE_ENV_KEYS = (
     "GEAK_MEMORY_API_KEY", "GEAK_USE_KNOWLEDGE_BASE",
     "GEAK_MEMORY_DISABLE", "GEAK_MEMORY_NO_CROSS_SESSION",
     "MSWEA_MODEL_NAME",
+    # PerfSkills e2e optimizer: the runner path + repo root so a Ray worker can
+    # locate interface/run_e2e.py and the workflow_e2e_team/ checkout.
+    "PERFSKILLS_ROOT", "PERFSKILLS_E2E_RUNNER",
+    "PERFSKILLS_CLAUDE_EFFORT", "PERFSKILLS_CLAUDE_MODEL", "PERFSKILLS_E2E_TIMEOUT_S",
 )
 
 

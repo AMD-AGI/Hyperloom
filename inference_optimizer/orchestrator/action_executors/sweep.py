@@ -230,6 +230,31 @@ class SweepExecutor:
                 ``workspace``.
         """
         params = ctx.task.params or {}
+
+        # PerfSkills reuse path: when the KERNEL phase was delegated to
+        # PerfSkills, sweep the optimized server via PerfSkills' own bench_e2e.sh
+        # + the already-built overlay (no overlay reconstruction).
+        ps_result = params.get("perfskills_result") or {}
+        if ps_result.get("bench_script") and ps_result.get("status") == "ok":
+            extra = getattr(ctx, "extra", None) or {}
+            output_root = Path(
+                params.get("output_dir")
+                or extra.get("workspace")
+                or runs_dir(self.session_dir, "sweep", ctx.task.task_id)
+            )
+            from ._perfskills_sweep import sweep_via_perfskills
+            return await sweep_via_perfskills(
+                result=ps_result,
+                conc_values=list(params.get("conc_values") or self.default_conc_values),
+                isl_osl_configs=list(
+                    params.get("isl_osl_configs") or self.default_isl_osl_configs
+                ),
+                output_root=output_root,
+                variant_timeout_sec=int(
+                    params.get("variant_timeout_sec", self.variant_timeout_sec)
+                ),
+            )
+
         config_path = Path(
             params.get("config_path")
             or self.default_config_path

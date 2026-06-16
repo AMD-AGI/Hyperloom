@@ -135,6 +135,13 @@ GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
 # revert this pin to the tag (e.g. v3.2.1) for stronger discoverability.
 # Operators can override with GEAK_REF=<tag|branch|sha>.
 GEAK_REF="${GEAK_REF:-ec61bdbdb151904ec187a8d89518afb969c53737}"
+# PerfSkills: a whole-pipeline e2e optimizer cloned like GEAK. Hyperloom calls
+# its interface/run_e2e.py at the KERNEL phase when --kernel-optimizer=perfskills.
+# Pin to a branch/tag/SHA; operators override with PERFSKILLS_REF.
+PERFSKILLS_REPO="${PERFSKILLS_REPO:-https://github.com/AMD-AGI/PerfSkills.git}"
+PERFSKILLS_ROOT="${PERFSKILLS_ROOT:-${_open_source_root}/PerfSkills}"
+PERFSKILLS_REF="${PERFSKILLS_REF:-main}"
+PERFSKILLS_E2E_RUNNER="${PERFSKILLS_E2E_RUNNER:-${PERFSKILLS_ROOT}/interface/run_e2e.py}"
 OOB_SRC="${OOB_SRC:-${HYPERLOOM_BUNDLE}/OOB}"
 OOB_CLI_ROOT="${OOB_CLI_ROOT:-${_open_source_root}/OOB/oob_cli}"
 GEAK_CONFIG="${GEAK_CONFIG:-${HYPERLOOM_RUNTIME_DIR}/geak-config/local.yaml}"
@@ -1276,6 +1283,8 @@ write_env_file() {
       echo "export TRACELENS_INTERNAL_ROOT='${TRACELENS_INTERNAL_ROOT}'"
       echo "export TL_EXTENSION='TraceLens_internal'"
     fi
+    [ -n "${PERFSKILLS_ROOT}" ] && echo "export PERFSKILLS_ROOT='${PERFSKILLS_ROOT}'"
+    [ -n "${PERFSKILLS_E2E_RUNNER}" ] && echo "export PERFSKILLS_E2E_RUNNER='${PERFSKILLS_E2E_RUNNER}'"
     [ -n "${GEAK_CONFIG}" ] && echo "export GEAK_CONFIG='${GEAK_CONFIG}'"
     [ -n "${GEAK_ROOT}" ] && echo "export GEAK_ROOT='${GEAK_ROOT}'"
     [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
@@ -1290,6 +1299,41 @@ write_env_file() {
   } > "$env_file"
   chmod 600 "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
+}
+
+# Clone PerfSkills (whole-pipeline e2e optimizer) the same way ensure_geak does:
+# SHA pins use a shallow fetch-checkout; tags/branches use git clone --branch.
+# PerfSkills is NOT pip-installed (it's a JS workflow dir invoked via the Claude
+# Code Workflow tool); we only need the checkout + the claude_agent_sdk that its
+# interface/run_e2e.py uses.
+ensure_perfskills() {
+  log "ensuring PerfSkills e2e optimizer"
+  if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
+    mkdir -p "${PERFSKILLS_ROOT}"
+  fi
+  if [ ! -d "${PERFSKILLS_ROOT}/.git" ]; then
+    if [[ "$PERFSKILLS_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+      run git init -q "${PERFSKILLS_ROOT}"
+      run git -C "${PERFSKILLS_ROOT}" remote add origin "$PERFSKILLS_REPO"
+      run git -C "${PERFSKILLS_ROOT}" fetch --depth 1 origin "$PERFSKILLS_REF"
+      run git -C "${PERFSKILLS_ROOT}" checkout -q FETCH_HEAD
+    else
+      run git clone --depth 1 --branch "$PERFSKILLS_REF" "$PERFSKILLS_REPO" "${PERFSKILLS_ROOT}"
+    fi
+  else
+    log "PerfSkills checkout already present: ${PERFSKILLS_ROOT}"
+  fi
+  if [ "$CHECK_ONLY" -eq 0 ]; then
+    # interface/run_e2e.py prefers the python SDK (falls back to `claude -p`).
+    _PIP_FLAGS="-q --no-cache-dir --break-system-packages"
+    run python3 -m pip install ${_PIP_FLAGS} claude-agent-sdk anyio || \
+      warn "claude-agent-sdk install failed; run_e2e.py will fall back to the claude CLI"
+    if [ ! -f "${PERFSKILLS_E2E_RUNNER}" ]; then
+      warn "PerfSkills runner not found at ${PERFSKILLS_E2E_RUNNER} (interface/ missing in checkout?)"
+    fi
+  else
+    log "check-only: skipping PerfSkills sdk installation"
+  fi
 }
 
 report_status() {
@@ -1384,6 +1428,7 @@ main() {
 
   # Always install everything; ensure_oob also calls ensure_llm_auth_files.
   ensure_geak
+  ensure_perfskills
   ensure_rag_index
   ensure_oob
   write_env_file

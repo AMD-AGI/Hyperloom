@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import time
 import traceback
 import uuid
@@ -1951,6 +1952,12 @@ class Coordinator:
         state.save(self.session_dir)
         return verdict_row
 
+    def _perfskills_enabled(self) -> bool:
+        """Whether the KERNEL phase is delegated to the PerfSkills e2e optimizer."""
+        return str(
+            getattr(self.shared_state, "kernel_optimizer", "native") or "native"
+        ).strip().lower() == "perfskills"
+
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
         """Run deterministic KERNEL-entry setup before LLM kernel work (FP8 GEMM tuning gate)."""
         if not self._kernel_enabled():
@@ -1959,6 +1966,12 @@ class Coordinator:
                 "KERNEL entry hook fired with kernel_enabled=False "
                 "(from=%s)", from_phase or "<unknown>",
             )
+            return
+        if self._perfskills_enabled():
+            # PerfSkills owns the whole KERNEL phase: one in-process e2e run
+            # seeded with the EXPLORE best config, then hand straight to SWEEP
+            # (which reuses PerfSkills' final_launch.sh + bench_e2e.sh).
+            await self._run_perfskills_kernel_phase(from_phase=from_phase)
             return
         if not self._gemm_tuning_required_before_kernel_opt():
             return
@@ -2014,6 +2027,136 @@ class Coordinator:
         )
         if self._should_continue_kernel_after_gemm():
             await self._run_kernel_opt_after_gemm()
+
+    async def _run_perfskills_kernel_phase(self, *, from_phase: str) -> None:
+        """Delegate the KERNEL phase to PerfSkills (one whole-pipeline e2e run).
+
+        Builds a handoff from the EXPLORE best config, runs the PerfSkills
+        runner out-of-process (it owns all Claude-SDK / Workflow detail),
+        records the optimized launch/bench scripts + throughput into state, then
+        signals SWEEP via the ``skip_to_sweep`` escalate hint.
+        """
+        state = self.shared_state
+        cb = state.current_best or {}
+        accepted_flags = str(cb.get("extra_server_args") or "")
+        extra_envs = cb.get("extra_envs") or {}
+        accepted_env = " ".join(f"{k}={v}" for k, v in dict(extra_envs).items())
+        workload = {
+            "isl": int(getattr(state, "isl", 0) or int(os.environ.get("ISL", "1024"))),
+            "osl": int(getattr(state, "osl", 0) or int(os.environ.get("OSL", "1024"))),
+            "conc": int(getattr(state, "conc", 0) or int(os.environ.get("CONC", "64"))),
+        }
+        handoff = {
+            "schema_version": 1,
+            "model_path": str(getattr(state, "model_path", "") or os.environ.get("MODEL_PATH", "")),
+            "framework": str(os.environ.get("FRAMEWORK", "") or "sglang"),
+            "gpu_type": str(getattr(state, "gpu_type", "") or os.environ.get("GPU_TYPE", "")),
+            "tp": int(os.environ.get("TP", "1") or 1),
+            "workload": workload,
+            "accepted_flags": accepted_flags,
+            "accepted_env": accepted_env,
+            "launch_recipe": str(getattr(state, "baseline_config_path", "") or ""),
+            "raw_baseline_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
+            "exp_root": str(self.session_dir / "perfskills"),
+            # Align PerfSkills' bench CLIENT to Hyperloom's exact one (InferenceX
+            # benchmark_serving.py) so final/sweep numbers are cross-harness 可比.
+            "bench_client": "auto",
+            "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
+        }
+
+        out_dir = self.session_dir / "perfskills"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        handoff_path = out_dir / "handoff.json"
+        handoff_path.write_text(json.dumps(handoff, indent=2), encoding="utf-8")
+
+        from .kernel_request_handlers import _kernel_agent_tool_path
+
+        try:
+            runner = _kernel_agent_tool_path("backends/perfskills_runner.py")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("PerfSkills runner not resolvable; skipping KERNEL")
+            state.perfskills_result = {"status": "error", "error": repr(exc)}
+            state.save(self.session_dir)
+            state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+            return
+
+        timeout_s = int(os.environ.get("PERFSKILLS_E2E_TIMEOUT_S", "21600"))
+        cmd = ["python3", str(runner), str(handoff_path), str(out_dir),
+               "--timeout-s", str(timeout_s)]
+        log.info("KERNEL entry: delegating to PerfSkills e2e (from=%s) cmd=%s",
+                 from_phase or "<unknown>", " ".join(cmd))
+
+        def _run() -> subprocess.CompletedProcess:
+            return subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout_s + 600,
+                env=dict(os.environ),
+            )
+
+        try:
+            proc = await asyncio.to_thread(_run)
+            stderr_tail = (proc.stderr or "")[-2000:]
+            if proc.returncode != 0:
+                log.warning("PerfSkills runner rc=%s: %s", proc.returncode, stderr_tail)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("PerfSkills runner crashed")
+            state.perfskills_result = {"status": "error", "error": repr(exc)}
+            state.save(self.session_dir)
+            state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+            return
+
+        result: dict[str, Any] = {}
+        result_path = out_dir / "result.json"
+        if result_path.is_file():
+            try:
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                result = {}
+        state.perfskills_result = result or {"status": "error", "error": "no result.json"}
+
+        self._promote_perfskills_result(result)
+        state.save(self.session_dir)
+        await self.bus.append_and_seq(Message.new(
+            "kernel", "orchestration", "response",
+            {
+                "in_reply_to": "",
+                "kind": "perfskills_e2e_done",
+                "status": str(result.get("status") or "unknown"),
+                "speedup": result.get("throughput_speedup"),
+                "result_path": str(result_path),
+            },
+            priority=1,
+        ))
+        # KERNEL is a one-shot under PerfSkills: wind down to SWEEP.
+        state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+
+    def _promote_perfskills_result(self, result: dict[str, Any]) -> None:
+        """Fold a PerfSkills e2e win into current_best + the validated gain ledger."""
+        if not isinstance(result, dict) or result.get("status") not in ("ok",):
+            return
+        new_tput = float(result.get("final_throughput_tok_s") or 0.0)
+        base = float(self.shared_state.baseline_tput or 0.0)
+        if new_tput <= 0:
+            return
+        cb = dict(self.shared_state.current_best or {})
+        cb.update({
+            "action": "perfskills_e2e",
+            "tput": new_tput,
+            "ttft_mean_ms": result.get("ttft_ms"),
+            "tpot_mean_ms": result.get("tpot_ms"),
+            # Sweep-reuse handles: the optimized self-contained launch + bench scripts.
+            "perfskills_launch_script": result.get("final_launch_script"),
+            "perfskills_bench_script": result.get("bench_script"),
+            "perfskills_eval_dir": result.get("eval_dir"),
+            "workspace": result.get("eval_dir"),
+        })
+        self.shared_state.current_best = cb
+        if base > 0:
+            gain = (new_tput - base) / base * 100.0
+            self.shared_state.cumulative_gain = gain
+            self.shared_state.cumulative_gain_validated = gain
+            self.shared_state.cumulative_gain_validated_ts = (
+                datetime.now(timezone.utc).isoformat()
+            )
 
     def _promote_gemm_tuning_keep(self, result: dict[str, Any]) -> None:
         """Promote a successful GEMM tuning run into the main gain ledger.
@@ -2883,6 +3026,12 @@ class Coordinator:
         }
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path
+        # PerfSkills-owned KERNEL: hand the e2e result to the sweep so it reuses
+        # PerfSkills' bench_e2e.sh + overlay instead of relaunching via Magpie.
+        ps_result = getattr(state, "perfskills_result", None) or {}
+        if isinstance(ps_result, dict) and ps_result.get("status") == "ok" \
+                and ps_result.get("bench_script"):
+            params["perfskills_result"] = ps_result
         cb = state.current_best or {}
         if isinstance(cb, dict):
             cb_args = str(cb.get("extra_server_args") or "")
