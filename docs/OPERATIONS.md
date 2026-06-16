@@ -42,6 +42,15 @@ session dir + GEAK build artefacts.
 
 ### Storage for `USER_DATA_PATH`
 
+By default, each optimization session lives under a per-model timestamped
+directory:
+
+```text
+$USER_DATA_PATH/<model_basename>/<YYYYMMDDTHHMMSSZ>/
+```
+
+Commands below use `$SESSION_DIR` for that concrete session directory.
+
 | Workload                  | Typical session size              | Retention recommendation                |
 |---------------------------|-----------------------------------|-----------------------------------------|
 | 2-hour explore-only run   | 5–10 GB                           | 30 days (then archive `session_breakdown.json` only) |
@@ -50,11 +59,12 @@ session dir + GEAK build artefacts.
 
 The largest contributors are:
 
-* `runs/<task_id>/` Magpie outputs (per-benchmark trace + result.json).
-* `agents/<agent>/runs/<session>/` kernel optimization attempt
-  artefacts (especially GEAK's `optimization_report.md` + per-task
-  patches).
-* `tracelens/` per-session traces (compressed but still GB-scale).
+* `$SESSION_DIR/runs/<action>/<task_id>/` Magpie outputs (per-benchmark trace
+  + result.json).
+* `$SESSION_DIR/kernel-agent/runs/<session_id>/` kernel optimization and
+  TraceLens artefacts (especially GEAK reports, prompts, traces, and patches).
+* `$SESSION_DIR/kernel-agent/runs/<session_id>/tracelens/` per-session traces
+  (compressed but still GB-scale).
 
 If you only need long-term observability, the only file you must
 preserve is `session_breakdown.json` (1–10 MB; see
@@ -98,10 +108,10 @@ Notes:
 
 | Phase           | Trigger                                            | Action                                                  |
 |-----------------|----------------------------------------------------|---------------------------------------------------------|
-| Session start   | API call / Job creation                            | Coordinator writes `manifest.json`, `state.json`.       |
-| Heartbeat       | Every 60 s                                         | Coordinator writes `state.json.tmp` → atomic rename.    |
+| Session start   | API call / Job creation                            | Coordinator creates `$SESSION_DIR` and writes `manifest.json`, `state.json`. |
+| Heartbeat       | Every 60 s                                         | Coordinator writes `state.json.tmp` → atomic rename inside `$SESSION_DIR`. |
 | Session end     | `target_reached` / `time_exhausted` / `global_converged` | Coordinator writes `session_breakdown.json`, exits 0. |
-| Crash recovery  | Pod OOM / preemption                               | Re-launch with `--resume`; reads `manifest.json` + `state.json`. |
+| Crash recovery  | Pod OOM / preemption                               | Re-launch with `--resume` / `--resume-from`; reads `manifest.json` + `state.json`. |
 
 ---
 
@@ -111,12 +121,12 @@ Notes:
 
 | Artefact                                | Source path                                                       | Retention                                                                                                |
 |-----------------------------------------|-------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
-| Session manifest + state                | `$USER_DATA_PATH/manifest.json`, `$USER_DATA_PATH/state.json`     | Until the session ends; not normally needed afterwards.                                                  |
-| `session_breakdown.json` (downstream contract) | `$USER_DATA_PATH/session_breakdown.json`                   | **Permanent.** This is the canonical record consumed by `claw-stats-service` and downstream notebooks.   |
-| KB contributions                        | `$INFERENCE_OPTIMIZER_KB_ROOT/*.jsonl`                            | **Permanent.** Append-only; backup before any cleanup of `USER_DATA_PATH`.                               |
+| Session manifest + state                | `$SESSION_DIR/manifest.json`, `$SESSION_DIR/state.json`           | Until the session ends; not normally needed afterwards.                                                  |
+| `session_breakdown.json` (downstream contract) | `$SESSION_DIR/session_breakdown.json`                       | **Permanent.** This is the canonical record consumed by `claw-stats-service` and downstream notebooks.   |
+| Local recipe KB                         | `${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}`                  | **Permanent.** Backup before cleanup of `USER_DATA_PATH`.                                                |
 | Robustness findings                     | `$USER_DATA_PATH/agents/robustness/findings/*.jsonl`              | 30 days minimum; longer if your incident process needs it.                                               |
-| Kernel-opt attempts                     | `$USER_DATA_PATH/agents/kernel/runs/<session>/optimization_attempts.jsonl` | 14 days unless an attempt was promoted; keep promoted attempts permanently.                       |
-| Per-attempt artefacts (full)            | `$USER_DATA_PATH/agents/kernel/runs/<session>/{logs,results,verification}/` | 7–14 days. Cold-archive only if you need full reproducibility.                                  |
+| Kernel-opt attempts                     | `$SESSION_DIR/kernel-agent/runs/<session_id>/optimization_attempts.jsonl` | 14 days unless an attempt was promoted; keep promoted attempts permanently.                       |
+| Per-attempt artefacts (full)            | `$SESSION_DIR/kernel-agent/runs/<session_id>/{logs,results,verification}/` | 7–14 days. Cold-archive only if you need full reproducibility.                                  |
 
 ### Suggested cron
 
@@ -124,10 +134,10 @@ Notes:
 # Daily: ship session_breakdown.json + KB to S3
 find "$USER_DATA_PATH" -name session_breakdown.json -mtime -1 \
   -exec aws s3 cp {} s3://my-bucket/hyperloom/sessions/ \;
-aws s3 sync "$INFERENCE_OPTIMIZER_KB_ROOT" s3://my-bucket/hyperloom/kb/
+aws s3 sync "${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}" s3://my-bucket/hyperloom/kb/
 
 # Weekly: prune session dirs older than 14 days
-find "$USER_DATA_PATH" -maxdepth 1 -name 'sess-*' -mtime +14 -exec rm -rf {} \;
+find "$USER_DATA_PATH" -mindepth 2 -maxdepth 2 -type d -name '20??????T??????Z' -mtime +14 -exec rm -rf {} \;
 ```
 
 ---
@@ -162,13 +172,12 @@ is JSONL-on-disk + (optional) downstream collectors.
 
 | Signal                         | File / location                                                                  | Format          |
 |--------------------------------|----------------------------------------------------------------------------------|-----------------|
-| Per-tick Coordinator state     | `$USER_DATA_PATH/state.json`                                                     | JSON, snapshot  |
-| Session breakdown (final)      | `$USER_DATA_PATH/session_breakdown.json`                                         | JSON, snapshot  |
+| Per-tick Coordinator state     | `$SESSION_DIR/state.json`                                                        | JSON, snapshot  |
+| Session breakdown (final)      | `$SESSION_DIR/session_breakdown.json`                                            | JSON, snapshot  |
 | Robustness findings            | `$USER_DATA_PATH/agents/robustness/findings/<session>.jsonl`                     | JSONL, append   |
 | Critic verdicts                | `$USER_DATA_PATH/critic-session-memory/<session>/emit-*.json`                    | JSON per call   |
-| Kernel-opt attempts            | `$USER_DATA_PATH/agents/kernel/runs/<session>/optimization_attempts.jsonl`       | JSONL, append   |
-| Coordinator logs               | `$USER_DATA_PATH/coordinator.log`                                                | text            |
-| Inference server logs          | `$USER_DATA_PATH/runs/<task>/server.log`                                         | text            |
+| Kernel-opt attempts            | `$SESSION_DIR/kernel-agent/runs/<session_id>/optimization_attempts.jsonl`        | JSONL, append   |
+| Inference server logs          | `$SESSION_DIR/runs/<action>/<task>/server.log`                                  | text            |
 
 Recommended pipeline: `vector` / `fluentbit` tailing the JSONL files
 and forwarding to your observability stack of choice (Datadog, Loki,
@@ -181,10 +190,11 @@ ingest it whole on session end.
 
 ### Scenario A: pod was OOM-killed mid-session
 
-1. Verify the PV is intact: `ls $USER_DATA_PATH/state.json`.
+1. Locate the affected session directory and verify the PV is intact:
+   `ls "$SESSION_DIR/state.json"`.
 2. Relaunch with `--resume`:
    ```bash
-   inference_optimizer optimize --resume
+   inference_optimizer optimize --resume --resume-from "$SESSION_DIR"
    ```
 3. Coordinator reads `manifest.json` + `state.json`, re-enters the
    loop at the last completed action. The current in-flight action
@@ -196,9 +206,8 @@ ingest it whole on session end.
 
 1. The session is unrecoverable. Restart from scratch with a fresh
    `--model …` invocation.
-2. KB is unaffected if `$INFERENCE_OPTIMIZER_KB_ROOT` lives on a
-   different volume (recommended). The next run gets the same priors
-   as before.
+2. KB is unaffected if `HYPERLOOM_LOCAL_KB_ROOT` lives on a different
+   volume (recommended). The next run gets the same local recipe store.
 
 ### Scenario C: auth-proxy stuck
 
@@ -207,14 +216,15 @@ ingest it whole on session end.
 3. If 401s persist, rotate `SAFE_API_KEY` (rare — the key is
    long-lived) and re-run.
 
-### Scenario D: KB write corrupted
+### Scenario D: Local KB store corrupted
 
-1. KB JSONL files are append-only. If the last record is partial,
-   truncate to the last newline:
+1. Move the selected local KB root aside before starting a new run:
    ```bash
-   sed -i '$d' $INFERENCE_OPTIMIZER_KB_ROOT/lessons.jsonl  # drop last line only if invalid
+   mv "${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}" \
+      "${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}.corrupt.$(date -u +%Y%m%dT%H%M%SZ)"
    ```
-2. Restart Critic; it will regenerate `index.json` on next ingest.
+2. Restart the optimizer with the same `--local-kb-root` (or env default). The
+   local store is recreated lazily on first write.
 
 ### Scenario E: Ray won't start (`--num-gpus` rejected)
 
@@ -245,8 +255,8 @@ Before going to production with self-hosted Hyperloom:
   = 1–8 GPUs depending on workload TP).
 - [ ] `USER_DATA_PATH` PV ≥ 200 GB per active session, ideally local
   NVMe.
-- [ ] `$INFERENCE_OPTIMIZER_KB_ROOT` on a separate PV with daily
-  backup.
+- [ ] `HYPERLOOM_LOCAL_KB_ROOT` (or `$USER_DATA_PATH/kb`) on persistent
+  storage with daily backup.
 - [ ] `SAFE_API_KEY` rotation runbook (key is long-lived; rotation
   requires only re-export + `install.sh` re-run).
 - [ ] Liveness probe for auth-proxy on `127.0.0.1:4002`.

@@ -55,7 +55,7 @@ The agent tested five SGLang backend switches one at a time:
 | Fused MoE runner | +0.4% |
 | Fused MLA decode | 0.0% |
 
-These are config-level changes — the kind an engineer would try. Individually, none looked significant. The DFS protocol requires testing all positive switches in combination. When the top three were enabled together:
+These are config-level changes — the kind an engineer would try. Individually, none looked significant. The agent's systematic search tests positive switches in combination rather than stopping at single-switch results. When the top three were enabled together:
 
 **+41.2%** (1,403 → 1,981 tok/s)
 
@@ -82,9 +82,9 @@ All values in tok/s/GPU. ISL=1024, OSL=1024, FP8 weights.
 
 ## Getting Faster Over Time
 
-The GLM-5 run was not the agent's first optimization. Prior runs on DeepSeek-R1, Kimi-K2.5, Qwen3, and others had already populated a structured knowledge base with validated lessons — "torch.compile is incompatible with MLA+FP8," "vendor aiter kernels resist rewriting," "backend switches outperform parameter sweeps on MoE models." These entries pruned dead branches before the first benchmark: the agent never attempted torch.compile on GLM-5 and deprioritized vendor kernel modifications, saving hours of exploration.
+The GLM-5 run was not the agent's first optimization. Prior runs on DeepSeek-R1, Kimi-K2.5, Qwen3, and others had already populated the recipe knowledge base (KB) with validated lessons — "torch.compile is incompatible with MLA+FP8," "vendor aiter kernels resist rewriting," "backend switches outperform parameter sweeps on MoE models." These priors pruned dead branches before the first benchmark: the agent never attempted torch.compile on GLM-5 and deprioritized vendor kernel modifications, saving hours of exploration.
 
-In return, GLM-5's findings — the super-linear backend synergy, the missing GEMM config pattern, the FP8 kernel eviction trick — were ingested back into the knowledge base. Future MoE+MLA+NSA models will start with higher-confidence priors for these actions, converging faster than GLM-5 did.
+In return, GLM-5's findings — the super-linear backend synergy, the missing GEMM config pattern, the FP8 kernel eviction trick — were ingested back into the KB. Future MoE+MLA+NSA models start with higher-confidence priors for these actions, converging faster than GLM-5 did.
 
 ---
 
@@ -103,5 +103,3 @@ bash scripts/run_benchmark.sh                  # Expected: ~2,039 tok/s (509 tok
 - [glm5-optimized README](https://github.com/AMD-AGI/Agentic-InferenceX/tree/main/glm5-optimized) — full reproduction guide with TurboQuant KV cache option
 - [Optimization History](https://github.com/AMD-AGI/Agentic-InferenceX/blob/main/glm5-optimized/docs/FULL_OPTIMIZATION_HISTORY.md) — complete v1→v8 journey with every experiment
 - [B200 Gap Analysis](https://github.com/AMD-AGI/Agentic-InferenceX/blob/main/glm5-optimized/docs/NVIDIA_B200_COMPARISON.md) — detailed comparison of software stacks
-- [DFS Scoring Walkthrough](dashboards/PRISM_DFS_SCORING_WALKTHROUGH.md) — formula-level trace of every scoring decision
-- [Interactive Search Tree](dashboards/optimization-search-tree.html) — visual DFS tree with scores at each node

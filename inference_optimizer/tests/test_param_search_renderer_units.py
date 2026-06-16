@@ -18,8 +18,8 @@ class TestParamSearchRenderer:
         out = _render({})
         assert isinstance(out, RenderedSection)
         assert out.skipped is True
-        assert any("backends DFS" in f for f in out.key_facts)
-        assert any("params DFS" in f for f in out.key_facts)
+        assert any("backends search" in f for f in out.key_facts)
+        assert any("params search" in f for f in out.key_facts)
 
     def test_populated_explore_unskips_section(self):
         out = _render({
@@ -37,7 +37,7 @@ class TestParamSearchRenderer:
                          "last_round": 0},
         })
         assert out.skipped is False
-        assert "Backends DFS" in out.markdown_block
+        assert "Backends search" in out.markdown_block
 
     def test_discovered_flags_rendered_per_framework(self):
         out = _render({
