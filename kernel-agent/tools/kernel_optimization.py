@@ -576,10 +576,12 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
         return [], notes
 
     # Unified ladder: forge FIRST (Kernel-Forge autonomous loop; falls through to
-    # geak/claude/codex when forge skips a non-triton candidate or misses a KEEP),
-    # then GEAK, then claude/codex. Without a benchmark GEAK still attempts but flags
+    # geak when forge skips a non-triton candidate or misses a KEEP), then GEAK.
+    # claude/codex are NOT auto-selected anymore — enable them only via explicit
+    # --backends or KERNEL_OPT_BACKEND_ORDER/KERNEL_OPT_BACKENDS env (handled
+    # above). Without a benchmark GEAK still attempts but flags
     # geak_without_benchmark=True so KEEP gates know confidence is reduced.
-    selected = ["forge", "geak", "claude", "codex"]
+    selected = ["forge", "geak"]
     if not benchmark_available:
         notes["geak_without_benchmark"] = True
     return selected, notes
@@ -2527,6 +2529,27 @@ def _oob_output_dir(session_id: str, prompt_file: Path) -> Path:
     return out
 
 
+def _forge_output_dir(session_id: str, prompt_file: Path) -> Path:
+    """Return the per-attempt output directory for a Forge run.
+
+    Mirrors _oob_output_dir but scopes Forge artifacts under their own
+    ``forge/`` root instead of the legacy ``oob/`` directory, so the Forge
+    backend's outputs (forge_loop.log, forge_experiments/, optimization_report,
+    optimized_versions/) are not confusingly nested under a sibling backend's
+    name.
+
+    Args:
+        session_id: Session identifier for the run.
+        prompt_file: Prompt file whose stem scopes the attempt directory.
+
+    Returns:
+        The created ``.../forge/<session_id>/<prompt_stem>`` directory.
+    """
+    out = _kernel_agent_root() / "forge" / session_id / prompt_file.stem
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 def _mirror_path_link(run_dir: Path, mirror: Path) -> None:
     """Create a relative symlink inside the run dir pointing at the mirror.
 
@@ -2635,6 +2658,8 @@ def invoke_backend(
     _shared_out_dir = (
         _geak_output_dir(args.session_id, prompt_file)
         if backend == "geak"
+        else _forge_output_dir(args.session_id, prompt_file)
+        if backend == "forge"
         else _oob_output_dir(args.session_id, prompt_file)
     )
     if common_test_command:
@@ -2781,7 +2806,7 @@ def invoke_backend(
             # same artifacts as OOB (optimized_versions/ + optimization_report.md),
             # so the downstream verify/propose/integrate path is unchanged.
             forge = _import_backend("forge_submit")
-            out_dir = _oob_output_dir(args.session_id, prompt_file)
+            out_dir = _forge_output_dir(args.session_id, prompt_file)
             result = forge.submit(
                 source_file=source_file,
                 prompt_file=prompt_file,
