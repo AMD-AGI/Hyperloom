@@ -1094,8 +1094,8 @@ class SharedState:
         ts: str | None = None,
         ts_unix: float | None = None,
     ) -> dict[str, Any]:
-        """Forwarding shim — implementation in :mod:`.shared_state_phase` (phase 2 behavior-offload)."""
-        from . import shared_state_phase as _m
+        """Forwarding shim — implementation in :mod:`.phase_state` (folded back in phase 6B)."""
+        from . import phase_state as _m
         return _m.record_phase_transition(self, to_phase=to_phase, reason=reason, evidence=evidence, ts=ts, ts_unix=ts_unix)
 
     def current_top_bottleneck(self) -> str:
@@ -1156,8 +1156,8 @@ class SharedState:
         duration_s: float | None = None,
         ts: str | None = None,
     ) -> dict[str, Any]:
-        """Forwarding shim — implementation in :mod:`.shared_state_phase` (phase 2 behavior-offload)."""
-        from . import shared_state_phase as _m
+        """Forwarding shim — implementation in :mod:`.phase_state` (folded back in phase 6B)."""
+        from . import phase_state as _m
         return _m.record_lifecycle_event(self, step=step, status=status, phase=phase, label=label, artifacts=artifacts, detail=detail, duration_s=duration_s, ts=ts)
 
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
