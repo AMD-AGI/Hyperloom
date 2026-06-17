@@ -27,6 +27,11 @@ from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     _load_model_config_dict,
 )
 
+# Re-exported from model_config_utils for callers/tests that import these via
+# ``cli_model_gate``; declared here so the re-export is intentional rather than
+# a flagged unused import.
+__all__ = ["_GEMMA2_ARCHITECTURES", "_config_architectures", "_load_model_config_dict"]
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------

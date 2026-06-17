@@ -3810,6 +3810,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         try:
             max_partial = max(1, int(env_v))
         except (TypeError, ValueError):
+            # Malformed env override → keep the default partial-attempt cap.
             pass
 
     # One backend ladder without a KEEP retires the kernel by default; raise threshold for flaky backends.
@@ -3819,6 +3820,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         try:
             max_failures = max(1, int(env_f))
         except (TypeError, ValueError):
+            # Malformed env override → keep the default failure cap.
             pass
 
     should_reject = (

@@ -843,6 +843,8 @@ class Coordinator:
                     self._STATE_JSON_WARN_BYTES / (1024.0**2),
                 )
         except OSError:
+            # Best-effort disk/size warning only; never block on a stat() that
+            # races a concurrent prune or a transient filesystem error.
             pass
 
         if free_gb >= self._DISK_FREE_MIN_GB and used_frac <= self._DISK_USED_MAX_FRAC:
@@ -1371,6 +1373,8 @@ class Coordinator:
             try:
                 await t
             except asyncio.CancelledError:
+                # Expected: we just cancelled these tasks; swallow the
+                # cancellation so shutdown drains every task cleanly.
                 pass
             except Exception:  # noqa: BLE001
                 log.exception("reactor task raised on shutdown")
@@ -5350,6 +5354,8 @@ class Coordinator:
                         stop_reason = "signal"
                         break
                     except asyncio.TimeoutError:
+                        # Normal path: no stop signal within the tick interval —
+                        # fall through and run the next tick.
                         pass
         finally:
             if self.shared_state.closing_phase:
@@ -5376,6 +5382,8 @@ class Coordinator:
                     for sig in previous_handlers:
                         loop.remove_signal_handler(sig)
                 except (NotImplementedError, RuntimeError):
+                    # Signal handlers are unsupported off the main thread / on
+                    # some platforms; teardown is best-effort, so ignore.
                     pass
         return self.shared_state.stop_reason
 
@@ -9824,4 +9832,23 @@ class Coordinator:
             self.shared_state.save(self.session_dir)
 
 
-__all__ = ["Coordinator", "CoordinatorState", "PendingProposal", "SharedState"]
+__all__ = [
+    "Coordinator",
+    "CoordinatorState",
+    "PendingProposal",
+    "SharedState",
+    # Re-exported from coordinator_helpers for callers/tests that reference
+    # them via ``coordinator.<name>`` (e.g. test_coordinator_runtime uses
+    # coordinator._summarize_failed_variants). Declared so the re-export is
+    # intentional rather than a flagged unused import.
+    "_BASELINE_FINGERPRINT_KEYS",
+    "_baseline_params_fingerprint",
+    "_dedupe_extra_server_args",
+    "_infer_model_class_from_config",
+    "_merge_cumulative_extra_sglang_args",
+    "_parse_baseline_workload_extra",
+    "_parse_iso_unix",
+    "_resolve_roofline_watermark_ratio",
+    "_summarize_failed_variants",
+    "effective_closing_grace_sec",
+]
