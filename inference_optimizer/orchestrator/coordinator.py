@@ -8806,6 +8806,12 @@ class Coordinator:
                                 result["gap_canonical_id"] = payload_gap
                         await self._record_integrate_keep(result)
                     self.shared_state.save(self.session_dir)
+                    # Re-evaluate pending integrations now that this one is
+                    # recorded: a retryable integration fault is re-dispatched
+                    # in-phase (KERNEL) rather than deferred to the SWEEP drain,
+                    # and any still-pending KEEP is chained forward. Idempotent —
+                    # KEEP/REVERT kernels have already left pending_keep_kernel_ids.
+                    await self._auto_enqueue_pending_integrations()
                 # Bug B: advance the kernel cursor past this request seq so the LLM kernel agent doesn't re-answer it next tick.
                 await self.cursors.advance(
                     target_agent,
@@ -9126,51 +9132,45 @@ class Coordinator:
             await self.cursors.advance(agent_name, seq=top.seq, msg_id=top.msg_id)
 
     async def _auto_enqueue_pending_integrations(self) -> None:
-        """Auto-dispatch integrate for KEEP'd kernels not yet integrated (IR-3).
+        """Auto-dispatch integrate for KEEP'd kernels awaiting integration (IR-3).
 
-        After kernel_opt completes, any kernel with decision=KEEP that has no
-        entry in kernel_integrate_attempts is immediately queued as an integrate
-        REQUEST on the kernel agent's bus. This prevents the LLM from proposing
-        explore/specialist instead of integrate after a successful kernel_opt.
+        The candidate set is :meth:`SharedState.pending_keep_kernel_ids` — the
+        single source of truth for KEEP'd kernels not yet integrated/rejected,
+        which **includes** kernels whose only prior integrate attempts were
+        un-exhausted integration *faults* (retryable). This lets an integration
+        fault be retried inside the KERNEL phase rather than waiting for the
+        SWEEP-entry drain.
+
+        Duplicate dispatch is guarded per kernel_id by the recorded
+        integrate-attempt count at the time of the last dispatch
+        (``_auto_integrate_attempt_marks``): a kernel is re-dispatched only once
+        its previously-dispatched integrate has been recorded (count advanced),
+        never while one is still in flight. A persistently-faulting kernel is
+        retried until it KEEPs, REVERTs, or exhausts its fault budget — at which
+        point it drops out of ``pending_keep_kernel_ids`` and is no longer
+        dispatched. Idempotent: safe to call after every kernel_opt and after
+        every integrate completion.
         """
         state = self.shared_state
-        opt_attempts = getattr(state, "kernel_opt_attempts", None) or {}
-        integ_attempts = getattr(state, "kernel_integrate_attempts", None) or {}
-        if not isinstance(opt_attempts, dict):
-            return
-
-        integrated_kids: set[str] = set()
-        if isinstance(integ_attempts, dict):
-            for entry in integ_attempts.values():
-                if isinstance(entry, dict):
-                    kid = str(entry.get("kernel_id") or "")
-                    if kid:
-                        integrated_kids.add(kid)
-
-        # Track dispatched auto-integrates across ticks via instance set.
-        if not hasattr(self, "_auto_integrate_dispatched"):
-            self._auto_integrate_dispatched: set[str] = set()
-
-        pending_kids: list[str] = []
-        for kid, data in opt_attempts.items():
-            if not isinstance(data, dict):
-                continue
-            decision = str(data.get("last_decision") or "").upper()
-            if (
-                decision == "KEEP"
-                and kid not in integrated_kids
-                and kid not in self._auto_integrate_dispatched
-            ):
-                pending_kids.append(kid)
-
+        pending_kids = state.pending_keep_kernel_ids()
         if not pending_kids:
             return
 
+        # Per-kernel in-flight guard, keyed on recorded integrate-attempt count.
+        if not hasattr(self, "_auto_integrate_attempt_marks"):
+            self._auto_integrate_attempt_marks: dict[str, int] = {}
+
         for kid in pending_kids:
+            recorded = state.integrate_attempt_count_for_kernel(kid)
+            mark = self._auto_integrate_attempt_marks.get(kid)
+            if mark is not None and recorded <= mark:
+                # A previously-dispatched integrate for this kernel is still in
+                # flight (no newly-recorded outcome) — don't pile on a duplicate.
+                continue
             log.info(
                 "auto-integrate: dispatching integrate for KEEP'd kernel %s "
-                "(IR-3 mandatory integration)",
-                kid,
+                "(IR-3 mandatory integration; recorded_attempts=%d)",
+                kid, recorded,
             )
             await self.bus.append_and_seq(Message.new(
                 "orchestration", "kernel", "request",
@@ -9181,7 +9181,7 @@ class Coordinator:
                 },
                 priority=2,
             ))
-            self._auto_integrate_dispatched.add(kid)
+            self._auto_integrate_attempt_marks[kid] = recorded
 
     def _record_kernel_opt_partial(self, result: dict[str, Any]) -> None:
         """Streaming callback for ``_run_optimization_batch`` sub-attempts: write each per-kernel entry to kernel_opt_attempts immediately so the next-tick prompt is accurate mid-batch.
