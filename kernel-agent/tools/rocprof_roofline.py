@@ -499,7 +499,15 @@ def _kernel_name_matches(row: dict[str, Any], target_kernel: str) -> bool:
 
 
 def _project_payload_to_row(payload: dict[str, Any], target_kernel: str = "") -> dict[str, Any]:
-    """Project the row that matches ``target_kernel`` into ``kernel_roofline.json``."""
+    """Project the matching result row into a ``kernel_roofline.json`` row.
+
+    Args:
+        payload: The rocprof roofline payload with a ``results`` list.
+        target_kernel: Kernel name to match; empty selects the first row.
+
+    Returns:
+        The projected roofline row, or a status dict when no row matches.
+    """
     rows = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(rows, list) or not rows:
         return {"status": payload.get("status", "failed") if isinstance(payload, dict) else "failed"}
@@ -537,10 +545,19 @@ def _generate_harness_for_candidate(
     out_dir: Path,
     log_fn: Any,
 ) -> tuple[str, str | None]:
-    """Best-effort harness generation for a TraceLens hot-kernel candidate.
+    """Generate a benchmark harness for a TraceLens hot-kernel candidate.
 
-    Returns ``(test_command, error)``. ``test_command`` is empty when no
-    benchmark file resolves; the caller should mark the row as skipped.
+    Best-effort: returns an empty command rather than raising when no
+    benchmark file resolves.
+
+    Args:
+        candidate: The hot-kernel candidate metadata.
+        out_dir: Directory to write the generated harness into.
+        log_fn: Logging callable for progress/diagnostics.
+
+    Returns:
+        A ``(test_command, error)`` tuple. ``test_command`` is empty when no
+        benchmark file resolves and ``error`` names the reason.
     """
     bench_files = candidate.get("benchmark_files") or []
     if not isinstance(bench_files, list) or not bench_files:
@@ -626,7 +643,17 @@ def enrich_kernel_roofline_sidecar(
       this row was considered (vs. silently ``null``).
     * Per-kernel rocprof timeout / failure marks the row ``status='failed'``
       but never aborts enrichment of remaining rows.
-    * Returns a small summary suitable for caller logging.
+
+    Args:
+        sidecar_path: Path to the ``kernel_roofline.json`` sidecar to update.
+        candidates_path: Path to the candidates JSON to read kernels from.
+        workdir: Optional working directory for profiling.
+        timeout_sec_per_kernel: Per-kernel rocprof timeout in seconds.
+        log_fn: Optional logging callable.
+
+    Returns:
+        A summary dict with ``matched``, ``skipped``, ``failed``, and ``rows``
+        counts suitable for caller logging.
     """
     sidecar_p = Path(sidecar_path).expanduser()
     cand_p = Path(candidates_path).expanduser()

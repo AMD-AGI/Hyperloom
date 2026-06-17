@@ -131,6 +131,17 @@ async def run_bench(
     Output lands under ``worktree/scratch/bench/<bench_id>/<call_id>/`` and is
     destroyed with the worktree. ``bench_dir_root`` overrides script discovery
     for tests.
+
+    Args:
+        bench_id: Registered micro-bench identifier to run.
+        worktree: Worktree the bench runs inside.
+        call_id: Unique call id used to scope the output directory.
+        params: Optional bench parameters passed via env JSON.
+        bench_dir_root: Override for bench-script discovery (tests).
+
+    Returns:
+        A result dict with ``ok`` plus bench output, or an error dict when the
+        bench is disabled/unknown/missing or the run fails or times out.
     """
     if not BENCH_TOOL_ENABLED:
         return _error(
@@ -206,7 +217,16 @@ _PATCH_PATH_RE = re.compile(r"^(?:---|\+\+\+) (?:a|b)/(?P<path>.+)$", re.M)
 def apply_patch_in_worktree(
     worktree: Path, patch_text: str,
 ) -> dict[str, Any]:
-    """Try ``git apply`` inside the worktree (self-check); not committed."""
+    """Try ``git apply`` inside the worktree (self-check); not committed.
+
+    Args:
+        worktree: Worktree the patch is applied inside.
+        patch_text: The unified-diff text to apply.
+
+    Returns:
+        A result dict with ``applied`` on success, or an error dict for an
+        empty patch, missing worktree, path escape, or git-apply failure.
+    """
     if not patch_text or not patch_text.strip():
         return _error("empty_patch")
     worktree = Path(worktree)
@@ -260,6 +280,13 @@ def capture_worktree_cumulative_diff(worktree: Path) -> str | None:
     * ``<diff>`` — uncommitted-change diff.
     * ``None``   — git failure / not a repo; callers skip the
                    cumulative-diff check rather than aborting.
+
+    Args:
+        worktree: Worktree to capture the cumulative diff from.
+
+    Returns:
+        The ``git diff HEAD`` output, ``""`` for a clean worktree, or ``None``
+        on git failure / not a repo.
     """
     worktree = Path(worktree)
     if not worktree.is_dir():
@@ -277,7 +304,11 @@ def capture_worktree_cumulative_diff(worktree: Path) -> str | None:
 
 
 def reset_worktree(worktree: Path) -> None:
-    """Discard uncommitted changes + untracked files in ``worktree``."""
+    """Discard uncommitted changes + untracked files in ``worktree``.
+
+    Args:
+        worktree: Worktree to hard-reset and clean.
+    """
     worktree = Path(worktree)
     if not worktree.is_dir():
         return

@@ -29,7 +29,11 @@ _MEMORY_KEYS: tuple[str, ...] = (
 
 
 def _now_iso() -> str:
-    """Return the current UTC time as a second-resolution ISO-8601 string."""
+    """Return the current UTC time as a second-resolution ISO-8601 string.
+
+    Returns:
+        The current UTC time formatted as a second-resolution ISO-8601 string.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
@@ -106,6 +110,14 @@ def parse_checkpoint_reply(raw_text: str) -> dict[str, Any]:
     Tolerant: accepts a fenced ```json block or bare object; missing keys
     default to empty. Never raises — malformed replies yield a best-effort
     dict (with a ``parse_error`` marker).
+
+    Args:
+        raw_text: The agent's raw checkpoint reply text.
+
+    Returns:
+        The parsed memory dict (``current_plan`` / ``hypotheses`` /
+        ``tried_and_why`` / ``pending`` / ``learnings``), with a
+        ``parse_error`` marker when no JSON object was found.
     """
     obj = _extract_json_object(raw_text)
     if obj is None:
@@ -172,6 +184,16 @@ def build_memory_record(
 
     ``learnings`` accumulate across checkpoints (deduped, capped) so durable
     lessons survive a later checkpoint that forgets to repeat them.
+
+    Args:
+        parsed: The parsed checkpoint reply from :func:`parse_checkpoint_reply`.
+        seq: The checkpoint sequence number.
+        tick: The current tick.
+        previous: The prior persisted memory record, or ``None``.
+
+    Returns:
+        The persisted ``orchestration_memory`` record with accumulated,
+        deduped, capped ``learnings`` and checkpoint bookkeeping.
     """
     prev = previous or {}
     learnings = list(prev.get("learnings") or [])
@@ -198,6 +220,12 @@ def render_memory_for_seed(memory: dict[str, Any]) -> str:
 
     Used for compaction re-seed and resume rebuild. Returns "" when memory
     is empty (fresh session).
+
+    Args:
+        memory: An ``orchestration_memory`` record.
+
+    Returns:
+        The rendered prompt text, or ``""`` when ``memory`` is empty.
     """
     if not memory:
         return ""
