@@ -7,6 +7,7 @@ are generated automatically from the in-code docstrings via recursive
 ``autosummary`` stubs, so no per-module ``.rst`` files need to be maintained by
 hand.
 """
+
 from __future__ import annotations
 
 import os
@@ -45,13 +46,13 @@ version = "0.6"
 
 # -- General configuration ---------------------------------------------------
 extensions = [
-    "sphinx.ext.autodoc",        # pull docstrings out of the source
-    "sphinx.ext.autosummary",    # auto-generate per-module API stub pages
-    "sphinx.ext.napoleon",       # understand Google- (and NumPy-) style docstrings
-    "sphinx.ext.viewcode",       # add "[source]" links next to documented objects
-    "sphinx.ext.intersphinx",    # cross-link to the Python/3rd-party docs
+    "sphinx.ext.autodoc",  # pull docstrings out of the source
+    "sphinx.ext.autosummary",  # auto-generate per-module API stub pages
+    "sphinx.ext.napoleon",  # understand Google- (and NumPy-) style docstrings
+    "sphinx.ext.viewcode",  # add "[source]" links next to documented objects
+    "sphinx.ext.intersphinx",  # cross-link to the Python/3rd-party docs
     "sphinx.ext.todo",
-    "myst_parser",               # render the existing Markdown guides in docs/
+    "myst_parser",  # render the existing Markdown guides in docs/
 ]
 
 templates_path = ["_templates"]
@@ -66,7 +67,7 @@ source_suffix = {
 root_doc = "index"
 
 # -- autodoc / autosummary ---------------------------------------------------
-autosummary_generate = True          # build stub pages from the autosummary directives
+autosummary_generate = True  # build stub pages from the autosummary directives
 autosummary_imported_members = False
 
 autodoc_default_options = {
@@ -82,10 +83,10 @@ autodoc_default_options = {
     # keeps the re-exports off the package page so each name resolves uniquely.
     "ignore-module-all": True,
 }
-autodoc_typehints = "description"     # render type hints in the description, not the signature
+autodoc_typehints = "description"  # render type hints in the description, not the signature
 autodoc_typehints_format = "short"
 autodoc_preserve_defaults = True
-autoclass_content = "class"           # use the class docstring (not __init__) for the class body
+autoclass_content = "class"  # use the class docstring (not __init__) for the class body
 
 # Many runtime modules import heavy / hardware-bound third-party packages at
 # import time. Mock them so the documentation build does not require a full

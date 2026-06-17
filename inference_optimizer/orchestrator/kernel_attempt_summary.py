@@ -57,7 +57,10 @@ ERROR_CLASS_UNKNOWN = "unknown"
 #: failure; those must not flip ``produced_artifact=true`` (masking
 #: ``ladder_all_failed``).
 _ARTIFACT_LOG_SUFFIXES = (
-    "_stdout.log", "_stderr.log", ".log", ".txt",
+    "_stdout.log",
+    "_stderr.log",
+    ".log",
+    ".txt",
 )
 
 
@@ -163,10 +166,7 @@ FIELD_GLOSSARY: dict[str, str] = {
         "Achieved throughput as a percentage of the kernel's roofline "
         "peak for its bound_type. Lower = more headroom to gain."
     ),
-    "bound_type": (
-        "Whether the kernel is limited by memory bandwidth "
-        "(memory-bound) or compute (compute-bound)."
-    ),
+    "bound_type": ("Whether the kernel is limited by memory bandwidth (memory-bound) or compute (compute-bound)."),
     "compile_passed": (
         "True only if at least one backend in the ladder produced a "
         "usable patch. False means the whole geak->claude->codex "
@@ -212,7 +212,8 @@ def _backend_results_dir(session_dir: Path, session_id: str) -> Path | None:
 
 
 def _load_kernel_result(
-    results_dir: Path | None, kernel_id: str,
+    results_dir: Path | None,
+    kernel_id: str,
 ) -> tuple[dict[str, Any] | None, str]:
     """Read the raw kernel-agent ``results/<kid>.json`` payload.
 
@@ -241,7 +242,8 @@ def _load_kernel_result(
 
 
 def _load_backend_ladder(
-    results_dir: Path | None, kernel_id: str,
+    results_dir: Path | None,
+    kernel_id: str,
 ) -> tuple[list[dict[str, Any]], str]:
     """Parse one kernel's kernel-agent ``results/<kid>.json`` attempts.
 
@@ -372,8 +374,7 @@ def _unattempted_reason(top_entry: dict[str, Any]) -> tuple[str, str]:
     if not recommended:
         return (
             UNATTEMPTED_NO_BACKEND,
-            "Reusable kernel but no recommended backend in the top-15 "
-            "row; kernel-agent will not auto-dispatch.",
+            "Reusable kernel but no recommended backend in the top-15 row; kernel-agent will not auto-dispatch.",
         )
     return (
         UNATTEMPTED_BELOW_CUTOFF,
@@ -405,17 +406,10 @@ def _summary_one_line(
         return f"integrated into optimization_stack; micro_speedup={micro:.3f}x"
     if category == CATEGORY_KEEP_PENDING:
         micro = entry.get("last_micro_speedup") or 0.0
-        return (
-            f"KEEP awaiting integrate; micro_speedup={micro:.3f}x "
-            "(pending integrate action)"
-        )
+        return f"KEEP awaiting integrate; micro_speedup={micro:.3f}x (pending integrate action)"
     if category == CATEGORY_ATTEMPTED_REJECTED:
-        all_failed = (
-            bool(backend_ladder)
-            and all(
-                row.get("status") == "failed" and not row.get("produced_artifact")
-                for row in backend_ladder
-            )
+        all_failed = bool(backend_ladder) and all(
+            row.get("status") == "failed" and not row.get("produced_artifact") for row in backend_ladder
         )
         if all_failed:
             backends = "/".join(row.get("backend") or "?" for row in backend_ladder)
@@ -459,23 +453,11 @@ def build_kernel_optimization_summary(
     results_dir = _backend_results_dir(sd_path, session_id)
 
     top15: list[dict[str, Any]] = list(
-        (getattr(state, "last_trace_analyze", {}) or {}).get(
-            "kernel_roofline_top15"
-        )
-        or []
+        (getattr(state, "last_trace_analyze", {}) or {}).get("kernel_roofline_top15") or []
     )
-    top_by_id: dict[str, dict[str, Any]] = {
-        str(k.get("kernel_id")): k
-        for k in top15
-        if isinstance(k, dict) and k.get("kernel_id")
-    }
 
-    attempts_map: dict[str, dict[str, Any]] = dict(
-        getattr(state, "kernel_opt_attempts", {}) or {}
-    )
-    rejected_ids: set[str] = set(
-        str(x) for x in (getattr(state, "rejected_kernel_ids", []) or [])
-    )
+    attempts_map: dict[str, dict[str, Any]] = dict(getattr(state, "kernel_opt_attempts", {}) or {})
+    rejected_ids: set[str] = set(str(x) for x in (getattr(state, "rejected_kernel_ids", []) or []))
     integrated_ids: set[str] = set()
     for entry in getattr(state, "optimization_stack", []) or []:
         if not isinstance(entry, dict):
@@ -487,11 +469,7 @@ def build_kernel_optimization_summary(
     keep_pending_kid = ""
     if str(last_kernel_opt.get("decision") or "").upper() == "KEEP":
         cand_kid = str(last_kernel_opt.get("kernel_id") or "")
-        if (
-            cand_kid
-            and cand_kid not in integrated_ids
-            and cand_kid not in rejected_ids
-        ):
+        if cand_kid and cand_kid not in integrated_ids and cand_kid not in rejected_ids:
             keep_pending_kid = cand_kid
 
     by_kernel: list[dict[str, Any]] = []
@@ -527,12 +505,8 @@ def build_kernel_optimization_summary(
         if attempt is None:
             reason_code, reason_detail = _unattempted_reason(top_entry)
             counts["unattempted"] += 1
-            unattempted_breakdown[reason_code] = (
-                unattempted_breakdown.get(reason_code, 0) + 1
-            )
-            by_kernel.append(
-                _render_unattempted_row(top_entry, reason_code, reason_detail)
-            )
+            unattempted_breakdown[reason_code] = unattempted_breakdown.get(reason_code, 0) + 1
+            by_kernel.append(_render_unattempted_row(top_entry, reason_code, reason_detail))
             continue
         counts["attempted"] += 1
         category = _classify_attempted(
@@ -563,8 +537,11 @@ def build_kernel_optimization_summary(
             counts["in_flight"] += 1
         by_kernel.append(
             _render_attempted_row(
-                top_entry, attempt, category,
-                results_dir=results_dir, session_dir=sd_path,
+                top_entry,
+                attempt,
+                category,
+                results_dir=results_dir,
+                session_dir=sd_path,
                 last_kernel_opt=last_kernel_opt if kid == keep_pending_kid else None,
             )
         )
@@ -591,8 +568,11 @@ def build_kernel_optimization_summary(
             counts["in_flight"] += 1
         by_kernel.append(
             _render_attempted_row(
-                {"kernel_id": kid}, attempt, category,
-                results_dir=results_dir, session_dir=sd_path,
+                {"kernel_id": kid},
+                attempt,
+                category,
+                results_dir=results_dir,
+                session_dir=sd_path,
                 last_kernel_opt=None,
             )
         )
@@ -609,9 +589,7 @@ def build_kernel_optimization_summary(
         "schema_version": schema_version,
         "session_id": session_id,
         "model_name": str(getattr(state, "model_name", "") or ""),
-        "cumulative_gain_validated_pct": float(
-            getattr(state, "cumulative_gain_validated", 0.0) or 0.0
-        ),
+        "cumulative_gain_validated_pct": float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0),
         "totals": counts,
         "rejection_breakdown": rejection_breakdown,
         "unattempted_reason_breakdown": unattempted_breakdown,
@@ -696,10 +674,15 @@ def _render_attempted_row(
         ver_block = kernel_result.get("verification")
         if isinstance(ver_block, dict):
             for key in (
-                "compile_passed", "correctness_passed",
-                "correctness_source", "micro_speedup",
-                "micro_speedup_source", "verification_status",
-                "best_artifact_path", "best_backend", "best_attempt_id",
+                "compile_passed",
+                "correctness_passed",
+                "correctness_source",
+                "micro_speedup",
+                "micro_speedup_source",
+                "verification_status",
+                "best_artifact_path",
+                "best_backend",
+                "best_attempt_id",
             ):
                 v = ver_block.get(key)
                 if v is not None:
@@ -707,7 +690,9 @@ def _render_attempted_row(
     # last_kernel_opt (KEEP_PENDING handoff) wins over ledger + detail file.
     if isinstance(last_kernel_opt, dict) and last_kernel_opt:
         for key in (
-            "compile_passed", "correctness_passed", "best_artifact_path",
+            "compile_passed",
+            "correctness_passed",
+            "best_artifact_path",
             "reasons",
         ):
             v = last_kernel_opt.get(key)
@@ -730,9 +715,7 @@ def _render_attempted_row(
         "kernel_id": kid,
         "kernel_name": str(top_entry.get("name") or ""),
         "kernel_category": str(top_entry.get("kernel_category") or ""),
-        "source_file": str(
-            top_entry.get("source_file") or attempt.get("last_source_file") or ""
-        ),
+        "source_file": str(top_entry.get("source_file") or attempt.get("last_source_file") or ""),
         "gpu_pct": _to_float(top_entry.get("gpu_pct")),
         "efficiency_pct": _to_float(top_entry.get("efficiency_percent")),
         "bound_type": str(top_entry.get("bound_type") or ""),
@@ -762,11 +745,11 @@ def _render_attempted_row(
 # Aggregations / takeaways
 #: ``backend_ladder[].error_class`` -> ``failure_reason_breakdown`` bucket.
 _ERROR_CLASS_TO_BUCKET = {
-    ERROR_CLASS_TIMEOUT:            "timeout",
-    ERROR_CLASS_PREPROCESS_FAILED:  "preprocess_failed",
-    ERROR_CLASS_COMPILE_FAILED:     "compile_failed",
+    ERROR_CLASS_TIMEOUT: "timeout",
+    ERROR_CLASS_PREPROCESS_FAILED: "preprocess_failed",
+    ERROR_CLASS_COMPILE_FAILED: "compile_failed",
     ERROR_CLASS_CORRECTNESS_FAILED: "correctness_failed",
-    ERROR_CLASS_AGENT_ERROR:        "agent_error",
+    ERROR_CLASS_AGENT_ERROR: "agent_error",
 }
 
 
@@ -863,13 +846,11 @@ def _build_top_takeaways(
 
     if attempted > 0:
         out.append(
-            f"{integrated} of {attempted} attempted kernels reached "
-            f"KEEP and integrated; {rejected} were rejected."
+            f"{integrated} of {attempted} attempted kernels reached KEEP and integrated; {rejected} were rejected."
         )
     else:
         out.append(
-            "No kernels were attempted in this session "
-            "(check if kernel_opt was disabled or no candidates qualified)."
+            "No kernels were attempted in this session (check if kernel_opt was disabled or no candidates qualified)."
         )
 
     ladder_all = failure_reason_breakdown.get("ladder_all_failed", 0)
@@ -894,9 +875,9 @@ def _build_top_takeaways(
 
     if unattempted > 0:
         no_src = sum(
-            1 for r in by_kernel
-            if r.get("category") == CATEGORY_UNATTEMPTED
-            and r.get("unattempted_reason") == UNATTEMPTED_NO_SOURCE
+            1
+            for r in by_kernel
+            if r.get("category") == CATEGORY_UNATTEMPTED and r.get("unattempted_reason") == UNATTEMPTED_NO_SOURCE
         )
         if no_src > 0:
             out.append(

@@ -17,6 +17,7 @@ import report_generator as rg  # noqa: E402
 
 # ── _fmt_pct / _avg / _first_of ──
 
+
 def test_fmt_pct():
     assert rg._fmt_pct(None) == "N/A"
     assert rg._fmt_pct(0.0) == "--"
@@ -35,6 +36,7 @@ def test_first_of():
 
 
 # ── _parse_metrics_from_report ──
+
 
 def test_parse_metrics_from_report_gpu_row():
     content = "Gain: **12.5%**\n| tok/s/GPU | ~100 | ~120 |\n"
@@ -57,6 +59,7 @@ def test_parse_metrics_from_report_empty():
 
 # ── _extract_metrics_via_llm ──
 
+
 def test_extract_metrics_via_llm_no_key(monkeypatch):
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     assert rg._extract_metrics_via_llm("report") == {}
@@ -70,12 +73,26 @@ def test_extract_metrics_via_llm_success(monkeypatch):
             pass
 
         def json(self):
-            return {"choices": [{"message": {"content": json.dumps({
-                "baseline_throughput": 10, "optimized_throughput": 12,
-                "tok_per_gpu_baseline": 5, "tok_per_gpu_optimized": 6,
-                "gain_pct": 20})}}]}
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "baseline_throughput": 10,
+                                    "optimized_throughput": 12,
+                                    "tok_per_gpu_baseline": 5,
+                                    "tok_per_gpu_optimized": 6,
+                                    "gain_pct": 20,
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
 
     import requests
+
     monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResp())
     out = rg._extract_metrics_via_llm("report text")
     assert out["gain_pct"] == 20
@@ -94,6 +111,7 @@ def test_extract_metrics_via_llm_fenced(monkeypatch):
             return {"choices": [{"message": {"content": fenced}}]}
 
     import requests
+
     monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResp())
     assert rg._extract_metrics_via_llm("r")["gain_pct"] == 3
 
@@ -111,10 +129,12 @@ def test_extract_metrics_via_llm_failure(monkeypatch):
 
 # ── extract_optimization_data ──
 
+
 def test_extract_optimization_data_ci_metrics(tmp_path: Path):
-    (tmp_path / "ci_metrics.json").write_text(json.dumps({
-        "tok_per_gpu_baseline": 100, "tok_per_gpu_optimized": 130,
-        "actions_taken": ["a", "b"]}), encoding="utf-8")
+    (tmp_path / "ci_metrics.json").write_text(
+        json.dumps({"tok_per_gpu_baseline": 100, "tok_per_gpu_optimized": 130, "actions_taken": ["a", "b"]}),
+        encoding="utf-8",
+    )
     data = rg.extract_optimization_data(str(tmp_path))
     assert data["baseline_throughput"] == 100
     assert data["optimized_throughput"] == 130
@@ -123,8 +143,7 @@ def test_extract_optimization_data_ci_metrics(tmp_path: Path):
 
 
 def test_extract_optimization_data_report_regex(tmp_path: Path):
-    (tmp_path / "optimization_report.md").write_text(
-        "Gain **10.0%**\n| tok/s/GPU | ~50 | ~55 |", encoding="utf-8")
+    (tmp_path / "optimization_report.md").write_text("Gain **10.0%**\n| tok/s/GPU | ~50 | ~55 |", encoding="utf-8")
     data = rg.extract_optimization_data(str(tmp_path))
     assert data["report_exists"] is True
     assert data["baseline_throughput"] == 50.0
@@ -132,10 +151,16 @@ def test_extract_optimization_data_report_regex(tmp_path: Path):
 
 
 def test_extract_optimization_data_nested_schema(tmp_path: Path):
-    (tmp_path / "ci_metrics.json").write_text(json.dumps({
-        "baseline": {"tok_s_per_gpu": 100},
-        "optimized": {"tok_s_per_gpu": 110},
-        "improvement": {"output_throughput_pct": 10}}), encoding="utf-8")
+    (tmp_path / "ci_metrics.json").write_text(
+        json.dumps(
+            {
+                "baseline": {"tok_s_per_gpu": 100},
+                "optimized": {"tok_s_per_gpu": 110},
+                "improvement": {"output_throughput_pct": 10},
+            }
+        ),
+        encoding="utf-8",
+    )
     data = rg.extract_optimization_data(str(tmp_path))
     assert data["baseline_throughput"] == 100
     assert data["optimized_throughput"] == 110
@@ -156,44 +181,55 @@ def test_extract_optimization_data_bad_ci_metrics(tmp_path: Path):
 
 # ── build_model_result ──
 
+
 def test_build_model_result_basic(tmp_path: Path):
-    (tmp_path / "ci_metrics.json").write_text(json.dumps({
-        "tok_per_gpu_baseline": 100, "tok_per_gpu_optimized": 120}), encoding="utf-8")
+    (tmp_path / "ci_metrics.json").write_text(
+        json.dumps({"tok_per_gpu_baseline": 100, "tok_per_gpu_optimized": 120}), encoding="utf-8"
+    )
     result = rg.build_model_result("M", "k", "img:1", "fp8", "completed", "ts", str(tmp_path))
     assert result["model"] == "M"
     assert result["optimized_tok_per_gpu"] == 120
 
 
 def test_build_model_result_with_ifx_reference(tmp_path: Path):
-    (tmp_path / "ci_metrics.json").write_text(json.dumps({
-        "tok_per_gpu_baseline": 80, "tok_per_gpu_optimized": 100}), encoding="utf-8")
+    (tmp_path / "ci_metrics.json").write_text(
+        json.dumps({"tok_per_gpu_baseline": 80, "tok_per_gpu_optimized": 100}), encoding="utf-8"
+    )
     ifx = {"metrics": {"output_tput_per_gpu": 90}, "decode_tp": 8}
-    result = rg.build_model_result("M", "k", "img", "fp8", "completed", "ts",
-                                   str(tmp_path), ifx_reference=ifx)
+    result = rg.build_model_result("M", "k", "img", "fp8", "completed", "ts", str(tmp_path), ifx_reference=ifx)
     assert result["inferenceX_tok_per_gpu"] == 90
     assert result["vs_inferenceX_pct"] is not None
 
 
 def test_build_model_result_total_throughput_correction(tmp_path: Path):
     # optimized is >3x ifx -> treated as total throughput, divided by TP.
-    (tmp_path / "ci_metrics.json").write_text(json.dumps({
-        "tok_per_gpu_baseline": 800, "tok_per_gpu_optimized": 1000}), encoding="utf-8")
+    (tmp_path / "ci_metrics.json").write_text(
+        json.dumps({"tok_per_gpu_baseline": 800, "tok_per_gpu_optimized": 1000}), encoding="utf-8"
+    )
     ifx = {"metrics": {"output_tput_per_gpu": 100}, "decode_tp": 8}
-    result = rg.build_model_result("M", "k", "img", "fp8", "completed", "ts",
-                                   str(tmp_path), ifx_reference=ifx)
+    result = rg.build_model_result("M", "k", "img", "fp8", "completed", "ts", str(tmp_path), ifx_reference=ifx)
     assert result["optimized_tok_per_gpu"] == 125.0  # 1000 / 8
 
 
 # ── report renderers ──
 
+
 def _results():
     return [
-        {"model": "A", "precision": "fp8", "image": "img:1", "status": "completed",
-         "baseline_tok_per_gpu": 100, "optimized_tok_per_gpu": 120, "gain_pct": 20.0,
-         "vs_inferenceX_pct": 5.0, "inferenceX_tok_per_gpu": 114, "report_exists": True,
-         "actions": ["x"]},
-        {"model": "B", "precision": "bf16", "image": "img:2", "status": "failed",
-         "actions": []},
+        {
+            "model": "A",
+            "precision": "fp8",
+            "image": "img:1",
+            "status": "completed",
+            "baseline_tok_per_gpu": 100,
+            "optimized_tok_per_gpu": 120,
+            "gain_pct": 20.0,
+            "vs_inferenceX_pct": 5.0,
+            "inferenceX_tok_per_gpu": 114,
+            "report_exists": True,
+            "actions": ["x"],
+        },
+        {"model": "B", "precision": "bf16", "image": "img:2", "status": "failed", "actions": []},
         {"model": "C", "precision": "fp8", "image": "img:3", "status": "timeout"},
     ]
 
@@ -223,8 +259,15 @@ def test_generate_github_summary():
 
 def test_generate_github_summary_overall_table():
     results = [
-        {"model": f"M{i}", "precision": "fp8", "image": "i", "status": "completed",
-         "baseline_tok_per_gpu": 10, "optimized_tok_per_gpu": 12, "gain_pct": 20.0}
+        {
+            "model": f"M{i}",
+            "precision": "fp8",
+            "image": "i",
+            "status": "completed",
+            "baseline_tok_per_gpu": 10,
+            "optimized_tok_per_gpu": 12,
+            "gain_pct": 20.0,
+        }
         for i in range(2)
     ]
     out = rg.generate_github_summary(results, "t", "c")

@@ -132,33 +132,65 @@ def test_relative_to_session(tmp_path: Path):
 
 def test_classify_attempted():
     entry = {"last_decision": "keep"}
-    assert kas._classify_attempted(
-        entry, integrated_ids={"x"}, rejected_ids=set(), kernel_id="x",
-    ) == kas.CATEGORY_INTEGRATED
-    assert kas._classify_attempted(
-        entry, integrated_ids=set(), rejected_ids={"x"}, kernel_id="x",
-    ) == kas.CATEGORY_ATTEMPTED_REJECTED
-    assert kas._classify_attempted(
-        entry, integrated_ids=set(), rejected_ids=set(), kernel_id="x",
-    ) == kas.CATEGORY_KEEP_PENDING
-    assert kas._classify_attempted(
-        {"last_decision": "partial"},
-        integrated_ids=set(), rejected_ids=set(), kernel_id="x",
-    ) == kas.CATEGORY_IN_FLIGHT
+    assert (
+        kas._classify_attempted(
+            entry,
+            integrated_ids={"x"},
+            rejected_ids=set(),
+            kernel_id="x",
+        )
+        == kas.CATEGORY_INTEGRATED
+    )
+    assert (
+        kas._classify_attempted(
+            entry,
+            integrated_ids=set(),
+            rejected_ids={"x"},
+            kernel_id="x",
+        )
+        == kas.CATEGORY_ATTEMPTED_REJECTED
+    )
+    assert (
+        kas._classify_attempted(
+            entry,
+            integrated_ids=set(),
+            rejected_ids=set(),
+            kernel_id="x",
+        )
+        == kas.CATEGORY_KEEP_PENDING
+    )
+    assert (
+        kas._classify_attempted(
+            {"last_decision": "partial"},
+            integrated_ids=set(),
+            rejected_ids=set(),
+            kernel_id="x",
+        )
+        == kas.CATEGORY_IN_FLIGHT
+    )
 
 
 def test_unattempted_reason_order():
     assert kas._unattempted_reason({})[0] == kas.UNATTEMPTED_NO_SOURCE
-    assert kas._unattempted_reason(
-        {"source_file": "f.py", "reusable_native_kernel": False},
-    )[0] == kas.UNATTEMPTED_NOT_REUSABLE
-    assert kas._unattempted_reason(
-        {"source_file": "f.py", "reusable_native_kernel": True, "recommended_backends": []},
-    )[0] == kas.UNATTEMPTED_NO_BACKEND
-    assert kas._unattempted_reason(
-        {
-            "source_file": "f.py",
-            "reusable_native_kernel": True,
-            "recommended_backends": ["geak"],
-        },
-    )[0] == kas.UNATTEMPTED_BELOW_CUTOFF
+    assert (
+        kas._unattempted_reason(
+            {"source_file": "f.py", "reusable_native_kernel": False},
+        )[0]
+        == kas.UNATTEMPTED_NOT_REUSABLE
+    )
+    assert (
+        kas._unattempted_reason(
+            {"source_file": "f.py", "reusable_native_kernel": True, "recommended_backends": []},
+        )[0]
+        == kas.UNATTEMPTED_NO_BACKEND
+    )
+    assert (
+        kas._unattempted_reason(
+            {
+                "source_file": "f.py",
+                "reusable_native_kernel": True,
+                "recommended_backends": ["geak"],
+            },
+        )[0]
+        == kas.UNATTEMPTED_BELOW_CUTOFF
+    )

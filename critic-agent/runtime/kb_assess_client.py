@@ -79,9 +79,7 @@ class KBAssessClient:
         if not url:
             return None
         try:
-            timeout = float(
-                os.environ.get("CORTEX_KB_HTTP_TIMEOUT_SEC", str(DEFAULT_TIMEOUT_SEC))
-            )
+            timeout = float(os.environ.get("CORTEX_KB_HTTP_TIMEOUT_SEC", str(DEFAULT_TIMEOUT_SEC)))
         except ValueError:
             timeout = DEFAULT_TIMEOUT_SEC
         return cls(url, timeout_sec=timeout)

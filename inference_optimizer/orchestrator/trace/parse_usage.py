@@ -80,9 +80,7 @@ def normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | None] | Non
     """
     if not isinstance(usage, dict) or not usage:
         return None
-    projected: dict[str, int | None] = {
-        k: _coerce_optional_int(usage.get(k)) for k in _TOKEN_KEYS
-    }
+    projected: dict[str, int | None] = {k: _coerce_optional_int(usage.get(k)) for k in _TOKEN_KEYS}
     if all(v is None for v in projected.values()):
         return None
     return projected
@@ -136,9 +134,7 @@ def parse_claude_stream_json_usage(
     except FileNotFoundError:
         return None
     except OSError as exc:
-        log.warning(
-            "parse_usage: failed reading stream-json log %s: %r", path, exc
-        )
+        log.warning("parse_usage: failed reading stream-json log %s: %r", path, exc)
         return None
     return normalize_usage(last_usage)
 
@@ -205,19 +201,14 @@ def parse_claude_stream_json_response(
                     if not isinstance(message, dict):
                         continue
                     for block in message.get("content") or []:
-                        if (
-                            isinstance(block, dict)
-                            and block.get("type") == "text"
-                        ):
+                        if isinstance(block, dict) and block.get("type") == "text":
                             text = block.get("text")
                             if isinstance(text, str) and text:
                                 assistant_chunks.append(text)
     except FileNotFoundError:
         return None
     except OSError as exc:
-        log.warning(
-            "parse_usage: failed reading stream-json log %s: %r", path, exc
-        )
+        log.warning("parse_usage: failed reading stream-json log %s: %r", path, exc)
         return None
     if result_text is not None:
         return result_text

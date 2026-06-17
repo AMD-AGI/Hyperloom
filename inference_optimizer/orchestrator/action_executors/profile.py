@@ -58,12 +58,16 @@ _TRACE_CONFIRM_BYTES = 64_000_000
 # ``capture_traces/`` file (Deval ref 99.97%; gated low to avoid false-positives).
 _INPUT_DIMS_FRACTION_FLOOR = 0.90
 
-_PROFILE_UNSAFE_BOOL_FLAGS = frozenset({
-    "--enable-torch-compile",
-})
-_PROFILE_UNSAFE_VALUE_FLAGS = frozenset({
-    "--torch-compile-max-bs",
-})
+_PROFILE_UNSAFE_BOOL_FLAGS = frozenset(
+    {
+        "--enable-torch-compile",
+    }
+)
+_PROFILE_UNSAFE_VALUE_FLAGS = frozenset(
+    {
+        "--torch-compile-max-bs",
+    }
+)
 
 
 def _sanitize_profile_server_args(args: str) -> str:
@@ -142,7 +146,7 @@ def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) ->
                 if substring in (carry + chunk):
                     return True
                 # Tail to catch a sentinel split across the chunk boundary.
-                carry = chunk[-(len(substring)):]
+                carry = chunk[-(len(substring)) :]
     except (OSError, EOFError, UnicodeDecodeError) as e:
         log.debug("_trace_contains: cannot stream %s: %s", path, e)
         return False
@@ -166,7 +170,9 @@ def _sample_trace_text(path: Path) -> str | None:
     except (OSError, EOFError, UnicodeDecodeError) as e:
         # Best-effort: a malformed sample must not fail the profile path.
         log.debug(
-            "_validate_trace_structure: cannot sample %s: %s", path, e,
+            "_validate_trace_structure: cannot sample %s: %s",
+            path,
+            e,
         )
         return None
 
@@ -189,7 +195,9 @@ def _count_substring_occurrences(text: str, substring: str) -> int:
 
 
 def _validate_trace_structure(
-    trace_dir: Path, framework: str, expected_pieces: int = 1,
+    trace_dir: Path,
+    framework: str,
+    expected_pieces: int = 1,
 ) -> dict[str, Any]:
     """Post-profile sanity check (#210 / Deval's ``check_torch_trace.py``).
 
@@ -243,10 +251,7 @@ def _validate_trace_structure(
         capture_files = sorted(p for p in capture.iterdir() if p.is_file())
         capture_traces_present = bool(capture_files)
         if not capture_files:
-            issues.append(
-                "[1] capture_traces/ exists but is empty — graph capture "
-                "path fired but produced no files."
-            )
+            issues.append("[1] capture_traces/ exists but is empty — graph capture path fired but produced no files.")
 
     # --- Check 2 (Deval): capture file has cpu_op + Input Dims ---
     # Sample the heaviest capture file; gate cpu_op-with-Input-Dims fraction
@@ -264,7 +269,7 @@ def _validate_trace_structure(
                 issues.append(
                     f"[2] capture file {target.name} has no literal "
                     f"'cpu_op' events in the first "
-                    f"{_TRACE_INSPECT_BYTES//1_000_000} MB — on ROCm/SGLang "
+                    f"{_TRACE_INSPECT_BYTES // 1_000_000} MB — on ROCm/SGLang "
                     "this is often just an event-naming difference (kernels "
                     "logged under 'sglang_profiler::*'); cross-check Check "
                     "[5] (kernel_shape_profiler) and the server log before "
@@ -294,7 +299,8 @@ def _validate_trace_structure(
         main_text = _sample_trace_text(main_traces[0])
         if main_text is not None:
             user_ann_count = _count_substring_occurrences(
-                main_text, '"name": "user_annotation"',
+                main_text,
+                '"name": "user_annotation"',
             )
             execute_count = _count_substring_occurrences(main_text, '"execute_')
             # ``execute_*`` labels are the real health signal (the splitter +
@@ -307,9 +313,7 @@ def _validate_trace_structure(
                 and user_ann_count == 0
                 and not (
                     _trace_contains(main_traces[0], '"execute_')
-                    or _trace_contains(
-                        main_traces[0], '"name": "user_annotation"'
-                    )
+                    or _trace_contains(main_traces[0], '"name": "user_annotation"')
                 )
             )
             if confirmed_absent:
@@ -372,7 +376,7 @@ def _validate_trace_structure(
         if "kernel_shape_profiler" not in main_text:
             issues.append(
                 f"[5] sglang main trace ({main_traces[0].name}, sampled "
-                f"first {_TRACE_INSPECT_BYTES//1_000_000} MB) lacks "
+                f"first {_TRACE_INSPECT_BYTES // 1_000_000} MB) lacks "
                 "kernel_shape_profiler events — shape-discovery "
                 "patch didn't reach the live SGLang. Verify "
                 "_server_patcher (PR #207) succeeded for the "
@@ -385,7 +389,8 @@ def _validate_trace_structure(
         log.warning(
             "trace structure check: %d issue(s) detected — TraceLens "
             "downstream analysis may be degraded. See per-issue messages "
-            "above for the actionable check.", len(issues),
+            "above for the actionable check.",
+            len(issues),
         )
     return {
         "issues": issues,
@@ -396,10 +401,8 @@ def _validate_trace_structure(
 
 # Legacy constant kept pointing at the sglang profile yaml for fixture use.
 # Runtime sglang/vllm selection goes through `_default_profile_config()`.
-PROFILE_DEFAULT_CONFIG = (
-    asset_root() / "scripts" / "configs" / "profile_sglang.yaml"
-)
-PROFILE_DEFAULT_TIMEOUT_SEC = 14400    # 4 h wall cap; Qwen3-32B TP=1 profile needs ~3 h with steady-state window
+PROFILE_DEFAULT_CONFIG = asset_root() / "scripts" / "configs" / "profile_sglang.yaml"
+PROFILE_DEFAULT_TIMEOUT_SEC = 14400  # 4 h wall cap; Qwen3-32B TP=1 profile needs ~3 h with steady-state window
 
 
 def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
@@ -552,11 +555,10 @@ class ProfileExecutor(BaselineExecutor):
             running multi-node.
         """
         from ._multi_node_env import is_multi_node, rayjob_id_from_state
+
         if not is_multi_node():
             return ""
-        provisioned = os.environ.get(
-            "HYPERLOOM_MN_PROFILE_TRACE_DIR", ""
-        ).strip()
+        provisioned = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
         if provisioned:
             return provisioned
         # Tier 2: derive from state-file rayjob_id (out-of-band launches).
@@ -570,14 +572,16 @@ class ProfileExecutor(BaselineExecutor):
             scoped.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             log.warning(
-                "cannot mkdir multi-node profile fallback dir %s: %s; "
-                "downstream readers may FileNotFoundError",
-                scoped, exc,
+                "cannot mkdir multi-node profile fallback dir %s: %s; downstream readers may FileNotFoundError",
+                scoped,
+                exc,
             )
         return str(scoped)
 
     def _after_materialize_config(
-        self, config_path: Path, output_dir: Path,
+        self,
+        config_path: Path,
+        output_dir: Path,
     ) -> dict[str, Any] | None:
         """Patch the exact InferenceX checkout Magpie will execute.
 
@@ -637,7 +641,7 @@ class ProfileExecutor(BaselineExecutor):
             except OSError:
                 return False
 
-        lib_valid = _contains(lib_path, '${NUM_PROMPTS:-$max_concurrency}')
+        lib_valid = _contains(lib_path, "${NUM_PROMPTS:-$max_concurrency}")
         serving_valid = _contains(serving_path, "PROFILE_EXTRA_BODY")
         if not (lib_ok and serving_ok and lib_valid and serving_valid):
             return {
@@ -683,6 +687,7 @@ class ProfileExecutor(BaselineExecutor):
         )
         caller_args = _sanitize_profile_server_args(read_extra_server_args(params))
         from ._grid_runner import merge_server_args
+
         merged_args = merge_server_args(base_args, caller_args)
         if merged_args:
             params["extra_server_args"] = merged_args
@@ -704,12 +709,15 @@ class ProfileExecutor(BaselineExecutor):
         # before super().__call__ so this round's traces are newer than the
         # watermark and earlier rounds' traces are filtered out below.
         import time as _time
+
         task_started_unix = _time.time()
 
         # Multi-node banner (silent for single-node) surfacing the round's dir.
         from ._multi_node_env import log_mn_banner
+
         log_mn_banner(
-            "profile_executor", log,
+            "profile_executor",
+            log,
             trace_dir=self._resolve_mn_round_trace_root(ctx),
         )
 
@@ -722,16 +730,14 @@ class ProfileExecutor(BaselineExecutor):
                 ServerRestartFailed,
                 restart_server_for_round,
             )
+
             try:
                 # PD knobs auto-resolved from $PD_* env (see baseline.py).
                 await restart_server_for_round(
                     extra_server_args=str(params.get("extra_server_args") or ""),
                     torch_profiler_dir=round_trace_root,
                     framework=os.environ.get("FRAMEWORK") or None,
-                    model_path=(
-                        str(params.get("model_path") or "").strip()
-                        or os.environ.get("MODEL_PATH") or None
-                    ),
+                    model_path=(str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None),
                     tp=int(os.environ.get("TP") or 0) or None,
                     ep=int(os.environ.get("EP") or 0) or None,
                 )
@@ -765,9 +771,11 @@ class ProfileExecutor(BaselineExecutor):
         # fail-soft per worker. ``PROFILE_EXTRA_BODY`` (start_step/num_steps
         # computed by _workload_envs) is the start_profile payload.
         from ._multi_node_server_lifecycle import trigger_dynamo_engine_profile
+
         prof_body: dict[str, Any] = {}
         try:
             import json as _json
+
             parsed = _json.loads(os.environ.get("PROFILE_EXTRA_BODY") or "{}")
             if isinstance(parsed, dict):
                 prof_body = parsed
@@ -784,9 +792,7 @@ class ProfileExecutor(BaselineExecutor):
         # crash. So the dynamo engine-route path forwards ONLY ``output_dir``
         # and bounds the trace by the start/stop wall-clock window instead.
         _SAFE_PROFILE_KEYS = ("output_dir",)
-        prof_body = {
-            k: v for k, v in prof_body.items() if k in _SAFE_PROFILE_KEYS
-        }
+        prof_body = {k: v for k, v in prof_body.items() if k in _SAFE_PROFILE_KEYS}
         # Pin the trace output dir explicitly. The disagg workers may not
         # carry SGLANG_TORCH_PROFILER_DIR (baseline-time launches never set
         # it and per-round restarts can resume rather than relaunch), so
@@ -807,12 +813,9 @@ class ProfileExecutor(BaselineExecutor):
         # throughput number), then stop. ``trigger_dynamo_engine_profile``
         # no-ops for RayJob / single-node, so this is multi-node-dynamo only.
         import asyncio as _asyncio
-        warmup_s = float(
-            os.environ.get("HYPERLOOM_MN_PROFILE_WARMUP_S", "60") or 60
-        )
-        window_s = float(
-            os.environ.get("HYPERLOOM_MN_PROFILE_WINDOW_S", "8") or 8
-        )
+
+        warmup_s = float(os.environ.get("HYPERLOOM_MN_PROFILE_WARMUP_S", "60") or 60)
+        window_s = float(os.environ.get("HYPERLOOM_MN_PROFILE_WINDOW_S", "8") or 8)
         _prof_started = {"v": False}
 
         async def _bounded_profile_window() -> None:
@@ -857,10 +860,7 @@ class ProfileExecutor(BaselineExecutor):
             trace_dir = Path(round_trace_root)
             if trace_dir.is_dir():
                 all_files = sorted(trace_dir.glob("*.trace.json.gz"))
-                trace_files = [
-                    p for p in all_files
-                    if _safe_mtime(p) >= task_started_unix
-                ]
+                trace_files = [p for p in all_files if _safe_mtime(p) >= task_started_unix]
                 result["trace_dir"] = str(trace_dir)
                 result["trace_files"] = [str(p) for p in trace_files]
                 if trace_files:
@@ -889,12 +889,14 @@ class ProfileExecutor(BaselineExecutor):
                             return p.stat().st_size
                         except OSError:
                             return 0
+
                     main_trace = max(trace_files, key=_safe_size)
                     result["main_trace_path"] = str(main_trace)
                     log.info(
                         "profile_executor: multi-node main trace selected by "
                         "size: %s (%d bytes; %d candidate traces this round)",
-                        main_trace.name, _safe_size(main_trace),
+                        main_trace.name,
+                        _safe_size(main_trace),
                         len(trace_files),
                     )
                 elif all_files:
@@ -903,14 +905,17 @@ class ProfileExecutor(BaselineExecutor):
                         "%d historical trace(s) but none with mtime >= "
                         "%.0f (this round's start); sglang may have "
                         "skipped /start_profile or the trace flush is "
-                        "lagging", trace_dir, len(all_files),
+                        "lagging",
+                        trace_dir,
+                        len(all_files),
                         task_started_unix,
                     )
                 else:
                     log.warning(
                         "profile_executor: multi-node trace dir %s exists "
                         "but no .trace.json.gz files found yet (server "
-                        "pods may still be flushing)", trace_dir,
+                        "pods may still be flushing)",
+                        trace_dir,
                     )
             else:
                 result["trace_dir"] = None
@@ -941,13 +946,12 @@ class ProfileExecutor(BaselineExecutor):
                 result["trace_dir"] = str(selected_trace_dir)
                 result["trace_files"] = [str(p) for p in selected_trace_files]
                 main_trace = _preferred_main_trace_path(
-                    selected_trace_dir, selected_trace_files,
+                    selected_trace_dir,
+                    selected_trace_files,
                 )
                 result["main_trace_path"] = str(main_trace)
                 result["profile_trace_selection_reason"] = (
-                    "merged_trace_preferred"
-                    if main_trace.name.startswith("merged-")
-                    else "trace_dir_preferred"
+                    "merged_trace_preferred" if main_trace.name.startswith("merged-") else "trace_dir_preferred"
                 )
                 # #210: warn if the trace shape suggests PROFILE_EXTRA_BODY
                 # leaked / shape-discovery missing. Read-only; never blocks.
@@ -962,29 +966,24 @@ class ProfileExecutor(BaselineExecutor):
                         result["trace_health"] = health
                 except Exception as e:  # noqa: BLE001 - validator is best-effort
                     log.debug(
-                        "profile_executor: trace structure validator failed: %s", e,
+                        "profile_executor: trace structure validator failed: %s",
+                        e,
                     )
             else:
                 result["trace_dir"] = None
                 result["trace_files"] = []
                 result["status"] = "failed"
                 result["error_class"] = "no_trace_files"
-                probed = ", ".join(
-                    str(p) for p in _candidate_trace_dirs(workspace)
-                )
-                result["error"] = (
-                    f"no .trace.json.gz under {workspace_str} (probed: {probed})"
-                )
+                probed = ", ".join(str(p) for p in _candidate_trace_dirs(workspace))
+                result["error"] = f"no .trace.json.gz under {workspace_str} (probed: {probed})"
                 if existing_empty_dirs:
                     log.warning(
-                        "profile_executor: trace dirs exist but no "
-                        ".trace.json.gz files in %s",
+                        "profile_executor: trace dirs exist but no .trace.json.gz files in %s",
                         ", ".join(str(p) for p in existing_empty_dirs),
                     )
                 else:
                     log.warning(
-                        "profile_executor: workspace=%s has no trace dir "
-                        "(checked: %s)",
+                        "profile_executor: workspace=%s has no trace dir (checked: %s)",
                         workspace_str,
                         ", ".join(str(p) for p in _candidate_trace_dirs(workspace)),
                     )

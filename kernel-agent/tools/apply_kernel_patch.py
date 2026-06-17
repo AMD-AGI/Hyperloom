@@ -140,34 +140,42 @@ def _dispatch_multinode_apply(
             other than ``ok`` (so the caller can roll back the local copy).
     """
     cmd = [
-        sys.executable, "-m", "inference_optimizer.multi_node",
+        sys.executable,
+        "-m",
+        "inference_optimizer.multi_node",
         "apply-patch",
-        "--patch-file", str(patch_path),
-        "--target-path", str(target_file),
-        "--backup-dir", backup_dir_on_pod,
-        "--kernel-id", kernel_id or "",
+        "--patch-file",
+        str(patch_path),
+        "--target-path",
+        str(target_file),
+        "--backup-dir",
+        backup_dir_on_pod,
+        "--kernel-id",
+        kernel_id or "",
     ]
     proc = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout_sec,
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout_sec,
     )
     if proc.returncode != 0:
         raise RuntimeError(
-            f"multi-node apply-patch returned rc={proc.returncode}: "
-            f"stderr={(proc.stderr or '')[-2000:]!r}"
+            f"multi-node apply-patch returned rc={proc.returncode}: stderr={(proc.stderr or '')[-2000:]!r}"
         )
     try:
-        parsed = json.loads(proc.stdout.strip().splitlines()[-1]) \
-            if proc.stdout.strip().startswith("{") is False \
+        parsed = (
+            json.loads(proc.stdout.strip().splitlines()[-1])
+            if proc.stdout.strip().startswith("{") is False
             else json.loads(proc.stdout)
+        )
     except (json.JSONDecodeError, IndexError) as exc:
         raise RuntimeError(
-            f"multi-node apply-patch stdout not JSON: {exc!r}; "
-            f"stdout_tail={(proc.stdout or '')[-2000:]!r}"
+            f"multi-node apply-patch stdout not JSON: {exc!r}; stdout_tail={(proc.stdout or '')[-2000:]!r}"
         ) from exc
     if str(parsed.get("status", "")).lower() != "ok":
         raise RuntimeError(
-            f"multi-node apply-patch reported status={parsed.get('status')!r}: "
-            f"failures={parsed.get('failures')!r}"
+            f"multi-node apply-patch reported status={parsed.get('status')!r}: failures={parsed.get('failures')!r}"
         )
     return parsed
 
@@ -191,13 +199,20 @@ def _dispatch_multinode_revert(
         The parsed JSON result, or an empty dict when output is not JSON.
     """
     cmd = [
-        sys.executable, "-m", "inference_optimizer.multi_node",
+        sys.executable,
+        "-m",
+        "inference_optimizer.multi_node",
         "revert-patch",
-        "--target-path", str(target_path),
-        "--backup-map-json", json.dumps(backup_map, sort_keys=True),
+        "--target-path",
+        str(target_path),
+        "--backup-map-json",
+        json.dumps(backup_map, sort_keys=True),
     ]
     proc = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout_sec,
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout_sec,
     )
     out = (proc.stdout or "").strip()
     try:
@@ -296,16 +311,22 @@ def _source_text_looks_complete(text: str, suffix: str) -> bool:
             compile(stripped + "\n", "<optimized_kernel>", "exec")
         except SyntaxError:
             return False
-        return any(
-            marker in stripped
-            for marker in ("def ", "class ", "import ", "@triton.jit", "torch.")
-        )
+        return any(marker in stripped for marker in ("def ", "class ", "import ", "@triton.jit", "torch."))
     if suffix in COMPILED_SOURCE_SUFFIXES:
         return any(
             marker in stripped
             for marker in (
-                "#include", "__global__", "__device__", "extern ", "namespace ",
-                "template", "void ", "int ", "float ", "half", "torch::",
+                "#include",
+                "__global__",
+                "__device__",
+                "extern ",
+                "namespace ",
+                "template",
+                "void ",
+                "int ",
+                "float ",
+                "half",
+                "torch::",
             )
         )
     return False
@@ -334,8 +355,7 @@ def _validate_patch_source(patch: Path, target: Path) -> None:
         raise ValueError(f"patch_path is not a complete source file: {patch}")
     if patch_suffix != target_suffix:
         raise ValueError(
-            f"patch suffix {patch_suffix or '<none>'} does not match "
-            f"target suffix {target_suffix or '<none>'}"
+            f"patch suffix {patch_suffix or '<none>'} does not match target suffix {target_suffix or '<none>'}"
         )
     try:
         text = patch.read_text(encoding="utf-8", errors="replace")
@@ -391,13 +411,9 @@ def _validate_replacement_compatibility(patch_text: str, target_text: str, targe
         ValueError: If the patch is incompatible with the target's contract.
     """
     if "PYBIND11_MODULE" in patch_text and "PYBIND11_MODULE" not in target_text:
-        raise ValueError(
-            "patch creates a standalone PYBIND11 module but target is a framework source file"
-        )
+        raise ValueError("patch creates a standalone PYBIND11 module but target is a framework source file")
     if "TORCH_LIBRARY" in patch_text and "TORCH_LIBRARY" not in target_text:
-        raise ValueError(
-            "patch creates standalone TORCH_LIBRARY registration absent from target"
-        )
+        raise ValueError("patch creates standalone TORCH_LIBRARY registration absent from target")
     if "namespace aiter" in target_text and "namespace aiter" not in patch_text:
         raise ValueError("patch does not preserve namespace aiter")
 
@@ -407,8 +423,7 @@ def _validate_replacement_compatibility(patch_text: str, target_text: str, targe
         missing = sorted(required - present)
         if missing:
             raise ValueError(
-                f"patch does not preserve target host entry function(s) for {target}: "
-                + ", ".join(missing[:12])
+                f"patch does not preserve target host entry function(s) for {target}: " + ", ".join(missing[:12])
             )
 
 
@@ -754,11 +769,13 @@ def _invalidate_aiter_cpp_itfs_cache(
     if not build_dir.exists():
         # Nothing cached yet -> the re-baseline server will build fresh into
         # this dir on first kernel call. No stale binary to mask.
-        record.update({
-            "status": "skipped",
-            "reason": "cpp_itfs build dir does not exist",
-            "moved": [],
-        })
+        record.update(
+            {
+                "status": "skipped",
+                "reason": "cpp_itfs build dir does not exist",
+                "moved": [],
+            }
+        )
         return record
     try:
         if module_names:
@@ -773,11 +790,13 @@ def _invalidate_aiter_cpp_itfs_cache(
     # De-dup: a shared .cuh can match overlapping MD_NAME globs.
     to_move = sorted({p.resolve() for p in to_move})
     if not to_move:
-        record.update({
-            "status": "skipped",
-            "reason": "no matching cpp_itfs cache entries",
-            "moved": [],
-        })
+        record.update(
+            {
+                "status": "skipped",
+                "reason": "no matching cpp_itfs cache entries",
+                "moved": [],
+            }
+        )
         return record
     cache_backup_root = backup_dir / "cpp_itfs_cache"
     moved: list[dict[str, str]] = []
@@ -786,20 +805,24 @@ def _invalidate_aiter_cpp_itfs_cache(
         for src in to_move:
             dst = cache_backup_root / src.name
             if dst.exists():
-                record.update({
-                    "status": "failed",
-                    "error": f"cpp_itfs cache backup path already exists: {dst}",
-                    "moved": moved,
-                })
+                record.update(
+                    {
+                        "status": "failed",
+                        "error": f"cpp_itfs cache backup path already exists: {dst}",
+                        "moved": moved,
+                    }
+                )
                 return record
             shutil.move(str(src), str(dst))
             moved.append({"src": str(src), "backup_path": str(dst)})
     except (OSError, shutil.Error) as exc:
-        record.update({
-            "status": "failed",
-            "error": f"shutil.move failed: {exc}",
-            "moved": moved,
-        })
+        record.update(
+            {
+                "status": "failed",
+                "error": f"shutil.move failed: {exc}",
+                "moved": moved,
+            }
+        )
         return record
     record.update({"status": "ok", "moved": moved})
     return record
@@ -897,10 +920,7 @@ def verify_cpp_itfs_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:
     return {
         "verified": False,
         "status": "stale",
-        "reason": (
-            "no freshly-built cpp_itfs lib.so found after re-baseline; "
-            "served binary is stale"
-        ),
+        "reason": ("no freshly-built cpp_itfs lib.so found after re-baseline; served binary is stale"),
         "build_dir": str(build_dir),
         "module_names": module_names,
     }
@@ -1103,9 +1123,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     multinode_info = manifest.get("multinode") or {}
     mn_revert: dict[str, Any] = {}
     if multinode_info and multinode_info.get("host_backup_map"):
-        target_path = multinode_info.get("target_path") or (
-            source_backup.get("path") if source_backup else ""
-        )
+        target_path = multinode_info.get("target_path") or (source_backup.get("path") if source_backup else "")
         backup_map = multinode_info.get("host_backup_map") or {}
         if target_path and backup_map:
             try:
@@ -1217,15 +1235,16 @@ def apply_kernel_patch(
     shutil.copy2(patch, target)
     cache_clear = (
         _clear_python_kernel_caches(target)
-        if target.suffix.lower() in PYTHON_SOURCE_SUFFIXES else
-        {"status": "skipped", "reason": "not a python source target"}
+        if target.suffix.lower() in PYTHON_SOURCE_SUFFIXES
+        else {"status": "skipped", "reason": "not a python source target"}
     )
 
     # Multi-node: fan-out the patch to every RayJob pod, else hard-revert the sandbox copy.
     multinode_info: dict[str, Any] = {}
     if _is_multi_node():
         pod_backup_dir = os.environ.get(
-            "HYPERLOOM_MN_KERNEL_BACKUP_DIR", _MN_POD_BACKUP_DIR_DEFAULT,
+            "HYPERLOOM_MN_KERNEL_BACKUP_DIR",
+            _MN_POD_BACKUP_DIR_DEFAULT,
         )
         try:
             mn_apply = _dispatch_multinode_apply(
@@ -1243,8 +1262,7 @@ def apply_kernel_patch(
             return {
                 "status": "failed",
                 "error": (
-                    "multi-node apply fan-out failed; sandbox copy "
-                    f"reverted to {source_backup['backup_path']}: {exc}"
+                    f"multi-node apply fan-out failed; sandbox copy reverted to {source_backup['backup_path']}: {exc}"
                 ),
                 "manifest_path": str(manifest_path),
             }
@@ -1279,10 +1297,13 @@ def apply_kernel_patch(
 
     rebuild = {"status": "skipped", "reason": "source-only patch or skip_rebuild=true"}
     jit_build_backup: dict[str, Any] = {
-        "status": "skipped", "reason": "rebuild not run",
+        "status": "skipped",
+        "reason": "rebuild not run",
     }
     cpp_itfs_cache_backup: dict[str, Any] = {
-        "status": "skipped", "reason": "rebuild not run", "is_cpp_itfs": False,
+        "status": "skipped",
+        "reason": "rebuild not run",
+        "is_cpp_itfs": False,
     }
     if strategy["compiled"] and not skip_rebuild:
         # PR-K: move aiter jit/build/ aside so post-rebuild import re-JITs cleanly.
@@ -1296,10 +1317,7 @@ def apply_kernel_patch(
             return {
                 "status": "failed",
                 "error_class": "aiter_jit_invalidation_failed",
-                "error": (
-                    "aiter jit/build/ invalidation failed: "
-                    f"{jit_build_backup.get('error')}"
-                ),
+                "error": (f"aiter jit/build/ invalidation failed: {jit_build_backup.get('error')}"),
                 "manifest_path": str(manifest_path),
                 "jit_build_backup": jit_build_backup,
             }
@@ -1332,10 +1350,7 @@ def apply_kernel_patch(
             return {
                 "status": "failed",
                 "error_class": "aiter_cpp_itfs_invalidation_failed",
-                "error": (
-                    "aiter cpp_itfs runtime cache invalidation failed: "
-                    f"{cpp_itfs_cache_backup.get('error')}"
-                ),
+                "error": (f"aiter cpp_itfs runtime cache invalidation failed: {cpp_itfs_cache_backup.get('error')}"),
                 "manifest_path": str(manifest_path),
                 "cpp_itfs_cache_backup": cpp_itfs_cache_backup,
             }

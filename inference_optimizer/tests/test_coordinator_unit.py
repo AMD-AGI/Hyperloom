@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
 
 from inference_optimizer.orchestrator.coordinator import (
     Coordinator,

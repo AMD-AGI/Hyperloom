@@ -57,6 +57,7 @@ class FakeAssistantMessage:
 @dataclass
 class FakeResultMessage:
     """Stand-in for the SDK's terminal ResultMessage (carries .result)."""
+
     result: str = ""
     content: list[Any] = field(default_factory=list)
 
@@ -64,6 +65,7 @@ class FakeResultMessage:
 @dataclass
 class FakeOptions:
     """Stand-in for ClaudeAgentOptions — captures kwargs for assertions."""
+
     kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __init__(self, **kwargs):
@@ -74,6 +76,7 @@ def _make_query_factory(messages: list[Any]):
     async def _q(*, prompt, options):
         for m in messages:
             yield m
+
     return _q
 
 
@@ -140,10 +143,14 @@ def test_validate_emit_intent_input_rejects_malformed(payload, error_match):
 # build_emit_intent_server
 def test_build_emit_intent_server_returns_none_without_factories():
     """Empty SDK shim with no `tool` or `create_sdk_mcp_server` → None."""
+
     class EmptySdk:
         __name__ = "empty"
+
     cfg = build_emit_intent_server(
-        sdk_module=EmptySdk(), tool_factory=None, server_factory=None,
+        sdk_module=EmptySdk(),
+        tool_factory=None,
+        server_factory=None,
     )
     assert cfg is None
 
@@ -153,9 +160,11 @@ def test_build_emit_intent_server_uses_factories():
 
     def fake_tool(name, desc, schema):
         captured["tool_name"] = name
+
         def deco(handler):
             captured["handler"] = handler
             return ("decorated", handler)
+
         return deco
 
     def fake_server(name, version, tools):
@@ -165,7 +174,8 @@ def test_build_emit_intent_server_uses_factories():
         return {"server": name}
 
     cfg = build_emit_intent_server(
-        tool_factory=fake_tool, server_factory=fake_server,
+        tool_factory=fake_tool,
+        server_factory=fake_server,
     )
     assert cfg == {"server": "inference_optimizer"}
     assert captured["tool_name"] == EMIT_INTENT_TOOL_NAME
@@ -178,6 +188,7 @@ def test_build_emit_intent_server_uses_factories():
 def test_claude_backend_raises_without_sdk_or_seams(monkeypatch):
     """If neither real SDK nor test seams provided, BackendError fires."""
     import importlib
+
     real_import = importlib.import_module
 
     def fake_import(name, *args, **kwargs):
@@ -188,7 +199,9 @@ def test_claude_backend_raises_without_sdk_or_seams(monkeypatch):
     monkeypatch.setattr(importlib, "import_module", fake_import)
     with pytest.raises(BackendError, match="claude-agent-sdk"):
         ClaudeBackend(
-            sdk_query_factory=None, sdk_options_cls=None, sdk_module=None,
+            sdk_query_factory=None,
+            sdk_options_cls=None,
+            sdk_module=None,
             enable_mcp_emit_intent=False,
         )
 
@@ -216,15 +229,17 @@ def test_claude_backend_warns_on_missing_api_key(monkeypatch):
 # ClaudeBackend.run — intent extraction
 @pytest.mark.asyncio
 async def test_run_extracts_single_emit_intent_tool_use():
-    msg = FakeAssistantMessage(content=[
-        ToolUseBlock(
-            name=EMIT_INTENT_TOOL_QUALIFIED,
-            input={
-                "intent_type": "send_message",
-                "payload": {"topic": "heartbeat", "body_md": "ok"},
-            },
-        ),
-    ])
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(
+                name=EMIT_INTENT_TOOL_QUALIFIED,
+                input={
+                    "intent_type": "send_message",
+                    "payload": {"topic": "heartbeat", "body_md": "ok"},
+                },
+            ),
+        ]
+    )
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
@@ -239,16 +254,24 @@ async def test_run_extracts_single_emit_intent_tool_use():
 
 @pytest.mark.asyncio
 async def test_run_extracts_multiple_emit_intent_tool_uses():
-    msg = FakeAssistantMessage(content=[
-        ToolUseBlock(name=EMIT_INTENT_TOOL_QUALIFIED, input={
-            "intent_type": "propose_action",
-            "payload": {"action_name": "baseline", "predicted_gain_pct": 0.0},
-        }),
-        ToolUseBlock(name=EMIT_INTENT_TOOL_QUALIFIED, input={
-            "intent_type": "request",
-            "payload": {"target_agent": "kernel", "kind": "trace_analyze"},
-        }),
-    ])
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(
+                name=EMIT_INTENT_TOOL_QUALIFIED,
+                input={
+                    "intent_type": "propose_action",
+                    "payload": {"action_name": "baseline", "predicted_gain_pct": 0.0},
+                },
+            ),
+            ToolUseBlock(
+                name=EMIT_INTENT_TOOL_QUALIFIED,
+                input={
+                    "intent_type": "request",
+                    "payload": {"target_agent": "kernel", "kind": "trace_analyze"},
+                },
+            ),
+        ]
+    )
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
@@ -263,12 +286,17 @@ async def test_run_extracts_multiple_emit_intent_tool_uses():
 @pytest.mark.asyncio
 async def test_run_accepts_short_tool_name_too():
     """SDK in-process tools sometimes show as plain `emit_intent` (no mcp__ prefix)."""
-    msg = FakeAssistantMessage(content=[
-        ToolUseBlock(name=EMIT_INTENT_TOOL_NAME, input={
-            "intent_type": "alert",
-            "payload": {"severity": "low", "summary": "x"},
-        }),
-    ])
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(
+                name=EMIT_INTENT_TOOL_NAME,
+                input={
+                    "intent_type": "alert",
+                    "payload": {"severity": "low", "summary": "x"},
+                },
+            ),
+        ]
+    )
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
@@ -280,13 +308,18 @@ async def test_run_accepts_short_tool_name_too():
 
 @pytest.mark.asyncio
 async def test_run_ignores_other_tool_uses():
-    msg = FakeAssistantMessage(content=[
-        ToolUseBlock(name="Read", input={"path": "/tmp/x"}),
-        ToolUseBlock(name=EMIT_INTENT_TOOL_QUALIFIED, input={
-            "intent_type": "send_message",
-            "payload": {"topic": "heartbeat"},
-        }),
-    ])
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(name="Read", input={"path": "/tmp/x"}),
+            ToolUseBlock(
+                name=EMIT_INTENT_TOOL_QUALIFIED,
+                input={
+                    "intent_type": "send_message",
+                    "payload": {"topic": "heartbeat"},
+                },
+            ),
+        ]
+    )
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
@@ -298,13 +331,19 @@ async def test_run_ignores_other_tool_uses():
 
 @pytest.mark.asyncio
 async def test_run_text_blocks_collected_into_raw_text():
-    msg = FakeAssistantMessage(content=[
-        TextBlock(text="thinking..."),
-        ToolUseBlock(name=EMIT_INTENT_TOOL_QUALIFIED, input={
-            "intent_type": "send_message", "payload": {"topic": "heartbeat"},
-        }),
-        TextBlock(text=" done."),
-    ])
+    msg = FakeAssistantMessage(
+        content=[
+            TextBlock(text="thinking..."),
+            ToolUseBlock(
+                name=EMIT_INTENT_TOOL_QUALIFIED,
+                input={
+                    "intent_type": "send_message",
+                    "payload": {"topic": "heartbeat"},
+                },
+            ),
+            TextBlock(text=" done."),
+        ]
+    )
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
@@ -317,10 +356,12 @@ async def test_run_text_blocks_collected_into_raw_text():
 
 @pytest.mark.asyncio
 async def test_run_no_emit_intent_raises_no_intent_emitted():
-    msg = FakeAssistantMessage(content=[
-        TextBlock(text="just thinking, no tool call."),
-        ToolUseBlock(name="Read", input={"path": "/tmp/x"}),
-    ])
+    msg = FakeAssistantMessage(
+        content=[
+            TextBlock(text="just thinking, no tool call."),
+            ToolUseBlock(name="Read", input={"path": "/tmp/x"}),
+        ]
+    )
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
@@ -333,16 +374,24 @@ async def test_run_no_emit_intent_raises_no_intent_emitted():
 @pytest.mark.asyncio
 async def test_run_invalid_tool_use_input_drops_block_silently():
     """Bad tool_use input shouldn't crash the run — just drop the bad block."""
-    msg = FakeAssistantMessage(content=[
-        ToolUseBlock(name=EMIT_INTENT_TOOL_QUALIFIED, input={
-            "intent_type": "send_message",
-            "payload": {},  # missing required `topic`
-        }),
-        ToolUseBlock(name=EMIT_INTENT_TOOL_QUALIFIED, input={
-            "intent_type": "send_message",
-            "payload": {"topic": "heartbeat"},
-        }),
-    ])
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(
+                name=EMIT_INTENT_TOOL_QUALIFIED,
+                input={
+                    "intent_type": "send_message",
+                    "payload": {},  # missing required `topic`
+                },
+            ),
+            ToolUseBlock(
+                name=EMIT_INTENT_TOOL_QUALIFIED,
+                input={
+                    "intent_type": "send_message",
+                    "payload": {"topic": "heartbeat"},
+                },
+            ),
+        ]
+    )
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
@@ -394,9 +443,14 @@ async def test_raw_completion_prefers_result_no_duplication():
 @pytest.mark.asyncio
 async def test_raw_completion_falls_back_to_text_blocks_without_result():
     """When no ResultMessage is emitted, raw_text is the joined TextBlocks."""
-    msgs = [FakeAssistantMessage(content=[
-        TextBlock(text="part-a "), TextBlock(text="part-b"),
-    ])]
+    msgs = [
+        FakeAssistantMessage(
+            content=[
+                TextBlock(text="part-a "),
+                TextBlock(text="part-b"),
+            ]
+        )
+    ]
     backend = ClaudeBackend(
         sdk_query_factory=_make_query_factory(msgs),
         sdk_options_cls=FakeOptions,
@@ -479,6 +533,7 @@ async def test_options_includes_mcp_server_when_emit_intent_enabled():
     def fake_tool(name, desc, schema):
         def deco(handler):
             return ("decorated", handler)
+
         return deco
 
     def fake_server(name, version, tools):

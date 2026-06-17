@@ -12,7 +12,10 @@ name: Tests with Coverage
 # UTs; if absent, install is skipped (``importorskip`` in OOB tests).
 # Two matrix legs (Python 3.10 + 3.11).
 on:
+  # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
+  # PR does not double-trigger (one run per event class).
   push:
+    branches: [main]
     paths-ignore:
       - "**/*.md"
       - "docs/**"
@@ -28,6 +31,11 @@ on:
       - "COPYRIGHT"
       - "CODEOWNERS"
       - ".gitattributes"
+
+# Cancel superseded runs for the same ref (newest push/PR sync wins).
+concurrency:
+  group: tests-coverage-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -110,25 +118,60 @@ jobs:
                       return parts[-1] if parts else "unknown"
               return "unknown"
 
-          # ``[tool.coverage.run].source`` mixes import-package names and
-          # on-disk paths; coverage data keys are file paths, so per-tree
-          # narrowing uses ``--include`` globs (``coverage report`` has no
-          # ``--source``). Only ``robustness_agent`` differs from its path.
-          _SOURCE_GLOBS = {
-              "robustness_agent": "robustness-agent/src/robustness_agent/*",
+          # Per-tree totals are computed by bucketing the rows of the full
+          # ``coverage report`` (which already has run-time ``omit`` applied)
+          # by a path segment for each source. This is robust to whatever path
+          # form the data uses (e.g. OOB is editable-installed as
+          # ``agent_mcp_server`` and may be recorded as ``OOB/`` or absolute),
+          # and never double-counts (unlike ``--include`` glob unions).
+          _SOURCE_SEGMENTS = {
+              "inference_optimizer": ["/inference_optimizer/"],
+              "robustness_agent": ["/robustness_agent/"],
+              "critic-agent/runtime": ["/critic-agent/runtime/"],
+              "framework-agent/src": ["/framework-agent/src/"],
+              "kernel-agent/tools": ["/kernel-agent/tools/"],
+              "quantization_agent": ["/quantization_agent/"],
+              "OOB": ["/OOB/", "/agent_mcp_server/"],
+              "ci": ["/ci/"],
           }
 
-          def _glob_for(source: str) -> str:
-              return _SOURCE_GLOBS.get(source, f"{source}/*")
+          def _row_path_stmts_miss(line: str):
+              """Parse a coverage report row -> (path, stmts, miss) or None.
 
-          def narrow_total(source: str) -> str:
-              proc = subprocess.run(
-                  ["coverage", "report", "--skip-empty", "--include", _glob_for(source)],
-                  capture_output=True,
-                  text=True,
-                  check=False,
-              )
-              return extract_total(proc.stdout or "")
+              Row layout is ``<path> <stmts> <miss> <cover%>``; stmts/miss are
+              the 3rd/2nd-from-last whitespace tokens.
+              """
+              parts = line.split()
+              if len(parts) < 4:
+                  return None
+              try:
+                  stmts = int(parts[-3])
+                  miss = int(parts[-2])
+              except ValueError:
+                  return None
+              path = " ".join(parts[:-3])
+              return path, stmts, miss
+
+          def per_tree_totals(report_text: str) -> dict:
+              """Aggregate (stmts, miss) per source from a full report body."""
+              acc = {src: [0, 0] for src in _SOURCE_SEGMENTS}
+              for line in report_text.splitlines():
+                  if line.startswith(("Name", "TOTAL", "-")):
+                      continue
+                  parsed = _row_path_stmts_miss(line)
+                  if parsed is None:
+                      continue
+                  path, stmts, miss = parsed
+                  norm = "/" + path.lstrip("/")
+                  for src, segs in _SOURCE_SEGMENTS.items():
+                      if any(seg in norm for seg in segs):
+                          acc[src][0] += stmts
+                          acc[src][1] += miss
+                          break
+              out: dict[str, str] = {}
+              for src, (stmts, miss) in acc.items():
+                  out[src] = f"{(stmts - miss) / stmts * 100:.2f}%" if stmts else "n/a"
+              return out
 
           cfg = load_cfg()
           sources = list(cfg["tool"]["coverage"]["run"]["source"])
@@ -148,7 +191,10 @@ jobs:
               print("=== Full coverage report (step log) ===")
               print(full_txt, end="" if full_txt.endswith("\n") else full_txt + "\n")
               total = extract_total(full_txt)
-              rows = [f"| `{src}` | {narrow_total(src)} |" for src in sources]
+              tree_totals = per_tree_totals(full_txt)
+              rows = [
+                  f"| `{src}` | {tree_totals.get(src, 'n/a')} |" for src in sources
+              ]
               lines = [
                   "## Coverage (UT)",
                   "",

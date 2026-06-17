@@ -24,8 +24,10 @@ TL_PATH = TOOLS_DIR / "tracelens_analysis.py"
 def tl_module():
     """Import tracelens_analysis.py as a module without executing main()."""
     import importlib.util
+
     spec = importlib.util.spec_from_file_location(
-        "tracelens_analysis_under_test", TL_PATH,
+        "tracelens_analysis_under_test",
+        TL_PATH,
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -39,10 +41,18 @@ def _write_exec_details(
     """Write a minimal execution_details.csv matching TraceLens splitter output."""
     path = split_dir / "execution_details.csv"
     cols = [
-        "idx", "output_path", "event_count", "num_gpu_events",
-        "gpu_duration", "gpu_busy_duration",
-        "phase_num_prefill", "phase_num_prefilldecode", "phase_num_decode",
-        "phase_avg_bs", "phase_avg_conc", "num_steps",
+        "idx",
+        "output_path",
+        "event_count",
+        "num_gpu_events",
+        "gpu_duration",
+        "gpu_busy_duration",
+        "phase_num_prefill",
+        "phase_num_prefilldecode",
+        "phase_num_decode",
+        "phase_avg_bs",
+        "phase_avg_conc",
+        "num_steps",
     ]
     with path.open("w", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=cols)
@@ -81,14 +91,17 @@ def test_chunk_with_real_gpu_work_passes(tl_module, split_dir):
     split_dir.mkdir()
     chunks = _make_chunk_files(split_dir)
     selected = chunks["mixed_steady_state"]
-    _write_exec_details(split_dir, [
-        {
-            "output_path": str(selected),
-            "num_gpu_events": 38796,
-            "gpu_duration": 3000000.0,
-            "gpu_busy_duration": 1800000.0,  # 60% busy
-        },
-    ])
+    _write_exec_details(
+        split_dir,
+        [
+            {
+                "output_path": str(selected),
+                "num_gpu_events": 38796,
+                "gpu_duration": 3000000.0,
+                "gpu_busy_duration": 1800000.0,  # 60% busy
+            },
+        ],
+    )
     available = {
         "mixed": ("mixed_steady_state", [selected]),
         "decode_only": ("decode_only_steady_state", []),
@@ -109,21 +122,24 @@ def test_empty_solar_style_mixed_chunk_emits_warning(tl_module, split_dir):
     chunks = _make_chunk_files(split_dir)
     mixed_path = chunks["mixed_steady_state"]
     pd_path = chunks["prefilldecode_steady_state"]
-    _write_exec_details(split_dir, [
-        # SOLAR mixed chunk: 160 sampler kernels, 99.87% idle.
-        {
-            "output_path": str(mixed_path),
-            "num_gpu_events": 160,
-            "gpu_duration": 1118730.0,
-            "gpu_busy_duration": 1428.0,
-        },
-        {
-            "output_path": str(pd_path),
-            "num_gpu_events": 2790,
-            "gpu_duration": 4538984.0,
-            "gpu_busy_duration": 2723452.0,  # 60% busy
-        },
-    ])
+    _write_exec_details(
+        split_dir,
+        [
+            # SOLAR mixed chunk: 160 sampler kernels, 99.87% idle.
+            {
+                "output_path": str(mixed_path),
+                "num_gpu_events": 160,
+                "gpu_duration": 1118730.0,
+                "gpu_busy_duration": 1428.0,
+            },
+            {
+                "output_path": str(pd_path),
+                "num_gpu_events": 2790,
+                "gpu_duration": 4538984.0,
+                "gpu_busy_duration": 2723452.0,  # 60% busy
+            },
+        ],
+    )
     available = {
         "mixed": ("mixed_steady_state", [mixed_path]),
         "decode_only": ("decode_only_steady_state", []),
@@ -151,26 +167,29 @@ def test_zero_event_chunk_emits_warning(tl_module, split_dir):
     mixed_path = chunks["mixed_steady_state"]
     pd_path = chunks["prefilldecode_steady_state"]
     do_path = chunks["decode_only_steady_state"]
-    _write_exec_details(split_dir, [
-        {
-            "output_path": str(mixed_path),
-            "num_gpu_events": 0,  # structurally empty
-            "gpu_duration": 1118730.0,
-            "gpu_busy_duration": 0.0,
-        },
-        {
-            "output_path": str(do_path),
-            "num_gpu_events": 0,  # also empty (decode-only inside graph)
-            "gpu_duration": 1118730.0,
-            "gpu_busy_duration": 0.0,
-        },
-        {
-            "output_path": str(pd_path),
-            "num_gpu_events": 2790,
-            "gpu_duration": 4538984.0,
-            "gpu_busy_duration": 2723452.0,
-        },
-    ])
+    _write_exec_details(
+        split_dir,
+        [
+            {
+                "output_path": str(mixed_path),
+                "num_gpu_events": 0,  # structurally empty
+                "gpu_duration": 1118730.0,
+                "gpu_busy_duration": 0.0,
+            },
+            {
+                "output_path": str(do_path),
+                "num_gpu_events": 0,  # also empty (decode-only inside graph)
+                "gpu_duration": 1118730.0,
+                "gpu_busy_duration": 0.0,
+            },
+            {
+                "output_path": str(pd_path),
+                "num_gpu_events": 2790,
+                "gpu_duration": 4538984.0,
+                "gpu_busy_duration": 2723452.0,
+            },
+        ],
+    )
     available = {
         "mixed": ("mixed_steady_state", [mixed_path]),
         "decode_only": ("decode_only_steady_state", [do_path]),
@@ -199,20 +218,23 @@ def test_zero_busy_duration_emits_warning(tl_module, split_dir):
     chunks = _make_chunk_files(split_dir)
     mixed_path = chunks["mixed_steady_state"]
     pd_path = chunks["prefilldecode_steady_state"]
-    _write_exec_details(split_dir, [
-        {
-            "output_path": str(mixed_path),
-            "num_gpu_events": 160,
-            "gpu_duration": 1118730.0,
-            "gpu_busy_duration": 0.0,  # exactly zero
-        },
-        {
-            "output_path": str(pd_path),
-            "num_gpu_events": 2790,
-            "gpu_duration": 4538984.0,
-            "gpu_busy_duration": 2723452.0,
-        },
-    ])
+    _write_exec_details(
+        split_dir,
+        [
+            {
+                "output_path": str(mixed_path),
+                "num_gpu_events": 160,
+                "gpu_duration": 1118730.0,
+                "gpu_busy_duration": 0.0,  # exactly zero
+            },
+            {
+                "output_path": str(pd_path),
+                "num_gpu_events": 2790,
+                "gpu_duration": 4538984.0,
+                "gpu_busy_duration": 2723452.0,
+            },
+        ],
+    )
     available = {
         "mixed": ("mixed_steady_state", [mixed_path]),
         "decode_only": ("decode_only_steady_state", []),
@@ -235,20 +257,23 @@ def test_warning_excludes_self_from_non_empty_modes(tl_module, split_dir):
     chunks = _make_chunk_files(split_dir)
     mixed_path = chunks["mixed_steady_state"]
     pd_path = chunks["prefilldecode_steady_state"]
-    _write_exec_details(split_dir, [
-        {
-            "output_path": str(mixed_path),
-            "num_gpu_events": 0,
-            "gpu_duration": 1118730.0,
-            "gpu_busy_duration": 0.0,
-        },
-        {
-            "output_path": str(pd_path),
-            "num_gpu_events": 2790,
-            "gpu_duration": 4538984.0,
-            "gpu_busy_duration": 2723452.0,
-        },
-    ])
+    _write_exec_details(
+        split_dir,
+        [
+            {
+                "output_path": str(mixed_path),
+                "num_gpu_events": 0,
+                "gpu_duration": 1118730.0,
+                "gpu_busy_duration": 0.0,
+            },
+            {
+                "output_path": str(pd_path),
+                "num_gpu_events": 2790,
+                "gpu_duration": 4538984.0,
+                "gpu_busy_duration": 2723452.0,
+            },
+        ],
+    )
     available = {
         "mixed": ("mixed_steady_state", [mixed_path]),
         "decode_only": ("decode_only_steady_state", []),
@@ -286,14 +311,17 @@ def test_selected_chunk_not_in_csv_returns_none(tl_module, split_dir):
     split_dir.mkdir()
     chunks = _make_chunk_files(split_dir)
     selected = chunks["mixed_steady_state"]
-    _write_exec_details(split_dir, [
-        {
-            "output_path": str(split_dir / "some_other.json.gz"),
-            "num_gpu_events": 0,
-            "gpu_duration": 0.0,
-            "gpu_busy_duration": 0.0,
-        },
-    ])
+    _write_exec_details(
+        split_dir,
+        [
+            {
+                "output_path": str(split_dir / "some_other.json.gz"),
+                "num_gpu_events": 0,
+                "gpu_duration": 0.0,
+                "gpu_busy_duration": 0.0,
+            },
+        ],
+    )
     available = {
         "mixed": ("mixed_steady_state", [selected]),
         "decode_only": ("decode_only_steady_state", []),
@@ -315,7 +343,9 @@ def _run_help() -> str:
     """Invoke `python tracelens_analysis.py --help` and return stdout."""
     proc = subprocess.run(
         [sys.executable, str(TL_PATH), "--help"],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     return (proc.stdout or "") + (proc.stderr or "")
 
@@ -334,12 +364,18 @@ def test_cli_rejects_unknown_mode():
     """argparse choices=() must reject random strings."""
     proc = subprocess.run(
         [
-            sys.executable, str(TL_PATH),
-            "--trace-input", "/tmp/does-not-exist",
-            "--workspace-path", "/tmp",
-            "--steady-state-mode", "garbage_mode",
+            sys.executable,
+            str(TL_PATH),
+            "--trace-input",
+            "/tmp/does-not-exist",
+            "--workspace-path",
+            "/tmp",
+            "--steady-state-mode",
+            "garbage_mode",
         ],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert proc.returncode != 0
     err = proc.stderr or ""

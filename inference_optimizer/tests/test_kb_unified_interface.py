@@ -14,6 +14,7 @@ adapters now share:
 
 No network: remotes are fed in-memory nested rows / a fake MCP.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -69,9 +70,7 @@ class _NestedRemote:
         self.last_prefer = prefer
         lm = label_match or {}
         matched = [
-            r
-            for r in self.rows
-            if all(str((r.get("labels") or {}).get(k, "")) == str(v) for k, v in lm.items())
+            r for r in self.rows if all(str((r.get("labels") or {}).get(k, "")) == str(v) for k, v in lm.items())
         ]
         return matched[: limit if limit and limit > 0 else None]
 
@@ -129,14 +128,24 @@ def _nested_row(
 # ===========================================================================
 def test_dispatcher_translates_nested_remote_row(tmp_path: Path) -> None:
     cid = recipe_canonical_id(
-        model="qwen3-32b", hardware="mi300x", framework="sglang",
-        framework_version="0.5.11", precision="fp8",
+        model="qwen3-32b",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.5.11",
+        precision="fp8",
     )
-    remote = _NestedRemote([
-        _nested_row(cid=cid, model="qwen3-32b", hardware="mi300x",
-                    args="--cuda-graph-max-bs 256", envs={"FOO": "1"},
-                    throughput=5430.9),
-    ])
+    remote = _NestedRemote(
+        [
+            _nested_row(
+                cid=cid,
+                model="qwen3-32b",
+                hardware="mi300x",
+                args="--cuda-graph-max-bs 256",
+                envs={"FOO": "1"},
+                throughput=5430.9,
+            ),
+        ]
+    )
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"), remote=remote)
 
     row = kb.get_recipe(canonical_id=cid)
@@ -180,17 +189,25 @@ def test_search_prefer_reorders_without_dropping(tmp_path: Path) -> None:
     # differ on tp. prefer={tp:8} must surface the tp=8 row first but keep
     # both.
     cid_a = recipe_canonical_id(
-        model="qwen3-32b", hardware="mi300x", framework="sglang",
-        framework_version="0.5.11", precision="fp8",
+        model="qwen3-32b",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.5.11",
+        precision="fp8",
     )
     cid_b = recipe_canonical_id(
-        model="qwen3-32b", hardware="mi355x", framework="sglang",
-        framework_version="0.5.11", precision="fp8",
+        model="qwen3-32b",
+        hardware="mi355x",
+        framework="sglang",
+        framework_version="0.5.11",
+        precision="fp8",
     )
-    remote = _NestedRemote([
-        _nested_row(cid=cid_a, model="qwen3-32b", hardware="mi300x", tp=4),
-        _nested_row(cid=cid_b, model="qwen3-32b", hardware="mi355x", tp=8),
-    ])
+    remote = _NestedRemote(
+        [
+            _nested_row(cid=cid_a, model="qwen3-32b", hardware="mi300x", tp=4),
+            _nested_row(cid=cid_b, model="qwen3-32b", hardware="mi355x", tp=8),
+        ]
+    )
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"), remote=remote)
 
     rows = kb.search(label_match={"model": "qwen3-32b"}, prefer={"tp": 8})
@@ -204,18 +221,12 @@ def test_search_prefer_reorders_without_dropping(tmp_path: Path) -> None:
 # seed-only detection + WarmStartContext
 # ===========================================================================
 def test_recipe_is_actionable() -> None:
-    assert _recipe_is_actionable(
-        {"best_config": {"extra_server_args": "--x 1"}}
-    )
-    assert _recipe_is_actionable(
-        {"best_config": {"extra_envs": {"A": "1"}}}
-    )
+    assert _recipe_is_actionable({"best_config": {"extra_server_args": "--x 1"}})
+    assert _recipe_is_actionable({"best_config": {"extra_envs": {"A": "1"}}})
     assert _recipe_is_actionable({"best_throughput": 1000.0})
     assert _recipe_is_actionable({"what_failed": [{"x": 1}]})
     # bare draft anchor — identity only, no champion / lists
-    assert not _recipe_is_actionable(
-        {"canonical_id": "inference:m:h:f:v:p", "best_config": {}}
-    )
+    assert not _recipe_is_actionable({"canonical_id": "inference:m:h:f:v:p", "best_config": {}})
     assert not _recipe_is_actionable({})
 
 
@@ -233,8 +244,12 @@ def test_build_warm_start_context_hit() -> None:
         "pitfalls": [{"attrs": {"description": "y"}}],
     }
     ctx = _build_warm_start_context(
-        status="hit", tier="exact", confidence=1.0,
-        canonical_id="inference:m:h:f:v:p", source="gbrain", recipe=recipe,
+        status="hit",
+        tier="exact",
+        confidence=1.0,
+        canonical_id="inference:m:h:f:v:p",
+        source="gbrain",
+        recipe=recipe,
     )
     assert ctx["status"] == "hit"
     assert ctx["match"]["source"] == "gbrain"
@@ -250,8 +265,12 @@ def test_build_warm_start_context_hit() -> None:
 @pytest.mark.parametrize("status", ["seed_only", "miss", "error"])
 def test_build_warm_start_context_non_hit_has_empty_replay(status: str) -> None:
     ctx = _build_warm_start_context(
-        status=status, tier=status, confidence=0.0,
-        canonical_id="inference:m:h:f:v:p", source="cortex-kb", recipe=None,
+        status=status,
+        tier=status,
+        confidence=0.0,
+        canonical_id="inference:m:h:f:v:p",
+        source="cortex-kb",
+        recipe=None,
     )
     assert ctx["status"] == status
     assert ctx["recommended_replay"] == {}
@@ -292,8 +311,12 @@ def test_t0_status_miss_on_empty_corpus(tmp_path: Path) -> None:
     sd.mkdir()
     state = _FakeState()
     run_t0_anchor(
-        kb, state, workload="brand-new", hw="mi300x",
-        extra_attrs={"framework": "sglang"}, session_dir=sd,
+        kb,
+        state,
+        workload="brand-new",
+        hw="mi300x",
+        extra_attrs={"framework": "sglang"},
+        session_dir=sd,
     )
     # The T0 put_recipe wrote a bare draft anchor, so the read-back is a
     # seed_only (not a miss) — there IS a row, it just isn't actionable.
@@ -306,18 +329,29 @@ def test_t0_status_hit_when_actionable_row_present(tmp_path: Path) -> None:
     sd.mkdir()
     state = _FakeState()
     cid = recipe_canonical_id(
-        model="M", hardware="mi300x", framework="sglang",
-        framework_version="0.5.11", precision="fp8",
+        model="M",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.5.11",
+        precision="fp8",
     )
     kb.put_recipe(
-        canonical_id=cid, model="M", hardware="mi300x",
-        framework="sglang", framework_version="0.5.11", precision="fp8",
+        canonical_id=cid,
+        model="M",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.5.11",
+        precision="fp8",
         best_config={"extra_server_args": "--x 1", "extra_envs": {"A": "1"}},
         best_throughput=2000.0,
     )
     run_t0_anchor(
-        kb, state, workload="M", hw="mi300x",
-        extra_attrs={"framework": "sglang"}, session_dir=sd,
+        kb,
+        state,
+        workload="M",
+        hw="mi300x",
+        extra_attrs={"framework": "sglang"},
+        session_dir=sd,
     )
     ctx = state.warm_start_context
     assert ctx.get("status") == "hit"

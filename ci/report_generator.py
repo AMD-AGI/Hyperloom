@@ -38,6 +38,7 @@ def _extract_metrics_via_llm(report_content: str) -> dict:
 
     try:
         import requests
+
         prompt = (
             "Extract performance metrics from this optimization report. "
             "Return ONLY a JSON object with these exact fields:\n"
@@ -55,12 +56,14 @@ def _extract_metrics_via_llm(report_content: str) -> dict:
         resp = requests.post(
             LLM_ENDPOINT,
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-            json={"model": "openai/gpt-4.1-mini", "messages": [{"role": "user", "content": prompt}],
-                  "temperature": 0, "max_tokens": 200},
+            json={
+                "model": "openai/gpt-4.1-mini",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+                "max_tokens": 200,
+            },
             timeout=30,
-            verify=os.environ.get(
-                "SSL_CERT_FILE", os.environ.get("REQUESTS_CA_BUNDLE", True)
-            ),
+            verify=os.environ.get("SSL_CERT_FILE", os.environ.get("REQUESTS_CA_BUNDLE", True)),
         )
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"].strip()
@@ -69,8 +72,13 @@ def _extract_metrics_via_llm(report_content: str) -> dict:
 
         result = json.loads(content)
         out = {}
-        for k in ("baseline_throughput", "optimized_throughput", "tok_per_gpu_baseline",
-                   "tok_per_gpu_optimized", "gain_pct"):
+        for k in (
+            "baseline_throughput",
+            "optimized_throughput",
+            "tok_per_gpu_baseline",
+            "tok_per_gpu_optimized",
+            "gain_pct",
+        ):
             v = result.get(k)
             if isinstance(v, (int, float)):
                 out[k] = v
@@ -118,20 +126,18 @@ def _parse_metrics_from_report(content: str) -> dict:
 
     result: dict[str, Any] = {}
 
-    gain_m = re.search(r'\*\*([+-]?[\d.]+)%\*\*', content)
+    gain_m = re.search(r"\*\*([+-]?[\d.]+)%\*\*", content)
     if gain_m:
         result["gain_pct"] = float(gain_m.group(1))
 
-    gpu_row = re.search(
-        r'tok/s/GPU\s*\|\s*~?([\d.]+)\s*(?:\([^)]*\))?\s*\|\s*~?([\d.]+)',
-        content)
+    gpu_row = re.search(r"tok/s/GPU\s*\|\s*~?([\d.]+)\s*(?:\([^)]*\))?\s*\|\s*~?([\d.]+)", content)
     if gpu_row:
         result["baseline_throughput"] = float(gpu_row.group(1))
         result["optimized_throughput"] = float(gpu_row.group(2))
     else:
         tput_row = re.search(
-            r'Output\s+Throughput\s*\(tok/s\)\s*\|\s*~?([\d.]+)\s*(?:\([^)]*\))?\s*\|\s*~?([\d.]+)',
-            content)
+            r"Output\s+Throughput\s*\(tok/s\)\s*\|\s*~?([\d.]+)\s*(?:\([^)]*\))?\s*\|\s*~?([\d.]+)", content
+        )
         if tput_row:
             result["baseline_throughput"] = float(tput_row.group(1))
             result["optimized_throughput"] = float(tput_row.group(2))
@@ -174,46 +180,62 @@ def extract_optimization_data(result_dir: str) -> dict:
             metrics = json.loads(ci_metrics_path.read_text())
             log.info("Loaded ci_metrics.json from %s", result_dir)
 
-            bl = _first_of(metrics,
-                           "tok_per_gpu_baseline", "baseline_throughput",
-                           "baseline_output_tput_per_gpu", "baseline_output_tput_tok_s",
-                           "baseline_tok_per_gpu")
-            opt = _first_of(metrics,
-                            "tok_per_gpu_optimized", "optimized_throughput",
-                            "optimized_output_tput_per_gpu", "optimized_output_tput_tok_s",
-                            "optimized_tok_per_gpu")
-            gain = _first_of(metrics,
-                             "gain_pct", "improvement_pct", "total_improvement_pct")
+            bl = _first_of(
+                metrics,
+                "tok_per_gpu_baseline",
+                "baseline_throughput",
+                "baseline_output_tput_per_gpu",
+                "baseline_output_tput_tok_s",
+                "baseline_tok_per_gpu",
+            )
+            opt = _first_of(
+                metrics,
+                "tok_per_gpu_optimized",
+                "optimized_throughput",
+                "optimized_output_tput_per_gpu",
+                "optimized_output_tput_tok_s",
+                "optimized_tok_per_gpu",
+            )
+            gain = _first_of(metrics, "gain_pct", "improvement_pct", "total_improvement_pct")
 
             # Nested schema fallback
             if bl is None and isinstance(metrics.get("baseline"), dict):
                 b = metrics["baseline"]
-                bl = _first_of(b, "tok_s_per_gpu", "output_throughput_tok_s",
-                               "output_tput_per_gpu", "tput_per_gpu")
+                bl = _first_of(b, "tok_s_per_gpu", "output_throughput_tok_s", "output_tput_per_gpu", "tput_per_gpu")
             if opt is None and isinstance(metrics.get("optimized"), dict):
                 o = metrics["optimized"]
-                opt = _first_of(o, "tok_s_per_gpu", "output_throughput_tok_s",
-                                "output_tput_per_gpu", "tput_per_gpu")
+                opt = _first_of(o, "tok_s_per_gpu", "output_throughput_tok_s", "output_tput_per_gpu", "tput_per_gpu")
             if gain is None and isinstance(metrics.get("improvement"), dict):
                 imp = metrics["improvement"]
-                gain = _first_of(imp, "output_throughput_pct", "tok_s_per_gpu_pct",
-                                 "gain_pct", "pct")
+                gain = _first_of(imp, "output_throughput_pct", "tok_s_per_gpu_pct", "gain_pct", "pct")
             if bl and opt and bl > 0:
                 computed_gain = round((opt - bl) / bl * 100, 2)
                 if gain is not None and abs(gain - computed_gain) > 1.0:
-                    log.warning("gain_pct from agent (%.2f%%) disagrees with computed (%.2f%%), using computed",
-                                gain, computed_gain)
+                    log.warning(
+                        "gain_pct from agent (%.2f%%) disagrees with computed (%.2f%%), using computed",
+                        gain,
+                        computed_gain,
+                    )
                 gain = computed_gain
 
             data["baseline_throughput"] = bl
             data["optimized_throughput"] = opt
             data["gain_pct"] = gain
             raw_actions = metrics.get("actions_taken") or metrics.get("actions", [])
-            data["actions"] = list(raw_actions) if isinstance(raw_actions, (list, tuple)) else [str(raw_actions)] if raw_actions else []
+            data["actions"] = (
+                list(raw_actions)
+                if isinstance(raw_actions, (list, tuple))
+                else [str(raw_actions)]
+                if raw_actions
+                else []
+            )
             if bl is not None and opt is not None:
                 return data
-            log.warning("ci_metrics.json loaded but missing key metrics (bl=%s, opt=%s), "
-                        "falling back to report markdown", bl, opt)
+            log.warning(
+                "ci_metrics.json loaded but missing key metrics (bl=%s, opt=%s), falling back to report markdown",
+                bl,
+                opt,
+            )
         except (json.JSONDecodeError, KeyError) as e:
             log.warning("Failed to parse ci_metrics.json in %s: %s", result_dir, e)
 
@@ -227,8 +249,9 @@ def extract_optimization_data(result_dir: str) -> dict:
                     data[k] = v
 
     # Priority 3: LLM extraction from report (if regex missed key fields)
-    if (data.get("baseline_throughput") is None or data.get("optimized_throughput") is None) \
-            and data.get("report_content"):
+    if (data.get("baseline_throughput") is None or data.get("optimized_throughput") is None) and data.get(
+        "report_content"
+    ):
         llm_parsed = _extract_metrics_via_llm(data["report_content"])
         if llm_parsed:
             log.info("Extracted metrics via LLM fallback: %s", llm_parsed)
@@ -296,13 +319,22 @@ def build_model_result(
                     log.warning(
                         "optimized (%.1f) is %.0fx InferenceX (%.1f) — likely total "
                         "throughput instead of per-GPU. Dividing by TP=%d.",
-                        result["optimized_tok_per_gpu"], ratio, ifx_tput, tp)
-                    result["baseline_tok_per_gpu"] = round(result["baseline_tok_per_gpu"] / tp, 2) if result["baseline_tok_per_gpu"] else None
+                        result["optimized_tok_per_gpu"],
+                        ratio,
+                        ifx_tput,
+                        tp,
+                    )
+                    result["baseline_tok_per_gpu"] = (
+                        round(result["baseline_tok_per_gpu"] / tp, 2) if result["baseline_tok_per_gpu"] else None
+                    )
                     result["optimized_tok_per_gpu"] = round(result["optimized_tok_per_gpu"] / tp, 2)
                     if result.get("gain_pct") is not None and result["baseline_tok_per_gpu"]:
                         result["gain_pct"] = round(
                             (result["optimized_tok_per_gpu"] - result["baseline_tok_per_gpu"])
-                            / result["baseline_tok_per_gpu"] * 100, 2)
+                            / result["baseline_tok_per_gpu"]
+                            * 100,
+                            2,
+                        )
             result["inferenceX_tok_per_gpu"] = ifx_tput
             vs = round((result["optimized_tok_per_gpu"] - ifx_tput) / ifx_tput * 100, 1)
             result["vs_inferenceX_pct"] = 0.0 if vs == -0.0 else vs
@@ -346,8 +378,7 @@ def generate_markdown_report(
         status_icon = {"completed": "✅", "failed": "❌", "timeout": "⏱️"}.get(r["status"], "❓")
 
         lines.append(
-            f"| {r['model']} | {r['precision']} | full | {baseline} | {optimized} "
-            f"| {gain} | {vs_ifx} | {status_icon} |"
+            f"| {r['model']} | {r['precision']} | full | {baseline} | {optimized} | {gain} | {vs_ifx} | {status_icon} |"
         )
 
     lines.extend(["", "## Image Versions"])

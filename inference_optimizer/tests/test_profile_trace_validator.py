@@ -26,30 +26,37 @@ def _write_minimal_sglang_trace(
         {"name": "cpu_op", "ph": "X", "ts": 0, "dur": 1, "args": {"Input Dims": [[1, 2, 3]]}},
     ]
     if with_user_annotation:
-        events.append({
-            "name": "user_annotation",
-            "ph": "i",
-            "args": {
-                "label": (
-                    "execute_16384_context_16(sq16384sk16384)_generation_0(sq0sk0)"
-                    if with_execute_star
-                    else "some_other_annotation_label"
-                ),
-            },
-        })
+        events.append(
+            {
+                "name": "user_annotation",
+                "ph": "i",
+                "args": {
+                    "label": (
+                        "execute_16384_context_16(sq16384sk16384)_generation_0(sq0sk0)"
+                        if with_execute_star
+                        else "some_other_annotation_label"
+                    ),
+                },
+            }
+        )
     if with_kernel_shape_profiler:
-        events.append({
-            "name": "python_function",
-            "ph": "i",
-            "args": {"frame": "kernel_shape_profiler"},
-        })
+        events.append(
+            {
+                "name": "python_function",
+                "ph": "i",
+                "args": {"frame": "kernel_shape_profiler"},
+            }
+        )
     payload = {"schemaVersion": 1, "traceEvents": events}
     with gzip.open(path, "wt", encoding="utf-8") as fh:
         json.dump(payload, fh)
 
 
 def _write_capture_file(
-    path: Path, *, cpu_op_count: int, with_input_dims_fraction: float = 1.0,
+    path: Path,
+    *,
+    cpu_op_count: int,
+    with_input_dims_fraction: float = 1.0,
 ) -> None:
     """Synthesize a capture file with a given fraction of ``Input Dims`` events (check [2])."""
     events: list[dict] = []
@@ -70,11 +77,13 @@ def _write_split_file(path: Path, *, with_execute_star: bool = True) -> None:
         {"name": "cpu_op", "ph": "X", "ts": 0, "dur": 1},
     ]
     if with_execute_star:
-        events.append({
-            "name": "user_annotation",
-            "ph": "i",
-            "args": {"label": "execute_32_context_1(sq32sk1025)_generation_0(sq0sk0)"},
-        })
+        events.append(
+            {
+                "name": "user_annotation",
+                "ph": "i",
+                "args": {"label": "execute_32_context_1(sq32sk1025)_generation_0(sq0sk0)"},
+            }
+        )
     payload = {"schemaVersion": 1, "traceEvents": events}
     with gzip.open(path, "wt", encoding="utf-8") as fh:
         json.dump(payload, fh)
@@ -88,7 +97,8 @@ def _build_healthy_layout(tmp_path: Path) -> Path:
     capture.mkdir()
     _write_capture_file(
         capture / "bs_104_rank0.json.gz",
-        cpu_op_count=200, with_input_dims_fraction=0.99,
+        cpu_op_count=200,
+        with_input_dims_fraction=0.99,
     )
     split = trace_dir / "trace_split"
     split.mkdir()
@@ -116,15 +126,13 @@ def test_validator_no_warnings_on_healthy_layout(tmp_path, caplog):
     caplog.set_level(logging.WARNING)
     _validate_trace_structure(trace_dir, "sglang")
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert warnings == [], (
-        f"healthy layout produced unexpected warnings: "
-        f"{[r.getMessage() for r in warnings]}"
-    )
+    assert warnings == [], f"healthy layout produced unexpected warnings: {[r.getMessage() for r in warnings]}"
 
 
 # Check [6] (Hyperloom-specific #210 smoking-gun)
 def test_validator_warns_on_extend_decode_files_without_steady_state(
-    tmp_path, caplog,
+    tmp_path,
+    caplog,
 ):
     """#210 symptom: ``_extend_*`` / ``_decode_*`` split files signal
     ``profile_by_stage=True`` leaked through."""
@@ -133,10 +141,12 @@ def test_validator_warns_on_extend_decode_files_without_steady_state(
     for p in list(split.iterdir()):
         p.unlink()
     _write_split_file(
-        split / "_extend_step_0_TP-0.trace.json.gz", with_execute_star=True,
+        split / "_extend_step_0_TP-0.trace.json.gz",
+        with_execute_star=True,
     )
     _write_split_file(
-        split / "_decode_step_0_TP-0.trace.json.gz", with_execute_star=True,
+        split / "_decode_step_0_TP-0.trace.json.gz",
+        with_execute_star=True,
     )
 
     caplog.set_level(logging.WARNING)
@@ -175,9 +185,7 @@ def test_validator_warns_when_capture_file_lacks_input_dims(tmp_path, caplog):
     caplog.set_level(logging.WARNING)
     _validate_trace_structure(trace_dir, "sglang")
     msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any(
-        "Input Dims" in m and "Shape-discovery instrumentation" in m for m in msgs
-    ), msgs
+    assert any("Input Dims" in m and "Shape-discovery instrumentation" in m for m in msgs), msgs
 
 
 def test_validator_warns_when_capture_file_has_no_cpu_op(tmp_path, caplog):
@@ -198,7 +206,8 @@ def test_validator_warns_when_capture_file_has_no_cpu_op(tmp_path, caplog):
 
 # Check [3] (Deval) main trace has user_annotation + execute_*
 def test_validator_no_warning_when_execute_star_present_without_user_annotation(
-    tmp_path, caplog,
+    tmp_path,
+    caplog,
 ):
     """``execute_*`` present without a ``user_annotation`` wrapper is healthy — Check [3] must not warn."""
     trace_dir = _build_healthy_layout(tmp_path)
@@ -212,12 +221,9 @@ def test_validator_no_warning_when_execute_star_present_without_user_annotation(
             {
                 "name": "kernel",
                 "ph": "X",
-                "args": {
-                    "label": "execute_16384_context_16(sq16384sk16384)"
-                },
+                "args": {"label": "execute_16384_context_16(sq16384sk16384)"},
             },
-            {"name": "python_function", "ph": "i",
-             "args": {"frame": "kernel_shape_profiler"}},
+            {"name": "python_function", "ph": "i", "args": {"frame": "kernel_shape_profiler"}},
         ],
     }
     with gzip.open(main, "wt", encoding="utf-8") as fh:
@@ -227,13 +233,13 @@ def test_validator_no_warning_when_execute_star_present_without_user_annotation(
     _validate_trace_structure(trace_dir, "sglang")
     msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert not any("[3]" in m for m in msgs), (
-        "execute_* present → Check [3] must not warn even without the "
-        f"user_annotation wrapper; got: {msgs}"
+        f"execute_* present → Check [3] must not warn even without the user_annotation wrapper; got: {msgs}"
     )
 
 
 def test_validator_warns_when_main_trace_lacks_all_annotations(
-    tmp_path, caplog,
+    tmp_path,
+    caplog,
 ):
     """Neither ``execute_*`` nor ``user_annotation`` anywhere → Check [3] warns."""
     trace_dir = _build_healthy_layout(tmp_path)
@@ -249,17 +255,14 @@ def test_validator_warns_when_main_trace_lacks_all_annotations(
     caplog.set_level(logging.WARNING)
     _validate_trace_structure(trace_dir, "sglang")
     msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any(
-        "[3]" in m and "per-step annotations didn't fire" in m for m in msgs
-    ), msgs
-    assert any("PROFILE_EXTRA_BODY" in m for m in msgs), (
-        "should point operators at the #210 fix path"
-    )
+    assert any("[3]" in m and "per-step annotations didn't fire" in m for m in msgs), msgs
+    assert any("PROFILE_EXTRA_BODY" in m for m in msgs), "should point operators at the #210 fix path"
 
 
 # Check [4] (Deval) per-file execute_* in trace_split/
 def test_validator_warns_when_split_file_lacks_execute_star(
-    tmp_path, caplog,
+    tmp_path,
+    caplog,
 ):
     """A split chunk with no ``execute_*`` annotations warns, naming the file."""
     trace_dir = _build_healthy_layout(tmp_path)
@@ -271,18 +274,14 @@ def test_validator_warns_when_split_file_lacks_execute_star(
     caplog.set_level(logging.WARNING)
     _validate_trace_structure(trace_dir, "sglang")
     msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any(
-        "trace_split/ file(s) have NO execute_* user_annotations" in m
-        for m in msgs
-    ), msgs
-    assert any(
-        "decode_only_steady_state_chunk0.json.gz" in m for m in msgs
-    ), "warning should name the offending file"
+    assert any("trace_split/ file(s) have NO execute_* user_annotations" in m for m in msgs), msgs
+    assert any("decode_only_steady_state_chunk0.json.gz" in m for m in msgs), "warning should name the offending file"
 
 
 # Check [5] (Deval) sglang kernel_shape_profiler presence
 def test_validator_warns_when_kernel_shape_profiler_absent_in_sglang(
-    tmp_path, caplog,
+    tmp_path,
+    caplog,
 ):
     """A sglang trace lacking ``kernel_shape_profiler`` warns (PR #207 patch missing)."""
     trace_dir = _build_healthy_layout(tmp_path)
@@ -297,9 +296,7 @@ def test_validator_warns_when_kernel_shape_profiler_absent_in_sglang(
     _validate_trace_structure(trace_dir, "sglang")
     msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any("kernel_shape_profiler" in m for m in msgs), msgs
-    assert any("PR #207" in m for m in msgs), (
-        "warning should point at the server-side patcher PR for diagnosis"
-    )
+    assert any("PR #207" in m for m in msgs), "warning should point at the server-side patcher PR for diagnosis"
 
 
 def test_validator_skips_kernel_shape_check_for_non_sglang(tmp_path, caplog):
@@ -394,6 +391,5 @@ def test_trace_health_return_shape_backward_compatible(tmp_path):
     trace_dir = _build_healthy_layout(tmp_path)
     health = _validate_trace_structure(trace_dir, "sglang")
     assert isinstance(health, dict)
-    assert {"issues", "per_kernel_attribution_degraded",
-            "capture_traces_present"} <= set(health)
+    assert {"issues", "per_kernel_attribution_degraded", "capture_traces_present"} <= set(health)
     assert isinstance(health["issues"], list)

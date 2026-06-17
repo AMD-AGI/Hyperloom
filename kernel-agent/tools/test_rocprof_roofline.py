@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import stat
 from pathlib import Path
 
@@ -18,7 +17,8 @@ _TOOLS_DIR = Path(__file__).resolve().parent
 def _load_module():
     """Load rocprof_roofline.py as an isolated module."""
     spec = importlib.util.spec_from_file_location(
-        "rocprof_roofline_under_test", _TOOLS_DIR / "rocprof_roofline.py",
+        "rocprof_roofline_under_test",
+        _TOOLS_DIR / "rocprof_roofline.py",
     )
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -29,13 +29,9 @@ def _load_module():
 rr = _load_module()
 
 
-def _content(*, mfma_actual=900.0, hbm_actual=1000.0, real_peak=3000.0,
-             include_fp=True, ai_hbm=2.5):
+def _content(*, mfma_actual=900.0, hbm_actual=1000.0, real_peak=3000.0, include_fp=True, ai_hbm=2.5):
     """Build synthetic rocprof-compute analyze text for one kernel."""
-    fp_row = (
-        f"│ 4.1.1 │ MFMA FLOPs (F16) │ {mfma_actual} │ GFLOPs │ 1000.0 │ x │\n"
-        if include_fp else ""
-    )
+    fp_row = f"│ 4.1.1 │ MFMA FLOPs (F16) │ {mfma_actual} │ GFLOPs │ 1000.0 │ x │\n" if include_fp else ""
     return (
         "Kernel 0: my_gemm_kernel (87.50%)\n"
         "4.1 Roofline Rate Metrics\n"
@@ -53,19 +49,23 @@ def _content(*, mfma_actual=900.0, hbm_actual=1000.0, real_peak=3000.0,
 
 # ---- pure helpers ----
 
+
 def test_safe_float():
     assert rr._safe_float("3.5") == 3.5
     assert rr._safe_float("nan-ish") is None
     assert rr._safe_float(None) is None
 
 
-@pytest.mark.parametrize("text,expected", [
-    ("memory-bound xyz", "memory"),
-    ("compute-bound xyz", "compute"),
-    ("latency-bound xyz", "latency"),
-    ("weird", "unknown"),
-    ("", "unknown"),
-])
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("memory-bound xyz", "memory"),
+        ("compute-bound xyz", "compute"),
+        ("latency-bound xyz", "latency"),
+        ("weird", "unknown"),
+        ("", "unknown"),
+    ],
+)
 def test_bound_type(text, expected):
     assert rr._bound_type(text) == expected
 
@@ -78,6 +78,7 @@ def test_recommended_actions():
 
 
 # ---- parsing ----
+
 
 def test_parse_blocks_and_ai_and_real_peak():
     a = rr.RocprofRooflineAnalyzer()
@@ -104,6 +105,7 @@ def test_parse_real_hbm_peak_none():
 
 
 # ---- compute_efficiency branches ----
+
 
 def test_efficiency_compute_bound():
     a = rr.RocprofRooflineAnalyzer()
@@ -138,6 +140,7 @@ def test_efficiency_latency_no_fp():
 
 # ---- text report ----
 
+
 def test_build_text_report():
     a = rr.RocprofRooflineAnalyzer()
     a.content = _content()
@@ -148,6 +151,7 @@ def test_build_text_report():
 
 
 # ---- row projection / matching ----
+
 
 def test_kernel_name_matches():
     row = {"matched_kernel_name": "foo", "name": "bar"}
@@ -184,6 +188,7 @@ def test_project_payload_target_matched():
 
 # ---- workdir / atomic write ----
 
+
 def test_profile_workdir_prefers_existing(tmp_path):
     f = tmp_path / "src.py"
     f.write_text("x", encoding="utf-8")
@@ -198,6 +203,7 @@ def test_atomic_write_json(tmp_path):
 
 
 # ---- rocprof-compute resolution / version ----
+
 
 def test_resolve_rocprof_compute_from_env(tmp_path, monkeypatch):
     tool = tmp_path / "rocprof-compute"
@@ -243,6 +249,7 @@ def test_check_rocprof_compute_nonzero(monkeypatch):
 
 
 # ---- run() ----
+
 
 def test_run_missing_tool(monkeypatch, tmp_path):
     monkeypatch.setattr(rr, "_resolve_rocprof_compute", lambda: None)
@@ -292,6 +299,7 @@ def test_run_profile_fails(monkeypatch, tmp_path):
 
 # ---- main() ----
 
+
 def test_main_success(monkeypatch, tmp_path):
     def fake_run(self, **kwargs):
         self.content = _content()
@@ -300,11 +308,20 @@ def test_main_success(monkeypatch, tmp_path):
     monkeypatch.setattr(rr.RocprofRooflineAnalyzer, "run", fake_run)
     out_json = tmp_path / "k.json"
     out_txt = tmp_path / "k.txt"
-    rc = rr.main([
-        "--workdir", str(tmp_path), "--cmd", "echo hi",
-        "--out-json", str(out_json), "--out-txt", str(out_txt),
-        "--raw-txt", str(tmp_path / "raw.txt"),
-    ])
+    rc = rr.main(
+        [
+            "--workdir",
+            str(tmp_path),
+            "--cmd",
+            "echo hi",
+            "--out-json",
+            str(out_json),
+            "--out-txt",
+            str(out_txt),
+            "--raw-txt",
+            str(tmp_path / "raw.txt"),
+        ]
+    )
     assert rc == 0
     assert json.loads(out_json.read_text())["status"] == "ok"
     assert (tmp_path / "raw.txt").is_file()
@@ -312,23 +329,35 @@ def test_main_success(monkeypatch, tmp_path):
 
 def test_main_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        rr.RocprofRooflineAnalyzer, "run", lambda self, **k: (False, "boom"),
+        rr.RocprofRooflineAnalyzer,
+        "run",
+        lambda self, **k: (False, "boom"),
     )
     out_json = tmp_path / "k.json"
     out_txt = tmp_path / "k.txt"
-    rc = rr.main([
-        "--workdir", str(tmp_path), "--cmd", "echo hi",
-        "--out-json", str(out_json), "--out-txt", str(out_txt),
-    ])
+    rc = rr.main(
+        [
+            "--workdir",
+            str(tmp_path),
+            "--cmd",
+            "echo hi",
+            "--out-json",
+            str(out_json),
+            "--out-txt",
+            str(out_txt),
+        ]
+    )
     assert rc == 1
     assert json.loads(out_json.read_text())["status"] == "failed"
 
 
 # ---- enrich_kernel_roofline_sidecar ----
 
+
 def test_enrich_missing_inputs(tmp_path):
     out = rr.enrich_kernel_roofline_sidecar(
-        sidecar_path=tmp_path / "nope.json", candidates_path=tmp_path / "no2.json",
+        sidecar_path=tmp_path / "nope.json",
+        candidates_path=tmp_path / "no2.json",
     )
     assert out["status"] == "missing_inputs"
 
@@ -366,6 +395,7 @@ def _install_fake_harness_generator(monkeypatch, impl):
     """Inject a fake harness_generator module exposing maybe_generate_harness."""
     import sys
     import types
+
     mod = types.ModuleType("harness_generator")
     mod.maybe_generate_harness = impl
     monkeypatch.setitem(sys.modules, "harness_generator", mod)
@@ -387,6 +417,7 @@ def test_generate_harness_success(tmp_path, monkeypatch):
     bench = tmp_path / "b.py"
     bench.write_text("x = 1\n", encoding="utf-8")
     import types as _t
+
     _install_fake_harness_generator(
         monkeypatch,
         lambda **k: _t.SimpleNamespace(test_command="python h.py --correctness"),
@@ -422,7 +453,8 @@ def test_generate_harness_error(tmp_path, monkeypatch):
 def test_enrich_full_matched_path(tmp_path, monkeypatch):
     monkeypatch.setattr(rr, "_check_rocprof_compute", lambda: "3.1.0")
     monkeypatch.setattr(
-        rr, "_generate_harness_for_candidate",
+        rr,
+        "_generate_harness_for_candidate",
         lambda cand, **k: ("python h.py --profile", None),
     )
 
@@ -437,9 +469,16 @@ def test_enrich_full_matched_path(tmp_path, monkeypatch):
     sc = root / "kernel_roofline.json"
     cd = root / "candidates.json"
     sc.write_text(json.dumps({"kernels": [{"kernel_id": "1", "name": "my_gemm_kernel"}]}), encoding="utf-8")
-    cd.write_text(json.dumps({"hot_kernels": [
-        {"kernel_id": "1", "reusable_native_kernel": True, "name": "my_gemm_kernel"},
-    ]}), encoding="utf-8")
+    cd.write_text(
+        json.dumps(
+            {
+                "hot_kernels": [
+                    {"kernel_id": "1", "reusable_native_kernel": True, "name": "my_gemm_kernel"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     out = rr.enrich_kernel_roofline_sidecar(sidecar_path=sc, candidates_path=cd)
     assert out["matched"] == 1
     assert out["status"] == "ok"
@@ -448,20 +487,30 @@ def test_enrich_full_matched_path(tmp_path, monkeypatch):
 def test_enrich_failed_run_path(tmp_path, monkeypatch):
     monkeypatch.setattr(rr, "_check_rocprof_compute", lambda: "3.1.0")
     monkeypatch.setattr(
-        rr, "_generate_harness_for_candidate",
+        rr,
+        "_generate_harness_for_candidate",
         lambda cand, **k: ("python h.py --profile", None),
     )
     monkeypatch.setattr(
-        rr.RocprofRooflineAnalyzer, "run", lambda self, **k: (False, "profile boom"),
+        rr.RocprofRooflineAnalyzer,
+        "run",
+        lambda self, **k: (False, "profile boom"),
     )
     root = tmp_path / "session" / "reports"
     root.mkdir(parents=True)
     sc = root / "kernel_roofline.json"
     cd = root / "candidates.json"
     sc.write_text(json.dumps({"kernels": [{"kernel_id": "1", "name": "k"}]}), encoding="utf-8")
-    cd.write_text(json.dumps({"hot_kernels": [
-        {"kernel_id": "1", "reusable_native_kernel": True, "name": "k"},
-    ]}), encoding="utf-8")
+    cd.write_text(
+        json.dumps(
+            {
+                "hot_kernels": [
+                    {"kernel_id": "1", "reusable_native_kernel": True, "name": "k"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     out = rr.enrich_kernel_roofline_sidecar(sidecar_path=sc, candidates_path=cd)
     assert out["failed"] == 1
 
@@ -469,7 +518,8 @@ def test_enrich_failed_run_path(tmp_path, monkeypatch):
 def test_enrich_no_test_command_skips(tmp_path, monkeypatch):
     monkeypatch.setattr(rr, "_check_rocprof_compute", lambda: "3.1.0")
     monkeypatch.setattr(
-        rr, "_generate_harness_for_candidate",
+        rr,
+        "_generate_harness_for_candidate",
         lambda cand, **k: ("", "no_benchmark_files"),
     )
     root = tmp_path / "session" / "reports"
@@ -477,9 +527,16 @@ def test_enrich_no_test_command_skips(tmp_path, monkeypatch):
     sc = root / "kernel_roofline.json"
     cd = root / "candidates.json"
     sc.write_text(json.dumps({"kernels": [{"kernel_id": "1", "name": "k"}]}), encoding="utf-8")
-    cd.write_text(json.dumps({"hot_kernels": [
-        {"kernel_id": "1", "reusable_native_kernel": True, "name": "k"},
-    ]}), encoding="utf-8")
+    cd.write_text(
+        json.dumps(
+            {
+                "hot_kernels": [
+                    {"kernel_id": "1", "reusable_native_kernel": True, "name": "k"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     out = rr.enrich_kernel_roofline_sidecar(sidecar_path=sc, candidates_path=cd)
     assert out["skipped"] == 1
 
@@ -492,6 +549,8 @@ def test_enrich_skips_when_rocprof_unavailable(tmp_path, monkeypatch):
     cd.write_text(json.dumps({"hot_kernels": [{"kernel_id": "1", "reusable_native_kernel": True}]}), encoding="utf-8")
     logs = []
     out = rr.enrich_kernel_roofline_sidecar(
-        sidecar_path=sc, candidates_path=cd, log_fn=logs.append,
+        sidecar_path=sc,
+        candidates_path=cd,
+        log_fn=logs.append,
     )
     assert out["skipped"] == 1

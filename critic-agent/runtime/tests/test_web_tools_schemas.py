@@ -76,8 +76,7 @@ def test_search_schema_required_fields():
     params = fn["parameters"]
     assert params["required"] == ["query"]
     props = params["properties"]
-    assert {"query", "allowed_domains", "blocked_domains",
-            "max_results", "site", "freshness"}.issubset(props)
+    assert {"query", "allowed_domains", "blocked_domains", "max_results", "site", "freshness"}.issubset(props)
     assert props["freshness"]["enum"] == ["day", "week", "month", "year", "any"]
 
 
@@ -95,5 +94,6 @@ def test_fetch_schema_required_fields():
 
 def test_schemas_are_json_serializable():
     import json
+
     out = build_tool_schemas(_cfg())
     json.dumps(out)  # must not raise

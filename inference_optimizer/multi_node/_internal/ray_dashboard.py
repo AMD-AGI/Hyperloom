@@ -26,7 +26,6 @@ RAY_DASHBOARD_PORT = 8265
 _HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)
 
 
-
 def _wrap_for_dash(body: str) -> str:
     """Base64-wrap a bash body so it survives /bin/sh (dash), which Ray Dashboard uses to run entrypoints.
 
@@ -37,8 +36,10 @@ def _wrap_for_dash(body: str) -> str:
         str: A shell command that decodes and runs ``body`` under bash.
     """
     import base64 as _b64
+
     encoded = _b64.b64encode(body.encode()).decode()
-    return f'echo {encoded} | base64 -d | bash'
+    return f"echo {encoded} | base64 -d | bash"
+
 
 class RayDashboardError(RuntimeError):
     """Raised when the Ray dashboard returns an unexpected status.

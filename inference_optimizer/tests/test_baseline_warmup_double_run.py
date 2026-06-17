@@ -52,22 +52,26 @@ def _write_yaml(path: Path, *, framework: str = "vllm") -> None:
 def _fake_workspace(slot: Path, *, tput: float) -> Path:
     ws = slot / "benchmark_vllm_20260602_010101"
     ws.mkdir(parents=True)
-    (ws / "benchmark_report.json").write_text(json.dumps({
-        "success": True,
-        "framework": "vllm",
-        "model": "/wekafs/models/Qwen-Qwen3-8B",
-        "throughput": {
-            "request_throughput": tput / 1024,
-            "output_throughput": tput,
-            "total_token_throughput": tput * 2,
-            "completed_requests": 64,
-            "duration_seconds": 25.0,
-        },
-        "latency": {
-            "ttft": {"mean_ms": 100.0, "p99_ms": 120.0},
-            "e2el": {"mean_ms": 2000.0, "p99_ms": 2300.0},
-        },
-    }))
+    (ws / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "framework": "vllm",
+                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "throughput": {
+                    "request_throughput": tput / 1024,
+                    "output_throughput": tput,
+                    "total_token_throughput": tput * 2,
+                    "completed_requests": 64,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {
+                    "ttft": {"mean_ms": 100.0, "p99_ms": 120.0},
+                    "e2el": {"mean_ms": 2000.0, "p99_ms": 2300.0},
+                },
+            }
+        )
+    )
     return ws
 
 
@@ -122,15 +126,16 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path):
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -148,9 +153,7 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path):
     assert warmup_lc["cleanup"] is False
     assert measure_lc["cleanup"] is True
     assert warmup_lc["pid_dir"] == measure_lc["pid_dir"] == str(output_dir)
-    assert captured[0]["benchmark"]["envs"]["PORT"] == (
-        captured[1]["benchmark"]["envs"]["PORT"]
-    )
+    assert captured[0]["benchmark"]["envs"]["PORT"] == (captured[1]["benchmark"]["envs"]["PORT"])
     assert captured[0]["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
 
 
@@ -164,15 +167,16 @@ def test_baseline_single_round_when_double_run_disabled(tmp_path, monkeypatch):
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -193,16 +197,17 @@ def test_baseline_single_round_when_script_not_builtin(tmp_path):
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-        "benchmark_script": "dsr1_fp8_mi300x.sh",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+            "benchmark_script": "dsr1_fp8_mi300x.sh",
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -225,15 +230,16 @@ def test_baseline_warmup_round_failure_short_circuits(tmp_path):
         return subprocess.CompletedProcess(cmd, 1, "", "boom: server crashed")
 
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -258,15 +264,16 @@ def test_baseline_no_workspace_persists_stderr_to_file(tmp_path):
         return subprocess.CompletedProcess(cmd, 1, "", crash_text)
 
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -281,7 +288,8 @@ def test_baseline_no_workspace_persists_stderr_to_file(tmp_path):
 
 
 def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """#524: a vLLM engine-core bootstrap failure — server.log carries
     ``Engine core initialization failed`` while Magpie exits nonzero without a
@@ -308,15 +316,16 @@ def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
         return subprocess.CompletedProcess(cmd, 1, "", "magpie wrapper noise")
 
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -327,7 +336,8 @@ def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
 
 
 def test_baseline_server_dead_returncode_classifies_server_init_dead(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """#524: when the liveness watchdog reaps a hung server
     (``SERVER_DEAD_RETURNCODE``), baseline classifies it ``server_init_dead``
@@ -345,15 +355,16 @@ def test_baseline_server_dead_returncode_classifies_server_init_dead(
         return subprocess.CompletedProcess(cmd, SERVER_DEAD_RETURNCODE, "", "")
 
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -363,7 +374,8 @@ def test_baseline_server_dead_returncode_classifies_server_init_dead(
 
 
 def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """#524: when Magpie DOES create a benchmark_* workspace but it carries no
     valid measurement, a server.log death marker takes precedence — the
@@ -391,15 +403,16 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -422,8 +435,7 @@ def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
     output_dir.mkdir(parents=True)
     # Stale death marker from a PRIOR attempt in the same slot.
     (output_dir / "server.log").write_text(
-        "(APIServer pid=1) RuntimeError: Engine core initialization failed. "
-        "Failed core proc(s): {}\n",
+        "(APIServer pid=1) RuntimeError: Engine core initialization failed. Failed core proc(s): {}\n",
         encoding="utf-8",
     )
 
@@ -436,15 +448,16 @@ def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -481,7 +494,8 @@ def test_ensure_local_inferencex_mirrors_network_path(tmp_path, monkeypatch):
     local_root = tmp_path / "local_cache"
     monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
     monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", str(local_root),
+        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
+        str(local_root),
     )
 
     dest = bl._ensure_local_inferencex(str(src))
@@ -489,14 +503,13 @@ def test_ensure_local_inferencex_mirrors_network_path(tmp_path, monkeypatch):
     assert dest != str(src)
     assert str(local_root) in dest
     # Mirror is complete (benchmark_lib.sh + the rest of the patched tree).
-    assert (Path(dest) / "benchmarks" / "benchmark_lib.sh").read_text() == (
-        "# patched lib"
-    )
+    assert (Path(dest) / "benchmarks" / "benchmark_lib.sh").read_text() == ("# patched lib")
     assert (Path(dest) / "utils" / "marker.txt").read_text() == "payload"
 
 
 def test_ensure_local_inferencex_isolates_per_task_mirrors(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """#523: callers can include a task/output-dir key in the mirror hash so
     two overlapping baselines sharing one wekafs checkout never rmtree/replace
@@ -509,7 +522,8 @@ def test_ensure_local_inferencex_isolates_per_task_mirrors(
     local_root = tmp_path / "local_cache"
     monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
     monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", str(local_root),
+        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
+        str(local_root),
     )
 
     dest_a = bl._ensure_local_inferencex(str(src), mirror_key="task-a")
@@ -535,7 +549,8 @@ def test_ensure_local_inferencex_disabled_by_env(tmp_path, monkeypatch):
 
 
 def test_ensure_local_inferencex_falls_back_on_copy_failure(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """#523: when the mirror copy itself fails (e.g. local disk full), the
     helper degrades to the original network-mount path instead of raising, so
@@ -548,7 +563,8 @@ def test_ensure_local_inferencex_falls_back_on_copy_failure(
     local_root = tmp_path / "local_cache"
     monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
     monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", str(local_root),
+        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
+        str(local_root),
     )
 
     def _boom(*_a, **_k):
@@ -560,7 +576,8 @@ def test_ensure_local_inferencex_falls_back_on_copy_failure(
 
 
 def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """#523: if the copy lands but the mirror is missing the load-bearing
     ``benchmarks/benchmark_lib.sh`` (partial / corrupt tree), the helper
@@ -575,7 +592,8 @@ def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
     local_root = tmp_path / "local_cache"
     monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
     monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", str(local_root),
+        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
+        str(local_root),
     )
 
     assert bl._ensure_local_inferencex(str(src)) == str(src)
@@ -608,7 +626,8 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
     monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
     monkeypatch.setenv("INFERENCEX_PATH", str(ix_src))
     monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", str(local_root),
+        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
+        str(local_root),
     )
 
     seen: dict = {}
@@ -616,24 +635,23 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
     def fake_run(cmd, *args, **kwargs):
         seen["env"] = kwargs.get("env")
         cfg_idx = cmd.index("--benchmark-config")
-        seen["materialized_cfg"] = yaml.safe_load(
-            Path(cmd[cfg_idx + 1]).read_text()
-        )
+        seen["materialized_cfg"] = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=_HOT_TPUT)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -672,15 +690,16 @@ def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -700,15 +719,16 @@ def test_atom_engages_double_run_like_vllm_sglang(tmp_path):
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -741,15 +761,16 @@ def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path):
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -782,22 +803,28 @@ def test_double_run_pre_start_cleanup_kills_zombie_and_clears_stale_meta(
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
-    with patch.object(
-        type(executor), "_port_healthy", return_value=True,
-    ), patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "_kill_stale_servers",
-        side_effect=fake_kill,
-    ), patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
-        side_effect=fake_run,
+    with (
+        patch.object(
+            type(executor),
+            "_port_healthy",
+            return_value=True,
+        ),
+        patch(
+            "inference_optimizer.orchestrator.action_executors.baseline._kill_stale_servers",
+            side_effect=fake_kill,
+        ),
+        patch(
+            "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+            side_effect=fake_run,
+        ),
     ):
         result = _run(executor(ctx))
 
@@ -830,22 +857,28 @@ def test_pre_start_cleanup_no_kill_when_port_free(tmp_path):
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
-    with patch.object(
-        type(executor), "_port_healthy", return_value=False,
-    ), patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "_kill_stale_servers",
-        side_effect=fake_kill,
-    ), patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
-        side_effect=fake_run,
+    with (
+        patch.object(
+            type(executor),
+            "_port_healthy",
+            return_value=False,
+        ),
+        patch(
+            "inference_optimizer.orchestrator.action_executors.baseline._kill_stale_servers",
+            side_effect=fake_kill,
+        ),
+        patch(
+            "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+            side_effect=fake_run,
+        ),
     ):
         result = _run(executor(ctx))
 
@@ -879,22 +912,28 @@ def test_pre_start_cleanup_no_kill_when_metadata_existed(tmp_path):
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
-    with patch.object(
-        type(executor), "_port_healthy", return_value=True,
-    ), patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "_kill_stale_servers",
-        side_effect=fake_kill,
-    ), patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
-        side_effect=fake_run,
+    with (
+        patch.object(
+            type(executor),
+            "_port_healthy",
+            return_value=True,
+        ),
+        patch(
+            "inference_optimizer.orchestrator.action_executors.baseline._kill_stale_servers",
+            side_effect=fake_kill,
+        ),
+        patch(
+            "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+            side_effect=fake_run,
+        ),
     ):
         result = _run(executor(ctx))
 
@@ -920,15 +959,21 @@ def test_pre_start_cleanup_preserves_metadata_when_reuse_target_healthy(
     def fake_kill():
         kill_calls["n"] += 1
 
-    with patch.object(
-        type(executor), "_port_healthy", return_value=True,
-    ), patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "_kill_stale_servers",
-        side_effect=fake_kill,
+    with (
+        patch.object(
+            type(executor),
+            "_port_healthy",
+            return_value=True,
+        ),
+        patch(
+            "inference_optimizer.orchestrator.action_executors.baseline._kill_stale_servers",
+            side_effect=fake_kill,
+        ),
     ):
         executor._pre_start_cleanup(
-            pid_dir=output_dir, framework="vllm", port=8888,
+            pid_dir=output_dir,
+            framework="vllm",
+            port=8888,
         )
 
     assert kill_calls["n"] == 0
@@ -949,22 +994,28 @@ def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path):
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
-    with patch.object(
-        type(executor), "_port_healthy", return_value=True,
-    ), patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "_kill_stale_servers",
-        side_effect=boom,
-    ), patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
-        side_effect=fake_run,
+    with (
+        patch.object(
+            type(executor),
+            "_port_healthy",
+            return_value=True,
+        ),
+        patch(
+            "inference_optimizer.orchestrator.action_executors.baseline._kill_stale_servers",
+            side_effect=boom,
+        ),
+        patch(
+            "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+            side_effect=fake_run,
+        ),
     ):
         result = _run(executor(ctx))
 
@@ -988,20 +1039,23 @@ def test_pre_start_cleanup_skipped_when_single_round(tmp_path, monkeypatch):
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
     executor = _executor(base, tmp_path)
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "gpu_type": "mi300x",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
 
-    with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "_kill_stale_servers",
-        side_effect=fake_kill,
-    ), patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
-        side_effect=fake_run,
+    with (
+        patch(
+            "inference_optimizer.orchestrator.action_executors.baseline._kill_stale_servers",
+            side_effect=fake_kill,
+        ),
+        patch(
+            "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+            side_effect=fake_run,
+        ),
     ):
         result = _run(executor(ctx))
 
@@ -1021,7 +1075,9 @@ def test_teardown_lifecycle_server_removes_state_files(tmp_path):
     (pid_dir / "vllm_8888.json").write_text("{}")
 
     executor._teardown_lifecycle_server(
-        pid_dir=pid_dir, framework="vllm", port=8888,
+        pid_dir=pid_dir,
+        framework="vllm",
+        port=8888,
     )
 
     assert not (pid_dir / "vllm_8888.pid").exists()
@@ -1036,43 +1092,37 @@ from inference_optimizer.orchestrator.action_executors.baseline import (
 
 
 def test_classify_fast_exit_unknown_backend():
-    assert _classify_subprocess_error(
-        5.0, "ValueError: Unknown attention backend: 'ROCM_FLASH'"
-    ) == "fast_exit_arg_error"
+    assert (
+        _classify_subprocess_error(5.0, "ValueError: Unknown attention backend: 'ROCM_FLASH'") == "fast_exit_arg_error"
+    )
 
 
 def test_classify_fast_exit_unrecognized_args():
-    assert _classify_subprocess_error(
-        2.0, "error: unrecognized arguments: --bogus-flag"
-    ) == "fast_exit_arg_error"
+    assert _classify_subprocess_error(2.0, "error: unrecognized arguments: --bogus-flag") == "fast_exit_arg_error"
 
 
 def test_classify_slow_failure_not_arg_error():
     """A slow failure (>30s) with the same stderr pattern must NOT be
     classified as arg error — it could be a real inference crash."""
-    assert _classify_subprocess_error(
-        120.0, "ValueError: some runtime error"
-    ) == "subprocess_nonzero"
+    assert _classify_subprocess_error(120.0, "ValueError: some runtime error") == "subprocess_nonzero"
 
 
 def test_classify_fast_exit_without_pattern():
     """A fast exit without arg-error patterns stays subprocess_nonzero."""
-    assert _classify_subprocess_error(
-        3.0, "Segmentation fault (core dumped)"
-    ) == "subprocess_nonzero"
+    assert _classify_subprocess_error(3.0, "Segmentation fault (core dumped)") == "subprocess_nonzero"
 
 
 def test_classify_fast_runtime_value_error_not_arg_error():
     """A generic fast runtime ValueError is not enough for arg-error routing."""
-    assert _classify_subprocess_error(
-        3.0, "ValueError: tensor shape mismatch during warmup"
-    ) == "subprocess_nonzero"
+    assert _classify_subprocess_error(3.0, "ValueError: tensor shape mismatch during warmup") == "subprocess_nonzero"
 
 
 def test_classify_value_error_with_argv_dump_not_arg_error():
     """A command/argv dump containing flags is not arg validation by itself."""
-    assert _classify_subprocess_error(
-        3.0,
-        "ValueError: tensor shape mismatch during warmup\n"
-        "argv: vllm serve --model /models/foo --tp 8",
-    ) == "subprocess_nonzero"
+    assert (
+        _classify_subprocess_error(
+            3.0,
+            "ValueError: tensor shape mismatch during warmup\nargv: vllm serve --model /models/foo --tp 8",
+        )
+        == "subprocess_nonzero"
+    )

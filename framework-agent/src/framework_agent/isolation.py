@@ -53,9 +53,7 @@ class WorkspacePaths:
 # ---------------------------------------------------------------------------
 # Subprocess helpers
 # ---------------------------------------------------------------------------
-def _run_subprocess(
-    args: list[str], *, cwd: Path | None = None, timeout_sec: int = 1800
-) -> None:
+def _run_subprocess(args: list[str], *, cwd: Path | None = None, timeout_sec: int = 1800) -> None:
     """Run a subprocess with a timeout; raise CalledProcessError on non-zero.
 
     Args:
@@ -108,7 +106,9 @@ def _resolve_min_free_gb(explicit: float | None) -> float:
         except ValueError:
             log.warning(
                 "%s=%r is not a number; falling back to default %.1f GB",
-                _DISK_MIN_GB_ENV, raw, _DEFAULT_DISK_MIN_GB,
+                _DISK_MIN_GB_ENV,
+                raw,
+                _DEFAULT_DISK_MIN_GB,
             )
     return _DEFAULT_DISK_MIN_GB
 
@@ -140,11 +140,15 @@ def disk_preflight(
     required_gb = max(floor_gb, float(n_candidates) * per_candidate_gb)
     work_dir.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(str(work_dir))
-    free_gb = usage.free / (1024 ** 3)
+    free_gb = usage.free / (1024**3)
     log.info(
-        "disk_preflight: work_dir=%s free=%.1fGB required=%.1fGB (n=%d, "
-        "floor=%.1fGB, per_cand=%.1fGB)",
-        work_dir, free_gb, required_gb, n_candidates, floor_gb, per_candidate_gb,
+        "disk_preflight: work_dir=%s free=%.1fGB required=%.1fGB (n=%d, floor=%.1fGB, per_cand=%.1fGB)",
+        work_dir,
+        free_gb,
+        required_gb,
+        n_candidates,
+        floor_gb,
+        per_candidate_gb,
     )
     if free_gb < required_gb:
         raise DiskPreflightError(
@@ -277,7 +281,8 @@ def prepare_candidate_workspace(
     if not execute or not req.prepare_candidate_env:
         log.debug(
             "prepare_candidate_workspace[%02d] %s: plan mode (no worktree/venv)",
-            index, candidate.ref,
+            index,
+            candidate.ref,
         )
         return WorkspacePaths(candidate_dir, worktree_dir, venv_dir)
 
@@ -287,7 +292,9 @@ def prepare_candidate_workspace(
         shutil.rmtree(worktree_dir)
     log.info(
         "prepare_candidate_workspace[%02d] %s: worktree -> %s",
-        index, candidate.ref, worktree_dir,
+        index,
+        candidate.ref,
+        worktree_dir,
     )
     _run_git(
         [
@@ -305,7 +312,9 @@ def prepare_candidate_workspace(
         shutil.rmtree(venv_dir)
     log.info(
         "prepare_candidate_workspace[%02d] %s: venv -> %s",
-        index, candidate.ref, venv_dir,
+        index,
+        candidate.ref,
+        venv_dir,
     )
     _run_subprocess(
         [sys.executable, "-m", "venv", "--system-site-packages", str(venv_dir)],

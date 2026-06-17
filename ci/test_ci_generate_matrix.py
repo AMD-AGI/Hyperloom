@@ -32,20 +32,26 @@ def test_entry_key_falls_back_to_inferencex_key():
 
 
 def test_generate_matrix_all_models(tmp_path: Path):
-    cfg = _write_config(tmp_path, [
-        {"inferenceX_key": "a"},
-        {"key": "b", "inferenceX_key": "ignored"},
-    ])
+    cfg = _write_config(
+        tmp_path,
+        [
+            {"inferenceX_key": "a"},
+            {"key": "b", "inferenceX_key": "ignored"},
+        ],
+    )
     matrix = gm.generate_matrix(str(cfg))
     assert matrix == {"include": [{"key": "a"}, {"key": "b"}]}
 
 
 def test_generate_matrix_selected_subset(tmp_path: Path):
-    cfg = _write_config(tmp_path, [
-        {"inferenceX_key": "a"},
-        {"inferenceX_key": "b"},
-        {"inferenceX_key": "c"},
-    ])
+    cfg = _write_config(
+        tmp_path,
+        [
+            {"inferenceX_key": "a"},
+            {"inferenceX_key": "b"},
+            {"inferenceX_key": "c"},
+        ],
+    )
     matrix = gm.generate_matrix(str(cfg), selected_models="a,c")
     assert matrix == {"include": [{"key": "a"}, {"key": "c"}]}
 

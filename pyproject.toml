@@ -282,12 +282,33 @@ jobs = 1
 # rationale behind each ignore.
 [tool.ruff]
 target-version = "py310"
-line-length = 100
-extend-exclude = ["slides", "_audit_artifacts"]
+line-length = 120
+# Exclude generated/vendored trees: ``slides`` + audit artifacts, build
+# output, virtualenvs, and the vendored sub-repos (TraceLens-internal /
+# InferenceX) that ship their own linting and are not part of this repo's
+# tracked sources.
+extend-exclude = [
+    "slides",
+    "_audit_artifacts",
+    "build",
+    ".venv",
+    "TraceLens-internal",
+    "InferenceX",
+]
 
 [tool.ruff.lint]
 # Default Ruff selection (what the audit ran with) -- pin it explicitly.
 select = ["E", "F", "W"]
+
+# E501 (line-too-long) is owned by ``ruff format``: it reflows code to
+# ``line-length``; the only residual long lines are strings / comments / URLs
+# the formatter intentionally does not wrap. Linting them adds noise, so E501
+# is disabled here (standard practice when a formatter is in use).
+#
+# E741 (ambiguous variable name, e.g. ``l``) is a stylistic check already
+# tolerated in tests; disabled repo-wide to avoid churn-only renames in math
+# / parsing helpers where single-letter locals are idiomatic.
+ignore = ["E501", "E741"]
 
 # Future-proofing -- uncomment once the current findings are at zero.
 # extend-select = ["B", "I", "UP", "SIM", "RUF"]
@@ -295,7 +316,15 @@ select = ["E", "F", "W"]
 [tool.ruff.lint.per-file-ignores]
 # matplotlib backend must be set before pyplot import
 "slides/*.py" = ["E402"]
-# Tests routinely re-import inside function bodies and use single-char loop vars
-"**/tests/**/*.py" = ["F811", "E741"]
+# Tests routinely re-import inside function bodies (E402), redefine fixtures
+# (F811), and bind setup values they assert on indirectly (F841).
+"**/tests/**/*.py" = ["F811", "E402", "F841"]
 # CLI dispatchers use string forward-refs to keep startup cheap
 "inference_optimizer/cli.py" = ["F821"]  # remove after fixing the 5 real ones first
+# Modules that intentionally place imports after a module docstring + early
+# constants / conditional setup (lazy or ordering-sensitive imports).
+"inference_optimizer/orchestrator/coordinator.py" = ["E402"]
+"inference_optimizer/orchestrator/specialist_runner.py" = ["E402"]
+"inference_optimizer/orchestrator/roofline_ceiling.py" = ["E402"]
+"inference_optimizer/orchestrator/system_prompts/specialist_prompt_builder.py" = ["E402"]
+"critic-agent/runtime/decision_reviewer.py" = ["E402"]
