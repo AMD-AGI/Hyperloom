@@ -19,7 +19,19 @@ def _render_pair(
     invocations_key: str,
     legacy_key: str,
 ) -> RenderedSection:
-    """Render either GEAK or OOB invocations (new ``invocations`` key, legacy fallback)."""
+    """Render either GEAK or OOB invocations (new ``invocations`` key, legacy fallback).
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+        section_id: Section identifier for the rendered block.
+        title: Human-readable section title.
+        invocations_key: Key under ``invocations`` to read records from.
+        legacy_key: Top-level fallback key for older breakdowns.
+
+    Returns:
+        The rendered section, or a skipped placeholder when no invocations
+        are present.
+    """
     raw = (
         (breakdown.get("invocations") or {}).get(invocations_key)
         or breakdown.get(legacy_key)
