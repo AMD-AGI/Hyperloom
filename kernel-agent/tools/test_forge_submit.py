@@ -51,6 +51,46 @@ def test_fellow_for_source_type():
     assert forge_submit._fellow_for_source_type("unknown") is None
 
 
+def test_fellow_compiled_gated_by_env(monkeypatch):
+    # Compiled fellows stay off by default (clean skip -> geak fallback).
+    monkeypatch.delenv("FORGE_ENABLE_COMPILED_FELLOWS", raising=False)
+    assert forge_submit._fellow_for_source_type("hip_cpp") is None
+    assert forge_submit._fellow_for_source_type("ck") is None
+    # Opt-in enables Kernel-Forge's native compiled fellows.
+    monkeypatch.setenv("FORGE_ENABLE_COMPILED_FELLOWS", "1")
+    assert forge_submit._fellow_for_source_type("hip_cpp") == "hip-fellow"
+    assert forge_submit._fellow_for_source_type("ck") == "ck-fellow"
+    assert forge_submit._fellow_for_source_type("aiter") == "aiter-fellow"
+    assert forge_submit._fellow_for_source_type("hipblaslt") == "hipblaslt-fellow"
+    # Still None for genuinely unsupported types.
+    assert forge_submit._fellow_for_source_type("vendor_binary") is None
+
+
+def _backends_args(backends=""):
+    import argparse
+    return argparse.Namespace(backends=backends, benchmark_file="", test_harness_path="")
+
+
+def test_choose_backends_appends_geak_fallback_for_forge_only(monkeypatch):
+    # RCA root cause A: forge-only must not run without a geak safety net.
+    monkeypatch.delenv("FORGE_DISABLE_GEAK_FALLBACK", raising=False)
+    selected, notes = ko.choose_backends(_backends_args("forge"), {})
+    assert selected == ["forge", "geak"]
+    assert notes.get("geak_fallback_appended") is True
+
+
+def test_choose_backends_geak_fallback_opt_out(monkeypatch):
+    monkeypatch.setenv("FORGE_DISABLE_GEAK_FALLBACK", "1")
+    selected, _ = ko.choose_backends(_backends_args("forge"), {})
+    assert selected == ["forge"]
+
+
+def test_choose_backends_no_double_geak(monkeypatch):
+    monkeypatch.delenv("FORGE_DISABLE_GEAK_FALLBACK", raising=False)
+    selected, _ = ko.choose_backends(_backends_args("forge,geak"), {})
+    assert selected == ["forge", "geak"]
+
+
 def test_report_anchors_roundtrip(tmp_path):
     """_write_report output must be parseable by kernel_optimization's extractors."""
     report = forge_submit._write_report(tmp_path, 0.183, 0.106, improved=True)

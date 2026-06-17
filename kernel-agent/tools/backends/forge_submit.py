@@ -61,10 +61,26 @@ _PLATFORM_TO_GFX = {
     "mi355x": "gfx950",
 }
 
-# Stage 1: only triton maps to a fellow; compiled backends are deferred.
+# Stage 1: only triton maps to a fellow by default; compiled backends are
+# deferred (the autogen driver + in-place bench path are triton-validated).
 _SOURCE_TYPE_TO_FELLOW = {
     "triton": "triton-fellow",
     "python": "triton-fellow",
+}
+
+# Compiled-kernel fellows that Kernel-Forge supports natively (hip/ck/aiter/
+# hipblaslt). MI300X hot kernels are mostly hip_cpp, so enabling these lets
+# forge attempt them instead of always skipping -> geak. Gated behind
+# FORGE_ENABLE_COMPILED_FELLOWS until the compiled forge flow (driver autogen +
+# bench) is verified end-to-end, so the default stays the safe triton-only path.
+_COMPILED_SOURCE_TYPE_TO_FELLOW = {
+    "hip_cpp": "hip-fellow",
+    "hip": "hip-fellow",
+    "cuda_cpp": "hip-fellow",
+    "ck": "ck-fellow",
+    "aiter": "aiter-fellow",
+    "hipblaslt": "hipblaslt-fellow",
+    "flydsl": "flydsl-fellow",
 }
 
 
@@ -96,8 +112,20 @@ def _resolve_gpu_target(candidate: dict) -> str:
 
 
 def _fellow_for_source_type(source_type: str) -> str | None:
-    """Map source_type to a Forge fellow (stage 1: triton only). None if unsupported."""
-    return _SOURCE_TYPE_TO_FELLOW.get((source_type or "").strip().lower())
+    """Map source_type to a Forge fellow. None if unsupported.
+
+    Triton/python always map to triton-fellow. Compiled source types
+    (hip_cpp/ck/aiter/hipblaslt/flydsl) map to their native fellow only when
+    FORGE_ENABLE_COMPILED_FELLOWS is set, so the default path stays triton-only
+    and non-triton candidates cleanly fall back to geak.
+    """
+    st = (source_type or "").strip().lower()
+    fellow = _SOURCE_TYPE_TO_FELLOW.get(st)
+    if fellow is not None:
+        return fellow
+    if os.environ.get("FORGE_ENABLE_COMPILED_FELLOWS", "").strip().lower() in ("1", "true", "yes"):
+        return _COMPILED_SOURCE_TYPE_TO_FELLOW.get(st)
+    return None
 
 
 def _git_toplevel(path: str) -> str:
