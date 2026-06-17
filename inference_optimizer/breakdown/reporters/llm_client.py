@@ -170,6 +170,10 @@ def build_client_from_env() -> Any | None:
     ``HYPERLOOM_REPORT_MODEL``, ``HYPERLOOM_REPORT_MAX_TOKENS`` and the
     per-backend base-url/api-key vars; returns ``None``
     (deterministic-only) when required vars are missing.
+
+    Returns:
+        A configured backend client instance, or ``None`` when the backend
+        is disabled or required environment variables are missing.
     """
     backend = (os.environ.get("HYPERLOOM_REPORT_LLM_BACKEND") or "none").lower()
     if backend in ("", "none", "off", "disabled"):

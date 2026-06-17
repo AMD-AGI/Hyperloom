@@ -95,7 +95,15 @@ def build_user_prompt(
     rendered: list[RenderedSection],
     global_facts: GlobalFacts,
 ) -> str:
-    """Build the user-message JSON the LLM sees (string so the exact bytes are log-inspectable)."""
+    """Build the user-message JSON the LLM sees (string so the exact bytes are log-inspectable).
+
+    Args:
+        rendered: Rendered sections to include; skipped sections are withheld.
+        global_facts: Global facts block prepended to the prompt payload.
+
+    Returns:
+        A pretty-printed JSON string representing the user message.
+    """
     payload = {
         "global_facts": global_facts.as_prompt_dict(),
         # Skipped sections are withheld so the model can't "explain" a phantom section.
@@ -109,6 +117,13 @@ def parse_llm_response(raw: str) -> dict[str, Any]:
 
     Tolerates a code fence; on any failure returns empty fields so the
     deterministic-only output path stays usable.
+
+    Args:
+        raw: Raw text returned by the LLM, optionally wrapped in a code fence.
+
+    Returns:
+        A dict with ``executive_summary`` and ``section_narratives`` keys;
+        both empty when parsing fails.
     """
     text = (raw or "").strip()
     if text.startswith("```"):

@@ -64,6 +64,9 @@ def is_multi_node() -> bool:
     State file wins over env so ``--resume`` works (manifest.json doesn't
     persist ``nodes``): ``/tmp/multi_node_state.json`` ``nodes`` >= 2 wins;
     else fall back to ``$INFERENCE_OPTIMIZER_NODES``.
+
+    Returns:
+        True when operating on a >=2-node RayJob cluster, else False.
     """
     state = _read_state()
     try:
@@ -104,6 +107,10 @@ def dynamo_ssh_env_from_state() -> dict[str, str]:
     Returns ``{}`` for the RayJob backend and single-node so the Ray placement
     path (``ray_gcs_address_from_state`` / ``RAY_ADDRESS``) is left untouched —
     this is the isolation seam that keeps the SSH path Dynamo-only.
+
+    Returns:
+        A ``{KERNEL_AGENT_GPU_PLACEMENT, MN_SSH_HOST/PORT/KEY}`` mapping for the
+        Dynamo backend when a GPU pod IP and ssh key are known, else ``{}``.
     """
     state = _read_state()
     if state.get("backend") != "dynamo":
@@ -132,6 +139,9 @@ def rayjob_id_from_state() -> str:
     Reads the ``$MULTI_NODE_STATE_FILE`` checkpoint. Used to scope per-RayJob
     shared artefacts when ``$HYPERLOOM_MN_PROFILE_TRACE_DIR`` was not exported
     in-process.
+
+    Returns:
+        The SaFE-allocated RayJob workload id, or ``""`` if absent.
     """
     return str(_read_state().get("rayjob_id") or "").strip()
 
@@ -153,6 +163,10 @@ def magpie_remote_env() -> dict[str, str]:
     "BENCHMARK_BASE_URL": "<service_url>"}`` so Magpie skips its local server
     launch and points ``benchmark_serving`` at the head pod. Multi-node without
     a state file: ``{}`` + WARN (the local-launch failure surfaces clearly).
+
+    Returns:
+        Env vars to inject into the Magpie subprocess, or ``{}`` for the
+        single-node path or when no service URL is available.
     """
     if not is_multi_node():
         return {}
@@ -195,6 +209,12 @@ def log_mn_banner(
     Multi-node prints ``[MN component=<name> nodes=N head=<ip>
     service_url=<url> key=value ...]``; ``**extra`` keys are appended for
     round-specific context (e.g. ``trace_dir=`` / ``variant=``).
+
+    Args:
+        component: Name of the component emitting the banner.
+        target_log: Logger the banner line is written to.
+        **extra: Round-specific key/value context appended to the banner;
+            keys with empty or None values are skipped.
     """
     if not is_multi_node():
         return
