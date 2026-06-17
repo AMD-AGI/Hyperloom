@@ -26,13 +26,11 @@ runs it with stubbed ``log``/``warn``/``git_fetch_pinned`` and a fake
 
 from __future__ import annotations
 
-import os
 import re
 import stat
 import subprocess
 from pathlib import Path
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 IO_INSTALL = REPO_ROOT / "inference_optimizer" / "scripts" / "install.sh"
@@ -56,9 +54,7 @@ def _fake_python(tmp_path: Path, *, probe_path: str | None) -> Path:
     * ``-c "import Magpie"`` (post-reinstall verify): exits 0.
     """
     marker = tmp_path / PIP_MARKER
-    probe_line = (
-        f'echo "{probe_path}"; exit 0' if probe_path is not None else "exit 1"
-    )
+    probe_line = f'echo "{probe_path}"; exit 0' if probe_path is not None else "exit 1"
     body = f"""#!/usr/bin/env bash
 for a in "$@"; do
   case "$a" in
@@ -82,7 +78,10 @@ exit 0
 
 
 def _run_ensure_magpie(
-    tmp_path: Path, *, checkout_present: bool, probe_path_tmpl: str | None,
+    tmp_path: Path,
+    *,
+    checkout_present: bool,
+    probe_path_tmpl: str | None,
 ) -> tuple[str, bool]:
     """Run the extracted ensure_magpie body; return (stdout, pip_called)."""
     magpie_dir = tmp_path / "runtime" / "Magpie"
@@ -132,7 +131,9 @@ ensure_magpie
 def test_skip_reinstall_when_already_installed_from_magpie_dir(tmp_path: Path) -> None:
     # checkout present + import resolves inside $MAGPIE_DIR -> skip pip.
     out, pip_called = _run_ensure_magpie(
-        tmp_path, checkout_present=True, probe_path_tmpl="{magpie_dir}",
+        tmp_path,
+        checkout_present=True,
+        probe_path_tmpl="{magpie_dir}",
     )
     assert not pip_called, f"reinstall should have been skipped:\n{out}"
     assert "skipping editable reinstall" in out
@@ -141,7 +142,9 @@ def test_skip_reinstall_when_already_installed_from_magpie_dir(tmp_path: Path) -
 def test_skip_when_import_resolves_to_subdir_of_magpie_dir(tmp_path: Path) -> None:
     # editable layouts resolve to $MAGPIE_DIR/Magpie -> still "inside" -> skip.
     out, pip_called = _run_ensure_magpie(
-        tmp_path, checkout_present=True, probe_path_tmpl="{magpie_dir}/Magpie",
+        tmp_path,
+        checkout_present=True,
+        probe_path_tmpl="{magpie_dir}/Magpie",
     )
     assert not pip_called, f"reinstall should have been skipped:\n{out}"
     assert "skipping editable reinstall" in out
@@ -150,7 +153,9 @@ def test_skip_when_import_resolves_to_subdir_of_magpie_dir(tmp_path: Path) -> No
 def test_reinstall_when_import_fails(tmp_path: Path) -> None:
     # checkout present but import probe fails (torn egg-link / fresh) -> reinstall.
     out, pip_called = _run_ensure_magpie(
-        tmp_path, checkout_present=True, probe_path_tmpl=None,
+        tmp_path,
+        checkout_present=True,
+        probe_path_tmpl=None,
     )
     assert pip_called, f"reinstall should have run on import failure:\n{out}"
     assert "Magpie installed OK" in out
@@ -169,7 +174,9 @@ def test_reinstall_when_import_resolves_elsewhere(tmp_path: Path) -> None:
 def test_reinstall_when_no_checkout(tmp_path: Path) -> None:
     # No checkout under $MAGPIE_DIR -> reinstall (clone+install) regardless of import.
     out, pip_called = _run_ensure_magpie(
-        tmp_path, checkout_present=False, probe_path_tmpl="{magpie_dir}",
+        tmp_path,
+        checkout_present=False,
+        probe_path_tmpl="{magpie_dir}",
     )
     assert pip_called, f"reinstall should have run with no checkout present:\n{out}"
 
@@ -180,9 +187,7 @@ def test_reinstall_when_no_checkout(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 def test_io_install_magpie_reinstall_is_idempotent_guarded() -> None:
     body = _extract_ensure_magpie()
-    assert "skipping editable reinstall" in body, (
-        "ensure_magpie must keep the idempotent skip branch"
-    )
+    assert "skipping editable reinstall" in body, "ensure_magpie must keep the idempotent skip branch"
     # The pip reinstall must live under an else-branch (guarded), not run
     # unconditionally before it.
     assert "Magpie.__file__" in body, "missing import-resolution path probe"

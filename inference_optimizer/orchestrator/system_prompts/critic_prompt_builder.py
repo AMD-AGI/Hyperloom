@@ -121,36 +121,41 @@ def _section_phase_review_contract() -> list[str]:
     for phase in PHASE_NAMES:
         proposable = sorted(
             llm_proposable_actions_for_with_interleave(
-                phase, interleave=interleave,
+                phase,
+                interleave=interleave,
             )
         )
         lines.append(f"- **{phase}**: {', '.join(proposable)}")
-    lines.extend([
-        "",
-        "Phase fit is a strategy concern, not a safety concern: the",
-        "Coordinator's PolicyGate R1 already blocks any out-of-phase",
-        "action before it reaches you. If a proposal somehow slips",
-        "through (legacy / resume / interleave), prefer `advise` with",
-        "`reasoning='phase_incompatible: action <name> not allowed in",
-        "<phase>'` so the LLM can self-correct without a hard reject.",
-        "Reserve `reject` for the safety carve-outs in the SKILL.md",
-        "Hard Rules (mismatched benchmark, accuracy gate failure,",
-        "missing rollback, robustness conflict, payload-shape /",
-        "provenance violations).",
-        "",
-        "``explore`` grids run their variants directly (each is",
-        "benchmarked and judged by the KEEP threshold), so they are not",
-        "routed to you for pre-review. Review the single-action",
-        "proposals you do receive with one verdict each.",
-    ])
-    if interleave:
-        lines.extend([
+    lines.extend(
+        [
             "",
-            "Phase interleave is ON: EXPLORE additionally accepts kernel-",
-            "owned REQUEST kinds and KERNEL additionally accepts explore /",
-            "specialist / integrate_patch. The kernel-owned data-dependency",
-            "and integrate_patch Critic gates still apply.",
-        ])
+            "Phase fit is a strategy concern, not a safety concern: the",
+            "Coordinator's PolicyGate R1 already blocks any out-of-phase",
+            "action before it reaches you. If a proposal somehow slips",
+            "through (legacy / resume / interleave), prefer `advise` with",
+            "`reasoning='phase_incompatible: action <name> not allowed in",
+            "<phase>'` so the LLM can self-correct without a hard reject.",
+            "Reserve `reject` for the safety carve-outs in the SKILL.md",
+            "Hard Rules (mismatched benchmark, accuracy gate failure,",
+            "missing rollback, robustness conflict, payload-shape /",
+            "provenance violations).",
+            "",
+            "``explore`` grids run their variants directly (each is",
+            "benchmarked and judged by the KEEP threshold), so they are not",
+            "routed to you for pre-review. Review the single-action",
+            "proposals you do receive with one verdict each.",
+        ]
+    )
+    if interleave:
+        lines.extend(
+            [
+                "",
+                "Phase interleave is ON: EXPLORE additionally accepts kernel-",
+                "owned REQUEST kinds and KERNEL additionally accepts explore /",
+                "specialist / integrate_patch. The kernel-owned data-dependency",
+                "and integrate_patch Critic gates still apply.",
+            ]
+        )
     return lines
 
 
@@ -204,9 +209,7 @@ def _section_known_actions(actions: list[ActionMetadata]) -> list[str]:
         lines.append("")
         for meta in items:
             lines.append(
-                f"- **{meta.name}** "
-                f"(acc_risk={meta.accuracy_risk:.2f}  family={meta.family}) "
-                f"— {meta.description}"
+                f"- **{meta.name}** (acc_risk={meta.accuracy_risk:.2f}  family={meta.family}) — {meta.description}"
             )
         lines.append("")
     return lines
@@ -223,12 +226,8 @@ def _section_default_verdict(actions: list[ActionMetadata]) -> list[str]:
         list[str]: Markdown lines describing the default verdict rules by
         accuracy risk and family.
     """
-    high_risk = sorted(
-        a.name for a in actions if a.accuracy_risk > 0.30
-    )
-    high_risk_line = (
-        ", ".join(high_risk) if high_risk else "(none in this run)"
-    )
+    high_risk = sorted(a.name for a in actions if a.accuracy_risk > 0.30)
+    high_risk_line = ", ".join(high_risk) if high_risk else "(none in this run)"
     return [
         "## 4. DEFAULT VERDICT",
         "",
@@ -247,7 +246,7 @@ def _section_default_verdict(actions: list[ActionMetadata]) -> list[str]:
         "  risk in `notes`; only escalate to `reject` when the safety",
         "  carve-outs in §6 actually fire.",
         f"  Higher-risk actions this run: {high_risk_line}.",
-        "- `family == \"deep_kernel\"` → `approve` (Orchestration sends these",
+        '- `family == "deep_kernel"` → `approve` (Orchestration sends these',
         "  via REQUEST; you OK the proposal flow).",
         "- Unknown `action_name` (not listed in §3) → `reject`.",
     ]
@@ -284,9 +283,7 @@ def _section_rules(rules_md: str) -> list[str]:
     Returns:
         list[str]: Markdown lines for the RULES section.
     """
-    body = rules_md.strip() or (
-        "(critic.md rules fragment not found — honor judge_bundle constraints.)"
-    )
+    body = rules_md.strip() or ("(critic.md rules fragment not found — honor judge_bundle constraints.)")
     return ["## 6. RULES", "", body]
 
 

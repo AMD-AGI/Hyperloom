@@ -80,10 +80,10 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Filenames + sub-paths within one recipe directory
 # ---------------------------------------------------------------------------
-RECIPE_FILENAME:        str = "recipe.json"
-HISTORY_DIRNAME:        str = "history"
-ATTEMPTS_FILENAME:      str = "attempts.ndjson"
-LOCK_FILENAME:          str = ".lock"
+RECIPE_FILENAME: str = "recipe.json"
+HISTORY_DIRNAME: str = "history"
+ATTEMPTS_FILENAME: str = "attempts.ndjson"
+LOCK_FILENAME: str = ".lock"
 HISTORY_VERSION_PREFIX: str = "v"
 HISTORY_VERSION_SUFFIX: str = ".json"
 
@@ -95,11 +95,11 @@ HISTORY_VERSION_SUFFIX: str = ".json"
 # ``order_by`` can't silently emit results in the wrong order.
 _ORDER_BY_KEYS: dict[str, tuple[str, bool]] = {
     "updated_at DESC": ("updated_at", True),
-    "updated_at ASC":  ("updated_at", False),
+    "updated_at ASC": ("updated_at", False),
     "created_at DESC": ("created_at", True),
-    "created_at ASC":  ("created_at", False),
-    "version DESC":    ("version",    True),
-    "version ASC":     ("version",    False),
+    "created_at ASC": ("created_at", False),
+    "version DESC": ("version", True),
+    "version ASC": ("version", False),
 }
 
 
@@ -240,7 +240,8 @@ def _list_jsonl(path: Path) -> list[dict[str, Any]]:
             except json.JSONDecodeError as exc:
                 log.warning(
                     "skipping malformed NDJSON row in %s: %s",
-                    path, exc,
+                    path,
+                    exc,
                 )
                 continue
             if isinstance(obj, dict):
@@ -397,10 +398,7 @@ class LocalRecipeStore:
         Returns:
             Path: Path to ``history/v{version}.json`` for the cid.
         """
-        return (
-            self._history_dir(canonical_id)
-            / f"{HISTORY_VERSION_PREFIX}{int(version)}{HISTORY_VERSION_SUFFIX}"
-        )
+        return self._history_dir(canonical_id) / f"{HISTORY_VERSION_PREFIX}{int(version)}{HISTORY_VERSION_SUFFIX}"
 
     def _attempts_path(self, canonical_id: str) -> Path:
         """Return the path to a cid's append-only attempts log.
@@ -606,9 +604,7 @@ class LocalRecipeStore:
             now = _utc_now_iso()
             live = _read_json(self._live_path(canonical_id))
             created = live is None
-            prior_version = (
-                int(live.get("version", 0)) if isinstance(live, dict) else 0
-            )
+            prior_version = int(live.get("version", 0)) if isinstance(live, dict) else 0
             new_version = prior_version + 1 if not created else 1
 
             if not created:
@@ -616,14 +612,15 @@ class LocalRecipeStore:
                 # carries the triggering write's provenance so an
                 # audit can trace who supplanted v{N-1}.
                 archive_path = self._history_version_path(
-                    canonical_id, prior_version,
+                    canonical_id,
+                    prior_version,
                 )
                 archive_payload: dict[str, Any] = {
                     "canonical_id": canonical_id,
-                    "version":      prior_version,
-                    "archived_at":  now,
-                    "replaced_by":  dict(provenance or {}),
-                    "snapshot":     dict(live) if isinstance(live, dict) else {},
+                    "version": prior_version,
+                    "archived_at": now,
+                    "replaced_by": dict(provenance or {}),
+                    "snapshot": dict(live) if isinstance(live, dict) else {},
                 }
                 _atomic_write_json(archive_path, archive_payload)
 
@@ -633,33 +630,30 @@ class LocalRecipeStore:
             # or ``{"description": ..., "measured_impact": ...}`` —
             # both end up in the same on-disk shape).
             payload_dict: dict[str, Any] = {
-                "canonical_id":      canonical_id,
-                "version":           new_version,
-                "created_at":        (
-                    str(live.get("created_at") or now)
-                    if isinstance(live, dict) else now
-                ),
-                "updated_at":        now,
-                "model":             model,
-                "hardware":          hardware,
-                "framework":         framework,
+                "canonical_id": canonical_id,
+                "version": new_version,
+                "created_at": (str(live.get("created_at") or now) if isinstance(live, dict) else now),
+                "updated_at": now,
+                "model": model,
+                "hardware": hardware,
+                "framework": framework,
                 "framework_version": framework_version,
-                "precision":         precision,
-                "best_config":       dict(best_config or {}),
-                "best_throughput":   float(best_throughput),
-                "what_worked":       _normalise_findings(what_worked),
-                "what_failed":       _normalise_failures(what_failed),
-                "remaining_gaps":    _normalise_gaps(remaining_gaps),
-                "prs_tested":        _normalise_prs(prs_tested),
-                "pitfalls":          _normalise_pitfalls(pitfalls),
-                "lessons":           _normalise_lessons(lessons),
-                "last_profiled":     last_profiled,
+                "precision": precision,
+                "best_config": dict(best_config or {}),
+                "best_throughput": float(best_throughput),
+                "what_worked": _normalise_findings(what_worked),
+                "what_failed": _normalise_failures(what_failed),
+                "remaining_gaps": _normalise_gaps(remaining_gaps),
+                "prs_tested": _normalise_prs(prs_tested),
+                "pitfalls": _normalise_pitfalls(pitfalls),
+                "lessons": _normalise_lessons(lessons),
+                "last_profiled": last_profiled,
                 "stack_fingerprint": dict(stack_fingerprint or {}),
-                "sessions":          _normalise_sessions(sessions),
-                "authority":         authority,
-                "confidence":        float(confidence),
-                "evidence_refs":     list(evidence_refs or []),
-                "provenance":        dict(provenance or {}),
+                "sessions": _normalise_sessions(sessions),
+                "authority": authority,
+                "confidence": float(confidence),
+                "evidence_refs": list(evidence_refs or []),
+                "provenance": dict(provenance or {}),
             }
             if extras:
                 # Splat extras at the top level so arbor consumers
@@ -670,13 +664,14 @@ class LocalRecipeStore:
 
             recipe = Recipe.from_dict(payload_dict)
             _atomic_write_json(
-                self._live_path(canonical_id), recipe.to_dict(),
+                self._live_path(canonical_id),
+                recipe.to_dict(),
             )
 
         return {
             "canonical_id": canonical_id,
-            "version":      new_version,
-            "created":      created,
+            "version": new_version,
+            "created": created,
         }
 
     # ------------------------------------------------------------------
@@ -766,10 +761,7 @@ class LocalRecipeStore:
         for entry in sorted(history_dir.iterdir()):
             if not entry.is_file():
                 continue
-            if not (
-                entry.name.startswith(HISTORY_VERSION_PREFIX)
-                and entry.name.endswith(HISTORY_VERSION_SUFFIX)
-            ):
+            if not (entry.name.startswith(HISTORY_VERSION_PREFIX) and entry.name.endswith(HISTORY_VERSION_SUFFIX)):
                 continue
             archive = _read_json(entry)
             if isinstance(archive, dict):
@@ -888,8 +880,7 @@ class LocalRecipeStore:
         del prefer  # client-side rerank lives in RecipeKB
         if order_by not in _ORDER_BY_KEYS:
             raise ValueError(
-                f"order_by must be one of {sorted(_ORDER_BY_KEYS)!r}, "
-                f"got {order_by!r}",
+                f"order_by must be one of {sorted(_ORDER_BY_KEYS)!r}, got {order_by!r}",
             )
         sort_key, descending = _ORDER_BY_KEYS[order_by]
         clamped_limit = max(1, min(1000, int(limit) if limit else 50))
@@ -898,11 +889,14 @@ class LocalRecipeStore:
         for recipe_dir in self._walk_recipe_dirs():
             try:
                 cid = canonical_id_for_path(
-                    root=self.root, recipe_dir=recipe_dir,
+                    root=self.root,
+                    recipe_dir=recipe_dir,
                 )
             except InvalidCanonicalIdError as exc:
                 log.warning(
-                    "skipping malformed recipe dir %s: %s", recipe_dir, exc,
+                    "skipping malformed recipe dir %s: %s",
+                    recipe_dir,
+                    exc,
                 )
                 continue
             payload = _read_json(recipe_dir / RECIPE_FILENAME)
@@ -1015,12 +1009,14 @@ class LocalRecipeStore:
                 except OSError as exc:
                     if exc.errno != errno.EINVAL:
                         log.debug(
-                            "fsync skipped on %s: %s", attempts_path, exc,
+                            "fsync skipped on %s: %s",
+                            attempts_path,
+                            exc,
                         )
         return {
-            "id":                  next_id,
+            "id": next_id,
             "recipe_canonical_id": canonical_id,
-            "attempt_at":          stamped_at,
+            "attempt_at": stamped_at,
         }
 
     def list_attempts(
@@ -1164,7 +1160,8 @@ def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> boo
 
 
 def _matches_metrics(
-    payload: dict[str, Any], metric_filters: dict[str, Any],
+    payload: dict[str, Any],
+    metric_filters: dict[str, Any],
 ) -> bool:
     """Numeric range filter against arbor-shape metric fields.
 
@@ -1194,10 +1191,7 @@ def _matches_metrics(
         # ``best_throughput`` for arbor-compat (the v2 wire spec
         # uses ``throughput`` as the canonical metric key, so
         # callers might still use that name).
-        lookup_key = (
-            "best_throughput" if key in ("throughput", "best_throughput")
-            else key
-        )
+        lookup_key = "best_throughput" if key in ("throughput", "best_throughput") else key
         if lookup_key not in payload:
             return False
         try:
@@ -1226,7 +1220,8 @@ def _matches_metrics(
 
 
 def _matches_updated_since(
-    payload: dict[str, Any], updated_since: str | None,
+    payload: dict[str, Any],
+    updated_since: str | None,
 ) -> bool:
     """Test whether a row was updated at or after a bound.
 
@@ -1297,6 +1292,7 @@ def _coerce_dict(item: Any) -> dict[str, Any] | None:
             cannot be coerced.
     """
     from dataclasses import is_dataclass, asdict
+
     if item is None:
         return None
     if isinstance(item, dict):
@@ -1321,14 +1317,16 @@ def _normalise_findings(items: list[Any] | None) -> list[dict[str, Any]]:
             dict per coercible finding.
     """
     out: list[dict[str, Any]] = []
-    for it in (items or []):
+    for it in items or []:
         d = _coerce_dict(it)
         if d is None:
             continue
-        out.append({
-            "description":     str(d.get("description") or ""),
-            "measured_impact": str(d.get("measured_impact") or ""),
-        })
+        out.append(
+            {
+                "description": str(d.get("description") or ""),
+                "measured_impact": str(d.get("measured_impact") or ""),
+            }
+        )
     return out
 
 
@@ -1344,14 +1342,16 @@ def _normalise_failures(items: list[Any] | None) -> list[dict[str, Any]]:
             coercible failure.
     """
     out: list[dict[str, Any]] = []
-    for it in (items or []):
+    for it in items or []:
         d = _coerce_dict(it)
         if d is None:
             continue
-        out.append({
-            "description": str(d.get("description") or ""),
-            "reason":      str(d.get("reason") or ""),
-        })
+        out.append(
+            {
+                "description": str(d.get("description") or ""),
+                "reason": str(d.get("reason") or ""),
+            }
+        )
     return out
 
 
@@ -1367,14 +1367,16 @@ def _normalise_gaps(items: list[Any] | None) -> list[dict[str, Any]]:
             coercible gap.
     """
     out: list[dict[str, Any]] = []
-    for it in (items or []):
+    for it in items or []:
         d = _coerce_dict(it)
         if d is None:
             continue
-        out.append({
-            "description": str(d.get("description") or ""),
-            "metrics":     str(d.get("metrics") or ""),
-        })
+        out.append(
+            {
+                "description": str(d.get("description") or ""),
+                "metrics": str(d.get("metrics") or ""),
+            }
+        )
     return out
 
 
@@ -1393,7 +1395,7 @@ def _normalise_prs(items: list[Any] | None) -> list[dict[str, Any]]:
             dict per coercible PR.
     """
     out: list[dict[str, Any]] = []
-    for it in (items or []):
+    for it in items or []:
         d = _coerce_dict(it)
         if d is None:
             continue
@@ -1401,12 +1403,14 @@ def _normalise_prs(items: list[Any] | None) -> list[dict[str, Any]]:
             number = int(d.get("number") or 0)
         except (TypeError, ValueError):
             number = 0
-        out.append({
-            "repo":    str(d.get("repo") or ""),
-            "number":  number,
-            "outcome": str(d.get("outcome") or ""),
-            "notes":   str(d.get("notes") or ""),
-        })
+        out.append(
+            {
+                "repo": str(d.get("repo") or ""),
+                "number": number,
+                "outcome": str(d.get("outcome") or ""),
+                "notes": str(d.get("notes") or ""),
+            }
+        )
     return out
 
 
@@ -1422,14 +1426,16 @@ def _normalise_pitfalls(items: list[Any] | None) -> list[dict[str, Any]]:
             coercible pitfall.
     """
     out: list[dict[str, Any]] = []
-    for it in (items or []):
+    for it in items or []:
         d = _coerce_dict(it)
         if d is None:
             continue
-        out.append({
-            "description": str(d.get("description") or ""),
-            "severity":    str(d.get("severity") or ""),
-        })
+        out.append(
+            {
+                "description": str(d.get("description") or ""),
+                "severity": str(d.get("severity") or ""),
+            }
+        )
     return out
 
 
@@ -1448,16 +1454,18 @@ def _normalise_lessons(items: list[Any] | None) -> list[dict[str, Any]]:
             dict per coercible lesson.
     """
     out: list[dict[str, Any]] = []
-    for it in (items or []):
+    for it in items or []:
         d = _coerce_dict(it)
         if d is None:
             continue
-        out.append({
-            "statement":       str(d.get("statement") or ""),
-            # Free-form (Coordinator writes a structured dict) — keep
-            # verbatim instead of str()-ing a dict into a lossy string.
-            "measured_impact": d.get("measured_impact") or "",
-        })
+        out.append(
+            {
+                "statement": str(d.get("statement") or ""),
+                # Free-form (Coordinator writes a structured dict) — keep
+                # verbatim instead of str()-ing a dict into a lossy string.
+                "measured_impact": d.get("measured_impact") or "",
+            }
+        )
     return out
 
 
@@ -1477,7 +1485,7 @@ def _normalise_sessions(items: list[Any] | None) -> list[dict[str, Any]]:
             coercible record.
     """
     out: list[dict[str, Any]] = []
-    for it in (items or []):
+    for it in items or []:
         d = _coerce_dict(it)
         if d is None:
             continue
@@ -1497,15 +1505,17 @@ def _normalise_sessions(items: list[Any] | None) -> list[dict[str, Any]]:
             stack_len = int(d.get("stack_len") or 0)
         except (TypeError, ValueError):
             stack_len = 0
-        out.append({
-            "date":              str(d.get("date") or ""),
-            "throughput_before": tput_before,
-            "throughput_after":  tput_after,
-            "actions_taken":     list(d.get("actions_taken") or []),
-            "session_id":        str(d.get("session_id") or ""),
-            "gain_pct":          gain_pct,
-            "stack_len":         stack_len,
-        })
+        out.append(
+            {
+                "date": str(d.get("date") or ""),
+                "throughput_before": tput_before,
+                "throughput_after": tput_after,
+                "actions_taken": list(d.get("actions_taken") or []),
+                "session_id": str(d.get("session_id") or ""),
+                "gain_pct": gain_pct,
+                "stack_len": stack_len,
+            }
+        )
     return out
 
 

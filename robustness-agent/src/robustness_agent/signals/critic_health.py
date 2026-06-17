@@ -27,7 +27,6 @@ from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
 
 
-
 @dataclass
 class CriticHealthConfig:
     """Tunables for :func:`evaluate_critic_health_signals`.
@@ -84,8 +83,10 @@ def evaluate_critic_health_signals(
 # E1 — KB outage streak
 # ---------------------------------------------------------------------------
 
+
 def _kb_outage_symptoms(
-    data: SourceData, cfg: CriticHealthConfig,
+    data: SourceData,
+    cfg: CriticHealthConfig,
 ) -> list[Symptom]:
     """E1: fire ``critic_kb_outage`` for a streak of KB-unreachable judges.
 
@@ -150,6 +151,7 @@ def _kb_outage_symptoms(
 # ---------------------------------------------------------------------------
 # E2 — critic_unavailable verdict streak
 # ---------------------------------------------------------------------------
+
 
 def _unavailable_streak_symptoms(
     ctx: ReactorContext,
@@ -228,8 +230,10 @@ def _unavailable_streak_symptoms(
 # E4 — workdir prune stuck
 # ---------------------------------------------------------------------------
 
+
 def _prune_stuck_symptoms(
-    data: SourceData, cfg: CriticHealthConfig,
+    data: SourceData,
+    cfg: CriticHealthConfig,
 ) -> list[Symptom]:
     """E4: fire ``critic_prune_stuck`` when the workdir count leaks past cap.
 
@@ -276,8 +280,10 @@ def _prune_stuck_symptoms(
 # E5 — runtime-cli timeout
 # ---------------------------------------------------------------------------
 
+
 def _runtime_stuck_symptoms(
-    data: SourceData, cfg: CriticHealthConfig,
+    data: SourceData,
+    cfg: CriticHealthConfig,
 ) -> list[Symptom]:
     """Collapse ``runtime.cli .* timed out`` log hits into one symptom.
 

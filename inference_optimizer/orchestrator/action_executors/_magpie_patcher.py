@@ -46,27 +46,26 @@ log = logging.getLogger(__name__)
 # EXPECTED no-op apart from a GENUINE failure instead of collapsing both into a
 # single ``False``. Only ``UNRECOGNIZED_SHAPE`` and ``IO_ERROR`` mean the
 # script-tearing race (bugs.md §C #1) may be unmitigated; the rest are benign.
-_ATOMIC_REASON_APPLIED = "applied"            # legacy block rewritten this run
+_ATOMIC_REASON_APPLIED = "applied"  # legacy block rewritten this run
 _ATOMIC_REASON_ALREADY_PATCHED = "already_patched"  # sentinel already present
 _ATOMIC_REASON_UPSTREAM_ATOMIC = "upstream_atomic"  # Magpie already atomic
-_ATOMIC_REASON_MISSING = "missing"            # MAGPIE_DIR unset / file absent
+_ATOMIC_REASON_MISSING = "missing"  # MAGPIE_DIR unset / file absent
 _ATOMIC_REASON_UNRECOGNIZED_SHAPE = "unrecognized_shape"  # genuine: unpatched
-_ATOMIC_REASON_IO_ERROR = "io_error"          # read/write failed mid-patch
+_ATOMIC_REASON_IO_ERROR = "io_error"  # read/write failed mid-patch
 
 # Reasons that mean the atomic-copy race is genuinely NOT mitigated — a strict
 # caller should fail-loud on these, a lenient one warns conspicuously.
-_ATOMIC_REASONS_GENUINE_FAILURE = frozenset({
-    _ATOMIC_REASON_UNRECOGNIZED_SHAPE,
-    _ATOMIC_REASON_IO_ERROR,
-})
+_ATOMIC_REASONS_GENUINE_FAILURE = frozenset(
+    {
+        _ATOMIC_REASON_UNRECOGNIZED_SHAPE,
+        _ATOMIC_REASON_IO_ERROR,
+    }
+)
 
 
 # Exact upstream two-line block we replace, whitespace-anchored so we don't
 # match an unrelated ``shutil.copy2`` elsewhere.
-_LEGACY_BLOCK = (
-    "            shutil.copy2(script, target_file)\n"
-    "            target_file.chmod(0o755)\n"
-)
+_LEGACY_BLOCK = "            shutil.copy2(script, target_file)\n            target_file.chmod(0o755)\n"
 
 # Replacement block; ``_hyperloom_*`` aliases keep the injected imports from
 # shadowing upstream names.
@@ -88,15 +87,15 @@ _PATCHED_BLOCK = (
     "            else:\n"
     "                try:\n"
     "                    _tmp_fd, _tmp_name = _hyperloom_tempfile.mkstemp(\n"
-    "                        prefix=f\".{script.name}.hyperloom_\", dir=str(target_dir),\n"
+    '                        prefix=f".{script.name}.hyperloom_", dir=str(target_dir),\n'
     "                    )\n"
     "                except OSError as _hyperloom_err:\n"
     "                    raise OSError(\n"
-    "                        f\"Hyperloom #C1: cannot stage benchmark script \"\n"
-    "                        f\"{script.name} into read-only {target_dir}: \"\n"
-    "                        f\"{_hyperloom_err}. Use a writable per-install \"\n"
-    "                        f\"InferenceX clone (unset INFERENCEX_PATH so \"\n"
-    "                        f\"install.sh clones a per-session copy).\"\n"
+    '                        f"Hyperloom #C1: cannot stage benchmark script "\n'
+    '                        f"{script.name} into read-only {target_dir}: "\n'
+    '                        f"{_hyperloom_err}. Use a writable per-install "\n'
+    '                        f"InferenceX clone (unset INFERENCEX_PATH so "\n'
+    '                        f"install.sh clones a per-session copy)."\n'
     "                    ) from _hyperloom_err\n"
     "                _hyperloom_os.close(_tmp_fd)\n"
     "                _hyperloom_shutil.copy2(script, _tmp_name)\n"
@@ -110,13 +109,10 @@ _REMOTE_TRUST_SENTINEL = "MAGPIE_TRUST_REMOTE_CODE"
 
 # Magpie's remote-server SGLang client path bypasses the local run_benchmark
 # helper, so it used to miss --trust-remote-code for custom tokenizer models.
-_REMOTE_DIRECT_LEGACY_BLOCK = (
-    "    SERVER_MONITOR_ARGS=()\n"
-    "    magpie_run_benchmark_serving_remote_direct || exit $?\n"
-)
+_REMOTE_DIRECT_LEGACY_BLOCK = "    SERVER_MONITOR_ARGS=()\n    magpie_run_benchmark_serving_remote_direct || exit $?\n"
 _REMOTE_DIRECT_PATCHED_BLOCK = (
     "    SERVER_MONITOR_ARGS=()\n"
-    "    if [[ \"${MAGPIE_TRUST_REMOTE_CODE:-0}\" == \"1\" ]]; then\n"
+    '    if [[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" ]]; then\n'
     "      magpie_run_benchmark_serving_remote_direct trust || exit $?\n"
     "    else\n"
     "      magpie_run_benchmark_serving_remote_direct || exit $?\n"
@@ -158,9 +154,7 @@ def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:
     if magpie_dir:
         root = Path(magpie_dir)
     else:
-        env = (
-            os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR") or ""
-        ).strip()
+        env = (os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR") or "").strip()
         if env:
             root = Path(env)
     if root is None:
@@ -212,9 +206,9 @@ def _file_lock(lock_path: str) -> Iterator[None]:
         fp = open(lock_path, "w")  # noqa: SIM115 — kept open across yield
     except OSError as e:
         log.warning(
-            "_magpie_patcher: cannot open lock file %s (%s); "
-            "proceeding without exclusion",
-            lock_path, e,
+            "_magpie_patcher: cannot open lock file %s (%s); proceeding without exclusion",
+            lock_path,
+            e,
         )
         yield
         return
@@ -354,7 +348,8 @@ def _apply_patch_atomic_reason(src: Path) -> str:
     except OSError as e:
         log.warning(
             "_magpie_patcher: cannot create temp file in %s: %s",
-            tmp_dir, e,
+            tmp_dir,
+            e,
         )
         return _ATOMIC_REASON_IO_ERROR
 
@@ -369,8 +364,9 @@ def _apply_patch_atomic_reason(src: Path) -> str:
             os.unlink(tmp_name)
         except OSError as cleanup_err:
             log.debug(
-                "_magpie_patcher: best-effort cleanup failed for temp "
-                "file %s: %s", tmp_name, cleanup_err,
+                "_magpie_patcher: best-effort cleanup failed for temp file %s: %s",
+                tmp_name,
+                cleanup_err,
             )
         return _ATOMIC_REASON_IO_ERROR
 
@@ -452,7 +448,8 @@ def _apply_remote_trust_patch_atomic(src: Path) -> bool:
     except OSError as e:
         log.warning(
             "_magpie_patcher: cannot create temp file in %s: %s",
-            tmp_dir, e,
+            tmp_dir,
+            e,
         )
         return False
 
@@ -467,8 +464,9 @@ def _apply_remote_trust_patch_atomic(src: Path) -> bool:
             os.unlink(tmp_name)
         except OSError as cleanup_err:
             log.debug(
-                "_magpie_patcher: best-effort cleanup failed for temp "
-                "file %s: %s", tmp_name, cleanup_err,
+                "_magpie_patcher: best-effort cleanup failed for temp file %s: %s",
+                tmp_name,
+                cleanup_err,
             )
         return False
 
@@ -531,8 +529,7 @@ def magpie_scripts_patch_status(
     src = _resolve_benchmarker_path(magpie_dir)
     if src is None:
         log.info(
-            "_magpie_patcher: MAGPIE_DIR unset or benchmarker.py missing — "
-            "skipping patch (fine for tests / dry-runs)",
+            "_magpie_patcher: MAGPIE_DIR unset or benchmarker.py missing — skipping patch (fine for tests / dry-runs)",
         )
         # remote_trust_ok=True here means "not applicable / not checked"
         # (no Magpie tree to inspect), NOT "trust patch verified". It is set
@@ -557,10 +554,7 @@ def magpie_scripts_patch_status(
             )
             remote_trust_ok = True
         else:
-            remote_trust_ok = (
-                _is_remote_trust_patched(sglang_script)
-                or _apply_remote_trust_patch_atomic(sglang_script)
-            )
+            remote_trust_ok = _is_remote_trust_patched(sglang_script) or _apply_remote_trust_patch_atomic(sglang_script)
         if not remote_trust_ok:
             log.warning(
                 "_magpie_patcher: SGLang remote trust patch did not apply; "

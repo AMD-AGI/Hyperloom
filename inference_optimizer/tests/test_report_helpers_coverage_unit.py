@@ -19,11 +19,13 @@ def test_completeness_annotations_empty():
 
 
 def test_completeness_annotations_full():
-    out = rp._format_completeness_annotations({
-        "has_unvalidated_keeps": True,
-        "untried_hot_reusable_kernels": ["k1"],
-        "pending_keep_kernels": ["k2"],
-    })
+    out = rp._format_completeness_annotations(
+        {
+            "has_unvalidated_keeps": True,
+            "untried_hot_reusable_kernels": ["k1"],
+            "pending_keep_kernels": ["k2"],
+        }
+    )
     body = "\n".join(out)
     assert "unvalidated" in body
     assert "k1" in body
@@ -36,15 +38,18 @@ def test_steward_section_empty():
 
 
 def test_steward_section_with_assessment():
-    out = rp._format_steward_section({
-        "remaining_gaps_assessment": {
-            "recommendation": "stop", "ts": "t0",
-            "remaining_potential_pct_estimate": 3.5,
-            "rationale": "diminishing\nreturns",
-            "next_gap_canonical_id": "gap.x",
-        },
-        "remaining_gaps_assessments_history": [1, 2, 3],
-    })
+    out = rp._format_steward_section(
+        {
+            "remaining_gaps_assessment": {
+                "recommendation": "stop",
+                "ts": "t0",
+                "remaining_potential_pct_estimate": 3.5,
+                "rationale": "diminishing\nreturns",
+                "next_gap_canonical_id": "gap.x",
+            },
+            "remaining_gaps_assessments_history": [1, 2, 3],
+        }
+    )
     body = "\n".join(out)
     assert "stop" in body
     assert "3.50%" in body
@@ -54,13 +59,15 @@ def test_steward_section_with_assessment():
 
 # ---- _format_degraded_mode_section ----
 def test_degraded_mode_section():
-    out = rp._format_degraded_mode_section({
-        "degraded_mode": True,
-        "model_warnings": [
-            {"model_name": "m", "architecture": "a", "signal": "img ignored"},
-            "skip-non-dict",
-        ],
-    })
+    out = rp._format_degraded_mode_section(
+        {
+            "degraded_mode": True,
+            "model_warnings": [
+                {"model_name": "m", "architecture": "a", "signal": "img ignored"},
+                "skip-non-dict",
+            ],
+        }
+    )
     body = "\n".join(out)
     assert "Degraded mode" in body
     assert "`m`" in body
@@ -89,10 +96,7 @@ def test_extract_exec_summary_no_block(tmp_path):
 def test_extract_exec_summary_present_and_image_stripped(tmp_path):
     md = tmp_path / "a.md"
     md.write_text(
-        "## Executive Summary\n"
-        "![chart](data:image/png;base64,AAAA)\n"
-        "compute 70%\n"
-        "## Next Section\nignored\n",
+        "## Executive Summary\n![chart](data:image/png;base64,AAAA)\ncompute 70%\n## Next Section\nignored\n",
         encoding="utf-8",
     )
     out = rp._extract_executive_summary(str(md))
@@ -137,8 +141,7 @@ def test_read_conc_sweep_pointer_present(tmp_path):
     rd = reports_dir(tmp_path)
     rd.mkdir(parents=True, exist_ok=True)
     (rd / "conc_sweep_summary.json").write_text(
-        json.dumps({"status": "done", "summary": {"x": 1},
-                    "budget_exhausted": True, "total_budget_sec": 10}),
+        json.dumps({"status": "done", "summary": {"x": 1}, "budget_exhausted": True, "total_budget_sec": 10}),
         encoding="utf-8",
     )
     ptr = rp._read_conc_sweep_pointer(tmp_path)
@@ -156,8 +159,7 @@ def test_read_conc_sweep_pointer_corrupt(tmp_path):
 # ---- _read_ko_summary_totals ----
 def test_read_ko_summary_totals(tmp_path):
     p = tmp_path / "ko.json"
-    p.write_text(json.dumps({"totals": {"a": 3, "b": 2.0, "c": "x"}}),
-                 encoding="utf-8")
+    p.write_text(json.dumps({"totals": {"a": 3, "b": 2.0, "c": "x"}}), encoding="utf-8")
     totals = rp._read_ko_summary_totals(p)
     assert totals == {"a": 3, "b": 2}
 
@@ -170,8 +172,12 @@ def test_read_ko_summary_totals_missing(tmp_path):
 def test_highlight_topics():
     assert "action_name" in rp._highlight({"action_name": "x"}, "proposal", "a")["summary"]
     assert "verdict" in rp._highlight({"verdict": "keep", "reasoning": "ok"}, "review_verdict", "a")["summary"]
-    assert "kind" in rp._highlight({"kind": "k", "action_name": "n", "task_id": "12345678abc"}, "decision", "a")["summary"]
-    dr = rp._highlight({"kind": "k", "state": "s", "result": {"output_throughput": 1, "decision": "keep"}}, "delegated_result", "a")
+    assert (
+        "kind" in rp._highlight({"kind": "k", "action_name": "n", "task_id": "12345678abc"}, "decision", "a")["summary"]
+    )
+    dr = rp._highlight(
+        {"kind": "k", "state": "s", "result": {"output_throughput": 1, "decision": "keep"}}, "delegated_result", "a"
+    )
     assert "tput=1" in dr["summary"]
     assert "status" in rp._highlight({"kind": "k", "status": "ok"}, "response", "a")["summary"]
     assert "sev" in rp._highlight({"severity": "high", "summary": "boom"}, "alert", "a")["summary"]

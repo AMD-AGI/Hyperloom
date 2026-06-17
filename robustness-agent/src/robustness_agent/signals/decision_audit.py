@@ -23,26 +23,29 @@ from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
 
 
-
 # Canonical ci_metrics field set the report_back pipeline must produce.
-_CI_METRICS_REQUIRED_FIELDS: frozenset[str] = frozenset({
-    "model",
-    "framework",
-    "gpu",
-    "tp",
-    "baseline_tok_per_gpu",
-    "optimized_tok_per_gpu",
-    "gain_pct",
-})
+_CI_METRICS_REQUIRED_FIELDS: frozenset[str] = frozenset(
+    {
+        "model",
+        "framework",
+        "gpu",
+        "tp",
+        "baseline_tok_per_gpu",
+        "optimized_tok_per_gpu",
+        "gain_pct",
+    }
+)
 
 # Legacy field names ci_metrics drift detection rejects (they exist in
 # old artefacts but the schema migration replaced them).
-_CI_METRICS_LEGACY_FIELDS: frozenset[str] = frozenset({
-    "baseline_throughput",
-    "baseline_tput",
-    "baseline_tput_per_gpu",
-    "optimized_throughput",
-})
+_CI_METRICS_LEGACY_FIELDS: frozenset[str] = frozenset(
+    {
+        "baseline_throughput",
+        "baseline_tput",
+        "baseline_tput_per_gpu",
+        "optimized_throughput",
+    }
+)
 
 
 @dataclass
@@ -108,6 +111,7 @@ def evaluate_decision_audit_signals(
 # ---------------------------------------------------------------------------
 # G1 / G2 / G3 — integrate result.json audit
 # ---------------------------------------------------------------------------
+
 
 def _integrate_symptoms(
     entries: list[dict[str, Any]],
@@ -183,7 +187,8 @@ def _g1_empty_patch_kept(entry: dict[str, Any]) -> list[Symptom]:
 
 
 def _g2_decision_threshold_violated(
-    entry: dict[str, Any], cfg: DecisionAuditConfig,
+    entry: dict[str, Any],
+    cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
     """G2: flag a KEEP whose gain is below the noise-floor threshold.
 
@@ -222,15 +227,15 @@ def _g2_decision_threshold_violated(
             subject={"kernel_id": str(kernel_id)},
             source="local",
             suggestion=(
-                "raise the executor's keep threshold to >= 1% and "
-                "require multi-seed confidence for sub-threshold KEEPs"
+                "raise the executor's keep threshold to >= 1% and require multi-seed confidence for sub-threshold KEEPs"
             ),
         )
     ]
 
 
 def _g3_kernel_dispatch_bypassed(
-    entry: dict[str, Any], cfg: DecisionAuditConfig,
+    entry: dict[str, Any],
+    cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
     """G3: flag a KEEP'd patch that likely never executed.
 
@@ -272,15 +277,12 @@ def _g3_kernel_dispatch_bypassed(
             name="kernel_dispatch_bypassed",
             severity=SymptomSeverity.HIGH,
             summary=(
-                f"integrate KEEP on kernel_id={kernel_id!r} but the "
-                f"patched kernel likely never executed: {reason}"
+                f"integrate KEEP on kernel_id={kernel_id!r} but the patched kernel likely never executed: {reason}"
             ),
             evidence={
                 "kernel_id": kernel_id,
                 "gain_pct": gain_pct,
-                "dispatch_bypass_pre_post_epsilon_pct": (
-                    cfg.dispatch_bypass_pre_post_epsilon_pct
-                ),
+                "dispatch_bypass_pre_post_epsilon_pct": (cfg.dispatch_bypass_pre_post_epsilon_pct),
                 "result_path": entry.get("result_path"),
                 **evidence_extra,
             },
@@ -299,8 +301,10 @@ def _g3_kernel_dispatch_bypassed(
 # G4 / G5 / G6 — ci_metrics audit (if-present only)
 # ---------------------------------------------------------------------------
 
+
 def _ci_metrics_symptoms(
-    ci_metrics: dict[str, Any], ci_metrics_path: str,
+    ci_metrics: dict[str, Any],
+    ci_metrics_path: str,
 ) -> list[Symptom]:
     """Apply the G4/G5/G6 ci_metrics audit rules when the file is present.
 
@@ -322,7 +326,8 @@ def _ci_metrics_symptoms(
 
 
 def _g4_negative_delta_kernel_kept(
-    ci_metrics: dict[str, Any], ci_metrics_path: str,
+    ci_metrics: dict[str, Any],
+    ci_metrics_path: str,
 ) -> list[Symptom]:
     """G4: flag net-negative kernel changes counted as wins.
 
@@ -369,7 +374,8 @@ def _g4_negative_delta_kernel_kept(
 
 
 def _g5_baseline_zero_without_status(
-    ci_metrics: dict[str, Any], ci_metrics_path: str,
+    ci_metrics: dict[str, Any],
+    ci_metrics_path: str,
 ) -> list[Symptom]:
     """G5: flag a zero baseline throughput lacking a failure marker.
 
@@ -395,10 +401,7 @@ def _g5_baseline_zero_without_status(
             "baseline_tok_per_gpu",
         )
     ]
-    baseline_values = [
-        v for v in baseline_candidates
-        if isinstance(v, (int, float)) and not isinstance(v, bool)
-    ]
+    baseline_values = [v for v in baseline_candidates if isinstance(v, (int, float)) and not isinstance(v, bool)]
     if not baseline_values:
         return []
     if any(v > 0 for v in baseline_values):
@@ -430,7 +433,8 @@ def _g5_baseline_zero_without_status(
 
 
 def _g6_schema_drift(
-    ci_metrics: dict[str, Any], ci_metrics_path: str,
+    ci_metrics: dict[str, Any],
+    ci_metrics_path: str,
 ) -> list[Symptom]:
     """G6: flag ci_metrics schema drift.
 
@@ -477,6 +481,7 @@ def _g6_schema_drift(
 # ---------------------------------------------------------------------------
 # G7 — OOB optimization_attempts.jsonl audit
 # ---------------------------------------------------------------------------
+
 
 def _oob_symptoms(
     entries: list[dict[str, Any]],

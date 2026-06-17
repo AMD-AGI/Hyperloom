@@ -153,21 +153,23 @@ def record_phase_event(
     try:
         task_id = str(entry.get("task_id") or "")
         payload = {
-            "ts":              str(entry.get("ts") or ""),
-            "action":          str(action or ""),
-            "task_id":         task_id,
-            "status":          str(entry.get("status") or ""),
-            "decision":        str(entry.get("decision") or ""),
-            "key_metric":      _to_float(entry.get("key_metric")),
+            "ts": str(entry.get("ts") or ""),
+            "action": str(action or ""),
+            "task_id": task_id,
+            "status": str(entry.get("status") or ""),
+            "decision": str(entry.get("decision") or ""),
+            "key_metric": _to_float(entry.get("key_metric")),
             "key_metric_kind": entry.get("key_metric_kind"),
-            "workspace":       entry.get("workspace"),
-            "error_class":     entry.get("error_class"),
-            "extras":          dict(entry.get("extras") or {}),
+            "workspace": entry.get("workspace"),
+            "error_class": entry.get("error_class"),
+            "extras": dict(entry.get("extras") or {}),
         }
         # Stable key per (action, task) so a re-recorded attempt overwrites.
         key = f"{action}-{task_id}" if task_id else None
         _recorder(session_dir, producer).record_item(
-            "phase_timeline", payload, key=key,
+            "phase_timeline",
+            payload,
+            key=key,
         )
     except Exception:  # noqa: BLE001
         log.debug("record_phase_event failed", exc_info=True)
@@ -202,13 +204,13 @@ def snapshot_state_sections(
         return
 
     for name, fn in (
-        ("session",            _snapshot_session),
-        ("workload",           _snapshot_workload),
-        ("final",              _snapshot_final),
-        ("explore_search",     _snapshot_explore_search),
-        ("sweep",              _snapshot_sweep),
+        ("session", _snapshot_session),
+        ("workload", _snapshot_workload),
+        ("final", _snapshot_final),
+        ("explore_search", _snapshot_explore_search),
+        ("sweep", _snapshot_sweep),
         ("optimization_stack", _snapshot_optimization_stack),
-        ("roofline",           _snapshot_roofline),
+        ("roofline", _snapshot_roofline),
     ):
         try:
             fn(rec, state)
@@ -226,16 +228,19 @@ def _snapshot_session(rec, st: Any) -> None:
     session_id = str(getattr(st, "session_id", "") or "")
     if not session_id:
         return
-    rec.record_singleton("session", {
-        "session_id":      session_id,
-        "claw_session_id": getattr(st, "claw_session_id", "") or "",
-        "sandbox_user_id": getattr(st, "sandbox_user_id", "") or "",
-        "start_ts":        str(getattr(st, "start_ts", "") or ""),
-        "stop_reason":     str(getattr(st, "stop_reason", "") or ""),
-        "max_minutes":     int(getattr(st, "max_minutes", 0) or 0),
-        "tick_count":      int(getattr(st, "tick", 0) or 0),
-        "phase":           str(getattr(st, "phase", "") or ""),
-    })
+    rec.record_singleton(
+        "session",
+        {
+            "session_id": session_id,
+            "claw_session_id": getattr(st, "claw_session_id", "") or "",
+            "sandbox_user_id": getattr(st, "sandbox_user_id", "") or "",
+            "start_ts": str(getattr(st, "start_ts", "") or ""),
+            "stop_reason": str(getattr(st, "stop_reason", "") or ""),
+            "max_minutes": int(getattr(st, "max_minutes", 0) or 0),
+            "tick_count": int(getattr(st, "tick", 0) or 0),
+            "phase": str(getattr(st, "phase", "") or ""),
+        },
+    )
 
 
 def _snapshot_workload(rec, st: Any) -> None:
@@ -251,20 +256,23 @@ def _snapshot_workload(rec, st: Any) -> None:
     model = str(getattr(st, "model_name", "") or getattr(st, "model_path", "") or "")
     if not framework and not model:
         return
-    rec.record_singleton("workload", {
-        "framework":     framework,
-        "model_name":    str(getattr(st, "model_name", "") or ""),
-        "model_path":    str(getattr(st, "model_path", "") or ""),
-        "model_class":   str(getattr(st, "model_class", "") or ""),
-        "gpu_type":      str(getattr(st, "gpu_type", "") or ""),
-        "tp":            int(getattr(st, "tp", 0) or 0),
-        "ep":            int(getattr(st, "ep", 0) or 0),
-        "precision":     str(getattr(st, "precision", "") or ""),
-        "conc":          int(getattr(st, "conc", 0) or 0),
-        "isl":           int(getattr(st, "isl", 0) or 0),
-        "osl":           int(getattr(st, "osl", 0) or 0),
-        "max_model_len": int(getattr(st, "max_model_len", 0) or 0),
-    })
+    rec.record_singleton(
+        "workload",
+        {
+            "framework": framework,
+            "model_name": str(getattr(st, "model_name", "") or ""),
+            "model_path": str(getattr(st, "model_path", "") or ""),
+            "model_class": str(getattr(st, "model_class", "") or ""),
+            "gpu_type": str(getattr(st, "gpu_type", "") or ""),
+            "tp": int(getattr(st, "tp", 0) or 0),
+            "ep": int(getattr(st, "ep", 0) or 0),
+            "precision": str(getattr(st, "precision", "") or ""),
+            "conc": int(getattr(st, "conc", 0) or 0),
+            "isl": int(getattr(st, "isl", 0) or 0),
+            "osl": int(getattr(st, "osl", 0) or 0),
+            "max_model_len": int(getattr(st, "max_model_len", 0) or 0),
+        },
+    )
 
 
 def _snapshot_final(rec, st: Any) -> None:
@@ -280,19 +288,19 @@ def _snapshot_final(rec, st: Any) -> None:
     stack = getattr(st, "optimization_stack", None) or []
     if not cb and not stack:
         return
-    rec.record_singleton("final", {
-        "current_best_action":                str(cb.get("action") or ""),
-        "throughput_tok_s_per_gpu":           _to_float(cb.get("tput")),
-        "cumulative_gain_pct_validated":      _to_float(
-            getattr(st, "cumulative_gain_validated", 0.0)) or 0.0,
-        "cumulative_gain_pct_per_round_sum":  _to_float(
-            getattr(st, "cumulative_gain", 0.0)) or 0.0,
-        "validated_ts":                       str(
-            getattr(st, "cumulative_gain_validated_ts", "") or ""),
-        "stack_len":                          len(stack),
-        "extra_server_args":                  str(cb.get("extra_server_args") or ""),
-        "extra_envs":                         dict(cb.get("extra_envs") or {}),
-    })
+    rec.record_singleton(
+        "final",
+        {
+            "current_best_action": str(cb.get("action") or ""),
+            "throughput_tok_s_per_gpu": _to_float(cb.get("tput")),
+            "cumulative_gain_pct_validated": _to_float(getattr(st, "cumulative_gain_validated", 0.0)) or 0.0,
+            "cumulative_gain_pct_per_round_sum": _to_float(getattr(st, "cumulative_gain", 0.0)) or 0.0,
+            "validated_ts": str(getattr(st, "cumulative_gain_validated_ts", "") or ""),
+            "stack_len": len(stack),
+            "extra_server_args": str(cb.get("extra_server_args") or ""),
+            "extra_envs": dict(cb.get("extra_envs") or {}),
+        },
+    )
 
 
 def _snapshot_explore_search(rec, st: Any) -> None:
@@ -309,12 +317,10 @@ def _snapshot_explore_search(rec, st: Any) -> None:
     if not search:
         return
     search["winner_history"] = list(getattr(st, "params_winner_history", None) or [])
-    search["no_promote_streak"] = int(
-        getattr(st, "params_no_promote_streak", 0) or 0)
+    search["no_promote_streak"] = int(getattr(st, "params_no_promote_streak", 0) or 0)
     search["discovered_flags"] = dict(getattr(st, "discovered_flags", None) or {})
     search["synergy_attempted"] = list(getattr(st, "synergy_attempted", None) or [])
-    search["backend_winners_history"] = list(
-        getattr(st, "backend_winners_history", None) or [])
+    search["backend_winners_history"] = list(getattr(st, "backend_winners_history", None) or [])
     rec.record_singleton("explore_search", search)
 
 
@@ -397,9 +403,7 @@ def _best_attempt_id(
     want_backend = str(verification.get("best_backend") or "").lower()
     candidates = rows
     if want_backend:
-        backend_rows = [
-            a for a in rows if str(a.get("backend") or "").lower() == want_backend
-        ]
+        backend_rows = [a for a in rows if str(a.get("backend") or "").lower() == want_backend]
         if backend_rows:
             candidates = backend_rows
 
@@ -497,17 +501,16 @@ def record_kernel_invocations(
                 decision = kernel_decision
             optimized = att.get("optimized_path") or att.get("optimized_file")
             payload = {
-                "kernel_id":       kid,
-                "attempt_id":      attempt_id,
-                "run_id":          run_id,
-                "ts":              str(att.get("ts") or att.get("started_at") or ""),
-                "backend":         backend,
-                "decision":        decision,
-                "status":          status,
-                "micro_speedup":   _to_float(
-                    att.get("micro_speedup") or att.get("speedup")),
+                "kernel_id": kid,
+                "attempt_id": attempt_id,
+                "run_id": run_id,
+                "ts": str(att.get("ts") or att.get("started_at") or ""),
+                "backend": backend,
+                "decision": decision,
+                "status": status,
+                "micro_speedup": _to_float(att.get("micro_speedup") or att.get("speedup")),
                 "optimized_files": [str(optimized)] if optimized else [],
-                "error":           att.get("error") or att.get("error_message"),
+                "error": att.get("error") or att.get("error_message"),
             }
             key = attempt_id or f"{kid}-{backend}"
             rec.record_item(section, payload, key=key)
@@ -520,24 +523,21 @@ def record_kernel_invocations(
         # the geak/oob view still shows it (root cause of invisible failures).
         status = str(result.get("status") or "").lower()
         err_class = str(result.get("error_class") or "")
-        decision = str(
-            (result.get("proposal") or {}).get("decision") or "").upper()
-        failed = status in _FAILED_STATUSES or (
-            decision == "REVERT" and bool(err_class)
-        )
+        decision = str((result.get("proposal") or {}).get("decision") or "").upper()
+        failed = status in _FAILED_STATUSES or (decision == "REVERT" and bool(err_class))
         if not failed:
             return
         backend = str(result.get("backend") or "").lower()
         section = _invocation_section(backend) or "geak_invocations"
         payload = {
-            "kernel_id":            kid,
-            "attempt_id":           "",
-            "run_id":               run_id,
-            "backend":              backend or "geak",
-            "decision":             "FAILED",
-            "status":               status or "failed",
-            "error":                result.get("error") or err_class or None,
-            "error_class":          err_class or None,
+            "kernel_id": kid,
+            "attempt_id": "",
+            "run_id": run_id,
+            "backend": backend or "geak",
+            "decision": "FAILED",
+            "status": status or "failed",
+            "error": result.get("error") or err_class or None,
+            "error_class": err_class or None,
             # Distinguishes a pre-dispatch gating failure (no backend ran) from
             # a backend that ran and failed.
             "pre_dispatch_failure": True,
@@ -586,18 +586,18 @@ _TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
 # package); TraceLens reads best as ``git describe``; OOB sub-agents report via
 # their npm CLIs (codex/claude), and the OOB harness itself via ``oob-mcp-server``.
 _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
-    "tracelens":    {"root_env": "TRACELENS_ROOT",            "version": "git_describe"},
-    "geak":         {"root_env": "GEAK_ROOT",                 "version": "git_short"},
-    "mini":         {"root_env": "GEAK_ROOT",                 "version": "git_short"},
-    "geak-gaagent": {"root_env": "GEAK_ROOT",                 "version": "git_short"},
+    "tracelens": {"root_env": "TRACELENS_ROOT", "version": "git_describe"},
+    "geak": {"root_env": "GEAK_ROOT", "version": "git_short"},
+    "mini": {"root_env": "GEAK_ROOT", "version": "git_short"},
+    "geak-gaagent": {"root_env": "GEAK_ROOT", "version": "git_short"},
     # forge (Kernel-Forge autonomous loop) is its own backend; it locates its
     # repo via $FORGE_PATH (forge_submit also accepts $KERNEL_FORGE_ROOT /
     # $KERNEL_FORGE_PATH, but root resolution here pins the primary env var).
-    "forge":        {"root_env": "FORGE_PATH",               "version": "git_short"},
-    "claude":       {"root_env": "",                          "version": ("cmd", ("claude", "--version"))},
-    "codex":        {"root_env": "",                          "version": ("cmd", ("codex", "--version"))},
-    "oob":          {"root_env": "",                          "version": ("dist", ("oob-mcp-server",))},
-    "inferencex":   {"root_env": "INFERENCEX_PATH",           "version": "git_short"},
+    "forge": {"root_env": "FORGE_PATH", "version": "git_short"},
+    "claude": {"root_env": "", "version": ("cmd", ("claude", "--version"))},
+    "codex": {"root_env": "", "version": ("cmd", ("codex", "--version"))},
+    "oob": {"root_env": "", "version": ("dist", ("oob-mcp-server",))},
+    "inferencex": {"root_env": "INFERENCEX_PATH", "version": "git_short"},
     "kernel_agent": {"root_env": "HYPERLOOM_KERNEL_AGENT_ROOT", "version": "git_short"},
 }
 
@@ -616,7 +616,11 @@ def _run_first_line(argv: list[str]) -> str:
 
     try:
         out = subprocess.run(
-            argv, capture_output=True, text=True, timeout=3, check=False,
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
         )
     except Exception:  # noqa: BLE001
         return ""
@@ -739,9 +743,7 @@ def _tool_metadata(
     key = str(tool or "").lower()
     hint = _TOOL_PROVENANCE.get(key, {})
     root_dir = str(
-        root
-        or os.environ.get(root_env or "", "")
-        or os.environ.get(str(hint.get("root_env") or ""), "")
+        root or os.environ.get(root_env or "", "") or os.environ.get(str(hint.get("root_env") or ""), "")
     ).strip()
     cache_key = f"{key}:{root_dir}"
     cached = _TOOL_META_CACHE.get(cache_key)
@@ -755,14 +757,16 @@ def _tool_metadata(
                 commit = ""
         probed = _probe_tool_version(hint.get("version"), root_dir) if hint else ""
         cached = {
-            "tool": tool, "root_dir": root_dir,
-            "commit": commit, "_probed_version": probed,
+            "tool": tool,
+            "root_dir": root_dir,
+            "commit": commit,
+            "_probed_version": probed,
         }
         _TOOL_META_CACHE[cache_key] = cached
     meta = {
-        "tool":     cached["tool"],
+        "tool": cached["tool"],
         "root_dir": cached["root_dir"],
-        "commit":   cached["commit"],
+        "commit": cached["commit"],
     }
     meta["version"] = str(version or "") or str(cached.get("_probed_version") or "")
     return meta
@@ -779,17 +783,17 @@ def _normalize_hot_kernel(k: dict[str, Any]) -> dict[str, Any]:
             shape.
     """
     return {
-        "kernel_id":               str(k.get("kernel_id") or k.get("id") or ""),
-        "name":                    str(k.get("name") or k.get("kernel_name") or ""),
-        "gpu_pct":                 _to_float(k.get("gpu_pct") or k.get("gpu_percent")),
-        "time_ms":                 _to_float(k.get("time_ms") or k.get("duration_ms")),
-        "bound_type":              str(k.get("bound_type") or k.get("bottleneck") or ""),
-        "arithmetic_intensity":    _to_float(k.get("arithmetic_intensity")),
-        "flops_per_byte":          _to_float(k.get("flops_per_byte")),
-        "efficiency_percent":      _to_float(k.get("efficiency_percent")),
-        "reusable_native_kernel":  bool(k.get("reusable_native_kernel") or False),
-        "source_file":             k.get("source_file"),
-        "recommended_backends":    list(k.get("recommended_backends") or []),
+        "kernel_id": str(k.get("kernel_id") or k.get("id") or ""),
+        "name": str(k.get("name") or k.get("kernel_name") or ""),
+        "gpu_pct": _to_float(k.get("gpu_pct") or k.get("gpu_percent")),
+        "time_ms": _to_float(k.get("time_ms") or k.get("duration_ms")),
+        "bound_type": str(k.get("bound_type") or k.get("bottleneck") or ""),
+        "arithmetic_intensity": _to_float(k.get("arithmetic_intensity")),
+        "flops_per_byte": _to_float(k.get("flops_per_byte")),
+        "efficiency_percent": _to_float(k.get("efficiency_percent")),
+        "reusable_native_kernel": bool(k.get("reusable_native_kernel") or False),
+        "source_file": k.get("source_file"),
+        "recommended_backends": list(k.get("recommended_backends") or []),
         "selected_for_optimization": bool(k.get("selected_for_optimization") or False),
     }
 
@@ -846,35 +850,35 @@ def record_kernel_discovery(
     if not session_dir:
         return
     try:
-        kernels = [
-            _normalize_hot_kernel(k) for k in (hot_kernels or [])
-            if isinstance(k, dict)
-        ]
+        kernels = [_normalize_hot_kernel(k) for k in (hot_kernels or []) if isinstance(k, dict)]
         scan = dict(scan or {})
         payload = {
-            "source":           str(source or ""),
-            "status":           str(status or ""),
-            "ts":               _now_iso_safe(),
-            "duration_sec":     _to_float(duration_sec),
-            "scan":             scan,
+            "source": str(source or ""),
+            "status": str(status or ""),
+            "ts": _now_iso_safe(),
+            "duration_sec": _to_float(duration_sec),
+            "scan": scan,
             "hot_kernel_count": len(kernels),
-            "hot_kernels":      kernels,
-            "error":            error,
+            "hot_kernels": kernels,
+            "error": error,
         }
-        key = (
-            str(scan.get("candidates_path") or scan.get("trace_report_path") or "")
-            or None
-        )
+        key = str(scan.get("candidates_path") or scan.get("trace_report_path") or "") or None
         _recorder(session_dir, producer).record_item(
-            "kernel_discovery", payload, key=key,
+            "kernel_discovery",
+            payload,
+            key=key,
         )
         # The discovery tool's authoritative version lands in the top-level
         # ``versions`` map (keyed by tool name), not inline per run. The version
         # provenance follows the underlying ``tool`` (defaults to ``source``),
         # so route aliases like ``bypass`` reuse the real toolchain's version.
         record_tool_version(
-            session_dir, tool=(tool or source), root=tool_root,
-            root_env=tool_root_env, version=tool_version, producer=producer,
+            session_dir,
+            tool=(tool or source),
+            root=tool_root,
+            root_env=tool_root_env,
+            version=tool_version,
+            producer=producer,
         )
     except Exception:  # noqa: BLE001
         log.debug("record_kernel_discovery failed", exc_info=True)
@@ -911,10 +915,15 @@ def record_tool_version(
         return
     try:
         meta = _tool_metadata(
-            tool, root=root, root_env=root_env, version=version,
+            tool,
+            root=root,
+            root_env=root_env,
+            version=version,
         )
         _recorder(session_dir, producer).record_item(
-            "versions", meta, key=str(tool).lower(),
+            "versions",
+            meta,
+            key=str(tool).lower(),
         )
     except Exception:  # noqa: BLE001
         log.debug("record_tool_version failed", exc_info=True)
@@ -955,16 +964,18 @@ def record_kernel_dispatch(
         return
     try:
         payload = {
-            "kernel_id":            str(kernel_id),
-            "dispatched":           bool(dispatched),
-            "backends":             [str(b) for b in (backends or [])],
-            "skip_reason":          str(skip_reason or ""),
+            "kernel_id": str(kernel_id),
+            "dispatched": bool(dispatched),
+            "backends": [str(b) for b in (backends or [])],
+            "skip_reason": str(skip_reason or ""),
             "orchestration_commit": str(orchestration_commit or ""),
-            "task_group":           task_group,
-            "ts":                   _now_iso_safe(),
+            "task_group": task_group,
+            "ts": _now_iso_safe(),
         }
         _recorder(session_dir, producer).record_item(
-            "kernel_dispatch", payload, key=str(kernel_id),
+            "kernel_dispatch",
+            payload,
+            key=str(kernel_id),
         )
     except Exception:  # noqa: BLE001
         log.debug("record_kernel_dispatch failed", exc_info=True)
@@ -999,14 +1010,12 @@ def record_kernel_backend_result(
         run_id = str(result.get("run_id") or result.get("session_id") or "")
         attempts = result.get("attempts")
         attempts = attempts if isinstance(attempts, list) else []
-        result_meta = result.get("metadata") if isinstance(
-            result.get("metadata"), dict) else {}
+        result_meta = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
         # The kernel-level micro_speedup is derived (best across attempts) and
         # lives in ``verification`` -- the raw per-attempt dict carries none. We
         # stamp it onto the adopted (best) attempt so the journey can correlate
         # achieved speedup with the e2e gain.
-        verification = result.get("verification") if isinstance(
-            result.get("verification"), dict) else {}
+        verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
         best_attempt_id = _best_attempt_id(attempts, verification)
         kernel_micro_speedup = _to_float(verification.get("micro_speedup"))
         recorded_any = False
@@ -1016,32 +1025,31 @@ def record_kernel_backend_result(
             backend = str(att.get("backend") or "").lower()
             attempt_id = str(att.get("attempt_id") or att.get("id") or "")
             optimized = att.get("optimized_path") or att.get("optimized_file")
-            att_meta = att.get("metadata") if isinstance(
-                att.get("metadata"), dict) else {}
-            micro_speedup = _to_float(
-                att.get("micro_speedup") or att.get("speedup"))
-            if (micro_speedup is None and kernel_micro_speedup is not None
-                    and attempt_id and attempt_id == best_attempt_id):
+            att_meta = att.get("metadata") if isinstance(att.get("metadata"), dict) else {}
+            micro_speedup = _to_float(att.get("micro_speedup") or att.get("speedup"))
+            if (
+                micro_speedup is None
+                and kernel_micro_speedup is not None
+                and attempt_id
+                and attempt_id == best_attempt_id
+            ):
                 micro_speedup = kernel_micro_speedup
             payload = {
-                "kernel_id":          kid,
-                "attempt_id":         attempt_id,
-                "run_id":             run_id,
-                "backend":            backend,
-                "model":              att.get("model"),
-                "ts":                 str(att.get("ts") or att.get("started_at")
-                                          or att.get("created_at") or ""),
-                "status":             str(att.get("status") or "").lower(),
-                "decision":           str(att.get("decision") or "").upper(),
-                "micro_speedup":      micro_speedup,
-                "compile_passed":     _to_bool(att.get("compile_passed")),
+                "kernel_id": kid,
+                "attempt_id": attempt_id,
+                "run_id": run_id,
+                "backend": backend,
+                "model": att.get("model"),
+                "ts": str(att.get("ts") or att.get("started_at") or att.get("created_at") or ""),
+                "status": str(att.get("status") or "").lower(),
+                "decision": str(att.get("decision") or "").upper(),
+                "micro_speedup": micro_speedup,
+                "compile_passed": _to_bool(att.get("compile_passed")),
                 "correctness_passed": _to_bool(att.get("correctness_passed")),
-                "optimized_files":    [str(optimized)] if optimized else [],
-                "error":              att.get("error") or att.get("error_message"),
-                "error_class":        str(att.get("error_type") or "") or None,
-                "duration_sec":       _to_float(
-                    att.get("duration_sec") or att.get("elapsed_sec")
-                    or att.get("elapsed_s")),
+                "optimized_files": [str(optimized)] if optimized else [],
+                "error": att.get("error") or att.get("error_message"),
+                "error_class": str(att.get("error_type") or "") or None,
+                "duration_sec": _to_float(att.get("duration_sec") or att.get("elapsed_sec") or att.get("elapsed_s")),
             }
             key = attempt_id or (f"{run_id}-{backend}" if run_id else None)
             rec.record_item("kernel_backend_result", payload, key=key)
@@ -1051,11 +1059,10 @@ def record_kernel_backend_result(
             # geak -> $GEAK_ROOT git SHA, claude/codex -> CLI --version.
             if backend:
                 record_tool_version(
-                    session_dir, tool=backend,
-                    root=str(att_meta.get("root_dir")
-                             or result_meta.get("root_dir") or "") or None,
-                    version=str(att_meta.get("version")
-                                or result_meta.get("version") or "") or None,
+                    session_dir,
+                    tool=backend,
+                    root=str(att_meta.get("root_dir") or result_meta.get("root_dir") or "") or None,
+                    version=str(att_meta.get("version") or result_meta.get("version") or "") or None,
                     producer=producer,
                 )
 
@@ -1068,40 +1075,39 @@ def record_kernel_backend_result(
         # the kernel looks merely "dispatched" with an empty attempt ladder).
         status = str(result.get("status") or "").lower()
         err_class = str(result.get("error_class") or "")
-        decision = str(
-            (result.get("proposal") or {}).get("decision") or "").upper()
-        failed = status in _FAILED_STATUSES or (
-            decision == "REVERT" and bool(err_class)
-        )
+        decision = str((result.get("proposal") or {}).get("decision") or "").upper()
+        failed = status in _FAILED_STATUSES or (decision == "REVERT" and bool(err_class))
         if not failed:
             return
         backend = str(result.get("backend") or "").lower() or "geak"
         payload = {
-            "kernel_id":            kid,
-            "attempt_id":           "",
-            "run_id":               run_id,
-            "backend":              backend,
-            "model":                None,
-            "ts":                   _now_iso_safe(),
-            "status":               status or "failed",
-            "decision":             "FAILED",
-            "micro_speedup":        None,
-            "compile_passed":       None,
-            "correctness_passed":   None,
-            "optimized_files":      [],
-            "error":                result.get("error") or err_class or None,
-            "error_class":          err_class or None,
-            "duration_sec":         None,
+            "kernel_id": kid,
+            "attempt_id": "",
+            "run_id": run_id,
+            "backend": backend,
+            "model": None,
+            "ts": _now_iso_safe(),
+            "status": status or "failed",
+            "decision": "FAILED",
+            "micro_speedup": None,
+            "compile_passed": None,
+            "correctness_passed": None,
+            "optimized_files": [],
+            "error": result.get("error") or err_class or None,
+            "error_class": err_class or None,
+            "duration_sec": None,
             # Distinguishes a pre-dispatch gating failure (no backend ran) from
             # a backend that ran and failed.
             "pre_dispatch_failure": True,
         }
         rec.record_item(
-            "kernel_backend_result", payload,
+            "kernel_backend_result",
+            payload,
             key=f"{kid}-predispatch",
         )
         record_tool_version(
-            session_dir, tool=backend,
+            session_dir,
+            tool=backend,
             root=str(result_meta.get("root_dir") or "") or None,
             version=str(result_meta.get("version") or "") or None,
             producer=producer,
@@ -1147,18 +1153,20 @@ def record_kernel_e2e(
         return
     try:
         payload = {
-            "kernel_id":         str(kernel_id),
-            "integrated":        bool(integrated),
-            "e2e_gain_pct":      _to_float(e2e_gain_pct),
-            "validated":         bool(validated) if validated is not None else None,
-            "decision":          str(decision or "").upper(),
-            "patch_path":        patch_path,
-            "target_file":       target_file,
+            "kernel_id": str(kernel_id),
+            "integrated": bool(integrated),
+            "e2e_gain_pct": _to_float(e2e_gain_pct),
+            "validated": bool(validated) if validated is not None else None,
+            "decision": str(decision or "").upper(),
+            "patch_path": patch_path,
+            "target_file": target_file,
             "extra_server_args": str(extra_server_args or ""),
-            "ts":                _now_iso_safe(),
+            "ts": _now_iso_safe(),
         }
         _recorder(session_dir, producer).record_item(
-            "kernel_e2e", payload, key=str(kernel_id),
+            "kernel_e2e",
+            payload,
+            key=str(kernel_id),
         )
     except Exception:  # noqa: BLE001
         log.debug("record_kernel_e2e failed", exc_info=True)
@@ -1185,7 +1193,9 @@ def record_specialist_round(
     try:
         key = str(entry.get("round_id") or "") or None
         _recorder(session_dir, producer).record_item(
-            "specialist_runs", dict(entry), key=key,
+            "specialist_runs",
+            dict(entry),
+            key=key,
         )
     except Exception:  # noqa: BLE001
         log.debug("record_specialist_round failed", exc_info=True)
@@ -1234,22 +1244,24 @@ def record_critic_iteration(
         emit = emit if isinstance(emit, dict) else {}
         wd = Path(workdir) if workdir else None
         payload = {
-            "iter":    int(iter_n),
-            "ts":      str(emit.get("ts") or review.get("ts") or ""),
-            "topic":   str(emit.get("topic") or review.get("topic") or ""),
+            "iter": int(iter_n),
+            "ts": str(emit.get("ts") or review.get("ts") or ""),
+            "topic": str(emit.get("topic") or review.get("topic") or ""),
             "verdict": str(review.get("verdict") or emit.get("verdict") or ""),
             "summary": str(review.get("summary") or emit.get("summary") or "")[:500],
-            "request_path":      _rel(wd / "request.json", session_dir) if wd else None,
+            "request_path": _rel(wd / "request.json", session_dir) if wd else None,
             "judge_bundle_path": _rel(wd / "judge_bundle.json", session_dir) if wd else None,
-            "emit_path":         _rel(wd / "emit.json", session_dir) if wd else None,
-            "review_path":       _rel(wd / "review.json", session_dir) if wd else None,
+            "emit_path": _rel(wd / "emit.json", session_dir) if wd else None,
+            "review_path": _rel(wd / "review.json", session_dir) if wd else None,
         }
         if isinstance(kb_assess, dict) and kb_assess:
             payload["kb_assess"] = kb_assess
         if isinstance(kb_priors, dict) and kb_priors:
             payload["kb_priors"] = kb_priors
         _recorder(session_dir, producer).record_item(
-            "critic_iterations", payload, key=str(iter_n),
+            "critic_iterations",
+            payload,
+            key=str(iter_n),
         )
     except Exception:  # noqa: BLE001
         log.debug("record_critic_iteration failed", exc_info=True)
@@ -1283,13 +1295,15 @@ def record_robustness_signal(
         signal_data = _read_json(wd / "signal.json")
         action_data = _read_json(wd / "action.json")
         payload = {
-            "ts":      str(signal_data.get("ts") or action_data.get("ts") or ""),
-            "signal":  str(signal_data.get("signal") or signal_data.get("kind") or ""),
-            "action":  str(action_data.get("action") or action_data.get("kind") or ""),
+            "ts": str(signal_data.get("ts") or action_data.get("ts") or ""),
+            "signal": str(signal_data.get("signal") or signal_data.get("kind") or ""),
+            "action": str(action_data.get("action") or action_data.get("kind") or ""),
             "workdir": _rel(wd, session_dir),
         }
         _recorder(session_dir, producer).record_item(
-            "robustness_signals", payload, key=wd.name,
+            "robustness_signals",
+            payload,
+            key=wd.name,
         )
     except Exception:  # noqa: BLE001
         log.debug("record_robustness_signal failed", exc_info=True)

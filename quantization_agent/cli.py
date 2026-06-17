@@ -54,9 +54,7 @@ def _interactive_value(raw: str) -> bool | None:
         return True
     if raw in ("off", "false", "no", "0"):
         return False
-    raise argparse.ArgumentTypeError(
-        f"--interactive expects auto / on / off (got {raw!r})"
-    )
+    raise argparse.ArgumentTypeError(f"--interactive expects auto / on / off (got {raw!r})")
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -107,8 +105,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=1,
         metavar="N",
-        help="Upper bound on Python-driven retries for Ask-class outcomes "
-        "(#3/#6/#16/#26) and #30. Default 1.",
+        help="Upper bound on Python-driven retries for Ask-class outcomes (#3/#6/#16/#26) and #30. Default 1.",
     )
     p.add_argument(
         "--model-id",
@@ -133,6 +130,7 @@ async def _run(args: argparse.Namespace) -> int:
         Process exit code: ``0`` on success or partial success, ``1`` when the
         resulting model is unusable.
     """
+
     def log(line: str) -> None:
         """Write a line to stderr when verbose output is enabled.
 
@@ -155,9 +153,7 @@ async def _run(args: argparse.Namespace) -> int:
 
     summary: dict[str, Any] = {
         "status": result.status,
-        "quantized_model_dir": (
-            str(result.quantized_model_dir) if result.quantized_model_dir else None
-        ),
+        "quantized_model_dir": (str(result.quantized_model_dir) if result.quantized_model_dir else None),
         "assessment": result.assessment.to_dict(),
     }
     print(json.dumps(summary, indent=2, sort_keys=True))

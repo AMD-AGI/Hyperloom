@@ -83,8 +83,11 @@ def test_put_recipe_first_call_creates_live_at_version_1(
     cid = _cid()
     result = store.put_recipe(
         canonical_id=cid,
-        model="deepseek-r1", hardware="mi300x", framework="sglang",
-        framework_version="0.4.5", precision="fp8",
+        model="deepseek-r1",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
         best_config={"tp": "8"},
         best_throughput=24300.5,
         provenance={"source": "test", "generator": "ut"},
@@ -94,15 +97,14 @@ def test_put_recipe_first_call_creates_live_at_version_1(
     assert live is not None
     assert live["version"] == 1
     # Top-level arbor identity fields stamped from put_recipe args.
-    assert live["model"]    == "deepseek-r1"
+    assert live["model"] == "deepseek-r1"
     assert live["hardware"] == "mi300x"
     # arbor-style payload fields at the top level.
-    assert live["best_config"]     == {"tp": "8"}
+    assert live["best_config"] == {"tp": "8"}
     assert live["best_throughput"] == 24300.5
     assert live["created_at"] == live["updated_at"]
     # Live row sits at the documented 5-level depth.
-    rel = (tmp_path / "deepseek-r1" / "mi300x" / "sglang" / "0.4.5" / "fp8"
-           / RECIPE_FILENAME)
+    rel = tmp_path / "deepseek-r1" / "mi300x" / "sglang" / "0.4.5" / "fp8" / RECIPE_FILENAME
     assert rel.is_file()
 
 
@@ -129,12 +131,13 @@ def test_put_recipe_second_call_archives_prior_and_bumps_version(
     assert archive["snapshot"]["best_throughput"] == 1000.0
     # ``replaced_by`` carries the triggering write's provenance for audit (boundary doc §4.2).
     assert archive["replaced_by"] == {
-        "source": "second", "generator": "ut",
+        "source": "second",
+        "generator": "ut",
     }
     # Live row carries the new throughput and the bumped version.
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
-    assert live["version"]         == 2
+    assert live["version"] == 2
     assert live["best_throughput"] == 2000.0
 
 
@@ -150,6 +153,7 @@ def test_put_recipe_preserves_created_at_across_updates(
     created_first = first_live["created_at"]
     # Force at least one microsecond gap so the timestamps differ.
     import time
+
     time.sleep(0.001)
     store.put_recipe(canonical_id=cid, best_throughput=2000.0)
     second_live = store.get_recipe(canonical_id=cid)
@@ -260,38 +264,57 @@ def test_delete_recipe_returns_false_for_unknown_cid(tmp_path: Path) -> None:
 def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
     """Create three recipes spanning different identity/metrics, keyed by short alias."""
     cid_a = recipe_canonical_id(
-        model="m-a", hardware="mi300x", framework="sglang",
-        framework_version="0.4.5", precision="fp8",
+        model="m-a",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
     )
     cid_b = recipe_canonical_id(
-        model="m-b", hardware="mi300x", framework="vllm",
-        framework_version="0.6.0", precision="bf16",
+        model="m-b",
+        hardware="mi300x",
+        framework="vllm",
+        framework_version="0.6.0",
+        precision="bf16",
     )
     cid_c = recipe_canonical_id(
-        model="m-c", hardware="mi355x", framework="sglang",
-        framework_version="0.5.0", precision="fp8",
+        model="m-c",
+        hardware="mi355x",
+        framework="sglang",
+        framework_version="0.5.0",
+        precision="fp8",
     )
     import time
+
     store.put_recipe(
         canonical_id=cid_a,
-        model="m-a", hardware="mi300x", framework="sglang",
-        framework_version="0.4.5", precision="fp8",
+        model="m-a",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
         best_throughput=10000.0,
         extras={"task": "pretrain", "mfu": 0.4},
     )
     time.sleep(0.001)
     store.put_recipe(
         canonical_id=cid_b,
-        model="m-b", hardware="mi300x", framework="vllm",
-        framework_version="0.6.0", precision="bf16",
+        model="m-b",
+        hardware="mi300x",
+        framework="vllm",
+        framework_version="0.6.0",
+        precision="bf16",
         best_throughput=25000.0,
         extras={"task": "inference", "mfu": 0.55},
     )
     time.sleep(0.001)
     store.put_recipe(
         canonical_id=cid_c,
-        model="m-c", hardware="mi355x", framework="sglang",
-        framework_version="0.5.0", precision="fp8",
+        model="m-c",
+        hardware="mi355x",
+        framework="sglang",
+        framework_version="0.5.0",
+        precision="fp8",
         best_throughput=5000.0,
         extras={"task": "pretrain", "mfu": 0.30},
     )
@@ -377,6 +400,7 @@ def test_search_updated_since_filters_old_rows(tmp_path: Path) -> None:
     assert cutoff_marker is not None
     cutoff = cutoff_marker["updated_at"]
     import time
+
     time.sleep(0.001)
     store.put_recipe(canonical_id=cid_new)
     rows = store.search(updated_since=cutoff)
@@ -394,9 +418,12 @@ def test_search_supports_all_six_order_by_values(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     _seed_diverse_recipes(store)
     for ob in (
-        "updated_at DESC", "updated_at ASC",
-        "created_at DESC", "created_at ASC",
-        "version DESC",    "version ASC",
+        "updated_at DESC",
+        "updated_at ASC",
+        "created_at DESC",
+        "created_at ASC",
+        "version DESC",
+        "version ASC",
     ):
         rows = store.search(order_by=ob)
         assert len(rows) == 3, f"order_by={ob!r}"
@@ -433,7 +460,9 @@ def test_append_attempt_does_not_require_parent_recipe(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid(model="orphan")
     out = store.append_attempt(
-        canonical_id=cid, session_id="sess-1", outcome="kept",
+        canonical_id=cid,
+        session_id="sess-1",
+        outcome="kept",
     )
     assert out["id"] == 1
     # No recipe.json was created — attempts dir is independent.
@@ -445,7 +474,9 @@ def test_append_attempt_id_is_monotonic_per_cid(tmp_path: Path) -> None:
     cid = _cid()
     ids = [
         store.append_attempt(
-            canonical_id=cid, session_id="s", outcome="kept",
+            canonical_id=cid,
+            session_id="s",
+            outcome="kept",
         )["id"]
         for _ in range(3)
     ]
@@ -457,7 +488,9 @@ def test_list_attempts_returns_newest_first(tmp_path: Path) -> None:
     cid = _cid()
     for outcome in ("kept", "reverted", "failed"):
         store.append_attempt(
-            canonical_id=cid, session_id="s", outcome=outcome,
+            canonical_id=cid,
+            session_id="s",
+            outcome=outcome,
         )
     rows = store.list_attempts(canonical_id=cid)
     assert [r["outcome"] for r in rows] == ["failed", "reverted", "kept"]
@@ -468,7 +501,9 @@ def test_list_attempts_respects_limit(tmp_path: Path) -> None:
     cid = _cid()
     for _ in range(5):
         store.append_attempt(
-            canonical_id=cid, session_id="s", outcome="kept",
+            canonical_id=cid,
+            session_id="s",
+            outcome="kept",
         )
     rows = store.list_attempts(canonical_id=cid, limit=2)
     assert len(rows) == 2
@@ -522,7 +557,9 @@ def test_append_attempt_concurrent_keeps_ids_unique(tmp_path: Path) -> None:
 
     def append_once(_: int) -> int:
         return store.append_attempt(
-            canonical_id=cid, session_id="s", outcome="kept",
+            canonical_id=cid,
+            session_id="s",
+            outcome="kept",
         )["id"]
 
     n = 16
@@ -552,20 +589,25 @@ def test_list_attempts_skips_malformed_lines(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.append_attempt(
-        canonical_id=cid, session_id="s", outcome="kept",
+        canonical_id=cid,
+        session_id="s",
+        outcome="kept",
     )
-    attempts_path = (
-        tmp_path.joinpath(*cid_to_path_components(cid)) / ATTEMPTS_FILENAME
-    )
+    attempts_path = tmp_path.joinpath(*cid_to_path_components(cid)) / ATTEMPTS_FILENAME
     with attempts_path.open("a", encoding="utf-8") as f:
         f.write("not json at all\n")
-        f.write(json.dumps({
-            "id": 99,
-            "recipe_canonical_id": cid,
-            "session_id": "s",
-            "attempt_at": "2026-05-28T10:00:00.000000+00:00",
-            "outcome": "reverted",
-        }) + "\n")
+        f.write(
+            json.dumps(
+                {
+                    "id": 99,
+                    "recipe_canonical_id": cid,
+                    "session_id": "s",
+                    "attempt_at": "2026-05-28T10:00:00.000000+00:00",
+                    "outcome": "reverted",
+                }
+            )
+            + "\n"
+        )
     rows = store.list_attempts(canonical_id=cid)
     outcomes = [r["outcome"] for r in rows]
     assert "kept" in outcomes
@@ -624,8 +666,7 @@ def test_recipe_payload_carries_canonical_id_and_version(tmp_path: Path) -> None
     cid = _cid()
     store.put_recipe(canonical_id=cid)
     payload = json.loads(
-        (tmp_path.joinpath(*cid_to_path_components(cid)) / RECIPE_FILENAME)
-        .read_text(encoding="utf-8")
+        (tmp_path.joinpath(*cid_to_path_components(cid)) / RECIPE_FILENAME).read_text(encoding="utf-8")
     )
     assert payload["canonical_id"] == cid
     assert payload["version"] == 1
@@ -638,9 +679,7 @@ def test_history_dir_lives_at_six_levels_below_root(tmp_path: Path) -> None:
     cid = _cid()
     store.put_recipe(canonical_id=cid)
     store.put_recipe(canonical_id=cid)
-    history_dir = (
-        tmp_path.joinpath(*cid_to_path_components(cid)) / HISTORY_DIRNAME
-    )
+    history_dir = tmp_path.joinpath(*cid_to_path_components(cid)) / HISTORY_DIRNAME
     assert history_dir.is_dir()
     rel = history_dir.relative_to(tmp_path).parts
     assert len(rel) == 6

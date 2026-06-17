@@ -2,6 +2,7 @@
 
 """Unit tests for the per-session path helpers (single source of truth for
 every path inside a session directory)."""
+
 from __future__ import annotations
 
 from pathlib import Path

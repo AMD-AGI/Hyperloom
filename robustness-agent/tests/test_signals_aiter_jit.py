@@ -81,9 +81,12 @@ def test_drop_above_ratio_threshold_does_not_fire():
 
 
 def test_stale_build_fires_medium_after_persistence_window():
-    det = AiterJitDetector(AiterJitConfig(
-        stale_build_threshold=1, stale_build_persist_ticks=3,
-    ))
+    det = AiterJitDetector(
+        AiterJitConfig(
+            stale_build_threshold=1,
+            stale_build_persist_ticks=3,
+        )
+    )
     # 3 consecutive ticks with build_count=5, unchanged.
     det.evaluate(_ctx(0), SourceData(local_aiter_jit=_aiter(50, build_count=5)))
     det.evaluate(_ctx(1), SourceData(local_aiter_jit=_aiter(50, build_count=5)))
@@ -94,9 +97,12 @@ def test_stale_build_fires_medium_after_persistence_window():
 
 
 def test_stale_build_resets_on_change():
-    det = AiterJitDetector(AiterJitConfig(
-        stale_build_threshold=1, stale_build_persist_ticks=3,
-    ))
+    det = AiterJitDetector(
+        AiterJitConfig(
+            stale_build_threshold=1,
+            stale_build_persist_ticks=3,
+        )
+    )
     det.evaluate(_ctx(0), SourceData(local_aiter_jit=_aiter(50, build_count=5)))
     det.evaluate(_ctx(1), SourceData(local_aiter_jit=_aiter(50, build_count=5)))
     out = det.evaluate(_ctx(2), SourceData(local_aiter_jit=_aiter(50, build_count=8)))

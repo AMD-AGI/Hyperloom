@@ -55,7 +55,10 @@ def test_anchored_dispatch_keeps_legacy_patch_gpu_default():
     historical single-domain, patch-authoring, GPU-leased behaviour."""
     prof = resolve_specialist_profile({"domain": "serving_specialist"})
     assert prof == SpecialistProfile(
-        scope=DEFAULT_SCOPE, mode=DEFAULT_MODE, bench=DEFAULT_BENCH, lane=DEFAULT_LANE,
+        scope=DEFAULT_SCOPE,
+        mode=DEFAULT_MODE,
+        bench=DEFAULT_BENCH,
+        lane=DEFAULT_LANE,
     )
     assert prof.scope == SCOPE_DOMAIN
     assert prof.mode == MODE_PATCH
@@ -66,8 +69,7 @@ def test_anchored_dispatch_keeps_legacy_patch_gpu_default():
 def test_unknown_values_fall_back_without_raising():
     # Unknown scope + a domain anchor -> inferred single-domain, patch/gpu.
     prof = resolve_specialist_profile(
-        {"scope": "galaxy", "mode": "telepathy", "lane": "quantum",
-         "domain": "serving_specialist"},
+        {"scope": "galaxy", "mode": "telepathy", "lane": "quantum", "domain": "serving_specialist"},
     )
     assert prof.scope == DEFAULT_SCOPE
     assert prof.mode == DEFAULT_MODE
@@ -156,13 +158,15 @@ def test_freeform_single_task_ok(gate, orchestration_role):
 def test_freeform_wave_ok(gate, orchestration_role):
     gate._validate_specialist_dispatch(
         orchestration_role,
-        _dispatch({
-            "scope": "freeform",
-            "tasks": [
-                {"task_description": "Investigate prefill batching."},
-                {"task_description": "Audit KV-cache allocation."},
-            ],
-        }),
+        _dispatch(
+            {
+                "scope": "freeform",
+                "tasks": [
+                    {"task_description": "Investigate prefill batching."},
+                    {"task_description": "Audit KV-cache allocation."},
+                ],
+            }
+        ),
     )
 
 
@@ -187,7 +191,8 @@ def test_freeform_empty_description_rejected(gate, orchestration_role):
 def test_freeform_missing_description_rejected(gate, orchestration_role):
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
-            orchestration_role, _dispatch({"scope": "freeform"}),
+            orchestration_role,
+            _dispatch({"scope": "freeform"}),
         )
     assert exc.value.rule == "specialist_freeform_empty_description"
 
@@ -202,11 +207,14 @@ def test_freeform_description_too_long_rejected(gate, orchestration_role):
     assert exc.value.rule == "specialist_freeform_description_too_long"
 
 
-@pytest.mark.parametrize("redline", [
-    "clean up with rm -rf / now",
-    "run mkfs.ext4 on the scratch disk",
-    "please shutdown the host afterwards",
-])
+@pytest.mark.parametrize(
+    "redline",
+    [
+        "clean up with rm -rf / now",
+        "run mkfs.ext4 on the scratch disk",
+        "please shutdown the host afterwards",
+    ],
+)
 def test_freeform_redline_rejected(gate, orchestration_role, redline):
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
@@ -226,10 +234,7 @@ def test_freeform_empty_wave_rejected(gate, orchestration_role):
 
 
 def test_freeform_wave_too_large_rejected(gate, orchestration_role):
-    tasks = [
-        {"task_description": f"task {i}"}
-        for i in range(SPECIALIST_FREEFORM_WAVE_MAX + 1)
-    ]
+    tasks = [{"task_description": f"task {i}"} for i in range(SPECIALIST_FREEFORM_WAVE_MAX + 1)]
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
             orchestration_role,
@@ -267,11 +272,13 @@ def test_domains_scope_requires_multiple_tags(gate, orchestration_role):
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
             orchestration_role,
-            _dispatch({
-                "scope": "domains",
-                "tags": [_REAL_TAGS[0]],
-                "gap_canonical_id": "gap.x.session-1",
-            }),
+            _dispatch(
+                {
+                    "scope": "domains",
+                    "tags": [_REAL_TAGS[0]],
+                    "gap_canonical_id": "gap.x.session-1",
+                }
+            ),
         )
     assert exc.value.rule == "specialist_scope_too_narrow"
 
@@ -289,10 +296,15 @@ def _gate_with_gaps(gaps: list[dict]) -> PolicyGate:
 
 
 def test_domain_dispatch_backfills_gap_from_ledger(orchestration_role):
-    gate = _gate_with_gaps([
-        {"canonical_id": "gap.framework.scheduler.session-1",
-         "domain_hint": "serving_specialist", "severity": "high"},
-    ])
+    gate = _gate_with_gaps(
+        [
+            {
+                "canonical_id": "gap.framework.scheduler.session-1",
+                "domain_hint": "serving_specialist",
+                "severity": "high",
+            },
+        ]
+    )
     params = {"domain": "serving_specialist"}  # no gap_canonical_id
     gate._validate_specialist_dispatch(orchestration_role, _dispatch(params))
     # Mutated in place so the downstream dispatch carries the canonical id.
@@ -300,12 +312,17 @@ def test_domain_dispatch_backfills_gap_from_ledger(orchestration_role):
 
 
 def test_gap_backfill_prefers_high_severity_then_least_attempted(orchestration_role):
-    gate = _gate_with_gaps([
-        {"canonical_id": "gap.low", "domain_hint": "serving_specialist",
-         "severity": "medium", "attempts": [{"x": 1}]},
-        {"canonical_id": "gap.win", "domain_hint": "framework",
-         "severity": "high"},
-    ])
+    gate = _gate_with_gaps(
+        [
+            {
+                "canonical_id": "gap.low",
+                "domain_hint": "serving_specialist",
+                "severity": "medium",
+                "attempts": [{"x": 1}],
+            },
+            {"canonical_id": "gap.win", "domain_hint": "framework", "severity": "high"},
+        ]
+    )
     params = {"domain": "serving_specialist"}
     gate._validate_specialist_dispatch(orchestration_role, _dispatch(params))
     # framework is serving_specialist's kb_anchor, so both match; high wins.
@@ -313,13 +330,15 @@ def test_gap_backfill_prefers_high_severity_then_least_attempted(orchestration_r
 
 
 def test_gap_backfill_noop_when_no_anchor_match_still_rejects(orchestration_role):
-    gate = _gate_with_gaps([
-        {"canonical_id": "gap.kernel", "domain_hint": "kernel_switch_specialist",
-         "severity": "high"},
-    ])
+    gate = _gate_with_gaps(
+        [
+            {"canonical_id": "gap.kernel", "domain_hint": "kernel_switch_specialist", "severity": "high"},
+        ]
+    )
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
-            orchestration_role, _dispatch({"domain": "comm_specialist"}),
+            orchestration_role,
+            _dispatch({"domain": "comm_specialist"}),
         )
     assert exc.value.rule == "specialist_dispatch_source"
     assert "gap" in str(exc.value)
@@ -330,11 +349,13 @@ def test_single_domain_scope_rejects_multiple_tags(gate, orchestration_role):
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
             orchestration_role,
-            _dispatch({
-                "scope": "domain",
-                "tags": _REAL_TAGS[:2],
-                "gap_canonical_id": "gap.x.session-1",
-            }),
+            _dispatch(
+                {
+                    "scope": "domain",
+                    "tags": _REAL_TAGS[:2],
+                    "gap_canonical_id": "gap.x.session-1",
+                }
+            ),
         )
     assert exc.value.rule == "specialist_scope_mismatch"
 
@@ -355,11 +376,14 @@ def test_freeform_gpu_request_clears_ceiling(orchestration_role):
     gate = _gate_with_gpu_capacity(2)
     gate._validate_specialist_dispatch(
         orchestration_role,
-        _dispatch({
-            "scope": "freeform",
-            "task_description": "micro-bench the decode attention kernel",
-            "needs_gpu": True, "gpu_count": 2,
-        }),
+        _dispatch(
+            {
+                "scope": "freeform",
+                "task_description": "micro-bench the decode attention kernel",
+                "needs_gpu": True,
+                "gpu_count": 2,
+            }
+        ),
     )
 
 
@@ -368,11 +392,13 @@ def test_freeform_gpu_request_rejected_when_pool_disabled(orchestration_role):
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
             orchestration_role,
-            _dispatch({
-                "scope": "freeform",
-                "task_description": "needs a GPU but pool is off",
-                "needs_gpu": True,
-            }),
+            _dispatch(
+                {
+                    "scope": "freeform",
+                    "task_description": "needs a GPU but pool is off",
+                    "needs_gpu": True,
+                }
+            ),
         )
     assert exc.value.rule == "specialist_gpu_pool_disabled"
 
@@ -382,11 +408,14 @@ def test_freeform_gpu_request_exceeds_capacity_rejected(orchestration_role):
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
             orchestration_role,
-            _dispatch({
-                "scope": "freeform",
-                "task_description": "asks for more GPUs than the pool has",
-                "needs_gpu": True, "gpu_count": 4,
-            }),
+            _dispatch(
+                {
+                    "scope": "freeform",
+                    "task_description": "asks for more GPUs than the pool has",
+                    "needs_gpu": True,
+                    "gpu_count": 4,
+                }
+            ),
         )
     assert exc.value.rule == "specialist_gpu_request_exceeds_capacity"
 
@@ -396,11 +425,14 @@ def test_freeform_gpu_request_nonpositive_count_rejected(orchestration_role):
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
             orchestration_role,
-            _dispatch({
-                "scope": "freeform",
-                "task_description": "bad gpu count",
-                "needs_gpu": True, "gpu_count": 0,
-            }),
+            _dispatch(
+                {
+                    "scope": "freeform",
+                    "task_description": "bad gpu count",
+                    "needs_gpu": True,
+                    "gpu_count": 0,
+                }
+            ),
         )
     assert exc.value.rule == "specialist_gpu_request_invalid"
 
@@ -412,11 +444,13 @@ def test_domain_gpu_request_still_governed_after_refactor(orchestration_role):
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
             orchestration_role,
-            _dispatch({
-                "domain": "serving_specialist",
-                "gap_canonical_id": "gap.framework.x.session-1",
-                "needs_gpu": True,
-            }),
+            _dispatch(
+                {
+                    "domain": "serving_specialist",
+                    "gap_canonical_id": "gap.framework.x.session-1",
+                    "needs_gpu": True,
+                }
+            ),
         )
     assert exc.value.rule == "specialist_gpu_pool_disabled"
 
@@ -430,12 +464,15 @@ def test_bench_specialist_without_explicit_needs_gpu_is_gated(orchestration_role
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
             orchestration_role,
-            _dispatch({
-                "scope": "freeform",
-                "task_description": "patch + bench the decode attention kernel",
-                "mode": "patch", "bench": True,
-                # NOTE: no explicit needs_gpu — the bench profile implies it.
-            }),
+            _dispatch(
+                {
+                    "scope": "freeform",
+                    "task_description": "patch + bench the decode attention kernel",
+                    "mode": "patch",
+                    "bench": True,
+                    # NOTE: no explicit needs_gpu — the bench profile implies it.
+                }
+            ),
         )
     assert exc.value.rule == "specialist_gpu_pool_disabled"
 
@@ -447,11 +484,13 @@ def test_research_specialist_without_needs_gpu_is_not_gated(orchestration_role):
     # Must not raise: research/CPU dispatch never contends for the GPU pool.
     gate._validate_specialist_dispatch(
         orchestration_role,
-        _dispatch({
-            "scope": "freeform",
-            "task_description": "read-only profile the decode path",
-            "mode": "research",
-        }),
+        _dispatch(
+            {
+                "scope": "freeform",
+                "task_description": "read-only profile the decode path",
+                "mode": "research",
+            }
+        ),
     )
 
 

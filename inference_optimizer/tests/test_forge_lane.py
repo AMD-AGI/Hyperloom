@@ -7,6 +7,7 @@ gets its own ``forge_invocations`` section, its own capability-summary row, its
 own attribution bucket, and its own ``adopted_by`` value — everywhere the
 breakdown splits invocations by lane.
 """
+
 from __future__ import annotations
 
 from inference_optimizer.breakdown import collectors
@@ -24,7 +25,11 @@ def test_invocation_section_forge_is_own_lane() -> None:
 def test_capability_summary_has_distinct_forge_row() -> None:
     forge_invs = [{"kernel_id": "k1", "decision": "KEEP", "micro_speedup": 1.4}]
     cap = collectors.collect_capability_summary(
-        {}, [], [], [], forge_invocations=forge_invs,
+        {},
+        [],
+        [],
+        [],
+        forge_invocations=forge_invs,
     )
     # forge gets its own row with its own KEEP tally.
     assert cap["forge"]["attempts"] == 1
@@ -36,10 +41,16 @@ def test_capability_summary_has_distinct_forge_row() -> None:
 
 
 def test_optimized_kernels_includes_forge_attempts() -> None:
-    forge_invs = [{
-        "kernel_id": "k1", "backend": "forge", "decision": "KEEP",
-        "micro_speedup": 1.6, "attempt_id": "a1", "ts": "2026-06-16T00:00:00Z",
-    }]
+    forge_invs = [
+        {
+            "kernel_id": "k1",
+            "backend": "forge",
+            "decision": "KEEP",
+            "micro_speedup": 1.6,
+            "attempt_id": "a1",
+            "ts": "2026-06-16T00:00:00Z",
+        }
+    ]
     rows = collectors._collect_optimized_kernels([], [], {}, forge_invs)
     by_kid = {r["kernel_id"]: r for r in rows}
     assert "k1" in by_kid
@@ -53,7 +64,12 @@ def test_attribution_splits_kernel_gain_to_forge() -> None:
     forge_invs = [{"kernel_id": "k1", "decision": "KEEP"}]
     adopted = [{"kernel_id": "k1", "e2e_gain_pct": 10.0}]
     out = collectors.collect_attribution(
-        state, [], [], adopted, [], forge_invocations=forge_invs,
+        state,
+        [],
+        [],
+        adopted,
+        [],
+        forge_invocations=forge_invs,
     )
     sb = out["source_breakdown"]
     # The adopted kernel's gain is attributed to forge, not oob.

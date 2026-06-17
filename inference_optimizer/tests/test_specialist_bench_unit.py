@@ -7,7 +7,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
 
 from inference_optimizer.orchestrator import specialist_bench as sb
 
@@ -16,7 +15,9 @@ def _git(repo: Path, *args: str) -> None:
     """Run a git command in repo, raising on failure."""
     subprocess.run(
         ["git", "-C", str(repo), *args],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     )
 
 
@@ -33,6 +34,7 @@ def _init_repo(repo: Path) -> None:
 
 # ---- envelopes ----
 
+
 def test_error_and_ok():
     e = sb._error("bad", x=1)
     assert e == {"ok": False, "reason": "bad", "x": 1}
@@ -41,6 +43,7 @@ def test_error_and_ok():
 
 
 # ---- run_bench ----
+
 
 async def test_run_bench_disabled(monkeypatch):
     monkeypatch.setattr(sb, "BENCH_TOOL_ENABLED", False)
@@ -56,7 +59,9 @@ async def test_run_bench_unknown_id(tmp_path):
 
 async def test_run_bench_script_missing(tmp_path):
     out = await sb.run_bench(
-        "kernel_gemm_timing", worktree=tmp_path, call_id="c1",
+        "kernel_gemm_timing",
+        worktree=tmp_path,
+        call_id="c1",
         bench_dir_root=tmp_path / "empty",
     )
     assert out["reason"] == "bench_script_missing"
@@ -66,11 +71,15 @@ async def test_run_bench_success(tmp_path):
     bench_root = tmp_path / "benches"
     bench_root.mkdir()
     (bench_root / "kernel_gemm_timing.sh").write_text(
-        "#!/usr/bin/env bash\necho hello-bench\n", encoding="utf-8",
+        "#!/usr/bin/env bash\necho hello-bench\n",
+        encoding="utf-8",
     )
     out = await sb.run_bench(
-        "kernel_gemm_timing", worktree=tmp_path, call_id="c1",
-        bench_dir_root=bench_root, params={"k": "v"},
+        "kernel_gemm_timing",
+        worktree=tmp_path,
+        call_id="c1",
+        bench_dir_root=bench_root,
+        params={"k": "v"},
     )
     assert out["ok"] is True
     assert out["exit_code"] == 0
@@ -79,6 +88,7 @@ async def test_run_bench_success(tmp_path):
 
 
 # ---- apply_patch_in_worktree ----
+
 
 def test_apply_patch_empty():
     assert sb.apply_patch_in_worktree(Path("/tmp"), "")["reason"] == "empty_patch"
@@ -102,7 +112,9 @@ def test_apply_patch_success(tmp_path):
     (tmp_path / "f.txt").write_text("b\n", encoding="utf-8")
     diff = subprocess.run(
         ["git", "-C", str(tmp_path), "diff"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
     _git(tmp_path, "checkout", "--", "f.txt")
     out = sb.apply_patch_in_worktree(tmp_path, diff)
@@ -112,16 +124,13 @@ def test_apply_patch_success(tmp_path):
 
 def test_apply_patch_rejected(tmp_path):
     _init_repo(tmp_path)
-    bad = (
-        "diff --git a/f.txt b/f.txt\n"
-        "--- a/f.txt\n+++ b/f.txt\n"
-        "@@ -1 +1 @@\n-does-not-match\n+new\n"
-    )
+    bad = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-does-not-match\n+new\n"
     out = sb.apply_patch_in_worktree(tmp_path, bad)
     assert out["reason"] == "git_apply_rejected"
 
 
 # ---- capture_worktree_cumulative_diff ----
+
 
 def test_capture_diff_not_a_dir(tmp_path):
     assert sb.capture_worktree_cumulative_diff(tmp_path / "nope") is None
@@ -145,6 +154,7 @@ def test_capture_diff_non_repo(tmp_path):
 
 
 # ---- reset_worktree ----
+
 
 def test_reset_worktree_not_a_dir(tmp_path):
     # Should not raise.

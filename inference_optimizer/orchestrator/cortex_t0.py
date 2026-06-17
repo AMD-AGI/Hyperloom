@@ -49,7 +49,12 @@ def _default_status_emitter(line: str) -> None:
 # closer-workload recipe is reranked first (the dispatcher does the actual
 # rerank; the 5-tuple ``required`` filter is unchanged).
 _PREFER_NUMERIC_ATTRS: tuple[str, ...] = (
-    "tp", "ep", "conc", "isl", "osl", "max_model_len",
+    "tp",
+    "ep",
+    "conc",
+    "isl",
+    "osl",
+    "max_model_len",
 )
 
 
@@ -265,11 +270,7 @@ def run_t0_anchor(
     hw = (hw or "").strip() or "unknown_gpu"
 
     # Short-circuit when already anchored (via ``warm_start_ts``); resume=True bypasses.
-    if (
-        sid
-        and not resume
-        and (getattr(shared_state, "warm_start_ts", "") or "").strip()
-    ):
+    if sid and not resume and (getattr(shared_state, "warm_start_ts", "") or "").strip():
         shared_state.cortex_session_id = sid
         emit(f"Cortex KB        : already anchored session_id={sid}")
         return T0Result(
@@ -293,15 +294,11 @@ def run_t0_anchor(
         )
 
     # Backfill operator-tracing metadata; T0 only stamps metadata (best_config preserved, rewritten at CLOSE).
-    _extra: Mapping[str, Any] = (
-        extra_attrs if isinstance(extra_attrs, Mapping) else {}
-    )
+    _extra: Mapping[str, Any] = extra_attrs if isinstance(extra_attrs, Mapping) else {}
     _model_class = str(_extra.get("model_class") or "").strip()
-    _framework   = str(_extra.get("framework")   or "").strip()
-    _precision   = str(getattr(shared_state, "precision", "") or "").strip()
-    fp: Mapping[str, Any] = (
-        stack_fingerprint if isinstance(stack_fingerprint, Mapping) else {}
-    )
+    _framework = str(_extra.get("framework") or "").strip()
+    _precision = str(getattr(shared_state, "precision", "") or "").strip()
+    fp: Mapping[str, Any] = stack_fingerprint if isinstance(stack_fingerprint, Mapping) else {}
     # framework_version: SharedState > stack_fingerprint > importlib auto-detect.
     _fw_version = str(getattr(shared_state, "framework_version", "") or "").strip()
     if not _fw_version and _framework in ("sglang", "vllm"):
@@ -337,11 +334,11 @@ def run_t0_anchor(
         if v:
             _extras[src_key] = v
     for src_attr, dst_key in (
-        ("tp",            "tp"),
-        ("ep",            "ep"),
-        ("conc",          "conc"),
-        ("isl",           "isl"),
-        ("osl",           "osl"),
+        ("tp", "tp"),
+        ("ep", "ep"),
+        ("conc", "conc"),
+        ("isl", "isl"),
+        ("osl", "osl"),
         ("max_model_len", "max_model_len"),
     ):
         v = getattr(shared_state, src_attr, None)
@@ -365,7 +362,8 @@ def run_t0_anchor(
 
     # Build canonical_id from the resolved 5-tuple (precision is a strong identity dim).
     cid = recipe_canonical_id(
-        model=workload, hardware=hw,
+        model=workload,
+        hardware=hw,
         framework=_framework or "",
         framework_version=_fw_version or "",
         precision=_precision or "",
@@ -387,16 +385,34 @@ def run_t0_anchor(
     # Merge prior extras; new values win.
     merged_extras: dict[str, Any] = {}
     prior_extras = {
-        k: v for k, v in (live or {}).items()
-        if k not in {
-            "canonical_id", "version", "created_at", "updated_at",
-            "model", "hardware", "framework", "framework_version",
+        k: v
+        for k, v in (live or {}).items()
+        if k
+        not in {
+            "canonical_id",
+            "version",
+            "created_at",
+            "updated_at",
+            "model",
+            "hardware",
+            "framework",
+            "framework_version",
             "precision",
-            "best_config", "best_throughput",
-            "what_worked", "what_failed", "remaining_gaps",
-            "prs_tested", "pitfalls", "lessons",
-            "last_profiled", "stack_fingerprint", "sessions",
-            "authority", "confidence", "evidence_refs", "provenance",
+            "best_config",
+            "best_throughput",
+            "what_worked",
+            "what_failed",
+            "remaining_gaps",
+            "prs_tested",
+            "pitfalls",
+            "lessons",
+            "last_profiled",
+            "stack_fingerprint",
+            "sessions",
+            "authority",
+            "confidence",
+            "evidence_refs",
+            "provenance",
         }
     }
     merged_extras.update(prior_extras)
@@ -413,8 +429,10 @@ def run_t0_anchor(
     try:
         kb.put_recipe(
             canonical_id=cid,
-            model=workload, hardware=hw,
-            framework=_framework or "", framework_version=_fw_version or "",
+            model=workload,
+            hardware=hw,
+            framework=_framework or "",
+            framework_version=_fw_version or "",
             precision=_precision or "",
             best_config=dict(live.get("best_config") or {}),
             best_throughput=float(live.get("best_throughput") or 0.0),
@@ -429,12 +447,12 @@ def run_t0_anchor(
             sessions=list(live.get("sessions") or []),
             extras=merged_extras,
             provenance={
-                "source":       "hyperloom-inference-optimizer",
-                "generator":    "t0_anchor",
+                "source": "hyperloom-inference-optimizer",
+                "generator": "t0_anchor",
                 "generated_at": datetime.now(timezone.utc).isoformat(
                     timespec="microseconds",
                 ),
-                "details":      {"sid": sid},
+                "details": {"sid": sid},
             },
         )
     except Exception:  # noqa: BLE001 — defensive
@@ -469,7 +487,8 @@ def run_t0_anchor(
             warm_conf = 0.0
     # Keep warm.json envelope shape stable for existing readers (kb_explorer, breakdown); new readers prefer shared_state.warm_start_recipe.
     warm_text = json.dumps(
-        {"points": [warm_point] if warm_point else []}, sort_keys=True,
+        {"points": [warm_point] if warm_point else []},
+        sort_keys=True,
     )
     try:
         warm_path = sd / "runtime" / "cortex" / ".kb_warm.json"
@@ -477,18 +496,24 @@ def run_t0_anchor(
         warm_path.write_text(
             json.dumps(
                 {
-                    "workload": workload, "hw": hw,
-                    "tier": warm_tier, "confidence": warm_conf,
-                    "recipe": warm_point, "raw": warm_text,
+                    "workload": workload,
+                    "hw": hw,
+                    "tier": warm_tier,
+                    "confidence": warm_conf,
+                    "recipe": warm_point,
+                    "raw": warm_text,
                 },
                 indent=2,
             ),
             encoding="utf-8",
         )
         shared_state.warm_start_recipe = {
-            "workload": workload, "hw": hw,
-            "tier": warm_tier, "confidence": warm_conf,
-            "recipe": warm_point, "raw": warm_text,
+            "workload": workload,
+            "hw": hw,
+            "tier": warm_tier,
+            "confidence": warm_conf,
+            "recipe": warm_point,
+            "raw": warm_text,
         }
     except OSError as exc:
         log.warning("warm_start snapshot write failed: %s", exc)
@@ -515,17 +540,17 @@ def run_t0_anchor(
 
     # warm_start_pitfalls / warm_start_lessons are embedded recipe-row fields (exact-5-tuple-only); read from warm_point.
     pitfalls_list: list[dict[str, Any]] = list(warm_point.get("pitfalls") or [])
-    lessons_list:  list[dict[str, Any]] = list(warm_point.get("lessons") or [])
+    lessons_list: list[dict[str, Any]] = list(warm_point.get("lessons") or [])
     try:
         pit_path = sd / "runtime" / "cortex" / ".kb_pitfalls.json"
         pit_path.parent.mkdir(parents=True, exist_ok=True)
         pit_path.write_text(
             json.dumps(
                 {
-                    "workload":  workload,
-                    "hw":        hw,
+                    "workload": workload,
+                    "hw": hw,
                     "framework": _framework or "",
-                    "pitfalls":  pitfalls_list,
+                    "pitfalls": pitfalls_list,
                 },
                 indent=2,
             ),
@@ -541,10 +566,10 @@ def run_t0_anchor(
         les_path.write_text(
             json.dumps(
                 {
-                    "workload":  workload,
-                    "hw":        hw,
+                    "workload": workload,
+                    "hw": hw,
                     "framework": _framework or "",
-                    "lessons":   lessons_list,
+                    "lessons": lessons_list,
                 },
                 indent=2,
             ),
@@ -561,7 +586,8 @@ def run_t0_anchor(
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
                 "Cortex T0: SharedState.save failed (sid=%s, workload=%s)",
-                sid, workload,
+                sid,
+                workload,
             )
 
     # warm_present = usable record (tier != "miss" and confidence > 0).
@@ -569,11 +595,7 @@ def run_t0_anchor(
     pitfalls_present = bool(pitfalls_list)
     lessons_present = bool(lessons_list)
     if began_now:
-        warm_label = (
-            f"hit:{warm_tier}@{warm_conf:.2f}" if warm_present else
-            "seed_only" if warm_point else
-            "empty"
-        )
+        warm_label = f"hit:{warm_tier}@{warm_conf:.2f}" if warm_present else "seed_only" if warm_point else "empty"
         emit(
             f"Recipe KB        : session_id={sid} "
             f"workload={cid} "

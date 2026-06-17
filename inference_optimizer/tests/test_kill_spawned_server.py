@@ -56,13 +56,11 @@ def test_kill_my_spawned_server_refuses_own_session_group(caplog):
         with caplog.at_level("ERROR"):
             kill_my_spawned_server(proc, grace_seconds=0.5)
         assert proc.poll() is None, (
-            "helper killed a process in the parent's own session — that "
-            "would take down the Coordinator in production"
+            "helper killed a process in the parent's own session — that would take down the Coordinator in production"
         )
-        assert any(
-            "refusing to killpg own session" in rec.message
-            for rec in caplog.records
-        ), "expected an ERROR log line about same-pgid refusal"
+        assert any("refusing to killpg own session" in rec.message for rec in caplog.records), (
+            "expected an ERROR log line about same-pgid refusal"
+        )
     finally:
         proc.kill()
         proc.wait(timeout=5)
@@ -71,11 +69,11 @@ def test_kill_my_spawned_server_refuses_own_session_group(caplog):
 def test_kill_my_spawned_server_sigterm_then_sigkill_for_ignorer():
     """A child that traps SIGTERM is still reaped via SIGKILL after the grace window."""
     proc = subprocess.Popen(
-        [sys.executable, "-c", (
-            "import signal, time;\n"
-            "signal.signal(signal.SIGTERM, signal.SIG_IGN);\n"
-            "time.sleep(60)\n"
-        )],
+        [
+            sys.executable,
+            "-c",
+            ("import signal, time;\nsignal.signal(signal.SIGTERM, signal.SIG_IGN);\ntime.sleep(60)\n"),
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         **new_session_kwargs(),
@@ -92,17 +90,22 @@ def test_kill_my_spawned_server_sigterm_then_sigkill_for_ignorer():
 def test_kill_my_spawned_server_reaps_grandchildren():
     """bugs.md §B: a child that spawns a grandchild leaves no surviving descendant after the helper returns."""
     proc = subprocess.Popen(
-        [sys.executable, "-c", (
-            "import os, sys, time;\n"
-            "# Write our pgid + grandchild PID to disk for the test to read.\n"
-            "pid = os.fork()\n"
-            "if pid == 0:\n"
-            "    # Grandchild: pretend to be a long-running server.\n"
-            "    time.sleep(120)\n"
-            "    sys.exit(0)\n"
-            "open(sys.argv[1], 'w').write(str(pid))\n"
-            "time.sleep(120)\n"
-        ), "/tmp/hyperloom_test_grandchild.pid"],
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os, sys, time;\n"
+                "# Write our pgid + grandchild PID to disk for the test to read.\n"
+                "pid = os.fork()\n"
+                "if pid == 0:\n"
+                "    # Grandchild: pretend to be a long-running server.\n"
+                "    time.sleep(120)\n"
+                "    sys.exit(0)\n"
+                "open(sys.argv[1], 'w').write(str(pid))\n"
+                "time.sleep(120)\n"
+            ),
+            "/tmp/hyperloom_test_grandchild.pid",
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         **new_session_kwargs(),
@@ -258,11 +261,7 @@ def test_run_with_session_kill_soft_deadline_does_not_fire_for_quick_child():
 
 def test_run_with_session_kill_streams_child_output_to_parent(capsys):
     """Captured child output is also mirrored immediately to parent streams."""
-    code = (
-        "import sys\n"
-        "print('child-out', flush=True)\n"
-        "print('child-err', file=sys.stderr, flush=True)\n"
-    )
+    code = "import sys\nprint('child-out', flush=True)\nprint('child-err', file=sys.stderr, flush=True)\n"
     cp = run_with_session_kill([sys.executable, "-c", code], timeout=10)
 
     captured = capsys.readouterr()
@@ -292,8 +291,7 @@ def test_server_log_shows_death_detects_marker(tmp_path):
     log_path.write_text("INFO loading shards 50%\nINFO graph capture\n")
     assert _server_log_shows_death(str(log_path)) is False  # healthy → alive
     log_path.write_text(
-        "ERROR core.py Exception: WorkerProc initialization failed due to an "
-        "exception in a background process.\n"
+        "ERROR core.py Exception: WorkerProc initialization failed due to an exception in a background process.\n"
     )
     assert _server_log_shows_death(str(log_path)) is True
 

@@ -66,9 +66,15 @@ def _resolve_geak_config() -> Path:
     return path
 
 
-def _build_cmd(prompt_file: Path, output_dir: Path, kernel_path: str, gpu_ids: str,
-               cost_limit: float | None, kernel_repo: str = "",
-               test_command: str = "") -> list[str]:
+def _build_cmd(
+    prompt_file: Path,
+    output_dir: Path,
+    kernel_path: str,
+    gpu_ids: str,
+    cost_limit: float | None,
+    kernel_repo: str = "",
+    test_command: str = "",
+) -> list[str]:
     """Assemble the GEAK CLI argument vector.
 
     Args:
@@ -88,8 +94,7 @@ def _build_cmd(prompt_file: Path, output_dir: Path, kernel_path: str, gpu_ids: s
     Returns:
         list[str]: The full command vector ready for ``subprocess.run``.
     """
-    cmd = [_find_geak_bin(), "-t", str(prompt_file), "--yolo",
-           "--output", str(output_dir), "--gpu-ids", gpu_ids]
+    cmd = [_find_geak_bin(), "-t", str(prompt_file), "--yolo", "--output", str(output_dir), "--gpu-ids", gpu_ids]
     cmd.extend(["--config", str(_resolve_geak_config())])
     if kernel_path:
         cmd.extend(["--kernel-path", kernel_path])
@@ -103,9 +108,16 @@ def _build_cmd(prompt_file: Path, output_dir: Path, kernel_path: str, gpu_ids: s
     return cmd
 
 
-def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
-                cost_limit: float | None, num_gpus: int, timeout_s: int,
-                kernel_repo: str = "", test_command: str = "") -> dict:
+def run_via_ray(
+    prompt_file: Path,
+    output_dir: Path,
+    kernel_path: str,
+    cost_limit: float | None,
+    num_gpus: int,
+    timeout_s: int,
+    kernel_repo: str = "",
+    test_command: str = "",
+) -> dict:
     """Run a GEAK submission inside a Ray GPU task.
 
     Initializes Ray (quietly), then dispatches a ``num_gpus``-pinned
@@ -130,12 +142,19 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
             ``gpu_ids``, ``elapsed_s``, and ``cmd``.
     """
     import ray
-    runtime_env = quiet_ray_init(
-        num_gpus=num_gpus, log_path=output_dir / "ray_lifecycle.log")
+
+    runtime_env = quiet_ray_init(num_gpus=num_gpus, log_path=output_dir / "ray_lifecycle.log")
 
     @ray.remote(num_gpus=num_gpus)
-    def _task(prompt_file_str: str, output_dir_str: str, kernel_path: str,
-              cost_limit, timeout_s: int, kernel_repo: str, test_command: str) -> dict:
+    def _task(
+        prompt_file_str: str,
+        output_dir_str: str,
+        kernel_path: str,
+        cost_limit,
+        timeout_s: int,
+        kernel_repo: str,
+        test_command: str,
+    ) -> dict:
         """Run one GEAK CLI attempt inside a Ray worker.
 
         Self-contained because Ray workers do not inherit the driver's
@@ -155,9 +174,13 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
             ``stderr_tail``, ``gpu_ids``, ``elapsed_s``, and ``cmd``.
         """
         # Self-contained: Ray workers lack the driver's sys.path.
-        import os as _os, shutil as _shutil, subprocess as _sp, time as _t
+        import os as _os
+        import shutil as _shutil
+        import subprocess as _sp
+        import time as _t
         import re as _re
         from pathlib import Path as _Path
+
         # r17/r20: map ROCR physical ids to logical 0..N-1 for HIP/CUDA so set_device works.
         rocr_raw = _os.environ.get("ROCR_VISIBLE_DEVICES", "")
         if rocr_raw:
@@ -173,15 +196,16 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
             gpu_ids = cuda_vis or "0"
         # Per-attempt compile caches so a co-running OOB ladder can't clobber
         # this run's aiter/triton/inductor artifacts (see isolated_compile_cache_env).
-        for _var, _sub in (("TRITON_CACHE_DIR", "triton"),
-                           ("AITER_ROOT_DIR", "aiter"),
-                           ("TORCHINDUCTOR_CACHE_DIR", "inductor")):
+        for _var, _sub in (
+            ("TRITON_CACHE_DIR", "triton"),
+            ("AITER_ROOT_DIR", "aiter"),
+            ("TORCHINDUCTOR_CACHE_DIR", "inductor"),
+        ):
             _cdir = _os.path.join(output_dir_str, ".cache", _sub)
             _os.makedirs(_cdir, exist_ok=True)
             _os.environ[_var] = _cdir
         geak_bin = _shutil.which("geak") or _shutil.which("mini") or "geak"
-        cmd = [geak_bin, "-t", prompt_file_str, "--yolo",
-               "--output", output_dir_str, "--gpu-ids", gpu_ids]
+        cmd = [geak_bin, "-t", prompt_file_str, "--yolo", "--output", output_dir_str, "--gpu-ids", gpu_ids]
         geak_config = _os.environ.get("GEAK_CONFIG", "").strip()
         if not geak_config:
             return {
@@ -253,16 +277,27 @@ def run_via_ray(prompt_file: Path, output_dir: Path, kernel_path: str,
             }
 
     ref = _task.options(num_gpus=num_gpus, runtime_env=runtime_env).remote(
-        str(prompt_file), str(output_dir), kernel_path, cost_limit, timeout_s,
-        kernel_repo, test_command,
+        str(prompt_file),
+        str(output_dir),
+        kernel_path,
+        cost_limit,
+        timeout_s,
+        kernel_repo,
+        test_command,
     )
     result = ray.get(ref)
     return result
 
 
-def run_via_cli(prompt_file: Path, output_dir: Path, kernel_path: str,
-                cost_limit: float | None, timeout_s: int,
-                kernel_repo: str = "", test_command: str = "") -> dict:
+def run_via_cli(
+    prompt_file: Path,
+    output_dir: Path,
+    kernel_path: str,
+    cost_limit: float | None,
+    timeout_s: int,
+    kernel_repo: str = "",
+    test_command: str = "",
+) -> dict:
     """Run one GEAK CLI attempt in a subprocess (non-Ray path).
 
     Builds a child environment with ROCR→logical GPU remapping and per-attempt
@@ -300,10 +335,16 @@ def run_via_cli(prompt_file: Path, output_dir: Path, kernel_path: str,
     child_env = isolated_compile_cache_env(output_dir, base_env=child_env)
     started = time.time()
     try:
-        cmd = _build_cmd(prompt_file, output_dir, kernel_path, gpu_ids, cost_limit,
-                         kernel_repo=kernel_repo, test_command=test_command)
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout_s, env=child_env)
+        cmd = _build_cmd(
+            prompt_file,
+            output_dir,
+            kernel_path,
+            gpu_ids,
+            cost_limit,
+            kernel_repo=kernel_repo,
+            test_command=test_command,
+        )
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=child_env)
         return {
             "returncode": proc.returncode,
             "stdout_tail": (proc.stdout or "")[-4000:],
@@ -332,10 +373,17 @@ def run_via_cli(prompt_file: Path, output_dir: Path, kernel_path: str,
         }
 
 
-def submit(prompt_file: Path, output_dir: Path, kernel_path: str = "",
-           cost_limit: float | None = None, timeout_s: int = 1800,
-           num_gpus: int = 1, prefer_ray: bool = True,
-           kernel_repo: str = "", test_command: str = "") -> dict:
+def submit(
+    prompt_file: Path,
+    output_dir: Path,
+    kernel_path: str = "",
+    cost_limit: float | None = None,
+    timeout_s: int = 1800,
+    num_gpus: int = 1,
+    prefer_ray: bool = True,
+    kernel_repo: str = "",
+    test_command: str = "",
+) -> dict:
     """Submit a GEAK run, preferring Ray with a CLI fallback.
 
     Ensures the output directory exists, then (when ``prefer_ray``)
@@ -371,18 +419,31 @@ def submit(prompt_file: Path, output_dir: Path, kernel_path: str = "",
         ssh_placement_active = lambda: False  # noqa: E731
     if ssh_placement_active():
         return run_geak_over_ssh(
-            prompt_file, output_dir, kernel_path, cost_limit, num_gpus,
-            timeout_s, kernel_repo=kernel_repo, test_command=test_command,
+            prompt_file,
+            output_dir,
+            kernel_path,
+            cost_limit,
+            num_gpus,
+            timeout_s,
+            kernel_repo=kernel_repo,
+            test_command=test_command,
         )
     if prefer_ray:
         try:
             import ray  # noqa: F401
+
             # ensure_ray_cluster starts a fresh head if `ray status` fails (no-op when healthy).
-            ensure_ray_cluster(num_gpus=num_gpus,
-                               log_path=output_dir / "ray_lifecycle.log")
-            return run_via_ray(prompt_file, output_dir, kernel_path, cost_limit,
-                               num_gpus, timeout_s, kernel_repo=kernel_repo,
-                               test_command=test_command)
+            ensure_ray_cluster(num_gpus=num_gpus, log_path=output_dir / "ray_lifecycle.log")
+            return run_via_ray(
+                prompt_file,
+                output_dir,
+                kernel_path,
+                cost_limit,
+                num_gpus,
+                timeout_s,
+                kernel_repo=kernel_repo,
+                test_command=test_command,
+            )
         except Exception as exc:
             return {
                 "returncode": 1,
@@ -396,8 +457,9 @@ def submit(prompt_file: Path, output_dir: Path, kernel_path: str = "",
                 "elapsed_s": 0.0,
                 "cmd": [],
             }
-    return run_via_cli(prompt_file, output_dir, kernel_path, cost_limit, timeout_s,
-                       kernel_repo=kernel_repo, test_command=test_command)
+    return run_via_cli(
+        prompt_file, output_dir, kernel_path, cost_limit, timeout_s, kernel_repo=kernel_repo, test_command=test_command
+    )
 
 
 def main() -> int:

@@ -27,16 +27,18 @@ from framework_agent.models import (
 
 def _req_for_gate(threshold_ratio: float = 1.05, max_drop: float = 0.05) -> ExploreRequest:
     """Build a minimal request usable by _winner_decision tests."""
-    return ExploreRequest.from_dict({
-        "framework": "sglang",
-        "repo_url": "https://github.com/x/y.git",
-        "work_dir": "/tmp/x",
-        "baseline": {"throughput": 100.0, "accuracy": 0.9, "completed": "1/1"},
-        "thresholds": {
-            "min_throughput_ratio": threshold_ratio,
-            "max_accuracy_drop": max_drop,
-        },
-    })
+    return ExploreRequest.from_dict(
+        {
+            "framework": "sglang",
+            "repo_url": "https://github.com/x/y.git",
+            "work_dir": "/tmp/x",
+            "baseline": {"throughput": 100.0, "accuracy": 0.9, "completed": "1/1"},
+            "thresholds": {
+                "min_throughput_ratio": threshold_ratio,
+                "max_accuracy_drop": max_drop,
+            },
+        }
+    )
 
 
 def test_winner_decision_pass() -> None:
@@ -113,7 +115,9 @@ def test_passes_filter_path_filter_needs_changed_files() -> None:
 def test_passes_filter_include_paths_hit() -> None:
     """include_paths passes when any changed_file matches a prefix."""
     cand = Candidate(
-        ref="PR:1", repo="r", source="x",
+        ref="PR:1",
+        repo="r",
+        source="x",
         changed_files=("python/sglang/foo.py", "docs/x.md"),
     )
     f = PrFilter.from_dict({"include_paths": ["python/"]})
@@ -140,15 +144,17 @@ def test_metric_float_returns_first_numeric_key() -> None:
 def test_explore_plan_writes_summary(monkeypatch, tmp_path: Path) -> None:
     """Plan mode returns mode=plan and never invokes shell commands."""
     work_dir = tmp_path / "work"
-    req = ExploreRequest.from_dict({
-        "framework": "sglang",
-        "repo_url": "https://github.com/sgl-project/sglang.git",
-        "work_dir": str(work_dir),
-        "baseline": {"throughput": 1.0, "accuracy": 0.9, "completed": "1/1"},
-        "candidate_refs": ["main"],
-        "search_perf_prs": False,
-        "prepare_candidate_env": False,
-    })
+    req = ExploreRequest.from_dict(
+        {
+            "framework": "sglang",
+            "repo_url": "https://github.com/sgl-project/sglang.git",
+            "work_dir": str(work_dir),
+            "baseline": {"throughput": 1.0, "accuracy": 0.9, "completed": "1/1"},
+            "candidate_refs": ["main"],
+            "search_perf_prs": False,
+            "prepare_candidate_env": False,
+        }
+    )
 
     def fake_enum(r):
         return [Candidate(ref="main", repo=r.repo_url, source="explicit")], []
@@ -180,25 +186,27 @@ def _request(
     min_throughput_ratio: float = 1.05,
 ) -> ExploreRequest:
     """Build a minimal request that exercises only the explore() control flow."""
-    return ExploreRequest.from_dict({
-        "framework": "sglang",
-        "repo_url": "https://github.com/x/y.git",
-        "work_dir": str(work_dir),
-        "baseline": {"throughput": 100.0, "accuracy": 0.9, "completed": "1/1"},
-        "thresholds": {
-            "min_throughput_ratio": min_throughput_ratio,
-            "max_accuracy_drop": 0.05,
-        },
-        "candidate_refs": ["main"],
-        "prepare_candidate_env": False,
-        "commands": {
-            "build": {"command": "true", "timeout_sec": 5, "required": True},
-        },
-        "ranking_mode": ranking_mode,
-        "keep_winner_only": keep_winner_only,
-        "build_concurrency": build_concurrency,
-        "disk_min_free_gb": disk_min_free_gb,
-    })
+    return ExploreRequest.from_dict(
+        {
+            "framework": "sglang",
+            "repo_url": "https://github.com/x/y.git",
+            "work_dir": str(work_dir),
+            "baseline": {"throughput": 100.0, "accuracy": 0.9, "completed": "1/1"},
+            "thresholds": {
+                "min_throughput_ratio": min_throughput_ratio,
+                "max_accuracy_drop": 0.05,
+            },
+            "candidate_refs": ["main"],
+            "prepare_candidate_env": False,
+            "commands": {
+                "build": {"command": "true", "timeout_sec": 5, "required": True},
+            },
+            "ranking_mode": ranking_mode,
+            "keep_winner_only": keep_winner_only,
+            "build_concurrency": build_concurrency,
+            "disk_min_free_gb": disk_min_free_gb,
+        }
+    )
 
 
 def _stub_explore(
@@ -209,10 +217,7 @@ def _stub_explore(
     n_candidates: int = 3,
 ) -> list[Candidate]:
     """Wire up workspace + commands + metric stubs; ``metrics_table`` maps candidate.ref to (throughput, accuracy, completed)."""
-    candidates = [
-        Candidate(ref=f"PR:{i}", repo="r", source="explicit")
-        for i in range(1, n_candidates + 1)
-    ]
+    candidates = [Candidate(ref=f"PR:{i}", repo="r", source="explicit") for i in range(1, n_candidates + 1)]
 
     def fake_enumerate(_req: ExploreRequest) -> tuple[list[Candidate], list[Any]]:
         return list(candidates), []
@@ -250,9 +255,7 @@ def _stub_explore(
 # ranking_mode --------------------------------------------------------------
 
 
-def test_ranking_mode_runs_every_candidate(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_ranking_mode_runs_every_candidate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """ranking_mode=True does NOT short-circuit on first winner."""
     metrics = {
         "PR:1": (200.0, 0.9, "1/1"),
@@ -268,9 +271,7 @@ def test_ranking_mode_runs_every_candidate(
     assert summary["candidates"][2]["candidate"]["ref"] == "PR:1"
 
 
-def test_legacy_mode_short_circuits_on_first_winner(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_legacy_mode_short_circuits_on_first_winner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """ranking_mode=False (default) stops after the first winner."""
     metrics = {
         "PR:1": (200.0, 0.9, "1/1"),
@@ -284,9 +285,7 @@ def test_legacy_mode_short_circuits_on_first_winner(
     assert summary["winner_ref"] == "PR:1"
 
 
-def test_ranking_mode_failed_candidates_sort_to_tail(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_ranking_mode_failed_candidates_sort_to_tail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A failed-bench candidate scores 0 and ranks below survivors."""
     metrics = {
         "PR:1": (50.0, 0.9, "1/1"),
@@ -304,13 +303,9 @@ def test_ranking_mode_failed_candidates_sort_to_tail(
 # build_concurrency --------------------------------------------------------
 
 
-def test_build_concurrency_runs_async_fanout(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_build_concurrency_runs_async_fanout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """ranking_mode=True + build_concurrency>1 takes the asyncio.gather path."""
-    metrics = {
-        f"PR:{i}": (100.0 + i, 0.9, "1/1") for i in range(1, 5)
-    }
+    metrics = {f"PR:{i}": (100.0 + i, 0.9, "1/1") for i in range(1, 5)}
     _stub_explore(monkeypatch, tmp_path, metrics_table=metrics, n_candidates=4)
     req = _request(tmp_path, ranking_mode=True, build_concurrency=3)
     summary = ex.explore(req, execute=True)
@@ -321,9 +316,7 @@ def test_build_concurrency_runs_async_fanout(
 # keep_winner_only ---------------------------------------------------------
 
 
-def test_keep_winner_only_removes_losers(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_keep_winner_only_removes_losers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Loser worktree+venv removed; winner kept; audit kept everywhere."""
     metrics = {
         "PR:1": (60.0, 0.9, "1/1"),
@@ -347,9 +340,7 @@ def test_keep_winner_only_removes_losers(
         assert Path(cand["candidate_dir"]).exists()
 
 
-def test_keep_winner_only_off_keeps_everything(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_keep_winner_only_off_keeps_everything(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Default keep_winner_only=False preserves every workspace (legacy)."""
     metrics = {
         "PR:1": (60.0, 0.9, "1/1"),
@@ -366,9 +357,7 @@ def test_keep_winner_only_off_keeps_everything(
 # disk_preflight integration -----------------------------------------------
 
 
-def test_disk_preflight_skipped_when_threshold_zero(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_disk_preflight_skipped_when_threshold_zero(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """disk_min_free_gb=0 bypasses the preflight even in execute mode."""
     called: dict[str, bool] = {"ran": False}
 
@@ -383,9 +372,7 @@ def test_disk_preflight_skipped_when_threshold_zero(
     assert called["ran"] is False
 
 
-def test_disk_preflight_runs_when_threshold_set(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_disk_preflight_runs_when_threshold_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A non-zero disk_min_free_gb triggers preflight in execute mode."""
     called: dict[str, Any] = {"args": None}
 

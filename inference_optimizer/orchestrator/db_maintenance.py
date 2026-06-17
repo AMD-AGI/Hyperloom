@@ -158,11 +158,14 @@ async def run_db_retention(
         A :class:`RetentionResult` with the per-table deletion counts.
     """
     events_deleted = await prune_events(
-        db, cursors, keep_recent=events_keep_recent,
+        db,
+        cursors,
+        keep_recent=events_keep_recent,
     )
     tasks_deleted = await prune_tasks(db, keep_done=tasks_keep_done)
     return RetentionResult(
-        events_deleted=events_deleted, tasks_deleted=tasks_deleted,
+        events_deleted=events_deleted,
+        tasks_deleted=tasks_deleted,
     )
 
 

@@ -19,124 +19,84 @@ ALLOWED_FILES: dict[str, str] = {
     # Compat helper modules (the only canonical reader of the legacy
     # key). Mentions are mechanical: constants, docstrings, error
     # messages naming both keys.
-    "inference_optimizer/compat/__init__.py":
-        "compat package docstring naming the rename",
-    "inference_optimizer/compat/payload_aliases.py":
-        "compat helper for the legacy alias",
-
+    "inference_optimizer/compat/__init__.py": "compat package docstring naming the rename",
+    "inference_optimizer/compat/payload_aliases.py": "compat helper for the legacy alias",
     # Sub-agent shims — duplicated by design (sub-agents are
     # standalone packages, see framework_agent.repo_map).
-    "kernel-agent/tools/_payload_aliases.py":
-        "kernel-agent payload-aliases shim",
-    "kernel-agent/tools/kernel_optimization.py":
-        "kernel-agent reader site falls back to candidate_extra_sglang_args for legacy envelopes",
-    "robustness-agent/src/robustness_agent/_payload_aliases.py":
-        "robustness-agent payload-aliases shim",
-
+    "kernel-agent/tools/_payload_aliases.py": "kernel-agent payload-aliases shim",
+    "kernel-agent/tools/kernel_optimization.py": "kernel-agent reader site falls back to candidate_extra_sglang_args for legacy envelopes",
+    "robustness-agent/src/robustness_agent/_payload_aliases.py": "robustness-agent payload-aliases shim",
     # Back-compat injection points in production code (renamed kwarg
     # alias on GridVariant, walk-and-rewrite on SharedState loader).
-    "inference_optimizer/actions/_meta/replay_warm_recipe.yaml":
-        "warm-replay internal action schema mirrors RecipeKB best_config "
-        "field names",
-    "inference_optimizer/orchestrator/action_executors/_grid_runner.py":
-        "GridVariant(extra_sglang_args=...) back-compat kwarg",
-    "inference_optimizer/orchestrator/shared_state.py":
-        "_migrate_legacy_extra_sglang_args_keys walker + state.json transform",
-    "inference_optimizer/orchestrator/action_executors/_explore_roofline_filter.py":
-        "roofline filter reads canonical extra_server_args with a "
-        "read-only legacy extra_sglang_args fallback for pre-rename "
-        "variant objects",
-    "inference_optimizer/orchestrator/research_hints.py":
-        "priors-match scorer builds a token blob from variant fields and "
-        "reads the legacy extra_sglang_args key alongside the canonical "
-        "extra_server_args so pre-rename variant dicts still match",
-    "inference_optimizer/orchestrator/optimization_journal.py":
-        "journal classification reads existing stack/variant args fields",
+    "inference_optimizer/actions/_meta/replay_warm_recipe.yaml": "warm-replay internal action schema mirrors RecipeKB best_config "
+    "field names",
+    "inference_optimizer/orchestrator/action_executors/_grid_runner.py": "GridVariant(extra_sglang_args=...) back-compat kwarg",
+    "inference_optimizer/orchestrator/shared_state.py": "_migrate_legacy_extra_sglang_args_keys walker + state.json transform",
+    "inference_optimizer/orchestrator/action_executors/_explore_roofline_filter.py": "roofline filter reads canonical extra_server_args with a "
+    "read-only legacy extra_sglang_args fallback for pre-rename "
+    "variant objects",
+    "inference_optimizer/orchestrator/research_hints.py": "priors-match scorer builds a token blob from variant fields and "
+    "reads the legacy extra_sglang_args key alongside the canonical "
+    "extra_server_args so pre-rename variant dicts still match",
+    "inference_optimizer/orchestrator/optimization_journal.py": "journal classification reads existing stack/variant args fields",
     # legacy v0.6 breakdown reader walks raw optimization_stack which can
     # carry the pre-rename candidate_extra_sglang_args field; the emitted
     # key is the canonical extra_server_args.
-    "inference_optimizer/breakdown/legacy_collectors.py":
-        "legacy v0.6 reader: raw optimization_stack carries pre-rename "
-        "candidate_extra_sglang_args (breakdown loads state without the "
-        "SharedState key migration)",
+    "inference_optimizer/breakdown/legacy_collectors.py": "legacy v0.6 reader: raw optimization_stack carries pre-rename "
+    "candidate_extra_sglang_args (breakdown loads state without the "
+    "SharedState key migration)",
     # CI transform reads legacy-keyed session_breakdown.json artefacts.
-    "ci/transform_to_session_summary_v2.py":
-        "legacy session-breakdown JSON reader (operator-side back-compat)",
-    "ci/test_ci_transform_v2.py":
-        "unit tests assert the ci legacy reader migrates extra_sglang_args "
-        "-> extra_server_args",
-
+    "ci/transform_to_session_summary_v2.py": "legacy session-breakdown JSON reader (operator-side back-compat)",
+    "ci/test_ci_transform_v2.py": "unit tests assert the ci legacy reader migrates extra_sglang_args "
+    "-> extra_server_args",
     # Prompt / orientation text that names both keys explicitly so the
     # LLM and any human reader of the prompt knows the alias exists
     # for one release.
     # Pytest marker registration mentions the legacy name in the
     # marker's description.
-    "pyproject.toml":
-        "pytest marker description naming the legacy alias",
-
+    "pyproject.toml": "pytest marker description naming the legacy alias",
     # Test files: compat helper coverage + back-compat regression
     # tests + this guard itself + the per-sub-agent shim tests.
-    "inference_optimizer/tests/test_payload_aliases.py":
-        "compat helper test surface",
-    "inference_optimizer/tests/test_back_compat_legacy_field_name.py":
-        "back-compat regression tests",
-    "inference_optimizer/tests/test_grid_runner.py":
-        "GridVariant back-compat tests exercise extra_sglang_args kwarg",
-    "inference_optimizer/tests/test_coordinator_kb_writes.py":
-        "recipe write-back regression test asserts best_config / "
-        "what_worked emit the KB-legacy extra_sglang_args field read "
-        "from canonical state",
-    "inference_optimizer/tests/test_no_legacy_writer_sites.py":
-        "this guard's allowlist + docstring",
-    "inference_optimizer/tests/test_optimization_journal.py":
-        "journal tests cover stack entries carrying legacy args field",
-    "inference_optimizer/tests/test_warm_replay.py":
-        "warm-replay tests mirror RecipeKB best_config field names",
-    "kernel-agent/tools/test_payload_aliases_shim.py":
-        "kernel-agent shim test surface",
-    "robustness-agent/tests/test_payload_aliases_shim.py":
-        "robustness-agent shim test surface",
-
+    "inference_optimizer/tests/test_payload_aliases.py": "compat helper test surface",
+    "inference_optimizer/tests/test_back_compat_legacy_field_name.py": "back-compat regression tests",
+    "inference_optimizer/tests/test_grid_runner.py": "GridVariant back-compat tests exercise extra_sglang_args kwarg",
+    "inference_optimizer/tests/test_coordinator_kb_writes.py": "recipe write-back regression test asserts best_config / "
+    "what_worked emit the KB-legacy extra_sglang_args field read "
+    "from canonical state",
+    "inference_optimizer/tests/test_no_legacy_writer_sites.py": "this guard's allowlist + docstring",
+    "inference_optimizer/tests/test_optimization_journal.py": "journal tests cover stack entries carrying legacy args field",
+    "inference_optimizer/tests/test_warm_replay.py": "warm-replay tests mirror RecipeKB best_config field names",
+    "kernel-agent/tools/test_payload_aliases_shim.py": "kernel-agent shim test surface",
+    "robustness-agent/tests/test_payload_aliases_shim.py": "robustness-agent shim test surface",
     # Readers that funnel external-envelope payloads through
     # ``read_extra_server_args`` mention the legacy key inline in the
     # surrounding code comment to document why the call goes through
     # the helper.
-    "inference_optimizer/orchestrator/coordinator.py":
-        "comments explain the read_extra_server_args call at the LLM "
-        "intent / sub-agent envelope read boundaries",
-    "inference_optimizer/orchestrator/coordinator_helpers.py":
-        "holds the extracted _merge_cumulative_extra_sglang_args helper "
-        "that merges the legacy KB best_config arg stacks",
-    "inference_optimizer/orchestrator/kernel_request_handlers.py":
-        "comments explain the read_extra_server_args call at the "
-        "integrate_patch sub-agent envelope read boundary",
-    "robustness-agent/tests/test_signals_repeated_payload.py":
-        "regression test that legacy + canonical envelopes hash to "
-        "the same fingerprint",
-
+    "inference_optimizer/orchestrator/coordinator.py": "comments explain the read_extra_server_args call at the LLM "
+    "intent / sub-agent envelope read boundaries",
+    "inference_optimizer/orchestrator/coordinator_helpers.py": "holds the extracted _merge_cumulative_extra_sglang_args helper "
+    "that merges the legacy KB best_config arg stacks",
+    "inference_optimizer/orchestrator/kernel_request_handlers.py": "comments explain the read_extra_server_args call at the "
+    "integrate_patch sub-agent envelope read boundary",
+    "robustness-agent/tests/test_signals_repeated_payload.py": "regression test that legacy + canonical envelopes hash to "
+    "the same fingerprint",
     # Regression tests parametrise the ``_load_materialized_workload_metadata``
     # reader over (sglang, vllm, atom) including stray-EXTRA_SGLANG_ARGS
     # cases for atom YAMLs, so the test source mentions the legacy name
     # by design.
-    "inference_optimizer/tests/test_kernel_request_handlers_units.py":
-        "test_server_args_read_from_per_framework_env_key + "
-        "test_atom_server_args_not_read_from_extra_sglang_args "
-        "parametrise the materialised metadata reader",
-
+    "inference_optimizer/tests/test_kernel_request_handlers_units.py": "test_server_args_read_from_per_framework_env_key + "
+    "test_atom_server_args_not_read_from_extra_sglang_args "
+    "parametrise the materialised metadata reader",
     # Watermark-refresh profile executor inherits current_best's launch
     # args through the canonical channel; the comment + params key name
     # the legacy alias for the downstream reader's back-compat path.
-    "inference_optimizer/orchestrator/action_executors/profile.py":
-        "watermark-refresh inheritance comments name the legacy "
-        "extra_sglang_args channel for the downstream reader",
-    "inference_optimizer/tests/test_profile_and_kernel_handlers.py":
-        "profile/kernel handler tests exercise the legacy "
-        "extra_sglang_args inheritance channel",
+    "inference_optimizer/orchestrator/action_executors/profile.py": "watermark-refresh inheritance comments name the legacy "
+    "extra_sglang_args channel for the downstream reader",
+    "inference_optimizer/tests/test_profile_and_kernel_handlers.py": "profile/kernel handler tests exercise the legacy "
+    "extra_sglang_args inheritance channel",
     # Back-compat regression for the cumulative-merge helper, which is
     # named after the legacy field it dedupes.
-    "inference_optimizer/tests/test_extra_sglang_args_merge.py":
-        "cumulative extra_sglang_args merge/dedupe back-compat tests",
-
+    "inference_optimizer/tests/test_extra_sglang_args_merge.py": "cumulative extra_sglang_args merge/dedupe back-compat tests",
 }
 
 
@@ -173,8 +133,16 @@ def _iter_repo_files() -> list[Path]:
         # Limit to text-shaped suffixes so we don't accidentally try to
         # read a binary fixture (none currently exist but be defensive).
         if path.suffix not in {
-            ".py", ".md", ".yaml", ".yml", ".toml", ".sh", ".txt",
-            ".json", ".cfg", ".ini",
+            ".py",
+            ".md",
+            ".yaml",
+            ".yml",
+            ".toml",
+            ".sh",
+            ".txt",
+            ".json",
+            ".cfg",
+            ".ini",
         }:
             continue
         out.append(path)
@@ -217,21 +185,14 @@ def test_allowlist_is_minimal():
     dead_entries = sorted(set(ALLOWED_FILES.keys()) - actual)
     assert not dead_entries, (
         "ALLOWED_FILES entries that no longer contain "
-        "'extra_sglang_args' (dead allowlist rows — remove them):\n  "
-        + "\n  ".join(dead_entries)
+        "'extra_sglang_args' (dead allowlist rows — remove them):\n  " + "\n  ".join(dead_entries)
     )
 
 
 def test_allowlist_paths_resolve():
     """Sanity: every allowlist key must point at an existing file."""
-    missing = [
-        p for p in ALLOWED_FILES
-        if not (_REPO_ROOT / p).exists()
-    ]
-    assert not missing, (
-        "ALLOWED_FILES entries pointing at non-existent paths:\n  "
-        + "\n  ".join(missing)
-    )
+    missing = [p for p in ALLOWED_FILES if not (_REPO_ROOT / p).exists()]
+    assert not missing, "ALLOWED_FILES entries pointing at non-existent paths:\n  " + "\n  ".join(missing)
 
 
 @pytest.mark.parametrize("path,_reason", sorted(ALLOWED_FILES.items()))

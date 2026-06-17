@@ -66,7 +66,9 @@ def _atomic_write_bytes(target: Path, data: bytes) -> None:
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_str = tempfile.mkstemp(
-        prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent),
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=str(target.parent),
     )
     tmp = Path(tmp_str)
     try:
@@ -130,9 +132,7 @@ def _apply_remote(
             compile_result = {"status": "ok"}
         except py_compile.PyCompileError as exc:
             shutil.copy2(backup_path, target)
-            raise ValueError(
-                f"py_compile failed on {target} (auto-reverted): {exc.msg}"
-            ) from exc
+            raise ValueError(f"py_compile failed on {target} (auto-reverted): {exc.msg}") from exc
 
     return {
         "host": host,
@@ -212,11 +212,17 @@ def _do_apply(args: argparse.Namespace) -> int:
     nodes = _alive_nodes()
     _log(f"apply: alive nodes={len(nodes)} target={args.target_path}")
     if not nodes:
-        sys.stdout.write(json.dumps({
-            "command": "apply",
-            "status": "failed",
-            "error": "no alive Ray nodes for fan-out",
-        }, indent=2) + "\n")
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "command": "apply",
+                    "status": "failed",
+                    "error": "no alive Ray nodes for fan-out",
+                },
+                indent=2,
+            )
+            + "\n"
+        )
         return 1
 
     ApplyActor = ray.remote(num_cpus=0, num_gpus=0)(_apply_remote)
@@ -225,10 +231,14 @@ def _do_apply(args: argparse.Namespace) -> int:
         node_id = node["NodeID"]
         ref = ApplyActor.options(
             scheduling_strategy=NodeAffinitySchedulingStrategy(
-                node_id=node_id, soft=False,
+                node_id=node_id,
+                soft=False,
             ),
         ).remote(
-            args.target_path, args.patch_b64, args.backup_dir, args.kernel_id,
+            args.target_path,
+            args.patch_b64,
+            args.backup_dir,
+            args.kernel_id,
         )
         refs.append((node_id[:16], ref))
 
@@ -240,8 +250,7 @@ def _do_apply(args: argparse.Namespace) -> int:
             per_node.append({"node_id": short_id, **res})
         except Exception as exc:  # noqa: BLE001
             _log(f"node {short_id}: apply FAILED: {type(exc).__name__}: {exc}")
-            failures.append({"node_id": short_id, "error": str(exc),
-                             "error_class": type(exc).__name__})
+            failures.append({"node_id": short_id, "error": str(exc), "error_class": type(exc).__name__})
 
     payload = {
         "command": "apply",
@@ -271,11 +280,17 @@ def _do_revert(args: argparse.Namespace) -> int:
     ray.init(ignore_reinit_error=True, log_to_driver=True)
     backup_map: dict[str, str] = json.loads(args.backup_map_json or "{}")
     if not backup_map:
-        sys.stdout.write(json.dumps({
-            "command": "revert",
-            "status": "failed",
-            "error": "empty backup_map_json (expected {hostname: backup_path})",
-        }, indent=2) + "\n")
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "command": "revert",
+                    "status": "failed",
+                    "error": "empty backup_map_json (expected {hostname: backup_path})",
+                },
+                indent=2,
+            )
+            + "\n"
+        )
         return 1
 
     nodes = _alive_nodes()
@@ -284,8 +299,7 @@ def _do_revert(args: argparse.Namespace) -> int:
         host = (n.get("NodeManagerHostname") or "").strip()
         if host:
             by_host[host] = n["NodeID"]
-    _log(f"revert: alive nodes={len(nodes)} target={args.target_path} "
-         f"backups={len(backup_map)}")
+    _log(f"revert: alive nodes={len(nodes)} target={args.target_path} backups={len(backup_map)}")
 
     RevertActor = ray.remote(num_cpus=0, num_gpus=0)(_revert_remote)
     refs = []
@@ -296,7 +310,8 @@ def _do_revert(args: argparse.Namespace) -> int:
             continue
         ref = RevertActor.options(
             scheduling_strategy=NodeAffinitySchedulingStrategy(
-                node_id=node_id, soft=False,
+                node_id=node_id,
+                soft=False,
             ),
         ).remote(args.target_path, backup_path)
         refs.append((host, ref))
@@ -309,8 +324,7 @@ def _do_revert(args: argparse.Namespace) -> int:
             per_node.append({"host": host, **res})
         except Exception as exc:  # noqa: BLE001
             _log(f"host {host}: revert FAILED: {type(exc).__name__}: {exc}")
-            failures.append({"host": host, "error": str(exc),
-                             "error_class": type(exc).__name__})
+            failures.append({"host": host, "error": str(exc), "error_class": type(exc).__name__})
 
     payload = {
         "command": "revert",
@@ -343,21 +357,19 @@ def main() -> int:
     sub = p.add_subparsers(dest="command", required=True)
 
     ap = sub.add_parser("apply", help="apply a patch to target_path on every pod")
-    ap.add_argument("--target-path", required=True,
-                    help="absolute file path on the pod (e.g. /sgl-workspace/aiter/aiter/ops/gemm.py)")
-    ap.add_argument("--patch-b64", required=True,
-                    help="base64-encoded new file contents")
-    ap.add_argument("--backup-dir", required=True,
-                    help="directory on each pod where the pre-patch original is saved")
-    ap.add_argument("--kernel-id", default="",
-                    help="optional id used to construct backup filename")
-    ap.add_argument("--timeout-sec", type=int, default=120,
-                    help="per-actor timeout (default 120s)")
+    ap.add_argument(
+        "--target-path",
+        required=True,
+        help="absolute file path on the pod (e.g. /sgl-workspace/aiter/aiter/ops/gemm.py)",
+    )
+    ap.add_argument("--patch-b64", required=True, help="base64-encoded new file contents")
+    ap.add_argument("--backup-dir", required=True, help="directory on each pod where the pre-patch original is saved")
+    ap.add_argument("--kernel-id", default="", help="optional id used to construct backup filename")
+    ap.add_argument("--timeout-sec", type=int, default=120, help="per-actor timeout (default 120s)")
 
     rp = sub.add_parser("revert", help="restore target_path from per-pod backup")
     rp.add_argument("--target-path", required=True)
-    rp.add_argument("--backup-map-json", required=True,
-                    help='JSON object mapping pod hostname -> backup file path')
+    rp.add_argument("--backup-map-json", required=True, help="JSON object mapping pod hostname -> backup file path")
     rp.add_argument("--timeout-sec", type=int, default=60)
 
     args = p.parse_args()

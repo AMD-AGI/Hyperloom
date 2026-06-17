@@ -147,20 +147,25 @@ _WINNERS_HISTORY_CAP = 200
 _EXPLORE_TESTED_CAP = 5000
 
 # Per-action audit trail kinds; kernel-owned actions excluded (dedicated structures).
-_AUDIT_ACTIONS: frozenset[str] = frozenset({
-    "baseline", "profile", "sweep", "explore",
-    # ``roofline`` runs profile + trace_analyze atomically; audited for snapshot id/path visibility.
-    "roofline",
-})
+_AUDIT_ACTIONS: frozenset[str] = frozenset(
+    {
+        "baseline",
+        "profile",
+        "sweep",
+        "explore",
+        # ``roofline`` runs profile + trace_analyze atomically; audited for snapshot id/path visibility.
+        "roofline",
+    }
+)
 
 # audit-action name -> (result-dict key, prompt-display label / key_metric_kind).
 _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
     "baseline": ("output_throughput", "output_throughput"),
-    "profile":  ("output_throughput", "output_throughput"),
-    "sweep":    ("output_throughput", "output_throughput"),
-    "explore":  ("best_gain_pct",     "gain_pct"),
+    "profile": ("output_throughput", "output_throughput"),
+    "sweep": ("output_throughput", "output_throughput"),
+    "explore": ("best_gain_pct", "gain_pct"),
     # ``roofline`` key metric is the monotonic snapshot id.
-    "roofline": ("snapshot_id",       "snapshot_id"),
+    "roofline": ("snapshot_id", "snapshot_id"),
 }
 
 
@@ -170,7 +175,7 @@ LATEST_STATE_SCHEMA_VERSION: int = 2
 
 # Phase4 compat (read-only): rename ``extra_sglang_args`` -> ``extra_server_args`` one-shot on load.
 _PHASE4_LEGACY_KEY_RENAMES: dict[str, str] = {
-    "extra_sglang_args":           "extra_server_args",
+    "extra_sglang_args": "extra_server_args",
     "candidate_extra_sglang_args": "candidate_extra_server_args",
 }
 
@@ -199,7 +204,9 @@ def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
 
 
 def _stamp_cycle_on_tested(
-    tested: dict[str, Any], cycle: int, bottleneck: str = "",
+    tested: dict[str, Any],
+    cycle: int,
+    bottleneck: str = "",
 ) -> dict[str, Any]:
     """Bucket negative-ledger entries by macro-cycle + bottleneck (R3).
 
@@ -234,7 +241,9 @@ def _stamp_cycle_on_tested(
 
 
 def _stamp_cycle_on_rejected(
-    rejected: list[Any], cycle: int, bottleneck: str = "",
+    rejected: list[Any],
+    cycle: int,
+    bottleneck: str = "",
 ) -> list[Any]:
     """Bucket rejected entries by macro-cycle + bottleneck (R3).
 
@@ -260,6 +269,7 @@ def _stamp_cycle_on_rejected(
             if bn and "bottleneck" not in v:
                 v["bottleneck"] = bn
     return rejected
+
 
 def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
     """Recursively rewrite legacy ``extra_sglang_args`` field names in-place; returns count rewritten (canonical kept when both present).
@@ -332,16 +342,12 @@ class TraceAnalyzeSnapshot:
             hot_kernels_top15=list(d.get("hot_kernels_top15") or []),
             kernel_roofline_top15=list(d.get("kernel_roofline_top15") or []),
             task_groups=list(d.get("task_groups") or []),
-            reusable_native_kernel_ids=list(
-                d.get("reusable_native_kernel_ids") or []
-            ),
+            reusable_native_kernel_ids=list(d.get("reusable_native_kernel_ids") or []),
             trace_health_warnings=list(d.get("trace_health_warnings") or []),
             analysis_md_path=str(d.get("analysis_md_path") or ""),
             analysis_md_text=str(d.get("analysis_md_text") or ""),
             roofline_snapshot_id=int(d.get("roofline_snapshot_id") or 0),
-            roofline_baseline_gain_at_snapshot=float(
-                d.get("roofline_baseline_gain_at_snapshot") or 0.0
-            ),
+            roofline_baseline_gain_at_snapshot=float(d.get("roofline_baseline_gain_at_snapshot") or 0.0),
             ts=str(d.get("ts") or ""),
         )
 
@@ -781,22 +787,23 @@ class SharedState:
         for legacy in _legacy_drop_fields:
             if legacy in raw:
                 payload = raw.get(legacy)
-                size = (
-                    len(payload) if isinstance(payload, (dict, list, str))
-                    else 1
-                )
+                size = len(payload) if isinstance(payload, (dict, list, str)) else 1
                 legacy_seen.append((legacy, int(size)))
             filtered.pop(legacy, None)
         if legacy_seen:
-            mode = os.environ.get(
-                "INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", "drop",
-            ).strip().lower()
+            mode = (
+                os.environ.get(
+                    "INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES",
+                    "drop",
+                )
+                .strip()
+                .lower()
+            )
             import logging as _logging
+
             log = _logging.getLogger(__name__)
             summary = ", ".join(f"{k}={n}" for k, n in legacy_seen)
-            migration_events.append(
-                f"§3.9 dropped scoreboard fields ({summary})"
-            )
+            migration_events.append(f"§3.9 dropped scoreboard fields ({summary})")
             if mode == "warn":
                 log.warning(
                     "v0.8 §3.9: dropped legacy scoreboard fields from "
@@ -806,8 +813,8 @@ class SharedState:
                 )
             else:
                 log.info(
-                    "v0.8 §3.9: dropped legacy scoreboard fields from "
-                    "state.json (%s).", summary,
+                    "v0.8 §3.9: dropped legacy scoreboard fields from state.json (%s).",
+                    summary,
                 )
         # Normalize the unified ``explore_search`` ledger at load; winners/synergy history folded in.
         filtered["explore_search"] = cls._build_explore_search(
@@ -819,12 +826,20 @@ class SharedState:
 
         # fact-layer integrity check (Inv-10.1): strict (default) aborts when a fact-layer key was present but didn't load; lenient warns.
         if needs_migration and raw:
-            mode = os.environ.get(
-                "INFERENCE_OPTIMIZER_MIGRATION_MODE", "strict",
-            ).strip().lower()
+            mode = (
+                os.environ.get(
+                    "INFERENCE_OPTIMIZER_MIGRATION_MODE",
+                    "strict",
+                )
+                .strip()
+                .lower()
+            )
             fact_layer_keys = (
-                "baseline_tput", "baseline_accuracy", "current_best",
-                "cumulative_gain", "cumulative_gain_validated",
+                "baseline_tput",
+                "baseline_accuracy",
+                "current_best",
+                "cumulative_gain",
+                "cumulative_gain_validated",
                 "optimization_stack",
                 # Steward fields safe to default (missing => no priors).
                 "last_remaining_gaps_assessment",
@@ -836,6 +851,7 @@ class SharedState:
                     missing.append(key)
             if missing:
                 import logging as _logging
+
                 log = _logging.getLogger(__name__)
                 fmt = (
                     "v0.8 §3.10: fact-layer field(s) %s present in "
@@ -860,11 +876,14 @@ class SharedState:
         # operator-visible migration summary so resume traces are self-describing.
         if needs_migration:
             import logging as _logging
+
             log = _logging.getLogger(__name__)
             event_str = "; ".join(migration_events) or "(no field changes)"
             log.info(
                 "v0.8 §3.10: state.json migrated v%d → v%d. Events: %s",
-                incoming_version, LATEST_STATE_SCHEMA_VERSION, event_str,
+                incoming_version,
+                LATEST_STATE_SCHEMA_VERSION,
+                event_str,
             )
 
         return cls(**filtered)
@@ -923,18 +942,18 @@ class SharedState:
                     str(entry.get("extra_server_args") or ""),
                     dict(entry.get("extra_envs") or {}),
                 )
-                wh.append({
-                    "round_id": str(entry.get("round_id") or ""),
-                    "variant_name": str(entry.get("variant_name")
-                                          or entry.get("name") or ""),
-                    "fingerprint": str(fp_val),
-                    "gain_pct": entry.get("gain_pct"),
-                    "extra_args": str(entry.get("extra_args")
-                                       or entry.get("extra_server_args") or ""),
-                    "extra_envs": dict(entry.get("extra_envs") or {}),
-                    "provenance": str(entry.get("provenance") or ""),
-                    "ts": str(entry.get("ts") or ""),
-                })
+                wh.append(
+                    {
+                        "round_id": str(entry.get("round_id") or ""),
+                        "variant_name": str(entry.get("variant_name") or entry.get("name") or ""),
+                        "fingerprint": str(fp_val),
+                        "gain_pct": entry.get("gain_pct"),
+                        "extra_args": str(entry.get("extra_args") or entry.get("extra_server_args") or ""),
+                        "extra_envs": dict(entry.get("extra_envs") or {}),
+                        "provenance": str(entry.get("provenance") or ""),
+                        "ts": str(entry.get("ts") or ""),
+                    }
+                )
         wh.sort(key=lambda r: (str(r.get("round_id") or ""), str(r.get("ts") or "")))
         out["winners_history"] = wh
 
@@ -1008,6 +1027,7 @@ class SharedState:
         self._session_dir = Path(session_dir)
         try:
             from ..breakdown.recorder import instrument
+
             instrument.snapshot_state_sections(session_dir, self)
         except Exception:  # noqa: BLE001
             pass
@@ -1117,9 +1137,7 @@ class SharedState:
             return
         prefix = f"{action_name}:"
         self.policy_denial_streak = {
-            k: v
-            for k, v in (self.policy_denial_streak or {}).items()
-            if not k.startswith(prefix)
+            k: v for k, v in (self.policy_denial_streak or {}).items() if not k.startswith(prefix)
         }
 
     # stop_reason ENUM validator
@@ -1147,6 +1165,7 @@ class SharedState:
                 ``STOP_REASON_VOCAB``.
         """
         from .phase_state import STOP_REASON_VOCAB, is_valid_stop_reason
+
         text = str(value or "").strip()
         if not text:
             self.stop_reason = ""
@@ -1155,17 +1174,20 @@ class SharedState:
             self.stop_reason = text
             return text
         if strict is None:
-            strict_env = os.environ.get(
-                "INFERENCE_OPTIMIZER_STRICT_STOP_REASON", "",
-            ).strip().lower()
+            strict_env = (
+                os.environ.get(
+                    "INFERENCE_OPTIMIZER_STRICT_STOP_REASON",
+                    "",
+                )
+                .strip()
+                .lower()
+            )
             strict = strict_env in ("1", "true", "yes")
         if strict:
-            raise ValueError(
-                f"stop_reason={text!r} not in STOP_REASON_VOCAB "
-                f"({sorted(STOP_REASON_VOCAB)!r})"
-            )
+            raise ValueError(f"stop_reason={text!r} not in STOP_REASON_VOCAB ({sorted(STOP_REASON_VOCAB)!r})")
         # Lenient: map to "unknown" and warn (original observable via warnings log).
         import logging as _logging
+
         _logging.getLogger(__name__).warning(
             "stop_reason=%r not in STOP_REASON_VOCAB; mapped to 'unknown' "
             ". Set "
@@ -1187,6 +1209,7 @@ class SharedState:
             str: The hint actually stored (``""`` when dropped or blank).
         """
         from .phase_state import is_valid_escalate_hint
+
         text = str(hint or "").strip()
         if text and not is_valid_escalate_hint(text):
             return ""
@@ -1233,6 +1256,7 @@ class SharedState:
         """
         from datetime import datetime as _dt, timezone as _tz
         import time as _time
+
         # Lazy import to avoid an import-time cycle.
         from .phase_state import make_history_row
 
@@ -1388,7 +1412,7 @@ class SharedState:
         # whole list on every call.
         events.append(event)
         if len(events) > _LIFECYCLE_CAP:
-            del events[: -_LIFECYCLE_CAP]
+            del events[:-_LIFECYCLE_CAP]
         return event
 
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
@@ -1404,10 +1428,7 @@ class SharedState:
         if not self.policy_denial_history:
             return ""
         rows = list(self.policy_denial_history)[-top_k:]
-        lines = [
-            "=== Recent policy denials "
-            f"(newest last, total={len(self.policy_denial_history)}) ==="
-        ]
+        lines = [f"=== Recent policy denials (newest last, total={len(self.policy_denial_history)}) ==="]
         for r in rows:
             lines.append(
                 f"  tick={r.get('tick')} action={r.get('action_name')!r} "
@@ -1536,13 +1557,14 @@ class SharedState:
                 history_tag += f"/retired={rej_reason}"
         return (
             f"kernel_id={kid or '?'} "
-            f"decision={ko.get('decision','?')} "
-            f"speedup={ko.get('micro_speedup','?')}"
+            f"decision={ko.get('decision', '?')} "
+            f"speedup={ko.get('micro_speedup', '?')}"
             f"{history_tag}"
         )
 
     def _resolve_kernel_patch_identity(
-        self, payload: dict[str, Any] | None,
+        self,
+        payload: dict[str, Any] | None,
     ) -> tuple[str, str, str, str]:
         """Resolve a kernel patch's identity tuple from a result/intent payload.
 
@@ -1563,28 +1585,17 @@ class SharedState:
         """
         payload = payload or {}
         kernel_id = str(payload.get("kernel_id") or "")
-        patch_path = str(
-            payload.get("patch_path")
-            or payload.get("best_artifact_path")
-            or ""
-        )
-        if (
-            not patch_path
-            and kernel_id
-            and str((self.last_kernel_opt or {}).get("kernel_id") or "") == kernel_id
-        ):
+        patch_path = str(payload.get("patch_path") or payload.get("best_artifact_path") or "")
+        if not patch_path and kernel_id and str((self.last_kernel_opt or {}).get("kernel_id") or "") == kernel_id:
             patch_path = str(
                 (self.last_kernel_opt or {}).get("best_artifact_path")
                 or (self.last_kernel_opt or {}).get("patch_path")
                 or ""
             )
-        target_file = str(
-            payload.get("target_file")
-            or payload.get("source_file")
-            or ""
-        )
+        target_file = str(payload.get("target_file") or payload.get("source_file") or "")
         # External envelope; route through compat helper so legacy ``extra_sglang_args`` still resolves.
         from ..compat.payload_aliases import read_extra_server_args
+
         extra_args = read_extra_server_args(payload).strip()
         return kernel_id, patch_path, target_file, extra_args
 
@@ -1599,9 +1610,7 @@ class SharedState:
             str: ``"<kernel_id>|<patch_path>|<extra_args>"``, or ``""`` when
                 either ``kernel_id`` or ``patch_path`` cannot be resolved.
         """
-        kernel_id, patch_path, _target_file, extra_args = (
-            self._resolve_kernel_patch_identity(payload)
-        )
+        kernel_id, patch_path, _target_file, extra_args = self._resolve_kernel_patch_identity(payload)
         if not kernel_id or not patch_path:
             return ""
         return "|".join([kernel_id, patch_path, extra_args])
@@ -1659,9 +1668,7 @@ class SharedState:
         key = self.kernel_patch_key(result)
         if not key:
             return None
-        kernel_id, patch_path, target_file, extra_args = (
-            self._resolve_kernel_patch_identity(result)
-        )
+        kernel_id, patch_path, target_file, extra_args = self._resolve_kernel_patch_identity(result)
         entry = dict(self.kernel_integrate_attempts.get(key) or {})
         attempts = list(entry.get("attempts") or [])
         attempt = {
@@ -1682,25 +1689,28 @@ class SharedState:
             ),
             default=0.0,
         )
-        entry.update({
-            "key": key,
-            "kernel_id": kernel_id,
-            "patch_path": patch_path,
-            "target_file": target_file,
-            "extra_server_args": extra_args,
-            "attempts": attempts,
-            "attempt_count": len(attempts),
-            "best_gain_pct": best_gain,
-            "last_decision": result.get("decision"),
-            "last_status": result.get("status"),
-            "updated_at": _now_iso(),
-        })
+        entry.update(
+            {
+                "key": key,
+                "kernel_id": kernel_id,
+                "patch_path": patch_path,
+                "target_file": target_file,
+                "extra_server_args": extra_args,
+                "attempts": attempts,
+                "attempt_count": len(attempts),
+                "best_gain_pct": best_gain,
+                "last_decision": result.get("decision"),
+                "last_status": result.get("status"),
+                "updated_at": _now_iso(),
+            }
+        )
         self.kernel_integrate_attempts[key] = entry
 
         # kernel_journey stage 4 (end-to-end integrate outcome): additive,
         # idempotent per kernel_id, best-effort.
         try:
             from ..breakdown.recorder import instrument
+
             sdir = getattr(self, "_session_dir", None)
             if sdir and kernel_id:
                 _dec = str(result.get("decision") or "").upper()
@@ -1721,17 +1731,12 @@ class SharedState:
         if result.get("decision") == "KEEP":
             return entry
 
-        should_reject = (
-            result.get("decision") == "REVERT"
-            or len(attempts) >= max_attempts
-        )
+        should_reject = result.get("decision") == "REVERT" or len(attempts) >= max_attempts
         if not should_reject:
             return entry
 
         reason = (
-            "revert_decision"
-            if result.get("decision") == "REVERT"
-            else f"max_e2e_attempts_{max_attempts}_without_keep"
+            "revert_decision" if result.get("decision") == "REVERT" else f"max_e2e_attempts_{max_attempts}_without_keep"
         )
         rejected = {
             "key": key,
@@ -1747,8 +1752,7 @@ class SharedState:
             "ts": _now_iso(),
         }
         self.rejected_kernel_patches = [
-            r for r in self.rejected_kernel_patches
-            if not (isinstance(r, dict) and r.get("key") == key)
+            r for r in self.rejected_kernel_patches if not (isinstance(r, dict) and r.get("key") == key)
         ]
         self.rejected_kernel_patches.append(rejected)
         if kernel_id and kernel_id not in self.rejected_kernel_ids:
@@ -1771,6 +1775,7 @@ class SharedState:
         # return so no failed attempt becomes invisible in the geak/oob view.
         try:
             from ..breakdown.recorder import instrument
+
             sdir = getattr(self, "_session_dir", None)
             instrument.record_kernel_invocations(sdir, result)
             # kernel_journey stage 2 (dispatch) + stage 3 (backend attempts):
@@ -1796,11 +1801,9 @@ class SharedState:
                 # attempt and the dispatch flag stay consistent.
                 _status = str(result.get("status") or "").lower()
                 _err_class = str(result.get("error_class") or "")
-                _decision = str(
-                    (result.get("proposal") or {}).get("decision") or "").upper()
+                _decision = str((result.get("proposal") or {}).get("decision") or "").upper()
                 _failed_predispatch = (not _attempts) and (
-                    _status in {"failed", "error", "crashed", "timeout"}
-                    or (_decision == "REVERT" and bool(_err_class))
+                    _status in {"failed", "error", "crashed", "timeout"} or (_decision == "REVERT" and bool(_err_class))
                 )
                 if _failed_predispatch and not _backends:
                     _b = str(result.get("backend") or "").lower() or "geak"
@@ -1811,8 +1814,7 @@ class SharedState:
                     kernel_id=_kid,
                     dispatched=_dispatched,
                     backends=_backends,
-                    skip_reason="" if _dispatched else str(
-                        result.get("error_class") or result.get("status") or ""),
+                    skip_reason="" if _dispatched else str(result.get("error_class") or result.get("status") or ""),
                     orchestration_commit=str(getattr(self, "code_revision", "") or ""),
                 )
                 instrument.record_kernel_backend_result(sdir, result)
@@ -1832,15 +1834,11 @@ class SharedState:
         except (TypeError, ValueError):
             micro_float = 0.0
         best_artifact_path = str(verification.get("best_artifact_path", "") or "")
-        source_file = str(
-            result.get("source_file")
-            or (result.get("candidate") or {}).get("source_file")
-            or ""
-        )
+        source_file = str(result.get("source_file") or (result.get("candidate") or {}).get("source_file") or "")
         # Extract test_command from the first attempt that recorded one so
         # after_kernel_opt rocprof can reuse it without re-deriving from scratch.
         test_command = ""
-        for _attempt in (result.get("attempts") or []):
+        for _attempt in result.get("attempts") or []:
             if isinstance(_attempt, dict):
                 _tc = str((_attempt.get("backend_paths") or {}).get("test_command") or "").strip()
                 if _tc:
@@ -1849,27 +1847,29 @@ class SharedState:
         status = str(result.get("status") or "").lower()
         err_class = str(result.get("error_class") or "")
         # Pure infra failure = backend ladder with no verdict; kept distinct from REVERT/PARTIAL so retirement counters don't double-count.
-        is_infra_failure = (
-            decision == ""
-            and (
-                status in {"failed", "error", "timeout"}
-                or err_class in {
-                    "subtask_exception",
-                    "handler_exception",
-                    "subprocess_timeout",
-                    "kernel_agent_root_missing",
-                    "missing_integration_inputs",
-                }
-            )
+        is_infra_failure = decision == "" and (
+            status in {"failed", "error", "timeout"}
+            or err_class
+            in {
+                "subtask_exception",
+                "handler_exception",
+                "subprocess_timeout",
+                "kernel_agent_root_missing",
+                "missing_integration_inputs",
+            }
         )
         ts = _now_iso()
 
         entry = dict(self.kernel_opt_attempts.get(kernel_id) or {})
         history = list(entry.get("history") or [])
-        history.append({
-            "decision": decision, "micro": micro_float,
-            "status": status, "ts": ts,
-        })
+        history.append(
+            {
+                "decision": decision,
+                "micro": micro_float,
+                "status": status,
+                "ts": ts,
+            }
+        )
         history = history[-10:]
         entry["attempts"] = int(entry.get("attempts", 0)) + 1
         # Per-source attempts so a Python wrapper and its device file don't share a retry quota.
@@ -1986,9 +1986,7 @@ class SharedState:
         return {
             str(e.get("kernel_id"))
             for e in (self.optimization_stack or [])
-            if isinstance(e, dict)
-            and e.get("action") == "integrate"
-            and e.get("kernel_id")
+            if isinstance(e, dict) and e.get("action") == "integrate" and e.get("kernel_id")
         }
 
     def _source_files_in_optimization_stack(self) -> set[str]:
@@ -2000,7 +1998,7 @@ class SharedState:
                 :attr:`optimization_stack`.
         """
         sources: set[str] = set()
-        for e in (self.optimization_stack or []):
+        for e in self.optimization_stack or []:
             if not isinstance(e, dict) or e.get("action") != "integrate":
                 continue
             src = str(e.get("target_file") or e.get("source_file") or "")
@@ -2154,18 +2152,22 @@ class SharedState:
 
         if min_gpu_pct is None:
             try:
-                min_gpu_pct = float(os.environ.get(
-                    "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
-                    _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
-                ))
+                min_gpu_pct = float(
+                    os.environ.get(
+                        "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
+                        _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
+                    )
+                )
             except (TypeError, ValueError):
                 min_gpu_pct = _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
         if top_n is None:
             try:
-                top_n = int(os.environ.get(
-                    "HYPERLOOM_KERNEL_OPT_GATE_TOP_N",
-                    _DEFAULT_HOT_KERNEL_GATE_TOP_N,
-                ))
+                top_n = int(
+                    os.environ.get(
+                        "HYPERLOOM_KERNEL_OPT_GATE_TOP_N",
+                        _DEFAULT_HOT_KERNEL_GATE_TOP_N,
+                    )
+                )
             except (TypeError, ValueError):
                 top_n = _DEFAULT_HOT_KERNEL_GATE_TOP_N
         top_n = max(1, int(top_n))
@@ -2222,8 +2224,7 @@ class SharedState:
                 continue
             if src and src in integrated_sources:
                 continue
-            if any(int((attempts.get(m) or {}).get("attempts", 0)) > 0
-                   for m in members):
+            if any(int((attempts.get(m) or {}).get("attempts", 0)) > 0 for m in members):
                 continue
             untried.append(kid)
         return untried
@@ -2307,14 +2308,12 @@ class SharedState:
             return None
         result = result or {}
         metric_key, metric_kind = _KEY_METRIC_MAP.get(
-            action, ("output_throughput", "output_throughput"),
+            action,
+            ("output_throughput", "output_throughput"),
         )
         raw_metric = result.get(metric_key)
         try:
-            key_metric: float | None = (
-                float(raw_metric) if isinstance(raw_metric, (int, float))
-                else None
-            )
+            key_metric: float | None = float(raw_metric) if isinstance(raw_metric, (int, float)) else None
         except (TypeError, ValueError):
             key_metric = None
         entry: dict[str, Any] = {
@@ -2324,31 +2323,18 @@ class SharedState:
             "decision": str(decision or ""),
             "key_metric": key_metric,
             "key_metric_kind": metric_kind,
-            "workspace": (
-                str(result.get("workspace"))
-                if result.get("workspace") else None
-            ),
-            "error_class": (
-                str(result.get("error_class"))
-                if result.get("error_class") else None
-            ),
+            "workspace": (str(result.get("workspace")) if result.get("workspace") else None),
+            "error_class": (str(result.get("error_class")) if result.get("error_class") else None),
             "error_excerpt": self._truncate_excerpt(result.get("error")),
             # stderr_tail mirrors record_action_failure: only for subprocess
             # failures, so the breakdown exporter can surface the raw crash.
             "stderr_tail": (
                 self._stderr_tail(result.get("error"))
-                if str(result.get("error_class") or "")
-                in {"subprocess_nonzero", "timeout"}
+                if str(result.get("error_class") or "") in {"subprocess_nonzero", "timeout"}
                 else None
             ),
-            "stderr_log_path": (
-                str(result.get("stderr_log_path"))
-                if result.get("stderr_log_path") else None
-            ),
-            "raw_result_path": (
-                str(result.get("raw_result_path"))
-                if result.get("raw_result_path") else None
-            ),
+            "stderr_log_path": (str(result.get("stderr_log_path")) if result.get("stderr_log_path") else None),
+            "raw_result_path": (str(result.get("raw_result_path")) if result.get("raw_result_path") else None),
             "reported_success": result.get("reported_success"),
             "extras": dict(extras or {}),
         }
@@ -2361,8 +2347,11 @@ class SharedState:
         # Author-time breakdown capture: one phase_timeline event per attempt.
         try:
             from ..breakdown.recorder import instrument
+
             instrument.record_phase_event(
-                getattr(self, "_session_dir", None), action=action, entry=entry,
+                getattr(self, "_session_dir", None),
+                action=action,
+                entry=entry,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -2399,22 +2388,11 @@ class SharedState:
             "error_class": error_class_str,
             "error_excerpt": self._truncate_excerpt(result.get("error")),
             "stderr_tail": (
-                self._stderr_tail(result.get("error"))
-                if error_class_str in {"subprocess_nonzero", "timeout"}
-                else None
+                self._stderr_tail(result.get("error")) if error_class_str in {"subprocess_nonzero", "timeout"} else None
             ),
-            "stderr_log_path": (
-                str(result.get("stderr_log_path"))
-                if result.get("stderr_log_path") else None
-            ),
-            "workspace": (
-                str(result.get("workspace"))
-                if result.get("workspace") else None
-            ),
-            "raw_result_path": (
-                str(result.get("raw_result_path"))
-                if result.get("raw_result_path") else None
-            ),
+            "stderr_log_path": (str(result.get("stderr_log_path")) if result.get("stderr_log_path") else None),
+            "workspace": (str(result.get("workspace")) if result.get("workspace") else None),
+            "raw_result_path": (str(result.get("raw_result_path")) if result.get("raw_result_path") else None),
             "reported_success": result.get("reported_success"),
         }
         history = list(self.last_action_failures or [])
@@ -2477,11 +2455,7 @@ class SharedState:
         """
         if not isinstance(result, dict):
             return
-        trace_input = (
-            (payload or {}).get("trace_input")
-            or (payload or {}).get("trace_dir")
-            or ""
-        )
+        trace_input = (payload or {}).get("trace_input") or (payload or {}).get("trace_dir") or ""
         candidates_path = result.get("candidates_path") or ""
         if not candidates_path:
             artifacts = result.get("artifact_paths") or {}
@@ -2570,12 +2544,14 @@ class SharedState:
                 reverse=True,
             )
             for entry in skipped_sorted[:15]:
-                skipped_summary.append({
-                    "kernel_id": entry.get("kernel_id"),
-                    "name": entry.get("name"),
-                    "skip_reason": entry.get("skip_reason") or "",
-                    "gpu_pct": entry.get("gpu_pct"),
-                })
+                skipped_summary.append(
+                    {
+                        "kernel_id": entry.get("kernel_id"),
+                        "name": entry.get("name"),
+                        "skip_reason": entry.get("skip_reason") or "",
+                        "gpu_pct": entry.get("gpu_pct"),
+                    }
+                )
 
         raw_warnings = result.get("trace_health_warnings") or []
         warnings_cleaned: list[dict[str, Any]] = []
@@ -2598,7 +2574,8 @@ class SharedState:
             try:
                 # Stored verbatim; prompt path strips base64 data-URLs via strip_base64_data_urls.
                 analysis_md_text = Path(analysis_md_path).read_text(
-                    encoding="utf-8", errors="replace",
+                    encoding="utf-8",
+                    errors="replace",
                 )
             except (OSError, ValueError):
                 analysis_md_text = ""
@@ -2632,6 +2609,7 @@ class SharedState:
         # Append compact history for report-side Roofline Comparison; best-effort, parse errors degrade to None.
         try:
             from .roofline_snapshot import build_roofline_snapshot
+
             # Stamp decode-roofline ceiling (session constant) + measured tput (current_best.tput else baseline_tput).
             from .roofline_ceiling import (
                 RooflineBreakdown,
@@ -2639,6 +2617,7 @@ class SharedState:
                 compute_roofline_from_perfmodel,
                 load_model_meta,
             )
+
             # Resolve which arm this snapshot measures FIRST so the ceiling's
             # precision is anchored to the SAME arm as achieved: a baseline
             # snapshot keeps its dtype on baseline even after current_best is
@@ -2652,8 +2631,8 @@ class SharedState:
             # a typo'd payload tag is visible instead of silently mis-anchored.
             if forced_arm and forced_arm not in ("baseline", "current_best"):
                 log.warning(
-                    "record_trace_analyze: ignoring unknown roofline_arm=%r; "
-                    "falling back to current_best inference", forced_arm,
+                    "record_trace_analyze: ignoring unknown roofline_arm=%r; falling back to current_best inference",
+                    forced_arm,
                 )
                 forced_arm = ""
             achieved_tput = 0.0
@@ -2678,7 +2657,8 @@ class SharedState:
             breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
             try:
                 breakdown = compute_roofline_breakdown_from_state(
-                    self, arm=snapshot_arm,
+                    self,
+                    arm=snapshot_arm,
                 )
             except Exception:  # noqa: BLE001 — ceiling is best-effort
                 pass
@@ -2696,6 +2676,7 @@ class SharedState:
             # Per-op PerfModel breakdown for dashboard visualization.
             try:
                 from .roofline_ceiling import resolve_runtime_workload
+
                 runtime = resolve_runtime_workload(self, arm=snapshot_arm)
                 meta = load_model_meta(
                     runtime.model_path,
@@ -2706,6 +2687,7 @@ class SharedState:
                         apply_runtime_dtype,
                         resolve_runtime_dtype,
                     )
+
                     eff_conc = runtime.concurrency
                     # Use the dtype the run actually read (e.g. fp8 over a
                     # float32 checkpoint), not the on-disk torch_dtype; pinned
@@ -2719,9 +2701,7 @@ class SharedState:
                         isl=runtime.isl,
                         osl=runtime.osl,
                         num_gpus=runtime.tp,
-                        precision_tag=rt.compute_precision_tag
-                        or runtime.precision
-                        or "bf16",
+                        precision_tag=rt.compute_precision_tag or runtime.precision or "bf16",
                     )
                     # Tag the formula by what actually produced the ceiling:
                     # ``perfmodel`` only when the bottom-up model succeeded,
@@ -2780,7 +2760,7 @@ class SharedState:
             if len(self.roofline_snapshots) > _ROOFLINE_SNAPSHOTS_CAP:
                 # Always keep snapshot #1 so the report's baseline anchor never rotates away.
                 base = self.roofline_snapshots[0]
-                tail = self.roofline_snapshots[-(_ROOFLINE_SNAPSHOTS_CAP - 1):]
+                tail = self.roofline_snapshots[-(_ROOFLINE_SNAPSHOTS_CAP - 1) :]
                 self.roofline_snapshots = [base, *tail]
         except Exception:  # noqa: BLE001 — never block record on render concerns
             pass
@@ -2803,7 +2783,8 @@ class SharedState:
         if isinstance(grid, list):
             best = max(
                 (
-                    e for e in grid
+                    e
+                    for e in grid
                     if isinstance(e, dict)
                     and e.get("status") == "succeeded"
                     and isinstance(e.get("output_throughput"), (int, float))
@@ -2830,13 +2811,13 @@ class SharedState:
         if not isinstance(result, dict):
             return
         self.last_conc_sweep = {
-            "ts":               _now_iso(),
-            "status":           str(result.get("status") or "succeeded"),
-            "skip_reason":      str(result.get("skip_reason") or ""),
-            "was_skipped":      bool(result.get("was_skipped", False)),
+            "ts": _now_iso(),
+            "status": str(result.get("status") or "succeeded"),
+            "skip_reason": str(result.get("skip_reason") or ""),
+            "was_skipped": bool(result.get("was_skipped", False)),
             "budget_exhausted": bool(result.get("budget_exhausted", False)),
-            "summary":          dict(result.get("summary") or {}),
-            "workspace":        str(result.get("workspace") or ""),
+            "summary": dict(result.get("summary") or {}),
+            "workspace": str(result.get("workspace") or ""),
         }
 
     # specialist round bookkeeping
@@ -2866,8 +2847,10 @@ class SharedState:
         # Author-time breakdown capture: one specialist_runs item per round.
         try:
             from ..breakdown.recorder import instrument
+
             instrument.record_specialist_round(
-                getattr(self, "_session_dir", None), entry,
+                getattr(self, "_session_dir", None),
+                entry,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -2878,7 +2861,10 @@ class SharedState:
             self.specialist_rounds = self.specialist_rounds[-_SPECIALIST_ROUNDS_CAP:]
 
     def bump_specialist_domain_empty_streak(
-        self, domain: str, *, empty: bool,
+        self,
+        domain: str,
+        *,
+        empty: bool,
     ) -> int:
         """Increment/reset the per-domain empty-proposal streak; returns new value (escalation threshold lives in ``KB_design §3.9``, not here).
 
@@ -2893,9 +2879,7 @@ class SharedState:
         """
         d = str(domain or "").strip() or "unknown"
         if empty:
-            self.specialist_domain_empty_streak[d] = int(
-                self.specialist_domain_empty_streak.get(d, 0) or 0
-            ) + 1
+            self.specialist_domain_empty_streak[d] = int(self.specialist_domain_empty_streak.get(d, 0) or 0) + 1
         else:
             self.specialist_domain_empty_streak[d] = 0
         return self.specialist_domain_empty_streak[d]
@@ -2908,12 +2892,8 @@ class SharedState:
         from .specialist_domains import KNOWLEDGE_DOMAIN_TAGS
 
         for anchor in KNOWLEDGE_DOMAIN_TAGS:
-            self.rounds_since_last_specialist[anchor] = int(
-                self.rounds_since_last_specialist.get(anchor, 0) or 0
-            ) + 1
-            self.rounds_since_last_keep[anchor] = int(
-                self.rounds_since_last_keep.get(anchor, 0) or 0
-            ) + 1
+            self.rounds_since_last_specialist[anchor] = int(self.rounds_since_last_specialist.get(anchor, 0) or 0) + 1
+            self.rounds_since_last_keep[anchor] = int(self.rounds_since_last_keep.get(anchor, 0) or 0) + 1
 
     @staticmethod
     def _anchor_for(domain_or_anchor: str) -> str:
@@ -2962,7 +2942,10 @@ class SharedState:
             self.rounds_since_last_keep[anchor] = 0
 
     def stalled_domains(
-        self, *, specialist_threshold: int, keep_threshold: int,
+        self,
+        *,
+        specialist_threshold: int,
+        keep_threshold: int,
     ) -> list[str]:
         """Return anchors whose ``rounds_since_last_specialist`` ≥
         ``specialist_threshold`` OR ``rounds_since_last_keep`` ≥
@@ -2979,10 +2962,7 @@ class SharedState:
             list[str]: Stalled anchors ordered by widest gap first, then by
                 anchor name.
         """
-        anchors = (
-            set(self.rounds_since_last_specialist)
-            | set(self.rounds_since_last_keep)
-        )
+        anchors = set(self.rounds_since_last_specialist) | set(self.rounds_since_last_keep)
         hits: list[tuple[int, str]] = []
         for anchor in anchors:
             spec = int(self.rounds_since_last_specialist.get(anchor, 0) or 0)
@@ -3066,25 +3046,24 @@ class SharedState:
         existing = self.find_gap(cid)
         if existing is None:
             merged: dict[str, Any] = {
-                "canonical_id":    cid,
-                "symptom":         str(entry.get("symptom") or ""),
-                "layer":           str(entry.get("layer") or ""),
-                "severity":        str(entry.get("severity") or "medium"),
-                "domain_hint":     str(entry.get("domain_hint") or ""),
-                "source":          str(entry.get("source") or ""),
+                "canonical_id": cid,
+                "symptom": str(entry.get("symptom") or ""),
+                "layer": str(entry.get("layer") or ""),
+                "severity": str(entry.get("severity") or "medium"),
+                "domain_hint": str(entry.get("domain_hint") or ""),
+                "source": str(entry.get("source") or ""),
                 # Optional origin reference (PR/blog URL) sedimented into the recipe with KEEP/REVERT provenance.
-                "provenance":      str(entry.get("provenance") or ""),
-                "first_seen_ts":   str(entry.get("first_seen_ts") or now),
+                "provenance": str(entry.get("provenance") or ""),
+                "first_seen_ts": str(entry.get("first_seen_ts") or now),
                 "last_updated_ts": now,
-                "attempts":        list(entry.get("attempts") or []),
+                "attempts": list(entry.get("attempts") or []),
             }
             if len(merged["attempts"]) > _GAPS_ATTEMPTS_HISTORY:
                 merged["attempts"] = merged["attempts"][-_GAPS_ATTEMPTS_HISTORY:]
             self.gaps.append(merged)
         else:
             # Field-wise merge: incoming non-empty values win except ``first_seen_ts`` (preserve oldest).
-            for key in ("symptom", "layer", "severity", "domain_hint",
-                        "source", "provenance"):
+            for key in ("symptom", "layer", "severity", "domain_hint", "source", "provenance"):
                 incoming = entry.get(key)
                 if incoming:
                     existing[key] = str(incoming)
@@ -3213,9 +3192,7 @@ class SharedState:
         if len(self.intervention_mix) > _INTERVENTION_MIX_CAP:
             self.intervention_mix = self.intervention_mix[-_INTERVENTION_MIX_CAP:]
         if ct == "config":
-            self.consecutive_config_only_rounds = (
-                int(self.consecutive_config_only_rounds or 0) + 1
-            )
+            self.consecutive_config_only_rounds = int(self.consecutive_config_only_rounds or 0) + 1
         elif ct == "code_patch":
             self.consecutive_config_only_rounds = 0
 
@@ -3246,17 +3223,11 @@ class SharedState:
 
         total_config = sum(1 for e in ledger if _ct(e) == "config")
         total_code_patch = sum(1 for e in ledger if _ct(e) == "code_patch")
-        total_code_patch_attempt = sum(
-            1 for e in ledger
-            if _ct(e) in ("code_patch", "code_patch_attempt")
-        )
+        total_code_patch_attempt = sum(1 for e in ledger if _ct(e) in ("code_patch", "code_patch_attempt"))
         window = ledger[-recent_window:] if recent_window > 0 else ledger
         recent_config = sum(1 for e in window if _ct(e) == "config")
         recent_code_patch = sum(1 for e in window if _ct(e) == "code_patch")
-        recent_code_patch_attempt = sum(
-            1 for e in window
-            if _ct(e) in ("code_patch", "code_patch_attempt")
-        )
+        recent_code_patch_attempt = sum(1 for e in window if _ct(e) in ("code_patch", "code_patch_attempt"))
 
         consecutive_config_only = 0
         for e in reversed(ledger):
@@ -3286,9 +3257,7 @@ class SharedState:
         Returns:
             int: The post-increment dispatch count.
         """
-        self.explore_specialist_dispatched_count = (
-            int(self.explore_specialist_dispatched_count or 0) + int(n)
-        )
+        self.explore_specialist_dispatched_count = int(self.explore_specialist_dispatched_count or 0) + int(n)
         return self.explore_specialist_dispatched_count
 
     def reset_specialist_dispatched(self) -> None:
@@ -3328,9 +3297,7 @@ class SharedState:
             added += 1
         if len(self.research_scout_seen_pr_ids) > _SEEN_PR_IDS_CAP:
             # FIFO eviction of oldest-seen ids; re-surfacing a very old PR is low-harm.
-            self.research_scout_seen_pr_ids = (
-                self.research_scout_seen_pr_ids[-_SEEN_PR_IDS_CAP:]
-            )
+            self.research_scout_seen_pr_ids = self.research_scout_seen_pr_ids[-_SEEN_PR_IDS_CAP:]
         return added
 
     def has_seen_pr_id(self, pr_id: Any) -> bool:
@@ -3373,21 +3340,18 @@ class SharedState:
         mix = self.intervention_mix or []
         if not mix:
             return ""
-        n_config = sum(
-            1 for m in mix if (m or {}).get("change_type") == "config"
-        )
-        n_patch = sum(
-            1 for m in mix if (m or {}).get("change_type") == "code_patch"
-        )
+        n_config = sum(1 for m in mix if (m or {}).get("change_type") == "config")
+        n_patch = sum(1 for m in mix if (m or {}).get("change_type") == "code_patch")
         n_patch_attempt = sum(
-            1 for m in mix
-            if (m or {}).get("change_type") in (
-                "code_patch", "code_patch_attempt",
+            1
+            for m in mix
+            if (m or {}).get("change_type")
+            in (
+                "code_patch",
+                "code_patch_attempt",
             )
         )
-        n_config_attempt = sum(
-            1 for m in mix if (m or {}).get("change_type") == "config_attempt"
-        )
+        n_config_attempt = sum(1 for m in mix if (m or {}).get("change_type") == "config_attempt")
         consec = int(self.consecutive_config_only_rounds or 0)
         return (
             f"config_keeps={n_config} config_attempts={n_config_attempt} "
@@ -3396,7 +3360,9 @@ class SharedState:
         )
 
     def record_specialist_patch_verdict(
-        self, specialist_task_id: str, verdict: str,
+        self,
+        specialist_task_id: str,
+        verdict: str,
     ) -> None:
         """Record the Critic verdict for a specialist worktree patch; idempotent (later verdict overwrites), empty ``verdict`` clears the entry to force re-review.
 
@@ -3416,7 +3382,8 @@ class SharedState:
         self.specialist_patch_verdicts[sid] = v
 
     def get_specialist_patch_verdict(
-        self, specialist_task_id: str,
+        self,
+        specialist_task_id: str,
     ) -> str:
         """Return the patch verdict, or empty when no Critic decision exists.
 
@@ -3469,9 +3436,7 @@ class SharedState:
             cur_cycle,
             cur_bottleneck,
         )
-        merged["name_index"] = dict(
-            update.get("name_index") or prior.get("name_index") or {}
-        )
+        merged["name_index"] = dict(update.get("name_index") or prior.get("name_index") or {})
         merged["cursor"] = int(update.get("cursor") or len(merged["tested"]))
         merged["last_round"] = dict(update.get("last_round") or {})
         # Append-only history fields — merge instead of overwrite.
@@ -3492,12 +3457,9 @@ class SharedState:
                     if items:
                         sa.add(items)
         merged["synergy_attempted"] = [list(c) for c in sorted(sa)]
-        merged["discovered_flags"] = list(
-            update.get("discovered_flags") or prior.get("discovered_flags") or []
-        )
+        merged["discovered_flags"] = list(update.get("discovered_flags") or prior.get("discovered_flags") or [])
         merged["domains_round_summary"] = list(
-            update.get("domains_round_summary")
-            or prior.get("domains_round_summary") or []
+            update.get("domains_round_summary") or prior.get("domains_round_summary") or []
         )
         # Preserve accepted bucket from prior runs (record_explore_accepted is its writer).
         merged["accepted"] = list(prior.get("accepted") or [])
@@ -3515,10 +3477,8 @@ class SharedState:
         if not isinstance(variant, dict) or not variant:
             return
         from .action_executors._canonical_fingerprint import canonical_fingerprint
-        args = str(
-            variant.get("candidate_extra_server_args")
-            or variant.get("extra_server_args") or ""
-        )
+
+        args = str(variant.get("candidate_extra_server_args") or variant.get("extra_server_args") or "")
         envs = dict(variant.get("extra_envs") or {})
         fp = str(variant.get("fingerprint") or canonical_fingerprint(args, envs))
         entry = {
@@ -3539,14 +3499,12 @@ class SharedState:
         search = dict(self.explore_search or {})
         search.setdefault("schema_version", 1)
         accepted = [
-            v for v in (search.get("accepted") or [])
-            if not (isinstance(v, dict) and v.get("fingerprint") == fp)
+            v for v in (search.get("accepted") or []) if not (isinstance(v, dict) and v.get("fingerprint") == fp)
         ]
         accepted.append(entry)
         search["accepted"] = accepted
         search["rejected"] = [
-            v for v in (search.get("rejected") or [])
-            if not (isinstance(v, dict) and v.get("fingerprint") == fp)
+            v for v in (search.get("rejected") or []) if not (isinstance(v, dict) and v.get("fingerprint") == fp)
         ]
         name_index = dict(search.get("name_index") or {})
         if entry["name"]:
@@ -3554,17 +3512,19 @@ class SharedState:
         search["name_index"] = name_index
         # Append a winners_history row so plateau judges needn't crawl optimization_stack.
         wh = list(search.get("winners_history") or [])
-        wh.append({
-            "round_id": entry["accepted_at_round"],
-            "variant_name": entry["name"],
-            "fingerprint": fp,
-            "gain_pct": entry["gain_pct"],
-            "extra_args": args,
-            "extra_envs": envs,
-            "provenance": entry["provenance"],
-            "ts": entry["ts"],
-            "cycle": entry["cycle"],
-        })
+        wh.append(
+            {
+                "round_id": entry["accepted_at_round"],
+                "variant_name": entry["name"],
+                "fingerprint": fp,
+                "gain_pct": entry["gain_pct"],
+                "extra_args": args,
+                "extra_envs": envs,
+                "provenance": entry["provenance"],
+                "ts": entry["ts"],
+                "cycle": entry["cycle"],
+            }
+        )
         search["winners_history"] = wh[-_WINNERS_HISTORY_CAP:]
         self.explore_search = search
 
@@ -3655,20 +3615,20 @@ class SharedState:
         extra_args = self.current_best.get("extra_server_args")
         if not variant and not extra_args:
             return
-        self.optimization_stack = [{
-            "action": self.current_best.get("action", "unknown"),
-            "variant_name": variant or "legacy_current_best",
-            "extra_server_args": extra_args or "",
-            "extra_envs": dict(self.current_best.get("extra_envs") or {}),
-            "tput": self.current_best.get("tput"),
-            "workspace": self.current_best.get("workspace"),
-            "source": "seeded_from_current_best",
-        }]
+        self.optimization_stack = [
+            {
+                "action": self.current_best.get("action", "unknown"),
+                "variant_name": variant or "legacy_current_best",
+                "extra_server_args": extra_args or "",
+                "extra_envs": dict(self.current_best.get("extra_envs") or {}),
+                "tput": self.current_best.get("tput"),
+                "workspace": self.current_best.get("workspace"),
+                "source": "seeded_from_current_best",
+            }
+        ]
         # Keep gain_per_stack_entry aligned with optimization_stack (None == unknown gain for seeded entries).
         if len(self.gain_per_stack_entry) < len(self.optimization_stack):
-            self.gain_per_stack_entry.extend(
-                [None] * (len(self.optimization_stack) - len(self.gain_per_stack_entry))
-            )
+            self.gain_per_stack_entry.extend([None] * (len(self.optimization_stack) - len(self.gain_per_stack_entry)))
 
     # Time-budget helpers (consumed by Coordinator._compose_prompt)
     def elapsed_minutes(self, *, now: datetime | None = None) -> float:
@@ -3733,20 +3693,18 @@ class SharedState:
         elapsed = self.elapsed_minutes(now=now)
         remaining = self.remaining_minutes(now=now)
         budget_line = (
-            f"time      : elapsed={elapsed:.1f}min "
-            f"remaining={remaining:.1f}min "
-            f"budget={self.max_minutes}min"
-        ) if remaining is not None else (
-            f"time      : elapsed={elapsed:.1f}min budget=unlimited"
+            (f"time      : elapsed={elapsed:.1f}min remaining={remaining:.1f}min budget={self.max_minutes}min")
+            if remaining is not None
+            else (f"time      : elapsed={elapsed:.1f}min budget=unlimited")
         )
         validated_age = ""
         if self.cumulative_gain_validated_ts:
             validated_age = f" (ts={self.cumulative_gain_validated_ts})"
         unvalidated = self.optimization_stack_has_unvalidated_keeps()
         unvalidated_tag = (
-            " ⚠ stack changed since last rebench — RUN `explore` "
-            "(per-KEEP stack rebench is inlined)"
-            if unvalidated else ""
+            " ⚠ stack changed since last rebench — RUN `explore` (per-KEEP stack rebench is inlined)"
+            if unvalidated
+            else ""
         )
         lines = [
             f"baseline  : {self.baseline_tput} tok/s/GPU",
@@ -3760,9 +3718,7 @@ class SharedState:
         # Surface reusable hot kernels still owing a kernel_opt attempt (visible without a checklist).
         untried_hot = self.untried_hot_reusable_kernels()
         if untried_hot:
-            lines.append(
-                f"untried_hot_kernels: {', '.join(untried_hot)}"
-            )
+            lines.append(f"untried_hot_kernels: {', '.join(untried_hot)}")
         lines.append(budget_line)
         return "\n".join(lines)
 
@@ -3776,9 +3732,9 @@ class SharedState:
         if not isinstance(self.current_best, dict) or not self.current_best:
             return "(none)"
         return (
-            f"action={self.current_best.get('action','?')} "
-            f"tput={self.current_best.get('tput','?')} "
-            f"variant={self.current_best.get('variant_name','?')}"
+            f"action={self.current_best.get('action', '?')} "
+            f"tput={self.current_best.get('tput', '?')} "
+            f"variant={self.current_best.get('variant_name', '?')}"
         )
 
     def to_phase_status_summary(
@@ -3813,27 +3769,26 @@ class SharedState:
         budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
         budget_pct_for_phase = budget.get(phase, 0.0)
         remaining = phase_budget_remaining_seconds(
-            self, budget_pct=budget, now_unix=now_unix,
+            self,
+            budget_pct=budget,
+            now_unix=now_unix,
         )
         budget_line: str
         if remaining is None:
-            budget_line = (
-                f"budget    : pct={budget_pct_for_phase:.2f} (unlimited run; "
-                f"no per-phase cap)"
-            )
+            budget_line = f"budget    : pct={budget_pct_for_phase:.2f} (unlimited run; no per-phase cap)"
         else:
             budget_line = (
-                f"budget    : pct={budget_pct_for_phase:.2f} "
-                f"elapsed_sec={elapsed} remaining_sec={int(remaining)}"
+                f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} remaining_sec={int(remaining)}"
             )
-        proposable = tuple(sorted(
-            llm_proposable_actions_for_with_interleave(
-                phase, explore_enabled=bool(getattr(self, "explore_enabled", True)),
+        proposable = tuple(
+            sorted(
+                llm_proposable_actions_for_with_interleave(
+                    phase,
+                    explore_enabled=bool(getattr(self, "explore_enabled", True)),
+                )
             )
-        ))
-        allowed_line = (
-            f"allowed   : {', '.join(proposable) if proposable else '(none)'}"
         )
+        allowed_line = f"allowed   : {', '.join(proposable) if proposable else '(none)'}"
         lines = [
             f"phase     : {phase}",
             f"entered   : {self.phase_started_ts or '(unset)'}",
@@ -3843,39 +3798,34 @@ class SharedState:
         # EXPLORE-only: distance to hard force-exit alongside the soft budget.
         if phase == PHASE_EXPLORE:
             overrides = self.plateau_overrides or {}
-            hours_thresh = float(overrides.get(
-                "force_exit_hours_remaining",
-                DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
-            ))
-            pct_thresh = float(overrides.get(
-                "force_exit_budget_pct",
-                DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
-            ))
+            hours_thresh = float(
+                overrides.get(
+                    "force_exit_hours_remaining",
+                    DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
+                )
+            )
+            pct_thresh = float(
+                overrides.get(
+                    "force_exit_budget_pct",
+                    DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
+                )
+            )
             session_remaining = session_remaining_seconds(
-                self, now_unix=now_unix,
+                self,
+                now_unix=now_unix,
             )
-            session_buffer = (
-                int(session_remaining - hours_thresh * 3600.0)
-                if session_remaining is not None else None
-            )
+            session_buffer = int(session_remaining - hours_thresh * 3600.0) if session_remaining is not None else None
             if remaining is not None and budget_pct_for_phase > 0:
                 mm = float(self.max_minutes or 0)
                 phase_total_sec = mm * 60.0 * budget_pct_for_phase
-                phase_remaining_pct = (
-                    remaining / phase_total_sec if phase_total_sec > 0 else 0.0
-                )
+                phase_remaining_pct = remaining / phase_total_sec if phase_total_sec > 0 else 0.0
             else:
                 phase_remaining_pct = None
-            force_line = (
-                f"force_exit: hours_thresh={hours_thresh:.1f}h "
-                f"pct_thresh={pct_thresh:.2f}"
-            )
+            force_line = f"force_exit: hours_thresh={hours_thresh:.1f}h pct_thresh={pct_thresh:.2f}"
             if session_buffer is not None:
                 force_line += f" session_buffer_sec={session_buffer}"
             if phase_remaining_pct is not None:
-                force_line += (
-                    f" phase_remaining_pct={phase_remaining_pct:.3f}"
-                )
+                force_line += f" phase_remaining_pct={phase_remaining_pct:.3f}"
             lines.append(force_line)
         return "\n".join(lines)
 
@@ -3920,9 +3870,7 @@ class SharedState:
                 # Currently-active segment — measure to now.
                 elapsed_now = phase_elapsed_seconds(self, now_unix=now_unix)
                 exited = entered + elapsed_now
-            elapsed_per_phase[phase] = (
-                elapsed_per_phase.get(phase, 0.0) + max(0.0, exited - entered)
-            )
+            elapsed_per_phase[phase] = elapsed_per_phase.get(phase, 0.0) + max(0.0, exited - entered)
         if not elapsed_per_phase:
             return "(no phase history yet)"
         mm = float(self.max_minutes or 0.0)
@@ -3937,9 +3885,7 @@ class SharedState:
             cap_sec = total_budget_sec * pct if total_budget_sec > 0 else 0.0
             used_pct = (elapsed / cap_sec * 100.0) if cap_sec > 0 else 0.0
             cap_line = f"cap={int(cap_sec)}s" if cap_sec > 0 else "cap=unlimited"
-            lines.append(
-                f"  {phase}: elapsed={int(elapsed)}s {cap_line} used={used_pct:.0f}%"
-            )
+            lines.append(f"  {phase}: elapsed={int(elapsed)}s {cap_line} used={used_pct:.0f}%")
         return "\n".join(lines) or "(no phase history yet)"
 
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
@@ -3989,8 +3935,7 @@ class SharedState:
                 out.append(f"  · {first_line[:240]}")
         if max_lines and len(out) > max_lines:
             out = out[:max_lines]
-            out.append(f"  · (truncated to {max_lines} lines; "
-                       f"see runtime/cortex/.kb_warm.json for full snapshot)")
+            out.append(f"  · (truncated to {max_lines} lines; see runtime/cortex/.kb_warm.json for full snapshot)")
         return "\n".join(out)
 
     def to_gaps_summary(self, *, max_entries: int = 10) -> str:
@@ -4028,19 +3973,10 @@ class SharedState:
             if isinstance(attempts, list) and attempts:
                 last = attempts[-1]
                 if isinstance(last, dict):
-                    last_tag = (
-                        f" last={last.get('action','?')}:"
-                        f"{last.get('outcome','?')}"
-                    )
-            rows.append(
-                f"  - {cid} [{layer}/{severity}] {symptom}\n"
-                f"      attempts={attempt_n}{last_tag}"
-            )
+                    last_tag = f" last={last.get('action', '?')}:{last.get('outcome', '?')}"
+            rows.append(f"  - {cid} [{layer}/{severity}] {symptom}\n      attempts={attempt_n}{last_tag}")
         if len(ordered) > max_entries:
-            rows.append(
-                f"  · (+{len(ordered) - max_entries} older gaps elided; "
-                f"see state.json `gaps[]`)"
-            )
+            rows.append(f"  · (+{len(ordered) - max_entries} older gaps elided; see state.json `gaps[]`)")
         return "\n".join(rows)
 
     def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:
@@ -4055,7 +3991,8 @@ class SharedState:
                 recent round carries scores.
         """
         rounds = [
-            r for r in (self.specialist_rounds or [])
+            r
+            for r in (self.specialist_rounds or [])
             if isinstance(r, dict)
             and isinstance(r.get("ensemble_scores"), dict)
             and (r["ensemble_scores"].get("models") or {})
@@ -4070,10 +4007,7 @@ class SharedState:
             all_slugs.update(str(s) for s in models.keys())
             errs = r["ensemble_scores"].get("errors") or {}
             all_slugs.update(str(s) for s in errs.keys())
-        rater_label = {
-            slug: f"rater_{i}"
-            for i, slug in enumerate(sorted(all_slugs), start=1)
-        }
+        rater_label = {slug: f"rater_{i}" for i, slug in enumerate(sorted(all_slugs), start=1)}
         rows: list[str] = [
             "(Advisory only — one reference among many, NOT a ranking "
             "directive. Scores are 0-10 likelihood-of-throughput-gain "
@@ -4090,7 +4024,7 @@ class SharedState:
             # Collect variant names across models, preserving proposal_set order when available.
             ordered_names: list[str] = []
             seen: set[str] = set()
-            for variant in (r.get("proposal_set") or []):
+            for variant in r.get("proposal_set") or []:
                 if isinstance(variant, dict):
                     nm = str(variant.get("name") or "")
                     if nm and nm not in seen:
@@ -4119,21 +4053,13 @@ class SharedState:
                         reason = str(cell.get("reason") or "").replace("\n", " ")
                         if len(reason) > 80:
                             reason = reason[:77] + "..."
-                        parts.append(
-                            f"{label}={float(cell['score']):.1f} "
-                            f"(\"{reason}\")"
-                        )
+                        parts.append(f'{label}={float(cell["score"]):.1f} ("{reason}")')
                     else:
                         parts.append(f"{label}=n/a")
                 rows.append(f"  - {nm}: " + ", ".join(parts))
             errors = ens.get("errors") or {}
             if errors:
-                err_labels = ", ".join(
-                    sorted(
-                        rater_label.get(str(s), "rater_?")
-                        for s in errors
-                    )
-                )
+                err_labels = ", ".join(sorted(rater_label.get(str(s), "rater_?") for s in errors))
                 rows.append(f"  · raters unavailable this round: {err_labels}")
         return "\n".join(rows)
 
@@ -4152,9 +4078,7 @@ class SharedState:
         # Advisory architecture profile; prompt-context only (TraceLens analysis_md is ground truth). Omitted when no profile.
         _arch_line = render_model_arch_compact(self.model_arch)
         if _arch_line:
-            lines.append(
-                f"model_arch(advisory; subordinate to TraceLens analysis_md)={_arch_line}"
-            )
+            lines.append(f"model_arch(advisory; subordinate to TraceLens analysis_md)={_arch_line}")
         lines += [
             f"baseline_tput={self.baseline_tput}  baseline_acc={self.baseline_accuracy}",
             f"baseline_failure_streak={self.baseline_failure_streak}",
@@ -4186,14 +4110,8 @@ class SharedState:
             f"synergy_attempted={len(self.synergy_attempted)} combos",
             f"last_kernel_opt={self._format_last_kernel_opt()}",
             # Pending KEEPs the integrate gate will drain, plus per-kernel attempt count.
-            (
-                "pending_keep_kernels="
-                f"{self.pending_keep_kernel_ids() or '(none)'}"
-            ),
-            (
-                "has_keep_pending_integrate="
-                f"{'true' if self.has_keep_pending_integrate else 'false'}"
-            ),
+            (f"pending_keep_kernels={self.pending_keep_kernel_ids() or '(none)'}"),
+            (f"has_keep_pending_integrate={'true' if self.has_keep_pending_integrate else 'false'}"),
             f"kernel_opt_attempts_count={self.kernel_opt_attempts_count}",
             f"rejected_kernel_patches={self._format_rejected_kernel_patches()}",
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
@@ -4204,8 +4122,7 @@ class SharedState:
             f"last_sweep={self._format_attempt(self.last_sweep)}",
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
-            f"tick={int(self.tick or 0)}  "
-            f"target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
+            f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
             f"stop_reason={self.stop_reason or '(none)'}",
             f"closing_phase={self.closing_phase}  "
             f"closing_started_unix={self.closing_started_unix or 0.0}  "
@@ -4229,17 +4146,14 @@ class SharedState:
             return "(none)"
         metric = entry.get("key_metric")
         metric_kind = entry.get("key_metric_kind") or "metric"
-        metric_str = (
-            f"{metric_kind}={metric:.2f}"
-            if isinstance(metric, (int, float)) else f"{metric_kind}=N/A"
-        )
+        metric_str = f"{metric_kind}={metric:.2f}" if isinstance(metric, (int, float)) else f"{metric_kind}=N/A"
         err = entry.get("error_class") or "-"
         ws = entry.get("workspace") or "-"
         return (
-            f"status={entry.get('status','?')} "
-            f"decision={entry.get('decision','?')} "
+            f"status={entry.get('status', '?')} "
+            f"decision={entry.get('decision', '?')} "
             f"{metric_str} err={err} ws={ws} "
-            f"task_id={entry.get('task_id','?')} ts={entry.get('ts','?')}"
+            f"task_id={entry.get('task_id', '?')} ts={entry.get('ts', '?')}"
         )
 
     def _format_attempts_history(self) -> str:
@@ -4256,14 +4170,8 @@ class SharedState:
             if not history:
                 continue
             total = len(history)
-            succ = sum(
-                1 for e in history
-                if isinstance(e, dict) and e.get("status") == "succeeded"
-            )
-            fail = sum(
-                1 for e in history
-                if isinstance(e, dict) and e.get("status") == "failed"
-            )
+            succ = sum(1 for e in history if isinstance(e, dict) and e.get("status") == "succeeded")
+            fail = sum(1 for e in history if isinstance(e, dict) and e.get("status") == "failed")
             parts.append(f"{action}:{total}(s{succ},f{fail})")
         return " ".join(parts) if parts else "(no attempts recorded)"
 
@@ -4286,13 +4194,8 @@ class SharedState:
             excerpt = entry.get("error_excerpt") or ""
             ws = entry.get("workspace") or "-"
             excerpt_short = excerpt.splitlines()[0][:200] if excerpt else ""
-            rows.append(
-                f"[{action}/{error_class}@{ts}] err=\"{excerpt_short}\" ws={ws}"
-            )
-        suffix = (
-            f" [+{len(self.last_action_failures) - 3} earlier]"
-            if len(self.last_action_failures) > 3 else ""
-        )
+            rows.append(f'[{action}/{error_class}@{ts}] err="{excerpt_short}" ws={ws}')
+        suffix = f" [+{len(self.last_action_failures) - 3} earlier]" if len(self.last_action_failures) > 3 else ""
         return " | ".join(rows) + suffix if rows else "(none)"
 
     def _format_rejected_kernel_patches(self) -> str:
@@ -4306,8 +4209,8 @@ class SharedState:
             return "(none)"
         return [
             (
-                f"{r.get('kernel_id','?')}: attempts={r.get('attempt_count','?')} "
-                f"best_gain={r.get('best_gain_pct','?')} reason={r.get('reason','?')}"
+                f"{r.get('kernel_id', '?')}: attempts={r.get('attempt_count', '?')} "
+                f"best_gain={r.get('best_gain_pct', '?')} reason={r.get('reason', '?')}"
             )
             for r in self.rejected_kernel_patches[-5:]
             if isinstance(r, dict)
@@ -4345,28 +4248,17 @@ class SharedState:
         name = str(entry.get("name") or "?")
         gain = entry.get("gain_pct")
         tput = entry.get("tput") or entry.get("output_throughput")
-        gain_s = (
-            f"{gain:+.2f}%" if isinstance(gain, (int, float)) else " no_meas"
-        )
-        tput_s = (
-            f" (tput={tput:.1f})"
-            if isinstance(tput, (int, float)) and tput > 0
-            else ""
-        )
-        args = (
-            str(entry.get("extra_server_args") or "").strip()
-            or "(no-flag)"
-        )
+        gain_s = f"{gain:+.2f}%" if isinstance(gain, (int, float)) else " no_meas"
+        tput_s = f" (tput={tput:.1f})" if isinstance(tput, (int, float)) and tput > 0 else ""
+        args = str(entry.get("extra_server_args") or "").strip() or "(no-flag)"
         envs = entry.get("extra_envs") or {}
-        envs_s = (
-            " " + " ".join(f"{k}={v}" for k, v in sorted(envs.items()))
-            if envs else ""
-        )
+        envs_s = " " + " ".join(f"{k}={v}" for k, v in sorted(envs.items())) if envs else ""
         return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}"
 
     @staticmethod
     def _enrich_with_tested_gain(
-        entry: dict[str, Any], tested: dict[str, Any],
+        entry: dict[str, Any],
+        tested: dict[str, Any],
     ) -> dict[str, Any]:
         """Backfill ``gain_pct``/``tput`` from the matching ``tested[fp]`` at render time (some accepted entries don't persist gain_pct; avoids a second writer).
 
@@ -4379,10 +4271,7 @@ class SharedState:
             dict[str, Any]: ``entry`` itself when already complete, otherwise
                 a copy with ``gain_pct`` / ``tput`` backfilled where possible.
         """
-        if (
-            entry.get("gain_pct") is not None
-            and entry.get("tput") is not None
-        ):
+        if entry.get("gain_pct") is not None and entry.get("tput") is not None:
             return entry
         fp = str(entry.get("fingerprint") or "")
         snap = tested.get(fp) if fp else None
@@ -4392,13 +4281,8 @@ class SharedState:
         if out.get("gain_pct") is None:
             out["gain_pct"] = snap.get("gain_pct")
         if out.get("tput") is None:
-            result = (
-                snap.get("result")
-                if isinstance(snap.get("result"), dict) else {}
-            )
-            out["tput"] = (
-                snap.get("tput") or (result or {}).get("output_throughput")
-            )
+            result = snap.get("result") if isinstance(snap.get("result"), dict) else {}
+            out["tput"] = snap.get("tput") or (result or {}).get("output_throughput")
         return out
 
     def _format_backend_winners_history(self) -> str:
@@ -4417,29 +4301,21 @@ class SharedState:
                 continue
             best = r.get("best") if isinstance(r.get("best"), dict) else None
             best_gain = best.get("gain_pct") if best else None
-            gain_tag = (
-                f" {best_gain:+.2f}%"
-                if isinstance(best_gain, (int, float)) else ""
-            )
+            gain_tag = f" {best_gain:+.2f}%" if isinstance(best_gain, (int, float)) else ""
             base = float(r.get("base_tput", 0.0) or 0.0)
             out.append(
-                f"    {r.get('round_id','?')} ({r.get('action','?')}): "
+                f"    {r.get('round_id', '?')} ({r.get('action', '?')}): "
                 f"base_tput={base:.1f}  "
                 f"best={(best.get('name') if best else '(none)')}{gain_tag}"
             )
-            winners = [
-                w for w in (r.get("winners") or []) if isinstance(w, dict)
-            ]
+            winners = [w for w in (r.get("winners") or []) if isinstance(w, dict)]
             if not winners:
                 out.append("      (no winners this round)")
                 continue
             for w in winners:
                 out.append("      • " + SharedState._format_variant_line(w))
         if len(self.backend_winners_history) > 5:
-            out.append(
-                f"    [+{len(self.backend_winners_history) - 5} "
-                f"earlier rounds elided]"
-            )
+            out.append(f"    [+{len(self.backend_winners_history) - 5} earlier rounds elided]")
         return "\n".join(out)
 
     def _format_explore_search(self) -> str:
@@ -4469,25 +4345,22 @@ class SharedState:
         cursor = search.get("cursor", 0)
         out: list[str] = [
             "",
-            f"    cursor={cursor}  accepted={len(accepted)}  "
-            f"rejected={len(rejected)}  tested={len(tested)}",
+            f"    cursor={cursor}  accepted={len(accepted)}  rejected={len(rejected)}  tested={len(tested)}",
         ]
         if accepted:
             out.append("    accepted:")
             for entry in accepted[-5:]:
                 if not isinstance(entry, dict):
                     continue
-                out.append("      • " + SharedState._format_variant_line(
-                    SharedState._enrich_with_tested_gain(entry, tested)
-                ))
+                out.append(
+                    "      • " + SharedState._format_variant_line(SharedState._enrich_with_tested_gain(entry, tested))
+                )
         if rejected:
             out.append("    rejected (last 5):")
             for entry in rejected[-5:]:
                 if not isinstance(entry, dict):
                     continue
-                out.append("      • " + SharedState._format_variant_line(
-                    entry
-                ))
+                out.append("      • " + SharedState._format_variant_line(entry))
         return "\n".join(out)
 
     def _format_optimization_stack(self) -> str:
@@ -4503,9 +4376,7 @@ class SharedState:
         for entry in self.optimization_stack:
             if not isinstance(entry, dict):
                 continue
-            parts.append(
-                f"{entry.get('action','?')}:{entry.get('variant_name','?')}"
-            )
+            parts.append(f"{entry.get('action', '?')}:{entry.get('variant_name', '?')}")
         return parts or "(none)"
 
     @staticmethod
@@ -4522,6 +4393,7 @@ class SharedState:
         if not text:
             return text or ""
         from inference_optimizer.tracelens_md import strip_base64_data_urls
+
         return strip_base64_data_urls(text)
 
     def _format_analysis_md_full(self) -> str:
@@ -4556,7 +4428,8 @@ class SharedState:
         # (profiler_digest=) and point at the show_analysis_md tool for the full
         # report — saves context on long runs. Default keeps the verbatim md.
         if os.getenv(
-            "INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", "1",
+            "INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE",
+            "1",
         ).strip().lower() in ("0", "false", "off", "no"):
             return (
                 f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
@@ -4578,8 +4451,10 @@ class SharedState:
                 snapshot lands.
         """
         from .roofline_snapshot import build_profiler_digest
+
         digest = build_profiler_digest(
-            self.roofline_snapshots, self.last_trace_analyze,
+            self.roofline_snapshots,
+            self.last_trace_analyze,
         )
         if not digest:
             return "(none)"
@@ -4616,8 +4491,8 @@ class SharedState:
         ]
         reusable = list(blob.get("reusable_native_kernel_ids", []))
         base = (
-            f"trace={blob.get('trace_input','?')} "
-            f"candidates_path={blob.get('candidates_path','?')} "
+            f"trace={blob.get('trace_input', '?')} "
+            f"candidates_path={blob.get('candidates_path', '?')} "
             f"top={ids or []} reusable_native={reusable or []}"
         )
         # With no routable candidates, surface skipped operators so the LLM doesn't echo invalid kernel_ids.
@@ -4630,9 +4505,7 @@ class SharedState:
                 if isinstance(s, dict) and s.get("kernel_id")
             ]
             if rendered_sk:
-                skipped_suffix = (
-                    f" skipped_kernels_top=[{'; '.join(rendered_sk)}]"
-                )
+                skipped_suffix = f" skipped_kernels_top=[{'; '.join(rendered_sk)}]"
         # Surface TraceLens routing signals inline so the LLM grounds the next action; omitted in steady-state.
         warnings = blob.get("trace_health_warnings") or []
         if not warnings:
@@ -4668,9 +4541,9 @@ class SharedState:
             return f"grid_size={self.last_sweep.get('grid_size', 0)} best=(none)"
         return (
             f"grid_size={self.last_sweep.get('grid_size', 0)} "
-            f"best={best.get('name','?')} "
-            f"tput={best.get('output_throughput','?')} "
-            f"conc={best.get('conc','?')} isl={best.get('isl','?')} osl={best.get('osl','?')}"
+            f"best={best.get('name', '?')} "
+            f"tput={best.get('output_throughput', '?')} "
+            f"conc={best.get('conc', '?')} isl={best.get('isl', '?')} osl={best.get('osl', '?')}"
         )
 
 

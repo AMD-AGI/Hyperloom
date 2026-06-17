@@ -55,8 +55,10 @@ def test_apply_non_py_target_skips_compile(tmp_path, capsys):
     target = tmp_path / "kernel.cpp"
     target.write_text("// old", encoding="utf-8")
     ns = argparse.Namespace(
-        target_path=str(target), backup_dir=str(tmp_path / "bak"),
-        kernel_id="k1", patch_b64=_b64("// new content"),
+        target_path=str(target),
+        backup_dir=str(tmp_path / "bak"),
+        kernel_id="k1",
+        patch_b64=_b64("// new content"),
     )
     rc = k._do_apply(ns)
     payload = _last_json(capsys)
@@ -71,8 +73,10 @@ def test_apply_valid_py_compiles_ok(tmp_path, capsys):
     target = tmp_path / "mod.py"
     target.write_text("x = 1\n", encoding="utf-8")
     ns = argparse.Namespace(
-        target_path=str(target), backup_dir=str(tmp_path / "bak"),
-        kernel_id="k", patch_b64=_b64("y = 2\n"),
+        target_path=str(target),
+        backup_dir=str(tmp_path / "bak"),
+        kernel_id="k",
+        patch_b64=_b64("y = 2\n"),
     )
     rc = k._do_apply(ns)
     payload = _last_json(capsys)
@@ -88,8 +92,10 @@ def test_apply_bad_py_auto_reverts(tmp_path, capsys):
     target = tmp_path / "mod.py"
     target.write_text("good = 1\n", encoding="utf-8")
     ns = argparse.Namespace(
-        target_path=str(target), backup_dir=str(tmp_path / "bak"),
-        kernel_id="k", patch_b64=_b64("def broken(:\n"),
+        target_path=str(target),
+        backup_dir=str(tmp_path / "bak"),
+        kernel_id="k",
+        patch_b64=_b64("def broken(:\n"),
     )
     rc = k._do_apply(ns)
     payload = _last_json(capsys)
@@ -104,7 +110,9 @@ def test_apply_missing_target_fails(tmp_path, capsys):
     k = _load("kno_apply_missing")
     ns = argparse.Namespace(
         target_path=str(tmp_path / "nope.py"),
-        backup_dir=str(tmp_path / "bak"), kernel_id="k", patch_b64=_b64("x=1"),
+        backup_dir=str(tmp_path / "bak"),
+        kernel_id="k",
+        patch_b64=_b64("x=1"),
     )
     rc = k._do_apply(ns)
     payload = _last_json(capsys)
@@ -117,8 +125,10 @@ def test_apply_bad_base64_fails(tmp_path, capsys):
     target = tmp_path / "f.txt"
     target.write_text("orig", encoding="utf-8")
     ns = argparse.Namespace(
-        target_path=str(target), backup_dir=str(tmp_path / "bak"),
-        kernel_id="k", patch_b64="!!!not-base64!!!",
+        target_path=str(target),
+        backup_dir=str(tmp_path / "bak"),
+        kernel_id="k",
+        patch_b64="!!!not-base64!!!",
     )
     rc = k._do_apply(ns)
     payload = _last_json(capsys)
@@ -156,9 +166,11 @@ def test_bench_rejects_absolute_and_parent_staging_paths(tmp_path, capsys):
     # payload cannot write outside the bench workspace.
     k = _load("kno_bench_traversal")
     ns = argparse.Namespace(
-        workspace=str(tmp_path / "ws"), bench_command="true",
+        workspace=str(tmp_path / "ws"),
+        bench_command="true",
         files_b64_json=json.dumps({"../escape.txt": _b64("x")}),
-        result_glob="*.json", timeout_sec=10,
+        result_glob="*.json",
+        timeout_sec=10,
     )
     rc = k._do_bench(ns)
     payload = _last_json(capsys)
@@ -172,7 +184,8 @@ def test_bench_stages_files_runs_and_collects_artifacts(tmp_path, capsys):
         workspace=str(tmp_path / "ws"),
         bench_command="cat kernel.txt > /dev/null; echo '{\"tput\": 42}' > result.json",
         files_b64_json=json.dumps({"kernel.txt": _b64("kernel body")}),
-        result_glob="*.json", timeout_sec=30,
+        result_glob="*.json",
+        timeout_sec=30,
     )
     rc = k._do_bench(ns)
     payload = _last_json(capsys)
@@ -188,8 +201,11 @@ def test_bench_stages_files_runs_and_collects_artifacts(tmp_path, capsys):
 def test_bench_invalid_files_json_fails(tmp_path, capsys):
     k = _load("kno_bench_badjson")
     ns = argparse.Namespace(
-        workspace=str(tmp_path / "ws"), bench_command="true",
-        files_b64_json="{not json", result_glob="*.json", timeout_sec=10,
+        workspace=str(tmp_path / "ws"),
+        bench_command="true",
+        files_b64_json="{not json",
+        result_glob="*.json",
+        timeout_sec=10,
     )
     rc = k._do_bench(ns)
     payload = _last_json(capsys)

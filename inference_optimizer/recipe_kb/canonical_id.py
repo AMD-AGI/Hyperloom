@@ -125,7 +125,8 @@ def cid_to_path_components(canonical_id: str) -> tuple[str, str, str, str, str]:
         # never emits these — if we see one in the wild it's an
         # operator-typed cid that bypassed the helper.
         raise InvalidCanonicalIdError(
-            raw, "empty segment(s) detected — every dimension must be non-empty",
+            raw,
+            "empty segment(s) detected — every dimension must be non-empty",
         )
     return (model, hardware, framework, framework_version, precision)
 
@@ -198,8 +199,7 @@ def canonical_id_for_path(*, root: Path, recipe_dir: Path) -> str:
     if len(parts) != CANONICAL_ID_DIMENSIONS:
         raise InvalidCanonicalIdError(
             str(recipe_dir),
-            f"expected {CANONICAL_ID_DIMENSIONS} levels under root, "
-            f"got {len(parts)}: {parts!r}",
+            f"expected {CANONICAL_ID_DIMENSIONS} levels under root, got {len(parts)}: {parts!r}",
         )
     model, hardware, framework, framework_version, precision = parts
     # Reuse recipe_canonical_id so the prefix + slugging contract

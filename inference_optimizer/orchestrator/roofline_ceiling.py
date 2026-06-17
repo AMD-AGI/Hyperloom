@@ -23,30 +23,47 @@ from typing import Any
 # Hardware specs (AMD MI300/MI355 line only).
 #: GPU per-chip peak specs (keys match ``SharedState.gpu_type``, lowercase). ``hbm_bw_gbps`` is vendor peak (strict ceiling); ``peak_tflops`` is DENSE peak (missing key ⇒ 0.0 falls back to T_mem). Vendor datasheets.
 _MI300X_PEAK_TFLOPS: dict[str, float] = {
-    "bf16": 1307.4, "bfloat16": 1307.4, "fp16": 1307.4, "float16": 1307.4,
-    "fp8": 2614.9, "float8_e4m3fn": 2614.9, "float8_e5m2": 2614.9,
-    "fp32": 163.4, "float32": 163.4,
+    "bf16": 1307.4,
+    "bfloat16": 1307.4,
+    "fp16": 1307.4,
+    "float16": 1307.4,
+    "fp8": 2614.9,
+    "float8_e4m3fn": 2614.9,
+    "float8_e5m2": 2614.9,
+    "fp32": 163.4,
+    "float32": 163.4,
 }
 _MI355X_PEAK_TFLOPS: dict[str, float] = {
-    "bf16": 2516.6, "bfloat16": 2516.6, "fp16": 2516.6, "float16": 2516.6,
-    "fp8": 5033.2, "float8_e4m3fn": 5033.2, "float8_e5m2": 5033.2,
-    "mxfp4": 10066.4, "fp4": 10066.4, "float4": 10066.4,
+    "bf16": 2516.6,
+    "bfloat16": 2516.6,
+    "fp16": 2516.6,
+    "float16": 2516.6,
+    "fp8": 5033.2,
+    "float8_e4m3fn": 5033.2,
+    "float8_e5m2": 5033.2,
+    "mxfp4": 10066.4,
+    "fp4": 10066.4,
+    "float4": 10066.4,
 }
 HW_SPECS: dict[str, dict[str, Any]] = {
     "mi300x": {
-        "hbm_gb": 192.0, "hbm_bw_gbps": 5300.0,
+        "hbm_gb": 192.0,
+        "hbm_bw_gbps": 5300.0,
         "peak_tflops": _MI300X_PEAK_TFLOPS,
     },
     "mi308x": {
-        "hbm_gb": 192.0, "hbm_bw_gbps": 5300.0,
+        "hbm_gb": 192.0,
+        "hbm_bw_gbps": 5300.0,
         "peak_tflops": _MI300X_PEAK_TFLOPS,
     },
     "mi325x": {
-        "hbm_gb": 256.0, "hbm_bw_gbps": 6000.0,
+        "hbm_gb": 256.0,
+        "hbm_bw_gbps": 6000.0,
         "peak_tflops": _MI300X_PEAK_TFLOPS,
     },
     "mi355x": {
-        "hbm_gb": 288.0, "hbm_bw_gbps": 8000.0,
+        "hbm_gb": 288.0,
+        "hbm_bw_gbps": 8000.0,
         "peak_tflops": _MI355X_PEAK_TFLOPS,
     },
 }
@@ -55,12 +72,19 @@ HW_SPECS: dict[str, dict[str, Any]] = {
 # Dtype bytes lookup.
 #: HF ``torch_dtype`` / precision tag → bytes per element (fallback when safetensors index absent).
 _DTYPE_BYTES: dict[str, float] = {
-    "float32": 4.0, "fp32": 4.0,
-    "bfloat16": 2.0, "bf16": 2.0,
-    "float16": 2.0, "fp16": 2.0,
-    "float8_e4m3fn": 1.0, "float8_e5m2": 1.0, "fp8": 1.0,
+    "float32": 4.0,
+    "fp32": 4.0,
+    "bfloat16": 2.0,
+    "bf16": 2.0,
+    "float16": 2.0,
+    "fp16": 2.0,
+    "float8_e4m3fn": 1.0,
+    "float8_e5m2": 1.0,
+    "fp8": 1.0,
     # mxfp4 / OCP-FP4 are 4-bit (block-scaled); align with HW_SPECS keys.
-    "float4": 0.5, "fp4": 0.5, "mxfp4": 0.5,
+    "float4": 0.5,
+    "fp4": 0.5,
+    "mxfp4": 0.5,
 }
 
 
@@ -85,10 +109,17 @@ def _resolve_dtype_bytes(tag: str | None) -> float:
 #: Only weight-quantization methods are listed; activation/KV dtype is
 #: tracked separately (``runtime_activation_dtype``) and stays >= bf16.
 _QUANT_WEIGHT_BYTES: dict[str, float] = {
-    "fp8": 1.0, "fp8_e4m3": 1.0, "fp8_e5m2": 1.0,
-    "fp4": 0.5, "mxfp4": 0.5, "nvfp4": 0.5,
-    "int8": 1.0, "w8a8_int8": 1.0,
-    "int4": 0.5, "awq": 0.5, "gptq": 0.5,
+    "fp8": 1.0,
+    "fp8_e4m3": 1.0,
+    "fp8_e5m2": 1.0,
+    "fp4": 0.5,
+    "mxfp4": 0.5,
+    "nvfp4": 0.5,
+    "int8": 1.0,
+    "w8a8_int8": 1.0,
+    "int4": 0.5,
+    "awq": 0.5,
+    "gptq": 0.5,
 }
 
 
@@ -120,7 +151,9 @@ def _parse_server_arg(args: str, flag: str) -> str:
 #: per framework. The baseline yaml only ever sets the one matching its
 #: framework, so reading all three and concatenating is safe.
 _RUNTIME_SERVER_ARG_ENV_KEYS = (
-    "EXTRA_SGLANG_ARGS", "EXTRA_VLLM_ARGS", "EXTRA_ATOM_ARGS",
+    "EXTRA_SGLANG_ARGS",
+    "EXTRA_VLLM_ARGS",
+    "EXTRA_ATOM_ARGS",
 )
 
 
@@ -161,6 +194,7 @@ def _read_baseline_yaml_benchmark(state: Any) -> dict[str, Any]:
         return {}
     try:
         import yaml as _yaml  # type: ignore[reportMissingModuleSource]
+
         with open(cfg_path, "r", encoding="utf-8") as f:
             cfg = _yaml.safe_load(f) or {}
         benchmark = cfg.get("benchmark") or {}
@@ -213,9 +247,7 @@ def _server_args_from_envs(envs: dict[str, Any]) -> str:
         A space-joined string of the non-empty server-arg env values.
     """
     parts = [
-        str(envs[k]).strip()
-        for k in _RUNTIME_SERVER_ARG_ENV_KEYS
-        if isinstance(envs.get(k), str) and envs[k].strip()
+        str(envs[k]).strip() for k in _RUNTIME_SERVER_ARG_ENV_KEYS if isinstance(envs.get(k), str) and envs[k].strip()
     ]
     return " ".join(parts)
 
@@ -235,9 +267,7 @@ def _read_baseline_yaml_server_args(state: Any) -> str:
     Returns:
         The assembled baseline server args, or ``""`` when unreadable.
     """
-    return _server_args_from_envs(
-        _benchmark_envs(_read_baseline_yaml_benchmark(state))
-    )
+    return _server_args_from_envs(_benchmark_envs(_read_baseline_yaml_benchmark(state)))
 
 
 def _server_args_env_override(entry: Any) -> str:
@@ -328,10 +358,7 @@ def _collect_runtime_server_args(state: Any, *, arm: str | None = None) -> str:
     Returns:
         The server-args string for the selected arm.
     """
-    base_args = (
-        _read_baseline_yaml_server_args(state)
-        or _server_args_from(getattr(state, "last_baseline", None))
-    )
+    base_args = _read_baseline_yaml_server_args(state) or _server_args_from(getattr(state, "last_baseline", None))
     resolved_arm = arm or _achieved_arm_source(state)
     if resolved_arm == "current_best":
         current_best = getattr(state, "current_best", None)
@@ -354,15 +381,14 @@ def _runtime_gpu_type(state: Any, benchmark: dict[str, Any]) -> str:
         The resolved GPU type string, or ``""`` when unknown.
     """
     return str(
-        getattr(state, "gpu_type", "")
-        or os.environ.get("TARGET_GPU_TYPE", "")
-        or benchmark.get("runner_type")
-        or ""
+        getattr(state, "gpu_type", "") or os.environ.get("TARGET_GPU_TYPE", "") or benchmark.get("runner_type") or ""
     )
 
 
 def resolve_runtime_workload(
-    state: Any, *, arm: str | None = None,
+    state: Any,
+    *,
+    arm: str | None = None,
 ) -> RuntimeWorkload:
     """Resolve runtime workload fields from baseline yaml plus overlay args.
 
@@ -434,7 +460,10 @@ class RuntimeDtype:
 
 
 def resolve_runtime_dtype(
-    state: Any, meta: "ModelMeta", *, arm: str | None = None,
+    state: Any,
+    meta: "ModelMeta",
+    *,
+    arm: str | None = None,
 ) -> RuntimeDtype:
     """Resolve the runtime weight/activation dtype from the actual run.
 
@@ -633,10 +662,7 @@ def _read_total_size(model_path: Path) -> int | None:
                 return int(size)
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             pass
-    return (
-        _sum_weight_file_sizes(model_path, "*.safetensors")
-        or _sum_weight_file_sizes(model_path, "*.bin")
-    )
+    return _sum_weight_file_sizes(model_path, "*.safetensors") or _sum_weight_file_sizes(model_path, "*.bin")
 
 
 def _sum_weight_file_sizes(model_path: Path, pattern: str) -> int | None:
@@ -650,11 +676,7 @@ def _sum_weight_file_sizes(model_path: Path, pattern: str) -> int | None:
         The summed shard size in bytes, or ``None`` when zero/unreadable.
     """
     try:
-        total = sum(
-            p.stat().st_size
-            for p in model_path.glob(pattern)
-            if p.is_file()
-        )
+        total = sum(p.stat().st_size for p in model_path.glob(pattern) if p.is_file())
     except OSError:
         return None
     return int(total) if total > 0 else None
@@ -730,7 +752,9 @@ def _compute_active_weight_bytes(
         The estimated per-token active weight bytes.
     """
     active, _total_expert, _ne, _ept = _compute_expert_decomposition(
-        cfg, weight_bytes=weight_bytes, dtype_bytes=dtype_bytes,
+        cfg,
+        weight_bytes=weight_bytes,
+        dtype_bytes=dtype_bytes,
     )
     return active
 
@@ -763,23 +787,15 @@ def _compute_expert_decomposition(
         return int(weight_bytes), 0, 0, 0
     hidden_size = int(cfg.get("hidden_size") or 0)
     num_layers = int(cfg.get("num_hidden_layers") or 0)
-    moe_inter = int(
-        cfg.get("moe_intermediate_size")
-        or cfg.get("intermediate_size")
-        or 0
-    )
+    moe_inter = int(cfg.get("moe_intermediate_size") or cfg.get("intermediate_size") or 0)
     if hidden_size <= 0 or num_layers <= 0 or moe_inter <= 0 or dtype_bytes <= 0:
         return int(weight_bytes), 0, 0, 0
-    expert_bytes_per_layer = (
-        num_experts * 3 * hidden_size * moe_inter * dtype_bytes
-    )
+    expert_bytes_per_layer = num_experts * 3 * hidden_size * moe_inter * dtype_bytes
     total_expert_bytes = int(num_layers * expert_bytes_per_layer)
     if total_expert_bytes <= 0 or total_expert_bytes >= int(weight_bytes):
         return int(weight_bytes), 0, 0, 0
     non_expert_bytes = int(weight_bytes) - total_expert_bytes
-    active_expert_bytes = int(
-        (experts_per_tok / num_experts) * total_expert_bytes
-    )
+    active_expert_bytes = int((experts_per_tok / num_experts) * total_expert_bytes)
     return (
         non_expert_bytes + active_expert_bytes,
         total_expert_bytes,
@@ -818,16 +834,11 @@ def load_model_meta(
     quant_cfg = cfg.get("quantization_config")
     if isinstance(quant_cfg, dict):
         quant_tag = str(quant_cfg.get("quant_method", "")).strip().lower()
-    dtype_bytes = _resolve_dtype_bytes(
-        quant_tag
-        or cfg.get("torch_dtype")
-        or cfg.get("dtype")
-        or precision_hint
-    )
-    active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok = (
-        _compute_expert_decomposition(
-            cfg, weight_bytes=weight_bytes, dtype_bytes=dtype_bytes,
-        )
+    dtype_bytes = _resolve_dtype_bytes(quant_tag or cfg.get("torch_dtype") or cfg.get("dtype") or precision_hint)
+    active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok = _compute_expert_decomposition(
+        cfg,
+        weight_bytes=weight_bytes,
+        dtype_bytes=dtype_bytes,
     )
     intermediate_size = int(cfg.get("intermediate_size") or 0)
     moe_intermediate_size = int(cfg.get("moe_intermediate_size") or 0)
@@ -926,27 +937,15 @@ def compute_theoretical_peak_output_tok_per_sec(
     # Average KV-cache length during decode (isl + half of osl).
     kv_seq_len = max(int(isl) + int(osl) // 2, 1)
     # Per-decode-step weight IO; MoE activated-expert union uses the coupon form ``activated_fraction = 1-(1-k/n)^B`` (valid upper bound everywhere) instead of the linear ``min(1, B*k/n)`` bound that over-counts at mid batch. Dense (num_experts==0) reads full ``weight_bytes`` each step.
-    if (
-        num_experts > 0
-        and experts_per_tok > 0
-        and expert_weight_bytes > 0
-    ):
+    if num_experts > 0 and experts_per_tok > 0 and expert_weight_bytes > 0:
         non_expert_bytes = max(int(weight_bytes) - int(expert_weight_bytes), 0)
-        activated_fraction = 1.0 - (
-            1.0 - experts_per_tok / num_experts
-        ) ** batch
-        effective_weight = (
-            non_expert_bytes + activated_fraction * int(expert_weight_bytes)
-        )
+        activated_fraction = 1.0 - (1.0 - experts_per_tok / num_experts) ** batch
+        effective_weight = non_expert_bytes + activated_fraction * int(expert_weight_bytes)
     else:
         effective_weight = float(
-            int(active_weight_bytes)
-            if active_weight_bytes and active_weight_bytes > 0
-            else int(weight_bytes)
+            int(active_weight_bytes) if active_weight_bytes and active_weight_bytes > 0 else int(weight_bytes)
         )
-    bytes_per_token_total = (
-        effective_weight / batch + kv_bytes * kv_seq_len
-    )
+    bytes_per_token_total = effective_weight / batch + kv_bytes * kv_seq_len
     if bytes_per_token_total <= 0:
         return 0.0
     return bw_total_bytes_per_sec / bytes_per_token_total
@@ -983,11 +982,7 @@ def compute_compute_bound_ceiling_tok_per_sec(
     if peak_tflops <= 0 or weight_dtype_bytes <= 0:
         return 0.0
     # B=1 per-token figure; fall back to dense weight_bytes only when active is missing/0 (never a batch-saturated weight here).
-    active_b1 = (
-        int(active_weight_bytes)
-        if active_weight_bytes and active_weight_bytes > 0
-        else int(weight_bytes)
-    )
+    active_b1 = int(active_weight_bytes) if active_weight_bytes and active_weight_bytes > 0 else int(weight_bytes)
     if active_b1 <= 0:
         return 0.0
     peak_flops_total = peak_tflops * 1e12 * max(num_gpus, 1)
@@ -1033,6 +1028,7 @@ def _resolve_effective_concurrency(state: Any) -> int:
 @dataclass(frozen=True)
 class RooflineBreakdown:
     """Decode roofline ceiling plus memory/compute side projections (PerfModel peak sums per-op max(t_mem,t_cmp), may differ from min(T_mem,T_cmp)). ``bound_kind`` ∈ {memory, compute, unknown} (unknown ⇒ peak 0)."""
+
     mem_tok_per_sec: float
     cmp_tok_per_sec: float
     peak_tok_per_sec: float
@@ -1055,7 +1051,9 @@ def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
 
 
 def compute_roofline_breakdown_from_state(
-    state: Any, *, arm: str | None = None,
+    state: Any,
+    *,
+    arm: str | None = None,
 ) -> RooflineBreakdown:
     """Primary decode ceiling + T_mem/T_cmp side projections. Prefers the bottom-up PerfModel (``compute_roofline_from_perfmodel``) when model config is complete, else the legacy top-down aggregate. Never raises; returns ``_EMPTY_BREAKDOWN`` on missing fields. ``arm`` pins precision to a specific arm ("baseline" anchors the ceiling dtype to baseline).
 
@@ -1082,9 +1080,7 @@ def compute_roofline_breakdown_from_state(
     rt = resolve_runtime_dtype(state, meta, arm=arm)
     meta = apply_runtime_dtype(meta, rt)
     precision_tag = (
-        rt.compute_precision_tag
-        or runtime.precision
-        or "bf16"  # mirror _resolve_dtype_bytes default
+        rt.compute_precision_tag or runtime.precision or "bf16"  # mirror _resolve_dtype_bytes default
     )
     mem = compute_theoretical_peak_output_tok_per_sec(
         gpu_type=gpu_type,
@@ -1186,20 +1182,40 @@ def read_baseline_server_args(state: Any) -> str:
 #:
 #: Sources: TraceLens/AgenticMode/Standalone/utils/arch/MI{300,325,355}X.json
 _MI300X_ACHIEVABLE_TFLOPS: dict[str, float] = {
-    "bf16": 708.0, "bfloat16": 708.0, "fp16": 654.0, "float16": 654.0,
-    "fp8": 1273.0, "float8_e4m3fn": 1273.0, "float8_e5m2": 1273.0,
-    "fp32": 163.0, "float32": 163.0,
+    "bf16": 708.0,
+    "bfloat16": 708.0,
+    "fp16": 654.0,
+    "float16": 654.0,
+    "fp8": 1273.0,
+    "float8_e4m3fn": 1273.0,
+    "float8_e5m2": 1273.0,
+    "fp32": 163.0,
+    "float32": 163.0,
 }
 _MI325X_ACHIEVABLE_TFLOPS: dict[str, float] = {
-    "bf16": 843.0, "bfloat16": 843.0, "fp16": 794.0, "float16": 794.0,
-    "fp8": 1519.0, "float8_e4m3fn": 1519.0, "float8_e5m2": 1519.0,
-    "fp32": 194.0, "float32": 194.0,
+    "bf16": 843.0,
+    "bfloat16": 843.0,
+    "fp16": 794.0,
+    "float16": 794.0,
+    "fp8": 1519.0,
+    "float8_e4m3fn": 1519.0,
+    "float8_e5m2": 1519.0,
+    "fp32": 194.0,
+    "float32": 194.0,
 }
 _MI355X_ACHIEVABLE_TFLOPS: dict[str, float] = {
-    "bf16": 1686.0, "bfloat16": 1686.0, "fp16": 1686.0, "float16": 1686.0,
-    "fp8": 3567.0, "float8_e4m3fn": 3567.0, "float8_e5m2": 3567.0,
-    "mxfp4": 5663.0, "fp4": 5663.0, "float4": 5663.0,
-    "fp32": 137.0, "float32": 137.0,
+    "bf16": 1686.0,
+    "bfloat16": 1686.0,
+    "fp16": 1686.0,
+    "float16": 1686.0,
+    "fp8": 3567.0,
+    "float8_e4m3fn": 3567.0,
+    "float8_e5m2": 3567.0,
+    "mxfp4": 5663.0,
+    "fp4": 5663.0,
+    "float4": 5663.0,
+    "fp32": 137.0,
+    "float32": 137.0,
 }
 
 HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
@@ -1265,8 +1281,13 @@ def _fused_moe_flops(M: int, K: int, N: int, topk: int) -> float:
 
 
 def _fused_moe_bytes(
-    M: int, K: int, N: int, num_experts: int, topk: int,
-    weight_bpe: float, act_bpe: float | None = None,
+    M: int,
+    K: int,
+    N: int,
+    num_experts: int,
+    topk: int,
+    weight_bpe: float,
+    act_bpe: float | None = None,
 ) -> float:
     """HBM bytes for one gated SwiGLU MoE forward using the coupon-collector
     active-expert count, inlined from TraceLens FusedMoE.bytes_func.
@@ -1297,23 +1318,24 @@ def _fused_moe_bytes(
         act_bpe = weight_bpe
     e_active = num_experts * (1.0 - ((num_experts - topk) / num_experts) ** M)
     return (
-        M * K * act_bpe                      # input read
+        M * K * act_bpe  # input read
         + e_active * N * K * weight_bpe * 2  # gate + up weight reads
-        + e_active * N * K * weight_bpe       # down weight reads
-        + M * K * act_bpe                     # output write
+        + e_active * N * K * weight_bpe  # down weight reads
+        + M * K * act_bpe  # output write
     )
 
 
 @_dc.dataclass(frozen=True)
 class OpBreakdown:
     """Per-operator roofline result from TraceLens PerfModel."""
+
     name: str
-    flops: float          # total FLOPs (across all layers)
-    bytes_moved: float    # total bytes (across all layers)
-    ai: float             # arithmetic intensity = flops / bytes_moved
-    time_s: float         # roofline time (seconds, across all layers)
-    bound: str            # "compute" | "memory"
-    pct_time: float       # fraction of total forward time (0–1)
+    flops: float  # total FLOPs (across all layers)
+    bytes_moved: float  # total bytes (across all layers)
+    ai: float  # arithmetic intensity = flops / bytes_moved
+    time_s: float  # roofline time (seconds, across all layers)
+    bound: str  # "compute" | "memory"
+    pct_time: float  # fraction of total forward time (0–1)
 
 
 @_dc.dataclass(frozen=True)
@@ -1329,12 +1351,13 @@ class PerfModelBreakdown:
     (already summed over the layer repetitions encoded in ``rep``).
     ``bound_kind`` reflects the decode-forward dominant bound.
     """
+
     decode_tok_per_s: float
     prefill_tok_per_s: float
     decode_mem_tok_per_s: float
     decode_cmp_tok_per_s: float
     ops: list[OpBreakdown]
-    bound_kind: str     # "compute" | "memory" | "unknown"
+    bound_kind: str  # "compute" | "memory" | "unknown"
     hbm_bw_gbps: float
     peak_achievable_tflops: float
 
@@ -1358,7 +1381,11 @@ def _gemm_flops(M: int, N: int, K: int) -> float:
 
 
 def _gemm_bytes(
-    M: int, N: int, K: int, weight_bpe: float, act_bpe: float | None = None,
+    M: int,
+    N: int,
+    K: int,
+    weight_bpe: float,
+    act_bpe: float | None = None,
 ) -> float:
     """HBM bytes for a bias-free matmul: read(act MK + weight KN) + write(act MN).
 
@@ -1382,8 +1409,14 @@ def _gemm_bytes(
 
 
 def _sdpa_flops(
-    B: int, N_Q: int, H_Q: int, N_KV: int, H_KV: int,
-    d_h_qk: int, d_h_v: int, causal: bool,
+    B: int,
+    N_Q: int,
+    H_Q: int,
+    N_KV: int,
+    H_KV: int,
+    d_h_qk: int,
+    d_h_v: int,
+    causal: bool,
 ) -> float:
     """FLOPs for scaled dot-product attention.
 
@@ -1415,8 +1448,15 @@ def _sdpa_flops(
 
 
 def _sdpa_bytes(
-    B: int, N_Q: int, H_Q: int, N_KV: int, H_KV: int,
-    d_h_qk: int, d_h_v: int, causal: bool, bpe: float,
+    B: int,
+    N_Q: int,
+    H_Q: int,
+    N_KV: int,
+    H_KV: int,
+    d_h_qk: int,
+    d_h_v: int,
+    causal: bool,
+    bpe: float,
 ) -> float:
     """HBM bytes for SDPA: read Q, K, V + write output.
 
@@ -1439,10 +1479,10 @@ def _sdpa_bytes(
         Total HBM bytes for scaled dot-product attention.
     """
     elems = (
-        B * N_Q * H_Q * d_h_qk    # Q read
+        B * N_Q * H_Q * d_h_qk  # Q read
         + B * N_KV * H_KV * d_h_qk  # K read
-        + B * N_KV * H_KV * d_h_v   # V read
-        + B * N_Q * H_Q * d_h_v     # output write
+        + B * N_KV * H_KV * d_h_v  # V read
+        + B * N_Q * H_Q * d_h_v  # output write
     )
     return float(elems) * bpe
 
@@ -1527,17 +1567,17 @@ def compute_roofline_from_perfmodel(
     # Attention projections and lm_head use the standard GEMM formula.
     # MoE FFN is handled separately in _forward via _fused_moe_flops/bytes.
     linears: list[tuple[str, int, int, int]] = [
-        ("q_proj",    hidden, q_out,  n_layers),
-        ("k_proj",    hidden, kv_out, n_layers),
-        ("v_proj",    hidden, kv_out, n_layers),
-        ("o_proj",    q_out,  hidden, n_layers),
+        ("q_proj", hidden, q_out, n_layers),
+        ("k_proj", hidden, kv_out, n_layers),
+        ("v_proj", hidden, kv_out, n_layers),
+        ("o_proj", q_out, hidden, n_layers),
     ]
     # Dense FFN: add gate/up/down to linears (standard GEMM).
     # MoE FFN is added inside _forward with the batch-aware coupon formula.
     if ffn and not (meta.num_experts > 0 and meta.moe_intermediate_size > 0):
         linears += [
             ("gate_proj", hidden, ffn, n_layers),
-            ("up_proj",   hidden, ffn, n_layers),
+            ("up_proj", hidden, ffn, n_layers),
             ("down_proj", ffn, hidden, n_layers),
         ]
     if vocab:
@@ -1583,60 +1623,68 @@ def compute_roofline_from_perfmodel(
             total_t += t * rep
             total_mem_t += t_mem * rep
             total_cmp_t += t_cmp * rep
-            op_rows.append(OpBreakdown(
-                name=name,
-                flops=fl * rep,
-                bytes_moved=by * rep,
-                ai=(fl / by if by else 0.0),
-                time_s=t * rep,
-                bound=side,
-                pct_time=0.0,  # filled after total is known
-            ))
+            op_rows.append(
+                OpBreakdown(
+                    name=name,
+                    flops=fl * rep,
+                    bytes_moved=by * rep,
+                    ai=(fl / by if by else 0.0),
+                    time_s=t * rep,
+                    bound=side,
+                    pct_time=0.0,  # filled after total is known
+                )
+            )
         # MoE FFN: TraceLens FusedMoE formula with batch-aware coupon
         # E_active = n*(1-(1-k/n)^M), which correctly accounts for the fact that
         # at high batch more expert weights are loaded (vs. topk fixed for B=1).
         if meta.num_experts > 0 and meta.moe_intermediate_size > 0:
             fl_moe = _fused_moe_flops(M, hidden, meta.moe_intermediate_size, meta.experts_per_tok)
             by_moe = _fused_moe_bytes(
-                M, hidden, meta.moe_intermediate_size,
-                meta.num_experts, meta.experts_per_tok, bpe, act_bpe,
+                M,
+                hidden,
+                meta.moe_intermediate_size,
+                meta.num_experts,
+                meta.experts_per_tok,
+                bpe,
+                act_bpe,
             )
             t_moe, side_moe, t_mem_moe, t_cmp_moe = _roofline_time(fl_moe, by_moe)
             total_t += t_moe * n_layers
             total_mem_t += t_mem_moe * n_layers
             total_cmp_t += t_cmp_moe * n_layers
-            op_rows.append(OpBreakdown(
-                name="moe_fused",
-                flops=fl_moe * n_layers,
-                bytes_moved=by_moe * n_layers,
-                ai=(fl_moe / by_moe if by_moe else 0.0),
-                time_s=t_moe * n_layers,
-                bound=side_moe,
-                pct_time=0.0,
-            ))
+            op_rows.append(
+                OpBreakdown(
+                    name="moe_fused",
+                    flops=fl_moe * n_layers,
+                    bytes_moved=by_moe * n_layers,
+                    ai=(fl_moe / by_moe if by_moe else 0.0),
+                    time_s=t_moe * n_layers,
+                    bound=side_moe,
+                    pct_time=0.0,
+                )
+            )
         # SDPA
-        causal = (s_q == s_kv)
+        causal = s_q == s_kv
         fl_s = _sdpa_flops(batch, s_q, n_q_heads, s_kv, n_kv_heads, hd, hd, causal)
         by_s = _sdpa_bytes(batch, s_q, n_q_heads, s_kv, n_kv_heads, hd, hd, causal, act_bpe)
         t_s, side_s, t_mem_s, t_cmp_s = _roofline_time(fl_s, by_s)
         total_t += t_s * n_layers
         total_mem_t += t_mem_s * n_layers
         total_cmp_t += t_cmp_s * n_layers
-        op_rows.append(OpBreakdown(
-            name="sdpa",
-            flops=fl_s * n_layers,
-            bytes_moved=by_s * n_layers,
-            ai=(fl_s / by_s if by_s else 0.0),
-            time_s=t_s * n_layers,
-            bound=side_s,
-            pct_time=0.0,
-        ))
+        op_rows.append(
+            OpBreakdown(
+                name="sdpa",
+                flops=fl_s * n_layers,
+                bytes_moved=by_s * n_layers,
+                ai=(fl_s / by_s if by_s else 0.0),
+                time_s=t_s * n_layers,
+                bound=side_s,
+                pct_time=0.0,
+            )
+        )
         # fill pct_time
         if total_t > 0:
-            op_rows = [
-                _dc.replace(op, pct_time=op.time_s / total_t)
-                for op in op_rows
-            ]
+            op_rows = [_dc.replace(op, pct_time=op.time_s / total_t) for op in op_rows]
         return total_t, total_mem_t, total_cmp_t, op_rows
 
     batch = max(concurrency, 1)
@@ -1667,7 +1715,9 @@ def compute_roofline_from_perfmodel(
 
 
 def compute_roofline_breakdown_from_state_v2(
-    state: Any, *, arm: str | None = None,
+    state: Any,
+    *,
+    arm: str | None = None,
 ) -> "tuple[RooflineBreakdown, PerfModelBreakdown | None]":
     """Return the primary roofline breakdown AND the per-op PerfModel breakdown.
 
@@ -1707,9 +1757,7 @@ def compute_roofline_breakdown_from_state_v2(
                 isl=runtime.isl,
                 osl=runtime.osl,
                 num_gpus=runtime.tp,
-                precision_tag=rt.compute_precision_tag
-                or runtime.precision
-                or "bf16",
+                precision_tag=rt.compute_precision_tag or runtime.precision or "bf16",
             )
         except Exception:  # noqa: BLE001 — best-effort, never raise
             pm_bd = None

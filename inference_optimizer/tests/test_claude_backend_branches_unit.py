@@ -3,12 +3,12 @@
 """Branch coverage for ClaudeBackend: SDK import, __post_init__ wiring,
 option building (resume / context tools / raw mode), timeout handling, the
 conversational session capture, and the SDK-stream error tolerance."""
+
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
@@ -48,6 +48,7 @@ def _query(messages, *, raise_exc=None):
             yield m
         if raise_exc is not None:
             raise raise_exc
+
     return _q
 
 
@@ -64,8 +65,7 @@ def _backend(messages=None, **over):
 def _emit_tool_block():
     return ToolUseBlock(
         name=cl.EMIT_INTENT_TOOL_QUALIFIED,
-        input={"intent_type": "send_message",
-               "payload": {"topic": "t", "body_md": "ok"}},
+        input={"intent_type": "send_message", "payload": {"topic": "t", "body_md": "ok"}},
     )
 
 
@@ -80,8 +80,7 @@ def test_import_sdk_missing(monkeypatch):
 
 
 def test_import_sdk_incomplete(monkeypatch):
-    monkeypatch.setattr(cl.importlib, "import_module",
-                        lambda name: SimpleNamespace())  # no query/options
+    monkeypatch.setattr(cl.importlib, "import_module", lambda name: SimpleNamespace())  # no query/options
     with pytest.raises(BackendError, match="missing query"):
         cl._import_sdk()
 
@@ -105,12 +104,10 @@ def test_post_init_imports_sdk(monkeypatch):
 
 
 def test_post_init_emit_intent_setup_failure(monkeypatch):
-    monkeypatch.setattr(cl, "build_emit_intent_server",
-                        lambda **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(cl, "build_emit_intent_server", lambda **k: (_ for _ in ()).throw(RuntimeError("boom")))
     b = _backend()
     assert b.has_emit_intent_tool is False
-    assert any("emit_intent MCP setup failed" in c.get("warn", "")
-               for c in b.calls)
+    assert any("emit_intent MCP setup failed" in c.get("warn", "") for c in b.calls)
 
 
 def test_post_init_conversational_floors(monkeypatch):
@@ -122,28 +119,24 @@ def test_post_init_conversational_floors(monkeypatch):
 
 # ---- set_context_provider -------------------------------------------------
 def test_set_context_provider_success(monkeypatch):
-    monkeypatch.setattr(cl, "build_context_tools_server",
-                        lambda provider, **k: SimpleNamespace(name="ctx"))
+    monkeypatch.setattr(cl, "build_context_tools_server", lambda provider, **k: SimpleNamespace(name="ctx"))
     b = _backend()
     b.set_context_provider(SimpleNamespace())
     assert b.has_context_tools is True
 
 
 def test_set_context_provider_failure(monkeypatch):
-    monkeypatch.setattr(cl, "build_context_tools_server",
-                        lambda provider, **k: (_ for _ in ()).throw(ValueError("x")))
+    monkeypatch.setattr(cl, "build_context_tools_server", lambda provider, **k: (_ for _ in ()).throw(ValueError("x")))
     b = _backend()
     b.set_context_provider(SimpleNamespace())
     assert b.has_context_tools is False
-    assert any("context tools MCP setup failed" in c.get("warn", "")
-               for c in b.calls)
+    assert any("context tools MCP setup failed" in c.get("warn", "") for c in b.calls)
 
 
 # ---- _build_options -------------------------------------------------------
 def test_build_options_model_and_resume():
     b = _backend(model="claude-x")
-    opts = b._build_options(tools=["Read"], max_turns=5,
-                            system_prompt="sys", resume_session_id="sess-1")
+    opts = b._build_options(tools=["Read"], max_turns=5, system_prompt="sys", resume_session_id="sess-1")
     assert opts.kwargs["model"] == "claude-x"
     assert opts.kwargs["system_prompt"] == "sys"
     assert opts.kwargs["resume"] == "sess-1"
@@ -157,8 +150,7 @@ def test_build_options_raw_completion():
 
 
 def test_build_options_with_context_tools(monkeypatch):
-    monkeypatch.setattr(cl, "build_context_tools_server",
-                        lambda provider, **k: SimpleNamespace(name="ctx"))
+    monkeypatch.setattr(cl, "build_context_tools_server", lambda provider, **k: SimpleNamespace(name="ctx"))
     b = _backend()
     b.set_context_provider(SimpleNamespace())
     opts = b._build_options(tools=[], max_turns=3, system_prompt=None)
@@ -216,11 +208,12 @@ async def test_run_timeout():
 # ---- run(): conversational session capture --------------------------------
 async def test_run_conversational_session_capture(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC", "60")
-    msg = _Msg(content=[_emit_tool_block()], result="done",
-               usage={"input_tokens": 5, "output_tokens": 2,
-                      "cache_read_input_tokens": 1,
-                      "cache_creation_input_tokens": 0},
-               session_id="sess-9")
+    msg = _Msg(
+        content=[_emit_tool_block()],
+        result="done",
+        usage={"input_tokens": 5, "output_tokens": 2, "cache_read_input_tokens": 1, "cache_creation_input_tokens": 0},
+        session_id="sess-9",
+    )
     b = _backend(messages=[msg], conversational=True)
     b.sdk_query_factory = _query([msg])
     res = await b.run("hi")
@@ -277,6 +270,5 @@ async def test_run_raw_completion_headroom():
 
 def test_parse_tool_use_block_invalid_returns_none():
     b = _backend()
-    bad = ToolUseBlock(name=cl.EMIT_INTENT_TOOL_QUALIFIED,
-                       input={"intent_type": "not_a_real_type", "payload": {}})
+    bad = ToolUseBlock(name=cl.EMIT_INTENT_TOOL_QUALIFIED, input={"intent_type": "not_a_real_type", "payload": {}})
     assert b._parse_tool_use_block(bad) is None

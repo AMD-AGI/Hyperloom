@@ -41,19 +41,23 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     if tput:
         facts.append(f"Baseline throughput: {float(tput):.2f} tok/s/gpu.")
-        decisions.append(Decision(
-            kind="attempted",
-            subject="baseline",
-            metric_pct=None,
-            rationale=f"baseline_tput={float(tput):.2f}",
-        ))
+        decisions.append(
+            Decision(
+                kind="attempted",
+                subject="baseline",
+                metric_pct=None,
+                rationale=f"baseline_tput={float(tput):.2f}",
+            )
+        )
     else:
         warnings.append("No baseline_tput recorded — every subsequent gain is uncomputable.")
-        decisions.append(Decision(
-            kind="not_attempted",
-            subject="baseline",
-            rationale="no throughput captured",
-        ))
+        decisions.append(
+            Decision(
+                kind="not_attempted",
+                subject="baseline",
+                rationale="no throughput captured",
+            )
+        )
     if acc:
         facts.append(f"Baseline accuracy: {float(acc):.4g}.")
     if ttft is not None:
@@ -76,27 +80,33 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if ttft is not None and ttft_source == "runs_baseline_disk":
         ttft_display = f"{float(ttft):.1f} (reconstructed from runs/baseline/ disk walk)"
     md_parts: list[str] = []
-    md_parts.append(md_kv_list([
-        ("throughput_tok_s_per_gpu", tput),
-        ("accuracy",                 acc),
-        ("ttft_mean_ms",             ttft_display),
-        ("e2el_mean_ms",             e2el),
-        ("ttft_e2el_source",         ttft_source or None),
-        ("config_path",              b.get("config_path")),
-        ("benchmark_report_path",    b.get("benchmark_report_path")),
-        ("failure_streak",           fail_streak or None),
-    ]))
+    md_parts.append(
+        md_kv_list(
+            [
+                ("throughput_tok_s_per_gpu", tput),
+                ("accuracy", acc),
+                ("ttft_mean_ms", ttft_display),
+                ("e2el_mean_ms", e2el),
+                ("ttft_e2el_source", ttft_source or None),
+                ("config_path", b.get("config_path")),
+                ("benchmark_report_path", b.get("benchmark_report_path")),
+                ("failure_streak", fail_streak or None),
+            ]
+        )
+    )
     if attempts:
         rows = [
-            [a.get("ts"), a.get("status"), a.get("decision"),
-             a.get("key_metric"), a.get("error_class")]
+            [a.get("ts"), a.get("status"), a.get("decision"), a.get("key_metric"), a.get("error_class")]
             for a in attempts[:10]
         ]
         md_parts.append("")
         md_parts.append("**Baseline attempts** (last 10):")
-        md_parts.append(md_table(
-            ["ts", "status", "decision", "key_metric", "error_class"], rows,
-        ))
+        md_parts.append(
+            md_table(
+                ["ts", "status", "decision", "key_metric", "error_class"],
+                rows,
+            )
+        )
 
     inv_md = render_invocation_block(b.get("invocation"), session.get("image"))
     if inv_md:

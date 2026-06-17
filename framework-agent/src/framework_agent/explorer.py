@@ -192,9 +192,7 @@ def _extract_html_url(detail: dict[str, Any]) -> str:
     return _coalesce_str(summary.get("html_url"), detail.get("html_url"), detail.get("url"))
 
 
-def _extract_changed_files(
-    detail: dict[str, Any], files_payload: list[dict[str, Any]]
-) -> tuple[str, ...]:
+def _extract_changed_files(detail: dict[str, Any], files_payload: list[dict[str, Any]]) -> tuple[str, ...]:
     """Pull changed-files list, preferring the dedicated files endpoint payload.
 
     Args:
@@ -257,13 +255,9 @@ def _enrich_candidate_via_primus(req: ExploreRequest, candidate: Candidate) -> C
         ) from exc
     base_url = req.primus_cortex.base_url
     timeout_sec = req.primus_cortex.timeout_sec
-    detail = primus_cortex.pr_get(
-        repo_slug, number, base_url=base_url, timeout_sec=timeout_sec
-    )
+    detail = primus_cortex.pr_get(repo_slug, number, base_url=base_url, timeout_sec=timeout_sec)
     try:
-        files_payload = primus_cortex.pr_files(
-            repo_slug, number, base_url=base_url, timeout_sec=timeout_sec
-        )
+        files_payload = primus_cortex.pr_files(repo_slug, number, base_url=base_url, timeout_sec=timeout_sec)
     except primus_cortex.PrimusCortexError:
         files_payload = []
     return replace(
@@ -457,14 +451,15 @@ def _prepare_candidate_workspace_with_artifacts(
     candidate_dir.mkdir(parents=True, exist_ok=True)
     artifact_paths = _write_pr_artifacts(req, candidate, candidate_dir)
     workspace = prepare_candidate_workspace(
-        req, candidate, index=index, execute=execute,
+        req,
+        candidate,
+        index=index,
+        execute=execute,
     )
     return workspace, artifact_paths
 
 
-def _write_pr_artifacts(
-    req: ExploreRequest, candidate: Candidate, candidate_dir: Path
-) -> dict[str, str]:
+def _write_pr_artifacts(req: ExploreRequest, candidate: Candidate, candidate_dir: Path) -> dict[str, str]:
     """Write ``pr.patches`` + ``pr_files.json`` for a PR candidate.
 
     No-op when Primus Cortex is unconfigured or the candidate is not a PR
@@ -497,15 +492,11 @@ def _write_pr_artifacts(
     base_url = req.primus_cortex.base_url
     timeout_sec = req.primus_cortex.timeout_sec
 
-    patches_text = primus_cortex.pr_patches(
-        repo_slug, number, base_url=base_url, timeout_sec=timeout_sec
-    )
+    patches_text = primus_cortex.pr_patches(repo_slug, number, base_url=base_url, timeout_sec=timeout_sec)
     patches_path = candidate_dir / "pr.patches"
     patches_path.write_text(patches_text, encoding="utf-8")
 
-    files_payload = primus_cortex.pr_files(
-        repo_slug, number, base_url=base_url, timeout_sec=timeout_sec
-    )
+    files_payload = primus_cortex.pr_files(repo_slug, number, base_url=base_url, timeout_sec=timeout_sec)
     files_json_path = candidate_dir / "pr_files.json"
     files_json_path.write_text(
         json.dumps(
@@ -559,9 +550,7 @@ def _variables(
     }
 
 
-def _evaluate_candidate(
-    req: ExploreRequest, variables: dict[str, str]
-) -> tuple[float | None, float | None, str]:
+def _evaluate_candidate(req: ExploreRequest, variables: dict[str, str]) -> tuple[float | None, float | None, str]:
     """Load post-run benchmark.json + accuracy.json and pull the metrics.
 
     Args:
@@ -607,11 +596,18 @@ def _run_single_candidate(
         The :class:`CandidateResult` for the candidate.
     """
     workspace, artifact_paths = _prepare_candidate_workspace_with_artifacts(
-        req, candidate, index=index, execute=execute,
+        req,
+        candidate,
+        index=index,
+        execute=execute,
     )
     candidate_dir = workspace.candidate_dir
     variables = _variables(
-        req, candidate, candidate_dir, workspace.worktree_dir, workspace.venv_dir,
+        req,
+        candidate,
+        candidate_dir,
+        workspace.worktree_dir,
+        workspace.venv_dir,
     )
     if not execute:
         return CandidateResult(
@@ -634,7 +630,10 @@ def _run_single_candidate(
             continue
         command = render_template(spec.command, variables, shell_quote=True)
         with stage_log(
-            log, name, candidate=candidate.ref, timeout_sec=spec.timeout_sec,
+            log,
+            name,
+            candidate=candidate.ref,
+            timeout_sec=spec.timeout_sec,
         ) as ctx:
             result = run_command(
                 name,
@@ -658,7 +657,11 @@ def _run_single_candidate(
     score = candidate_score(req, throughput, accuracy)
     log.info(
         "candidate %s: status=%s winner=%s score=%.4f reason=%s",
-        candidate.ref, status, winner, score, reason,
+        candidate.ref,
+        status,
+        winner,
+        score,
+        reason,
     )
     return CandidateResult(
         candidate=candidate,
@@ -711,7 +714,11 @@ async def _run_candidates_concurrent(
         """
         async with semaphore:
             return await asyncio.to_thread(
-                _run_single_candidate, req, cand, index=idx, execute=execute,
+                _run_single_candidate,
+                req,
+                cand,
+                index=idx,
+                execute=execute,
             )
 
     tasks = [_bounded(i, c) for i, c in enumerate(candidates, start=1)]
@@ -810,8 +817,14 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
     log.info(
         "explore start framework=%s repo=%s work_dir=%s execute=%s "
         "ranking=%s build_concurrency=%d keep_winner_only=%s kb_domain=%r",
-        req.framework, req.repo_url, req.work_dir, execute,
-        req.ranking_mode, req.build_concurrency, req.keep_winner_only, req.kb_domain,
+        req.framework,
+        req.repo_url,
+        req.work_dir,
+        execute,
+        req.ranking_mode,
+        req.build_concurrency,
+        req.keep_winner_only,
+        req.kb_domain,
     )
     req.work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -827,15 +840,16 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
             "explore: ranking_mode + build_concurrency=%d -> asyncio.gather",
             req.build_concurrency,
         )
-        results: list[CandidateResult] = asyncio.run(
-            _run_candidates_concurrent(req, candidates, execute=execute)
-        )
+        results: list[CandidateResult] = asyncio.run(_run_candidates_concurrent(req, candidates, execute=execute))
     else:
         # Serial path; early-stops on first winner unless ranking_mode is on.
         results = []
         for index, candidate in enumerate(candidates, start=1):
             result = _run_single_candidate(
-                req, candidate, index=index, execute=execute,
+                req,
+                candidate,
+                index=index,
+                execute=execute,
             )
             results.append(result)
             if execute and result.winner and not req.ranking_mode:
@@ -884,8 +898,7 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
         "winner_dir": winner_result.candidate_dir if winner_result else None,
         "promotion_policy": "manual_only",
         "promotion_hint": (
-            "No main-environment mutation was performed. "
-            "Inspect winner_dir and promote manually."
+            "No main-environment mutation was performed. Inspect winner_dir and promote manually."
             if winner_result
             else "No winner found."
         ),
@@ -897,7 +910,9 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
     }
     log.info(
         "explore done winner=%s n_results=%d kb=%s",
-        summary["winner_ref"], len(results), kb_contribution.get("status"),
+        summary["winner_ref"],
+        len(results),
+        kb_contribution.get("status"),
     )
     return summary
 

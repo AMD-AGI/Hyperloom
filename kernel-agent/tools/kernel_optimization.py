@@ -23,6 +23,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _collective_names import kernel_name_implies_multigpu  # noqa: E402
 from _paths import workspace_root  # noqa: E402
+
 sys.path.pop(0)
 
 
@@ -198,10 +199,7 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
     candidates = list(payload.get("hot_kernels") or payload.get("kernel_candidates") or [])
     skipped = payload.get("skipped_kernels") or []
     if isinstance(skipped, list):
-        seen_ids = {
-            c.get("kernel_id") for c in candidates
-            if isinstance(c, dict) and c.get("kernel_id")
-        }
+        seen_ids = {c.get("kernel_id") for c in candidates if isinstance(c, dict) and c.get("kernel_id")}
         for entry in skipped:
             if not isinstance(entry, dict):
                 continue
@@ -214,10 +212,7 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
     artifact_paths = payload.get("artifact_paths")
     if not isinstance(artifact_paths, dict):
         artifact_paths = {}
-    report_path = (
-        payload.get("trace_report_path")
-        or artifact_paths.get("trace_report_path")
-    )
+    report_path = payload.get("trace_report_path") or artifact_paths.get("trace_report_path")
     if report_path:
         for candidate in candidates:
             if isinstance(candidate, dict):
@@ -239,14 +234,12 @@ def _normalize_kernel_id(value: str) -> str:
     """
     s = value.strip().lower()
     for prefix in ("kn", "rn"):
-        if s.startswith(prefix) and s[len(prefix):].isdigit():
-            return "k" + s[len(prefix):]
+        if s.startswith(prefix) and s[len(prefix) :].isdigit():
+            return "k" + s[len(prefix) :]
     return s
 
 
-def find_candidate(
-    candidates: list[dict[str, Any]], kernel_id: str
-) -> dict[str, Any] | None:
+def find_candidate(candidates: list[dict[str, Any]], kernel_id: str) -> dict[str, Any] | None:
     """Resolve a candidate by id with progressively looser matching.
 
     Tries exact ``kernel_id`` first, then a unique routable ``name`` match,
@@ -565,10 +558,12 @@ def parse_backends(backends: str) -> list[str]:
     allowed = {"geak", "claude", "codex", "cursor", "forge"}
     invalid = [b for b in parsed if b not in allowed]
     if invalid:
-        raise ValueError(f"unsupported backend(s): {', '.join(invalid)} "
-                         f"(allowed: {sorted(allowed)}; the 'llm' single-shot "
-                         "backend was removed because max_tokens=2048 truncates "
-                         "any non-trivial kernel)")
+        raise ValueError(
+            f"unsupported backend(s): {', '.join(invalid)} "
+            f"(allowed: {sorted(allowed)}; the 'llm' single-shot "
+            "backend was removed because max_tokens=2048 truncates "
+            "any non-trivial kernel)"
+        )
     return parsed
 
 
@@ -607,8 +602,7 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     # (KERNEL_OPT_BACKEND_ORDER=forge) still fired geak/claude/codex. Mirror the
     # handler's _backend_order precedence here so the subprocess agrees.
     if not user_backends:
-        env_order = (os.environ.get("KERNEL_OPT_BACKEND_ORDER")
-                     or os.environ.get("KERNEL_OPT_BACKENDS") or "").strip()
+        env_order = (os.environ.get("KERNEL_OPT_BACKEND_ORDER") or os.environ.get("KERNEL_OPT_BACKENDS") or "").strip()
         if env_order:
             user_backends = parse_backends(env_order)
     benchmark_available = has_benchmark(args, candidate)
@@ -721,14 +715,15 @@ def _hardware_prompt_blocks(target_platform: str) -> tuple[str, str]:
             "inference serving. Produce an actual edited kernel file with "
             "measurable speedup; do NOT just analyze and submit unchanged."
         )
-        notes = "\n".join([
-            "Hardware notes (target platform unknown):",
-            "- Before benchmarking, query the runtime environment for the ROCm arch ",
-            "(hipDeviceGetName/rocminfo), visible GPU IDs (ROCR_VISIBLE_DEVICES), "
-            + "and memory size/bandwidth.",
-            "- Record those values in the result and choose --offload-arch=<arch> "
-            + "accordingly; replace <arch> with the inspected ROCm arch before running.",
-        ])
+        notes = "\n".join(
+            [
+                "Hardware notes (target platform unknown):",
+                "- Before benchmarking, query the runtime environment for the ROCm arch ",
+                "(hipDeviceGetName/rocminfo), visible GPU IDs (ROCR_VISIBLE_DEVICES), " + "and memory size/bandwidth.",
+                "- Record those values in the result and choose --offload-arch=<arch> "
+                + "accordingly; replace <arch> with the inspected ROCm arch before running.",
+            ]
+        )
         return intro, notes
 
     intro = (
@@ -737,14 +732,16 @@ def _hardware_prompt_blocks(target_platform: str) -> tuple[str, str]:
         "edited kernel file with measurable speedup; do NOT just analyze and "
         "submit unchanged."
     )
-    notes = "\n".join([
-        f"Hardware notes (target platform: `{platform}`):",
-        f"- {hw['cus']} CUs, {hw['uarch']}, ROCm arch `{hw['arch']}`",
-        f"- {hw['mem']}",
-        f"- Build flag: `{hw['build_flag']}`",
-        f"- Use optimizations compatible with `{hw['arch']}` and verify runtime "
-        "device properties before benchmarking.",
-    ])
+    notes = "\n".join(
+        [
+            f"Hardware notes (target platform: `{platform}`):",
+            f"- {hw['cus']} CUs, {hw['uarch']}, ROCm arch `{hw['arch']}`",
+            f"- {hw['mem']}",
+            f"- Build flag: `{hw['build_flag']}`",
+            f"- Use optimizations compatible with `{hw['arch']}` and verify runtime "
+            "device properties before benchmarking.",
+        ]
+    )
     return intro, notes
 
 
@@ -804,9 +801,7 @@ def _format_shapes_for_case(shapes: Any) -> str:
     return str(shapes)
 
 
-_SHAPE_ARG_RE = re.compile(
-    r"^\s*\((?P<dims>[^)]*)\)\s*(?P<dtype>[A-Za-z0-9_]+)?\s*$"
-)
+_SHAPE_ARG_RE = re.compile(r"^\s*\((?P<dims>[^)]*)\)\s*(?P<dtype>[A-Za-z0-9_]+)?\s*$")
 
 
 def _split_shape_fragments(shape_text: Any) -> list[str]:
@@ -821,11 +816,7 @@ def _split_shape_fragments(shape_text: Any) -> list[str]:
     text = str(shape_text or "").strip()
     if not text:
         return []
-    return [
-        frag.strip()
-        for frag in re.split(r"\s*(?:<br\s*/?>|\n)\s*", text, flags=re.IGNORECASE)
-        if frag.strip()
-    ]
+    return [frag.strip() for frag in re.split(r"\s*(?:<br\s*/?>|\n)\s*", text, flags=re.IGNORECASE) if frag.strip()]
 
 
 def _parse_shape_arg(raw: Any, *, index: int) -> dict[str, Any]:
@@ -909,10 +900,7 @@ def _shape_case_from_value(
         args = list(structured_args)
     else:
         fragments = _split_shape_fragments(raw_shape)
-        args = [
-            _parse_shape_arg(fragment, index=idx)
-            for idx, fragment in enumerate(fragments)
-        ]
+        args = [_parse_shape_arg(fragment, index=idx) for idx, fragment in enumerate(fragments)]
     return {
         "primary": bool(primary),
         "call_count": parsed_count,
@@ -965,21 +953,18 @@ def _structured_benchmark_shape_cases(candidate: dict[str, Any]) -> dict[str, An
                 call_count=row.get("call_count"),
                 primary=idx == 0,
             )
-            case.update({
-                "operation": str(row.get("name") or ""),
-                "aggregate_time_ms": _safe_float(row.get("duration_us")) / 1000.0,
-                "percent_e2e": row.get("percent_of_total"),
-                "bound": str(row.get("bound_type") or ""),
-                "source": "task_group",
-            })
+            case.update(
+                {
+                    "operation": str(row.get("name") or ""),
+                    "aggregate_time_ms": _safe_float(row.get("duration_us")) / 1000.0,
+                    "percent_e2e": row.get("percent_of_total"),
+                    "bound": str(row.get("bound_type") or ""),
+                    "source": "task_group",
+                }
+            )
             if case["raw"] or case["args"]:
                 cases.append(case)
-    if (
-        not cases
-        and isinstance(input_shapes, list)
-        and input_shapes
-        and not is_synthetic
-    ):
+    if not cases and isinstance(input_shapes, list) and input_shapes and not is_synthetic:
         # Only use input_shapes when they come from a real program output
         # (TraceLens / runtime enrichment), not from the synthetic
         # legacy-shapes conversion in enrich_candidates_with_runtime_metadata.
@@ -1069,25 +1054,29 @@ def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
         "",
     ]
     if len(rows) > 1:
-        lines.extend([
-            f"This kernel resolves to the same source function across "
-            f"{len(rows)} TraceLens rows ("
-            f"{function_name or '<unknown function>'}"
-            + (f" at {location}" if location else "")
-            + (", AST-resolved" if ast_resolved else "")
-            + "). Optimize the source function once; the patch applies "
-            "to all rows below. Use the first row as the primary",
-            "benchmark case; treat the rest as supplementary shape coverage.",
-            "",
-        ])
+        lines.extend(
+            [
+                f"This kernel resolves to the same source function across "
+                f"{len(rows)} TraceLens rows ("
+                f"{function_name or '<unknown function>'}"
+                + (f" at {location}" if location else "")
+                + (", AST-resolved" if ast_resolved else "")
+                + "). Optimize the source function once; the patch applies "
+                "to all rows below. Use the first row as the primary",
+                "benchmark case; treat the rest as supplementary shape coverage.",
+                "",
+            ]
+        )
     else:
-        lines.extend([
-            f"This kernel maps to a single TraceLens row in "
-            f"{function_name or '<unknown function>'}"
-            + (f" at {location}" if location else "")
-            + ". The case below is the primary benchmark target.",
-            "",
-        ])
+        lines.extend(
+            [
+                f"This kernel maps to a single TraceLens row in "
+                f"{function_name or '<unknown function>'}"
+                + (f" at {location}" if location else "")
+                + ". The case below is the primary benchmark target.",
+                "",
+            ]
+        )
 
     for idx, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
@@ -1186,19 +1175,13 @@ _PRIORITY_BULLETS: dict[str, list[str]] = {
             "1. **Structural simplification**: hoist loop-invariant computations, "
             + "remove redundant address arithmetic, collapse dual-pass logic."
         ),
-        (
-            "2. **Shape-aware tuning**: specialize block sizes and grid indexing "
-            + "for the dominant TraceLens Args."
-        ),
+        ("2. **Shape-aware tuning**: specialize block sizes and grid indexing " + "for the dominant TraceLens Args."),
         (
             "3. **Memory traffic reduction**: improve coalescing / vectorization, "
             + "reduce intermediate writes, avoid extra global-memory round trips."
         ),
         "4. **Launch amortization** for tiny high-count decode shapes.",
-        (
-            "5. **Compute utilization**: improve MFMA tile choice, occupancy, "
-            + "register / shared-memory balance."
-        ),
+        ("5. **Compute utilization**: improve MFMA tile choice, occupancy, " + "register / shared-memory balance."),
     ],
 }
 
@@ -1242,9 +1225,7 @@ def _build_priority_block(candidate: dict[str, Any]) -> str:
         return ""
     bucket = _classify_bound(bound_type)
     label = bound_type or "unknown"
-    header_line = (
-        f"## Optimization priorities (TraceLens bound: `{label}`)"
-    )
+    header_line = f"## Optimization priorities (TraceLens bound: `{label}`)"
     intro = (
         "The list below orders optimization levers by expected payoff for "
         "this kernel's bottleneck. Try lever 1 first; only move to lever 2 "
@@ -1279,7 +1260,10 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 
 def _format_impact_range(
-    low_ms: float, low_e2e: float, high_ms: float, high_e2e: float,
+    low_ms: float,
+    low_e2e: float,
+    high_ms: float,
+    high_e2e: float,
 ) -> str:
     """One-line impact range formatter; empty string when both ends zero.
 
@@ -1487,10 +1471,12 @@ def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any
     entries: list[dict[str, Any]] = []
     for shape in shapes:
         if isinstance(shape, dict) and "shape" in shape:
-            entries.append({
-                "call_num": int(shape.get("call_num") or count),
-                "shape": shape["shape"],
-            })
+            entries.append(
+                {
+                    "call_num": int(shape.get("call_num") or count),
+                    "shape": shape["shape"],
+                }
+            )
         elif shape not in (None, "", [], ()):
             entries.append({"call_num": count, "shape": shape})
     return entries
@@ -1533,6 +1519,7 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
     from _payload_aliases import (  # type: ignore[import-not-found]
         read_extra_server_args as _read_eserver,
     )
+
     extra_server_args = (
         getattr(args, "extra_server_args", "")
         or _read_eserver(candidate)
@@ -1636,13 +1623,10 @@ def build_prompt(
     if isinstance(bench_files, str):
         bench_files = [bench_files]
     # Sort by semantic match so the most-relevant benchmarks head the [:8]-clipped list.
-    bench_files = _match_benchmark_for_kernel(
-        str(candidate.get("name") or ""), bench_files
-    )
+    bench_files = _match_benchmark_for_kernel(str(candidate.get("name") or ""), bench_files)
     is_multigpu = bool(candidate.get("is_multigpu"))
     # GPU count: CLI override, then candidate hint, then 1.
-    num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0)
-                   or int(candidate.get("num_gpus_recommended") or 1))
+    num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0) or int(candidate.get("num_gpus_recommended") or 1))
     # Map source_type to GEAK's kernel_type vocabulary for task_parser routing.
     geak_kernel_type = _GEAK_KERNEL_TYPE.get(str(candidate.get("source_type", "unknown")), "other")
     kernel_name = str(candidate.get("name", args.kernel_id))
@@ -1705,9 +1689,7 @@ def build_prompt(
         budget_min = int(getattr(args, "geak_budget_min", 130) or 130)
     else:
         budget_min = int(getattr(args, "budget_minutes", 60) or 60)
-    target_platform = (
-        getattr(args, "target_platform", "") or _env_target_platform()
-    )
+    target_platform = getattr(args, "target_platform", "") or _env_target_platform()
     platform_intro, hardware_notes = _hardware_prompt_blocks(target_platform)
     platform_build_flag = _target_build_flag(target_platform)
     hypothesis_block = _build_hypothesis_block(candidate)
@@ -1760,7 +1742,7 @@ def build_prompt(
         f"- Run mode: {'full' if budget_min >= 120 else 'quick'} "
         f"(--mode {'full' if budget_min >= 120 else 'quick'}).\n"
         f"- Hard wall-clock budget: ~{budget_min} minutes. Iterate up to minute "
-        f"{int(budget_min*0.85)},\n"
+        f"{int(budget_min * 0.85)},\n"
         "  then STOP iterating and finalize the report with your best so-far measured\n"
         "  speedup. The runner will SIGTERM at minute "
         f"{budget_min}; any in-flight work not on disk is lost.\n"
@@ -1801,7 +1783,7 @@ def build_prompt(
         "from your_v3 import <fn> as optimized` — Triton is JIT-compiled, NO rebuild.\n"
         "(option 2) STANDALONE HIP/CUDA program. Write a single .hip/.cu under\n"
         "  ./benchmarks/ that #include's BOTH the aiter baseline header (e.g.\n"
-        f"  `#include \"{kernel_repo}/csrc/include/<the_target>.cuh\"`) AND your\n"
+        f'  `#include "{kernel_repo}/csrc/include/<the_target>.cuh"`) AND your\n'
         "  optimized .cuh from ./optimized_versions/, then build with:\n"
         f"  `hipcc -O3 -std=c++17 -DUSE_ROCM -I{kernel_repo or '/sgl-workspace/aiter'}/csrc/include "
         f"{platform_build_flag} -o ./benchmarks/bench ./benchmarks/bench.hip`.\n"
@@ -1847,9 +1829,7 @@ def build_prompt(
     # resolution as apply_kernel_patch._mn_state_path / _multi_node_env. This
     # keeps test isolation intact: a stale real /tmp state file no longer
     # misclassifies a single-node run as multi-node.
-    mn_state_file = Path(
-        os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json")
-    )
+    mn_state_file = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))
     is_multinode_run = False
     try:
         if mn_state_file.is_file():
@@ -1870,13 +1850,13 @@ def build_prompt(
             "       python3 -m inference_optimizer.multi_node kernel-bench \\\n"
             "         --workspace /tmp/kbench_$KERNEL_ID \\\n"
             "         --bench-command 'cd /tmp/kbench_$KERNEL_ID && bash bench.sh' \\\n"
-            "         --files-b64-json '<{\"bench.sh\":\"<b64>\",\"v1.cu\":\"<b64>\",...}>' \\\n"
+            '         --files-b64-json \'<{"bench.sh":"<b64>","v1.cu":"<b64>",...}>\' \\\n'
             "         --result-glob 'result*.json'\n"
             "  3. Parse the printed JSON document's `result.stdout_tail`\n"
             "     and `result.artifacts[].content` for the speedup number;\n"
             "     write it into optimization_report.md as `[MICRO_SPEEDUP]`.\n"
             "Helper script to construct the b64 map cleanly:\n"
-            "    python3 -c 'import base64,json,glob;print(json.dumps({p:base64.b64encode(open(p,\"rb\").read()).decode() for p in glob.glob(\"**/*\",recursive=True) if __import__(\"os\").path.isfile(p)}))'\n"
+            '    python3 -c \'import base64,json,glob;print(json.dumps({p:base64.b64encode(open(p,"rb").read()).decode() for p in glob.glob("**/*",recursive=True) if __import__("os").path.isfile(p)}))\'\n'
             "Treat `kernel-bench` as your only measurement gate; everything\n"
             "else (code edits, correctness reasoning) still happens locally.\n"
         )
@@ -1918,53 +1898,50 @@ def build_prompt(
                     )
                 else:
                     focus_line = "Use the report below as full context for this kernel.\n"
-                tracelens_context_block = (
-                    "\n## TraceLens Context\n\n"
-                    + focus_line
-                    + "\n"
-                    + full_report
-                )
+                tracelens_context_block = "\n## TraceLens Context\n\n" + focus_line + "\n" + full_report
     # Use GEAK task_parser field names so its parser can extract them; OOB reads the same body as prose.
-    return "\n".join([
-        f"# TASK: Optimize the `{kernel_name}` kernel",
-        "",
-        budget_protocol_block,
-        platform_intro,
-        "",
-        f"kernel_name: {kernel_name}",
-        f"kernel_url: {source_file}",
-        f"kernel_type: {geak_kernel_type}",
-        f"repo: {kernel_repo}",
-        f"GPU percent: {candidate.get('gpu_pct', 'unknown')}",
-        f"Shapes: {json.dumps(candidate.get('shapes', []), sort_keys=True)}",
-        (
-            "Shape contract: when `benchmark_shape_cases` is present in the "
-            "metadata, benchmark its `primary_shape` first and use "
-            "`supplementary_shapes` only as additional coverage. Do not invent "
-            "shapes or reorder tensor arguments."
-            if kernel_metadata.get("benchmark_shape_cases")
-            else ""
-        ),
-        promotion_block,
-        "",
-        "Kernel runtime metadata (structured context for GEAK; unknown fields are null, empty arrays, or empty objects):",
-        "```json",
-        json.dumps(kernel_metadata, indent=2, sort_keys=True),
-        "```",
-        "",
-        hardware_notes,
-        hypothesis_block,
-        benchmark_cases_block,
-        priority_block,
-        "",
-        "Preserve function name, signature, decorators, and numerical behavior.",
-        "Return complete optimized code plus explanation of correctness assumptions.",
-        repo_block,
-        bench_block,
-        safety,
-        source_block,
-        tracelens_context_block,
-    ])
+    return "\n".join(
+        [
+            f"# TASK: Optimize the `{kernel_name}` kernel",
+            "",
+            budget_protocol_block,
+            platform_intro,
+            "",
+            f"kernel_name: {kernel_name}",
+            f"kernel_url: {source_file}",
+            f"kernel_type: {geak_kernel_type}",
+            f"repo: {kernel_repo}",
+            f"GPU percent: {candidate.get('gpu_pct', 'unknown')}",
+            f"Shapes: {json.dumps(candidate.get('shapes', []), sort_keys=True)}",
+            (
+                "Shape contract: when `benchmark_shape_cases` is present in the "
+                "metadata, benchmark its `primary_shape` first and use "
+                "`supplementary_shapes` only as additional coverage. Do not invent "
+                "shapes or reorder tensor arguments."
+                if kernel_metadata.get("benchmark_shape_cases")
+                else ""
+            ),
+            promotion_block,
+            "",
+            "Kernel runtime metadata (structured context for GEAK; unknown fields are null, empty arrays, or empty objects):",
+            "```json",
+            json.dumps(kernel_metadata, indent=2, sort_keys=True),
+            "```",
+            "",
+            hardware_notes,
+            hypothesis_block,
+            benchmark_cases_block,
+            priority_block,
+            "",
+            "Preserve function name, signature, decorators, and numerical behavior.",
+            "Return complete optimized code plus explanation of correctness assumptions.",
+            repo_block,
+            bench_block,
+            safety,
+            source_block,
+            tracelens_context_block,
+        ]
+    )
 
 
 def ray_available() -> bool:
@@ -1975,6 +1952,7 @@ def ray_available() -> bool:
     """
     try:
         import ray  # noqa: F401
+
         return True
     except Exception:
         return False
@@ -2005,6 +1983,7 @@ def _import_backend(name: str):
     if str(backends_dir) not in sys.path:
         sys.path.insert(0, str(backends_dir))
     import importlib
+
     return importlib.import_module(name)
 
 
@@ -2338,14 +2317,16 @@ def _compact_rocprof_prompt(payload: dict[str, Any]) -> str:
         roof = row.get("rocprof_roofline") or {}
         if not isinstance(roof, dict):
             roof = {}
-        lines.extend([
-            f"- Device kernel: {row.get('matched_kernel_name') or row.get('name') or 'unknown'}",
-            f"  - Bound type: {roof.get('bound_type') or row.get('bottleneck') or 'unknown'}",
-            f"  - Roofline efficiency: {roof.get('roofline_efficiency_pct')}",
-            f"  - AI HBM: {roof.get('ai_hbm')}",
-            f"  - Compute util pct: {roof.get('compute_utilization_pct')}",
-            f"  - Bandwidth util pct: {roof.get('bandwidth_utilization_pct')}",
-        ])
+        lines.extend(
+            [
+                f"- Device kernel: {row.get('matched_kernel_name') or row.get('name') or 'unknown'}",
+                f"  - Bound type: {roof.get('bound_type') or row.get('bottleneck') or 'unknown'}",
+                f"  - Roofline efficiency: {roof.get('roofline_efficiency_pct')}",
+                f"  - AI HBM: {roof.get('ai_hbm')}",
+                f"  - Compute util pct: {roof.get('compute_utilization_pct')}",
+                f"  - Bandwidth util pct: {roof.get('bandwidth_utilization_pct')}",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -2391,11 +2372,16 @@ def _run_rocprof_roofline(
     cmd = [
         sys.executable,
         str(tool),
-        "--workdir", str(workdir),
-        "--cmd", profiling_command,
-        "--out-json", str(out_json),
-        "--out-txt", str(out_txt),
-        "--timeout-sec", str(_rocprof_timeout_sec()),
+        "--workdir",
+        str(workdir),
+        "--cmd",
+        profiling_command,
+        "--out-json",
+        str(out_json),
+        "--out-txt",
+        str(out_txt),
+        "--timeout-sec",
+        str(_rocprof_timeout_sec()),
     ]
     if target_kernel:
         cmd.extend(["--target-kernel", target_kernel])
@@ -2499,13 +2485,15 @@ def _rocprof_sidecar_from_payload(payload: dict[str, Any], txt_path: str, json_p
     else:
         first = rows[0] if isinstance(rows[0], dict) else {}
     roof = dict(first.get("rocprof_roofline") or {})
-    roof.update({
-        "status": first.get("status") or payload.get("status") or "matched",
-        "matched_kernel_name": first.get("matched_kernel_name") or first.get("name"),
-        "target_kernel": target_kernel,
-        "report_path": txt_path,
-        "json_path": json_path,
-    })
+    roof.update(
+        {
+            "status": first.get("status") or payload.get("status") or "matched",
+            "matched_kernel_name": first.get("matched_kernel_name") or first.get("name"),
+            "target_kernel": target_kernel,
+            "report_path": txt_path,
+            "json_path": json_path,
+        }
+    )
     return roof
 
 
@@ -2772,7 +2760,9 @@ def _git_checkout_fallback(kernel_repo: str, log_path: Path) -> None:
     try:
         proc = subprocess.run(
             ["git", "-C", kernel_repo, "checkout", "--", "."],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         append_log(log_path, f"[git-fallback] checkout rc={proc.returncode}")
         if proc.stderr.strip():
@@ -2809,8 +2799,7 @@ def invoke_backend(
     """
     # GEAK needs more wall-clock than claude/codex; 130min default triggers GEAK's mode=full path.
     if backend == "geak":
-        budget_min = float(getattr(args, "geak_budget_min", 0)
-                           or getattr(args, "budget_minutes", 60) or 60)
+        budget_min = float(getattr(args, "geak_budget_min", 0) or getattr(args, "budget_minutes", 60) or 60)
     else:
         budget_min = float(getattr(args, "budget_minutes", 60) or 60)
     timeout_s = max(60, int(budget_min * 60))
@@ -2819,8 +2808,7 @@ def invoke_backend(
     kernel_repo = str(candidate.get("kernel_repo") or "")
     bench_files: list[str] = list(candidate.get("benchmark_files") or [])
     # GPU count: CLI override, then candidate hint, then 1.
-    num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0)
-                   or int(candidate.get("num_gpus_recommended") or 1))
+    num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0) or int(candidate.get("num_gpus_recommended") or 1))
 
     # ---------------------------------------------------------------------------
     # Common test-command + before_kernel_opt rocprof — runs for ALL backends
@@ -2828,10 +2816,7 @@ def invoke_backend(
     # pre-optimization roofline snapshot without duplicating the logic.
     # ---------------------------------------------------------------------------
     cand_name = str(candidate.get("name") or "")
-    is_multigpu_common = (
-        bool(candidate.get("is_multigpu"))
-        or kernel_name_implies_multigpu(cand_name)
-    )
+    is_multigpu_common = bool(candidate.get("is_multigpu")) or kernel_name_implies_multigpu(cand_name)
     # Derive a shared test_command that GEAK will use and rocprof will profile.
     # OOB backends don't accept --test-command but we still want the rocprof
     # snapshot, so we compute it here unconditionally.
@@ -2855,8 +2840,12 @@ def invoke_backend(
     )
     if common_test_command:
         _harness_cmd = _try_generate_harness(
-            common_test_command, candidate, source_file, _shared_out_dir,
-            kernel_repo, log_path,
+            common_test_command,
+            candidate,
+            source_file,
+            _shared_out_dir,
+            kernel_repo,
+            log_path,
         )
         if _harness_cmd:
             common_test_command = _harness_cmd
@@ -2882,6 +2871,7 @@ def invoke_backend(
                 append_log(log_path, f"[geak] test_command={test_command}")
             if test_command:
                 import shutil as _shutil
+
                 harness_dir = out_dir / "unittest"
                 harness_dir.mkdir(parents=True, exist_ok=True)
                 for _tc_part in test_command.split("&&"):
@@ -3025,8 +3015,11 @@ def invoke_backend(
         return {
             "returncode": 2,
             "stdout_tail": f"unknown backend: {backend}",
-            "stderr_tail": "", "stdout": "", "gpu_ids": "",
-            "elapsed_s": 0.0, "cmd": [],
+            "stderr_tail": "",
+            "stdout": "",
+            "gpu_ids": "",
+            "elapsed_s": 0.0,
+            "cmd": [],
         }
     finally:
         # Always undo rogue writes under the kernel repo, regardless of exit code.
@@ -3108,13 +3101,12 @@ def run_attempt(
         if source_suffix == ".py":
             placeholder = "def optimized_kernel_placeholder():\n    return None\n"
         else:
-            placeholder = "extern \"C\" __global__ void optimized_kernel_placeholder() {}\n"
+            placeholder = 'extern "C" __global__ void optimized_kernel_placeholder() {}\n'
         optimized_path.write_text(placeholder, encoding="utf-8")
         result = {}
     else:
         append_log(log_path, f"$ invoke_backend({backend})")
-        result = invoke_backend(backend, prompt_file, source_file, args,
-                                candidate=candidate, log_path=log_path)
+        result = invoke_backend(backend, prompt_file, source_file, args, candidate=candidate, log_path=log_path)
         returncode = int(result.get("returncode", 1))
         full_stdout = result.get("stdout") or result.get("stdout_tail") or ""
         stdout_tail = (full_stdout or "")[-4000:] or result.get("stderr_tail", "")
@@ -3159,10 +3151,14 @@ def run_attempt(
             # /home/user/ rescue: claude sometimes writes to ~/optimized_versions/ instead of the
             # workspace; surface fresh files there when the workspace's optimized_versions/ is empty.
             home_opt = Path("/home/user/optimized_versions")
-            if (cli_workspace
-                    and (not (Path(cli_workspace) / "optimized_versions").is_dir()
-                         or not list((Path(cli_workspace) / "optimized_versions").iterdir()))
-                    and home_opt.is_dir()):
+            if (
+                cli_workspace
+                and (
+                    not (Path(cli_workspace) / "optimized_versions").is_dir()
+                    or not list((Path(cli_workspace) / "optimized_versions").iterdir())
+                )
+                and home_opt.is_dir()
+            ):
                 rescued = sorted(
                     [p for p in home_opt.iterdir() if p.is_file() and p.stat().st_mtime >= started],
                     key=lambda p: p.stat().st_mtime,
@@ -3172,9 +3168,11 @@ def run_attempt(
                     backend_paths["partial_latest_optimized"] = str(rescued[-1])
                     backend_paths["partial_optimized_rescued_from"] = str(home_opt)
                     home_report = Path("/home/user/optimization_report.md")
-                    if (home_report.is_file()
-                            and home_report.stat().st_mtime >= started
-                            and "partial_report" not in backend_paths):
+                    if (
+                        home_report.is_file()
+                        and home_report.stat().st_mtime >= started
+                        and "partial_report" not in backend_paths
+                    ):
                         backend_paths["partial_report"] = str(home_report)
             if cli_workspace:
                 backend_paths["cli_workspace"] = cli_workspace
@@ -3217,8 +3215,7 @@ def run_attempt(
                 backend_paths["geak_latest_patch"] = geak_patch
                 backend_paths["geak_patch_count"] = str(result.get("geak_patch_count") or 0)
             # Per-task best speedup salvage (when select_patch didn't finish before SIGTERM).
-            per_task_sp = (result.get("geak_per_task_best_speedup")
-                           if isinstance(result, dict) else None)
+            per_task_sp = result.get("geak_per_task_best_speedup") if isinstance(result, dict) else None
             if per_task_sp:
                 backend_paths["geak_per_task_best_speedup"] = str(per_task_sp)
                 bt = result.get("geak_per_task_best_task")
@@ -3235,21 +3232,19 @@ def run_attempt(
             # EXCEPTION: refuse promotion on a persistent inner-LLM auth loop (>= _AUTH_RETRY_THRESHOLD),
             # which leaves an empty optimized_versions/ that would falsely ship PARTIAL.
             partial_evidence_keys = (
-                "partial_latest_optimized", "partial_report",
-                "geak_final_report", "geak_latest_patch",
+                "partial_latest_optimized",
+                "partial_report",
+                "geak_final_report",
+                "geak_latest_patch",
             )
             auth_loop_hits = _count_auth_failures(full_stdout)
             if auth_loop_hits >= _AUTH_RETRY_THRESHOLD:
                 backend_paths["auth_failure_count"] = str(auth_loop_hits)
-                backend_paths["auth_failure_marker"] = (
-                    "persistent_inner_llm_401_loop_no_partial_promotion"
-                )
+                backend_paths["auth_failure_marker"] = "persistent_inner_llm_401_loop_no_partial_promotion"
                 # Force a non-partial terminal state so build_verification excludes it and make_proposal REVERTs.
                 if status == "timeout":
                     status = "failed"
-            elif status in {"timeout", "failed"} and any(
-                k in backend_paths for k in partial_evidence_keys
-            ):
+            elif status in {"timeout", "failed"} and any(k in backend_paths for k in partial_evidence_keys):
                 status = "partial"
 
     return {
@@ -3397,19 +3392,39 @@ def _extract_correctness_from_report(report_path: str | Path) -> bool | None:
     if marker:
         return marker.group(1).lower().startswith("pass")
     fail_markers = (
-        "correctness failed", "incorrect", "mismatch", "assert_close failed",
-        "not close", "wrong output", "validation failed", "correctness: fail",
-        "correctness: failed", "does not match", "do not match",
-        "failed against reference", "reference check failed",
+        "correctness failed",
+        "incorrect",
+        "mismatch",
+        "assert_close failed",
+        "not close",
+        "wrong output",
+        "validation failed",
+        "correctness: fail",
+        "correctness: failed",
+        "does not match",
+        "do not match",
+        "failed against reference",
+        "reference check failed",
     )
     pass_markers = (
-        "correctness passed", "correctness: pass", "all tests passed",
-        "assert_close passed", "torch.testing.assert_close passed",
-        "validation passed", "matches reference", "match reference",
-        "matched reference", "matches the reference", "verified against original",
-        "verified against the original", "validated against original",
-        "validated against the original", "validated against baseline",
-        "outputs match", "output matches", "numerically matches",
+        "correctness passed",
+        "correctness: pass",
+        "all tests passed",
+        "assert_close passed",
+        "torch.testing.assert_close passed",
+        "validation passed",
+        "matches reference",
+        "match reference",
+        "matched reference",
+        "matches the reference",
+        "verified against original",
+        "verified against the original",
+        "validated against original",
+        "validated against the original",
+        "validated against baseline",
+        "outputs match",
+        "output matches",
+        "numerically matches",
         "reference comparison passed",
     )
     if any(marker in lower for marker in fail_markers):
@@ -3494,7 +3509,15 @@ def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None
 
 
 _SOURCE_SUFFIXES = {
-    ".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".hip", ".py",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cu",
+    ".cuh",
+    ".h",
+    ".hpp",
+    ".hip",
+    ".py",
 }
 _FENCE_RE = re.compile(
     r"```(?P<lang>[A-Za-z0-9_+.-]*)\s*\n(?P<body>.*?)\n```",
@@ -3525,16 +3548,22 @@ def _source_text_looks_complete(text: str, suffix: str) -> bool:
             compile(stripped + "\n", "<optimized_kernel>", "exec")
         except SyntaxError:
             return False
-        return any(
-            marker in stripped
-            for marker in ("def ", "class ", "import ", "@triton.jit", "torch.")
-        )
+        return any(marker in stripped for marker in ("def ", "class ", "import ", "@triton.jit", "torch."))
     if suffix in {".cu", ".cuh", ".hip", ".cpp", ".cc", ".c", ".h", ".hpp"}:
         return any(
             marker in stripped
             for marker in (
-                "#include", "__global__", "__device__", "extern ", "namespace ",
-                "template", "void ", "int ", "float ", "half", "torch::",
+                "#include",
+                "__global__",
+                "__device__",
+                "extern ",
+                "namespace ",
+                "template",
+                "void ",
+                "int ",
+                "float ",
+                "half",
+                "torch::",
             )
         )
     return False
@@ -3606,7 +3635,7 @@ def _geak_best_worktree(best_patch_path: str) -> Path | None:
     parallel_name = parent.name
     if not parallel_name.startswith("parallel_"):
         return None
-    slot_id = parallel_name[len("parallel_"):]
+    slot_id = parallel_name[len("parallel_") :]
     if not slot_id:
         return None
     worktree = parent.parent / "worktrees" / f"slot_{slot_id}"
@@ -3701,20 +3730,24 @@ def _candidate_artifact_paths(
     if cli_workspace:
         opt_dir = Path(cli_workspace) / "optimized_versions"
         if opt_dir.is_dir():
-            paths.extend(sorted(
-                (p for p in opt_dir.iterdir() if p.is_file()),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            ))
+            paths.extend(
+                sorted(
+                    (p for p in opt_dir.iterdir() if p.is_file()),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+            )
     out_dir = bp.get("output_dir")
     if out_dir:
         opt_dir = Path(out_dir) / "optimized_versions"
         if opt_dir.is_dir():
-            paths.extend(sorted(
-                (p for p in opt_dir.iterdir() if p.is_file()),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            ))
+            paths.extend(
+                sorted(
+                    (p for p in opt_dir.iterdir() if p.is_file()),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+            )
     optimized_path = attempt.get("optimized_path")
     if optimized_path:
         paths.append(Path(optimized_path))
@@ -3792,7 +3825,9 @@ def _select_source_artifact(
     return "", "missing", f"no complete {target_suffix} source artifact found; tried: {tried}"
 
 
-def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]], benchmark_available: bool) -> dict[str, Any]:
+def build_verification(
+    args: argparse.Namespace, attempts: list[dict[str, Any]], benchmark_available: bool
+) -> dict[str, Any]:
     """Summarize attempt results into a verification record.
 
     Selects the best usable attempt (by extracted speedup, falling back to the
@@ -3843,11 +3878,7 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
     if best is not None:
         target_file = str(getattr(args, "source_file", "") or "")
         # kernel_repo lets worktree recovery map an absolute source path to GEAK's edited relative path.
-        kernel_repo = str(
-            getattr(args, "kernel_repo", "")
-            or getattr(args, "repo", "")
-            or ""
-        )
+        kernel_repo = str(getattr(args, "kernel_repo", "") or getattr(args, "repo", "") or "")
         run_dir = None
         optimized_path = best.get("optimized_path")
         if optimized_path:
@@ -3863,16 +3894,12 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
     correctness_source = "cli_override" if correctness_signal is not None else "missing"
     if correctness_signal is None and best is not None:
         bp = best.get("backend_paths") or {}
-        correctness_signal = _extract_correctness_from_report(
-            bp.get("partial_report") or bp.get("report") or ""
-        )
+        correctness_signal = _extract_correctness_from_report(bp.get("partial_report") or bp.get("report") or "")
         if correctness_signal is not None:
             correctness_source = "report_scan"
     if correctness_signal is None and best is not None:
         bp = best.get("backend_paths") or {}
-        correctness_signal = _extract_correctness_from_geak(
-            bp.get("geak_final_report", "")
-        )
+        correctness_signal = _extract_correctness_from_geak(bp.get("geak_final_report", ""))
         if correctness_signal is not None:
             correctness_source = "geak_report"
     # PR-E (default ON): trust GEAK status=complete + measured speedup as correctness=True
@@ -3889,10 +3916,7 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
         geak_status = ""
         if bp_geak and Path(bp_geak).is_file():
             try:
-                geak_status = str(
-                    json.loads(Path(bp_geak).read_text(encoding="utf-8"))
-                    .get("status") or ""
-                ).lower()
+                geak_status = str(json.loads(Path(bp_geak).read_text(encoding="utf-8")).get("status") or "").lower()
             except Exception:  # noqa: BLE001
                 geak_status = ""
         if geak_status in {"complete", "succeeded", "ok"}:
@@ -3962,8 +3986,7 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         # failure from a backend-dispatch failure (no usable attempt to compile from).
         err = (verification.get("artifact_error") or "").strip()
         if err and verification.get("best_attempt_id", "") == "":
-            return {"decision": "REVERT",
-                    "reasons": [f"backend dispatch failed: {err}"]}
+            return {"decision": "REVERT", "reasons": [f"backend dispatch failed: {err}"]}
         return {"decision": "REVERT", "reasons": ["compile failed"]}
     if not verification["correctness_passed"]:
         reasons.append("correctness evidence missing or failed")
@@ -3979,10 +4002,7 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
     # 1.05x KEEP threshold (issue #442); below is routed to NEEDS_REVIEW.
     KEEP_THRESHOLD = 1.05
     if verification["micro_speedup"] < KEEP_THRESHOLD:
-        reasons.append(
-            f"speedup {verification['micro_speedup']:.3f}x below KEEP "
-            f"threshold {KEEP_THRESHOLD:.2f}x"
-        )
+        reasons.append(f"speedup {verification['micro_speedup']:.3f}x below KEEP threshold {KEEP_THRESHOLD:.2f}x")
     if verification["e2e_gain_pct"] is not None and verification["e2e_gain_pct"] < 0:
         return {"decision": "REVERT", "reasons": ["E2E regressed"]}
     if verification["accuracy_passed"] is False:
@@ -4031,19 +4051,26 @@ def main() -> int:
     parser.add_argument("--source-file", default="")
     parser.add_argument("--target-platform", default=_env_target_platform())
     parser.add_argument("--extra-sglang-args", default="")
-    parser.add_argument("--budget-minutes", type=float, default=60.0,
-                        help="Per-attempt wall-clock budget for claude/codex "
-                             "OOB backends. GEAK uses --geak-budget-min.")
+    parser.add_argument(
+        "--budget-minutes",
+        type=float,
+        default=60.0,
+        help="Per-attempt wall-clock budget for claude/codex OOB backends. GEAK uses --geak-budget-min.",
+    )
     # Default tracks $GEAK_RUN_MODE: quick -> 70 min, full -> 130 min.
     _geak_budget_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130.0
-    parser.add_argument("--geak-budget-min", type=float, default=_geak_budget_default,
-                        help="Per-attempt wall-clock budget for GEAK only "
-                             "(default tracks $GEAK_RUN_MODE: full -> 130, "
-                             "quick -> 70; both aligned with yaml "
-                             "run.budgets.<mode>.total_s + finalize_grace + "
-                             "kill_buffer + safety so the prompt-quoted "
-                             "budget triggers the matching GEAK mode at "
-                             "mini.py:435 task_extracted_mode).")
+    parser.add_argument(
+        "--geak-budget-min",
+        type=float,
+        default=_geak_budget_default,
+        help="Per-attempt wall-clock budget for GEAK only "
+        "(default tracks $GEAK_RUN_MODE: full -> 130, "
+        "quick -> 70; both aligned with yaml "
+        "run.budgets.<mode>.total_s + finalize_grace + "
+        "kill_buffer + safety so the prompt-quoted "
+        "budget triggers the matching GEAK mode at "
+        "mini.py:435 task_extracted_mode).",
+    )
     parser.add_argument("--micro-speedup", type=float, default=None)
     parser.add_argument("--e2e-gain-pct", type=float, default=None)
     parser.add_argument("--correctness-passed", choices=["true", "false", "unknown"], default="unknown")
@@ -4062,18 +4089,26 @@ def main() -> int:
             "$HYPERLOOM_GEAK_COST_LIMIT or this flag for CI budgets."
         ),
     )
-    parser.add_argument("--disable-rag", action="store_true",
-                        help="Run GEAK with tools.rag disabled for this request.")
-    parser.add_argument("--disable-xs-memory", action="store_true",
-                        help="Disable GEAK cross-session memory retrieval/write-back for this request.")
-    parser.add_argument("--test-command", type=str, default="",
-                        help="Test command from unittest skill. "
-                             "Passed to GEAK as --test-command.")
-    parser.add_argument("--num-gpus", type=int,
-                        default=int(os.environ.get("KERNEL_AGENT_NUM_GPUS", "0")),
-                        help="Per-task GPU reservation; 0 means follow the "
-                             "candidate's num_gpus_recommended (1 for compute "
-                             "kernels, 2 for communication kernels).")
+    parser.add_argument("--disable-rag", action="store_true", help="Run GEAK with tools.rag disabled for this request.")
+    parser.add_argument(
+        "--disable-xs-memory",
+        action="store_true",
+        help="Disable GEAK cross-session memory retrieval/write-back for this request.",
+    )
+    parser.add_argument(
+        "--test-command",
+        type=str,
+        default="",
+        help="Test command from unittest skill. Passed to GEAK as --test-command.",
+    )
+    parser.add_argument(
+        "--num-gpus",
+        type=int,
+        default=int(os.environ.get("KERNEL_AGENT_NUM_GPUS", "0")),
+        help="Per-task GPU reservation; 0 means follow the "
+        "candidate's num_gpus_recommended (1 for compute "
+        "kernels, 2 for communication kernels).",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -4087,14 +4122,16 @@ def main() -> int:
     artifacts: dict[str, str] = {}
 
     try:
-        update_status(status_path, state="running", current_step="load_candidate",
-                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                      started_at=started_at)
-        candidates_path = (
-            Path(args.candidates_path)
-            if args.candidates_path
-            else resolve_candidates_path(run_dir)
+        update_status(
+            status_path,
+            state="running",
+            current_step="load_candidate",
+            log_path=log_path,
+            artifact_paths=artifacts,
+            run_id=run_id,
+            started_at=started_at,
         )
+        candidates_path = Path(args.candidates_path) if args.candidates_path else resolve_candidates_path(run_dir)
         all_candidates = load_candidates(candidates_path)
         candidate = find_candidate(all_candidates, args.kernel_id)
         if candidate is None:
@@ -4105,26 +4142,36 @@ def main() -> int:
                 f"candidates {known}; skipping (no fabricated target)"
             )
             append_log(log_path, f"[skip] {msg}")
-            update_status(status_path, state="skipped", current_step="skipped",
-                          log_path=log_path, artifact_paths=artifacts,
-                          run_id=run_id, started_at=started_at, error=msg)
-            print(json.dumps({
-                "tool": "kernel_optimization",
-                "session_id": session_id,
-                "run_id": run_id,
-                "kernel_id": args.kernel_id,
-                "status": "skipped",
-                "reason": "kernel_id_not_in_candidates",
-                "error_class": "invalid_kernel_id",
-                "known_kernel_ids": known,
-                "cli_log_path": str(log_path),
-                "status_path": str(status_path),
-            }, indent=2, sort_keys=True))
+            update_status(
+                status_path,
+                state="skipped",
+                current_step="skipped",
+                log_path=log_path,
+                artifact_paths=artifacts,
+                run_id=run_id,
+                started_at=started_at,
+                error=msg,
+            )
+            print(
+                json.dumps(
+                    {
+                        "tool": "kernel_optimization",
+                        "session_id": session_id,
+                        "run_id": run_id,
+                        "kernel_id": args.kernel_id,
+                        "status": "skipped",
+                        "reason": "kernel_id_not_in_candidates",
+                        "error_class": "invalid_kernel_id",
+                        "known_kernel_ids": known,
+                        "cli_log_path": str(log_path),
+                        "status_path": str(status_path),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
             return 0
-        if (
-            candidate.get("reusable_native_kernel") is False
-            or not candidate.get("source_file")
-        ):
+        if candidate.get("reusable_native_kernel") is False or not candidate.get("source_file"):
             reason = (
                 candidate.get("skip_reason")
                 or candidate.get("optimization_notes")
@@ -4135,42 +4182,51 @@ def main() -> int:
                 f"TraceLens candidate {candidate.get('kernel_id')!r}: {reason}"
             )
             append_log(log_path, f"[skip] {msg}")
-            update_status(status_path, state="skipped", current_step="skipped",
-                          log_path=log_path, artifact_paths=artifacts,
-                          run_id=run_id, started_at=started_at, error=msg)
-            print(json.dumps({
-                "tool": "kernel_optimization",
-                "session_id": session_id,
-                "run_id": run_id,
-                "kernel_id": candidate.get("kernel_id") or args.kernel_id,
-                "requested_kernel_id": args.kernel_id,
-                "resolved_kernel_id": candidate.get("kernel_id"),
-                "kernel_name": candidate.get("name"),
-                "status": "skipped",
-                "decision": "REVERT",
-                "error_class": (
-                    "missing_native_source"
-                    if not candidate.get("source_file")
-                    else "non_reusable_kernel"
-                ),
-                "reason": "non_routable_candidate",
-                "skip_reason": reason,
-                "verification": {
-                    "micro_speedup": 0.0,
-                    "best_artifact_path": "",
-                },
-                "proposal": {
-                    "decision": "REVERT",
-                    "reasons": [reason],
-                },
-                "cli_log_path": str(log_path),
-                "status_path": str(status_path),
-            }, indent=2, sort_keys=True))
+            update_status(
+                status_path,
+                state="skipped",
+                current_step="skipped",
+                log_path=log_path,
+                artifact_paths=artifacts,
+                run_id=run_id,
+                started_at=started_at,
+                error=msg,
+            )
+            print(
+                json.dumps(
+                    {
+                        "tool": "kernel_optimization",
+                        "session_id": session_id,
+                        "run_id": run_id,
+                        "kernel_id": candidate.get("kernel_id") or args.kernel_id,
+                        "requested_kernel_id": args.kernel_id,
+                        "resolved_kernel_id": candidate.get("kernel_id"),
+                        "kernel_name": candidate.get("name"),
+                        "status": "skipped",
+                        "decision": "REVERT",
+                        "error_class": (
+                            "missing_native_source" if not candidate.get("source_file") else "non_reusable_kernel"
+                        ),
+                        "reason": "non_routable_candidate",
+                        "skip_reason": reason,
+                        "verification": {
+                            "micro_speedup": 0.0,
+                            "best_artifact_path": "",
+                        },
+                        "proposal": {
+                            "decision": "REVERT",
+                            "reasons": [reason],
+                        },
+                        "cli_log_path": str(log_path),
+                        "status_path": str(status_path),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
             return 0
         # TraceLens is source of truth: _resolve_source_file overrides a disagreeing LLM path.
-        resolved_source = _resolve_source_file(
-            args.source_file, candidate, args.kernel_id, log_path
-        )
+        resolved_source = _resolve_source_file(args.source_file, candidate, args.kernel_id, log_path)
         args.source_file = resolved_source
         # Forward the candidate's repo root so worktree artifact recovery can map source_file to GEAK's relative path.
         if not getattr(args, "kernel_repo", None):
@@ -4188,20 +4244,31 @@ def main() -> int:
         append_log(log_path, f"resolved_source={resolved_source or 'NONE'}")
         append_log(log_path, f"selected_backends={','.join(selected_backends) or 'none'}")
 
-        update_status(status_path, state="running", current_step="run_backends",
-                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                      started_at=started_at)
+        update_status(
+            status_path,
+            state="running",
+            current_step="run_backends",
+            log_path=log_path,
+            artifact_paths=artifacts,
+            run_id=run_id,
+            started_at=started_at,
+        )
         attempts: list[dict[str, Any]] = []
         for backend in selected_backends:
-            attempt = run_attempt(backend, args=args, candidate=candidate,
-                                  run_dir=run_dir, log_path=log_path)
+            attempt = run_attempt(backend, args=args, candidate=candidate, run_dir=run_dir, log_path=log_path)
             attempt.update(backend_notes)
             attempts.append(attempt)
             append_jsonl(run_dir / "optimization_attempts.jsonl", attempt)
 
-        update_status(status_path, state="running", current_step="verify_and_propose",
-                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                      started_at=started_at)
+        update_status(
+            status_path,
+            state="running",
+            current_step="verify_and_propose",
+            log_path=log_path,
+            artifact_paths=artifacts,
+            run_id=run_id,
+            started_at=started_at,
+        )
         accuracy = None if args.accuracy_passed == "unknown" else args.accuracy_passed == "true"
         args.accuracy_passed = accuracy
         correctness = None if args.correctness_passed == "unknown" else args.correctness_passed == "true"
@@ -4237,25 +4304,44 @@ def main() -> int:
         }
         atomic_write_json(result_path, result)
         artifacts.update(result["artifact_paths"])
-        update_status(status_path, state="succeeded", current_step="done",
-                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                      started_at=started_at)
+        update_status(
+            status_path,
+            state="succeeded",
+            current_step="done",
+            log_path=log_path,
+            artifact_paths=artifacts,
+            run_id=run_id,
+            started_at=started_at,
+        )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     except Exception as exc:
         append_log(log_path, f"[error] {type(exc).__name__}: {exc}")
-        update_status(status_path, state="failed", current_step="failed",
-                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                      started_at=started_at, error=f"{type(exc).__name__}: {exc}")
-        print(json.dumps({
-            "tool": "kernel_optimization",
-            "session_id": session_id,
-            "run_id": run_id,
-            "status": "failed",
-            "error": f"{type(exc).__name__}: {exc}",
-            "cli_log_path": str(log_path),
-            "status_path": str(status_path),
-        }, indent=2, sort_keys=True))
+        update_status(
+            status_path,
+            state="failed",
+            current_step="failed",
+            log_path=log_path,
+            artifact_paths=artifacts,
+            run_id=run_id,
+            started_at=started_at,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        print(
+            json.dumps(
+                {
+                    "tool": "kernel_optimization",
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "cli_log_path": str(log_path),
+                    "status_path": str(status_path),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 1
 
 

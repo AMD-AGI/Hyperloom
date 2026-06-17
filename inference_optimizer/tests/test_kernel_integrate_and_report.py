@@ -27,7 +27,8 @@ from inference_optimizer.orchestrator.sub_agent_runner import (
     SubAgentRunner,
 )
 from inference_optimizer.orchestrator.resource_lock import (
-    ResourceLockManager, SqliteLeaseBackend,
+    ResourceLockManager,
+    SqliteLeaseBackend,
 )
 from inference_optimizer.orchestrator.task_registry import TaskRegistry
 from inference_optimizer.paths import make_session_dir
@@ -45,33 +46,42 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     # Stub the interpreter resolver so the unit test never spawns a real probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     from inference_optimizer.orchestrator.action_executors import _grid_runner
+
     monkeypatch.setattr(
-        _grid_runner, "_resolve_magpie_python", lambda: "/usr/bin/python3",
+        _grid_runner,
+        "_resolve_magpie_python",
+        lambda: "/usr/bin/python3",
     )
     return make_session_dir()
 
 
 def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE,
-                  payload={"topic": "heartbeat", "body_md": "ok"})
+    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {n: MockBackend(silent, name=n)
-            for n in ("orchestration", "kernel", "critic", "robustness")}
+    return {n: MockBackend(silent, name=n) for n in ("orchestration", "kernel", "critic", "robustness")}
 
 
 def _write_baseline_yaml(path: Path) -> None:
-    cfg = {"benchmark": {
-        "framework": "sglang", "model": "/x", "precision": "bf16",
-        "run_mode": "local", "envs": {"TP": 1},
-        "benchmark_script": "sglang_mi300x.sh", "timeout_seconds": 600,
-        "profiler": {"torch_profiler": {"enabled": False},
-                      "system_profiler": {"enabled": False},
-                      "tracelens": {"enabled": False}},
-        "gpu_selection": {"auto": False},
-    }}
+    cfg = {
+        "benchmark": {
+            "framework": "sglang",
+            "model": "/x",
+            "precision": "bf16",
+            "run_mode": "local",
+            "envs": {"TP": 1},
+            "benchmark_script": "sglang_mi300x.sh",
+            "timeout_seconds": 600,
+            "profiler": {
+                "torch_profiler": {"enabled": False},
+                "system_profiler": {"enabled": False},
+                "tracelens": {"enabled": False},
+            },
+            "gpu_selection": {"auto": False},
+        }
+    }
     with path.open("w") as f:
         yaml.safe_dump(cfg, f)
 
@@ -79,19 +89,26 @@ def _write_baseline_yaml(path: Path) -> None:
 def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
     workspace = slot / "benchmark_sglang_smoke"
     workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "benchmark_report.json").write_text(json.dumps({
-        "success": True, "framework": "sglang",
-        "model": "/wekafs/models/Qwen-Qwen3-8B",
-        "throughput": {
-            "request_throughput": tput / 256, "output_throughput": tput,
-            "total_token_throughput": tput * 2, "completed_requests": 80,
-            "duration_seconds": 25.0,
-        },
-        "latency": {
-            "ttft": {"mean_ms": 140, "p99_ms": 158},
-            "e2el": {"mean_ms": 2500, "p99_ms": 2580},
-        },
-    }))
+    (workspace / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "framework": "sglang",
+                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "throughput": {
+                    "request_throughput": tput / 256,
+                    "output_throughput": tput,
+                    "total_token_throughput": tput * 2,
+                    "completed_requests": 80,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {
+                    "ttft": {"mean_ms": 140, "p99_ms": 158},
+                    "e2el": {"mean_ms": 2500, "p99_ms": 2580},
+                },
+            }
+        )
+    )
     return workspace
 
 
@@ -111,7 +128,8 @@ def _write_patch_pair(
 
 # integrate_handler
 def test_resolve_integrate_payload_fills_source_when_patch_path_present(
-    session_dir, tmp_path,
+    session_dir,
+    tmp_path,
 ):
     """Queued KEEPs may pass patch_path while relying on kernel_opt_attempts for source_file."""
     state = SharedState.load_or_init(session_dir)
@@ -154,20 +172,25 @@ async def test_integrate_handler_keep_decision(session_dir, tmp_path):
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=900.0)
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
     target, patch_file = _write_patch_pair(tmp_path)
     payload = {
-        "base_tput":   800.0,
+        "base_tput": 800.0,
         "config_path": str(base_yaml),
-        "kernel_id":   "k_abc",
-        "patch_path":  str(patch_file),
+        "kernel_id": "k_abc",
+        "patch_path": str(patch_file),
         "target_file": str(target),
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -183,7 +206,8 @@ async def test_integrate_handler_keep_decision(session_dir, tmp_path):
 
 @pytest.mark.asyncio
 async def test_integrate_handler_keeps_positive_stack_increment(
-    session_dir, tmp_path,
+    session_dir,
+    tmp_path,
 ):
     """When a kernel stack already exists, a positive incremental gain should KEEP."""
     base_yaml = tmp_path / "base.yaml"
@@ -195,11 +219,13 @@ async def test_integrate_handler_keeps_positive_stack_increment(
         "kernel_id": "k004",
         "tput": 100.0,
     }
-    state.optimization_stack = [{
-        "action": "integrate",
-        "kernel_id": "k004",
-        "tput": 100.0,
-    }]
+    state.optimization_stack = [
+        {
+            "action": "integrate",
+            "kernel_id": "k004",
+            "tput": 100.0,
+        }
+    ]
     state.save(session_dir)
 
     def _fake_run(cmd, *args, **kwargs):
@@ -207,7 +233,10 @@ async def test_integrate_handler_keeps_positive_stack_increment(
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=100.75)
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
     target, patch_file = _write_patch_pair(tmp_path)
@@ -220,7 +249,9 @@ async def test_integrate_handler_keeps_positive_stack_increment(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -234,7 +265,8 @@ async def test_integrate_handler_keeps_positive_stack_increment(
 
 @pytest.mark.asyncio
 async def test_integrate_handler_rejects_stack_increment_under_noise_floor(
-    session_dir, tmp_path,
+    session_dir,
+    tmp_path,
 ):
     """A sub-0.5% stack increment should remain NEEDS_REVIEW, not KEEP."""
     base_yaml = tmp_path / "base.yaml"
@@ -246,11 +278,13 @@ async def test_integrate_handler_rejects_stack_increment_under_noise_floor(
         "kernel_id": "k004",
         "tput": 100.0,
     }
-    state.optimization_stack = [{
-        "action": "integrate",
-        "kernel_id": "k004",
-        "tput": 100.0,
-    }]
+    state.optimization_stack = [
+        {
+            "action": "integrate",
+            "kernel_id": "k004",
+            "tput": 100.0,
+        }
+    ]
     state.save(session_dir)
 
     def _fake_run(cmd, *args, **kwargs):
@@ -258,7 +292,10 @@ async def test_integrate_handler_rejects_stack_increment_under_noise_floor(
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=100.49)
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
     target, patch_file = _write_patch_pair(tmp_path)
@@ -271,7 +308,9 @@ async def test_integrate_handler_rejects_stack_increment_under_noise_floor(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -283,7 +322,8 @@ async def test_integrate_handler_rejects_stack_increment_under_noise_floor(
 
 @pytest.mark.asyncio
 async def test_integrate_handler_keeps_exact_stack_increment_noise_floor(
-    session_dir, tmp_path,
+    session_dir,
+    tmp_path,
 ):
     """A +0.5% stack increment should KEEP at the configured noise floor."""
     base_yaml = tmp_path / "base.yaml"
@@ -295,11 +335,13 @@ async def test_integrate_handler_keeps_exact_stack_increment_noise_floor(
         "kernel_id": "k004",
         "tput": 100.0,
     }
-    state.optimization_stack = [{
-        "action": "integrate",
-        "kernel_id": "k004",
-        "tput": 100.0,
-    }]
+    state.optimization_stack = [
+        {
+            "action": "integrate",
+            "kernel_id": "k004",
+            "tput": 100.0,
+        }
+    ]
     state.save(session_dir)
 
     def _fake_run(cmd, *args, **kwargs):
@@ -307,7 +349,10 @@ async def test_integrate_handler_keeps_exact_stack_increment_noise_floor(
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=100.5)
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
     target, patch_file = _write_patch_pair(tmp_path)
@@ -320,7 +365,9 @@ async def test_integrate_handler_keeps_exact_stack_increment_noise_floor(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -344,7 +391,10 @@ async def test_integrate_handler_accepts_valid_rebaseline_with_wrapper_warning(s
         data["success"] = False
         report_path.write_text(json.dumps(data))
         return subprocess.CompletedProcess(
-            args=cmd, returncode=1, stdout="", stderr="cleanup failed",
+            args=cmd,
+            returncode=1,
+            stdout="",
+            stderr="cleanup failed",
         )
 
     payload = {
@@ -356,7 +406,9 @@ async def test_integrate_handler_accepts_valid_rebaseline_with_wrapper_warning(s
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -375,7 +427,10 @@ async def test_integrate_handler_revert_decision(session_dir, tmp_path):
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=700.0)
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
     target, patch_file = _write_patch_pair(tmp_path)
@@ -388,7 +443,9 @@ async def test_integrate_handler_revert_decision(session_dir, tmp_path):
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
     assert res["decision"] == "REVERT"
     assert res["gain_pct"] < -1
@@ -396,7 +453,8 @@ async def test_integrate_handler_revert_decision(session_dir, tmp_path):
 
 @pytest.mark.asyncio
 async def test_integrate_handler_reverts_applied_source_on_non_keep(
-    session_dir, tmp_path,
+    session_dir,
+    tmp_path,
 ):
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
@@ -410,7 +468,10 @@ async def test_integrate_handler_reverts_applied_source_on_non_keep(
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=700.0)
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
     payload = {
@@ -422,7 +483,9 @@ async def test_integrate_handler_reverts_applied_source_on_non_keep(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["decision"] == "REVERT"
@@ -433,7 +496,8 @@ async def test_integrate_handler_reverts_applied_source_on_non_keep(
 
 @pytest.mark.asyncio
 async def test_integrate_handler_resolves_patch_and_target_from_state(
-    session_dir, tmp_path,
+    session_dir,
+    tmp_path,
 ):
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
@@ -445,11 +509,13 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
             "best_artifact_path": str(patch_file),
         },
         last_trace_analyze={
-            "hot_kernels_top15": [{
-                "kernel_id": "k006",
-                "source_file": str(target),
-                "reusable_native_kernel": True,
-            }],
+            "hot_kernels_top15": [
+                {
+                    "kernel_id": "k006",
+                    "source_file": str(target),
+                    "reusable_native_kernel": True,
+                }
+            ],
         },
     )
     state.save(session_dir)
@@ -459,7 +525,10 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=900.0)
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
     payload = {
@@ -469,7 +538,9 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -482,7 +553,8 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
 
 @pytest.mark.asyncio
 async def test_integrate_handler_fails_when_patch_inputs_missing(
-    session_dir, tmp_path,
+    session_dir,
+    tmp_path,
 ):
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
@@ -531,7 +603,8 @@ async def test_integrate_handler_rejects_text_patch_artifact(session_dir, tmp_pa
 
 @pytest.mark.asyncio
 async def test_integrate_handler_rejects_incompatible_standalone_cpp(
-    session_dir, tmp_path,
+    session_dir,
+    tmp_path,
 ):
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
@@ -566,7 +639,8 @@ async def test_integrate_handler_rejects_incompatible_standalone_cpp(
 
 @pytest.mark.asyncio
 async def test_integrate_handler_injects_extra_server_args(
-    session_dir, tmp_path,
+    session_dir,
+    tmp_path,
 ):
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
@@ -580,7 +654,10 @@ async def test_integrate_handler_injects_extra_server_args(
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=900.0)
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
     target, patch_file = _write_patch_pair(tmp_path)
@@ -594,7 +671,9 @@ async def test_integrate_handler_injects_extra_server_args(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["decision"] == "KEEP"
@@ -607,7 +686,8 @@ async def test_integrate_handler_injects_extra_server_args(
 
 @pytest.mark.asyncio
 async def test_integrate_handler_needs_review_when_within_threshold(
-    session_dir, tmp_path,
+    session_dir,
+    tmp_path,
 ):
     """re-baseline returns 805 (+0.625%) vs base 800 → NEEDS_REVIEW."""
     base_yaml = tmp_path / "base.yaml"
@@ -619,7 +699,10 @@ async def test_integrate_handler_needs_review_when_within_threshold(
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=805.0)
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
     payload = {
@@ -631,7 +714,9 @@ async def test_integrate_handler_needs_review_when_within_threshold(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
     assert res["decision"] == "NEEDS_REVIEW"
 
@@ -662,7 +747,10 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=900.0)
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
     c = Coordinator(session_dir, backends=_backends_silent())
@@ -674,23 +762,28 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
             "reusable_native_kernel_ids": ["k1"],
         }
         c.shared_state.save(session_dir)
-        with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
-            await c._handle_intent("orchestration", Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel",
-                    "kind": "integrate",
-                    "params": {
-                        "base_tput": 800.0,
-                        "config_path": str(base_yaml),
-                        "kernel_id": "k1",
-                        "patch_path": str(patch_file),
-                        "target_file": str(target),
-                        "allow_unknown_target": True,
-                        "skip_rebuild": True,
+        with patch(
+            "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        ):
+            await c._handle_intent(
+                "orchestration",
+                Intent(
+                    type=IntentType.REQUEST,
+                    payload={
+                        "target_agent": "kernel",
+                        "kind": "integrate",
+                        "params": {
+                            "base_tput": 800.0,
+                            "config_path": str(base_yaml),
+                            "kernel_id": "k1",
+                            "patch_path": str(patch_file),
+                            "target_file": str(target),
+                            "allow_unknown_target": True,
+                            "skip_rebuild": True,
+                        },
                     },
-                },
-            ))
+                ),
+            )
         responses = sorted(
             await c.bus.tail(topic="response", to_agent="orchestration"),
             key=lambda msg: msg.seq,
@@ -705,8 +798,7 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
         assert c.shared_state.current_best["action"] == "integrate"
         assert c.shared_state.current_best["kernel_id"] == "k1"
         assert any(
-            item.get("action") == "integrate"
-            and item.get("kernel_id") == "k1"
+            item.get("action") == "integrate" and item.get("kernel_id") == "k1"
             for item in c.shared_state.optimization_stack
         )
     finally:
@@ -715,7 +807,8 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
 
 @pytest.mark.asyncio
 async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
-    session_dir, tmp_path,
+    session_dir,
+    tmp_path,
 ):
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
@@ -729,7 +822,10 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=805.0)  # +0.625%, below KEEP threshold
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
     c = Coordinator(session_dir, backends=_backends_silent())
@@ -754,7 +850,9 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
                 "skip_rebuild": True,
             },
         }
-        with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+        with patch(
+            "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+        ):
             for _ in range(4):
                 await c._handle_intent(
                     "orchestration",
@@ -765,11 +863,7 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
             await c.bus.tail(topic="response", to_agent="orchestration"),
             key=lambda msg: msg.seq,
         )
-        integrate_results = [
-            r.payload["result"]
-            for r in responses
-            if r.payload.get("kind") == "integrate_done"
-        ]
+        integrate_results = [r.payload["result"] for r in responses if r.payload.get("kind") == "integrate_done"]
         assert len(integrate_results) == 4
         # Cap: first 3 attempts run the integrate path, the 4th is short-circuited.
         # Assert proportionally since per-attempt subprocess count is an impl detail.
@@ -804,9 +898,13 @@ async def test_report_executor_writes_md_and_json(session_dir):
         model_path="/wekafs/models/Qwen-Qwen3-8B",
         baseline_tput=800.0,
         cumulative_gain=12.5,
-        current_best={"action": "backends", "tput": 900.0,
-                       "ttft_mean_ms": 130.0, "e2el_mean_ms": 2400.0,
-                       "workspace": "/x/y/z"},
+        current_best={
+            "action": "backends",
+            "tput": 900.0,
+            "ttft_mean_ms": 130.0,
+            "e2el_mean_ms": 2400.0,
+            "workspace": "/x/y/z",
+        },
         max_minutes=120,
         stop_reason="target_reached",
     )
@@ -814,18 +912,27 @@ async def test_report_executor_writes_md_and_json(session_dir):
 
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        await c._handle_intent("orchestration", Intent(
-            type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
-        ))
-        await c._handle_intent("orchestration", Intent(
-            type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": "explore", "predicted_gain_pct": 5.0},
-        ))
-        await c._handle_intent("robustness", Intent(
-            type=IntentType.ALERT,
-            payload={"severity": "low", "summary": "noise"},
-        ))
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PROPOSE_ACTION,
+                payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
+            ),
+        )
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PROPOSE_ACTION,
+                payload={"action_name": "explore", "predicted_gain_pct": 5.0},
+            ),
+        )
+        await c._handle_intent(
+            "robustness",
+            Intent(
+                type=IntentType.ALERT,
+                payload={"severity": "low", "summary": "noise"},
+            ),
+        )
     finally:
         await c.stop()
 
@@ -868,8 +975,7 @@ def tmp_path_helper(session_dir: Path) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path,
-                                                                      monkeypatch):
+async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path, monkeypatch):
     """An unresolvable session_dir yields a structured failure, not a crash."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "noses"))
     db = SqliteConnection(tmp_path / "x.db")
@@ -893,9 +999,12 @@ async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path,
 # after_kernel_opt rocprof: KEEP triggers it, REVERT/NEEDS_REVIEW skips it.
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_integrate_keep_schedules_after_kernel_opt_rocprof(
-    session_dir, tmp_path, monkeypatch,
+    session_dir,
+    tmp_path,
+    monkeypatch,
 ):
     """On KEEP, after-opt rocprof is scheduled without blocking integrate."""
     base_yaml = tmp_path / "base.yaml"
@@ -923,7 +1032,9 @@ async def test_integrate_keep_schedules_after_kernel_opt_rocprof(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["decision"] == "KEEP"
@@ -934,7 +1045,9 @@ async def test_integrate_keep_schedules_after_kernel_opt_rocprof(
 
 @pytest.mark.asyncio
 async def test_integrate_revert_skips_after_kernel_opt_rocprof(
-    session_dir, tmp_path, monkeypatch,
+    session_dir,
+    tmp_path,
+    monkeypatch,
 ):
     """On REVERT, _run_after_kernel_opt_rocprof is NOT called."""
     base_yaml = tmp_path / "base.yaml"
@@ -963,7 +1076,9 @@ async def test_integrate_revert_skips_after_kernel_opt_rocprof(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["decision"] == "REVERT"
@@ -973,7 +1088,9 @@ async def test_integrate_revert_skips_after_kernel_opt_rocprof(
 
 @pytest.mark.asyncio
 async def test_after_kernel_opt_rocprof_uses_profile_mode_and_safe_timeout(
-    session_dir, tmp_path, monkeypatch,
+    session_dir,
+    tmp_path,
+    monkeypatch,
 ):
     """After-opt rocprof must be best-effort and profile the same workload as before."""
     state = SharedState.load_or_init(session_dir)
@@ -988,32 +1105,46 @@ async def test_after_kernel_opt_rocprof_uses_profile_mode_and_safe_timeout(
     state.save(session_dir)
     sidecar = session_dir / "reports" / "kernel_roofline.json"
     sidecar.parent.mkdir(parents=True, exist_ok=True)
-    sidecar.write_text(json.dumps({
-        "kernels": [{
-            "kernel_id": "k_after",
-            "name": "aiter::moe_kernel",
-            "rocprof_roofline": {
-                "before_kernel_opt": {"status": "matched"},
-                "after_kernel_opt": None,
-            },
-        }]
-    }), encoding="utf-8")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "kernels": [
+                    {
+                        "kernel_id": "k_after",
+                        "name": "aiter::moe_kernel",
+                        "rocprof_roofline": {
+                            "before_kernel_opt": {"status": "matched"},
+                            "after_kernel_opt": None,
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     captured: dict[str, list[str]] = {}
 
     async def _fake_run_subprocess(cmd, *, timeout_sec):
         captured["cmd"] = cmd
         captured["timeout_sec"] = timeout_sec
         out_json = Path(cmd[cmd.index("--out-json") + 1])
-        out_json.write_text(json.dumps({
-            "status": "ok",
-            "target_kernel": "aiter::moe_kernel",
-            "results": [{
-                "name": "aiter::moe_kernel",
-                "matched_kernel_name": "aiter::moe_kernel",
-                "status": "matched",
-                "rocprof_roofline": {"bound_type": "memory"},
-            }],
-        }), encoding="utf-8")
+        out_json.write_text(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "target_kernel": "aiter::moe_kernel",
+                    "results": [
+                        {
+                            "name": "aiter::moe_kernel",
+                            "matched_kernel_name": "aiter::moe_kernel",
+                            "status": "matched",
+                            "rocprof_roofline": {"bound_type": "memory"},
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
         return 0, "ok", ""
 
     monkeypatch.setenv("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "abc")
@@ -1034,20 +1165,28 @@ async def test_after_kernel_opt_rocprof_uses_profile_mode_and_safe_timeout(
 
 
 def test_schedule_after_kernel_opt_rocprof_marks_scheduled(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     sidecar = session_dir / "reports" / "kernel_roofline.json"
     sidecar.parent.mkdir(parents=True, exist_ok=True)
-    sidecar.write_text(json.dumps({
-        "kernels": [{
-            "kernel_id": "k_sched",
-            "name": "aiter::sched_kernel",
-            "rocprof_roofline": {
-                "before_kernel_opt": {"status": "matched"},
-                "after_kernel_opt": None,
-            },
-        }]
-    }), encoding="utf-8")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "kernels": [
+                    {
+                        "kernel_id": "k_sched",
+                        "name": "aiter::sched_kernel",
+                        "rocprof_roofline": {
+                            "before_kernel_opt": {"status": "matched"},
+                            "after_kernel_opt": None,
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     created: list[object] = []
 
     async def _fake_run_after(**_kwargs):

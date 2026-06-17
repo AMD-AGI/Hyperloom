@@ -55,12 +55,18 @@ def _build_sglang_router_cmd(
         list[str]: The argv for launching the sglang router.
     """
     return [
-        "python3", "-m", "sglang_router.launch_router",
+        "python3",
+        "-m",
+        "sglang_router.launch_router",
         "--pd-disaggregation",
-        "--prefill", prefill_url,
-        "--decode", decode_url,
-        "--host", "0.0.0.0",
-        "--port", str(public_port),
+        "--prefill",
+        prefill_url,
+        "--decode",
+        decode_url,
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(public_port),
     ]
 
 
@@ -84,18 +90,23 @@ def _build_vllm_router_cmd(
     """
     if override_cmd:
         rendered = (
-            override_cmd
-            .replace("{prefill}", prefill_url)
+            override_cmd.replace("{prefill}", prefill_url)
             .replace("{decode}", decode_url)
             .replace("{port}", str(public_port))
         )
         return shlex.split(rendered)
     return [
-        "python3", "-m", "vllm.entrypoints.openai.disagg_proxy",
-        "--prefill-url", prefill_url,
-        "--decode-url", decode_url,
-        "--host", "0.0.0.0",
-        "--port", str(public_port),
+        "python3",
+        "-m",
+        "vllm.entrypoints.openai.disagg_proxy",
+        "--prefill-url",
+        prefill_url,
+        "--decode-url",
+        decode_url,
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(public_port),
     ]
 
 
@@ -140,20 +151,20 @@ def _detach_router(
 
     proc = subprocess.run(
         ["/bin/bash", "-lc", shell_cmd],
-        env=sub_env, capture_output=True, text=True, timeout=60,
+        env=sub_env,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     if proc.returncode != 0:
         raise RuntimeError(
-            f"router detach spawn shell failed rc={proc.returncode} "
-            f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+            f"router detach spawn shell failed rc={proc.returncode} stdout={proc.stdout!r} stderr={proc.stderr!r}"
         )
 
     try:
         pid = int(pid_file.read_text(encoding="utf-8").strip())
     except (ValueError, OSError) as exc:
-        raise RuntimeError(
-            f"router pid file {pid_file} missing/invalid: {exc}"
-        ) from exc
+        raise RuntimeError(f"router pid file {pid_file} missing/invalid: {exc}") from exc
 
     time.sleep(0.5)
     try:
@@ -163,14 +174,12 @@ def _detach_router(
         try:
             if log_file.is_file() and log_file.stat().st_size > 0:
                 tail = log_file.read_text(
-                    encoding="utf-8", errors="replace",
+                    encoding="utf-8",
+                    errors="replace",
                 )[-8000:]
         except OSError:
             tail = "<could not read log>"
-        raise RuntimeError(
-            f"router pid={pid} not alive after 0.5s ({exc}); "
-            f"log tail:\n{tail}"
-        ) from exc
+        raise RuntimeError(f"router pid={pid} not alive after 0.5s ({exc}); log tail:\n{tail}") from exc
     return pid
 
 
@@ -188,33 +197,47 @@ def main() -> int:
         prog="launch_router.py",
         description="Detach the PD-disaggregation router on the head pod.",
     )
-    p.add_argument("--framework", required=True, choices=("sglang", "vllm"),
-                   help="picks router implementation: sglang_router vs vllm proxy")
-    p.add_argument("--prefill-url", required=True,
-                   help="internal prefill HTTP endpoint, e.g. http://10.0.0.1:30000")
-    p.add_argument("--decode-url", required=True,
-                   help="internal decode HTTP endpoint, e.g. http://10.0.0.2:30001")
-    p.add_argument("--public-port", type=int, default=_PUBLIC_PORT,
-                   help=f"port the router binds for the magpie client "
-                        f"(default {_PUBLIC_PORT})")
-    p.add_argument("--pid-file", default=_DEFAULT_PID_FILE,
-                   help=f"router PID file (default {_DEFAULT_PID_FILE}). "
-                        f"kill_multinode.py picks up router*.pid here.")
-    p.add_argument("--log-file", default=_DEFAULT_LOG_FILE,
-                   help=f"router stdout/stderr log (default {_DEFAULT_LOG_FILE})")
-    p.add_argument("--vllm-router-cmd", default="",
-                   help="(vllm only) override entire router command; supports "
-                        "{prefill} / {decode} / {port} placeholders")
+    p.add_argument(
+        "--framework",
+        required=True,
+        choices=("sglang", "vllm"),
+        help="picks router implementation: sglang_router vs vllm proxy",
+    )
+    p.add_argument("--prefill-url", required=True, help="internal prefill HTTP endpoint, e.g. http://10.0.0.1:30000")
+    p.add_argument("--decode-url", required=True, help="internal decode HTTP endpoint, e.g. http://10.0.0.2:30001")
+    p.add_argument(
+        "--public-port",
+        type=int,
+        default=_PUBLIC_PORT,
+        help=f"port the router binds for the magpie client (default {_PUBLIC_PORT})",
+    )
+    p.add_argument(
+        "--pid-file",
+        default=_DEFAULT_PID_FILE,
+        help=f"router PID file (default {_DEFAULT_PID_FILE}). kill_multinode.py picks up router*.pid here.",
+    )
+    p.add_argument(
+        "--log-file", default=_DEFAULT_LOG_FILE, help=f"router stdout/stderr log (default {_DEFAULT_LOG_FILE})"
+    )
+    p.add_argument(
+        "--vllm-router-cmd",
+        default="",
+        help="(vllm only) override entire router command; supports {prefill} / {decode} / {port} placeholders",
+    )
     args = p.parse_args()
 
     fw = args.framework.lower()
     if fw == "sglang":
         cmd = _build_sglang_router_cmd(
-            args.prefill_url, args.decode_url, args.public_port,
+            args.prefill_url,
+            args.decode_url,
+            args.public_port,
         )
     else:
         cmd = _build_vllm_router_cmd(
-            args.prefill_url, args.decode_url, args.public_port,
+            args.prefill_url,
+            args.decode_url,
+            args.public_port,
             override_cmd=args.vllm_router_cmd,
         )
 

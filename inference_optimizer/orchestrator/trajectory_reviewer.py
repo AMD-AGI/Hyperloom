@@ -71,18 +71,17 @@ def _exhausted_clusters(entries: list[Any]) -> list[dict[str, Any]]:
             continue
         key = (str(getattr(e, "kind", "")), str(getattr(e, "change", "")))
         row = clusters.setdefault(
-            key, {"kind": key[0], "change": key[1], "count": 0, "max_gain": None},
+            key,
+            {"kind": key[0], "change": key[1], "count": 0, "max_gain": None},
         )
         row["count"] += 1
         gain = getattr(e, "gain_pct", None)
         if isinstance(gain, (int, float)):
-            row["max_gain"] = (
-                gain if row["max_gain"] is None else max(row["max_gain"], gain)
-            )
+            row["max_gain"] = gain if row["max_gain"] is None else max(row["max_gain"], gain)
     dead = [
-        r for r in clusters.values()
-        if r["count"] >= _EXHAUSTED_MIN_ATTEMPTS
-        and (r["max_gain"] is None or r["max_gain"] < _EXHAUSTED_MAX_GAIN_PCT)
+        r
+        for r in clusters.values()
+        if r["count"] >= _EXHAUSTED_MIN_ATTEMPTS and (r["max_gain"] is None or r["max_gain"] < _EXHAUSTED_MAX_GAIN_PCT)
     ]
     dead.sort(key=lambda r: r["count"], reverse=True)
     return dead
@@ -102,9 +101,7 @@ def _stalled_cycle_count(shared_state: Any) -> int:
     search = getattr(shared_state, "explore_search", None) or {}
     wh = search.get("winners_history") if isinstance(search, dict) else None
     cycles_with_winner = {
-        row.get("cycle")
-        for row in (wh or [])
-        if isinstance(row, dict) and row.get("cycle") is not None
+        row.get("cycle") for row in (wh or []) if isinstance(row, dict) and row.get("cycle") is not None
     }
     cycle = int(getattr(shared_state, "macro_cycle", 0) or 0)
     stalled = 0
@@ -137,10 +134,7 @@ def build_trajectory_digest(
     """
     try:
         entries = _load_journal_entries(Path(session_dir), shared_state)
-        snaps = [
-            s for s in (getattr(shared_state, "roofline_snapshots", None) or [])
-            if isinstance(s, dict)
-        ]
+        snaps = [s for s in (getattr(shared_state, "roofline_snapshots", None) or []) if isinstance(s, dict)]
         dead = _exhausted_clusters(entries)
         stalled = _stalled_cycle_count(shared_state)
         if not dead and not snaps and stalled == 0:
@@ -149,10 +143,7 @@ def build_trajectory_digest(
         lines: list[str] = []
         validated = getattr(shared_state, "cumulative_gain_validated", None)
         if isinstance(validated, (int, float)):
-            lines.append(
-                f"progress: validated_gain={validated:.2f}%  "
-                f"stalled_cycles={stalled}"
-            )
+            lines.append(f"progress: validated_gain={validated:.2f}%  stalled_cycles={stalled}")
         elif stalled:
             lines.append(f"progress: stalled_cycles={stalled}")
 
@@ -160,15 +151,9 @@ def build_trajectory_digest(
             lines.append("exhausted_directions (avoid re-proposing):")
             for row in dead[:max_directions]:
                 gain = row["max_gain"]
-                gain_str = (
-                    f"max_gain {gain:.2f}%" if isinstance(gain, (int, float))
-                    else "no positive gain"
-                )
+                gain_str = f"max_gain {gain:.2f}%" if isinstance(gain, (int, float)) else "no positive gain"
                 change = row["change"] or "(unspecified)"
-                lines.append(
-                    f"  - [{row['kind']}] {change}: "
-                    f"{row['count']} non-promoting attempts, {gain_str}"
-                )
+                lines.append(f"  - [{row['kind']}] {change}: {row['count']} non-promoting attempts, {gain_str}")
 
         if snaps:
             direction, pct = dominant_direction(snaps[-1])
@@ -181,10 +166,7 @@ def build_trajectory_digest(
 
         if not lines:
             return ""
-        lines.append(
-            "advisory only: redirect exploration with this; it does not gate "
-            "phase advance."
-        )
+        lines.append("advisory only: redirect exploration with this; it does not gate phase advance.")
         return "\n".join(lines)
     except Exception:  # noqa: BLE001 — review must never crash
         log.exception("trajectory_reviewer: build_trajectory_digest failed")

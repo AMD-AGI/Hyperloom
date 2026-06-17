@@ -42,14 +42,14 @@ def _ensure_requests_attrs() -> None:
             setattr(mod, _name, _no_network)
 
     if not hasattr(mod, "Session"):
+
         class _Session:
             def __init__(self) -> None:
                 self.headers: dict = {}
                 self.verify = True
 
             def request(self, *_a, **_k):
-                raise RuntimeError(
-                    "requests stub: network disabled in unit tests")
+                raise RuntimeError("requests stub: network disabled in unit tests")
 
             def get(self, *a, **k):
                 return self.request("GET", *a, **k)

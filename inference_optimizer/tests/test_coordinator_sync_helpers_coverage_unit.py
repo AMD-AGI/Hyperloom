@@ -5,6 +5,7 @@
 Builds one Coordinator with mock backends and exercises the formatting / gap /
 fact / tag helpers directly (both empty-guard and populated paths), avoiding the
 async event loop."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -26,13 +27,13 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     sd = make_session_dir()
     from .conftest import seed_target_analysis_marker
+
     seed_target_analysis_marker(sd)
     return sd
 
 
 def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE,
-                  payload={"topic": "heartbeat", "body_md": "ok"})
+    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 
 
 def _silent_plan() -> ScriptedPlan:
@@ -41,8 +42,7 @@ def _silent_plan() -> ScriptedPlan:
 
 def _build_backends() -> dict[str, Backend]:
     return {
-        name: MockBackend(_silent_plan(), name=name)
-        for name in ("orchestration", "kernel", "critic", "robustness")
+        name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "kernel", "critic", "robustness")
     }
 
 
@@ -62,11 +62,15 @@ def test_gap_layer_for_action(coord: Coordinator) -> None:
 
 def test_task_id_from_specialist_source(coord: Coordinator) -> None:
     from inference_optimizer.orchestrator.coordinator import SPECIALIST_FROM_AGENT_PREFIX
+
     assert coord._task_id_from_specialist_source("") == ""
     assert coord._task_id_from_specialist_source("kernel") == ""
-    assert coord._task_id_from_specialist_source(
-        f"{SPECIALIST_FROM_AGENT_PREFIX}abc",
-    ) == "abc"
+    assert (
+        coord._task_id_from_specialist_source(
+            f"{SPECIALIST_FROM_AGENT_PREFIX}abc",
+        )
+        == "abc"
+    )
 
 
 def test_pr_summary_to_dict(coord: Coordinator) -> None:
@@ -230,11 +234,15 @@ def test_warm_recipe_proven_items(coord: Coordinator) -> None:
     coord.shared_state.warm_start_recipe = {}
     assert coord._warm_recipe_proven_items() == []
     coord.shared_state.warm_start_recipe = {
-        "recipe": {"attrs": {"what_worked": [
-            {"name": "fp8", "source": "kb"},
-            {"name": "", "source": "skip"},
-            "not-a-dict",
-        ]}},
+        "recipe": {
+            "attrs": {
+                "what_worked": [
+                    {"name": "fp8", "source": "kb"},
+                    {"name": "", "source": "skip"},
+                    "not-a-dict",
+                ]
+            }
+        },
     }
     out = coord._warm_recipe_proven_items()
     assert out == [{"name": "fp8", "source": "kb"}]
@@ -261,13 +269,16 @@ def test_collect_workload_tags(coord: Coordinator, monkeypatch) -> None:
 def test_build_kernel_optimizations_from_state(coord: Coordinator) -> None:
     ss = coord.shared_state
     ss.kernel_opt_attempts = {
-        "k1": {"last_decision": "KEEP", "last_micro_speedup": 1.3,
-               "last_source_file": "a.py", "last_artifact_path": "a.so"},
+        "k1": {
+            "last_decision": "KEEP",
+            "last_micro_speedup": 1.3,
+            "last_source_file": "a.py",
+            "last_artifact_path": "a.so",
+        },
         "k2": {"last_decision": "REVERT", "last_micro_speedup": 1.1},
     }
     ss.kernel_integrate_attempts = {
-        "i1": {"kernel_id": "k1", "last_decision": "KEEP", "best_gain_pct": 5.0,
-               "attempts": [{"new_tput": 210.0}]},
+        "i1": {"kernel_id": "k1", "last_decision": "KEEP", "best_gain_pct": 5.0, "attempts": [{"new_tput": 210.0}]},
     }
     out = coord._build_kernel_optimizations_from_state()
     assert len(out) == 1  # only the KEEP'd k1
@@ -356,16 +367,21 @@ def test_workload_canonical_id_and_anchor(coord: Coordinator) -> None:
 
 def test_resolve_issue_canonical_priority(coord: Coordinator) -> None:
     from inference_optimizer.orchestrator.coordinator import PendingProposal
+
     pending = PendingProposal(
-        proposal_msg_id="m1", from_agent="orchestration",
-        action_name="explore", predicted_gain_pct=0.0,
+        proposal_msg_id="m1",
+        from_agent="orchestration",
+        action_name="explore",
+        predicted_gain_pct=0.0,
         payload={"gap_canonical_id": "explicit-top"},
     )
     assert coord._resolve_issue_canonical(pending) == "explicit-top"
     # falls back to params then anchor
     pending2 = PendingProposal(
-        proposal_msg_id="m2", from_agent="orchestration",
-        action_name="explore", predicted_gain_pct=0.0,
+        proposal_msg_id="m2",
+        from_agent="orchestration",
+        action_name="explore",
+        predicted_gain_pct=0.0,
         payload={"params": {"gap_canonical_id": "from-params"}},
     )
     assert coord._resolve_issue_canonical(pending2) == "from-params"
@@ -387,11 +403,14 @@ def test_select_next_framework_pr_candidate(coord: Coordinator) -> None:
     ss = coord.shared_state
     ss.framework_pr_batches = []
     assert coord._select_next_framework_pr_candidate() is None
-    ss.framework_pr_batches = [{
-        "candidates": [
-            {"candidate_id": "c1"}, {"candidate_id": "c2"},
-        ],
-    }]
+    ss.framework_pr_batches = [
+        {
+            "candidates": [
+                {"candidate_id": "c1"},
+                {"candidate_id": "c2"},
+            ],
+        }
+    ]
     ss.framework_pr_phase_progress = [{"candidate_id": "c1"}]
     nxt = coord._select_next_framework_pr_candidate()
     assert nxt == {"candidate_id": "c2"}
@@ -412,6 +431,7 @@ def test_framework_pr_known_candidate_ids(coord: Coordinator) -> None:
 # -- module-level helpers --------------------------------------------------
 def test_first_present() -> None:
     from inference_optimizer.orchestrator.coordinator import _first_present
+
     assert _first_present({"a": 1, "b": 2}, ("x", "b", "a")) == 2
     assert _first_present({"a": None, "b": 5}, ("a", "b")) == 5
     assert _first_present({}, ("a",)) is None
@@ -420,6 +440,7 @@ def test_first_present() -> None:
 
 def test_lifecycle_paths() -> None:
     from inference_optimizer.orchestrator.coordinator import _lifecycle_paths
+
     assert _lifecycle_paths("not-a-dict") == {}
     out = _lifecycle_paths({"patch_path": "/a/p.diff", "workspace": "", "other": "x"})
     assert out == {"patch_path": "/a/p.diff"}
@@ -430,22 +451,32 @@ def test_format_inbox_event_variants() -> None:
     from inference_optimizer.orchestrator.message_bus import Message
 
     delegated = Message.new(
-        "kernel", "orchestration", "delegated_result",
-        {"kind": "explore", "state": "succeeded",
-         "result": {"status": "kept", "gain_pct": 5.0, "tput": 200.0, "kept": True}},
+        "kernel",
+        "orchestration",
+        "delegated_result",
+        {
+            "kind": "explore",
+            "state": "succeeded",
+            "result": {"status": "kept", "gain_pct": 5.0, "tput": 200.0, "kept": True},
+        },
     )
     line = _format_inbox_event(delegated)
     assert "topic=delegated_result" in line
     assert "status=" in line and "kept=" in line
 
     verdict = Message.new(
-        "critic", "orchestration", "review_verdict",
+        "critic",
+        "orchestration",
+        "review_verdict",
         {"target_proposal_msg_id": "m1", "verdict": "approve", "reasoning": "ok"},
     )
     assert "verdict='approve'" in _format_inbox_event(verdict)
 
     obs = Message.new(
-        "coordinator", "orchestration", "observation", {"kind": "policy_denied"},
+        "coordinator",
+        "orchestration",
+        "observation",
+        {"kind": "policy_denied"},
     )
     assert "kind='policy_denied'" in _format_inbox_event(obs)
 
