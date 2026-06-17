@@ -1290,6 +1290,14 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Re-derive source_type from the file extension when it's unknown: the
+    # upstream classifier often computes source_type before the source_file is
+    # resolved, so an aiter .cu/.cuh kernel (e.g. aiter::mha_batch_prefill)
+    # arrives as "unknown" and would be wrongly skipped. A real device-source
+    # extension means hip_cpp.
+    if (source_type or "").strip().lower() in ("", "unknown") and \
+            str(source_file).lower().endswith((".cu", ".cuh", ".hip")):
+        source_type = "hip_cpp"
     fellow = _fellow_for_source_type(source_type)
     if fellow is None:
         return _normalized(2, "", f"forge stage-1 supports triton only; got source_type={source_type}",

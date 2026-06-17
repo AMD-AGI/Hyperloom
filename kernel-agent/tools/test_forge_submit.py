@@ -149,6 +149,20 @@ def test_shapes_from_candidate_unparseable_falls_back():
     assert forge_submit._shapes_from_candidate(cand)["primary"] == {}
 
 
+def test_submit_rederives_aiter_cu_source_type(tmp_path, monkeypatch):
+    """An aiter .cu kernel arriving with source_type='unknown' is re-derived to
+    hip_cpp so forge maps it to hip-fellow (with compiled fellows enabled)."""
+    monkeypatch.setenv("FORGE_ENABLE_COMPILED_FELLOWS", "1")
+    # unknown + .cu -> hip_cpp -> hip-fellow (not the triton-only skip).
+    res = forge_submit.submit(
+        source_file="/sgl-workspace/aiter/csrc/py_itfs_ck/mha_batch_prefill_kernels.cu",
+        prompt_file=tmp_path / "p.txt", output_dir=tmp_path / "out",
+        test_command="", source_type="unknown", candidate={"operation": "attention"},
+        kernel_repo="")
+    # It must NOT be the "supports triton only" skip (rc=2 with that message).
+    assert "supports triton only" not in (res.get("stderr_tail") or "")
+
+
 def test_submit_skips_non_triton(tmp_path):
     """Stage 1 supports triton only; other source_types return a clean skip, no GPU work."""
     res = forge_submit.submit(

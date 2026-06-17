@@ -1180,6 +1180,16 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
             f"not this .py): {source_file}"
         )
     source_type = candidate.get("source_type")
+    # aiter device-source promotion: aiter ships editable and JIT-compiles each
+    # op, so a real .cu/.cuh/.hip kernel under /aiter/ is patchable even when the
+    # upstream classifier left source_type unknown (e.g. aiter::mha_batch_prefill
+    # -> csrc/py_itfs_ck/*.cu). forge edits it in place + AITER_REBUILD recompiles
+    # it. Excludes tuned_gemm.py-style Python dispatchers (real GEMM is a
+    # compiled CK/hipBLASLt lib, editing the .py does nothing).
+    if (source_type not in {"hip_cpp", "triton", "python", "flydsl"}
+            and "/aiter/" in lower_file
+            and lower_file.endswith((".cu", ".cuh", ".hip"))):
+        return True, ""
     if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
         return False, (f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}")
     return True, ""

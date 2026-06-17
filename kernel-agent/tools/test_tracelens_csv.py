@@ -2250,6 +2250,30 @@ def test_library_token_pairing():
     assert tla._library_token(src) != tla._library_token(test)
 
 
+def test_classify_patchability_allows_aiter_device_source_unknown_type(monkeypatch):
+    """aiter .cu/.cuh device sources are patchable even when source_type is
+    'unknown' (classifier ran before source_file resolved). Enables forge to
+    optimize aiter::mha_batch_prefill etc."""
+    src = "/sgl-workspace/aiter/csrc/py_itfs_ck/mha_batch_prefill_kernels.cu"
+    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/sgl-workspace/aiter/",))
+    reusable, reason = tla.classify_patchability(
+        {"name": "aiter::mha_batch_prefill", "source_file": src, "source_type": "unknown"},
+    )
+    assert reusable is True, reason
+
+
+def test_classify_patchability_still_rejects_aiter_py_dispatcher(monkeypatch):
+    """aten::mm -> aiter tuned_gemm.py is a dispatcher (real GEMM is a compiled
+    CK/hipBLASLt lib); editing the .py does nothing, so it stays non-patchable."""
+    src = "/sgl-workspace/aiter/aiter/tuned_gemm.py"
+    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/sgl-workspace/aiter/",))
+    reusable, reason = tla.classify_patchability(
+        {"name": "aten::mm", "source_file": src, "source_type": "python",
+         "library": "pytorch native"},
+    )
+    assert reusable is False
+
+
 def test_classify_patchability_keeps_cpp_itfs_device_source(monkeypatch):
     """The real device source (.cuh) under cpp_itfs stays reusable."""
     src = "/wekafs/aiter/csrc/cpp_itfs/pa/pa_kernels.cuh"
