@@ -78,19 +78,12 @@ def render_invocation_block(
     config_path = invocation.get("config_path")
     server_log_path = invocation.get("server_log_path")
 
-    has_anything = (
-        framework_args
-        or (isinstance(extra_envs, dict) and extra_envs)
-        or config_path
-        or server_log_path
-    )
+    has_anything = framework_args or (isinstance(extra_envs, dict) and extra_envs) or config_path or server_log_path
     if not has_anything:
         return ""
 
     image_display = (
-        str(session_image).strip()
-        if isinstance(session_image, str) and session_image.strip()
-        else "(not configured)"
+        str(session_image).strip() if isinstance(session_image, str) and session_image.strip() else "(not configured)"
     )
     lines = ["### Invocation"]
     lines.append(f"- **image**: {image_display}")
@@ -100,11 +93,7 @@ def render_invocation_block(
         lines.append(f"- **command**: `{_truncate(framework_args, _FRAMEWORK_ARGS_MAX)}`")
     # Lineage label under ``command`` shows where the echoed string came from.
     if framework_args_source:
-        suffix = (
-            "  (extraction failed; try server.log or config yaml)"
-            if framework_args_source == "unknown"
-            else ""
-        )
+        suffix = "  (extraction failed; try server.log or config yaml)" if framework_args_source == "unknown" else ""
         lines.append(f"- **source**: {framework_args_source}{suffix}")
     envs_str = _format_envs(extra_envs if isinstance(extra_envs, dict) else None)
     if envs_str:

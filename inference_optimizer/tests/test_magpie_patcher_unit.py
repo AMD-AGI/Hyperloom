@@ -3,11 +3,11 @@
 """Unit tests for the idempotent, atomic Magpie ``benchmarker.py`` patcher
 (path resolution, sentinel/legacy detection, upstream-atomic awareness, and
 the classified atomic-reason outcomes)."""
+
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from inference_optimizer.orchestrator.action_executors import _magpie_patcher as mp
 
@@ -21,15 +21,10 @@ _LEGACY_SRC = (
     "        return\n"
 )
 
-_SGLANG_LEGACY = (
-    "#!/bin/bash\n"
-    "    SERVER_MONITOR_ARGS=()\n"
-    "    magpie_run_benchmark_serving_remote_direct || exit $?\n"
-)
+_SGLANG_LEGACY = "#!/bin/bash\n    SERVER_MONITOR_ARGS=()\n    magpie_run_benchmark_serving_remote_direct || exit $?\n"
 
 
-def _make_magpie(root: Path, *, benchmarker: str | None = _LEGACY_SRC,
-                 sglang: str | None = _SGLANG_LEGACY) -> Path:
+def _make_magpie(root: Path, *, benchmarker: str | None = _LEGACY_SRC, sglang: str | None = _SGLANG_LEGACY) -> Path:
     if benchmarker is not None:
         bp = root / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
         bp.parent.mkdir(parents=True, exist_ok=True)
@@ -108,9 +103,9 @@ def test_extract_prepare_region_blank_and_dedent():
         "class C:\n"
         "    def _prepare_benchmark_scripts(self):\n"
         "        a = 1\n"
-        "\n"                       # blank line inside body -> continue
+        "\n"  # blank line inside body -> continue
         "        b = 2\n"
-        "    def other(self):\n"   # dedent to def_indent -> break
+        "    def other(self):\n"  # dedent to def_indent -> break
         "        c = 3\n"
     )
     region = mp._extract_prepare_region(src)
@@ -151,9 +146,7 @@ def test_apply_reason_already_patched(tmp_path):
 def test_apply_reason_upstream_atomic(tmp_path):
     f = tmp_path / "b.py"
     f.write_text(
-        "def _prepare_benchmark_scripts(self):\n"
-        "    tempfile.mkstemp(dir=d)\n"
-        "    os.replace(a, b)\n",
+        "def _prepare_benchmark_scripts(self):\n    tempfile.mkstemp(dir=d)\n    os.replace(a, b)\n",
         encoding="utf-8",
     )
     assert mp._apply_patch_atomic_reason(f) == mp._ATOMIC_REASON_UPSTREAM_ATOMIC
@@ -187,8 +180,7 @@ def test_apply_reason_fdopen_write_error(tmp_path, monkeypatch):
     f = tmp_path / "b.py"
     f.write_text(_LEGACY_SRC, encoding="utf-8")
     # mkstemp succeeds but os.replace fails -> fdopen-path OSError + cleanup
-    monkeypatch.setattr(mp.os, "replace",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
+    monkeypatch.setattr(mp.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
     assert mp._apply_patch_atomic_reason(f) == mp._ATOMIC_REASON_IO_ERROR
 
 
@@ -237,27 +229,23 @@ def test_apply_remote_trust_read_error(tmp_path):
 def test_apply_remote_trust_write_error(tmp_path, monkeypatch):
     f = tmp_path / "s.sh"
     f.write_text(_SGLANG_LEGACY, encoding="utf-8")
-    monkeypatch.setattr(mp.tempfile, "mkstemp",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
+    monkeypatch.setattr(mp.tempfile, "mkstemp", lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
     assert mp._apply_remote_trust_patch_atomic(f) is False
 
 
 def test_apply_remote_trust_fdopen_write_error(tmp_path, monkeypatch):
     f = tmp_path / "s.sh"
     f.write_text(_SGLANG_LEGACY, encoding="utf-8")
-    monkeypatch.setattr(mp.os, "replace",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
+    monkeypatch.setattr(mp.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
     assert mp._apply_remote_trust_patch_atomic(f) is False
 
 
 # ---- MagpiePatchStatus ----------------------------------------------------
 def test_status_properties():
-    s = mp.MagpiePatchStatus(atomic_ok=True, remote_trust_ok=True,
-                             atomic_reason=mp._ATOMIC_REASON_APPLIED)
+    s = mp.MagpiePatchStatus(atomic_ok=True, remote_trust_ok=True, atomic_reason=mp._ATOMIC_REASON_APPLIED)
     assert s.ok is True
     assert s.atomic_genuine_failure is False
-    s2 = mp.MagpiePatchStatus(atomic_ok=False, remote_trust_ok=True,
-                              atomic_reason=mp._ATOMIC_REASON_IO_ERROR)
+    s2 = mp.MagpiePatchStatus(atomic_ok=False, remote_trust_ok=True, atomic_reason=mp._ATOMIC_REASON_IO_ERROR)
     assert s2.ok is False
     assert s2.atomic_genuine_failure is True
 

@@ -49,9 +49,14 @@ from .slugify import slugify, slugify_safe
 
 # Verdicts that should produce a KB write (per contract §5.1 — defer /
 # inconclusive / advise are pure dispatch decisions, no reusable lesson).
-_KB_RELEVANT_VERDICTS: frozenset[str] = frozenset({
-    "approve", "reject", "redirect", "needs_review",
-})
+_KB_RELEVANT_VERDICTS: frozenset[str] = frozenset(
+    {
+        "approve",
+        "reject",
+        "redirect",
+        "needs_review",
+    }
+)
 
 
 # Circuit-breaker defaults: after ``threshold`` consecutive transport
@@ -185,9 +190,7 @@ class KBWriter:
         self.read_enabled = _read_bool_env("KB_READ_ENABLED", True)
         self._time_fn = time_fn
 
-        self._breaker_threshold = max(
-            1, _read_int_env("CRITIC_KB_BREAKER_THRESHOLD", _DEFAULT_BREAKER_THRESHOLD)
-        )
+        self._breaker_threshold = max(1, _read_int_env("CRITIC_KB_BREAKER_THRESHOLD", _DEFAULT_BREAKER_THRESHOLD))
         self._breaker_cooldown = max(
             0.0, _read_float_env("CRITIC_KB_BREAKER_COOLDOWN_SECONDS", _DEFAULT_BREAKER_COOLDOWN_SECONDS)
         )
@@ -229,9 +232,7 @@ class KBWriter:
                 back to the configured cooldown when ``None``.
         """
         self._consecutive_failures = self._breaker_threshold
-        self._unreachable_until = self._time_fn() + (
-            cooldown if cooldown is not None else self._breaker_cooldown
-        )
+        self._unreachable_until = self._time_fn() + (cooldown if cooldown is not None else self._breaker_cooldown)
         get_registry().counter(CRITIC_KB_BREAKER_OPEN_TOTAL).inc({"reason": "manual"})
 
     def _record_kb_failure(self, endpoint: str, exc: Exception) -> None:
@@ -242,16 +243,20 @@ class KBWriter:
             exc (Exception): The transport exception (recorded via metrics).
         """
         self._consecutive_failures += 1
-        get_registry().counter(CRITIC_KB_UNREACHABLE_TOTAL).inc({
-            "endpoint": endpoint,
-        })
+        get_registry().counter(CRITIC_KB_UNREACHABLE_TOTAL).inc(
+            {
+                "endpoint": endpoint,
+            }
+        )
         if self._consecutive_failures >= self._breaker_threshold:
             already_open = self._unreachable_until > self._time_fn()
             self._unreachable_until = self._time_fn() + self._breaker_cooldown
             if not already_open:
-                get_registry().counter(CRITIC_KB_BREAKER_OPEN_TOTAL).inc({
-                    "endpoint": endpoint,
-                })
+                get_registry().counter(CRITIC_KB_BREAKER_OPEN_TOTAL).inc(
+                    {
+                        "endpoint": endpoint,
+                    }
+                )
 
     def _record_kb_success(self) -> None:
         """Reset the breaker after any successful KB call."""
@@ -382,14 +387,19 @@ class KBWriter:
         if not self.write_enabled:
             return WriteResult("disabled", {"reason": "KB_WRITE_ENABLED=false"})
         if self.is_kb_unreachable():
-            return WriteResult("disabled", {
-                "reason": "kb_unreachable",
-                "breaker": self.kb_breaker_state(),
-            })
+            return WriteResult(
+                "disabled",
+                {
+                    "reason": "kb_unreachable",
+                    "breaker": self.kb_breaker_state(),
+                },
+            )
         verdict_label = verdict.get("verdict")
-        get_registry().counter(CRITIC_REVIEW_VERDICT_TOTAL).inc({
-            "verdict": str(verdict_label),
-        })
+        get_registry().counter(CRITIC_REVIEW_VERDICT_TOTAL).inc(
+            {
+                "verdict": str(verdict_label),
+            }
+        )
         if verdict_label not in _KB_RELEVANT_VERDICTS:
             return WriteResult("skipped", {"reason": f"verdict={verdict_label}"})
 
@@ -408,11 +418,13 @@ class KBWriter:
 
         kind = "pitfall" if verdict_label in ("reject", "redirect", "needs_review") else "technique"
         has_measurement = bool(verdict.get("packet_evidence"))
-        importance = cap_importance(importance_for_verdict(
-            verdict=verdict_label,
-            confidence=verdict.get("confidence"),
-            has_measurement=has_measurement,
-        ))
+        importance = cap_importance(
+            importance_for_verdict(
+                verdict=verdict_label,
+                confidence=verdict.get("confidence"),
+                has_measurement=has_measurement,
+            )
+        )
 
         payload = {
             "scope": scope,
@@ -470,10 +482,13 @@ class KBWriter:
         if not kb_drafts:
             return WriteResult("skipped", {"reason": "no_drafts"})
         if self.is_kb_unreachable():
-            return WriteResult("disabled", {
-                "reason": "kb_unreachable",
-                "breaker": self.kb_breaker_state(),
-            })
+            return WriteResult(
+                "disabled",
+                {
+                    "reason": "kb_unreachable",
+                    "breaker": self.kb_breaker_state(),
+                },
+            )
         try:
             scope = build_scope(packet_context, session_context=session_context)
         except ScopeError as exc:
@@ -495,34 +510,38 @@ class KBWriter:
                 rejected.append({"draft": d, "reason": f"slug_failed: {exc}"})
                 continue
             importance = cap_importance(importance_for_kb_draft(confidence=d.get("confidence")))
-            items.append({
-                "scope": scope,
-                "kind": kind,
-                "slug": slug,
-                "importance": importance,
-                "summary": (d.get("lesson") or d.get("action") or "")[:2000],
-                "metadata": {
-                    "source_session": ctx.session_id,
-                    "source_review_id": ctx.review_id,
-                    "source_type": "critic_kb_draft",
-                    "source_role": ctx.source_role,
-                    "topic": topic,
-                    "tags": list(d.get("tags") or []),
-                    "result": d.get("result") or {},
-                    "context": d.get("context") or "",
-                    "strategy_tested": d.get("strategy_tested") or [],
-                    **ctx.extra_metadata,
-                },
-            })
+            items.append(
+                {
+                    "scope": scope,
+                    "kind": kind,
+                    "slug": slug,
+                    "importance": importance,
+                    "summary": (d.get("lesson") or d.get("action") or "")[:2000],
+                    "metadata": {
+                        "source_session": ctx.session_id,
+                        "source_review_id": ctx.review_id,
+                        "source_type": "critic_kb_draft",
+                        "source_role": ctx.source_role,
+                        "topic": topic,
+                        "tags": list(d.get("tags") or []),
+                        "result": d.get("result") or {},
+                        "context": d.get("context") or "",
+                        "strategy_tested": d.get("strategy_tested") or [],
+                        **ctx.extra_metadata,
+                    },
+                }
+            )
         if not items:
             return WriteResult("skipped", {"reason": "all_rejected", "rejected": rejected})
 
         try:
             response = self.client.batch_insert(items, on_conflict="upsert")
-            get_registry().counter(CRITIC_KB_WRITE_TOTAL).inc({
-                "endpoint": "batch_insert",
-                "status": "200",
-            })
+            get_registry().counter(CRITIC_KB_WRITE_TOTAL).inc(
+                {
+                    "endpoint": "batch_insert",
+                    "status": "200",
+                }
+            )
             self._record_kb_success()
             return WriteResult(
                 "ok",
@@ -592,16 +611,16 @@ class KBWriter:
         if not self.write_enabled:
             return WriteResult("disabled", {"reason": "KB_WRITE_ENABLED=false"})
         if self.is_kb_unreachable():
-            return WriteResult("disabled", {
-                "reason": "kb_unreachable",
-                "breaker": self.kb_breaker_state(),
-            })
+            return WriteResult(
+                "disabled",
+                {
+                    "reason": "kb_unreachable",
+                    "breaker": self.kb_breaker_state(),
+                },
+            )
         if not new_id or not old_ids:
             return WriteResult("skipped", {"reason": "missing_ids"})
-        edges = [
-            {"kind": "contradicts", "from_id": new_id, "to_id": old_id}
-            for old_id in old_ids
-        ]
+        edges = [{"kind": "contradicts", "from_id": new_id, "to_id": old_id} for old_id in old_ids]
         try:
             response = self.client.add_edges(edges)
             self._record_kb_success()
@@ -633,10 +652,12 @@ class KBWriter:
         """
         try:
             response = self.client.upsert(payload)
-            get_registry().counter(CRITIC_KB_WRITE_TOTAL).inc({
-                "endpoint": "upsert",
-                "status": "200",
-            })
+            get_registry().counter(CRITIC_KB_WRITE_TOTAL).inc(
+                {
+                    "endpoint": "upsert",
+                    "status": "200",
+                }
+            )
             self._record_kb_success()
             return WriteResult("ok", {"response": response})
         except KBTransportError as exc:

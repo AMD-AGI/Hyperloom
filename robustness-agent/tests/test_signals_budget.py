@@ -155,6 +155,7 @@ def test_dedup_key_is_session_wide():
 # H3 budget_strategy_drift — 50% burnt + 0 gain early warning
 # ---------------------------------------------------------------------------
 
+
 def test_strategy_drift_fires_at_half_burnt_with_zero_gain():
     """50% burnt, validated_gain=0 → MEDIUM early hint."""
     ctx = _ctx(
@@ -207,6 +208,7 @@ def test_strategy_drift_does_not_double_fire_with_warn():
 # ---------------------------------------------------------------------------
 # H1 deadline_warning — absolute-time 30-min predictive warning
 # ---------------------------------------------------------------------------
+
 
 def test_deadline_warning_fires_at_30min_remaining_with_zero_gain_high():
     """Long session: 24h budget, 25 min remain, 0 validated gain → HIGH."""
@@ -264,6 +266,7 @@ def test_deadline_warning_independent_of_burn_pct():
 # H1 deadline_hard_cutoff — < 5 min emergency cut
 # ---------------------------------------------------------------------------
 
+
 def test_hard_cutoff_fires_at_5min_remaining_always_high():
     ctx = _ctx(
         elapsed_minutes=355.0,
@@ -315,6 +318,7 @@ def test_hard_cutoff_silent_when_remaining_above_threshold():
 # ---------------------------------------------------------------------------
 # Axis coexistence — absolute and percentage signals can overlap
 # ---------------------------------------------------------------------------
+
 
 def test_absolute_and_percentage_can_both_fire():
     """24h budget, 25 min remain, 95% burnt, no validated gain.

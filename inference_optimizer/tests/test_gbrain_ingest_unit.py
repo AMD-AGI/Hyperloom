@@ -4,12 +4,11 @@
 seed-only shareable-signal gate, page mapping (stack fingerprint + negative
 knowledge), bulk + single mirror flows, env-built MCP, the mirroring KB
 wrapper, and the CLI ``main`` entry point."""
+
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-import pytest
 
 from inference_optimizer.recipe_kb import gbrain_ingest as gi
 
@@ -28,13 +27,15 @@ class _FakeMcp:
 
 # -- _emit_yaml ------------------------------------------------------------
 def test_emit_yaml_shapes() -> None:
-    out = gi._emit_yaml({
-        "empty_list": [],
-        "empty_map": {},
-        "nested": {"a": 1},
-        "scalar_list": ["x", "y"],
-        "flat": "v",
-    })
+    out = gi._emit_yaml(
+        {
+            "empty_list": [],
+            "empty_map": {},
+            "nested": {"a": 1},
+            "scalar_list": ["x", "y"],
+            "flat": "v",
+        }
+    )
     assert "empty_list: []" in out
     assert "empty_map: {}" in out
     assert "- x" in out and "- y" in out
@@ -47,9 +48,12 @@ def test_has_shareable_signal_session_throughput() -> None:
 
 
 def test_has_shareable_signal_session_actions() -> None:
-    assert gi._has_shareable_signal(
-        {"sessions": [{"throughput_after": "bad", "actions_taken": ["x"]}]},
-    ) is True
+    assert (
+        gi._has_shareable_signal(
+            {"sessions": [{"throughput_after": "bad", "actions_taken": ["x"]}]},
+        )
+        is True
+    )
 
 
 def test_has_shareable_signal_negative_knowledge_field() -> None:
@@ -77,15 +81,19 @@ def test_recipe_to_page_strict_gate_skips_seed_only(monkeypatch) -> None:
 
 def test_recipe_to_page_emits_fingerprint_and_negatives(monkeypatch) -> None:
     monkeypatch.delenv("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", raising=False)
-    slug, content = gi.recipe_to_page({
-        "canonical_id": "sglang:qwen:mi300x:bf16:v1",
-        "model": "qwen", "hardware": "mi300x", "framework": "sglang",
-        "best_config": {"extra_server_args": "--tp 1", "extra_envs": {"A": "1"}},
-        "best_throughput": 1000.0,
-        "what_worked": ["aiter"],
-        "pitfalls": [{"knob": "x"}],
-        "stack_fingerprint": {"rocm": "6.2", "aiter": "abc"},
-    })
+    slug, content = gi.recipe_to_page(
+        {
+            "canonical_id": "sglang:qwen:mi300x:bf16:v1",
+            "model": "qwen",
+            "hardware": "mi300x",
+            "framework": "sglang",
+            "best_config": {"extra_server_args": "--tp 1", "extra_envs": {"A": "1"}},
+            "best_throughput": 1000.0,
+            "what_worked": ["aiter"],
+            "pitfalls": [{"knob": "x"}],
+            "stack_fingerprint": {"rocm": "6.2", "aiter": "abc"},
+        }
+    )
     assert slug.startswith("recipe-snapshot/")
     assert "stack_fingerprint" in content
     assert "what_worked" in content
@@ -95,8 +103,8 @@ def test_recipe_to_page_emits_fingerprint_and_negatives(monkeypatch) -> None:
 # -- ingest_local_to_gbrain ------------------------------------------------
 def test_ingest_dry_run_and_skip_and_error() -> None:
     recipes = [
-        {"canonical_id": "a:b:c:d:e", "model": "m"},   # mirrorable
-        {"model": "no-canonical"},                       # skipped
+        {"canonical_id": "a:b:c:d:e", "model": "m"},  # mirrorable
+        {"model": "no-canonical"},  # skipped
     ]
     # dry-run: counts ingested without touching mcp
     stats = gi.ingest_local_to_gbrain(recipes=recipes, mcp=None, dry_run=True)
@@ -106,7 +114,9 @@ def test_ingest_dry_run_and_skip_and_error() -> None:
     # write path with a failing mcp -> error counted, loop continues
     mcp = _FakeMcp(fail=True)
     stats2 = gi.ingest_local_to_gbrain(
-        recipes=[{"canonical_id": "a:b:c:d:e"}], mcp=mcp, dry_run=False,
+        recipes=[{"canonical_id": "a:b:c:d:e"}],
+        mcp=mcp,
+        dry_run=False,
     )
     assert stats2["errors"] == 1
     assert mcp.calls  # put_page attempted
@@ -115,7 +125,9 @@ def test_ingest_dry_run_and_skip_and_error() -> None:
 def test_ingest_write_success() -> None:
     mcp = _FakeMcp()
     stats = gi.ingest_local_to_gbrain(
-        recipes=[{"canonical_id": "a:b:c:d:e"}], mcp=mcp, dry_run=False,
+        recipes=[{"canonical_id": "a:b:c:d:e"}],
+        mcp=mcp,
+        dry_run=False,
     )
     assert stats["ingested"] == 1
     assert mcp.calls[0][0] == "put_page"
@@ -199,8 +211,7 @@ def test_main_write_requires_creds(tmp_path, monkeypatch, capsys) -> None:
         "inference_optimizer.recipe_kb.local_store.LocalRecipeStore.list_recent",
         lambda self, limit: [],
     )
-    rc = gi.main(["--local-kb-root", str(tmp_path), "--write",
-                  "--gbrain-url", "", "--token", ""])
+    rc = gi.main(["--local-kb-root", str(tmp_path), "--write", "--gbrain-url", "", "--token", ""])
     assert rc == 2
     assert "GBRAIN_BASE_URL" in capsys.readouterr().out
 

@@ -14,30 +14,49 @@ from typing import Any
 from ..storage.connection import SqliteConnection
 
 
-TOPIC_ALLOWLIST = frozenset({
-    # Optimization-loop topics
-    "proposal", "question", "answer",
-    "observation", "event", "decision",
-    "alert",
-    "historical_warning", "reflection_tick",
-    "do_postmortem", "do_strategic_review", "do_emergency_rca",
-    "synthesize_for_kb", "graceful_stop", "heartbeat",
-    "delegated_result", "intent_emitted", "rca_done",
-    # Storage-layer events
-    "lease_expired", "lease_acquire_failed",
-    # Agent-to-agent RPC (REQUEST / RESPONSE intents).
-    "request", "response",
-    # Critic Review Protocol verdict broadcast.
-    "review_verdict", "advice", "strategy_change",
-    # Dynamic-specialist dispatch audit trail (free-form CPU-only
-    # specialist dispatch via dynamic_dispatch_tools). These are
-    # write-only observation-style records the Coordinator emits so the
-    # dispatch / poll / collect lifecycle is visible in the bus; no
-    # consumer keys off them, but they must be allow-listed or
-    # ``append_and_seq`` rejects them with ``unknown topic``.
-    "dynamic_specialist_dispatched", "dynamic_specialist_status",
-    "dynamic_specialist_results", "dynamic_specialist_error",
-})
+TOPIC_ALLOWLIST = frozenset(
+    {
+        # Optimization-loop topics
+        "proposal",
+        "question",
+        "answer",
+        "observation",
+        "event",
+        "decision",
+        "alert",
+        "historical_warning",
+        "reflection_tick",
+        "do_postmortem",
+        "do_strategic_review",
+        "do_emergency_rca",
+        "synthesize_for_kb",
+        "graceful_stop",
+        "heartbeat",
+        "delegated_result",
+        "intent_emitted",
+        "rca_done",
+        # Storage-layer events
+        "lease_expired",
+        "lease_acquire_failed",
+        # Agent-to-agent RPC (REQUEST / RESPONSE intents).
+        "request",
+        "response",
+        # Critic Review Protocol verdict broadcast.
+        "review_verdict",
+        "advice",
+        "strategy_change",
+        # Dynamic-specialist dispatch audit trail (free-form CPU-only
+        # specialist dispatch via dynamic_dispatch_tools). These are
+        # write-only observation-style records the Coordinator emits so the
+        # dispatch / poll / collect lifecycle is visible in the bus; no
+        # consumer keys off them, but they must be allow-listed or
+        # ``append_and_seq`` rejects them with ``unknown topic``.
+        "dynamic_specialist_dispatched",
+        "dynamic_specialist_status",
+        "dynamic_specialist_results",
+        "dynamic_specialist_error",
+    }
+)
 
 
 def _now_iso() -> str:
@@ -246,10 +265,7 @@ class MessageBus:
         if topic is not None:
             clauses.append("topic = ?")
             params.append(topic)
-        sql = (
-            f"SELECT * FROM events WHERE {' AND '.join(clauses)} "
-            f"ORDER BY seq DESC LIMIT ?"
-        )
+        sql = f"SELECT * FROM events WHERE {' AND '.join(clauses)} ORDER BY seq DESC LIMIT ?"
         params.append(n)
         rows = await self.db.fetchall(sql, params)
         return [Message.from_row(r) for r in rows]
@@ -266,8 +282,7 @@ class MessageBus:
             list[Message]: Matching messages ordered by ascending ``seq``.
         """
         rows = await self.db.fetchall(
-            "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') "
-            "ORDER BY seq ASC",
+            "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq ASC",
             (after_seq, to_agent),
         )
         return [Message.from_row(r) for r in rows]
@@ -281,9 +296,7 @@ class MessageBus:
         Returns:
             Message | None: The matching message, or ``None`` if absent.
         """
-        row = await self.db.fetchone(
-            "SELECT * FROM events WHERE msg_id = ?", (msg_id,)
-        )
+        row = await self.db.fetchone("SELECT * FROM events WHERE msg_id = ?", (msg_id,))
         return Message.from_row(row) if row else None
 
     async def count(self) -> int:

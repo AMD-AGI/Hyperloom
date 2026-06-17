@@ -11,6 +11,7 @@ from inference_optimizer.orchestrator import coordinator_helpers as ch
 
 # ---- _infer_model_class_from_config ----
 
+
 def test_infer_model_class_dense_empty():
     assert ch._infer_model_class_from_config("") == "dense"
 
@@ -38,12 +39,14 @@ def test_infer_model_class_reads_config_json(tmp_path):
 
 def test_infer_model_class_ignores_bool_experts(tmp_path):
     (tmp_path / "config.json").write_text(
-        json.dumps({"num_experts": True, "model_type": "llama"}), encoding="utf-8",
+        json.dumps({"num_experts": True, "model_type": "llama"}),
+        encoding="utf-8",
     )
     assert ch._infer_model_class_from_config(str(tmp_path)) == "dense"
 
 
 # ---- effective_closing_grace_sec ----
+
 
 def test_closing_grace_explicit():
     assert ch.effective_closing_grace_sec(100, 0) == 0.0
@@ -59,6 +62,7 @@ def test_closing_grace_default():
 
 # ---- _parse_iso_unix ----
 
+
 def test_parse_iso_unix():
     assert ch._parse_iso_unix("") == 0.0
     assert ch._parse_iso_unix("not-a-date") == 0.0
@@ -69,13 +73,13 @@ def test_parse_iso_unix():
 
 # ---- _summarize_failed_variants ----
 
+
 def test_summarize_failed_variants():
     assert ch._summarize_failed_variants("bad") == []
     rows = [
         {"status": "succeeded", "name": "ok"},
         "not-a-dict",
-        {"status": "failed", "name": "v1", "error_class": "E", "error": "boom" * 200,
-         "extra_server_args": "--x"},
+        {"status": "failed", "name": "v1", "error_class": "E", "error": "boom" * 200, "extra_server_args": "--x"},
     ]
     out = ch._summarize_failed_variants(rows)
     assert len(out) == 1
@@ -90,6 +94,7 @@ def test_summarize_failed_variants_cap():
 
 
 # ---- _parse_baseline_workload_extra ----
+
 
 def test_parse_baseline_workload_extra_missing(tmp_path):
     assert ch._parse_baseline_workload_extra(str(tmp_path / "nope.yaml")) == {}
@@ -137,11 +142,14 @@ def test_parse_baseline_workload_extra_non_dict_benchmark(tmp_path):
 
 # ---- _baseline_params_fingerprint ----
 
+
 def test_baseline_params_fingerprint():
-    out = ch._baseline_params_fingerprint({
-        "benchmark_script": "b.sh",
-        "extra_envs": {"B": "2", "A": "1"},
-    })
+    out = ch._baseline_params_fingerprint(
+        {
+            "benchmark_script": "b.sh",
+            "extra_envs": {"B": "2", "A": "1"},
+        }
+    )
     assert out["benchmark_script"] == "b.sh"
     assert out["model_path"] is None
     # extra_envs sorted list of [k, v] pairs.
@@ -154,6 +162,7 @@ def test_baseline_params_fingerprint_bad_envs():
 
 
 # ---- _resolve_roofline_watermark_ratio ----
+
 
 def test_watermark_ratio_default(monkeypatch):
     monkeypatch.delenv(ch._ROOFLINE_WATERMARK_RATIO_ENV, raising=False)
@@ -177,6 +186,7 @@ def test_watermark_ratio_invalid(monkeypatch):
 
 # ---- _dedupe_extra_server_args ----
 
+
 def test_dedupe_empty():
     assert ch._dedupe_extra_server_args("") == ""
 
@@ -198,9 +208,7 @@ def test_dedupe_positional_token():
 
 
 def test_dedupe_normalizes_equals_form():
-    out = ch._dedupe_extra_server_args(
-        "--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA"
-    )
+    out = ch._dedupe_extra_server_args("--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA")
     assert out == "--attention-backend ROCM_AITER_FA"
 
 

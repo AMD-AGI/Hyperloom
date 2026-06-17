@@ -115,7 +115,10 @@ def _resolve_arch_benchmark_timeout_s() -> int:
 
 
 def _build_high_idle_warning(
-    *, idle_pct: float, threshold_pct: float, report_path: Path,
+    *,
+    idle_pct: float,
+    threshold_pct: float,
+    report_path: Path,
 ) -> dict[str, Any]:
     """Build the ``trace_health_warnings[]`` entry for a high-idle trace.
 
@@ -150,8 +153,13 @@ def _build_high_idle_warning(
 
 
 def _build_trace_split_warning(
-    *, trace_input: Path, split_dir: Path, split_rc: int,
-    mixed_count: int, decode_count: int, prefilldecode_count: int,
+    *,
+    trace_input: Path,
+    split_dir: Path,
+    split_rc: int,
+    mixed_count: int,
+    decode_count: int,
+    prefilldecode_count: int,
 ) -> dict[str, Any]:
     """Build the ``trace_split_no_steady_state`` trace-health warning.
 
@@ -328,7 +336,8 @@ def _resolve_min_busy_ratio() -> float:
         float: The busy-ratio threshold in the inclusive range ``[0.0, 1.0]``.
     """
     raw = os.environ.get(
-        "INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO", "",
+        "INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO",
+        "",
     ).strip()
     if not raw:
         return _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO
@@ -422,6 +431,7 @@ def _check_selected_chunk_has_gpu_events_quality(
         """
         if row is None:
             return 0, 0.0, 0.0
+
         def _f(k: str) -> float:
             """Read a numeric field from the CSV row.
 
@@ -435,6 +445,7 @@ def _check_selected_chunk_has_gpu_events_quality(
                 return float(row.get(k) or "0") or 0.0
             except (TypeError, ValueError):
                 return 0.0
+
         return int(_f("num_gpu_events")), _f("gpu_busy_duration"), _f("gpu_duration")
 
     selected_row = _row_for(selected_chunk)
@@ -485,8 +496,8 @@ def _check_selected_chunk_has_gpu_events_quality(
             "Re-issue roofline with env "
             "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one of "
             f"{non_empty_modes}. The TraceLens splitter chunk for the "
-            f"requested mode '{mode}' is {sel_ratio*100:.2f}% busy "
-            f"(threshold {threshold*100:.0f}%) -- non-empty but "
+            f"requested mode '{mode}' is {sel_ratio * 100:.2f}% busy "
+            f"(threshold {threshold * 100:.0f}%) -- non-empty but "
             "substantively garbage. Most common cause for prefill-"
             "heavy workloads: profile window misalignment "
             "(_workload_envs.delay_iters formula only considers OSL, "
@@ -494,9 +505,9 @@ def _check_selected_chunk_has_gpu_events_quality(
         ),
         "message": (
             f"TraceLens splitter selected chunk ({mode}) busy_ratio="
-            f"{sel_ratio*100:.3f}% (events={sel_events}, "
+            f"{sel_ratio * 100:.3f}% (events={sel_events}, "
             f"busy={sel_busy:.1f}us / dur={sel_dur:.1f}us) -- below "
-            f"the {threshold*100:.0f}% threshold and alternate "
+            f"the {threshold * 100:.0f}% threshold and alternate "
             f"modes have higher busy_ratio. Refusing to feed it into "
             "TraceLens analysis (would produce a misleading analysis.md "
             "with reusable_native_kernel_ids=[] and stall the "
@@ -506,8 +517,19 @@ def _check_selected_chunk_has_gpu_events_quality(
 
 
 KERNEL_HINTS = (
-    "kernel", "triton", "hip", "cuda", "rocblas", "hipblas", "aiter",
-    "fmha", "gemm", "attention", "moe", "rmsnorm", "layernorm",
+    "kernel",
+    "triton",
+    "hip",
+    "cuda",
+    "rocblas",
+    "hipblas",
+    "aiter",
+    "fmha",
+    "gemm",
+    "attention",
+    "moe",
+    "rmsnorm",
+    "layernorm",
 )
 RUNTIME_API_NAMES = {
     "hipeventsynchronize",
@@ -636,7 +658,8 @@ def update_status(
             if end_dt.tzinfo is None:
                 end_dt = end_dt.replace(tzinfo=timezone.utc)
             payload["duration_seconds"] = max(
-                0.0, (end_dt - start_dt).total_seconds(),
+                0.0,
+                (end_dt - start_dt).total_seconds(),
             )
         except (ValueError, TypeError):
             payload["duration_seconds"] = None
@@ -865,7 +888,6 @@ def source_type_for(name: str, source_file: str) -> str:
             ``triton``, ``python``, ``vendor_binary``, or ``unknown``.
     """
     lower_name = name.lower()
-    lower_file = source_file.lower()
     # PR #668: synthetic ``pseudo_op::*flydsl_*`` carry no source_file; match the name prefix directly.
     if any(marker in lower_name for marker in _FLYDSL_PSEUDO_OP_NAME_MARKERS):
         return "flydsl"
@@ -898,6 +920,8 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
+
+
 @functools.lru_cache(maxsize=1)
 def _framework_patch_roots() -> tuple[str, ...]:
     """Resolve framework install roots for patch-target matching.
@@ -978,6 +1002,8 @@ def _reusable_roots() -> tuple[str, ...]:
         if fly not in roots:
             roots = roots + (fly,)
     return roots
+
+
 # Kernel-name substrings marking an op non-patchable regardless of source: vendor BLAS, collectives, copies.
 _NON_PATCHABLE_NAME_MARKERS: tuple[str, ...] = (
     "rocblas",
@@ -1020,9 +1046,7 @@ _VENDOR_BACKEND_LIBRARIES: frozenset[str] = frozenset(
 # the file itself contains no rewritable device kernel, so a symbol that
 # resolves here is a dispatch stub, not an editable kernel. Matched as a
 # POSIX path suffix against the resolved ``source_file``.
-_TORCH_DISPATCH_SHIM_SOURCES: tuple[str, ...] = (
-    "vllm/model_executor/parameter.py",
-)
+_TORCH_DISPATCH_SHIM_SOURCES: tuple[str, ...] = ("vllm/model_executor/parameter.py",)
 
 
 def is_torch_dispatch_shim_source(source_file: str) -> bool:
@@ -1090,19 +1114,14 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
     if candidate.get("vendor_dispatch_wrapper"):
         return False, f"vendor dispatch wrapper at {source_file}"
     if is_torch_dispatch_shim_source(source_file):
-        return False, (
-            f"torch dispatch shim (no rewritable kernel body): {source_file}"
-        )
+        return False, (f"torch dispatch shim (no rewritable kernel body): {source_file}")
     for marker in _NON_PATCHABLE_NAME_MARKERS:
         if marker in lower_name:
-            return False, (
-                f"non-patchable kernel name marker '{marker}' in {name!r}"
-            )
+            return False, (f"non-patchable kernel name marker '{marker}' in {name!r}")
     library = str(candidate.get("library") or "").strip().lower()
     if library in _VENDOR_BACKEND_LIBRARIES:
         return False, (
-            f"vendor backend library {candidate.get('library')!r} "
-            "(precompiled binary, no rewritable source)"
+            f"vendor backend library {candidate.get('library')!r} (precompiled binary, no rewritable source)"
         )
     if name.startswith("aten::"):
         if not library or library in {"tensile", "pytorch native"}:
@@ -1112,19 +1131,13 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
                 "(typically Tensile / vendor backend)"
             )
     if is_runtime_generated_kernel(name, source_file):
-        return False, (
-            f"runtime-generated (torch.compile / Inductor cache): {source_file}"
-        )
+        return False, (f"runtime-generated (torch.compile / Inductor cache): {source_file}")
     lower_file = source_file.lower()
     if not any(root in lower_file for root in _reusable_roots()):
-        return False, (
-            f"source not under a reusable framework root: {source_file}"
-        )
+        return False, (f"source not under a reusable framework root: {source_file}")
     source_type = candidate.get("source_type")
     if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
-        return False, (
-            f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}"
-        )
+        return False, (f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}")
     return True, ""
 
 
@@ -1155,7 +1168,10 @@ _VENDOR_DISPATCH_SIGS = (
     "AiterAsmKernel",  # ASM dispatch wrapper
 )
 _VENDOR_KEYWORD_NAMES = (
-    "hipblaslt", "rocblaslt", "miopen", "ck_kernels",
+    "hipblaslt",
+    "rocblaslt",
+    "miopen",
+    "ck_kernels",
 )
 
 
@@ -1227,11 +1243,29 @@ def _strip_template_args(symbol: str) -> str:
 
 
 _NAMESPACE_BLOCKLIST = {
-    "aiter", "sglang", "vllm", "torch", "ck_tile", "ck", "pybind",
-    "RankData", "RankSignals", "Signal", "module", "namespace",
+    "aiter",
+    "sglang",
+    "vllm",
+    "torch",
+    "ck_tile",
+    "ck",
+    "pybind",
+    "RankData",
+    "RankSignals",
+    "Signal",
+    "module",
+    "namespace",
 }
 _TYPE_BLOCKLIST = {
-    "void", "int", "float", "char", "long", "short", "bool", "unsigned", "string",
+    "void",
+    "int",
+    "float",
+    "char",
+    "long",
+    "short",
+    "bool",
+    "unsigned",
+    "string",
 }
 
 
@@ -1267,7 +1301,8 @@ def _normalize_profiler_op_name(name: str) -> str:
     # is no ``::`` namespace to slice on later).
     s = re.sub(
         r"^(?:void|bool|int|unsigned|long|short|char|float|double|size_t)\s+",
-        "", s,
+        "",
+        s,
     ).strip()
     # Trailing display annotation such as ``(Synthetic Op)``.
     s = re.sub(r"\s*\([^()]*\bOp\)\s*$", "", s).strip()
@@ -1304,7 +1339,7 @@ def _candidate_keywords(name: str) -> list[str]:
                 continue
             length = int(m.group(1))
             start = pos + m.end()
-            ident = cleaned[start:start + length]
+            ident = cleaned[start : start + length]
             if ident and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", ident):
                 tokens.append(ident)
                 pos = start + length
@@ -1363,11 +1398,17 @@ def _grep_for_keyword(keyword: str, root: Path) -> list[Path]:
     if cache_key in _GREP_CACHE:
         return _GREP_CACHE[cache_key]
     cmd = [
-        "grep", "-rln",
-        "--include=*.cuh", "--include=*.cu", "--include=*.hip",
-        "--include=*.cpp", "--include=*.h", "--include=*.hpp",
+        "grep",
+        "-rln",
+        "--include=*.cuh",
+        "--include=*.cu",
+        "--include=*.hip",
+        "--include=*.cpp",
+        "--include=*.h",
+        "--include=*.hpp",
         "--include=*.py",
-        keyword, str(root),
+        keyword,
+        str(root),
     ]
     try:
         proc = subprocess.run(cmd, text=True, capture_output=True, timeout=15)
@@ -1497,8 +1538,8 @@ def _file_defines_symbol(path: Path, keyword: str) -> bool:
     except OSError:
         return False
     patterns = (
-        r"\bdef\s+" + kw + r"\b",            # Python (incl. @triton.jit) def
-        r"\b" + kw + r"\s*=",                # kernel bound to a module-level name
+        r"\bdef\s+" + kw + r"\b",  # Python (incl. @triton.jit) def
+        r"\b" + kw + r"\s*=",  # kernel bound to a module-level name
         r"__global__[^\n;{]*\b" + kw + r"\b",  # CUDA/HIP global kernel
     )
     return any(re.search(p, text) for p in patterns)
@@ -1660,9 +1701,7 @@ _KNOWN_HARNESS_HINTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     # --- Batch-invariant addmm (Triton) ---
     (
         ("batch_invariant", "addmm"),
-        (
-            "/sgl-workspace/sglang/test/registered/unit/batch_invariant_ops/test_batch_invariant_ops.py",
-        ),
+        ("/sgl-workspace/sglang/test/registered/unit/batch_invariant_ops/test_batch_invariant_ops.py",),
     ),
 )
 
@@ -1726,12 +1765,20 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
             try:
                 proc = subprocess.run(
                     [
-                        "grep", "-rln",
-                        "--include=*.py", "--include=*.cpp", "--include=*.cu",
-                        "--include=*.cuh", "--include=*.hip", "--include=*.sh",
-                        keyword, str(sub_root),
+                        "grep",
+                        "-rln",
+                        "--include=*.py",
+                        "--include=*.cpp",
+                        "--include=*.cu",
+                        "--include=*.cuh",
+                        "--include=*.hip",
+                        "--include=*.sh",
+                        keyword,
+                        str(sub_root),
                     ],
-                    text=True, capture_output=True, timeout=15,
+                    text=True,
+                    capture_output=True,
+                    timeout=15,
                 )
             except Exception:
                 continue
@@ -1757,6 +1804,7 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
             continue
         seen.add(s)
         unique.append(s)
+
     # Demote multi-GPU / distributed tests to the end: backends running on a
     # single Ray worker can't satisfy them, and they tend to make agents bail.
     def _is_multigpu(path_str: str) -> bool:
@@ -1770,11 +1818,14 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
         """
         low = path_str.lower()
         return any(tag in low for tag in ("multigpu", "multi_gpu", "multinode", "/dist/", "_dist_"))
+
     unique.sort(key=_is_multigpu)
     return unique[:10]
 
 
 _PYBIND_PARENT_DIRS = ("csrc/pybind", "csrc/python", "python_bindings")
+
+
 # A pybind11 registration shim (<2KB, just PYBIND11_MODULE) has no device code; detect so callers promote it to the real .cu/.cuh.
 def _is_pybind_shim(source_file: str) -> bool:
     """Detect a tiny pybind11 registration TU (no rewritable device code).
@@ -1832,9 +1883,7 @@ def _is_pybind_shim(source_file: str) -> bool:
 # patterns or when several ``.cu`` files implement variants of the same op.
 _AITER_COMPILE_OPS_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # ck_moe_stage1/2 — the .cu is the @compile_ops codegen entry (jit/build invalidated by PR-K before rebuild).
-    ("ck_moe_stage", (
-        "csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",
-    )),
+    ("ck_moe_stage", ("csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu",)),
     # topk_softmax decode kernels.
     ("topk_softmax_group", ("csrc/kernels/topk_softmax_kernels_group.cu",)),
     ("topk_softmax", ("csrc/kernels/topk_softmax_kernels.cu",)),
@@ -1843,10 +1892,13 @@ _AITER_COMPILE_OPS_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # moe_fused_gate — gating + top-k in fused form.
     ("moe_fused_gate", ("csrc/kernels/moe_fused_gate.cu",)),
     # rmsnorm — fused add + rmsnorm + quantization kernel (dense / MoE shared).
-    ("rmsnorm", (
-        "csrc/kernels/rmsnorm_quant_kernels.cu",
-        "csrc/py_itfs_ck/rmsnorm_ck_kernels.cu",
-    )),
+    (
+        "rmsnorm",
+        (
+            "csrc/kernels/rmsnorm_quant_kernels.cu",
+            "csrc/py_itfs_ck/rmsnorm_ck_kernels.cu",
+        ),
+    ),
 )
 
 # Fallback aiter editable-checkout root when find_repo_root can't resolve from a wheel-install wrapper (no csrc/).
@@ -1862,7 +1914,9 @@ _PACKAGE_INNER_ROOTS = (
 
 
 def upgrade_aiter_compile_ops_launcher(
-    source_file: str, kernel_name: str, kernel_repo: str,
+    source_file: str,
+    kernel_name: str,
+    kernel_repo: str,
 ) -> str:
     """Promote an aiter ``@compile_ops`` Python wrapper to the device ``.cu``.
 
@@ -1924,9 +1978,7 @@ def upgrade_aiter_compile_ops_launcher(
 _SGL_KERNEL_DEVICE_PROMOTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "silu_and_mul",
-        (
-            "/sgl-workspace/sglang/sgl-kernel/include/hip/hip_act_and_mul.cuh",
-        ),
+        ("/sgl-workspace/sglang/sgl-kernel/include/hip/hip_act_and_mul.cuh",),
     ),
 )
 
@@ -1957,8 +2009,7 @@ def upgrade_sgl_kernel_launcher(source_file: str, kernel_name: str) -> str:
     return source_file
 
 
-def upgrade_pybind_shim_source(source_file: str, kernel_name: str,
-                               kernel_repo: str) -> str:
+def upgrade_pybind_shim_source(source_file: str, kernel_name: str, kernel_repo: str) -> str:
     """Promote a tiny pybind11 shim to the real device source.
 
     When ``source_file`` is a pybind11 shim, finds the ``.cu``/``.cuh``
@@ -2022,7 +2073,7 @@ def _coerce_count(value: Any) -> int | None:
         return None
     text = str(value).strip()
     if text.startswith("np.float64(") and text.endswith(")"):
-        text = text[len("np.float64("):-1]
+        text = text[len("np.float64(") : -1]
     try:
         count = int(float(text))
     except (TypeError, ValueError):
@@ -2094,13 +2145,24 @@ def derive_kernel_category(candidate: dict[str, Any]) -> str:
     if candidate.get("source_type") == "flydsl":
         return "FlyDSL"
     name = str(candidate.get("name") or "").lower()
-    if any(t in name for t in ("gemm", "matmul", "rocblas", "hipblas",
-                                "cijk", "sgemm", "hgemm",
-                                # PyTorch op-name variants for the raw-trace path.
-                                "::mm", "::addmm", "::bmm")):
+    if any(
+        t in name
+        for t in (
+            "gemm",
+            "matmul",
+            "rocblas",
+            "hipblas",
+            "cijk",
+            "sgemm",
+            "hgemm",
+            # PyTorch op-name variants for the raw-trace path.
+            "::mm",
+            "::addmm",
+            "::bmm",
+        )
+    ):
         return "GEMM"
-    if any(t in name for t in ("attention", "attn", "fmha",
-                                "paged_attention", "flash")):
+    if any(t in name for t in ("attention", "attn", "fmha", "paged_attention", "flash")):
         return "SDPA"
     if "rmsnorm" in name or "layernorm" in name or "norm_kernel" in name:
         return "LayerNorm"
@@ -2133,12 +2195,25 @@ def is_multigpu_kernel(name: str, source_file: str) -> bool:
             distributed marker.
     """
     blob = f"{name} {source_file}".lower()
-    return any(tag in blob for tag in (
-        "all_reduce", "allreduce", "all_gather", "allgather",
-        "reduce_scatter", "broadcast", "p2p", "send_recv",
-        "cross_device", "rank_signal", "ranksignals",
-        "/dist/", "dist/", "communicator",
-    ))
+    return any(
+        tag in blob
+        for tag in (
+            "all_reduce",
+            "allreduce",
+            "all_gather",
+            "allgather",
+            "reduce_scatter",
+            "broadcast",
+            "p2p",
+            "send_recv",
+            "cross_device",
+            "rank_signal",
+            "ranksignals",
+            "/dist/",
+            "dist/",
+            "communicator",
+        )
+    )
 
 
 def analyze_trace_files(trace_files: list[Path], top_k: int) -> list[dict[str, Any]]:
@@ -2392,10 +2467,22 @@ _DEFAULT_OTHER_BUCKET_MIN_GPU_PCT = 10.0
 # Raw/normalized category labels that mean "TraceLens did not roofline this op"
 # (no P-item block). Compared case-insensitively against both the raw category
 # and normalize_upstream_category() output.
-_OTHER_LIKE_CATEGORIES = frozenset({
-    "", "other", "others", "misc", "miscellaneous", "uncategorized",
-    "uncategorised", "unknown", "n/a", "na", "none", "null",
-})
+_OTHER_LIKE_CATEGORIES = frozenset(
+    {
+        "",
+        "other",
+        "others",
+        "misc",
+        "miscellaneous",
+        "uncategorized",
+        "uncategorised",
+        "unknown",
+        "n/a",
+        "na",
+        "none",
+        "null",
+    }
+)
 
 # Per-op ranking sidecars in preference order, relative to the skill output dir.
 _OPS_RANKING_CSV_RELPATHS = (
@@ -2413,28 +2500,59 @@ _RANK_NAME_KEYS = ("name", "operation", "op", "kernel", "kernel_name", "op_name"
 _RANK_CATEGORY_KEYS = (
     # ``categories`` is the real ops_summary.csv column (stored as a list-repr
     # string like ``['MoE_fused']``; see _clean_category_label).
-    "op category", "op_category", "category", "categories", "tracelens_category",
+    "op category",
+    "op_category",
+    "category",
+    "categories",
+    "tracelens_category",
 )
 # GPU-time column/field names → multiplier to microseconds (most specific first).
 # ``total_direct_kernel_time_ms`` is the real ops_summary.csv per-op GPU-time
 # column (its ``_sum`` sibling holds the same value in microseconds, handled by
 # _RANK_TIME_US_KEYS below).
 _RANK_TIME_MS_KEYS = (
-    "gpu time total (ms)", "total gpu time (ms)", "gpu time (ms)",
-    "self gpu time (ms)", "total_direct_kernel_time_ms",
-    "total_direct_kernel_time_ms_sum", "gpu_time_ms", "gpu_time_total_ms",
-    "duration (ms)", "dur (ms)", "time (ms)", "time_ms", "duration_ms",
+    "gpu time total (ms)",
+    "total gpu time (ms)",
+    "gpu time (ms)",
+    "self gpu time (ms)",
+    "total_direct_kernel_time_ms",
+    "total_direct_kernel_time_ms_sum",
+    "gpu_time_ms",
+    "gpu_time_total_ms",
+    "duration (ms)",
+    "dur (ms)",
+    "time (ms)",
+    "time_ms",
+    "duration_ms",
 )
 _RANK_TIME_US_KEYS = (
-    "gpu time (us)", "self gpu time (us)", "total_direct_kernel_time_sum",
-    "total_direct_kernel_time_us", "gpu_time_us", "gpu_time_total_us",
-    "duration_us", "dur (us)", "time (us)", "time_us", "dur",
+    "gpu time (us)",
+    "self gpu time (us)",
+    "total_direct_kernel_time_sum",
+    "total_direct_kernel_time_us",
+    "gpu_time_us",
+    "gpu_time_total_us",
+    "duration_us",
+    "dur (us)",
+    "time (us)",
+    "time_us",
+    "dur",
 )
 _RANK_PCT_KEYS = (
     # ``percentage (%)`` is the real ops_summary.csv % column.
-    "% gpu time", "gpu time %", "gpu %", "gpu_pct", "gpu_time_pct",
-    "% of compute time", "% of compute", "%e2e", "% e2e",
-    "percentage (%)", "percentage", "percent", "pct",
+    "% gpu time",
+    "gpu time %",
+    "gpu %",
+    "gpu_pct",
+    "gpu_time_pct",
+    "% of compute time",
+    "% of compute",
+    "%e2e",
+    "% e2e",
+    "percentage (%)",
+    "percentage",
+    "percent",
+    "pct",
 )
 
 
@@ -2618,8 +2736,14 @@ def _iter_json_ranking_records(data: Any) -> list[dict]:
         return [r for r in data if isinstance(r, dict)]
     if isinstance(data, dict):
         for key in (
-            "findings", "operations", "ops", "priorities", "candidates",
-            "kernels", "items", "rows",
+            "findings",
+            "operations",
+            "ops",
+            "priorities",
+            "candidates",
+            "kernels",
+            "items",
+            "rows",
         ):
             v = data.get(key)
             if isinstance(v, list):
@@ -2711,9 +2835,7 @@ def _is_other_like_category(category: str) -> bool:
     raw_l = str(category or "").strip().lower()
     if raw_l in _OTHER_LIKE_CATEGORIES:
         return True
-    return str(
-        normalize_upstream_category(category or "")
-    ).strip().lower() in _OTHER_LIKE_CATEGORIES
+    return str(normalize_upstream_category(category or "")).strip().lower() in _OTHER_LIKE_CATEGORIES
 
 
 def recover_other_bucket_candidates(
@@ -2760,14 +2882,8 @@ def recover_other_bucket_candidates(
     if min_gpu_pct is None:
         min_gpu_pct = _resolve_other_bucket_min_gpu_pct()
 
-    have = {
-        str(c.get("name") or "").strip().lower()
-        for c in existing_candidates
-        if isinstance(c, dict)
-    }
-    total_us = sum(
-        r["gpu_us"] for r in ranking if r.get("gpu_us") is not None
-    ) or 0.0
+    have = {str(c.get("name") or "").strip().lower() for c in existing_candidates if isinstance(c, dict)}
+    total_us = sum(r["gpu_us"] for r in ranking if r.get("gpu_us") is not None) or 0.0
 
     def _pct(rec: dict[str, Any]) -> float | None:
         """Return a record's GPU-time percentage.
@@ -2805,17 +2921,19 @@ def recover_other_bucket_candidates(
     out: list[dict[str, Any]] = []
     for pct, rec in qualifying[: max(1, top_k)]:
         gpu_us = rec.get("gpu_us")
-        out.append({
-            "name": rec["name"],
-            "duration_us": float(gpu_us) if gpu_us is not None else 0.0,
-            "call_count": 0,
-            "source_file": "",
-            "source_type": "unknown",
-            "shapes": [],
-            "tracelens_category": rec.get("category") or "other",
-            "gpu_pct": round(pct, 3),
-            "candidate_source": "other_bucket_fallback",
-        })
+        out.append(
+            {
+                "name": rec["name"],
+                "duration_us": float(gpu_us) if gpu_us is not None else 0.0,
+                "call_count": 0,
+                "source_file": "",
+                "source_type": "unknown",
+                "shapes": [],
+                "tracelens_category": rec.get("category") or "other",
+                "gpu_pct": round(pct, 3),
+                "candidate_source": "other_bucket_fallback",
+            }
+        )
         if log is not None:
             log(
                 f"candidate recovery fallback (#514/#515): recovered "
@@ -2829,7 +2947,9 @@ def recover_other_bucket_candidates(
 
 
 def _finalize_candidates(
-    top: list[dict[str, Any]], *, total_dur: float | None = None,
+    top: list[dict[str, Any]],
+    *,
+    total_dur: float | None = None,
     perf_report_csv_dir: Path | str | None = None,
 ) -> list[dict[str, Any]]:
     """Apply shared post-processing to parsed candidate rows.
@@ -2848,10 +2968,7 @@ def _finalize_candidates(
     Returns:
         The finalized candidate list (the same ``top`` object).
     """
-    op_cat_map = (
-        load_op_category_map(perf_report_csv_dir)
-        if perf_report_csv_dir is not None else {}
-    )
+    op_cat_map = load_op_category_map(perf_report_csv_dir) if perf_report_csv_dir is not None else {}
     sum_dur = total_dur if total_dur is not None else sum(it.get("duration_us", 0.0) for it in top)
     sum_dur = sum_dur or 1.0
     # #727 companion: the fused-MoE expert kernel's top-level trace event carries
@@ -2895,7 +3012,8 @@ def _finalize_candidates(
             item["source_promoted_from_launcher"] = True
         wrapper_before_sgl_promotion = item.get("source_file", "")
         item["source_file"] = upgrade_sgl_kernel_launcher(
-            wrapper_before_sgl_promotion, item["name"],
+            wrapper_before_sgl_promotion,
+            item["name"],
         )
         if item["source_file"] != wrapper_before_sgl_promotion:
             item["launcher_source_file"] = wrapper_before_sgl_promotion
@@ -2911,18 +3029,15 @@ def _finalize_candidates(
                 _fb = _resolve_flydsl_source_fallback()
                 if _fb:
                     item["source_file"] = _fb
-                    item["kernel_repo"] = (
-                        find_repo_root(_fb) or item.get("kernel_repo", "")
-                    )
+                    item["kernel_repo"] = find_repo_root(_fb) or item.get("kernel_repo", "")
                     item["flydsl_source_from_fallback"] = True
         # Downgrade thin .so/.co dispatch wrappers to vendor_binary so recommend_backends() drops them.
-        if (item["source_type"] != "vendor_binary"
-                and is_vendor_dispatch_wrapper(item["name"], item.get("source_file", ""))):
+        if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(
+            item["name"], item.get("source_file", "")
+        ):
             item["source_type"] = "vendor_binary"
             item["vendor_dispatch_wrapper"] = True
-        item["runtime_generated_kernel"] = is_runtime_generated_kernel(
-            item["name"], item.get("source_file", "")
-        )
+        item["runtime_generated_kernel"] = is_runtime_generated_kernel(item["name"], item.get("source_file", ""))
         # One classify_patchability call yields both the routing bool and the audit skip_reason.
         reusable, skip_reason = classify_patchability(item)
         item["reusable_native_kernel"] = reusable
@@ -2984,13 +3099,11 @@ def build_notes(candidate: dict[str, Any]) -> str:
     """
     if not candidate.get("source_file"):
         return "source file not resolved; backend dispatch will be skipped"
-    if candidate.get("runtime_generated_kernel", is_runtime_generated_kernel(
-        str(candidate.get("name") or ""), str(candidate.get("source_file") or "")
-    )):
-        return (
-            "runtime-generated torch.compile/Inductor kernel; not reusable, "
-            "kernel-opt disabled"
-        )
+    if candidate.get(
+        "runtime_generated_kernel",
+        is_runtime_generated_kernel(str(candidate.get("name") or ""), str(candidate.get("source_file") or "")),
+    ):
+        return "runtime-generated torch.compile/Inductor kernel; not reusable, kernel-opt disabled"
     if not candidate.get("reusable_native_kernel", is_reusable_native_kernel(candidate)):
         return "not a reusable native source; kernel-opt disabled"
     return f"resolved source: {candidate['source_file']}"
@@ -3075,9 +3188,11 @@ def _category_analysis_command(
         )
         return [sys.executable, "-c", snippet]
     cmd = [
-        sys.executable, "-m",
+        sys.executable,
+        "-m",
         f"TraceLens.Agent.Analysis.category_analyses.{script_base}_analysis",
-        "--output-dir", str(output_dir),
+        "--output-dir",
+        str(output_dir),
     ]
     if category_arg is not None:
         cmd += ["--category", category_arg]
@@ -3143,11 +3258,15 @@ def _run_deterministic_tracelens_steps(
 
     # Step 1: perf report
     report_cmd = [
-        sys.executable, "-m",
+        sys.executable,
+        "-m",
         "TraceLens.Reporting.generate_perf_report_pytorch_inference",
-        "--profile_json_path", str(trace_path),
-        "--output_csvs_dir", str(csv_dir),
-        "--gpu_arch_platform", platform,
+        "--profile_json_path",
+        str(trace_path),
+        "--output_csvs_dir",
+        str(csv_dir),
+        "--gpu_arch_platform",
+        platform,
         "--include_call_stack",
         "--enable_pseudo_ops",
     ]
@@ -3159,11 +3278,15 @@ def _run_deterministic_tracelens_steps(
 
     # Steps 2-5: orchestrator_prepare
     prepare_cmd = [
-        sys.executable, "-m",
+        sys.executable,
+        "-m",
         "TraceLens.Agent.Analysis.utils.orchestrator_prepare",
-        "--trace-path", str(trace_path),
-        "--output-dir", str(output_dir),
-        "--platform", platform,
+        "--trace-path",
+        str(trace_path),
+        "--output-dir",
+        str(output_dir),
+        "--platform",
+        platform,
     ]
     rc = run_command(prepare_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s)
     if rc != 0:
@@ -3190,12 +3313,14 @@ def _run_deterministic_tracelens_steps(
             if analysis_cmd is None:
                 append_log(
                     log_path,
-                    f"deterministic: no category analysis script for "
-                    f"category={cat_name!r} tier={tier!r}; skipping",
+                    f"deterministic: no category analysis script for category={cat_name!r} tier={tier!r}; skipping",
                 )
                 continue
             rc_cat = run_command(
-                analysis_cmd, cwd=tl_root, log_path=log_path, timeout_s=timeout_s,
+                analysis_cmd,
+                cwd=tl_root,
+                log_path=log_path,
+                timeout_s=timeout_s,
             )
             if rc_cat != 0:
                 category_failures.append(rc_cat)
@@ -3207,7 +3332,8 @@ def _run_deterministic_tracelens_steps(
 
     # Step 7.5: generate_priority_data
     priority_cmd = [
-        sys.executable, "-c",
+        sys.executable,
+        "-c",
         f"from TraceLens.Agent.Analysis.utils.report_utils import "
         f"generate_priority_data; "
         f"generate_priority_data({str(output_dir)!r})",
@@ -3274,7 +3400,9 @@ _MATCH_OP_MAX_DELTA_MS = 5.0
 
 
 def _match_op_by_time(
-    ops: list[dict[str, Any]], name: str, time_ms: float,
+    ops: list[dict[str, Any]],
+    name: str,
+    time_ms: float,
 ) -> dict[str, Any]:
     """Find the operation in *_metrics.json matching by name and time_ms.
 
@@ -3388,10 +3516,7 @@ def deterministic_extract_hot_kernels(
                 f"deterministic: failed to parse {priority_path}: {exc}",
             )
         if fail_on_corrupt_priority:
-            raise RuntimeError(
-                f"Deterministic TraceLens pipeline failed to parse "
-                f"{priority_path}: {exc}"
-            ) from exc
+            raise RuntimeError(f"Deterministic TraceLens pipeline failed to parse {priority_path}: {exc}") from exc
         return []
     findings = priority_data.get("findings", [])
 
@@ -3422,7 +3547,8 @@ def deterministic_extract_hot_kernels(
         cat_ops = ops_by_category.get(category, [])
 
         sorted_members = sorted(
-            members, key=lambda m: m.get("efficiency_pct", 100),
+            members,
+            key=lambda m: m.get("efficiency_pct", 100),
         )
 
         for member in sorted_members:
@@ -3461,10 +3587,12 @@ def deterministic_extract_hot_kernels(
             # instead of the synthetic conversion in enrich_candidates.
             input_shapes: list[dict[str, Any]] = []
             if shapes_raw:
-                input_shapes.append({
-                    "call_num": op_count,
-                    "shape": shapes_raw,
-                })
+                input_shapes.append(
+                    {
+                        "call_num": op_count,
+                        "shape": shapes_raw,
+                    }
+                )
 
             candidate = {
                 "name": op_name,
@@ -3516,8 +3644,7 @@ def deterministic_extract_hot_kernels(
             if log_path is not None:
                 append_log(
                     log_path,
-                    "deterministic: other-bucket op skipped (no op name) "
-                    f"time_ms={time_ms} launcher={launcher_path!r}",
+                    f"deterministic: other-bucket op skipped (no op name) time_ms={time_ms} launcher={launcher_path!r}",
                 )
             continue
         source_file = locate_source_via_grep(op_name)
@@ -3541,10 +3668,12 @@ def deterministic_extract_hot_kernels(
         shapes = [shapes_raw] if shapes_raw else []
         input_shapes: list[dict[str, Any]] = []
         if shapes_raw:
-            input_shapes.append({
-                "call_num": op_count,
-                "shape": shapes_raw,
-            })
+            input_shapes.append(
+                {
+                    "call_num": op_count,
+                    "shape": shapes_raw,
+                }
+            )
 
         candidate = {
             "name": op_name,
@@ -3604,8 +3733,7 @@ def generate_minimal_analysis_md(
 
     lines.append("# TraceLens Performance Analysis Report")
     lines.append("")
-    lines.append("> Generated via deterministic analysis route "
-                 "(HYPERLOOM_TRACE_ANALYSIS_ROUTE=deterministic)")
+    lines.append("> Generated via deterministic analysis route (HYPERLOOM_TRACE_ANALYSIS_ROUTE=deterministic)")
     lines.append("")
 
     # Executive Summary
@@ -3631,6 +3759,7 @@ def generate_minimal_analysis_md(
     # that gates hot-kernel extraction. The agent route surfaces these as
     # LLM-written recommendations — here we expose only the underlying numbers.
     if gpu_rows:
+
         def _timeline_pct(row_type: str) -> float | None:
             """Return the GPU-timeline percentage for a given row type.
 
@@ -3667,13 +3796,9 @@ def generate_minimal_analysis_md(
                 )
                 lines.append(f"| GPU idle | {idle_share:.2f}% | {note} |")
             if comm_share is not None:
-                lines.append(
-                    f"| Exposed communication | {comm_share:.2f}% | - |"
-                )
+                lines.append(f"| Exposed communication | {comm_share:.2f}% | - |")
             if memcpy_share is not None:
-                lines.append(
-                    f"| Exposed memcpy (device copy) | {memcpy_share:.2f}% | - |"
-                )
+                lines.append(f"| Exposed memcpy (device copy) | {memcpy_share:.2f}% | - |")
             lines.append("")
 
     # Top Hot Kernels table
@@ -3683,14 +3808,8 @@ def generate_minimal_analysis_md(
         # GPU% is the kernel's share of total GPU time (gpu_pct), the real
         # impact signal — unlike Impact (impact_score) which is 0 for the
         # "other" bucket that has no TraceLens efficiency model.
-        lines.append(
-            "| Rank | Operation | Time (us) | GPU% | Efficiency | Impact | "
-            "Category | Bound | Source File |"
-        )
-        lines.append(
-            "|------|-----------|-----------|------|------------|--------|"
-            "----------|-------|-------------|"
-        )
+        lines.append("| Rank | Operation | Time (us) | GPU% | Efficiency | Impact | Category | Bound | Source File |")
+        lines.append("|------|-----------|-----------|------|------------|--------|----------|-------|-------------|")
         for i, c in enumerate(candidates, 1):
             lines.append(
                 f"| {i} | {c.get('name', '')} "
@@ -3709,24 +3828,17 @@ def generate_minimal_analysis_md(
     # Emit P-item sections in ascending rank order (P0, P1, ...) regardless of
     # the time-sorted candidate order above.
     seen_ranks: set[int] = set()
-    ordered_ranks = sorted(
-        {int(c.get("tracelens_pitem_rank", 0)) for c in candidates}
-    )
+    ordered_ranks = sorted({int(c.get("tracelens_pitem_rank", 0)) for c in candidates})
     for rank in ordered_ranks:
         if rank in seen_ranks:
             continue
         seen_ranks.add(rank)
-        rank_cands = [
-            x for x in candidates
-            if x.get("tracelens_pitem_rank") == rank
-        ]
+        rank_cands = [x for x in candidates if x.get("tracelens_pitem_rank") == rank]
         cat = rank_cands[0].get("tracelens_category", "") if rank_cands else ""
 
         lines.append(f"### P{rank}: {cat} kernels")
         lines.append("")
-        lines.append(
-            f"<!-- reasoning-candidate tier=compute rank={rank} -->"
-        )
+        lines.append(f"<!-- reasoning-candidate tier=compute rank={rank} -->")
         lines.append("")
         lines.append(
             "**Data:**\n\n"
@@ -3944,7 +4056,8 @@ def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
         "roofline_name": candidate.get("roofline_name"),
         "recommended_actions": list(candidate.get("recommended_actions") or []),
         "reusable_native_kernel": bool(candidate.get("reusable_native_kernel")),
-        "rocprof_roofline": candidate.get("rocprof_roofline"),    }
+        "rocprof_roofline": candidate.get("rocprof_roofline"),
+    }
 
 
 def build_kernel_roofline_payload(
@@ -3972,11 +4085,7 @@ def build_kernel_roofline_payload(
     Returns:
         The kernel-roofline sidecar payload dict.
     """
-    rows = [
-        _kernel_roofline_row(candidate)
-        for candidate in candidates
-        if isinstance(candidate, dict)
-    ]
+    rows = [_kernel_roofline_row(candidate) for candidate in candidates if isinstance(candidate, dict)]
     return {
         "schema_version": 1,
         "source": "tracelens_analysis",
@@ -4017,10 +4126,7 @@ def kernel_roofline_path_for_run(run_dir: Path) -> Path:
         kernel_agent_dir_legacy = runs_dir_legacy.parent
     except (IndexError, AttributeError):
         return run_dir / "reports" / "kernel_roofline.json"
-    if (
-        runs_dir_legacy.name == "runs"
-        and kernel_agent_dir_legacy.name == "kernel-agent"
-    ):
+    if runs_dir_legacy.name == "runs" and kernel_agent_dir_legacy.name == "kernel-agent":
         session_dir = kernel_agent_dir_legacy.parent
         return session_dir / "reports" / "kernel_roofline.json"
     return run_dir / "reports" / "kernel_roofline.json"
@@ -4081,10 +4187,7 @@ def load_model_kernel_params(model_name: str) -> dict[str, Any]:
         params: dict[str, Any] = {
             "MODEL_CONFIG_PATH": str(config_path),
         }
-        has_mla_dims = any(
-            cfg.get(key) is not None
-            for key in ("qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim")
-        )
+        has_mla_dims = any(cfg.get(key) is not None for key in ("qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"))
         if cfg.get("head_dim") is not None:
             params["HEAD_SIZE"] = cfg.get("head_dim")
         elif not has_mla_dims:
@@ -4115,7 +4218,10 @@ _FLYDSL_TARGET_ARCH_BY_PLATFORM = {
 }
 _FLYDSL_SMEM_MARKERS = ("SmemAllocator", "SmemPtr", "smem_alloc")
 _FLYDSL_BUFFER_LOAD_MARKERS = (
-    "make_buffer_tensor", "BufferCopy", "rocdl", "buffer_load",
+    "make_buffer_tensor",
+    "BufferCopy",
+    "rocdl",
+    "buffer_load",
 )
 
 
@@ -4145,7 +4251,8 @@ def _resolve_flydsl_source_fallback() -> str:
 
 
 def _flydsl_kernel_params(
-    source_file: str, target_platform: str,
+    source_file: str,
+    target_platform: str,
 ) -> dict[str, Any]:
     """Build FlyDSL-specific kernel params.
 
@@ -4186,7 +4293,8 @@ def _flydsl_kernel_params(
 
 
 def enrich_candidates_with_runtime_metadata(
-    candidates: list[dict[str, Any]], args: argparse.Namespace,
+    candidates: list[dict[str, Any]],
+    args: argparse.Namespace,
 ) -> None:
     """Attach stable runtime metadata fields before GEAK prompt generation.
 
@@ -4215,7 +4323,8 @@ def enrich_candidates_with_runtime_metadata(
             item.setdefault("backend", framework)
         if "input_shapes" not in item:
             item["input_shapes"] = _shape_call_entries(
-                item.get("shapes", []) or [], item.get("call_count"),
+                item.get("shapes", []) or [],
+                item.get("call_count"),
             )
             item["_input_shapes_synthetic"] = True
         item.setdefault("output_shapes", [])
@@ -4237,7 +4346,8 @@ def enrich_candidates_with_runtime_metadata(
                 if fb:
                     item["source_file"] = fb
             flydsl_params = _flydsl_kernel_params(
-                str(item.get("source_file") or ""), target_platform,
+                str(item.get("source_file") or ""),
+                target_platform,
             )
             params = item["kernel_params"]
             if isinstance(params, dict):
@@ -4310,22 +4420,20 @@ def build_audit_summary(
             continue
         reusable = bool(cand.get("reusable_native_kernel"))
         compact = {
-            "kernel_id":         cand.get("kernel_id"),
-            "name":              cand.get("name"),
-            "source_file":       cand.get("source_file") or "",
-            "source_type":       cand.get("source_type") or "",
-            "kernel_category":   cand.get("kernel_category") or "",
-            "gpu_pct":           cand.get("gpu_pct"),
-            "duration_us":       cand.get("duration_us"),
-            "call_count":        cand.get("call_count"),
-            "tracelens_pitem_rank":  cand.get("tracelens_pitem_rank"),
+            "kernel_id": cand.get("kernel_id"),
+            "name": cand.get("name"),
+            "source_file": cand.get("source_file") or "",
+            "source_type": cand.get("source_type") or "",
+            "kernel_category": cand.get("kernel_category") or "",
+            "gpu_pct": cand.get("gpu_pct"),
+            "duration_us": cand.get("duration_us"),
+            "call_count": cand.get("call_count"),
+            "tracelens_pitem_rank": cand.get("tracelens_pitem_rank"),
             "tracelens_pitem_title": cand.get("tracelens_pitem_title"),
-            "bound_type":        cand.get("bound_type") or "",
+            "bound_type": cand.get("bound_type") or "",
         }
         if reusable:
-            compact["recommended_backends"] = list(
-                cand.get("recommended_backends") or []
-            )
+            compact["recommended_backends"] = list(cand.get("recommended_backends") or [])
             tasks.append(compact)
         else:
             compact["skip_reason"] = cand.get("skip_reason") or "unknown"
@@ -4335,30 +4443,32 @@ def build_audit_summary(
     for group in task_groups or []:
         if not isinstance(group, dict):
             continue
-        group_entries.append({
-            "task_group_id":        group.get("task_group_id"),
-            "source_path":          group.get("source_path"),
-            "definition_line":      group.get("definition_line"),
-            "function_name":        group.get("function_name"),
-            "ast_resolved":         bool(group.get("ast_resolved")),
-            "primary_kernel_id":    group.get("primary_kernel_id"),
-            "kernel_ids":           list(group.get("kernel_ids") or []),
-            "row_count":            len(group.get("rows") or []),
-            "aggregate_duration_us": group.get("aggregate_duration_us"),
-            "aggregate_call_count": group.get("aggregate_call_count"),
-            "aggregate_gpu_pct":    group.get("aggregate_gpu_pct"),
-        })
+        group_entries.append(
+            {
+                "task_group_id": group.get("task_group_id"),
+                "source_path": group.get("source_path"),
+                "definition_line": group.get("definition_line"),
+                "function_name": group.get("function_name"),
+                "ast_resolved": bool(group.get("ast_resolved")),
+                "primary_kernel_id": group.get("primary_kernel_id"),
+                "kernel_ids": list(group.get("kernel_ids") or []),
+                "row_count": len(group.get("rows") or []),
+                "aggregate_duration_us": group.get("aggregate_duration_us"),
+                "aggregate_call_count": group.get("aggregate_call_count"),
+                "aggregate_gpu_pct": group.get("aggregate_gpu_pct"),
+            }
+        )
     return {
-        "generated_at":    utc_now(),
-        "trace_input":     trace_input,
-        "framework":       framework,
+        "generated_at": utc_now(),
+        "trace_input": trace_input,
+        "framework": framework,
         "target_platform": target_platform,
-        "task_count":      len(tasks),
-        "skipped_count":   len(skipped),
+        "task_count": len(tasks),
+        "skipped_count": len(skipped),
         "task_group_count": len(group_entries),
-        "tasks":           tasks,
-        "skipped":         skipped,
-        "task_groups":     group_entries,
+        "tasks": tasks,
+        "skipped": skipped,
+        "task_groups": group_entries,
         # T3: trace-quality findings (empty = healthy; non-empty explains an empty ``tasks``).
         "trace_health_warnings": list(trace_health_warnings or []),
     }
@@ -4426,14 +4536,8 @@ def write_reports(
     kernel_candidates_path = run_dir / "kernel_candidates.json"
     # Hyperloom#314: hot_kernels is the dispatch payload (routable only); skipped_kernels keeps
     # full dicts so direct lookups can still resolve non-routable kernels. Full list stays in tracelens_report.json.
-    routable_candidates = [
-        c for c in candidates
-        if isinstance(c, dict) and c.get("reusable_native_kernel") is True
-    ]
-    skipped_kernels = [
-        c for c in candidates
-        if isinstance(c, dict) and c.get("reusable_native_kernel") is not True
-    ]
+    routable_candidates = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel") is True]
+    skipped_kernels = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel") is not True]
     atomic_write_json(
         kernel_candidates_path,
         {
@@ -4456,12 +4560,9 @@ def write_reports(
     summary_path = tracelens_dir / "summary.json"
     atomic_write_json(summary_path, summary)
 
-    missing_trace_report = (
-        existing_report_path is None or not existing_report_path.exists()
-    )
+    missing_trace_report = existing_report_path is None or not existing_report_path.exists()
     trace_quality_blocked = any(
-        isinstance(w, dict) and w.get("code") == "trace_split_no_steady_state"
-        for w in (trace_health_warnings or [])
+        isinstance(w, dict) and w.get("code") == "trace_split_no_steady_state" for w in (trace_health_warnings or [])
     )
     if missing_trace_report:
         if not getattr(args, "dry_run", False):
@@ -4488,14 +4589,9 @@ def write_reports(
     kernel_roofline_payload = build_kernel_roofline_payload(
         trace_input=str(Path(args.trace_input).resolve()),
         trace_input_type=trace_input_type,
-        analysis_md_path=(
-            str(existing_report_path) if existing_report_path else ""
-        ),
+        analysis_md_path=(str(existing_report_path) if existing_report_path else ""),
         kernel_candidates_path=str(kernel_candidates_path),
-        roofline_json_path=(
-            str(Path(args.roofline_json).expanduser())
-            if getattr(args, "roofline_json", "") else ""
-        ),
+        roofline_json_path=(str(Path(args.roofline_json).expanduser()) if getattr(args, "roofline_json", "") else ""),
         candidates=candidates,
     )
     atomic_write_json(kernel_roofline_path, kernel_roofline_payload)
@@ -4509,13 +4605,12 @@ def write_reports(
             if tools_dir not in sys.path:
                 sys.path.insert(0, tools_dir)
             from rocprof_roofline import enrich_kernel_roofline_sidecar  # noqa: WPS433
+
             enrich_summary = enrich_kernel_roofline_sidecar(
                 sidecar_path=str(kernel_roofline_path),
                 candidates_path=str(kernel_candidates_path),
                 workdir=str(run_dir),
-                timeout_sec_per_kernel=int(
-                    os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800") or 1800
-                ),
+                timeout_sec_per_kernel=int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800") or 1800),
                 log_fn=None,
             )
             print(
@@ -4604,16 +4699,21 @@ def main() -> int:
             "for legacy launchers, then to /workspace/hyperloom."
         ),
     )
-    parser.add_argument("--tracelens-root", default=os.environ.get("TRACELENS_ROOT", ""),
-                        help="TraceLens public checkout (TRACELENS_ROOT). Required: "
-                             "kernel-agent/scripts/install.sh exports it from "
-                             "kernel-agent.env.sh; pass --tracelens-root only when "
-                             "running outside the installer-managed env.")
-    parser.add_argument("--tracelens-internal-root",
-                        default=os.environ.get("TRACELENS_INTERNAL_ROOT", DEFAULT_TRACELENS_INTERNAL_ROOT),
-                        help="Optional TraceLens-internal checkout (TRACELENS_INTERNAL_ROOT). "
-                             "Rehydration module; plumbed to run_tracelens_skill. "
-                             "Leave empty for the open-source-only report.")
+    parser.add_argument(
+        "--tracelens-root",
+        default=os.environ.get("TRACELENS_ROOT", ""),
+        help="TraceLens public checkout (TRACELENS_ROOT). Required: "
+        "kernel-agent/scripts/install.sh exports it from "
+        "kernel-agent.env.sh; pass --tracelens-root only when "
+        "running outside the installer-managed env.",
+    )
+    parser.add_argument(
+        "--tracelens-internal-root",
+        default=os.environ.get("TRACELENS_INTERNAL_ROOT", DEFAULT_TRACELENS_INTERNAL_ROOT),
+        help="Optional TraceLens-internal checkout (TRACELENS_INTERNAL_ROOT). "
+        "Rehydration module; plumbed to run_tracelens_skill. "
+        "Leave empty for the open-source-only report.",
+    )
     parser.add_argument("--roofline-json", default="")
     parser.add_argument(
         "--capture-folder",
@@ -4625,10 +4725,7 @@ def main() -> int:
     )
     parser.add_argument("--budget-minutes", type=float, default=60.0)
     parser.add_argument("--dry-run", action="store_true")
-    default_analysis_route = (
-        os.environ.get(ANALYSIS_ROUTE_ENV, "").strip().lower()
-        or ANALYSIS_ROUTE_AGENT
-    )
+    default_analysis_route = os.environ.get(ANALYSIS_ROUTE_ENV, "").strip().lower() or ANALYSIS_ROUTE_AGENT
     if default_analysis_route not in _VALID_ANALYSIS_ROUTES:
         default_analysis_route = ANALYSIS_ROUTE_AGENT
     parser.add_argument(
@@ -4649,7 +4746,8 @@ def main() -> int:
         ),
     )
     default_llm_orchestrator = os.environ.get(
-        "KERNEL_AGENT_USE_LLM_ORCHESTRATOR", "1",
+        "KERNEL_AGENT_USE_LLM_ORCHESTRATOR",
+        "1",
     ).strip().lower() not in {"0", "false", "no", "off"}
     parser.add_argument(
         "--use-llm-orchestrator",
@@ -4694,25 +4792,16 @@ def main() -> int:
     parser.add_argument(
         "--split-conc",
         default=os.environ.get("TRACELENS_SPLIT_CONC", "") or os.environ.get("CONC", ""),
-        help=(
-            "Expected peak concurrency for the splitter (#127). Maps to "
-            "--CONC. Defaults to $CONC when set."
-        ),
+        help=("Expected peak concurrency for the splitter (#127). Maps to --CONC. Defaults to $CONC when set."),
     )
     parser.add_argument(
         "--split-osl",
         default=os.environ.get("TRACELENS_SPLIT_OSL", "") or os.environ.get("OSL", ""),
-        help=(
-            "Maximum output sequence length hint for the splitter (#127). "
-            "Maps to --OSL. Defaults to $OSL when set."
-        ),
+        help=("Maximum output sequence length hint for the splitter (#127). Maps to --OSL. Defaults to $OSL when set."),
     )
     parser.add_argument(
         "--split-r",
-        default=(
-            os.environ.get("TRACELENS_SPLIT_R", "")
-            or os.environ.get("RANDOM_RANGE_RATIO", "")
-        ),
+        default=(os.environ.get("TRACELENS_SPLIT_R", "") or os.environ.get("RANDOM_RANGE_RATIO", "")),
         help=(
             "OSL window ratio R for the splitter (#194 §3). Maps to "
             "--R on TraceLens.TraceUtils.split_inference_trace_annotation. "
@@ -4725,10 +4814,7 @@ def main() -> int:
     parser.add_argument(
         "--steady-state-mode",
         choices=("mixed", "decode_only", "prefilldecode"),
-        default=(
-            os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "").strip()
-            or "mixed"
-        ),
+        default=(os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "").strip() or "mixed"),
         help=(
             "Which of TraceLens splitter's three steady-state chunks to "
             "consume for the perf report (see docs/Inference_analysis.md "
@@ -4781,9 +4867,15 @@ def main() -> int:
     trace_health_warnings: list[dict[str, Any]] = []
 
     try:
-        update_status(status_path, state="running", current_step="discover_trace_input",
-                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                      started_at=started_at)
+        update_status(
+            status_path,
+            state="running",
+            current_step="discover_trace_input",
+            log_path=log_path,
+            artifact_paths=artifacts,
+            run_id=run_id,
+            started_at=started_at,
+        )
         trace_input = Path(args.trace_input).expanduser().resolve()
         trace_input_type, trace_files = discover_trace_inputs(trace_input)
         append_log(log_path, f"trace_input_type={trace_input_type}")
@@ -4794,8 +4886,7 @@ def main() -> int:
             kernel_event_count = count_gpu_kernel_events(trace_files[0])
             append_log(
                 log_path,
-                f"trace_gpu_kernel_events={kernel_event_count} "
-                f"(probe={trace_files[0].name})",
+                f"trace_gpu_kernel_events={kernel_event_count} (probe={trace_files[0].name})",
             )
             if kernel_event_count == 0:
                 raise RuntimeError(
@@ -4808,9 +4899,15 @@ def main() -> int:
                 )
 
         if not args.dry_run:
-            update_status(status_path, state="running", current_step="install_tracelens",
-                          log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                          started_at=started_at)
+            update_status(
+                status_path,
+                state="running",
+                current_step="install_tracelens",
+                log_path=log_path,
+                artifact_paths=artifacts,
+                run_id=run_id,
+                started_at=started_at,
+            )
             tl_root_arg = (args.tracelens_root or "").strip()
             if not tl_root_arg:
                 raise SystemExit(
@@ -4821,34 +4918,39 @@ def main() -> int:
             tl_root = Path(tl_root_arg)
             # Internal extension is opt-in (non-empty --tracelens-internal-root / env).
             internal_root_arg = (args.tracelens_internal_root or "").strip()
-            tl_internal_root: Path | None = (
-                Path(internal_root_arg) if internal_root_arg else None
-            )
+            tl_internal_root: Path | None = Path(internal_root_arg) if internal_root_arg else None
             if not tl_root.exists():
                 raise FileNotFoundError(
-                    f"TraceLens root not found: {tl_root} "
-                    "(set TRACELENS_ROOT or pass --tracelens-root)"
+                    f"TraceLens root not found: {tl_root} (set TRACELENS_ROOT or pass --tracelens-root)"
                 )
             if tl_internal_root is not None and not tl_internal_root.exists():
-                append_log(log_path,
+                append_log(
+                    log_path,
                     f"TraceLens-internal root not found: {tl_internal_root}; "
                     "falling back to open-source-only "
-                    "(provide an existing internal checkout to enable)")
+                    "(provide an existing internal checkout to enable)",
+                )
                 tl_internal_root = None
             if tl_internal_root is None:
-                append_log(log_path,
-                    "TraceLens-internal: not provided "
-                    "(open-source-only; set TRACELENS_INTERNAL_ROOT to enable)")
+                append_log(
+                    log_path,
+                    "TraceLens-internal: not provided (open-source-only; set TRACELENS_INTERNAL_ROOT to enable)",
+                )
                 os.environ.pop("TL_EXTENSION", None)
-            run_command([sys.executable, "-m", "pip", "install", "-e", "."],
-                        cwd=tl_root, log_path=log_path,
-                        timeout_s=max(60, int(args.budget_minutes * 60)))
+            run_command(
+                [sys.executable, "-m", "pip", "install", "-e", "."],
+                cwd=tl_root,
+                log_path=log_path,
+                timeout_s=max(60, int(args.budget_minutes * 60)),
+            )
             # TraceLens v0.3 (#148): analysis-orchestrator.md under Agent/Analysis/, with the legacy path as fallback below.
             skill = tl_root / "TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md"
             if not skill.exists():
                 skill = tl_root / "TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
             if not skill.exists():
-                raise FileNotFoundError(f"TraceLens standalone skill not found (tried Agent/Analysis and AgenticMode/Standalone paths): {skill}")
+                raise FileNotFoundError(
+                    f"TraceLens standalone skill not found (tried Agent/Analysis and AgenticMode/Standalone paths): {skill}"
+                )
             append_log(log_path, f"TraceLens skill: {skill}")
 
             tracelens_dir = run_dir / "tracelens"
@@ -4900,19 +5002,28 @@ def main() -> int:
             cli_trace_path = trace_files[0]
             trace_split_blocked = False
             if not args.skip_split:
-                update_status(status_path, state="running", current_step="split_trace",
-                              log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                              started_at=started_at)
+                update_status(
+                    status_path,
+                    state="running",
+                    current_step="split_trace",
+                    log_path=log_path,
+                    artifact_paths=artifacts,
+                    run_id=run_id,
+                    started_at=started_at,
+                )
                 split_dir = tracelens_dir / "trace_split"
                 split_dir.mkdir(parents=True, exist_ok=True)
                 # --find-steady-state writes the three *_steady_state_* chunks; --R (#194 §3) feeds PD-ratio selection.
                 split_cmd = [
-                    sys.executable, "-m",
+                    sys.executable,
+                    "-m",
                     "TraceLens.TraceUtils.split_inference_trace_annotation",
                     str(trace_files[0]),
-                    "-o", str(split_dir),
+                    "-o",
+                    str(split_dir),
                     "--find-steady-state",
-                    "--num-steps", str(max(8, int(args.split_num_steps or 32))),
+                    "--num-steps",
+                    str(max(8, int(args.split_num_steps or 32))),
                 ]
                 conc = args.split_conc or os.environ.get("CONC", "").strip()
                 if str(conc).strip():
@@ -4922,7 +5033,8 @@ def main() -> int:
                     split_cmd += ["--OSL", str(osl).strip()]
                 # Only pass --R when provided so the splitter's default keeps working for legacy traces.
                 r_raw = args.split_r or os.environ.get(
-                    "RANDOM_RANGE_RATIO", "",
+                    "RANDOM_RANGE_RATIO",
+                    "",
                 )
                 r_str = str(r_raw).strip()
                 if r_str:
@@ -4941,6 +5053,7 @@ def main() -> int:
                     log_path=log_path,
                     timeout_s=max(60, int(args.budget_minutes * 60)),
                 )
+
                 # The three chunks are parallel views, not a fallback ladder; the consumer picks ONE
                 # via --steady-state-mode (default 'mixed') and we hard-fail when the selected chunk is missing/empty.
                 def _collect(prefix: str) -> list[Path]:
@@ -5001,9 +5114,7 @@ def main() -> int:
                         "severity": "blocking",
                         "requested_mode": args.steady_state_mode,
                         "requested_chunk_label": chunk_label,
-                        "available_modes": [
-                            m for m, (_, ch) in _mode_to_chunks.items() if ch
-                        ],
+                        "available_modes": [m for m, (_, ch) in _mode_to_chunks.items() if ch],
                         "remediation": (
                             "Re-issue roofline with env "
                             "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one "
@@ -5074,9 +5185,9 @@ def main() -> int:
                         f"ERROR: --steady-state-mode={args.steady_state_mode} "
                         f"selected chunk {cli_trace_path.name} is "
                         f"non-empty but low-quality: busy_ratio="
-                        f"{low_quality_warning['busy_ratio']*100:.3f}% "
+                        f"{low_quality_warning['busy_ratio'] * 100:.3f}% "
                         f"(threshold "
-                        f"{low_quality_warning['threshold']*100:.0f}%); "
+                        f"{low_quality_warning['threshold'] * 100:.0f}%); "
                         f"alternate modes with higher busy_ratio: "
                         f"{low_quality_warning['non_empty_modes']}. "
                         "Refusing to analyze (would yield misleading "
@@ -5086,7 +5197,7 @@ def main() -> int:
                         f"steady_state_chunk_low_quality: requested "
                         f"--steady-state-mode={args.steady_state_mode} chunk "
                         f"busy_ratio="
-                        f"{low_quality_warning['busy_ratio']*100:.3f}%; "
+                        f"{low_quality_warning['busy_ratio'] * 100:.3f}%; "
                         f"better alternates: "
                         f"{low_quality_warning['non_empty_modes']}"
                     )
@@ -5106,32 +5217,31 @@ def main() -> int:
             trace_input_path = Path(args.trace_input).expanduser().resolve()
             capture_folder: Path | None = (
                 Path(args.capture_folder).expanduser().resolve()
-                if args.capture_folder else
-                discover_capture_folder(trace_input_path, trace_files)
+                if args.capture_folder
+                else discover_capture_folder(trace_input_path, trace_files)
             )
             if capture_folder:
                 append_log(
                     log_path,
-                    f"capture_folder resolved: {capture_folder} "
-                    f"(exists={capture_folder.is_dir()})",
+                    f"capture_folder resolved: {capture_folder} (exists={capture_folder.is_dir()})",
                 )
 
             # ------ Route: deterministic vs agent ------
-            use_deterministic = (
-                args.analysis_route == ANALYSIS_ROUTE_DETERMINISTIC
-            )
+            use_deterministic = args.analysis_route == ANALYSIS_ROUTE_DETERMINISTIC
 
             if use_deterministic and not trace_split_blocked:
                 update_status(
-                    status_path, state="running",
+                    status_path,
+                    state="running",
                     current_step="deterministic_pipeline",
-                    log_path=log_path, artifact_paths=artifacts,
-                    run_id=run_id, started_at=started_at,
+                    log_path=log_path,
+                    artifact_paths=artifacts,
+                    run_id=run_id,
+                    started_at=started_at,
                 )
                 append_log(
                     log_path,
-                    "analysis-route=deterministic: running TraceLens "
-                    "deterministic Python toolchain (no LLM calls)",
+                    "analysis-route=deterministic: running TraceLens deterministic Python toolchain (no LLM calls)",
                 )
 
                 det_rc = _run_deterministic_tracelens_steps(
@@ -5147,20 +5257,14 @@ def main() -> int:
                 )
                 orchestrator_mode = "deterministic"
                 if det_rc != 0:
-                    orchestrator_error = (
-                        "Deterministic TraceLens pipeline returned "
-                        f"rc={det_rc}"
-                    )
+                    orchestrator_error = f"Deterministic TraceLens pipeline returned rc={det_rc}"
                 _raise_on_failed_deterministic_pipeline(det_rc)
 
                 idle_pct_value = _extract_idle_pct_from_gpu_timeline(
                     tracelens_dir,
                 )
                 idle_pct_threshold = _resolve_idle_pct_threshold()
-                high_idle_detected = (
-                    idle_pct_value is not None
-                    and idle_pct_value > idle_pct_threshold
-                )
+                high_idle_detected = idle_pct_value is not None and idle_pct_value > idle_pct_threshold
                 if high_idle_detected:
                     assert idle_pct_value is not None
                     agent_candidates = []
@@ -5194,26 +5298,17 @@ def main() -> int:
                         fail_on_corrupt_priority=True,
                     )
                     if raw_det_candidates:
-                        total_dur = (
-                            _extract_total_time_us_from_gpu_timeline(
-                                tracelens_dir
-                            )
-                            or sum(
-                                float(c.get("duration_us") or 0)
-                                for c in raw_det_candidates
-                            )
+                        total_dur = _extract_total_time_us_from_gpu_timeline(tracelens_dir) or sum(
+                            float(c.get("duration_us") or 0) for c in raw_det_candidates
                         )
                         agent_candidates = _finalize_candidates(
                             raw_det_candidates,
                             total_dur=total_dur or None,
-                            perf_report_csv_dir=(
-                                tracelens_dir / "perf_report_csvs"
-                            ),
+                            perf_report_csv_dir=(tracelens_dir / "perf_report_csvs"),
                         )
                         append_log(
                             log_path,
-                            f"deterministic pipeline produced "
-                            f"{len(agent_candidates)} hot kernels",
+                            f"deterministic pipeline produced {len(agent_candidates)} hot kernels",
                         )
                     else:
                         agent_candidates = []
@@ -5234,25 +5329,32 @@ def main() -> int:
                 artifacts["tracelens_agent_report"] = str(agent_report_path)
 
             elif args.use_llm_orchestrator and not trace_split_blocked:
-                update_status(status_path, state="running",
-                              current_step="run_tracelens_sdk_orchestrator",
-                              log_path=log_path, artifact_paths=artifacts,
-                              run_id=run_id, started_at=started_at)
+                update_status(
+                    status_path,
+                    state="running",
+                    current_step="run_tracelens_sdk_orchestrator",
+                    log_path=log_path,
+                    artifact_paths=artifacts,
+                    run_id=run_id,
+                    started_at=started_at,
+                )
                 try:
-                    skill_result = asyncio.run(run_tracelens_skill(
-                        skill_path=skill,
-                        trace_path=cli_trace_path,
-                        output_dir=tracelens_dir,
-                        tracelens_root=tl_root,
-                        tracelens_internal_root=tl_internal_root,
-                        platform=args.target_platform,
-                        framework=args.framework,
-                        analysis_mode=args.analysis_mode,
-                        capture_folder=capture_folder,
-                        budget_minutes=args.budget_minutes,
-                        model=os.environ.get("ANTHROPIC_MODEL", ""),
-                        log=lambda msg: append_log(log_path, msg),
-                    ))
+                    skill_result = asyncio.run(
+                        run_tracelens_skill(
+                            skill_path=skill,
+                            trace_path=cli_trace_path,
+                            output_dir=tracelens_dir,
+                            tracelens_root=tl_root,
+                            tracelens_internal_root=tl_internal_root,
+                            platform=args.target_platform,
+                            framework=args.framework,
+                            analysis_mode=args.analysis_mode,
+                            capture_folder=capture_folder,
+                            budget_minutes=args.budget_minutes,
+                            model=os.environ.get("ANTHROPIC_MODEL", ""),
+                            log=lambda msg: append_log(log_path, msg),
+                        )
+                    )
                     artifacts.update(skill_result.artifact_paths)
                     agent_report_path = skill_result.report_path
                     orchestrator_mode = "claude_agent_sdk"
@@ -5263,10 +5365,7 @@ def main() -> int:
                         skill_result.report_path,
                     )
                     idle_pct_threshold = _resolve_idle_pct_threshold()
-                    high_idle_detected = (
-                        idle_pct_value is not None
-                        and idle_pct_value > idle_pct_threshold
-                    )
+                    high_idle_detected = idle_pct_value is not None and idle_pct_value > idle_pct_threshold
                     if high_idle_detected:
                         assert idle_pct_value is not None
                         agent_candidates = []
@@ -5301,7 +5400,8 @@ def main() -> int:
                                 "candidate extraction",
                             )
                         report_cands = parse_analysis_md(
-                            skill_result.report_path, args.top_k,
+                            skill_result.report_path,
+                            args.top_k,
                         )
                         # #514 defense-in-depth: recover any HIGH-GPU-time
                         # "other"-bucket op that TraceLens filed without a
@@ -5320,10 +5420,7 @@ def main() -> int:
                             report_cands = report_cands + fallback_cands
                         if report_cands:
                             raw_agent_candidates = report_cands
-                            report_source = (
-                                "analysis.md+other_bucket_fallback"
-                                if fallback_cands else "analysis.md"
-                            )
+                            report_source = "analysis.md+other_bucket_fallback" if fallback_cands else "analysis.md"
                         else:
                             agent_candidates = []
                             allow_empty_candidates = True
@@ -5345,21 +5442,13 @@ def main() -> int:
                         # gpu_pct means its share of total GPU time, not its
                         # share of the top-k candidate sum. Falls back to the
                         # candidate sum only when gpu_timeline.csv is missing.
-                        total_dur = (
-                            _extract_total_time_us_from_gpu_timeline(
-                                skill_result.output_dir
-                            )
-                            or sum(
-                                float(c.get("duration_us") or 0)
-                                for c in raw_agent_candidates
-                            )
+                        total_dur = _extract_total_time_us_from_gpu_timeline(skill_result.output_dir) or sum(
+                            float(c.get("duration_us") or 0) for c in raw_agent_candidates
                         )
                         agent_candidates = _finalize_candidates(
                             raw_agent_candidates,
                             total_dur=total_dur or None,
-                            perf_report_csv_dir=(
-                                skill_result.output_dir / "perf_report_csvs"
-                            ),
+                            perf_report_csv_dir=(skill_result.output_dir / "perf_report_csvs"),
                         )
                         append_log(
                             log_path,
@@ -5391,9 +5480,15 @@ def main() -> int:
         else:
             append_log(log_path, "[dry-run] skipping TraceLens install and external CLI")
 
-        update_status(status_path, state="running", current_step="extract_hot_kernels",
-                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                      started_at=started_at)
+        update_status(
+            status_path,
+            state="running",
+            current_step="extract_hot_kernels",
+            log_path=log_path,
+            artifact_paths=artifacts,
+            run_id=run_id,
+            started_at=started_at,
+        )
         # Production candidate extraction is analysis.md-only (no sidecar/CSV fallback).
         candidates = agent_candidates
         if candidates:
@@ -5416,8 +5511,7 @@ def main() -> int:
                 # Test-only path: parse the raw trace so unit tests can exercise extraction without TraceLens.
                 append_log(
                     log_path,
-                    "dry-run: parsing raw trace for hot kernels "
-                    "(production code path raises here — see #203)",
+                    "dry-run: parsing raw trace for hot kernels (production code path raises here — see #203)",
                 )
                 candidates = analyze_trace_files(trace_files, args.top_k)
             else:
@@ -5432,11 +5526,17 @@ def main() -> int:
         if roofline_by_name:
             append_log(log_path, f"merged roofline results: {len(roofline_by_name)} kernels")
         merge_roofline_into_candidates(candidates, roofline_by_name)
-        artifacts.update(write_reports(run_dir, trace_input_type=trace_input_type,
-                                       trace_files=trace_files, candidates=candidates,
-                                       args=args,
-                                       existing_report_path=agent_report_path,
-                                       trace_health_warnings=trace_health_warnings))
+        artifacts.update(
+            write_reports(
+                run_dir,
+                trace_input_type=trace_input_type,
+                trace_files=trace_files,
+                candidates=candidates,
+                args=args,
+                existing_report_path=agent_report_path,
+                trace_health_warnings=trace_health_warnings,
+            )
+        )
         if args.roofline_json:
             artifacts["roofline_json"] = str(Path(args.roofline_json).expanduser())
         artifacts["cli_log_path"] = str(log_path)
@@ -5465,35 +5565,57 @@ def main() -> int:
             # T3: trace-quality findings surfaced to the Coordinator (empty = nothing wrong).
             "trace_health_warnings": trace_health_warnings,
         }
-        atomic_write_json(run_dir / "session_state.json", {
-            "session_id": session_id,
-            "last_tool": "tracelens_analysis",
-            "last_run_id": run_id,
-            "updated_at": utc_now(),
-            "model_name": args.model_name,
-            "framework": args.framework,
-        })
-        update_status(status_path, state="succeeded", current_step="done",
-                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                      started_at=started_at)
+        atomic_write_json(
+            run_dir / "session_state.json",
+            {
+                "session_id": session_id,
+                "last_tool": "tracelens_analysis",
+                "last_run_id": run_id,
+                "updated_at": utc_now(),
+                "model_name": args.model_name,
+                "framework": args.framework,
+            },
+        )
+        update_status(
+            status_path,
+            state="succeeded",
+            current_step="done",
+            log_path=log_path,
+            artifact_paths=artifacts,
+            run_id=run_id,
+            started_at=started_at,
+        )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     except Exception as exc:
         append_log(log_path, f"[error] {type(exc).__name__}: {exc}")
-        update_status(status_path, state="failed", current_step="failed",
-                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                      started_at=started_at, error=f"{type(exc).__name__}: {exc}")
+        update_status(
+            status_path,
+            state="failed",
+            current_step="failed",
+            log_path=log_path,
+            artifact_paths=artifacts,
+            run_id=run_id,
+            started_at=started_at,
+            error=f"{type(exc).__name__}: {exc}",
+        )
         # Include trace_health_warnings accumulated pre-exception so the Coordinator can auto-recover.
-        print(json.dumps({
-            "tool": "tracelens_analysis",
-            "session_id": session_id,
-            "run_id": run_id,
-            "status": "failed",
-            "error": f"{type(exc).__name__}: {exc}",
-            "cli_log_path": str(log_path),
-            "status_path": str(status_path),
-            "trace_health_warnings": trace_health_warnings,
-        }, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "tool": "tracelens_analysis",
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "cli_log_path": str(log_path),
+                    "status_path": str(status_path),
+                    "trace_health_warnings": trace_health_warnings,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 1
 
 

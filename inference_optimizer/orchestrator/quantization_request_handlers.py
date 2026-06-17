@@ -76,10 +76,7 @@ async def run_quantization_prelude_async(
     qdir = result.quantized_model_dir
 
     if result.status == "success":
-        print(
-            f"Quantization: success (final={final}, "
-            f"eval_gap={result.assessment.eval_gap}) -> {qdir}"
-        )
+        print(f"Quantization: success (final={final}, eval_gap={result.assessment.eval_gap}) -> {qdir}")
         return str(qdir)
 
     if result.status == "partial" and qdir is not None:
@@ -118,11 +115,7 @@ def run_quantization_prelude(
     Returns:
         The path to the exported quantized model directory.
     """
-    return asyncio.run(
-        run_quantization_prelude_async(
-            prompt=prompt, source_model=source_model, workspace=workspace
-        )
-    )
+    return asyncio.run(run_quantization_prelude_async(prompt=prompt, source_model=source_model, workspace=workspace))
 
 
 __all__ = ["run_quantization_prelude", "run_quantization_prelude_async"]

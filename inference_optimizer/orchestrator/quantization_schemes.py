@@ -83,10 +83,7 @@ def validate_scheme(scheme: str | None, gpu_type: str | None) -> None:
     if not scheme or scheme == NO_QUANTIZATION:
         return
     if scheme not in SUPPORTED_SCHEMES:
-        raise ValueError(
-            f"unknown quantization scheme {scheme!r}; "
-            f"choose one of {list(SUPPORTED_SCHEMES)}"
-        )
+        raise ValueError(f"unknown quantization scheme {scheme!r}; choose one of {list(SUPPORTED_SCHEMES)}")
     gpu = (gpu_type or "").strip().lower()
     if scheme in MI355X_ONLY and gpu and gpu != "mi355x":
         raise SchemeNotSupportedError(
@@ -149,18 +146,12 @@ def _strategy_paragraph(cfg: QuantizationConfig) -> str:
     """
     sentences = [f"Apply {cfg.global_scheme} as the global quantization scheme."]
     if cfg.layer_overrides:
-        clauses = [
-            f"the {layer} layers with {scheme}"
-            for layer, scheme in cfg.layer_overrides.items()
-        ]
+        clauses = [f"the {layer} layers with {scheme}" for layer, scheme in cfg.layer_overrides.items()]
         sentences.append(f"Override {_join_clauses(clauses)}.")
     if cfg.kv_cache:
         sentences.append(f"Quantize the kv_cache with {cfg.kv_cache}.")
     if cfg.exclude_layers:
-        sentences.append(
-            f"Additionally exclude {_join_clauses(list(cfg.exclude_layers))} "
-            f"from quantization."
-        )
+        sentences.append(f"Additionally exclude {_join_clauses(list(cfg.exclude_layers))} from quantization.")
     if cfg.output_dir:
         sentences.append(f"Write the quantized model to {cfg.output_dir}.")
     return "Quantization strategy:\n" + " ".join(sentences)
@@ -203,10 +194,7 @@ def _evaluation_paragraph(cfg: QuantizationConfig) -> str | None:
     if cfg.acceptable_eval_gap is None:
         return None
     pct = f"{cfg.acceptable_eval_gap * 100:g}"
-    return (
-        "Evaluation:\n"
-        f"Keep the quantized model's accuracy within {pct}% of the bf16 baseline."
-    )
+    return f"Evaluation:\nKeep the quantized model's accuracy within {pct}% of the bf16 baseline."
 
 
 def build_quantization_prompt(
@@ -239,9 +227,7 @@ def build_quantization_prompt(
     if model_path:
         target = f" on an {gpu_type.upper()} target" if gpu_type else ""
         if skill_path:
-            paragraphs.append(
-                f"Use the skill at {skill_path} to quantize {model_path}{target}."
-            )
+            paragraphs.append(f"Use the skill at {skill_path} to quantize {model_path}{target}.")
         else:
             paragraphs.append(f"Quantize {model_path}{target}.")
 
@@ -277,10 +263,7 @@ def resolve_scheme_prompt(scheme: str | None) -> str | None:
     if not scheme or scheme == NO_QUANTIZATION:
         return None
     if scheme not in SUPPORTED_SCHEMES:
-        raise ValueError(
-            f"unknown quantization scheme {scheme!r}; "
-            f"choose one of {list(SUPPORTED_SCHEMES)}"
-        )
+        raise ValueError(f"unknown quantization scheme {scheme!r}; choose one of {list(SUPPORTED_SCHEMES)}")
     return build_quantization_prompt(QuantizationConfig(global_scheme=scheme))
 
 

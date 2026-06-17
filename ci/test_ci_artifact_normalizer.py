@@ -17,6 +17,7 @@ import artifact_normalizer as an  # noqa: E402
 
 # ── small coercion helpers ──
 
+
 def test_read_json_none():
     assert an._read_json(None, []) is None
 
@@ -72,6 +73,7 @@ def test_relative(tmp_path: Path):
 
 # ── find_artifact ──
 
+
 def test_find_artifact_by_tail(tmp_path: Path):
     f = tmp_path / "hyperloom" / "ci_metrics.json"
     f.parent.mkdir(parents=True)
@@ -91,6 +93,7 @@ def test_find_artifact_no_match(tmp_path: Path):
 
 # ── parse_env_file ──
 
+
 def test_parse_env_file(tmp_path: Path):
     p = tmp_path / "run_context.env"
     p.write_text("# comment\nFOO='bar'\nBAZ=\"qux\"\nNOEQ\n\n", encoding="utf-8")
@@ -104,9 +107,9 @@ def test_parse_env_file_missing(tmp_path: Path):
 
 # ── parse_ci_metrics ──
 
+
 def test_parse_ci_metrics_flat():
-    data = {"baseline_throughput": "100", "optimized_throughput": "120",
-            "tp": "8", "conc": "64", "model": "m"}
+    data = {"baseline_throughput": "100", "optimized_throughput": "120", "tp": "8", "conc": "64", "model": "m"}
     m = an.parse_ci_metrics(data)
     assert m["baseline_throughput"] == 100.0
     assert m["optimized_throughput"] == 120.0
@@ -133,6 +136,7 @@ def test_parse_ci_metrics_explicit_gain():
 
 # ── parse_baseline_summary ──
 
+
 def test_parse_baseline_summary():
     m = an.parse_baseline_summary({"baseline_tput_per_gpu": "50", "tp": "8"})
     assert m["baseline_tput_per_gpu"] == 50.0
@@ -144,6 +148,7 @@ def test_parse_baseline_summary_none():
 
 
 # ── parse_sweep_results ──
+
 
 def test_parse_sweep_results(tmp_path: Path):
     p = tmp_path / "sweep_results.csv"
@@ -166,6 +171,7 @@ def test_parse_sweep_results_missing(tmp_path: Path):
 
 # ── parse_kernel_candidates / results ──
 
+
 def test_parse_kernel_candidates():
     data = [{"rank": "1", "name": "k", "gpu_pct": "10.5", "count": "3", "time_ms": "1.2"}, "bad"]
     out = an.parse_kernel_candidates(data)
@@ -179,8 +185,7 @@ def test_parse_kernel_candidates_non_list():
 
 
 def test_parse_kernel_results():
-    data = {"kernels": [{"name": "k", "micro_speedup": "1.5"}, 5],
-            "summary": {"total": 1}}
+    data = {"kernels": [{"name": "k", "micro_speedup": "1.5"}, 5], "summary": {"total": 1}}
     kernels, summary = an.parse_kernel_results(data)
     assert len(kernels) == 1
     assert kernels[0]["micro_speedup"] == 1.5
@@ -194,6 +199,7 @@ def test_parse_kernel_results_none():
 
 
 # ── classify_artifact ──
+
 
 def test_classify_artifact():
     assert an.classify_artifact("x/ci_metrics.json") == "ci_metrics"
@@ -209,6 +215,7 @@ def test_classify_artifact():
 
 
 # ── build_artifact_index ──
+
 
 def test_build_artifact_index(tmp_path: Path):
     (tmp_path / "a").mkdir()
@@ -226,19 +233,23 @@ def test_build_artifact_index_missing(tmp_path: Path):
 
 # ── normalize_task_result (end-to-end) ──
 
+
 def test_normalize_task_result_full(tmp_path: Path):
     task_dir = tmp_path / "task1"
     (task_dir / "hyperloom").mkdir(parents=True)
     (task_dir / "hyperloom" / "ci_metrics.json").write_text(
-        json.dumps({"baseline_throughput": 100, "optimized_throughput": 130,
-                    "model": "org/m", "tp": 8}),
+        json.dumps({"baseline_throughput": 100, "optimized_throughput": 130, "model": "org/m", "tp": 8}),
         encoding="utf-8",
     )
     (task_dir / "results").mkdir()
-    (task_dir / "results" / "sweep_results.csv").write_text(
-        "CONC,ISL,OSL\n64,1024,1024\n", encoding="utf-8")
-    record = {"task_id": "task1", "model": "org/m", "display_name": "m",
-              "status": "submitted", "final_status": "Succeeded"}
+    (task_dir / "results" / "sweep_results.csv").write_text("CONC,ISL,OSL\n64,1024,1024\n", encoding="utf-8")
+    record = {
+        "task_id": "task1",
+        "model": "org/m",
+        "display_name": "m",
+        "status": "submitted",
+        "final_status": "Succeeded",
+    }
     result = an.normalize_task_result(task_dir, record, {"source": "test"})
     assert result["schema_version"] == an.SCHEMA_VERSION
     assert result["task"]["task_id"] == "task1"
@@ -259,24 +270,26 @@ def test_normalize_task_result_session_breakdown_fallback(tmp_path: Path):
     task_dir.mkdir()
     # No ci_metrics.json; only a session_breakdown variant via rglob fallback.
     (task_dir / "session_breakdown_2026.json").write_text(
-        json.dumps({"baseline_throughput": 10, "optimized_throughput": 11}),
-        encoding="utf-8")
+        json.dumps({"baseline_throughput": 10, "optimized_throughput": 11}), encoding="utf-8"
+    )
     result = an.normalize_task_result(task_dir, {"task_id": "t"}, None)
     assert result["source_files"]["session_breakdown"] is not None
 
 
 # ── collect_normalized_results ──
 
+
 def test_collect_normalized_results(tmp_path: Path):
     artifacts = tmp_path / "artifacts"
     manifests = tmp_path / "manifests"
     (artifacts / "task1").mkdir(parents=True)
     (artifacts / "task1" / "ci_metrics.json").write_text(
-        json.dumps({"baseline_throughput": 1, "optimized_throughput": 2}), encoding="utf-8")
+        json.dumps({"baseline_throughput": 1, "optimized_throughput": 2}), encoding="utf-8"
+    )
     manifests.mkdir()
     (manifests / "submission_manifest.json").write_text(
-        json.dumps({"submitted_at": "now", "records": [{"task_id": "task1", "model": "m"}]}),
-        encoding="utf-8")
+        json.dumps({"submitted_at": "now", "records": [{"task_id": "task1", "model": "m"}]}), encoding="utf-8"
+    )
     results = an.collect_normalized_results(artifacts, manifests, {"source": "ci"})
     assert len(results) == 1
     assert results[0]["task"]["task_id"] == "task1"
@@ -296,6 +309,7 @@ def test_collect_normalized_results_malformed_manifest(tmp_path: Path):
 
 # ── write_single_result / main ──
 
+
 def test_write_single_result(tmp_path: Path):
     an.write_single_result({"a": 1}, tmp_path / "out")
     assert (tmp_path / "out" / "normalized_result.json").exists()
@@ -307,10 +321,10 @@ def test_main_success(tmp_path: Path, monkeypatch, capsys):
     task_dir = tmp_path / "task"
     task_dir.mkdir()
     (task_dir / "ci_metrics.json").write_text(
-        json.dumps({"baseline_throughput": 1, "optimized_throughput": 2}), encoding="utf-8")
+        json.dumps({"baseline_throughput": 1, "optimized_throughput": 2}), encoding="utf-8"
+    )
     out_dir = tmp_path / "out"
-    monkeypatch.setattr(sys, "argv", ["a.py", "--task-dir", str(task_dir),
-                                      "--out-dir", str(out_dir)])
+    monkeypatch.setattr(sys, "argv", ["a.py", "--task-dir", str(task_dir), "--out-dir", str(out_dir)])
     assert an.main() == 0
     assert (out_dir / "normalized_result.json").exists()
 

@@ -148,10 +148,7 @@ class Recorder:
             filename = f"{_slug(section)}__{self._producer}__{_slug(key)}.json"
         else:
             seq = self._next_seq()
-            filename = (
-                f"{_slug(section)}__{self._producer}__"
-                f"{os.getpid()}-{seq:06d}.json"
-            )
+            filename = f"{_slug(section)}__{self._producer}__{os.getpid()}-{seq:06d}.json"
         return self._write(section, "item", payload, filename=filename)
 
     @staticmethod
@@ -167,10 +164,7 @@ class Recorder:
         """
         declared = SECTION_SHAPES.get(section)
         if declared is not None and declared != kind:
-            raise ValueError(
-                f"section {section!r} is declared {declared!r}, "
-                f"not {kind!r}"
-            )
+            raise ValueError(f"section {section!r} is declared {declared!r}, not {kind!r}")
 
     def _write(
         self,
@@ -201,17 +195,19 @@ class Recorder:
         """
         self._dir.mkdir(parents=True, exist_ok=True)
         record = {
-            "section":  section,
-            "kind":     kind,
-            "seq":      self._next_seq(),
-            "ts":       _now_iso(),
+            "section": section,
+            "kind": kind,
+            "seq": self._next_seq(),
+            "ts": _now_iso(),
             "producer": self._producer,
-            "payload":  dict(payload) if isinstance(payload, Mapping) else payload,
+            "payload": dict(payload) if isinstance(payload, Mapping) else payload,
         }
         data = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
         target = self._dir / filename
         fd, tmp = tempfile.mkstemp(
-            prefix=f".{filename}.", suffix=".tmp", dir=str(self._dir),
+            prefix=f".{filename}.",
+            suffix=".tmp",
+            dir=str(self._dir),
         )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:

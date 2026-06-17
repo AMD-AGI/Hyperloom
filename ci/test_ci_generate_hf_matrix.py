@@ -19,6 +19,7 @@ import generate_hf_matrix as gm  # noqa: E402
 
 # ── pure helpers ──
 
+
 def test_slugify():
     assert gm.slugify("Qwen/Qwen3-8B") == "qwen-qwen3-8b"
     assert gm.slugify("a..b//c") == "a-b-c"
@@ -47,6 +48,7 @@ def test_parse_explicit_models():
 
 # ── _filter_entries_by_explicit_models ──
 
+
 def test_filter_entries_by_explicit_models():
     entries = [{"repo_id": "Org/A"}, {"repo_id": "Org/B"}]
     out = gm._filter_entries_by_explicit_models(entries, ["org/b"])
@@ -66,10 +68,13 @@ def test_filter_entries_missing_warns(capsys):
 
 # ── _load_candidate_entries ──
 
+
 def test_load_candidate_entries(tmp_path: Path):
     p = tmp_path / "c.json"
-    p.write_text(json.dumps({"pool_id": "pool1", "candidates": [
-        {"repo_id": "a"}, {"no_repo": 1}, {"repo_id": "b"}]}), encoding="utf-8")
+    p.write_text(
+        json.dumps({"pool_id": "pool1", "candidates": [{"repo_id": "a"}, {"no_repo": 1}, {"repo_id": "b"}]}),
+        encoding="utf-8",
+    )
     out = gm._load_candidate_entries(p)
     assert [e["repo_id"] for e in out] == ["a", "b"]
     assert out[0]["pool_id"] == "pool1"
@@ -83,6 +88,7 @@ def test_load_candidate_entries_bad_file(tmp_path: Path, capsys):
 
 
 # ── _resolve_batch_index ──
+
 
 def test_resolve_batch_index_explicit(monkeypatch):
     monkeypatch.setenv("INPUT_BATCH_INDEX", "3")
@@ -115,6 +121,7 @@ def test_resolve_batch_index_run_number_invalid(monkeypatch):
 
 
 # ── cron rotation ──
+
 
 def test_cron_fire_counter_monotonic():
     a = gm._cron_fire_counter(datetime(2026, 6, 15, 16, 0, tzinfo=timezone.utc))
@@ -150,6 +157,7 @@ def test_cron_batch_index_bad_now(monkeypatch):
 
 
 # ── _slice_entries ──
+
 
 def test_slice_entries_no_batch(monkeypatch):
     monkeypatch.delenv("INPUT_BATCH_SIZE", raising=False)
@@ -192,6 +200,7 @@ def test_slice_entries_bad_batch_size(monkeypatch):
 
 # ── _slice_entries_with_active_refill ──
 
+
 def test_active_refill_no_batch(monkeypatch):
     monkeypatch.delenv("INPUT_BATCH_SIZE", raising=False)
     entries = [{"repo_id": "a"}, {"repo_id": "b"}]
@@ -215,6 +224,7 @@ def test_active_refill_empty_pool(monkeypatch):
 
 # ── _slice_from_candidates / _all_from_candidates ──
 
+
 def test_slice_from_candidates(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("INPUT_BATCH_SIZE", raising=False)
     p = tmp_path / "c.json"
@@ -230,14 +240,14 @@ def test_all_from_candidates(tmp_path: Path, capsys):
 
 # ── _matrix_entry ──
 
+
 def test_matrix_entry_string():
     assert gm._matrix_entry("Org/M") == {"model": "Org/M", "key": "org-m"}
 
 
 def test_matrix_entry_dict_with_meta(monkeypatch):
     monkeypatch.setenv("INPUT_BATCH_SIZE", "10")
-    entry = {"repo_id": "Org/M", "framework": "sglang", "tp": 8,
-             "_selected_batch_index": 2, "_selected_batch_size": 10}
+    entry = {"repo_id": "Org/M", "framework": "sglang", "tp": 8, "_selected_batch_index": 2, "_selected_batch_size": 10}
     out = gm._matrix_entry(entry)
     assert out["model"] == "Org/M"
     assert out["framework"] == "sglang"
@@ -246,6 +256,7 @@ def test_matrix_entry_dict_with_meta(monkeypatch):
 
 
 # ── collect_entries ──
+
 
 def test_collect_entries_explicit_only(monkeypatch):
     monkeypatch.setenv("INPUT_MODELS", "a b")
@@ -275,8 +286,10 @@ def test_collect_entries_candidates_file_missing(tmp_path: Path, monkeypatch, ca
 
 def test_collect_entries_explicit_filter_candidates(tmp_path: Path, monkeypatch):
     p = tmp_path / "c.json"
-    p.write_text(json.dumps({"candidates": [
-        {"repo_id": "Org/A", "framework": "sglang"}, {"repo_id": "Org/B"}]}), encoding="utf-8")
+    p.write_text(
+        json.dumps({"candidates": [{"repo_id": "Org/A", "framework": "sglang"}, {"repo_id": "Org/B"}]}),
+        encoding="utf-8",
+    )
     monkeypatch.setenv("INPUT_MODELS", "org/a")
     monkeypatch.setenv("INPUT_CANDIDATES_FILE", str(p))
     monkeypatch.delenv("INPUT_EXCLUDE_LEADERBOARD", raising=False)
@@ -293,6 +306,7 @@ def test_collect_repos(tmp_path: Path, monkeypatch):
 
 
 # ── main ──
+
 
 def test_main_empty(monkeypatch, tmp_path: Path, capsys):
     monkeypatch.delenv("INPUT_MODELS", raising=False)
@@ -325,6 +339,7 @@ def test_main_stdout(monkeypatch, capsys):
 
 # ── network functions (mocked urllib) ──
 
+
 class _FakeURLMap:
     """Monkeypatch target: maps URL substring -> JSON/HTML payload."""
 
@@ -344,10 +359,12 @@ class _FakeURLMap:
 
 
 def test_paginate_models(monkeypatch):
-    routes = {"/api/v1/leaderboard": {
-        "results": [{"model": "Org/A", "task_id": "t1"},
-                    {"model": "Org/B", "tasks": [{"task_id": "t2"}]}],
-        "pagination": {"has_more": False}}}
+    routes = {
+        "/api/v1/leaderboard": {
+            "results": [{"model": "Org/A", "task_id": "t1"}, {"model": "Org/B", "tasks": [{"task_id": "t2"}]}],
+            "pagination": {"has_more": False},
+        }
+    }
     monkeypatch.setattr(gm.urllib.request, "urlopen", _FakeURLMap(routes))
     models, tids = gm._paginate_models("/api/v1/leaderboard")
     assert "org/a" in models and "org/b" in models
@@ -357,6 +374,7 @@ def test_paginate_models(monkeypatch):
 def test_paginate_models_error(monkeypatch):
     def boom(url, timeout=0):
         raise OSError("net")
+
     monkeypatch.setattr(gm.urllib.request, "urlopen", boom)
     try:
         gm._paginate_models("/x")
@@ -378,8 +396,7 @@ def test_resolve_task_models_empty():
 
 def test_dashboard_task_ids(monkeypatch):
     html = '<a href="api/v1/tasks/abc">x</a> api/v1/tasks/def'
-    monkeypatch.setattr(gm.urllib.request, "urlopen",
-                        _FakeURLMap({}, html_routes={"/dashboard": html}))
+    monkeypatch.setattr(gm.urllib.request, "urlopen", _FakeURLMap({}, html_routes={"/dashboard": html}))
     tids = gm._dashboard_task_ids()
     assert {"abc", "def"} <= tids
 
@@ -395,10 +412,12 @@ def test_active_workflow_slugs(monkeypatch):
     monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
     monkeypatch.setenv("GITHUB_RUN_ID", "999")
     routes = {
-        "actions/runs": {"workflow_runs": [
-            {"id": 1, "name": "SaFE Optimize Submit", "jobs_url": "https://api.github.com/jobs1"},
-            {"id": 999, "name": "SaFE Optimize Submit", "jobs_url": "https://api.github.com/skip"},
-        ]},
+        "actions/runs": {
+            "workflow_runs": [
+                {"id": 1, "name": "SaFE Optimize Submit", "jobs_url": "https://api.github.com/jobs1"},
+                {"id": 999, "name": "SaFE Optimize Submit", "jobs_url": "https://api.github.com/skip"},
+            ]
+        },
         "jobs1": {"jobs": [{"name": "optimize-org-m"}, {"name": "other"}]},
     }
     monkeypatch.setattr(gm.urllib.request, "urlopen", _FakeURLMap(routes))
@@ -408,13 +427,10 @@ def test_active_workflow_slugs(monkeypatch):
 
 def test_leaderboard_models(monkeypatch):
     routes = {
-        "/api/v1/leaderboard": {"results": [{"model": "Org/A", "task_id": "t1"}],
-                                "pagination": {"has_more": False}},
-        "/api/v1/tasks": {"results": [{"model": "Org/B", "task_id": "t2"}],
-                          "pagination": {"has_more": False}},
+        "/api/v1/leaderboard": {"results": [{"model": "Org/A", "task_id": "t1"}], "pagination": {"has_more": False}},
+        "/api/v1/tasks": {"results": [{"model": "Org/B", "task_id": "t2"}], "pagination": {"has_more": False}},
     }
-    monkeypatch.setattr(gm.urllib.request, "urlopen",
-                        _FakeURLMap(routes, html_routes={"/dashboard": "no tasks here"}))
+    monkeypatch.setattr(gm.urllib.request, "urlopen", _FakeURLMap(routes, html_routes={"/dashboard": "no tasks here"}))
     models = gm._leaderboard_models()
     assert "org/a" in models and "org/b" in models
 
@@ -443,6 +459,7 @@ def test_apply_exclusions_to_entries_with_active(monkeypatch):
 
 # ── extra branch coverage for generate_hf_matrix ──
 
+
 def test_resolve_batch_index_schedule(monkeypatch):
     monkeypatch.delenv("INPUT_BATCH_INDEX", raising=False)
     monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
@@ -464,8 +481,7 @@ def test_matrix_entry_bad_batch_size(monkeypatch):
 
 
 def test_collect_entries_relative_path(tmp_path: Path, monkeypatch):
-    (tmp_path / "rel.json").write_text(
-        json.dumps({"candidates": [{"repo_id": "a"}]}), encoding="utf-8")
+    (tmp_path / "rel.json").write_text(json.dumps({"candidates": [{"repo_id": "a"}]}), encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("INPUT_MODELS", raising=False)
     monkeypatch.setenv("INPUT_CANDIDATES_FILE", "rel.json")
@@ -478,8 +494,7 @@ def test_collect_entries_relative_path(tmp_path: Path, monkeypatch):
 
 def test_collect_entries_exclude_leaderboard(tmp_path: Path, monkeypatch):
     p = tmp_path / "c.json"
-    p.write_text(json.dumps({"candidates": [{"repo_id": "Org/A"}, {"repo_id": "Org/B"}]}),
-                 encoding="utf-8")
+    p.write_text(json.dumps({"candidates": [{"repo_id": "Org/A"}, {"repo_id": "Org/B"}]}), encoding="utf-8")
     monkeypatch.delenv("INPUT_MODELS", raising=False)
     monkeypatch.setenv("INPUT_CANDIDATES_FILE", str(p))
     monkeypatch.setenv("INPUT_EXCLUDE_LEADERBOARD", "1")
@@ -492,8 +507,7 @@ def test_collect_entries_exclude_leaderboard(tmp_path: Path, monkeypatch):
 
 def test_collect_entries_exclude_active(tmp_path: Path, monkeypatch):
     p = tmp_path / "c.json"
-    p.write_text(json.dumps({"candidates": [{"repo_id": "Org/A"}, {"repo_id": "Org/B"}]}),
-                 encoding="utf-8")
+    p.write_text(json.dumps({"candidates": [{"repo_id": "Org/A"}, {"repo_id": "Org/B"}]}), encoding="utf-8")
     monkeypatch.delenv("INPUT_MODELS", raising=False)
     monkeypatch.setenv("INPUT_CANDIDATES_FILE", str(p))
     monkeypatch.delenv("INPUT_EXCLUDE_LEADERBOARD", raising=False)
@@ -525,27 +539,27 @@ def test_collect_entries_hf_fallback(monkeypatch):
 def test_resolve_task_models_failure(monkeypatch, capsys):
     def boom(url, timeout=0):
         raise OSError("net")
+
     monkeypatch.setattr(gm.urllib.request, "urlopen", boom)
     assert gm._resolve_task_models(["t1"], max_workers=1) == set()
 
 
 def test_resolve_task_models_non_dict(monkeypatch):
-    monkeypatch.setattr(gm.urllib.request, "urlopen",
-                        _FakeURLMap({"/api/v1/tasks/t1": [1, 2, 3]}))
+    monkeypatch.setattr(gm.urllib.request, "urlopen", _FakeURLMap({"/api/v1/tasks/t1": [1, 2, 3]}))
     assert gm._resolve_task_models(["t1"], max_workers=1) == set()
 
 
 def test_dashboard_task_ids_error(monkeypatch):
     def boom(url, timeout=0):
         raise OSError("net")
+
     monkeypatch.setattr(gm.urllib.request, "urlopen", boom)
     assert gm._dashboard_task_ids() == set()
 
 
 def test_leaderboard_models_recovers_hidden(monkeypatch):
     routes = {
-        "/api/v1/leaderboard": {"results": [{"model": "Org/A", "task_id": "t1"}],
-                                "pagination": {"has_more": False}},
+        "/api/v1/leaderboard": {"results": [{"model": "Org/A", "task_id": "t1"}], "pagination": {"has_more": False}},
         "/api/v1/tasks/hidden1": {"model": "Org/Hidden"},
         "/api/v1/tasks": {"results": [], "pagination": {"has_more": False}},
     }
@@ -562,6 +576,7 @@ def test_active_workflow_slugs_error_branches(monkeypatch):
 
     def boom(url_or_req, timeout=0):
         raise OSError("net down")
+
     monkeypatch.setattr(gm.urllib.request, "urlopen", boom)
     assert gm._active_workflow_slugs() == set()
 
@@ -574,12 +589,15 @@ def test_active_workflow_slugs_jobs_error(monkeypatch):
     def selective(url_or_req, timeout=0):
         url = getattr(url_or_req, "full_url", url_or_req)
         if "actions/runs" in url:
-            payload = {"workflow_runs": [
-                {"id": 1, "name": "SaFE Optimize Submit", "jobs_url": "https://api.github.com/jobs1"},
-                {"id": 2, "name": "Other Workflow", "jobs_url": "https://x/jobs2"},
-                {"id": 3, "name": "SaFE Optimize Submit"},  # missing jobs_url
-            ]}
+            payload = {
+                "workflow_runs": [
+                    {"id": 1, "name": "SaFE Optimize Submit", "jobs_url": "https://api.github.com/jobs1"},
+                    {"id": 2, "name": "Other Workflow", "jobs_url": "https://x/jobs2"},
+                    {"id": 3, "name": "SaFE Optimize Submit"},  # missing jobs_url
+                ]
+            }
             return io.BytesIO(json.dumps(payload).encode())
         raise OSError("jobs listing failed")
+
     monkeypatch.setattr(gm.urllib.request, "urlopen", selective)
     assert gm._active_workflow_slugs() == set()

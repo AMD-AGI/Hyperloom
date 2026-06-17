@@ -18,6 +18,7 @@ import inferenceX_parser as ix  # noqa: E402
 
 # ── formatting helpers ──
 
+
 def test_fmt_num():
     assert bs.fmt_num(None) == "—"
     assert bs.fmt_num(1.234) == "1.2"
@@ -76,10 +77,10 @@ def test_gain_sort_key():
 
 # ── load_hf_to_ifx_map ──
 
+
 def test_load_hf_to_ifx_map(tmp_path: Path):
     p = tmp_path / "ifx.yaml"
-    p.write_text("models:\n  - hf_model: org/m\n    api_name: m-api\n  - hf_model: x\n",
-                 encoding="utf-8")
+    p.write_text("models:\n  - hf_model: org/m\n    api_name: m-api\n  - hf_model: x\n", encoding="utf-8")
     assert bs.load_hf_to_ifx_map(p) == {"org/m": "m-api"}
 
 
@@ -89,14 +90,19 @@ def test_load_hf_to_ifx_map_missing(tmp_path: Path):
 
 # ── fetch_inferenceX_ref ──
 
+
 def test_fetch_inferenceX_ref_no_mapping():
     assert bs.fetch_inferenceX_ref("org/m", {}, "b200", 1024, 1024) is None
 
 
 def test_fetch_inferenceX_ref_match(monkeypatch):
-    monkeypatch.setattr(ix, "fetch_benchmarks", lambda name: [{
-        "hardware": "b200", "isl": 1024, "osl": 1024, "precision": "fp8",
-        "metrics": {"output_tput_per_gpu": 123}}])
+    monkeypatch.setattr(
+        ix,
+        "fetch_benchmarks",
+        lambda name: [
+            {"hardware": "b200", "isl": 1024, "osl": 1024, "precision": "fp8", "metrics": {"output_tput_per_gpu": 123}}
+        ],
+    )
     ref = bs.fetch_inferenceX_ref("org/m", {"org/m": "m-api"}, "b200", 1024, 1024)
     assert ref == 123
 
@@ -104,6 +110,7 @@ def test_fetch_inferenceX_ref_match(monkeypatch):
 def test_fetch_inferenceX_ref_api_error(monkeypatch):
     def boom(name):
         raise RuntimeError("down")
+
     monkeypatch.setattr(ix, "fetch_benchmarks", boom)
     assert bs.fetch_inferenceX_ref("org/m", {"org/m": "api"}, "b200", 1024, 1024) is None
 
@@ -115,6 +122,7 @@ def test_fetch_inferenceX_ref_no_bench(monkeypatch):
 
 # ── build_run_metadata ──
 
+
 def test_build_run_metadata(monkeypatch):
     monkeypatch.setenv("GITHUB_RUN_ID", "42")
     md = bs.build_run_metadata()
@@ -124,17 +132,28 @@ def test_build_run_metadata(monkeypatch):
 
 # ── collect_rows / render_markdown / main (end-to-end) ──
 
+
 def _make_artifacts(tmp_path: Path) -> tuple[Path, Path]:
     artifacts = tmp_path / "artifacts"
     manifests = tmp_path / "manifests"
     (artifacts / "task1").mkdir(parents=True)
-    (artifacts / "task1" / "ci_metrics.json").write_text(json.dumps({
-        "baseline_throughput": 100, "optimized_throughput": 130,
-        "model": "org/m-7B", "framework": "sglang", "tp": 8}), encoding="utf-8")
+    (artifacts / "task1" / "ci_metrics.json").write_text(
+        json.dumps(
+            {
+                "baseline_throughput": 100,
+                "optimized_throughput": 130,
+                "model": "org/m-7B",
+                "framework": "sglang",
+                "tp": 8,
+            }
+        ),
+        encoding="utf-8",
+    )
     manifests.mkdir()
-    (manifests / "submission_manifest.json").write_text(json.dumps({
-        "records": [{"task_id": "task1", "model": "org/m-7B", "final_status": "Succeeded"}]}),
-        encoding="utf-8")
+    (manifests / "submission_manifest.json").write_text(
+        json.dumps({"records": [{"task_id": "task1", "model": "org/m-7B", "final_status": "Succeeded"}]}),
+        encoding="utf-8",
+    )
     return artifacts, manifests
 
 
@@ -164,10 +183,21 @@ def test_main(tmp_path: Path, monkeypatch):
     artifacts, manifests = _make_artifacts(tmp_path)
     out_dir = tmp_path / "out"
     monkeypatch.setattr(bs, "fetch_inferenceX_ref", lambda *a, **k: None)
-    monkeypatch.setattr(sys, "argv", [
-        "build_summary.py", "--artifacts-dir", str(artifacts),
-        "--manifests-dir", str(manifests), "--out-dir", str(out_dir),
-        "--ifx-models-yaml", str(tmp_path / "absent.yaml")])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "build_summary.py",
+            "--artifacts-dir",
+            str(artifacts),
+            "--manifests-dir",
+            str(manifests),
+            "--out-dir",
+            str(out_dir),
+            "--ifx-models-yaml",
+            str(tmp_path / "absent.yaml"),
+        ],
+    )
     assert bs.main() == 0
     assert (out_dir / "ci_summary.md").exists()
     assert (out_dir / "ci_summary.json").exists()

@@ -71,9 +71,7 @@ def resolve_gpu_specialist_devices(capacity: int) -> list[int]:
     cap = max(0, int(capacity or 0))
     if cap <= 0:
         return []
-    explicit = _parse_gpu_list(
-        os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", "")
-    )
+    explicit = _parse_gpu_list(os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", ""))
     if explicit:
         return explicit[:cap]
     return list(range(cap))
@@ -143,7 +141,8 @@ class SpecialistGpuPool:
         now_iso = _now_iso()
         expires_ts = now_ts + max(1, int(ttl_sec or DEFAULT_GPU_LEASE_TTL_SEC))
         expires_iso = datetime.fromtimestamp(
-            expires_ts, tz=timezone.utc,
+            expires_ts,
+            tz=timezone.utc,
         ).isoformat(timespec="microseconds")
 
         async with self.db.transaction() as cur:
@@ -191,8 +190,7 @@ class SpecialistGpuPool:
         params = list(lease.gpu_ids) + [lease.holder_id]
         async with self.db.transaction() as cur:
             cur.execute(
-                f"DELETE FROM gpu_leases "
-                f"WHERE gpu_id IN ({placeholders}) AND holder_id=?",
+                f"DELETE FROM gpu_leases WHERE gpu_id IN ({placeholders}) AND holder_id=?",
                 params,
             )
 
@@ -209,8 +207,7 @@ class SpecialistGpuPool:
         params = [now_iso] + list(lease.gpu_ids) + [lease.holder_id]
         async with self.db.transaction() as cur:
             cur.execute(
-                f"UPDATE gpu_leases SET heartbeat_at=? "
-                f"WHERE gpu_id IN ({placeholders}) AND holder_id=?",
+                f"UPDATE gpu_leases SET heartbeat_at=? WHERE gpu_id IN ({placeholders}) AND holder_id=?",
                 params,
             )
 
@@ -228,7 +225,8 @@ class SpecialistGpuPool:
         now_iso = _now_iso()
         async with self.db.transaction() as cur:
             cur.execute(
-                "DELETE FROM gpu_leases WHERE expires_at <= ?", (now_iso,),
+                "DELETE FROM gpu_leases WHERE expires_at <= ?",
+                (now_iso,),
             )
             return int(cur.rowcount or 0)
 

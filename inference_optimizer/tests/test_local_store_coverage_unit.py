@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import json
 
 import pytest
 
@@ -12,11 +11,13 @@ from inference_optimizer.recipe_kb import local_store as ls
 from inference_optimizer.recipe_kb.canonical_id import canonical_id_from_components
 
 
-def _cid(model="m", hardware="mi300", framework="sglang",
-         framework_version="v1", precision="fp8") -> str:
+def _cid(model="m", hardware="mi300", framework="sglang", framework_version="v1", precision="fp8") -> str:
     return canonical_id_from_components(
-        model=model, hardware=hardware, framework=framework,
-        framework_version=framework_version, precision=precision,
+        model=model,
+        hardware=hardware,
+        framework=framework,
+        framework_version=framework_version,
+        precision=precision,
     )
 
 
@@ -32,6 +33,7 @@ class _ToDictItem:
 
 # ---- _coerce_dict ----
 
+
 def test_coerce_dict_variants():
     assert ls._coerce_dict(None) is None
     assert ls._coerce_dict("x") is None
@@ -41,6 +43,7 @@ def test_coerce_dict_variants():
 
 
 # ---- normalisation helpers ----
+
 
 def test_normalise_findings_and_failures():
     assert ls._normalise_findings([{"description": "d", "measured_impact": "i"}, "skip"]) == [
@@ -63,19 +66,29 @@ def test_normalise_gaps_pitfalls_lessons():
 
 
 def test_normalise_prs_number_coercion():
-    out = ls._normalise_prs([
-        {"repo": "r", "number": "12", "outcome": "merged"},
-        {"repo": "r2", "number": "bad"},
-    ])
+    out = ls._normalise_prs(
+        [
+            {"repo": "r", "number": "12", "outcome": "merged"},
+            {"repo": "r2", "number": "bad"},
+        ]
+    )
     assert out[0]["number"] == 12
     assert out[1]["number"] == 0
 
 
 def test_normalise_sessions_coercion():
-    out = ls._normalise_sessions([
-        {"date": "d", "throughput_before": "10", "throughput_after": "bad",
-         "gain_pct": "x", "stack_len": "5", "actions_taken": ["a"]},
-    ])
+    out = ls._normalise_sessions(
+        [
+            {
+                "date": "d",
+                "throughput_before": "10",
+                "throughput_after": "bad",
+                "gain_pct": "x",
+                "stack_len": "5",
+                "actions_taken": ["a"],
+            },
+        ]
+    )
     assert out[0]["throughput_before"] == 10.0
     assert out[0]["throughput_after"] == 0.0
     assert out[0]["gain_pct"] == 0.0
@@ -84,11 +97,14 @@ def test_normalise_sessions_coercion():
 
 # ---- put / get / history with full payload ----
 
+
 def test_put_get_history_roundtrip(tmp_path):
     store = ls.LocalRecipeStore(root=str(tmp_path))
     cid = _cid()
     r1 = store.put_recipe(
-        canonical_id=cid, model="m", best_throughput=100.0,
+        canonical_id=cid,
+        model="m",
+        best_throughput=100.0,
         what_worked=[{"description": "w", "measured_impact": "i"}],
         prs_tested=[_ToDictItem({"repo": "r", "number": 1})],
         sessions=[{"date": "d", "throughput_before": 1.0}],
@@ -142,6 +158,7 @@ def test_empty_cid_raises(tmp_path):
 
 # ---- delete / purge ----
 
+
 def test_delete_recipe(tmp_path):
     store = ls.LocalRecipeStore(root=tmp_path)
     cid = _cid()
@@ -165,11 +182,11 @@ def test_purge_recipe(tmp_path):
 
 # ---- attempts ----
 
+
 def test_attempts_roundtrip(tmp_path):
     store = ls.LocalRecipeStore(root=tmp_path)
     cid = _cid()
-    a1 = store.append_attempt(canonical_id=cid, session_id="s1", fitness=1.0,
-                              outcome="ok", diff={"x": 1})
+    a1 = store.append_attempt(canonical_id=cid, session_id="s1", fitness=1.0, outcome="ok", diff={"x": 1})
     assert a1["id"] == 1
     store.append_attempt(canonical_id=cid, session_id="s2", fitness=None)
     listed = store.list_attempts(canonical_id=cid)
@@ -186,6 +203,7 @@ def test_append_attempt_requires_session(tmp_path):
 
 
 # ---- search ----
+
 
 def test_search_filters(tmp_path):
     store = ls.LocalRecipeStore(root=tmp_path)
@@ -215,6 +233,7 @@ def test_search_bad_order_by(tmp_path):
 
 
 # ---- low-level helpers ----
+
 
 def test_matches_metrics_missing_key():
     assert ls._matches_metrics({}, {"best_throughput": {"min": 1}}) is False
@@ -273,9 +292,17 @@ def test_matches_metrics_scalar_shorthand_and_bad_bound():
     assert ls._matches_metrics({"best_throughput": 100.0}, {"throughput": 100.0}) is True
     assert ls._matches_metrics({"best_throughput": 100.0}, {"throughput": 50.0}) is False
     # bad bound type -> False
-    assert ls._matches_metrics(
-        {"best_throughput": 100.0}, {"throughput": {"min": "bad"}},
-    ) is False
-    assert ls._matches_metrics(
-        {"best_throughput": 100.0}, {"throughput": {"max": "bad"}},
-    ) is False
+    assert (
+        ls._matches_metrics(
+            {"best_throughput": 100.0},
+            {"throughput": {"min": "bad"}},
+        )
+        is False
+    )
+    assert (
+        ls._matches_metrics(
+            {"best_throughput": 100.0},
+            {"throughput": {"max": "bad"}},
+        )
+        is False
+    )

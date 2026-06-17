@@ -87,12 +87,10 @@ def test_kill_remote_missing_pid_dir():
 
 
 def test_install_oob_node_uses_flat_oob_src():
-    text = (
-        _repo_root() / "multi_node" / "scripts" / "install_oob_node.sh"
-    ).read_text(encoding="utf-8")
+    text = (_repo_root() / "multi_node" / "scripts" / "install_oob_node.sh").read_text(encoding="utf-8")
     assert 'if [ -f "$OOB_SRC/pyproject.toml" ]; then' in text
     assert 'OOB_INSTALL_SRC="$OOB_SRC"' in text
-    assert '$OOB_SRC/oob_cli/pyproject.toml' not in text
+    assert "$OOB_SRC/oob_cli/pyproject.toml" not in text
     assert '$PIP install -q --no-cache-dir --break-system-packages "$OOB_INSTALL_SRC"' in text
 
 
@@ -278,7 +276,9 @@ def test_detach_framework_launch_raises_on_immediate_exit(tmp_path):
 def test_pick_head_first_orders_local_first(monkeypatch):
     lm = _load_script_module("lm_test_pick", "launch_multinode.py")
     monkeypatch.setattr(
-        lm.ray.util, "get_node_ip_address", lambda: "10.0.0.1",
+        lm.ray.util,
+        "get_node_ip_address",
+        lambda: "10.0.0.1",
     )
     nodes = [
         {"NodeManagerAddress": "10.0.0.2", "NodeID": "b"},
@@ -292,7 +292,9 @@ def test_pick_head_first_orders_local_first(monkeypatch):
 def test_pick_head_first_fallback_sorts_when_local_missing(monkeypatch):
     lm = _load_script_module("lm_test_pick2", "launch_multinode.py")
     monkeypatch.setattr(
-        lm.ray.util, "get_node_ip_address", lambda: "192.168.99.99",
+        lm.ray.util,
+        "get_node_ip_address",
+        lambda: "192.168.99.99",
     )
     nodes = [
         {"NodeManagerAddress": "10.0.0.2", "NodeID": "b"},
@@ -524,9 +526,7 @@ def test_session_id_injects_primus_claw_label():
     )
     assert b["labels"].get("primus-claw/session-id") == "sess-123"
     # The builder writes no primus-safe.* labels.
-    assert not any(
-        k.startswith("primus-safe.") for k in b["labels"]
-    )
+    assert not any(k.startswith("primus-safe.") for k in b["labels"])
 
 
 def test_session_id_omitted_skips_label():
@@ -669,9 +669,15 @@ def test_dynamo_body_pd_independent_instances_no_multinode():
     from inference_optimizer.multi_node._internal import workload_spec
 
     b = workload_spec.build_dynamo_workload_body(
-        **{**_DYNAMO_MIN_KWARGS, "nodes": 1, "pd_mode": "disaggregated",
-           "pd_prefill_nodes": 2, "pd_decode_nodes": 2,
-           "pd_prefill_tp": 8, "pd_decode_tp": 8},
+        **{
+            **_DYNAMO_MIN_KWARGS,
+            "nodes": 1,
+            "pd_mode": "disaggregated",
+            "pd_prefill_nodes": 2,
+            "pd_decode_nodes": 2,
+            "pd_prefill_tp": 8,
+            "pd_decode_tp": 8,
+        },
     )
     assert b["dynamoOptions"]["serviceRoles"] == ["frontend", "prefill", "decode"]
     assert "multinodeRoles" not in b["dynamoOptions"]
@@ -689,9 +695,15 @@ def test_dynamo_body_pd_multinode_when_tp_exceeds_node():
     from inference_optimizer.multi_node._internal import workload_spec
 
     b = workload_spec.build_dynamo_workload_body(
-        **{**_DYNAMO_MIN_KWARGS, "nodes": 1, "pd_mode": "disaggregated",
-           "pd_prefill_nodes": 2, "pd_decode_nodes": 2,
-           "pd_prefill_tp": 16, "pd_decode_tp": 16},
+        **{
+            **_DYNAMO_MIN_KWARGS,
+            "nodes": 1,
+            "pd_mode": "disaggregated",
+            "pd_prefill_nodes": 2,
+            "pd_decode_nodes": 2,
+            "pd_prefill_tp": 16,
+            "pd_decode_tp": 16,
+        },
     )
     assert b["dynamoOptions"]["multinodeRoles"] == ["prefill", "decode"]
     assert b["resources"][1]["rdmaResource"] == "1k"
@@ -701,12 +713,14 @@ def test_dynamo_body_pd_multinode_when_tp_exceeds_node():
 def test_dynamo_discover_role_pods_groups_prefill_decode():
     from inference_optimizer.multi_node._internal import dynamo_support
 
-    wl = {"pods": [
-        {"podId": "x-frontend-a", "resourceId": 0, "podIP": "10.0.0.9"},
-        {"podId": "x-prefillworker-1", "resourceId": 1, "podIP": "10.0.1.1"},
-        {"podId": "x-prefillworker-0", "resourceId": 1, "podIP": "10.0.1.0"},
-        {"podId": "x-decodeworker-0", "resourceId": 2, "podIP": "10.0.2.0"},
-    ]}
+    wl = {
+        "pods": [
+            {"podId": "x-frontend-a", "resourceId": 0, "podIP": "10.0.0.9"},
+            {"podId": "x-prefillworker-1", "resourceId": 1, "podIP": "10.0.1.1"},
+            {"podId": "x-prefillworker-0", "resourceId": 1, "podIP": "10.0.1.0"},
+            {"podId": "x-decodeworker-0", "resourceId": 2, "podIP": "10.0.2.0"},
+        ]
+    }
     r = dynamo_support.discover_role_pods(wl)
     assert [p["podIP"] for p in r["prefill"]] == ["10.0.1.0", "10.0.1.1"]
     assert [p["podIP"] for p in r["decode"]] == ["10.0.2.0"]
@@ -723,8 +737,12 @@ def test_dynamo_disagg_flags_and_launch_args():
     assert dynamo_support.disagg_flags("bogus", "nixl") == ""
 
     la = dynamo_support.build_node_launch_args(
-        framework="sglang", model="/m", tp=8, nnodes=1,
-        disagg_mode="decode", kv_transfer_backend="nixl",
+        framework="sglang",
+        model="/m",
+        tp=8,
+        nnodes=1,
+        disagg_mode="decode",
+        kv_transfer_backend="nixl",
     )
     assert "--extra-args" in la and "decode" in la
 
@@ -752,12 +770,14 @@ def test_dynamo_body_vllm_backend_and_session_label():
 def test_dynamo_discover_worker_pods_excludes_frontend_sorts_by_ordinal():
     from inference_optimizer.multi_node._internal import dynamo_support
 
-    wl = {"pods": [
-        {"podId": "dyn-frontend-abc", "resourceId": 0, "podIP": "10.0.0.9"},
-        {"podId": "dyn-worker-1", "resourceId": 1, "podIP": "10.0.0.2"},
-        {"podId": "dyn-worker-0", "resourceId": 1, "podIP": "10.0.0.1"},
-        {"podId": "dyn-worker-pending", "resourceId": 1, "podIP": ""},
-    ]}
+    wl = {
+        "pods": [
+            {"podId": "dyn-frontend-abc", "resourceId": 0, "podIP": "10.0.0.9"},
+            {"podId": "dyn-worker-1", "resourceId": 1, "podIP": "10.0.0.2"},
+            {"podId": "dyn-worker-0", "resourceId": 1, "podIP": "10.0.0.1"},
+            {"podId": "dyn-worker-pending", "resourceId": 1, "podIP": ""},
+        ]
+    }
     w = dynamo_support.discover_worker_pods(wl)
     assert [p["podIP"] for p in w] == ["10.0.0.1", "10.0.0.2"]
     assert [p["lwsIndex"] for p in w] == [0, 1]
@@ -766,14 +786,10 @@ def test_dynamo_discover_worker_pods_excludes_frontend_sorts_by_ordinal():
 def test_dynamo_frontend_service_url_prefers_live_then_dns():
     from inference_optimizer.multi_node._internal import dynamo_support
 
+    assert dynamo_support.frontend_service_url("wid", "ws") == "http://wid.ws.svc.cluster.local:8000"
     assert (
-        dynamo_support.frontend_service_url("wid", "ws")
-        == "http://wid.ws.svc.cluster.local:8000"
-    )
-    assert (
-        dynamo_support.frontend_service_url(
-            "wid", "ws", {"clusterIp": "10.1.2.3", "port": 8000}
-        ) == "http://10.1.2.3:8000"
+        dynamo_support.frontend_service_url("wid", "ws", {"clusterIp": "10.1.2.3", "port": 8000})
+        == "http://10.1.2.3:8000"
     )
 
 
@@ -781,22 +797,34 @@ def test_dynamo_frontend_service_url_internal_domain_and_nested_port():
     from inference_optimizer.multi_node._internal import dynamo_support
 
     # internalDomain wins.
-    assert dynamo_support.frontend_service_url(
-        "w", "ns", {"internalDomain": "w.ns.svc.cluster.local:8000",
-                    "clusterIp": "1.2.3.4", "port": {"port": 8000}},
-    ) == "http://w.ns.svc.cluster.local:8000"
+    assert (
+        dynamo_support.frontend_service_url(
+            "w",
+            "ns",
+            {"internalDomain": "w.ns.svc.cluster.local:8000", "clusterIp": "1.2.3.4", "port": {"port": 8000}},
+        )
+        == "http://w.ns.svc.cluster.local:8000"
+    )
     # Nested port dict (SaFE shape) -> integer port, not the dict repr.
-    assert dynamo_support.frontend_service_url(
-        "w", "ns", {"clusterIp": "192.168.154.0",
-                    "port": {"protocol": "TCP", "port": 8000, "targetPort": 8000}},
-    ) == "http://192.168.154.0:8000"
+    assert (
+        dynamo_support.frontend_service_url(
+            "w",
+            "ns",
+            {"clusterIp": "192.168.154.0", "port": {"protocol": "TCP", "port": 8000, "targetPort": 8000}},
+        )
+        == "http://192.168.154.0:8000"
+    )
 
 
 def test_dynamo_build_node_launch_args_sglang_and_kill_only():
     from inference_optimizer.multi_node._internal import dynamo_support
 
     a = dynamo_support.build_node_launch_args(
-        framework="sglang", model="/m/x", tp=16, nnodes=2, ep=16,
+        framework="sglang",
+        model="/m/x",
+        tp=16,
+        nnodes=2,
+        ep=16,
         extra_args="--mem-fraction-static 0.7",
     )
     assert "--framework sglang" in a
@@ -806,7 +834,11 @@ def test_dynamo_build_node_launch_args_sglang_and_kill_only():
     assert "--extra-args" in a and "0.7" in a
 
     k = dynamo_support.build_node_launch_args(
-        framework="vllm", model="", tp=0, nnodes=2, kill_only=True,
+        framework="vllm",
+        model="",
+        tp=0,
+        nnodes=2,
+        kill_only=True,
     )
     assert "--kill-only" in k and "--framework vllm" in k
     assert "--model" not in k
@@ -841,8 +873,14 @@ def test_apply_patch_routes_to_dynamo_only_when_backend_dynamo(tmp_path, monkeyp
     monkeypatch.setattr(mn_cli, "_dynamo_apply_patch", lambda a: 4242)
 
     ns = argparse.Namespace(
-        patch_file="/p", target_path="/t", backup_dir="/b", kernel_id="k",
-        timeout_sec=60, print_logs=False, poll_interval=6, poll_timeout=110,
+        patch_file="/p",
+        target_path="/t",
+        backup_dir="/b",
+        kernel_id="k",
+        timeout_sec=60,
+        print_logs=False,
+        poll_interval=6,
+        poll_timeout=110,
     )
     sp.write_text('{"backend":"dynamo","nodes":2}', encoding="utf-8")
     assert mn_cli.cmd_apply_patch(ns) == 4242  # routed to dynamo
@@ -859,9 +897,14 @@ def test_kernel_bench_routes_to_dynamo_only_when_backend_dynamo(tmp_path, monkey
     monkeypatch.setattr(mn_cli, "_dynamo_kernel_bench", lambda a: 7777)
 
     ns = argparse.Namespace(
-        workspace="/w", bench_command="true", files_b64_json="{}",
-        result_glob="*.json", timeout_sec=60, print_logs=False,
-        poll_interval=6, poll_timeout=110,
+        workspace="/w",
+        bench_command="true",
+        files_b64_json="{}",
+        result_glob="*.json",
+        timeout_sec=60,
+        print_logs=False,
+        poll_interval=6,
+        poll_timeout=110,
     )
     sp.write_text('{"backend":"dynamo","nodes":2}', encoding="utf-8")
     assert mn_cli.cmd_kernel_bench(ns) == 7777
@@ -896,6 +939,7 @@ def test_install_oob_and_kernel_tools_noop_for_rayjob(tmp_path, monkeypatch):
 
 def _write_mn_state(tmp_path, monkeypatch, payload):
     import json as _json
+
     sp = tmp_path / "mn_state.json"
     sp.write_text(_json.dumps(payload), encoding="utf-8")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
@@ -907,21 +951,34 @@ def test_dynamo_ssh_env_empty_for_rayjob(tmp_path, monkeypatch):
     # placement path is left completely untouched.
     from inference_optimizer.orchestrator.action_executors import _multi_node_env
 
-    _write_mn_state(tmp_path, monkeypatch, {
-        "backend": "rayjob", "nodes": 2, "head_pod_ip": "10.0.0.1",
-        "ray_address": "10.0.0.1:6379",
-    })
+    _write_mn_state(
+        tmp_path,
+        monkeypatch,
+        {
+            "backend": "rayjob",
+            "nodes": 2,
+            "head_pod_ip": "10.0.0.1",
+            "ray_address": "10.0.0.1:6379",
+        },
+    )
     assert _multi_node_env.dynamo_ssh_env_from_state() == {}
 
 
 def test_dynamo_ssh_env_aggregated_picks_worker_pod(tmp_path, monkeypatch):
     from inference_optimizer.orchestrator.action_executors import _multi_node_env
 
-    _write_mn_state(tmp_path, monkeypatch, {
-        "backend": "dynamo", "nodes": 2, "pd_mode": "aggregated",
-        "worker_pod_ips": ["10.0.1.0", "10.0.1.1"],
-        "ssh_key_path": "/tmp/mn_ssh/k", "ssh_port": 2222,
-    })
+    _write_mn_state(
+        tmp_path,
+        monkeypatch,
+        {
+            "backend": "dynamo",
+            "nodes": 2,
+            "pd_mode": "aggregated",
+            "worker_pod_ips": ["10.0.1.0", "10.0.1.1"],
+            "ssh_key_path": "/tmp/mn_ssh/k",
+            "ssh_port": 2222,
+        },
+    )
     env = _multi_node_env.dynamo_ssh_env_from_state()
     assert env["KERNEL_AGENT_GPU_PLACEMENT"] == "ssh"
     assert env["MN_SSH_HOST"] == "10.0.1.0"
@@ -932,11 +989,19 @@ def test_dynamo_ssh_env_aggregated_picks_worker_pod(tmp_path, monkeypatch):
 def test_dynamo_ssh_env_pd_picks_prefill_then_decode(tmp_path, monkeypatch):
     from inference_optimizer.orchestrator.action_executors import _multi_node_env
 
-    _write_mn_state(tmp_path, monkeypatch, {
-        "backend": "dynamo", "nodes": 2, "pd_mode": "disaggregated",
-        "prefill_pod_ips": ["10.0.2.0"], "decode_pod_ips": ["10.0.3.0"],
-        "ssh_key_path": "/tmp/mn_ssh/k", "ssh_port": 2222,
-    })
+    _write_mn_state(
+        tmp_path,
+        monkeypatch,
+        {
+            "backend": "dynamo",
+            "nodes": 2,
+            "pd_mode": "disaggregated",
+            "prefill_pod_ips": ["10.0.2.0"],
+            "decode_pod_ips": ["10.0.3.0"],
+            "ssh_key_path": "/tmp/mn_ssh/k",
+            "ssh_port": 2222,
+        },
+    )
     env = _multi_node_env.dynamo_ssh_env_from_state()
     assert env["MN_SSH_HOST"] == "10.0.2.0"  # prefill first
 
@@ -944,10 +1009,16 @@ def test_dynamo_ssh_env_pd_picks_prefill_then_decode(tmp_path, monkeypatch):
 def test_dynamo_ssh_env_empty_without_pods_or_key(tmp_path, monkeypatch):
     from inference_optimizer.orchestrator.action_executors import _multi_node_env
 
-    _write_mn_state(tmp_path, monkeypatch, {
-        "backend": "dynamo", "nodes": 2, "worker_pod_ips": [],
-        "ssh_key_path": "/tmp/k",
-    })
+    _write_mn_state(
+        tmp_path,
+        monkeypatch,
+        {
+            "backend": "dynamo",
+            "nodes": 2,
+            "worker_pod_ips": [],
+            "ssh_key_path": "/tmp/k",
+        },
+    )
     assert _multi_node_env.dynamo_ssh_env_from_state() == {}
 
 

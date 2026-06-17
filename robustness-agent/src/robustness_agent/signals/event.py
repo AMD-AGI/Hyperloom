@@ -166,10 +166,7 @@ def _delegated_failure_symptoms(
             Symptom(
                 name="repeated_failure",
                 severity=SymptomSeverity.MEDIUM,
-                summary=(
-                    f"action family {family!r} failed {count} times "
-                    f"(>= {cfg.delegated_failure_threshold})"
-                ),
+                summary=(f"action family {family!r} failed {count} times (>= {cfg.delegated_failure_threshold})"),
                 evidence={
                     "family": family,
                     "count": count,
@@ -204,6 +201,7 @@ def _idempotency_replay_symptoms(
         return []
     import hashlib  # local — avoid module-level cost for runs without delegates
     import json
+
     grouped: dict[tuple[str, str], set[str]] = {}
     samples: dict[tuple[str, str], dict[str, Any]] = {}
     for item in ctx.inbox:
@@ -281,7 +279,7 @@ def _recover_unsuccessful_symptoms(
     Returns:
         A list with one :class:`Symptom` when it fires, else empty.
     """
-    head = events[-cfg.recover_lookback_events:] if events else []
+    head = events[-cfg.recover_lookback_events :] if events else []
     latest: dict[str, Any] | None = None
     for ev in head:
         if ev.get("topic") != "delegated_result":
@@ -320,9 +318,7 @@ def _recover_unsuccessful_symptoms(
             },
             subject={},  # session-wide; cooldown collapses across ticks
             source="coordinator_events",
-            suggestion=(
-                "delegate(report) to finalize at the last validated gain"
-            ),
+            suggestion=("delegate(report) to finalize at the last validated gain"),
         )
     ]
 
@@ -354,6 +350,7 @@ def _is_recover_payload(payload: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 # Normalisation helpers
 # ---------------------------------------------------------------------------
+
 
 def _normalise_inbox(inbox: list[InboxItem]) -> list[dict[str, Any]]:
     """Convert inbox items to the common event-dict shape used by the rules.

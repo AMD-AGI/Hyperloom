@@ -320,9 +320,7 @@ class DegradeRouter:
                 data.sources_used = [*data.sources_used, self._fallback.name]
             primary_state = self._states[self._primary.name]
             if primary_state.state is HealthState.DEGRADED and not data.degraded_reason:
-                data.degraded_reason = (
-                    f"primary {self._primary.name} degraded; using {self._fallback.name}"
-                )
+                data.degraded_reason = f"primary {self._primary.name} degraded; using {self._fallback.name}"
             return data
 
     # -- state machine helpers ------------------------------------------
@@ -376,10 +374,7 @@ class DegradeRouter:
         """
         state.fail_streak += 1
         state.last_recheck = self._clock()
-        if (
-            state.state is HealthState.HEALTHY
-            and state.fail_streak >= self._fail_threshold
-        ):
+        if state.state is HealthState.HEALTHY and state.fail_streak >= self._fail_threshold:
             self._maybe_log_transition(state, HealthState.DEGRADED, reason)
             state.state = HealthState.DEGRADED
 
@@ -414,6 +409,7 @@ class DegradeRouter:
 # ---------------------------------------------------------------------------
 # Helpers used by source implementations
 # ---------------------------------------------------------------------------
+
 
 async def call_with_timeout(
     coro_factory: Callable[[], Awaitable[Any]],

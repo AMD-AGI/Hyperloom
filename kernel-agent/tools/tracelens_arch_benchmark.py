@@ -76,6 +76,7 @@ def _get_check_gpu_idle():
         check_gpu_idle = _fn
     return check_gpu_idle
 
+
 MICROBENCH_WARMUP = 20
 MICROBENCH_REP = 50
 
@@ -128,9 +129,7 @@ def list_candidate_physical_gpus() -> list[int]:
     return []
 
 
-def single_physical_gpu_env(
-    physical_id: int, *, base_env: dict[str, str] | None = None
-) -> dict[str, str]:
+def single_physical_gpu_env(physical_id: int, *, base_env: dict[str, str] | None = None) -> dict[str, str]:
     """Build a subprocess env that exposes exactly one physical GPU.
 
     Args:
@@ -147,9 +146,7 @@ def single_physical_gpu_env(
     return env
 
 
-def select_idle_gpu(
-    *, log: Callable[[str], None] | None = None, util_threshold: int = 5
-) -> int:
+def select_idle_gpu(*, log: Callable[[str], None] | None = None, util_threshold: int = 5) -> int:
     """Pick an unoccupied GPU for the arch microbenchmark subprocess.
 
     Args:
@@ -169,9 +166,7 @@ def select_idle_gpu(
 
     candidates = list_candidate_physical_gpus()
     if not candidates:
-        raise RuntimeError(
-            "gpu_arch_benchmark found no GPUs; cannot run arch microbenchmark"
-        )
+        raise RuntimeError("gpu_arch_benchmark found no GPUs; cannot run arch microbenchmark")
 
     busy_reports: list[str] = []
     for logical_idx, physical_id in enumerate(candidates):
@@ -181,17 +176,11 @@ def select_idle_gpu(
                 if len(candidates) == 1:
                     log(f"gpu_arch_json: using idle GPU {physical_id} ({msg})")
                 else:
-                    log(
-                        "gpu_arch_json: selected idle GPU "
-                        f"{physical_id} from candidates {candidates} ({msg})"
-                    )
+                    log(f"gpu_arch_json: selected idle GPU {physical_id} from candidates {candidates} ({msg})")
             return physical_id
         busy_reports.append(f"GPU {physical_id}: {msg}")
 
-    raise RuntimeError(
-        "gpu_arch_benchmark found no unoccupied GPU among "
-        f"{candidates}. {'; '.join(busy_reports)}"
-    )
+    raise RuntimeError(f"gpu_arch_benchmark found no unoccupied GPU among {candidates}. {'; '.join(busy_reports)}")
 
 
 def resolve_arch_json_path(platform: str) -> Path | None:
@@ -227,11 +216,7 @@ def default_arch_output_path(tracelens_root: Path, platform: str) -> Path:
         The conventional ``.../arch/<PLATFORM>.json`` path.
     """
     canonical = normalize_platform(platform)
-    return (
-        tracelens_root
-        / "TraceLens/Agent/Analysis/utils/arch"
-        / f"{canonical}.json"
-    )
+    return tracelens_root / "TraceLens/Agent/Analysis/utils/arch" / f"{canonical}.json"
 
 
 def _sanitize_measured_arch_spec(
@@ -357,10 +342,7 @@ def populate_gpu_arch_json(
                 f"{existing} (MAF backfilled by extension)"
             )
             return existing
-        log(
-            "gpu_arch_json: internal extension enabled; MAF backfilled by "
-            "extension, skipping microbenchmark"
-        )
+        log("gpu_arch_json: internal extension enabled; MAF backfilled by extension, skipping microbenchmark")
         return None
 
     existing = resolve_arch_json_path(platform)
@@ -370,9 +352,7 @@ def populate_gpu_arch_json(
 
     canonical = normalize_platform(platform)
     if not canonical:
-        raise RuntimeError(
-            "target platform is empty; cannot resolve or generate gpu arch JSON"
-        )
+        raise RuntimeError("target platform is empty; cannot resolve or generate gpu arch JSON")
 
     out_path = default_arch_output_path(tracelens_root, canonical)
     log(
@@ -402,13 +382,9 @@ def populate_gpu_arch_json(
         env=single_physical_gpu_env(physical_id),
     )
     if rc != 0:
-        raise RuntimeError(
-            f"gpu arch microbenchmark failed with exit code {rc}; see log for details"
-        )
+        raise RuntimeError(f"gpu arch microbenchmark failed with exit code {rc}; see log for details")
     if not out_path.is_file():
-        raise RuntimeError(
-            f"gpu arch microbenchmark finished but output is missing: {out_path}"
-        )
+        raise RuntimeError(f"gpu arch microbenchmark finished but output is missing: {out_path}")
 
     payload = json.loads(out_path.read_text(encoding="utf-8"))
     changed = False
@@ -419,9 +395,7 @@ def populate_gpu_arch_json(
 
     # Reject / sanitize a spec with 0 (unmeasured) MAF or bandwidth before
     # roofline consumes it as a divisor (#390).
-    changed = _sanitize_measured_arch_spec(
-        payload, platform=canonical, out_path=out_path, log=log
-    ) or changed
+    changed = _sanitize_measured_arch_spec(payload, platform=canonical, out_path=out_path, log=log) or changed
 
     if changed:
         out_path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")

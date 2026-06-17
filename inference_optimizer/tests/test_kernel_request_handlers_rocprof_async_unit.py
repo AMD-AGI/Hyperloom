@@ -3,6 +3,7 @@
 """Coverage for the after-kernel-opt rocprof roofline flow in
 ``kernel_request_handlers``: env gating, state resolution, tool/subprocess
 failure branches, the happy path, and background scheduling."""
+
 from __future__ import annotations
 
 import asyncio
@@ -29,7 +30,9 @@ def _state_with_test_command(session_dir: Path, kernel_id: str, cmd: str) -> Non
 async def test_run_after_kernel_opt_rocprof_disabled_by_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_ROCPROF_ROOFLINE", "0")
     out = await krh._run_after_kernel_opt_rocprof(
-        kernel_id="k1", session_dir=tmp_path, log=log,
+        kernel_id="k1",
+        session_dir=tmp_path,
+        log=log,
     )
     assert out == {"status": "skipped", "reason": "disabled_by_env"}
 
@@ -38,7 +41,9 @@ async def test_run_after_kernel_opt_rocprof_disabled_by_env(tmp_path, monkeypatc
 async def test_run_after_kernel_opt_rocprof_no_test_command(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_ROCPROF_ROOFLINE", "1")
     out = await krh._run_after_kernel_opt_rocprof(
-        kernel_id="k1", session_dir=tmp_path, log=log,
+        kernel_id="k1",
+        session_dir=tmp_path,
+        log=log,
     )
     assert out["status"] == "skipped"
     assert out["reason"] == "no_test_command_in_state"
@@ -54,10 +59,13 @@ async def test_run_after_kernel_opt_rocprof_tool_unavailable(tmp_path, monkeypat
 
     monkeypatch.setattr(krh, "_kernel_agent_tool_path", _boom)
     out = await krh._run_after_kernel_opt_rocprof(
-        kernel_id="k1", session_dir=tmp_path, log=log,
+        kernel_id="k1",
+        session_dir=tmp_path,
+        log=log,
     )
     assert out == {
-        "status": "skipped", "reason": "rocprof_roofline_tool_unavailable",
+        "status": "skipped",
+        "reason": "rocprof_roofline_tool_unavailable",
     }
 
 
@@ -73,7 +81,9 @@ async def test_run_after_kernel_opt_rocprof_subprocess_error(tmp_path, monkeypat
 
     monkeypatch.setattr(krh, "_run_subprocess", _raise)
     out = await krh._run_after_kernel_opt_rocprof(
-        kernel_id="k1", session_dir=tmp_path, log=log,
+        kernel_id="k1",
+        session_dir=tmp_path,
+        log=log,
     )
     assert out["status"] == "failed"
     assert "RuntimeError" in out["reason"]
@@ -95,7 +105,9 @@ async def test_run_after_kernel_opt_rocprof_happy_path(tmp_path, monkeypatch):
 
     monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
     out = await krh._run_after_kernel_opt_rocprof(
-        kernel_id="k1", session_dir=tmp_path, log=log,
+        kernel_id="k1",
+        session_dir=tmp_path,
+        log=log,
     )
     assert out["status"] == "ok"
     assert out["json_path"].endswith("after.json")
@@ -105,7 +117,9 @@ async def test_run_after_kernel_opt_rocprof_happy_path(tmp_path, monkeypatch):
 async def test_schedule_after_kernel_opt_rocprof_disabled(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_ROCPROF_ROOFLINE", "off")
     out = krh._schedule_after_kernel_opt_rocprof(
-        kernel_id="k1", session_dir=tmp_path, log=log,
+        kernel_id="k1",
+        session_dir=tmp_path,
+        log=log,
     )
     assert out == {"status": "skipped", "reason": "disabled_by_env"}
 
@@ -114,7 +128,9 @@ async def test_schedule_after_kernel_opt_rocprof_disabled(tmp_path, monkeypatch)
 async def test_schedule_after_kernel_opt_rocprof_scheduled(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_ROCPROF_ROOFLINE", "1")
     out = krh._schedule_after_kernel_opt_rocprof(
-        kernel_id="k1", session_dir=tmp_path, log=log,
+        kernel_id="k1",
+        session_dir=tmp_path,
+        log=log,
     )
     assert out == {"status": "scheduled", "reason": "background_task"}
     # Drain the spawned background task (it short-circuits on no_test_command).

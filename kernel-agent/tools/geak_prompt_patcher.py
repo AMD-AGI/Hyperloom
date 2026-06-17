@@ -74,7 +74,10 @@ def _atomic_write(target: Path, content: str) -> None:
         content: Text to write.
     """
     with tempfile.NamedTemporaryFile(
-        "w", dir=str(target.parent), delete=False, encoding="utf-8",
+        "w",
+        dir=str(target.parent),
+        delete=False,
+        encoding="utf-8",
     ) as tmp:
         tmp.write(content)
         tmp_path = Path(tmp.name)
@@ -107,9 +110,7 @@ def ensure_geak_prompt_patched() -> tuple[bool, str]:
     if _UPSTREAM_FIXED_MARKER in text:
         return True, f"upstream already fixed (uses generic placeholders): {yaml_path}"
     if _OLD_BLOCK not in text:
-        return False, (
-            f"upstream example block changed; manual review required: {yaml_path}"
-        )
+        return False, (f"upstream example block changed; manual review required: {yaml_path}")
     patched = text.replace(_OLD_BLOCK, _NEW_BLOCK, 1)
     if patched == text:
         return False, f"replace produced no change: {yaml_path}"

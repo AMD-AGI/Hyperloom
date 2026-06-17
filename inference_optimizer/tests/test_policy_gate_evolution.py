@@ -8,7 +8,8 @@ import pytest
 
 from inference_optimizer.orchestrator.agent_role import default_role_registry
 from inference_optimizer.protocol.intent import (
-    Intent, IntentType,
+    Intent,
+    IntentType,
 )
 from inference_optimizer.orchestrator.policy import (
     ALL_KNOWN_EXTERNAL_TOOL_NAMES,
@@ -50,20 +51,13 @@ def test_tool_registry_constants_are_disjoint():
         ("WEB", WEB_TOOL_NAMES),
     ]
     for i, (n1, a) in enumerate(pairs):
-        for n2, b in pairs[i + 1:]:
+        for n2, b in pairs[i + 1 :]:
             overlap = a & b
-            assert not overlap, (
-                f"{n1} and {n2} tool sets overlap: {overlap!r}"
-            )
+            assert not overlap, f"{n1} and {n2} tool sets overlap: {overlap!r}"
 
 
 def test_all_known_external_tool_names_equals_union():
-    expected = (
-        KB_WRITE_TOOL_NAMES
-        | CORTEX_KB_READ_TOOL_NAMES
-        | PR_MONITOR_TOOL_NAMES
-        | WEB_TOOL_NAMES
-    )
+    expected = KB_WRITE_TOOL_NAMES | CORTEX_KB_READ_TOOL_NAMES | PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES
     assert ALL_KNOWN_EXTERNAL_TOOL_NAMES == expected
 
 
@@ -86,16 +80,25 @@ def test_primary_roles_have_empty_external_tool_set():
 def test_no_tools_are_phase_restricted():
     """No tool carries a phase restriction — role isolation is the only R5 gate."""
     from inference_optimizer.orchestrator import policy as policy_mod
+
     assert not hasattr(policy_mod, "PHASE_RESTRICTED_TOOLS")
 
 
 # 2. R4 — kb_write_unauthorized via validate_tool_invocation
 @pytest.mark.parametrize("write_tool", sorted(KB_WRITE_TOOL_NAMES))
-@pytest.mark.parametrize("role_name", [
-    "specialist", "orchestration", "kernel", "critic", "robustness",
-])
+@pytest.mark.parametrize(
+    "role_name",
+    [
+        "specialist",
+        "orchestration",
+        "kernel",
+        "critic",
+        "robustness",
+    ],
+)
 def test_validate_tool_invocation_blocks_kb_writes_for_every_role(
-    write_tool: str, role_name: str,
+    write_tool: str,
+    role_name: str,
 ):
     gate = _gate()
     with pytest.raises(PolicyDenied) as excinfo:
@@ -112,9 +115,12 @@ def test_validate_tool_invocation_empty_tool_name():
 
 
 # 3. R5 — tool_whitelist_role
-@pytest.mark.parametrize("read_tool", sorted(
-    CORTEX_KB_READ_TOOL_NAMES | PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES,
-))
+@pytest.mark.parametrize(
+    "read_tool",
+    sorted(
+        CORTEX_KB_READ_TOOL_NAMES | PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES,
+    ),
+)
 def test_validate_tool_invocation_blocks_readonly_external_tools_for_non_specialist(
     read_tool: str,
 ):
@@ -127,11 +133,7 @@ def test_validate_tool_invocation_blocks_readonly_external_tools_for_non_special
 
 def test_specialist_can_invoke_readonly_external_tools_in_explore():
     gate = _gate(_State(phase="EXPLORE"))
-    for tool in (
-        sorted(CORTEX_KB_READ_TOOL_NAMES)
-        + sorted(PR_MONITOR_TOOL_NAMES)
-        + sorted(WEB_TOOL_NAMES)
-    ):
+    for tool in sorted(CORTEX_KB_READ_TOOL_NAMES) + sorted(PR_MONITOR_TOOL_NAMES) + sorted(WEB_TOOL_NAMES):
         gate.validate_tool_invocation(tool, source_role="specialist")
 
 
@@ -139,7 +141,8 @@ def test_specialist_can_invoke_readonly_external_tools_in_explore():
 @pytest.mark.parametrize("web_tool", sorted(WEB_TOOL_NAMES))
 @pytest.mark.parametrize("phase", ["PRELUDE", "EXPLORE", "KERNEL", "SWEEP", "CLOSE"])
 def test_specialist_web_tools_allowed_in_any_phase(
-    web_tool: str, phase: str,
+    web_tool: str,
+    phase: str,
 ):
     gate = _gate(_State(phase=phase))
     gate.validate_tool_invocation(web_tool, source_role="specialist")
@@ -158,12 +161,16 @@ def test_validate_tool_invocation_phase_argument_is_noop():
     gate = _gate()
     gate.validate_tool_invocation("WebSearch", source_role="specialist")
     gate.validate_tool_invocation(
-        "WebSearch", source_role="specialist", phase="KERNEL",
+        "WebSearch",
+        source_role="specialist",
+        phase="KERNEL",
     )
     # Role isolation still applies regardless of phase.
     with pytest.raises(PolicyDenied) as excinfo:
         gate.validate_tool_invocation(
-            "WebSearch", source_role="orchestration", phase="EXPLORE",
+            "WebSearch",
+            source_role="orchestration",
+            phase="EXPLORE",
         )
     assert excinfo.value.rule == "tool_whitelist_role"
 
