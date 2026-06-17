@@ -646,7 +646,7 @@ def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
 
 def test_normalize_upstream_category_handles_moe_aux_and_collective():
     """New mappings: MoE_aux -> MoE and CustomCollective -> Communication normalize cleanly."""
-    from tracelens_skill_runner import normalize_upstream_category
+    normalize_upstream_category = tlr.normalize_upstream_category
 
     assert normalize_upstream_category("MoE_aux") == "MoE"
     assert normalize_upstream_category("moe_aux") == "MoE"

@@ -334,6 +334,11 @@ def run_via_cli(
     # Per-attempt compile caches (see isolated_compile_cache_env).
     child_env = isolated_compile_cache_env(output_dir, base_env=child_env)
     started = time.time()
+    # Bound before the try so the TimeoutExpired handler's ``"cmd": cmd`` is
+    # never a use of an uninitialized local if _build_cmd raises (CodeQL
+    # py/uninitialized-local-variable). The ValueError handler still catches a
+    # _build_cmd failure exactly as before.
+    cmd: list[str] = []
     try:
         cmd = _build_cmd(
             prompt_file,

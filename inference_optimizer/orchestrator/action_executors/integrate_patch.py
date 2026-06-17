@@ -101,15 +101,41 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _resolve_framework_root(explicit: str | None) -> Path | None:
+def _root_contains_patch_targets(root: Path, patch_paths: list[Path]) -> bool:
+    """True when *every* supplied patch has all its modify/delete targets
+    present under ``root`` (at some ``-p`` strip level).
+
+    A patch only applies in the package tree that actually contains the files
+    it edits; ``vllm/...`` patches can never apply under the ``aiter`` root.
+    Returns False if any patch is unreadable or has a missing target here.
+    """
+    if not patch_paths:
+        return False
+    for patch in patch_paths:
+        try:
+            text = patch.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        if patch_targets_missing(text, root):
+            return False
+    return True
+
+
+def _resolve_framework_root(
+    explicit: str | None, patch_paths: list[Path] | None = None,
+) -> Path | None:
     """Pick the framework source root for patches.
 
-    Precedence: explicit param → first existing
-    ``resolve_source_file_allowlist()`` entry. None when nothing resolves.
+    Precedence: explicit param → first allowlist root whose tree actually
+    contains the patch targets (target-aware: a ``vllm/...`` patch must apply
+    under the vllm root, not the first allowlist entry which is ``aiter``) →
+    first existing git root → first existing dir. None when nothing resolves.
 
     Args:
         explicit: Explicit framework-root override, or ``None`` to use the
             allowlist.
+        patch_paths: Patch target paths used to pick the allowlist root whose
+            tree actually contains them.
 
     Returns:
         The resolved framework source root, or ``None`` when nothing resolves.
@@ -122,13 +148,17 @@ def _resolve_framework_root(explicit: str | None) -> Path | None:
             "integrate_patch: framework_source_root override %r does not exist; falling back to allowlist",
             explicit,
         )
-    for root in resolve_source_file_allowlist():
-        p = Path(root)
+    roots = [Path(r) for r in resolve_source_file_allowlist()]
+    # Target-aware: prefer the root that actually holds the patch's targets.
+    if patch_paths:
+        for p in roots:
+            if p.is_dir() and _root_contains_patch_targets(p, patch_paths):
+                return p
+    for p in roots:
         if p.is_dir() and (p / ".git").exists():
             return p
     # Last resort: a non-git dir (prefer surfacing as clean apply_failed).
-    for root in resolve_source_file_allowlist():
-        p = Path(root)
+    for p in roots:
         if p.is_dir():
             return p
     return None
@@ -435,22 +465,31 @@ def _patch_touched_paths(
     framework_root: Path,
     patches: list[Path],
 ) -> list[str]:
-    """Repo-relative paths the applied ``patches`` modified/created.
+    """Repo-relative paths the applied ``patches`` created / modified / deleted.
 
     Used to scope the commit-on-KEEP to *only* the files this patch touched, so
     an unrelated dirty working tree under ``framework_root`` (generated files,
     manual edits, stray artifacts) is never swept into the ``hyperloom KEEP``
-    commit. Only paths that exist post-apply are emitted (pure deletions, the
-    rare KEEP shape, are skipped) so the subsequent ``git add`` pathspec can
-    never miss and silently stage nothing for the whole set.
+    commit.
+
+    Per header pair (``old`` ``---``, ``new`` ``+++``):
+      * created / modified → the ``new`` target exists post-apply → emit it.
+      * deleted (Issue 6) → ``new`` is ``/dev/null`` (or its target is gone)
+        and ``old`` existed pre-apply → emit the ``old`` path so the subsequent
+        ``git add -A -- <path>`` stages the *removal* of a tracked file.
+        Without this a pure-deletion KEEP committed nothing, and a later cycle's
+        ``git checkout -- .`` REVERT resurrected the deleted file.
+    A header that resolves to neither (matches nothing pre or post) is dropped
+    so ``git add`` cannot error on a bogus pathspec.
 
     Args:
         framework_root: The git checkout the patches were applied into.
         patches: The applied patch files to inspect.
 
     Returns:
-        The repo-relative paths the patches modified/created that exist
-        post-apply.
+        The repo-relative paths the patches created/modified (existing
+        post-apply) plus the old paths of pure deletions, so the subsequent
+        ``git add`` stages removals too.
     """
     out: list[str] = []
     for patch in patches:
@@ -463,17 +502,26 @@ def _patch_touched_paths(
             continue
         lvl = _commit_strip_level(framework_root, pairs)
         for old, new in pairs:
-            for raw in (new, old):
-                if not raw or raw == _PATCH_DEV_NULL:
-                    continue
-                rel = _strip_path_prefix(raw, lvl)
-                try:
-                    exists = (framework_root / rel).exists()
-                except OSError:
-                    exists = False
-                if exists and rel not in out:
-                    out.append(rel)
-                    break  # one resolved path per header pair
+            rel_new = (
+                _strip_path_prefix(new, lvl)
+                if new and new != _PATCH_DEV_NULL else None
+            )
+            rel_old = (
+                _strip_path_prefix(old, lvl)
+                if old and old != _PATCH_DEV_NULL else None
+            )
+            try:
+                new_exists = bool(rel_new) and (framework_root / rel_new).exists()
+            except OSError:
+                new_exists = False
+            if rel_new and new_exists:
+                # Created or modified — the post-apply file is on disk.
+                if rel_new not in out:
+                    out.append(rel_new)
+            elif rel_old:
+                # Deletion — new target is gone; stage the removal of old.
+                if rel_old not in out:
+                    out.append(rel_old)
     return out
 
 
@@ -547,6 +595,15 @@ def _git_commit_kept(
     return False, cp.stderr.strip()
 
 
+def _is_within(child: Path, root: Path) -> bool:
+    """True iff ``child`` is ``root`` or nested under it (both pre-resolved)."""
+    try:
+        child.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def _resolve_patch_paths(
     *,
     specialist_workspace: Path,
@@ -558,6 +615,13 @@ def _resolve_patch_paths(
     Order: ``params.patches`` → ``specialist_done.patches_written`` →
     filesystem scan of ``specialist_workspace/{worktree/,}patches/``.
     Entries normalised to absolute Paths; missing ones logged + dropped.
+
+    Security (Issue 5a): a resolved patch path must live inside the specialist
+    workspace (or its worktree). ``params.patches`` is LLM-/specialist-
+    controllable, so an absolute path pointing outside the sandbox (another
+    session's patch, ``/etc/...``) is dropped — otherwise it would be read and
+    ``git apply``-ed against the framework tree. Both sides are ``resolve()``-d
+    first so a legitimately symlinked workspace still matches.
 
     Args:
         specialist_workspace: The specialist task workspace to resolve
@@ -584,6 +648,11 @@ def _resolve_patch_paths(
                 for p in sorted(base.glob("*.diff")):
                     candidates.append(str(p))
 
+    allowed_roots = [
+        (specialist_workspace / "worktree").resolve(),
+        specialist_workspace.resolve(),
+    ]
+
     out: list[Path] = []
     for c in candidates:
         p = Path(c)
@@ -604,7 +673,15 @@ def _resolve_patch_paths(
                 specialist_workspace,
             )
             continue
-        out.append(p.resolve())
+        resolved = p.resolve()
+        if not any(_is_within(resolved, root) for root in allowed_roots):
+            log.warning(
+                "integrate_patch: patch %r resolves outside the specialist "
+                "workspace (%s); dropping for safety",
+                c, specialist_workspace,
+            )
+            continue
+        out.append(resolved)
     return out
 
 
@@ -762,6 +839,7 @@ class IntegratePatchExecutor:
 
         framework_root = _resolve_framework_root(
             params.get("framework_source_root") or None,
+            patch_paths=patch_paths,
         )
         # Pure config_changes path works without a framework root.
         if patch_paths and framework_root is None:

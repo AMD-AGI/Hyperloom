@@ -100,18 +100,28 @@ setsid nohup inference_optimizer --verbose optimize \
 echo $! > "$PID_FILE"
 ```
 
-`setsid nohup ... &` is required for runs longer than 5 minutes. After launch,
-locate the optimizer with `pgrep -af 'inference_optimizer.*optimize'`; `$!` may
-be only a wrapper PID.
+`setsid nohup ... &` is required for runs longer than 5 minutes. The `$!`
+written above is the **setsid wrapper** PID, which exits immediately — the
+robustness monitor reads `$PID_FILE` and would misfire a spurious `--resume` if
+it kept the dead wrapper PID. After launch, reconcile `$PID_FILE` to the **real**
+optimizer PID, which the CLI records as `.pid` in the launch-info JSON.
 
-Health-check after 30 seconds:
+Health-check after 30 seconds (the launch-info JSON carries the authoritative
+`.pid` and `.session_dir`; `jq` is not guaranteed on every node, so fall back to
+a tiny `python3` reader):
 
 ```bash
 sleep 30
-pid="$(cat "$PID_FILE")"
-test -d "/proc/$pid" && echo "optimizer_alive=true pid=$pid"
+read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
 
-SESSION_DIR="$(jq -r '.session_dir // empty' "$LAUNCH_INFO_FILE" 2>/dev/null)"
+# Real optimizer PID (NOT the setsid wrapper in $!): take it from launch-info
+# and rewrite $PID_FILE so the monitor watches the right process.
+REAL_PID="$(read_json "$LAUNCH_INFO_FILE" pid)"
+[ -z "$REAL_PID" ] && REAL_PID="$(pgrep -f 'inference_optimizer .*optimize' | head -1)"
+[ -n "$REAL_PID" ] && echo "$REAL_PID" > "$PID_FILE"
+test -d "/proc/$REAL_PID" && echo "optimizer_alive=true pid=$REAL_PID"
+
+SESSION_DIR="$(read_json "$LAUNCH_INFO_FILE" session_dir)"
 if [ -z "$SESSION_DIR" ]; then
   echo "ERROR: no .session_dir in $LAUNCH_INFO_FILE; inspect HYPERLOOM_LAUNCH and $RUN_LOG" >&2
   return 1 2>/dev/null || exit 1
