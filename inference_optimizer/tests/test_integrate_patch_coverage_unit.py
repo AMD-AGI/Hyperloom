@@ -97,7 +97,10 @@ async def test_no_framework_root(tmp_path, monkeypatch):
     session = tmp_path / "s"
     session.mkdir()
     _write_workspace(session, "spec")
-    monkeypatch.setattr(ip, "_resolve_framework_root", lambda explicit: None)
+    monkeypatch.setattr(
+        ip, "_resolve_framework_root",
+        lambda explicit, patch_paths=None: None,
+    )
     ex = IntegratePatchExecutor(session_dir=session)
     res = await ex(_make_ctx("t", {"specialist_task_id": "spec"}))
     assert res["status"] == "apply_failed"

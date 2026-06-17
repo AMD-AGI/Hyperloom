@@ -29,6 +29,7 @@ import yaml
 
 from ...paths import asset_root
 from ._grid_runner import (
+    compact_json_server_args,
     dedup_vllm_server_args,
     inject_sglang_attention_backend,
     inject_sglang_context_length,
@@ -608,6 +609,17 @@ def materialize_config_with_envs(
     #    duplicate. Collapse repeated single-value flags to last-wins (so the
     #    variant override survives); no-op for sglang.
     resolved_server_args = dedup_vllm_server_args(
+        resolved_server_args, bench.get("framework"),
+    )
+    # 6. JSON-valued flags (--speculative-config / --compilation-config /
+    #    --hf-overrides ...): Magpie expands $EXTRA_VLLM_ARGS UNQUOTED, so a JSON
+    #    value with the conventional separator spaces ('{"k": v}') is word-split
+    #    by the shell and the server dies at boot. Compact each JSON blob to be
+    #    space-free (string-internal spaces preserved) so it survives as one
+    #    shell word — otherwise spec-decode / compilation-config explore variants
+    #    can never be evaluated. No-op for sglang and for arg strings with no
+    #    JSON.
+    resolved_server_args = compact_json_server_args(
         resolved_server_args, bench.get("framework"),
     )
     if resolved_server_args:

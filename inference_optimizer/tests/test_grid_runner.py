@@ -1085,3 +1085,56 @@ class TestDedupVllmServerArgs:
         # cuda-graph-bs takes a list; never collapse a string that carries one.
         raw = "--attention-backend A --cuda-graph-bs 1 2 4 8 --attention-backend B"
         assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+
+
+class TestCompactJsonServerArgs:
+    """JSON-valued flags must be space-free to survive Magpie's unquoted
+    ``$EXTRA_VLLM_ARGS`` splice (otherwise spec-decode / compilation-config
+    explore variants always crash the server at boot)."""
+
+    def test_compilation_config_separator_space_removed(self):
+        out = _grid_runner.compact_json_server_args(
+            '--compilation-config {"full_cuda_graph": true}', "vllm"
+        )
+        assert out == '--compilation-config {"full_cuda_graph":true}'
+        # the JSON value is now a single shell word under bash word-splitting
+        assert len(out.split()) == 2
+
+    def test_speculative_config_multikey(self):
+        out = _grid_runner.compact_json_server_args(
+            '--speculative-config {"method": "eagle", "num_speculative_tokens": 3}',
+            "vllm",
+        )
+        assert out == (
+            '--speculative-config {"method":"eagle","num_speculative_tokens":3}'
+        )
+        assert len(out.split()) == 2
+
+    def test_string_internal_space_preserved(self):
+        # json.dumps keeps spaces INSIDE string values; only separators shrink.
+        out = _grid_runner.compact_json_server_args(
+            '--speculative-config {"model": "draft model name"}', "vllm"
+        )
+        assert out == '--speculative-config {"model":"draft model name"}'
+
+    def test_other_flags_around_json_untouched(self):
+        out = _grid_runner.compact_json_server_args(
+            '--kv-cache-dtype fp8 --compilation-config {"level": 3}', "vllm"
+        )
+        assert out == '--kv-cache-dtype fp8 --compilation-config {"level":3}'
+
+    def test_sglang_is_noop(self):
+        raw = '--speculative-config {"method": "eagle"}'
+        assert _grid_runner.compact_json_server_args(raw, "sglang") == raw
+
+    def test_no_json_is_noop(self):
+        raw = "--block-size 128 --no-enable-prefix-caching"
+        assert _grid_runner.compact_json_server_args(raw, "vllm") == raw
+
+    def test_malformed_json_left_verbatim(self):
+        raw = "--compilation-config {not json}"
+        assert _grid_runner.compact_json_server_args(raw, "vllm") == raw
+
+    def test_empty_is_noop(self):
+        assert _grid_runner.compact_json_server_args("", "vllm") == ""
+        assert _grid_runner.compact_json_server_args(None, "vllm") == ""

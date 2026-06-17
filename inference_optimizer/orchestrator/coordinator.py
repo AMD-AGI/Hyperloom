@@ -5883,6 +5883,21 @@ class Coordinator:
             keep = self._decaying_keep_threshold_pct()
             if keep is not None:
                 params.setdefault("keep_threshold_pct", keep)
+            # Seed the patched-eval server with the same base args/config every
+            # other eval server uses (current-best stack ∪ reference recipe).
+            # Without this the patched server launches on bare framework defaults
+            # (e.g. vLLM block_size=16) and crashes at startup regardless of the
+            # patch — so every integrate_patch falsely REVERTs with "no
+            # measurable throughput". Mirrors the sweep/explore branches above.
+            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
+                else self.shared_state.baseline_tput
+            params.setdefault("base_tput", float(base or 0.0))
+            params.setdefault("base_extra_args", cb_args)
+            if self.shared_state.baseline_config_path:
+                params.setdefault(
+                    "config_path", self.shared_state.baseline_config_path
+                )
         lanes, ttl = self._registry_lanes_ttl(pending.action_name)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=pending.action_name,
