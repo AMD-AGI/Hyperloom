@@ -137,6 +137,15 @@ ALLOWED_FILES: dict[str, str] = {
     "inference_optimizer/tests/test_extra_sglang_args_merge.py":
         "cumulative extra_sglang_args merge/dedupe back-compat tests",
 
+    # T0 fallback reads best_config via read_extra_server_args (which falls
+    # back to the legacy key); dispatcher comment names the alias.
+    "inference_optimizer/orchestrator/cortex_t0.py":
+        "warm-start config extraction reads legacy extra_sglang_args "
+        "via read_extra_server_args fallback for older recipe rows",
+    "inference_optimizer/recipe_kb/dispatcher.py":
+        "v2-to-arbor projection reads body.extra_sglang_args for "
+        "legacy kb-extract recipes that lack body.best_config",
+
 }
 
 

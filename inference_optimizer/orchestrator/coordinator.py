@@ -17,7 +17,7 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
 from ..compat.payload_aliases import read_extra_server_args
 from ..recipe_kb import RecipeKB, recipe_canonical_id
@@ -3071,48 +3071,62 @@ class Coordinator:
         except (TypeError, ValueError):
             conf = 0.0
         min_conf = float(getattr(self, "_warm_replay_min_confidence", 0.7) or 0.7)
-        if conf < min_conf:
-            state.warm_replay_outcome = {
-                "status": "skipped",
-                "reason": f"confidence_below_threshold ({conf:.2f} < {min_conf:.2f})",
-                "warm_recipe_tier": tier,
-                "warm_recipe_conf": conf,
-            }
-            state.warm_replay_attempted = True
-            return None
         recipe = warm.get("recipe") or {}
         if not isinstance(recipe, dict):
             recipe = {}
         # v2 RecipeKB keeps best_config/sessions top-level; v1 nested under attrs. Fall back to recipe itself.
         recipe_attrs = recipe.get("attrs") or recipe
-        best_config = recipe_attrs.get("best_config") or {}
-        if not isinstance(best_config, dict):
-            best_config = {}
-        # Read canonical extra_server_args FIRST, then legacy extra_sglang_args/args.
-        bc_args = str(
-            best_config.get("extra_server_args")
-            or best_config.get("extra_sglang_args")
-            or best_config.get("args")
-            or ""
-        ).strip()
-        bc_envs = best_config.get("extra_envs") or best_config.get("envs") or {}
-        if not isinstance(bc_envs, dict):
-            bc_envs = {}
-        # Prefer the WarmStartContext's ready-to-replay champion when T0
-        # built one (status=hit). It is the model-facing projection that
-        # already normalized args/envs, so it wins over re-deriving from
-        # the raw recipe row; the recipe path stays as the fallback for
-        # legacy state.json without a context.
+        # Resolve the replay config via config-donor decoupling: prefer the
+        # WarmStartContext's ready-to-replay champion — whose config may be
+        # BORROWED from a same-architecture sibling when this recipe's own
+        # best_config is empty — and gate on the donor's TRANSFER confidence
+        # rather than the identity-match confidence. Fall back to the identity
+        # recipe's own best_config for legacy state.json without a context.
         wsc = getattr(state, "warm_start_context", None) or {}
-        if isinstance(wsc, dict) and str(wsc.get("status") or "") == "hit":
-            replay = wsc.get("recommended_replay") or {}
-            if isinstance(replay, dict):
-                rep_args = str(replay.get("extra_server_args") or "").strip()
-                rep_envs = replay.get("extra_envs") or {}
-                if rep_args or (isinstance(rep_envs, dict) and rep_envs):
-                    bc_args = rep_args or bc_args
-                    if isinstance(rep_envs, dict) and rep_envs:
-                        bc_envs = rep_envs
+        replay = wsc.get("recommended_replay") if isinstance(wsc, dict) else {}
+        replay = replay if isinstance(replay, dict) else {}
+        rep_args = str(replay.get("extra_server_args") or "").strip()
+        rep_envs = replay.get("extra_envs") if isinstance(replay.get("extra_envs"), dict) else {}
+        if rep_args or rep_envs:
+            bc_args = rep_args
+            bc_envs = dict(rep_envs)
+            # Donor transfer confidence (self-donor == identity confidence).
+            replay_conf = float(replay.get("config_confidence") or conf or 0.0)
+            config_source = str(replay.get("config_source") or "")
+            config_tier = str(replay.get("config_tier") or "self")
+            donor_expected_gain = float(replay.get("expected_gain_pct") or 0.0)
+        else:
+            best_config = recipe_attrs.get("best_config") or {}
+            if not isinstance(best_config, dict):
+                best_config = {}
+            # Read canonical extra_server_args FIRST, then legacy extra_sglang_args/args.
+            bc_args = str(
+                best_config.get("extra_server_args")
+                or best_config.get("extra_sglang_args")
+                or best_config.get("args")
+                or ""
+            ).strip()
+            bc_envs = best_config.get("extra_envs") or best_config.get("envs") or {}
+            if not isinstance(bc_envs, dict):
+                bc_envs = {}
+            replay_conf = float(conf or 0.0)
+            config_source = str(recipe.get("canonical_id") or "")
+            config_tier = "self"
+            donor_expected_gain = 0.0
+        # Gate on the replay (config-transfer) confidence: a borrowed
+        # same_arch_class config (0.95) clears the 0.7 bar; a cross-version
+        # (0.5) donor stays advisory-only and is NOT auto-replayed.
+        if replay_conf < min_conf:
+            state.warm_replay_outcome = {
+                "status": "skipped",
+                "reason": f"confidence_below_threshold ({replay_conf:.2f} < {min_conf:.2f})",
+                "warm_recipe_tier": tier,
+                "warm_recipe_conf": conf,
+                "config_donor_tier": config_tier,
+                "config_source": config_source,
+            }
+            state.warm_replay_attempted = True
+            return None
         if not bc_args and not bc_envs:
             state.warm_replay_outcome = {
                 "status": "skipped",
@@ -3122,10 +3136,12 @@ class Coordinator:
             }
             state.warm_replay_attempted = True
             return None
-        # Historical gain anchor for _promote_warm_replay: MAX gain across attrs.sessions[]; fallback 0.0 accepts any positive measurement.
-        expected_gain = 0.0
+        # Historical gain anchor for _promote_warm_replay: prefer the donor's
+        # expected gain (set when the champion config was borrowed); else MAX
+        # gain across this recipe's attrs.sessions[]; fallback flat gain_pct.
+        expected_gain = donor_expected_gain
         sessions_field = recipe_attrs.get("sessions")
-        if isinstance(sessions_field, list):
+        if expected_gain <= 0 and isinstance(sessions_field, list):
             session_gains: list[float] = []
             for s in sessions_field:
                 if not isinstance(s, dict):
@@ -3157,6 +3173,10 @@ class Coordinator:
             "warm_expected_gain_pct": expected_gain,
             "warm_recipe_tier": tier,
             "warm_recipe_conf": conf,
+            # Config provenance: which sibling the champion config was borrowed
+            # from (config_tier="self" when the identity match owned it).
+            "config_donor_tier": config_tier,
+            "config_source": config_source,
             "baseline_tput_anchor": float(baseline_tput),
         }
         task, was_existing = await self.tasks.create_or_return_existing(
@@ -3175,6 +3195,8 @@ class Coordinator:
             "status": "in_flight",
             "warm_recipe_tier": tier,
             "warm_recipe_conf": conf,
+            "config_donor_tier": config_tier,
+            "config_source": config_source,
             "expected_gain_pct": expected_gain,
             "replay_task_id": task.task_id,
         }
@@ -6271,12 +6293,16 @@ class Coordinator:
         if not framework_version and framework:
             framework_version = detect_framework_version(framework)
         precision = str(getattr(ss, "precision", "") or "")
+        model_type = str(getattr(ss, "model_type", "") or "")
+        architectures = getattr(ss, "model_architectures", None) or []
         return recipe_canonical_id(
             model=workload,
             hardware=hw,
             framework=framework,
             framework_version=framework_version,
             precision=precision,
+            model_type=model_type,
+            architectures=architectures,
         )
 
     def _gap_anchor_canonical_id(self) -> str:
@@ -6286,6 +6312,103 @@ class Coordinator:
             The workload canonical recipe id used as the gap anchor.
         """
         return self._workload_canonical_id()
+
+    def _read_local_recipe_row(self) -> dict[str, Any]:
+        """Load the authoritative local recipe row for amend/finalize writes.
+
+        Cached per tick to avoid repeated I/O during multi-variant KEEP batches.
+        """
+        if self.cortex_kb is None:
+            return {}
+        tick = int(getattr(self.shared_state, "tick", 0) or 0)
+        cache = getattr(self, "_local_recipe_cache", None)
+        if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == tick:
+            return cache[1]
+        try:
+            row = (
+                self.cortex_kb.local.get_recipe(
+                    canonical_id=self._workload_canonical_id(),
+                )
+                or {}
+            )
+        except Exception:  # noqa: BLE001 — best-effort read
+            row = {}
+        self._local_recipe_cache = (tick, row)
+        return row
+
+    @staticmethod
+    def _extract_kept_best_config(
+        *,
+        task: "Task",
+        variant_attrs: dict[str, Any] | None = None,
+        result_dict: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build a replayable ``best_config`` from a KEEP'd task or explore variant."""
+        params = task.params if isinstance(getattr(task, "params", None), dict) else {}
+        attrs = variant_attrs if isinstance(variant_attrs, dict) else {}
+
+        args = read_extra_server_args(attrs)
+        if not args.strip():
+            args = read_extra_server_args(params)
+        if not args.strip() and isinstance(result_dict, dict):
+            args = read_extra_server_args(result_dict)
+
+        envs_raw = attrs.get("extra_envs") or params.get("extra_envs") or {}
+        if not envs_raw and isinstance(result_dict, dict):
+            envs_raw = result_dict.get("extra_envs") or {}
+        envs = (
+            {str(k): str(v) for k, v in envs_raw.items()}
+            if isinstance(envs_raw, dict)
+            else {}
+        )
+
+        if not args.strip() and not envs:
+            return {}
+
+        best_config: dict[str, Any] = {}
+        if args.strip():
+            best_config["extra_server_args"] = args.strip()
+        if envs:
+            best_config["extra_envs"] = envs
+        return best_config
+
+    @staticmethod
+    def _kb_best_config_overrides_for_keep(
+        *,
+        live: Mapping[str, Any],
+        best_config_candidate: Mapping[str, Any],
+        throughput_after: float | None,
+    ) -> dict[str, Any]:
+        """Decide whether a KEEP amend should also stamp ``best_config`` on the recipe row."""
+        if not best_config_candidate:
+            return {}
+
+        live_bc = live.get("best_config") if isinstance(live.get("best_config"), Mapping) else {}
+        live_has_config = bool(
+            read_extra_server_args(dict(live_bc)).strip()
+            or (
+                isinstance(live_bc.get("extra_envs"), Mapping)
+                and live_bc.get("extra_envs")
+            )
+        )
+        try:
+            live_tput = float(live.get("best_throughput") or 0.0)
+        except (TypeError, ValueError):
+            live_tput = 0.0
+        try:
+            new_tput = float(throughput_after or 0.0)
+        except (TypeError, ValueError):
+            new_tput = 0.0
+
+        # Stamp when live has no replayable config, or this measurement beats live.
+        if not live_has_config or (new_tput > 0.0 and new_tput >= live_tput):
+            overrides: dict[str, Any] = {
+                "best_config": dict(best_config_candidate),
+            }
+            if new_tput > 0.0:
+                overrides["best_throughput"] = new_tput
+            return overrides
+        return {}
 
     def _kb_amend_recipe(
         self,
@@ -6419,6 +6542,7 @@ class Coordinator:
         }
         try:
             self.cortex_kb.put_recipe(**put_kwargs)
+            self._local_recipe_cache = None
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
                 "_kb_amend_recipe: put_recipe failed for cid=%s", cid,
@@ -9949,12 +10073,23 @@ class Coordinator:
                 stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
                 measured_at=now_iso,
             )
+            live = self._read_local_recipe_row()
+            best_config_candidate = self._extract_kept_best_config(
+                task=task,
+                result_dict=result_dict,
+            )
+            recipe_overrides = self._kb_best_config_overrides_for_keep(
+                live=live,
+                best_config_candidate=best_config_candidate,
+                throughput_after=throughput_after,
+            )
             # v2: append onto the recipe's lessons[] (no cross-recipe dedup).
             self._kb_amend_recipe(
                 append_lesson={
                     "statement":       statement,
                     "measured_impact": impact,
                 },
+                recipe_overrides=recipe_overrides or None,
                 provenance_details={
                     "source_session_id": source_session_id,
                     "source_task_id":    task.task_id,
@@ -10162,6 +10297,16 @@ class Coordinator:
                 stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
                 measured_at=now_iso,
             )
+            live = self._read_local_recipe_row()
+            best_config_candidate = self._extract_kept_best_config(
+                task=task,
+                variant_attrs=change_attrs,
+            )
+            recipe_overrides = self._kb_best_config_overrides_for_keep(
+                live=live,
+                best_config_candidate=best_config_candidate,
+                throughput_after=throughput_after,
+            )
             # v2: per-variant lesson append onto recipe.lessons[]
             # (no cross-recipe dedup, see _record_fact_per_task).
             self._kb_amend_recipe(
@@ -10169,6 +10314,7 @@ class Coordinator:
                     "statement":       statement,
                     "measured_impact": impact,
                 },
+                recipe_overrides=recipe_overrides or None,
                 provenance_details={
                     "source_session_id":   source_session_id,
                     "source_task_id":      task.task_id,
