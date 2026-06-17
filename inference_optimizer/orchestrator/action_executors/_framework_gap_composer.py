@@ -24,26 +24,26 @@ log = logging.getLogger(__name__)
 # Op-name substring → canonical bottleneck keyword fed to fa. Order matters:
 # first match wins so we emit exactly one keyword (not competing ones).
 _OP_TO_KEYWORD: tuple[tuple[str, str], ...] = (
-    ("attention",   "attention"),
-    ("attn",        "attention"),
-    ("flash",       "attention"),
-    ("moe",         "moe"),
-    ("expert",      "moe"),
-    ("router",      "moe"),
-    ("gemm",        "gemm"),
-    ("matmul",      "gemm"),
-    ("rmsnorm",     "norm"),
-    ("layernorm",   "norm"),
-    ("rope",        "rope"),
-    ("kvcache",     "kv_cache"),
-    ("kv_cache",    "kv_cache"),
-    ("sampler",     "sampling"),
-    ("allreduce",   "comm"),
-    ("nccl",        "comm"),
-    ("rccl",        "comm"),
-    ("quant",       "quant"),
-    ("fp8",         "fp8"),
-    ("int8",        "int8"),
+    ("attention", "attention"),
+    ("attn", "attention"),
+    ("flash", "attention"),
+    ("moe", "moe"),
+    ("expert", "moe"),
+    ("router", "moe"),
+    ("gemm", "gemm"),
+    ("matmul", "gemm"),
+    ("rmsnorm", "norm"),
+    ("layernorm", "norm"),
+    ("rope", "rope"),
+    ("kvcache", "kv_cache"),
+    ("kv_cache", "kv_cache"),
+    ("sampler", "sampling"),
+    ("allreduce", "comm"),
+    ("nccl", "comm"),
+    ("rccl", "comm"),
+    ("quant", "quant"),
+    ("fp8", "fp8"),
+    ("int8", "int8"),
 )
 
 
@@ -71,7 +71,8 @@ def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str
     except (OSError, json.JSONDecodeError) as exc:
         log.warning(
             "_framework_gap_composer: could not read kernel breakdown %s: %s",
-            p, exc,
+            p,
+            exc,
         )
         return ""
     candidates: list[str] = []

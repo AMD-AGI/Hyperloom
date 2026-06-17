@@ -19,6 +19,7 @@ import transform_to_session_summary_v2 as tx  # noqa: E402
 
 # ── safe_get ──
 
+
 def test_safe_get_nested():
     assert tx.safe_get({"a": {"b": 1}}, "a", "b") == 1
 
@@ -36,6 +37,7 @@ def test_safe_get_none_value_returns_default():
 
 
 # ── _patch_baseline ──
+
 
 def test_patch_baseline_legacy_alias():
     data = {"baseline": {"extra_sglang_args": "--foo"}}
@@ -64,16 +66,19 @@ def test_patch_baseline_no_baseline():
 
 # ── _best_gain_for_phase ──
 
+
 def test_best_gain_from_param_search():
     data = {"param_search": {"params": {"top_by_gain": [{"gain_pct": 12.5}]}}}
     assert tx._best_gain_for_phase(data, "params") == 12.5
 
 
 def test_best_gain_from_phase_timeline():
-    data = {"phase_timeline": [
-        {"action": "sweep", "extras": {"best_gain_pct_vs_base": 3.0}},
-        {"action": "sweep", "extras": {"best_gain_pct_vs_base": 7.0}},
-    ]}
+    data = {
+        "phase_timeline": [
+            {"action": "sweep", "extras": {"best_gain_pct_vs_base": 3.0}},
+            {"action": "sweep", "extras": {"best_gain_pct_vs_base": 7.0}},
+        ]
+    }
     assert tx._best_gain_for_phase(data, "sweep") == 7.0
 
 
@@ -82,6 +87,7 @@ def test_best_gain_none():
 
 
 # ── _patch_capability_summary ──
+
 
 def test_patch_capability_summary_fills_phases():
     data = {
@@ -98,6 +104,7 @@ def test_patch_capability_summary_no_cs():
 
 
 # ── _patch_phase_timeline ──
+
 
 def test_patch_phase_timeline_alias_added():
     data = {"phase_timeline": [{"extras": {"candidate_extra_server_args": "--x"}}]}
@@ -117,15 +124,20 @@ def test_patch_phase_timeline_no_pt():
 
 # ── _aggregate_backend ──
 
+
 def test_aggregate_backend_picks_best():
-    data = {"kernel_decision_path": [{
-        "kid": "k1",
-        "steps": [
-            {"backend": "geak", "speedup": 1.2, "outcome": "PARTIAL"},
-            {"backend": "geak", "speedup": 1.5, "decision": "KEEP"},
-            {"backend": "oob", "speedup": 9.0},
-        ],
-    }]}
+    data = {
+        "kernel_decision_path": [
+            {
+                "kid": "k1",
+                "steps": [
+                    {"backend": "geak", "speedup": 1.2, "outcome": "PARTIAL"},
+                    {"backend": "geak", "speedup": 1.5, "decision": "KEEP"},
+                    {"backend": "oob", "speedup": 9.0},
+                ],
+            }
+        ]
+    }
     agg = tx._aggregate_backend(data, "k1", "geak")
     assert agg == {"decision": "KEEP", "best_speedup": 1.5}
 
@@ -136,12 +148,18 @@ def test_aggregate_backend_no_path():
 
 # ── _patch_detected_kernels ──
 
+
 def test_patch_detected_kernels_fills():
     data = {
         "kernel_lifecycle": {"detected": [{"kernel_id": "k1"}]},
-        "kernel_decision_path": [{"kid": "k1", "steps": [
-            {"backend": "geak", "speedup": 2.0, "decision": "KEEP"},
-        ]}],
+        "kernel_decision_path": [
+            {
+                "kid": "k1",
+                "steps": [
+                    {"backend": "geak", "speedup": 2.0, "decision": "KEEP"},
+                ],
+            }
+        ],
     }
     tx._patch_detected_kernels(data)
     k = data["kernel_lifecycle"]["detected"][0]
@@ -155,11 +173,11 @@ def test_patch_detected_kernels_no_detected():
 
 # ── is_already_v2 / transform ──
 
+
 def _v2_doc() -> dict:
     return {
         "baseline": {"extra_server_args": "", "extra_envs": {}},
-        "capability_summary": {p: {"best_gain_pct": 1.0}
-                               for p in ("params", "backends", "sweep", "geak", "oob")},
+        "capability_summary": {p: {"best_gain_pct": 1.0} for p in ("params", "backends", "sweep", "geak", "oob")},
         "phase_timeline": [],
         "kernel_lifecycle": {"detected": []},
     }
@@ -180,9 +198,12 @@ def test_transform_already_v2_passthrough():
 
 
 def test_transform_legacy_applies_patches():
-    legacy = {"baseline": {}, "capability_summary": {"params": {}},
-              "phase_timeline": [{"extras": {"candidate_extra_server_args": "--z"}}],
-              "kernel_lifecycle": {"detected": [{"kernel_id": "k"}]}}
+    legacy = {
+        "baseline": {},
+        "capability_summary": {"params": {}},
+        "phase_timeline": [{"extras": {"candidate_extra_server_args": "--z"}}],
+        "kernel_lifecycle": {"detected": [{"kernel_id": "k"}]},
+    }
     out = tx.transform(legacy)
     assert out["source"] == "claw_legacy_phased"
     assert "_v2_patches" in out["data"]
@@ -196,6 +217,7 @@ def test_transform_does_not_mutate_input():
 
 
 # ── transform_file / _output_name_for / main ──
+
 
 def test_transform_file_default_suffix(tmp_path: Path):
     p = tmp_path / "session_breakdown.json"

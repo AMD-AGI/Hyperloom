@@ -15,7 +15,10 @@ name: Lint
 # after editable installs + ``PYTHONPATH`` for critic ``runtime`` and
 # ``quantization_agent`` (see the ``pylint`` job run script).
 on:
+  # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
+  # PR does not double-trigger (one run per event class).
   push:
+    branches: [main]
     paths-ignore:
       - "**/*.md"
       - "docs/**"
@@ -34,6 +37,11 @@ on:
 
 permissions:
   contents: read
+
+# Cancel superseded runs for the same ref.
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   ruff:

@@ -111,9 +111,7 @@ def decide(
         An :class:`EvalDecision` describing the status (``missing``,
         ``within``, or ``exceeded``), the relative gap, and the threshold used.
     """
-    threshold, source = resolve_threshold(
-        workspace, acceptable_eval_gap=acceptable_eval_gap
-    )
+    threshold, source = resolve_threshold(workspace, acceptable_eval_gap=acceptable_eval_gap)
 
     if not isinstance(eval_report, dict):
         return EvalDecision(

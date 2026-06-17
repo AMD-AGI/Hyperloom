@@ -2,6 +2,7 @@
 
 """Coverage for phase_state pure helpers: escalate hints, budget normalization,
 time/budget remaining math, post-prelude target, and history-row builder."""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -31,12 +32,14 @@ def test_is_valid_escalate_hint() -> None:
 # -- budget normalization + bump ------------------------------------------
 def test_normalize_budget_pct_defaults_and_filters() -> None:
     assert ps.normalize_budget_pct(None) == dict(ps.DEFAULT_PHASE_BUDGET_PCT)
-    out = ps.normalize_budget_pct({
-        "EXPLORE": 0.4,
-        "BOGUS_PHASE": 0.5,      # unknown phase dropped
-        "KERNEL": "bad",          # non-numeric dropped
-        "SWEEP": 2.0,             # out of (0,1] dropped
-    })
+    out = ps.normalize_budget_pct(
+        {
+            "EXPLORE": 0.4,
+            "BOGUS_PHASE": 0.5,  # unknown phase dropped
+            "KERNEL": "bad",  # non-numeric dropped
+            "SWEEP": 2.0,  # out of (0,1] dropped
+        }
+    )
     assert out["EXPLORE"] == 0.4
     assert "BOGUS_PHASE" not in out
 
@@ -47,11 +50,17 @@ def test_apply_escalate_budget_bump() -> None:
     assert ps.apply_escalate_budget_bump(base, phase="nope") == base
     # valid phase -> bumped and capped
     out = ps.apply_escalate_budget_bump(
-        {"EXPLORE": 0.3}, phase="explore", delta=0.1, cap=0.8,
+        {"EXPLORE": 0.3},
+        phase="explore",
+        delta=0.1,
+        cap=0.8,
     )
     assert out["EXPLORE"] == pytest.approx(0.4)
     capped = ps.apply_escalate_budget_bump(
-        {"EXPLORE": 0.75}, phase="explore", delta=0.5, cap=0.8,
+        {"EXPLORE": 0.75},
+        phase="explore",
+        delta=0.5,
+        cap=0.8,
     )
     assert capped["EXPLORE"] == 0.8
 
@@ -94,13 +103,17 @@ def test_phase_budget_remaining_seconds() -> None:
     assert ps.phase_budget_remaining_seconds(SimpleNamespace(max_minutes=0)) is None
     # phase not present in the budget map -> pct 0 -> None
     state = SimpleNamespace(
-        max_minutes=60, phase="UNKNOWN_PHASE", phase_started_unix=0.0,
+        max_minutes=60,
+        phase="UNKNOWN_PHASE",
+        phase_started_unix=0.0,
         phase_budget_pct={"EXPLORE": 0.5},
     )
     assert ps.phase_budget_remaining_seconds(state) is None
     # normal: 60min * 0.5 = 1800s budget, minus elapsed
     state2 = SimpleNamespace(
-        max_minutes=60, phase="EXPLORE", phase_started_unix=1000.0,
+        max_minutes=60,
+        phase="EXPLORE",
+        phase_started_unix=1000.0,
         phase_budget_pct={"EXPLORE": 0.5},
     )
     rem = ps.phase_budget_remaining_seconds(state2, now_unix=1300.0)
@@ -110,15 +123,22 @@ def test_phase_budget_remaining_seconds() -> None:
 def test_session_remaining_seconds() -> None:
     assert ps.session_remaining_seconds(SimpleNamespace(max_minutes=0)) is None
     # no start_ts -> None
-    assert ps.session_remaining_seconds(
-        SimpleNamespace(max_minutes=60, start_ts=""),
-    ) is None
+    assert (
+        ps.session_remaining_seconds(
+            SimpleNamespace(max_minutes=60, start_ts=""),
+        )
+        is None
+    )
     # bad ts -> None
-    assert ps.session_remaining_seconds(
-        SimpleNamespace(max_minutes=60, start_ts="not-a-date"),
-    ) is None
+    assert (
+        ps.session_remaining_seconds(
+            SimpleNamespace(max_minutes=60, start_ts="not-a-date"),
+        )
+        is None
+    )
     # valid recent start -> positive remaining
     from datetime import datetime, timezone
+
     now_iso = datetime.now(timezone.utc).isoformat()
     rem = ps.session_remaining_seconds(
         SimpleNamespace(max_minutes=60, start_ts=now_iso),
@@ -130,7 +150,8 @@ def test_session_remaining_seconds() -> None:
 def test_interleave_kernel_strips_explore_when_disabled() -> None:
     # interleave ON, explore_enabled default True: KERNEL gets the explore triple.
     full = ps.llm_proposable_actions_for_with_interleave(
-        ps.PHASE_KERNEL, interleave=True,
+        ps.PHASE_KERNEL,
+        interleave=True,
     )
     assert "explore" in full
     assert "specialist" in full
@@ -138,7 +159,9 @@ def test_interleave_kernel_strips_explore_when_disabled() -> None:
 
     # --no-explore: KERNEL loses `explore` but keeps specialist/integrate_patch.
     stripped = ps.llm_proposable_actions_for_with_interleave(
-        ps.PHASE_KERNEL, interleave=True, explore_enabled=False,
+        ps.PHASE_KERNEL,
+        interleave=True,
+        explore_enabled=False,
     )
     assert "explore" not in stripped
     assert "specialist" in stripped
@@ -146,17 +169,31 @@ def test_interleave_kernel_strips_explore_when_disabled() -> None:
 
     # EXPLORE phase extras (kernel-owned) are unaffected by explore_enabled.
     explore_set = ps.llm_proposable_actions_for_with_interleave(
-        ps.PHASE_EXPLORE, interleave=True, explore_enabled=False,
+        ps.PHASE_EXPLORE,
+        interleave=True,
+        explore_enabled=False,
     )
     assert "kernel_opt" in explore_set
 
     # is_action_* mirror honours the strip.
-    assert ps.is_action_llm_proposable_in_phase_with_interleave(
-        "explore", ps.PHASE_KERNEL, interleave=True, explore_enabled=False,
-    ) is False
-    assert ps.is_action_llm_proposable_in_phase_with_interleave(
-        "specialist", ps.PHASE_KERNEL, interleave=True, explore_enabled=False,
-    ) is True
+    assert (
+        ps.is_action_llm_proposable_in_phase_with_interleave(
+            "explore",
+            ps.PHASE_KERNEL,
+            interleave=True,
+            explore_enabled=False,
+        )
+        is False
+    )
+    assert (
+        ps.is_action_llm_proposable_in_phase_with_interleave(
+            "specialist",
+            ps.PHASE_KERNEL,
+            interleave=True,
+            explore_enabled=False,
+        )
+        is True
+    )
 
 
 # -- post-prelude target + history row ------------------------------------
@@ -168,8 +205,12 @@ def test_post_prelude_target() -> None:
 
 def test_make_history_row() -> None:
     row = ps.make_history_row(
-        from_phase="explore", to_phase="kernel", reason="  plateau  ",
-        evidence={"k": 1}, ts="2026-06-09T00:00:00Z", ts_unix=12.0,
+        from_phase="explore",
+        to_phase="kernel",
+        reason="  plateau  ",
+        evidence={"k": 1},
+        ts="2026-06-09T00:00:00Z",
+        ts_unix=12.0,
     )
     assert row["from_phase"] == "EXPLORE"
     assert row["to_phase"] == "KERNEL"

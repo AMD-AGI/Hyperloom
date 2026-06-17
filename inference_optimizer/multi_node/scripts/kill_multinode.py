@@ -158,10 +158,10 @@ def main() -> int:
         prog="kill_multinode.py",
         description="Kill every multi-node server process spawned by launch_multinode.py.",
     )
-    p.add_argument("--pid-dir", required=True,
-                   help="dir containing rank_*.pid files (same value passed to launch_multinode)")
-    p.add_argument("--grace-sec", type=int, default=5,
-                   help="seconds between SIGTERM and SIGKILL (default 5)")
+    p.add_argument(
+        "--pid-dir", required=True, help="dir containing rank_*.pid files (same value passed to launch_multinode)"
+    )
+    p.add_argument("--grace-sec", type=int, default=5, help="seconds between SIGTERM and SIGKILL (default 5)")
     args = p.parse_args()
 
     _log(f"pid_dir={args.pid_dir} grace={args.grace_sec}s")
@@ -176,7 +176,8 @@ def main() -> int:
         node_id = node["NodeID"]
         ref = KillActor.options(
             scheduling_strategy=NodeAffinitySchedulingStrategy(
-                node_id=node_id, soft=False,
+                node_id=node_id,
+                soft=False,
             ),
         ).remote(args.pid_dir, args.grace_sec)
         refs.append((node_id[:16], ref))

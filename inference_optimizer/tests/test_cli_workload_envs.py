@@ -36,7 +36,10 @@ def test_framework_script_mismatch_fails_fast(tmp_path):
     _write_yaml(src, "vllm", benchmark_script="sglang_mi300x.sh")
     with pytest.raises(FrameworkScriptMismatchError, match="framework/script mismatch"):
         materialize_config_with_envs(
-            src, tmp_path / "out", model_path="/m", gpu_type="mi300x",
+            src,
+            tmp_path / "out",
+            model_path="/m",
+            gpu_type="mi300x",
             benchmark_script="sglang_mi300x.sh",
         )
 
@@ -46,7 +49,10 @@ def test_framework_script_match_ok(tmp_path):
     src = tmp_path / "cfg.yaml"
     _write_yaml(src, "vllm")
     out = materialize_config_with_envs(
-        src, tmp_path / "out", model_path="/m", gpu_type="mi300x",
+        src,
+        tmp_path / "out",
+        model_path="/m",
+        gpu_type="mi300x",
     )
     bench = yaml.safe_load(out.read_text())["benchmark"]
     assert bench["benchmark_script"] == "vllm_mi300x.sh"

@@ -63,7 +63,9 @@ def local_store(tmp_path: Path) -> LocalRecipeStore:
 @pytest.fixture
 def remote(env_clean: None) -> RemoteRecipeClient:
     return RemoteRecipeClient(
-        kb_url=KB_URL, foreground=False, retry_attempts=1,
+        kb_url=KB_URL,
+        foreground=False,
+        retry_attempts=1,
     )
 
 
@@ -80,8 +82,7 @@ class _ReadOnlyRemoteSpy:
 
     def _boom(self, *_a: Any, **_k: Any) -> Any:
         raise AssertionError(
-            "remote read method invoked during a write — "
-            "writes must be local-only",
+            "remote read method invoked during a write — writes must be local-only",
         )
 
     health = _boom
@@ -131,10 +132,10 @@ def test_get_recipe_returns_remote_when_remote_hits(kb: RecipeKB) -> None:
     cid = _cid()
     v2_payload = {
         "canonical_id": cid,
-        "version":      5,
-        "labels":       {"model": "remote-model", "hardware": "mi300x"},
-        "body":         {"best_config": {"tp": "16"}},
-        "metrics":      {"throughput": 30000.0},
+        "version": 5,
+        "labels": {"model": "remote-model", "hardware": "mi300x"},
+        "body": {"best_config": {"tp": "16"}},
+        "metrics": {"throughput": 30000.0},
     }
     with respx.mock(base_url=KB_URL) as mock:
         mock.post(PATH_RECIPES_SEARCH).mock(
@@ -142,12 +143,12 @@ def test_get_recipe_returns_remote_when_remote_hits(kb: RecipeKB) -> None:
         )
         out = kb.get_recipe(canonical_id=cid)
     assert out is not None
-    assert out["canonical_id"]     == cid
-    assert out["version"]          == 5
-    assert out["model"]            == "remote-model"
-    assert out["hardware"]         == "mi300x"
-    assert out["best_config"]      == {"tp": "16"}
-    assert out["best_throughput"]  == 30000.0
+    assert out["canonical_id"] == cid
+    assert out["version"] == 5
+    assert out["model"] == "remote-model"
+    assert out["hardware"] == "mi300x"
+    assert out["best_config"] == {"tp": "16"}
+    assert out["best_throughput"] == 30000.0
 
 
 def test_v2_framework_version_label_is_read(kb: RecipeKB) -> None:
@@ -155,15 +156,15 @@ def test_v2_framework_version_label_is_read(kb: RecipeKB) -> None:
     cid = _cid()
     v2_payload = {
         "canonical_id": cid,
-        "version":      7,
+        "version": 7,
         "labels": {
-            "model":             "remote-model",
-            "hardware":          "mi300x",
-            "framework":         "sglang",
+            "model": "remote-model",
+            "hardware": "mi300x",
+            "framework": "sglang",
             "framework_version": "0.4.5",
-            "precision":         "fp8",
+            "precision": "fp8",
         },
-        "body":    {},
+        "body": {},
         "metrics": {},
     }
     with respx.mock(base_url=KB_URL) as mock:
@@ -181,15 +182,15 @@ def test_v2_legacy_version_label_is_not_read(kb: RecipeKB) -> None:
     cid = _cid()
     v2_payload = {
         "canonical_id": cid,
-        "version":      7,
+        "version": 7,
         "labels": {
-            "model":     "remote-model",
-            "hardware":  "mi300x",
+            "model": "remote-model",
+            "hardware": "mi300x",
             "framework": "sglang",
-            "version":   "0.4.5",
+            "version": "0.4.5",
             "precision": "fp8",
         },
-        "body":    {},
+        "body": {},
         "metrics": {},
     }
     with respx.mock(base_url=KB_URL) as mock:
@@ -203,12 +204,14 @@ def test_v2_legacy_version_label_is_not_read(kb: RecipeKB) -> None:
 
 
 def test_get_recipe_falls_through_to_local_when_remote_empty(
-    kb: RecipeKB, local_store: LocalRecipeStore,
+    kb: RecipeKB,
+    local_store: LocalRecipeStore,
 ) -> None:
     """Remote search finding no match must NOT shadow an authoritative local write."""
     cid = _cid()
     local_store.put_recipe(
-        canonical_id=cid, model="local-marker",
+        canonical_id=cid,
+        model="local-marker",
     )
     with respx.mock(base_url=KB_URL) as mock:
         mock.post(PATH_RECIPES_SEARCH).mock(
@@ -220,7 +223,8 @@ def test_get_recipe_falls_through_to_local_when_remote_empty(
 
 
 def test_get_recipe_falls_through_to_local_on_transport_error(
-    kb: RecipeKB, local_store: LocalRecipeStore,
+    kb: RecipeKB,
+    local_store: LocalRecipeStore,
 ) -> None:
     cid = _cid()
     local_store.put_recipe(canonical_id=cid, model="local-marker")
@@ -252,6 +256,7 @@ def test_get_recipe_returns_none_when_neither_has_it(
 def test_get_recipe_remote_sends_5tuple_label_match(kb: RecipeKB) -> None:
     """The remote read calls /recipes/search ONCE with the full 7-tuple as label_match."""
     import json as _json
+
     cid = _cid()
     captured: dict = {}
 
@@ -264,14 +269,20 @@ def test_get_recipe_remote_sends_5tuple_label_match(kb: RecipeKB) -> None:
         kb.get_recipe(canonical_id=cid)
     label_match = captured.get("label_match") or {}
     assert set(label_match) == {
-        "model", "hardware", "framework", "framework_version", "precision",
-        "model_type", "architectures",
+        "model",
+        "hardware",
+        "framework",
+        "framework_version",
+        "precision",
+        "model_type",
+        "architectures",
     }
     assert all(label_match.values()), "all 5 cid segments must be present"
 
 
 def test_get_history_is_local_only(
-    kb: RecipeKB, local_store: LocalRecipeStore,
+    kb: RecipeKB,
+    local_store: LocalRecipeStore,
 ) -> None:
     """get_history is LOCAL only; the dispatcher must not touch the remote."""
     cid = _cid()
@@ -283,7 +294,8 @@ def test_get_history_is_local_only(
 
 
 def test_search_falls_through_to_local_on_remote_failure(
-    kb: RecipeKB, local_store: LocalRecipeStore,
+    kb: RecipeKB,
+    local_store: LocalRecipeStore,
 ) -> None:
     cid = _cid()
     local_store.put_recipe(
@@ -301,7 +313,8 @@ def test_search_falls_through_to_local_on_remote_failure(
 
 
 def test_list_recent_is_local_only(
-    kb: RecipeKB, local_store: LocalRecipeStore,
+    kb: RecipeKB,
+    local_store: LocalRecipeStore,
 ) -> None:
     """list_recent is LOCAL only."""
     cid_local = _cid(model="local-only")
@@ -311,12 +324,15 @@ def test_list_recent_is_local_only(
 
 
 def test_list_attempts_is_local_only(
-    kb: RecipeKB, local_store: LocalRecipeStore,
+    kb: RecipeKB,
+    local_store: LocalRecipeStore,
 ) -> None:
     """list_attempts is LOCAL only."""
     cid = _cid()
     local_store.append_attempt(
-        canonical_id=cid, session_id="s", outcome="kept",
+        canonical_id=cid,
+        session_id="s",
+        outcome="kept",
     )
     rows = kb.list_attempts(canonical_id=cid)
     assert len(rows) == 1
@@ -324,12 +340,15 @@ def test_list_attempts_is_local_only(
 
 
 def test_list_session_attempts_is_local_only(
-    kb: RecipeKB, local_store: LocalRecipeStore,
+    kb: RecipeKB,
+    local_store: LocalRecipeStore,
 ) -> None:
     """list_session_attempts is LOCAL only."""
     cid = _cid()
     local_store.append_attempt(
-        canonical_id=cid, session_id="sess-7", outcome="kept",
+        canonical_id=cid,
+        session_id="sess-7",
+        outcome="kept",
     )
     rows = kb.list_session_attempts(session_id="sess-7")
     assert len(rows) == 1
@@ -350,7 +369,8 @@ def test_no_remote_means_local_only_for_reads(
 
 
 def test_disabled_remote_treated_as_no_remote(
-    local_store: LocalRecipeStore, env_clean: None,
+    local_store: LocalRecipeStore,
+    env_clean: None,
 ) -> None:
     """A ``remote.enabled=False`` client behaves identically to ``remote=None``."""
     disabled = RemoteRecipeClient(kb_url=KB_URL, enabled=False)
@@ -368,9 +388,11 @@ def test_audit_hook_emitted_on_remote_hit(kb: RecipeKB) -> None:
     events: list[dict[str, Any]] = []
     kb.audit_hook = lambda e: events.append(e)
     v2_payload = {
-        "canonical_id": cid, "version": 5,
+        "canonical_id": cid,
+        "version": 5,
         "labels": {"model": "remote-model", "hardware": "mi300x"},
-        "body": {"best_config": {"tp": "16"}}, "metrics": {"throughput": 30000.0},
+        "body": {"best_config": {"tp": "16"}},
+        "metrics": {"throughput": 30000.0},
     }
     with respx.mock(base_url=KB_URL) as mock:
         mock.post(PATH_RECIPES_SEARCH).mock(
@@ -390,7 +412,8 @@ def test_audit_hook_emitted_on_remote_hit(kb: RecipeKB) -> None:
 
 
 def test_audit_hook_emitted_on_local_fallthrough(
-    kb: RecipeKB, local_store: LocalRecipeStore,
+    kb: RecipeKB,
+    local_store: LocalRecipeStore,
 ) -> None:
     cid = _cid()
     local_store.put_recipe(canonical_id=cid, model="local-marker")
@@ -438,7 +461,8 @@ def test_audit_hook_never_raises_into_caller(kb: RecipeKB) -> None:
 
 # Lifecycle
 def test_close_releases_remote_transport(
-    local_store: LocalRecipeStore, remote: RemoteRecipeClient,
+    local_store: LocalRecipeStore,
+    remote: RemoteRecipeClient,
 ) -> None:
     """``RecipeKB.close`` must call ``remote.close``."""
     closed_marker: list[bool] = []
@@ -454,10 +478,12 @@ def test_close_with_no_remote_is_noop(local_store: LocalRecipeStore) -> None:
 
 
 def test_close_swallows_remote_close_error(
-    local_store: LocalRecipeStore, remote: RemoteRecipeClient,
+    local_store: LocalRecipeStore,
+    remote: RemoteRecipeClient,
 ) -> None:
     def _boom() -> None:
         raise RuntimeError("close failed")
+
     remote.close = _boom  # type: ignore[method-assign]
     kb = RecipeKB(local=local_store, remote=remote)
     kb.close()

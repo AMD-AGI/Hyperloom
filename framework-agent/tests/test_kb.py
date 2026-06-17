@@ -74,9 +74,7 @@ class TestListAndMatch:
     def test_match_domains_atom_keyword_hit(self) -> None:
         """``atom`` must hit the framework domain (pinned so a future trim of DOMAIN_KEYWORDS doesn't silently drop it)."""
         domains = kb._match_domains("improve atom moe throughput on mi300x")
-        assert "framework" in domains, (
-            f"atom must hit the framework domain; got {domains!r}"
-        )
+        assert "framework" in domains, f"atom must hit the framework domain; got {domains!r}"
 
     def test_atom_in_framework_domain_keywords_constant(self) -> None:
         """Constant-level guard: ``atom`` must appear in the framework domain's keyword list."""
@@ -213,12 +211,20 @@ class TestKbCli:
 
     def test_list_after_contribute(self, kb_root: Path, capsys: pytest.CaptureFixture) -> None:
         """A successful contribute makes the new domain show up in list."""
-        rc = cli.main([
-            "kb", "contribute",
-            "--domain", "framework",
-            "--body", "hello",
-            "--source", "test", "--session-id", "s1",
-        ])
+        rc = cli.main(
+            [
+                "kb",
+                "contribute",
+                "--domain",
+                "framework",
+                "--body",
+                "hello",
+                "--source",
+                "test",
+                "--session-id",
+                "s1",
+            ]
+        )
         assert rc == 0
         capsys.readouterr()  # discard contribute output
         rc = cli.main(["kb", "list"])
@@ -252,7 +258,10 @@ class TestKbCli:
         assert "--body" in err
 
     def test_synthesize_pure_python_smoke(
-        self, kb_root: Path, tmp_path: Path, capsys: pytest.CaptureFixture,
+        self,
+        kb_root: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture,
     ) -> None:
         """fa kb synthesize without --with-llm emits a deterministic digest."""
         findings = [
@@ -267,11 +276,16 @@ class TestKbCli:
         ]
         findings_path = tmp_path / "findings.json"
         findings_path.write_text(json.dumps(findings), encoding="utf-8")
-        rc = cli.main([
-            "kb", "synthesize",
-            "--domain", "framework",
-            "--findings", str(findings_path),
-        ])
+        rc = cli.main(
+            [
+                "kb",
+                "synthesize",
+                "--domain",
+                "framework",
+                "--findings",
+                str(findings_path),
+            ]
+        )
         assert rc == 0
         out = capsys.readouterr().out
         assert "## Synthesised findings - framework" in out
@@ -279,7 +293,10 @@ class TestKbCli:
         assert "1234.5" in out
 
     def test_synthesize_with_llm_missing_sdk_exit_two(
-        self, kb_root: Path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch,
+        self,
+        kb_root: Path,
+        capsys: pytest.CaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """--with-llm but claude_agent_sdk absent must surface as rc=2 with hint."""
         monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
@@ -303,7 +320,9 @@ class TestPathForFramework:
 
     @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
     def test_path_resolves_for_all_known_frameworks(
-        self, kb_root: Path, framework: str,
+        self,
+        kb_root: Path,
+        framework: str,
     ) -> None:
         path = kb.path_for_framework(framework)
         assert path == kb_root / "framework_optimization" / framework
@@ -346,14 +365,18 @@ class TestContributeToKbForFramework:
 
     def test_appends_subsequent_findings(self, kb_root: Path) -> None:
         kb.contribute_to_kb_for_framework(
-            "atom", finding="first", source="explore", session_id="s1",
+            "atom",
+            finding="first",
+            source="explore",
+            session_id="s1",
         )
         kb.contribute_to_kb_for_framework(
-            "atom", finding="second", source="explore", session_id="s1",
+            "atom",
+            finding="second",
+            source="explore",
+            session_id="s1",
         )
-        body = (
-            kb_root / "framework_optimization" / "atom" / "empirical_kb.md"
-        ).read_text()
+        body = (kb_root / "framework_optimization" / "atom" / "empirical_kb.md").read_text()
         # Both findings present, separated by the `---` divider the helper emits.
         assert body.count("---") == 2
         assert "first" in body

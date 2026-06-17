@@ -169,15 +169,19 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
 
     candidates: list[Path] = []
     if trace_input.is_dir():
-        candidates.extend([
-            trace_input / "capture_traces",
-            trace_input / "graph_capture",
-        ])
+        candidates.extend(
+            [
+                trace_input / "capture_traces",
+                trace_input / "graph_capture",
+            ]
+        )
     for trace_file in trace_files[:1]:
-        candidates.extend([
-            trace_file.parent / "capture_traces",
-            trace_file.parent.parent / "capture_traces",
-        ])
+        candidates.extend(
+            [
+                trace_file.parent / "capture_traces",
+                trace_file.parent.parent / "capture_traces",
+            ]
+        )
     for candidate in candidates:
         if candidate.is_dir():
             return candidate
@@ -224,14 +228,8 @@ def build_orchestrator_prompt(
     else:
         exec_mode = "default"
 
-    internal_root_text = (
-        str(tracelens_internal_root) if tracelens_internal_root
-        else "(not installed; OSS-only mode)"
-    )
-    tl_extension_text = (
-        "TraceLens_internal" if tracelens_internal_root
-        else "(unset)"
-    )
+    internal_root_text = str(tracelens_internal_root) if tracelens_internal_root else "(not installed; OSS-only mode)"
+    tl_extension_text = "TraceLens_internal" if tracelens_internal_root else "(unset)"
 
     comparison_scope = "standalone"
     capture_text = str(capture_folder) if capture_folder else "N/A"
@@ -287,9 +285,7 @@ def _import_sdk() -> tuple[Any, Any]:
     try:
         import claude_agent_sdk as sdk  # type: ignore
     except ImportError as exc:  # pragma: no cover - exercised via caller fallback
-        raise RuntimeError(
-            "claude_agent_sdk not installed; run kernel-agent/scripts/install.sh first"
-        ) from exc
+        raise RuntimeError("claude_agent_sdk not installed; run kernel-agent/scripts/install.sh first") from exc
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
         raise RuntimeError("claude_agent_sdk missing query / ClaudeAgentOptions")
     return sdk.query, sdk.ClaudeAgentOptions
@@ -562,16 +558,13 @@ async def run_tracelens_skill(
     except OSError as exc:  # noqa: BLE001
         transcript_fh = None
         if log:
-            log(f"[claude-sdk] WARNING: cannot open transcript "
-                f"{transcript_path}: {exc}")
+            log(f"[claude-sdk] WARNING: cannot open transcript {transcript_path}: {exc}")
     try:
         async for message in sdk_query_factory(prompt=prompt, options=options):
             if transcript_fh is not None:
                 try:
                     record = _serialize_sdk_message(message, seq=transcript_seq)
-                    transcript_fh.write(
-                        json.dumps(record, ensure_ascii=False) + "\n"
-                    )
+                    transcript_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
                     transcript_fh.flush()
                     transcript_seq += 1
                     transcript_written = True
@@ -595,17 +588,14 @@ async def run_tracelens_skill(
                 # Closing the diagnostic transcript must never abort an
                 # otherwise-successful run; surface it as a warning instead.
                 if log:
-                    log(f"[claude-sdk] WARNING: cannot close transcript "
-                        f"{transcript_path}: {exc}")
+                    log(f"[claude-sdk] WARNING: cannot close transcript {transcript_path}: {exc}")
 
     # Final report is ``analysis.md`` (contract since #148; the v0.2 standalone_analysis.md
     # fallback was dropped in #203 for masking orchestrator failures with stale data).
     report_path = output_dir / "analysis.md"
     if not report_path.exists():
         if sdk_error:
-            raise RuntimeError(
-                f"TraceLens SDK runner failed before writing {report_path}: {sdk_error}"
-            )
+            raise RuntimeError(f"TraceLens SDK runner failed before writing {report_path}: {sdk_error}")
         raise RuntimeError(f"TraceLens SDK runner did not write {report_path}")
 
     artifact_paths = {
@@ -627,8 +617,7 @@ async def run_tracelens_skill(
             transcript_path.unlink(missing_ok=True)
         except OSError as exc:
             if log:
-                log(f"[claude-sdk] WARNING: cannot remove empty transcript "
-                    f"{transcript_path}: {exc}")
+                log(f"[claude-sdk] WARNING: cannot remove empty transcript {transcript_path}: {exc}")
     if sdk_error:
         artifact_paths["tracelens_agent_sdk_error"] = sdk_error
 
@@ -672,9 +661,7 @@ _DATA_TABLE_HEADER_TOKENS = (
     "bound",
 )
 # Lowercased canonical header tokens; separates the 9 typed fields from trailing extras.
-_DATA_TABLE_CANONICAL_KEY_SET = frozenset(
-    tok.strip().lower() for tok in _DATA_TABLE_HEADER_TOKENS
-)
+_DATA_TABLE_CANONICAL_KEY_SET = frozenset(tok.strip().lower() for tok in _DATA_TABLE_HEADER_TOKENS)
 _PITEM_MARKER_RE = re.compile(
     r"<!--\s*impact-begin\s+kind=p_item\s+([^>]*?)-->",
     re.IGNORECASE,
@@ -722,7 +709,9 @@ def _parse_marker_attrs(blob: str) -> dict[str, str]:
 
 
 def _extract_between(
-    text: str, start_marker: str, end_markers: tuple[str, ...],
+    text: str,
+    start_marker: str,
+    end_markers: tuple[str, ...],
 ) -> str:
     """Extract the substring between a start marker and the earliest end marker.
 
@@ -757,23 +746,26 @@ def _extract_pitem_prose(body: str) -> dict[str, Any]:
         ``resolution``, and impact estimates (defaulting to empty / 0.0).
     """
     identification = _extract_between(
-        body, _IDENTIFICATION_LABEL,
+        body,
+        _IDENTIFICATION_LABEL,
         (_DATA_LABEL, _REASONING_LABEL, _RESOLUTION_LABEL, _IMPACT_LABEL),
     )
     reasoning = _extract_between(
-        body, _REASONING_LABEL, (_RESOLUTION_LABEL, _IMPACT_LABEL),
+        body,
+        _REASONING_LABEL,
+        (_RESOLUTION_LABEL, _IMPACT_LABEL),
     )
     resolution = _extract_between(body, _RESOLUTION_LABEL, (_IMPACT_LABEL,))
     low_match = _IMPACT_LOW_RE.search(body)
     high_match = _IMPACT_HIGH_RE.search(body)
     return {
-        "identification":         identification,
+        "identification": identification,
         "reasoning_for_slowdown": reasoning,
-        "resolution":             resolution,
-        "impact_low_ms":          _safe_float(low_match.group(1)) if low_match else 0.0,
-        "impact_low_e2e_pct":     _safe_float(low_match.group(2)) if low_match else 0.0,
-        "impact_high_ms":         _safe_float(high_match.group(1)) if high_match else 0.0,
-        "impact_high_e2e_pct":    _safe_float(high_match.group(2)) if high_match else 0.0,
+        "resolution": resolution,
+        "impact_low_ms": _safe_float(low_match.group(1)) if low_match else 0.0,
+        "impact_low_e2e_pct": _safe_float(low_match.group(2)) if low_match else 0.0,
+        "impact_high_ms": _safe_float(high_match.group(1)) if high_match else 0.0,
+        "impact_high_e2e_pct": _safe_float(high_match.group(2)) if high_match else 0.0,
     }
 
 
@@ -793,12 +785,14 @@ def _extract_pitem_categories(text: str) -> list[dict[str, Any]]:
         attrs = _parse_marker_attrs(match.group(1))
         if "category" not in attrs:
             continue
-        items.append({
-            "category": attrs.get("category", ""),
-            "impact_score_low": _safe_float(attrs.get("low")),
-            "impact_score": _safe_float(attrs.get("mid")),
-            "impact_score_high": _safe_float(attrs.get("high")),
-        })
+        items.append(
+            {
+                "category": attrs.get("category", ""),
+                "impact_score_low": _safe_float(attrs.get("low")),
+                "impact_score": _safe_float(attrs.get("mid")),
+                "impact_score_high": _safe_float(attrs.get("high")),
+            }
+        )
     return items
 
 
@@ -847,7 +841,7 @@ def _extract_data_table(body: str) -> list[list[str]]:
     marker = body.find("**Data:**")
     if marker < 0:
         return []
-    tail = body[marker + len("**Data:**"):]
+    tail = body[marker + len("**Data:**") :]
     rows: list[list[str]] = []
     in_table = False
     for line in tail.splitlines():
@@ -904,10 +898,7 @@ def _row_to_candidate(
         return None
     record = dict(zip(headers, cells))
     # Trailing extras (spec allows appended columns) preserved verbatim for downstream consumers.
-    extra_columns = {
-        key: value for key, value in record.items()
-        if key not in _DATA_TABLE_CANONICAL_KEY_SET
-    }
+    extra_columns = {key: value for key, value in record.items() if key not in _DATA_TABLE_CANONICAL_KEY_SET}
 
     name = record.get("operation", "").strip()
     if not name or name in {"-", "—"}:
@@ -1129,9 +1120,19 @@ _LAUNCHER_PATH_RE = re.compile(
     r"(?P<path>.+?)\((?P<line>\d+)\)\s*:\s*(?P<func>[A-Za-z_][A-Za-z0-9_]*)\s*$",
 )
 # Placeholders for unresolved Kernel Paths; must not survive parsing (else all group under a bogus path).
-_LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset({
-    "", "-", "—", "–", "n/a", "none", "null", "tbd", "unknown",
-})
+_LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
+    {
+        "",
+        "-",
+        "—",
+        "–",
+        "n/a",
+        "none",
+        "null",
+        "tbd",
+        "unknown",
+    }
+)
 
 
 def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]:
@@ -1328,10 +1329,7 @@ def _resolve_source_target(
     # Prefer verbatim tracelens_launcher_path so AST resolution survives _finalize_candidates'
     # source_file overwrite; fall back to source_file / kernel_path for non-TraceLens candidates.
     kernel_path = str(
-        candidate.get("tracelens_launcher_path")
-        or candidate.get("source_file")
-        or candidate.get("kernel_path")
-        or ""
+        candidate.get("tracelens_launcher_path") or candidate.get("source_file") or candidate.get("kernel_path") or ""
     )
     raw_path, reported_line, reported_func = _parse_launcher_path(kernel_path)
     if not raw_path:
@@ -1346,20 +1344,32 @@ def _resolve_source_target(
         if ast_line is not None:
             definition_line = ast_line
     return {
-        "source_path":      str(source_path),
-        "definition_line":  definition_line,
-        "function_name":    function_name,
-        "reported_path":    raw_path,
-        "reported_line":    reported_line,
-        "reported_func":    reported_func,
-        "ast_resolved":     bool(reported_func and source_path.exists()
-                                  and reported_func == function_name
-                                  and reported_line != definition_line),
+        "source_path": str(source_path),
+        "definition_line": definition_line,
+        "function_name": function_name,
+        "reported_path": raw_path,
+        "reported_line": reported_line,
+        "reported_func": reported_func,
+        "ast_resolved": bool(
+            reported_func
+            and source_path.exists()
+            and reported_func == function_name
+            and reported_line != definition_line
+        ),
     }
 
 
 _NATIVE_SOURCE_SUFFIXES = (
-    ".cu", ".cuh", ".hip", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h", ".c",
+    ".cu",
+    ".cuh",
+    ".hip",
+    ".cpp",
+    ".cc",
+    ".cxx",
+    ".hpp",
+    ".hh",
+    ".h",
+    ".c",
 )
 
 
@@ -1474,22 +1484,22 @@ def aggregate_by_source_function(
         bucket = groups.get(key)
         if bucket is None:
             bucket = {
-                "task_group_id":          "",  # filled below after sorting
-                "operation":              operation,
-                "source_path":            src_norm,
-                "definition_line":        target["definition_line"],
-                "function_name":          target["function_name"],
-                "ast_resolved":           bool(target.get("ast_resolved")),
-                "reported_path":          target["reported_path"],
-                "kernel_ids":             [],
-                "primary_kernel_id":      "",
-                "rows":                   [],
-                "aggregate_duration_us":  0.0,
-                "aggregate_call_count":   0,
-                "aggregate_gpu_pct":      0.0,
+                "task_group_id": "",  # filled below after sorting
+                "operation": operation,
+                "source_path": src_norm,
+                "definition_line": target["definition_line"],
+                "function_name": target["function_name"],
+                "ast_resolved": bool(target.get("ast_resolved")),
+                "reported_path": target["reported_path"],
+                "kernel_ids": [],
+                "primary_kernel_id": "",
+                "rows": [],
+                "aggregate_duration_us": 0.0,
+                "aggregate_call_count": 0,
+                "aggregate_gpu_pct": 0.0,
                 # Q2: distinct per-P-item prose (deduped by (rank, title)) so build_prompt renders every P-item when one function spans multiple.
-                "all_pitem_prose":        [],
-                "_pitem_prose_seen":      set(),  # popped before return
+                "all_pitem_prose": [],
+                "_pitem_prose_seen": set(),  # popped before return
             }
             groups[key] = bucket
         kid = str(cand.get("kernel_id") or "") or cand.get("name") or ""
@@ -1505,17 +1515,19 @@ def aggregate_by_source_function(
         pitem_key = (pitem_rank, pitem_title)
         if pitem_key not in bucket["_pitem_prose_seen"]:
             bucket["_pitem_prose_seen"].add(pitem_key)
-            bucket["all_pitem_prose"].append({
-                "rank":                    pitem_rank,
-                "title":                   pitem_title,
-                "identification":          str(cand.get("identification") or "").strip(),
-                "reasoning_for_slowdown":  str(cand.get("reasoning_for_slowdown") or "").strip(),
-                "resolution":              str(cand.get("resolution") or "").strip(),
-                "impact_low_ms":           _safe_float(cand.get("impact_low_ms")),
-                "impact_low_e2e_pct":      _safe_float(cand.get("impact_low_e2e_pct")),
-                "impact_high_ms":          _safe_float(cand.get("impact_high_ms")),
-                "impact_high_e2e_pct":     _safe_float(cand.get("impact_high_e2e_pct")),
-            })
+            bucket["all_pitem_prose"].append(
+                {
+                    "rank": pitem_rank,
+                    "title": pitem_title,
+                    "identification": str(cand.get("identification") or "").strip(),
+                    "reasoning_for_slowdown": str(cand.get("reasoning_for_slowdown") or "").strip(),
+                    "resolution": str(cand.get("resolution") or "").strip(),
+                    "impact_low_ms": _safe_float(cand.get("impact_low_ms")),
+                    "impact_low_e2e_pct": _safe_float(cand.get("impact_low_e2e_pct")),
+                    "impact_high_ms": _safe_float(cand.get("impact_high_ms")),
+                    "impact_high_e2e_pct": _safe_float(cand.get("impact_high_e2e_pct")),
+                }
+            )
         try:
             bucket["aggregate_duration_us"] += float(cand.get("duration_us") or 0.0)
         except (TypeError, ValueError):
@@ -1538,19 +1550,19 @@ def aggregate_by_source_function(
         group["task_group_id"] = f"tg{idx:03d}"
         # Heaviest row (by duration) becomes primary; the rest are additional benchmark cases.
         group["rows"].sort(
-            key=lambda r: float(r.get("duration_us") or 0.0), reverse=True,
+            key=lambda r: float(r.get("duration_us") or 0.0),
+            reverse=True,
         )
         if group["rows"]:
             primary = group["rows"][0]
-            group["primary_kernel_id"] = str(
-                primary.get("kernel_id") or primary.get("name") or ""
-            )
+            group["primary_kernel_id"] = str(primary.get("kernel_id") or primary.get("name") or "")
         group["aggregate_duration_us"] = round(group["aggregate_duration_us"], 3)
         group["aggregate_gpu_pct"] = round(group["aggregate_gpu_pct"], 3)
         # Sort prose by rank (P1 first); drop entirely-empty entries.
         group["all_pitem_prose"].sort(key=lambda e: (e["rank"], e["title"]))
         group["all_pitem_prose"] = [
-            e for e in group["all_pitem_prose"]
+            e
+            for e in group["all_pitem_prose"]
             if e["rank"]
             or e["identification"]
             or e["reasoning_for_slowdown"]

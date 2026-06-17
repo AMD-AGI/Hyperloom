@@ -106,12 +106,8 @@ def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
     rows = _parse_executive_table(text)
     out["compute_pct"] = _parse_pct(rows.get("Compute %"))
     out["idle_pct"] = _parse_pct(rows.get("Idle %"))
-    out["comm_pct"] = _parse_pct(
-        rows.get("Exposed Communication %") or rows.get("Communication %")
-    )
-    out["top_bottleneck"] = _parse_top_bottleneck(
-        rows.get("Top Bottleneck Category")
-    )
+    out["comm_pct"] = _parse_pct(rows.get("Exposed Communication %") or rows.get("Communication %"))
+    out["top_bottleneck"] = _parse_top_bottleneck(rows.get("Top Bottleneck Category"))
     return out
 
 
@@ -176,9 +172,7 @@ def extract_top_kernel(analysis_md_path: str | Path) -> dict[str, Any] | None:
                 "name": str(op.get("name") or ""),
                 "gpu_pct": round(pct, 2),
                 "efficiency_pct": _parse_pct(
-                    str(eff.get("efficiency_percent"))
-                    if eff.get("efficiency_percent") is not None
-                    else None
+                    str(eff.get("efficiency_percent")) if eff.get("efficiency_percent") is not None else None
                 ),
                 "bound_type": str(eff.get("bound_type") or op.get("bound_type") or ""),
                 "category": category,
@@ -256,24 +250,12 @@ def build_roofline_snapshot(
         "top_kernel": None,
         # Primary decode roofline ceiling plus its memory/compute sides; all None when the ceiling is unavailable.
         "theoretical_peak_tok_per_sec": (
-            float(theoretical_peak_tok_per_sec)
-            if theoretical_peak_tok_per_sec > 0 else None
+            float(theoretical_peak_tok_per_sec) if theoretical_peak_tok_per_sec > 0 else None
         ),
-        "roofline_mem_ceiling_tok_per_sec": (
-            float(mem_ceiling_tok_per_sec)
-            if mem_ceiling_tok_per_sec > 0 else None
-        ),
-        "roofline_cmp_ceiling_tok_per_sec": (
-            float(cmp_ceiling_tok_per_sec)
-            if cmp_ceiling_tok_per_sec > 0 else None
-        ),
-        "roofline_bound_kind": (
-            str(bound_kind) if bound_kind else "unknown"
-        ),
-        "achieved_tok_per_sec": (
-            float(achieved_tok_per_sec)
-            if achieved_tok_per_sec > 0 else None
-        ),
+        "roofline_mem_ceiling_tok_per_sec": (float(mem_ceiling_tok_per_sec) if mem_ceiling_tok_per_sec > 0 else None),
+        "roofline_cmp_ceiling_tok_per_sec": (float(cmp_ceiling_tok_per_sec) if cmp_ceiling_tok_per_sec > 0 else None),
+        "roofline_bound_kind": (str(bound_kind) if bound_kind else "unknown"),
+        "achieved_tok_per_sec": (float(achieved_tok_per_sec) if achieved_tok_per_sec > 0 else None),
         "within_roofline_pct": within,
         "gap_to_roofline_pct": gap,
     }
@@ -350,11 +332,7 @@ def build_roofline_comparison_from_history(
     latest = dict(snapshots[-1])
     base_id = baseline.get("snapshot_id")
     latest_id = latest.get("snapshot_id")
-    same_snapshot = (
-        isinstance(base_id, int)
-        and isinstance(latest_id, int)
-        and base_id == latest_id
-    )
+    same_snapshot = isinstance(base_id, int) and isinstance(latest_id, int) and base_id == latest_id
     mode = "single_snapshot" if same_snapshot else "before_after"
     out: dict[str, Any] = {
         "mode": mode,
@@ -366,13 +344,16 @@ def build_roofline_comparison_from_history(
         lat_eff = (latest.get("top_kernel") or {}).get("efficiency_pct")
         out["delta"] = {
             "compute_pct": _num_delta(
-                latest.get("compute_pct"), baseline.get("compute_pct"),
+                latest.get("compute_pct"),
+                baseline.get("compute_pct"),
             ),
             "idle_pct": _num_delta(
-                latest.get("idle_pct"), baseline.get("idle_pct"),
+                latest.get("idle_pct"),
+                baseline.get("idle_pct"),
             ),
             "comm_pct": _num_delta(
-                latest.get("comm_pct"), baseline.get("comm_pct"),
+                latest.get("comm_pct"),
+                baseline.get("comm_pct"),
             ),
             "top_kernel_efficiency_pct": _num_delta(lat_eff, base_eff),
             "within_roofline_pct": _num_delta(
@@ -475,48 +456,42 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
     lines: list[str] = list(ceiling_lines)
     if mode == "single_snapshot":
         snap = baseline
-        lines.extend([
-            "| Metric | Value |",
-            "|--------|-------|",
-            f"| Compute % | {cell(snap.get('compute_pct'))} |",
-            f"| Idle % | {cell(snap.get('idle_pct'))} |",
-            f"| Comm % | {cell(snap.get('comm_pct'))} |",
-            f"| Top bottleneck | {snap.get('top_bottleneck') or '—'} |",
-        ])
+        lines.extend(
+            [
+                "| Metric | Value |",
+                "|--------|-------|",
+                f"| Compute % | {cell(snap.get('compute_pct'))} |",
+                f"| Idle % | {cell(snap.get('idle_pct'))} |",
+                f"| Comm % | {cell(snap.get('comm_pct'))} |",
+                f"| Top bottleneck | {snap.get('top_bottleneck') or '—'} |",
+            ]
+        )
         tk = snap.get("top_kernel") or {}
         lines.append(f"| Top kernel efficiency | {cell(tk.get('efficiency_pct'))} |")
         if tk.get("name"):
             lines.append(f"| Top kernel | `{tk.get('name')}` |")
-        lines.append(
-            f"| Achieved output_throughput | "
-            f"{_fmt_tput(snap.get('achieved_tok_per_sec'))} |"
-        )
-        lines.append(
-            f"| Within roofline % | "
-            f"{_fmt_pct_cell(snap.get('within_roofline_pct'))} |"
-        )
-        lines.append(
-            f"| Gap to roofline % | "
-            f"{_fmt_pct_cell(snap.get('gap_to_roofline_pct'))} |"
-        )
+        lines.append(f"| Achieved output_throughput | {_fmt_tput(snap.get('achieved_tok_per_sec'))} |")
+        lines.append(f"| Within roofline % | {_fmt_pct_cell(snap.get('within_roofline_pct'))} |")
+        lines.append(f"| Gap to roofline % | {_fmt_pct_cell(snap.get('gap_to_roofline_pct'))} |")
         lines.append("")
         return lines
 
-    lines.extend([
-        "| Metric | Base | Opt | Δ |",
-        "|--------|------|-----|---|",
-        f"| Compute % | {cell(baseline.get('compute_pct'))} | "
-        f"{cell(latest.get('compute_pct'))} | "
-        f"{_fmt_delta(delta.get('compute_pct'))} |",
-        f"| Idle % | {cell(baseline.get('idle_pct'))} | "
-        f"{cell(latest.get('idle_pct'))} | "
-        f"{_fmt_delta(delta.get('idle_pct'))} |",
-        f"| Comm % | {cell(baseline.get('comm_pct'))} | "
-        f"{cell(latest.get('comm_pct'))} | "
-        f"{_fmt_delta(delta.get('comm_pct'))} |",
-        f"| Top bottleneck | {baseline.get('top_bottleneck') or '—'} | "
-        f"{latest.get('top_bottleneck') or '—'} | — |",
-    ])
+    lines.extend(
+        [
+            "| Metric | Base | Opt | Δ |",
+            "|--------|------|-----|---|",
+            f"| Compute % | {cell(baseline.get('compute_pct'))} | "
+            f"{cell(latest.get('compute_pct'))} | "
+            f"{_fmt_delta(delta.get('compute_pct'))} |",
+            f"| Idle % | {cell(baseline.get('idle_pct'))} | "
+            f"{cell(latest.get('idle_pct'))} | "
+            f"{_fmt_delta(delta.get('idle_pct'))} |",
+            f"| Comm % | {cell(baseline.get('comm_pct'))} | "
+            f"{cell(latest.get('comm_pct'))} | "
+            f"{_fmt_delta(delta.get('comm_pct'))} |",
+            f"| Top bottleneck | {baseline.get('top_bottleneck') or '—'} | {latest.get('top_bottleneck') or '—'} | — |",
+        ]
+    )
     btk = baseline.get("top_kernel") or {}
     ltk = latest.get("top_kernel") or {}
     lines.append(
@@ -525,10 +500,7 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
         f"{_fmt_delta(delta.get('top_kernel_efficiency_pct'))} |"
     )
     if btk.get("name") or ltk.get("name"):
-        lines.append(
-            f"| Top kernel | `{btk.get('name') or '—'}` | "
-            f"`{ltk.get('name') or '—'}` | — |"
-        )
+        lines.append(f"| Top kernel | `{btk.get('name') or '—'}` | `{ltk.get('name') or '—'}` | — |")
     lines.append(
         f"| Achieved output_throughput | "
         f"{_fmt_tput(baseline.get('achieved_tok_per_sec'))} | "
@@ -679,16 +651,11 @@ def build_profiler_digest(
         direction, _pct_val = dominant_direction(latest)
         lever = BOTTLENECK_DOMAIN_HINTS.get(direction)
         if lever:
-            lines.append(
-                f"suggested_lever (dominant={direction}): {lever[0]}"
-            )
+            lines.append(f"suggested_lever (dominant={direction}): {lever[0]}")
 
         reusable = ta.get("reusable_native_kernel_ids") or []
         if isinstance(reusable, list) and reusable:
-            lines.append(
-                "reusable_native_kernel_ids="
-                f"{[str(r) for r in reusable[:12]]}"
-            )
+            lines.append(f"reusable_native_kernel_ids={[str(r) for r in reusable[:12]]}")
 
         return "\n".join(lines)
     except Exception:  # noqa: BLE001 — prompt enrichment must never crash

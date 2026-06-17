@@ -3,12 +3,12 @@
 """Coverage for ClaudeBackend pure helpers (no real SDK): prompt composition,
 usage coercion, block iteration/classification, tool-use parsing, text
 extraction, and conversation-session accessors."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
 
-import pytest
 
 from inference_optimizer.orchestrator.backends import (
     ClaudeBackend,
@@ -46,6 +46,7 @@ def _make_query_factory():
     async def _q(*, prompt, options):  # pragma: no cover - not invoked here
         if False:
             yield None
+
     return _q
 
 
@@ -112,13 +113,19 @@ def test_iter_blocks() -> None:
 
 def test_is_tool_use_for_emit_intent() -> None:
     b = _backend()
-    assert b._is_tool_use_for_emit_intent(
-        ToolUseBlock(name=EMIT_INTENT_TOOL_NAME, input={}),
-    ) is True
+    assert (
+        b._is_tool_use_for_emit_intent(
+            ToolUseBlock(name=EMIT_INTENT_TOOL_NAME, input={}),
+        )
+        is True
+    )
     # wrong tool name
-    assert b._is_tool_use_for_emit_intent(
-        ToolUseBlock(name="other_tool", input={}),
-    ) is False
+    assert (
+        b._is_tool_use_for_emit_intent(
+            ToolUseBlock(name="other_tool", input={}),
+        )
+        is False
+    )
     # wrong block class
     assert b._is_tool_use_for_emit_intent(TextBlock("hi")) is False
 

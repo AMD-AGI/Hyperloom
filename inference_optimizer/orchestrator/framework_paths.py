@@ -15,15 +15,9 @@ import os
 import sys
 from pathlib import Path
 
-_DEFAULT_SGLANG_SERVER_ARGS = Path(
-    "/sgl-workspace/sglang/python/sglang/srt/server_args.py"
-)
-_DEFAULT_VLLM_ARG_UTILS = Path(
-    "/sgl-workspace/vllm/vllm/engine/arg_utils.py"
-)
-_DEFAULT_ATOM_ARG_UTILS = Path(
-    "/app/ATOM/atom/model_engine/arg_utils.py"
-)
+_DEFAULT_SGLANG_SERVER_ARGS = Path("/sgl-workspace/sglang/python/sglang/srt/server_args.py")
+_DEFAULT_VLLM_ARG_UTILS = Path("/sgl-workspace/vllm/vllm/engine/arg_utils.py")
+_DEFAULT_ATOM_ARG_UTILS = Path("/app/ATOM/atom/model_engine/arg_utils.py")
 
 _DEFAULT_SOURCE_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter/",
@@ -227,9 +221,7 @@ def resolve_source_file_allowlist() -> tuple[str, ...]:
         tuple[str, ...]: The merged, de-duplicated allowlist roots.
     """
     env = os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").strip()
-    env_roots = tuple(
-        _normalize_root(p) for p in env.split(":") if p.strip()
-    ) if env else ()
+    env_roots = tuple(_normalize_root(p) for p in env.split(":") if p.strip()) if env else ()
     return _merge_roots(
         _DEFAULT_SOURCE_ROOTS,
         _discover_installed_framework_roots(),
@@ -282,9 +274,7 @@ def resolve_sglang_server_args_path() -> tuple[Path, str]:
         ):
             if alt.is_file():
                 return alt, str(alt)
-    return _DEFAULT_SGLANG_SERVER_ARGS, (
-        f"sglang server_args not found (checked {_DEFAULT_SGLANG_SERVER_ARGS})"
-    )
+    return _DEFAULT_SGLANG_SERVER_ARGS, (f"sglang server_args not found (checked {_DEFAULT_SGLANG_SERVER_ARGS})")
 
 
 def resolve_vllm_arg_utils_path() -> tuple[Path, str]:
@@ -310,14 +300,10 @@ def resolve_vllm_arg_utils_path() -> tuple[Path, str]:
         candidate = origin / "engine" / "arg_utils.py"
         if candidate.is_file():
             return candidate, str(candidate)
-        for alt in (
-            origin / "vllm" / "engine" / "arg_utils.py",
-        ):
+        for alt in (origin / "vllm" / "engine" / "arg_utils.py",):
             if alt.is_file():
                 return alt, str(alt)
-    return _DEFAULT_VLLM_ARG_UTILS, (
-        f"vllm arg_utils not found (checked {_DEFAULT_VLLM_ARG_UTILS})"
-    )
+    return _DEFAULT_VLLM_ARG_UTILS, (f"vllm arg_utils not found (checked {_DEFAULT_VLLM_ARG_UTILS})")
 
 
 def resolve_atom_arg_utils_path() -> tuple[Path, str]:
@@ -343,14 +329,10 @@ def resolve_atom_arg_utils_path() -> tuple[Path, str]:
         candidate = origin / "model_engine" / "arg_utils.py"
         if candidate.is_file():
             return candidate, str(candidate)
-        for alt in (
-            origin / "atom" / "model_engine" / "arg_utils.py",
-        ):
+        for alt in (origin / "atom" / "model_engine" / "arg_utils.py",):
             if alt.is_file():
                 return alt, str(alt)
-    return _DEFAULT_ATOM_ARG_UTILS, (
-        f"atom arg_utils not found (checked {_DEFAULT_ATOM_ARG_UTILS})"
-    )
+    return _DEFAULT_ATOM_ARG_UTILS, (f"atom arg_utils not found (checked {_DEFAULT_ATOM_ARG_UTILS})")
 
 
 def probe_framework_source_roots_for_env() -> str:

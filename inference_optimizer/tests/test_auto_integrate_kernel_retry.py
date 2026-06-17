@@ -105,9 +105,15 @@ def test_integrate_attempt_count_sums_across_patch_keys():
 @pytest.mark.asyncio
 async def test_auto_enqueue_dispatches_pending_keep_once_then_guards_inflight():
     state = SharedState()
-    state.record_kernel_opt(_ok_result(
-        "k001", "KEEP", 3.0, source_file="/p/a.py", artifact="/tmp/k001_opt.py",
-    ))
+    state.record_kernel_opt(
+        _ok_result(
+            "k001",
+            "KEEP",
+            3.0,
+            source_file="/p/a.py",
+            artifact="/tmp/k001_opt.py",
+        )
+    )
     coord = _coord(state)
 
     await coord._auto_enqueue_pending_integrations()
@@ -122,9 +128,15 @@ async def test_auto_enqueue_dispatches_pending_keep_once_then_guards_inflight():
 @pytest.mark.asyncio
 async def test_auto_enqueue_retries_unexhausted_fault():
     state = SharedState()
-    state.record_kernel_opt(_ok_result(
-        "k001", "KEEP", 3.0, source_file="/p/a.py", artifact="/tmp/k001_opt.py",
-    ))
+    state.record_kernel_opt(
+        _ok_result(
+            "k001",
+            "KEEP",
+            3.0,
+            source_file="/p/a.py",
+            artifact="/tmp/k001_opt.py",
+        )
+    )
     coord = _coord(state)
 
     # First dispatch (mark = 0 recorded attempts).
@@ -132,10 +144,15 @@ async def test_auto_enqueue_retries_unexhausted_fault():
     assert _dispatched_kids(coord) == ["k001"]
 
     # The in-flight integrate completes as a fault (recorded -> count advances).
-    entry = state.record_kernel_integrate_result(_integrate_result(
-        "k001", decision="REVERT", status="failed",
-        error_class="rebaseline_exception", patch_path="/tmp/k001_opt.py",
-    ))
+    entry = state.record_kernel_integrate_result(
+        _integrate_result(
+            "k001",
+            decision="REVERT",
+            status="failed",
+            error_class="rebaseline_exception",
+            patch_path="/tmp/k001_opt.py",
+        )
+    )
     assert entry.get("retryable") is True
 
     # Count advanced past the mark -> retry is dispatched.
@@ -147,18 +164,29 @@ async def test_auto_enqueue_retries_unexhausted_fault():
 @pytest.mark.asyncio
 async def test_auto_enqueue_stops_after_fault_budget_exhausted():
     state = SharedState()
-    state.record_kernel_opt(_ok_result(
-        "k001", "KEEP", 3.0, source_file="/p/a.py", artifact="/tmp/k001_opt.py",
-    ))
+    state.record_kernel_opt(
+        _ok_result(
+            "k001",
+            "KEEP",
+            3.0,
+            source_file="/p/a.py",
+            artifact="/tmp/k001_opt.py",
+        )
+    )
     coord = _coord(state)
 
     # Two faults exhaust the budget (2) -> rejected.
     for _ in range(2):
         await coord._auto_enqueue_pending_integrations()
-        state.record_kernel_integrate_result(_integrate_result(
-            "k001", decision="REVERT", status="failed",
-            error_class="apply_failed", patch_path="/tmp/k001_opt.py",
-        ))
+        state.record_kernel_integrate_result(
+            _integrate_result(
+                "k001",
+                decision="REVERT",
+                status="failed",
+                error_class="apply_failed",
+                patch_path="/tmp/k001_opt.py",
+            )
+        )
 
     assert "k001" in state.rejected_kernel_ids
     before = len(coord.bus.sent)
@@ -171,23 +199,39 @@ async def test_auto_enqueue_stops_after_fault_budget_exhausted():
 @pytest.mark.asyncio
 async def test_auto_enqueue_no_redispatch_after_keep():
     state = SharedState()
-    state.record_kernel_opt(_ok_result(
-        "k001", "KEEP", 3.0, source_file="/p/a.py", artifact="/tmp/k001_opt.py",
-    ))
+    state.record_kernel_opt(
+        _ok_result(
+            "k001",
+            "KEEP",
+            3.0,
+            source_file="/p/a.py",
+            artifact="/tmp/k001_opt.py",
+        )
+    )
     coord = _coord(state)
 
     await coord._auto_enqueue_pending_integrations()
     assert _dispatched_kids(coord) == ["k001"]
 
     # Integrate KEEPs -> lands in optimization_stack -> leaves pending.
-    state.record_kernel_integrate_result(_integrate_result(
-        "k001", decision="KEEP", status="ok", gain_pct=5.0,
-        patch_path="/tmp/k001_opt.py", target_file="/p/a.py",
-    ))
-    state.optimization_stack.append({
-        "action": "integrate", "kernel_id": "k001",
-        "target_file": "/p/a.py", "tput": 4500.0,
-    })
+    state.record_kernel_integrate_result(
+        _integrate_result(
+            "k001",
+            decision="KEEP",
+            status="ok",
+            gain_pct=5.0,
+            patch_path="/tmp/k001_opt.py",
+            target_file="/p/a.py",
+        )
+    )
+    state.optimization_stack.append(
+        {
+            "action": "integrate",
+            "kernel_id": "k001",
+            "target_file": "/p/a.py",
+            "tput": 4500.0,
+        }
+    )
 
     before = len(coord.bus.sent)
     await coord._auto_enqueue_pending_integrations()
@@ -198,18 +242,29 @@ async def test_auto_enqueue_no_redispatch_after_keep():
 @pytest.mark.asyncio
 async def test_auto_enqueue_no_redispatch_after_genuine_revert():
     state = SharedState()
-    state.record_kernel_opt(_ok_result(
-        "k001", "KEEP", 3.0, source_file="/p/a.py", artifact="/tmp/k001_opt.py",
-    ))
+    state.record_kernel_opt(
+        _ok_result(
+            "k001",
+            "KEEP",
+            3.0,
+            source_file="/p/a.py",
+            artifact="/tmp/k001_opt.py",
+        )
+    )
     coord = _coord(state)
 
     await coord._auto_enqueue_pending_integrations()
     assert _dispatched_kids(coord) == ["k001"]
 
-    state.record_kernel_integrate_result(_integrate_result(
-        "k001", decision="REVERT", status="ok", gain_pct=-3.0,
-        patch_path="/tmp/k001_opt.py",
-    ))
+    state.record_kernel_integrate_result(
+        _integrate_result(
+            "k001",
+            decision="REVERT",
+            status="ok",
+            gain_pct=-3.0,
+            patch_path="/tmp/k001_opt.py",
+        )
+    )
     assert "k001" in state.rejected_kernel_ids
 
     before = len(coord.bus.sent)

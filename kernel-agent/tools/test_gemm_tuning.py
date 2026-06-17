@@ -18,7 +18,8 @@ _TOOLS_DIR = Path(__file__).resolve().parent
 def _load_module():
     """Load gemm_tuning.py as an isolated module without running main()."""
     spec = importlib.util.spec_from_file_location(
-        "gemm_tuning_under_test", _TOOLS_DIR / "gemm_tuning.py",
+        "gemm_tuning_under_test",
+        _TOOLS_DIR / "gemm_tuning.py",
     )
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -42,12 +43,30 @@ def test_safe_cleanup_clause_mentions_safety():
 
 
 def test_build_task_with_known_baseline():
-    args = gt._parse_args([
-        "--benchmark-script", "/b.sh", "--tp", "2", "--conc", "8",
-        "--isl", "128", "--osl", "256", "--model-path", "/m",
-        "--framework", "sglang", "--gpu-type", "MI355X",
-        "--precision", "fp8", "--baseline-tput", "123.5",
-    ])
+    args = gt._parse_args(
+        [
+            "--benchmark-script",
+            "/b.sh",
+            "--tp",
+            "2",
+            "--conc",
+            "8",
+            "--isl",
+            "128",
+            "--osl",
+            "256",
+            "--model-path",
+            "/m",
+            "--framework",
+            "sglang",
+            "--gpu-type",
+            "MI355X",
+            "--precision",
+            "fp8",
+            "--baseline-tput",
+            "123.5",
+        ]
+    )
     task = gt._build_task(args, Path("/ws"))
     assert "123.5 tok/s" in task
     assert "TP=2, CONC=8, ISL=128, OSL=256" in task
@@ -77,6 +96,7 @@ def test_latest_gemm_workspace_picks_newest(tmp_path):
     old.mkdir()
     new.mkdir()
     import os
+
     os.utime(old, (1000, 1000))
     os.utime(new, (2000, 2000))
     assert gt._latest_gemm_workspace(tmp_path) == new
@@ -151,10 +171,17 @@ def test_main_requires_benchmark_script(tmp_path, capsys):
 
 
 def test_main_dry_run(tmp_path, capsys):
-    rc = gt.main([
-        "--cwd", str(tmp_path), "--model-path", "/m",
-        "--benchmark-script", "/b.sh", "--dry-run",
-    ])
+    rc = gt.main(
+        [
+            "--cwd",
+            str(tmp_path),
+            "--model-path",
+            "/m",
+            "--benchmark-script",
+            "/b.sh",
+            "--dry-run",
+        ]
+    )
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["dry_run"] is True
@@ -162,10 +189,16 @@ def test_main_dry_run(tmp_path, capsys):
 
 
 def test_main_requires_config_when_not_dry_run(tmp_path, capsys):
-    rc = gt.main([
-        "--cwd", str(tmp_path), "--model-path", "/m",
-        "--benchmark-script", "/b.sh",
-    ])
+    rc = gt.main(
+        [
+            "--cwd",
+            str(tmp_path),
+            "--model-path",
+            "/m",
+            "--benchmark-script",
+            "/b.sh",
+        ]
+    )
     assert rc == 2
     assert json.loads(capsys.readouterr().out)["error_class"] == "geak_config_missing"
 
@@ -189,14 +222,23 @@ def test_main_success_keep(tmp_path, capsys, monkeypatch):
         ws = Path(cwd) / "optimization_logs" / "gemm_tuning_x"
         ws.mkdir(parents=True)
         (ws / "final_report.json").write_text(
-            json.dumps({"status": "complete", "best_speedup": 1.5}), encoding="utf-8",
+            json.dumps({"status": "complete", "best_speedup": 1.5}),
+            encoding="utf-8",
         )
 
     _install_fake_minisweagent(monkeypatch, fake_run)
-    rc = gt.main([
-        "--cwd", str(tmp_path), "--model-path", "/m",
-        "--benchmark-script", "/b.sh", "--config", "/c.yaml",
-    ])
+    rc = gt.main(
+        [
+            "--cwd",
+            str(tmp_path),
+            "--model-path",
+            "/m",
+            "--benchmark-script",
+            "/b.sh",
+            "--config",
+            "/c.yaml",
+        ]
+    )
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
     # report's own status ("complete") is spread last and wins the merge.
@@ -209,14 +251,23 @@ def test_main_success_revert_when_no_speedup(tmp_path, capsys, monkeypatch):
         ws = Path(kwargs["cwd"]) / "optimization_logs" / "gemm_tuning_x"
         ws.mkdir(parents=True)
         (ws / "final_report.json").write_text(
-            json.dumps({"status": "ok", "best_speedup": 0.9}), encoding="utf-8",
+            json.dumps({"status": "ok", "best_speedup": 0.9}),
+            encoding="utf-8",
         )
 
     _install_fake_minisweagent(monkeypatch, fake_run)
-    rc = gt.main([
-        "--cwd", str(tmp_path), "--model-path", "/m",
-        "--benchmark-script", "/b.sh", "--config", "/c.yaml",
-    ])
+    rc = gt.main(
+        [
+            "--cwd",
+            str(tmp_path),
+            "--model-path",
+            "/m",
+            "--benchmark-script",
+            "/b.sh",
+            "--config",
+            "/c.yaml",
+        ]
+    )
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert out["decision"] == "REVERT"
@@ -224,10 +275,18 @@ def test_main_success_revert_when_no_speedup(tmp_path, capsys, monkeypatch):
 
 def test_main_report_missing(tmp_path, capsys, monkeypatch):
     _install_fake_minisweagent(monkeypatch, lambda **k: None)
-    rc = gt.main([
-        "--cwd", str(tmp_path), "--model-path", "/m",
-        "--benchmark-script", "/b.sh", "--config", "/c.yaml",
-    ])
+    rc = gt.main(
+        [
+            "--cwd",
+            str(tmp_path),
+            "--model-path",
+            "/m",
+            "--benchmark-script",
+            "/b.sh",
+            "--config",
+            "/c.yaml",
+        ]
+    )
     out = json.loads(capsys.readouterr().out)
     assert rc == 1
     assert out["error_class"] == "final_report_missing"
@@ -238,10 +297,18 @@ def test_main_handles_run_exception(tmp_path, capsys, monkeypatch):
         raise RuntimeError("kaboom")
 
     _install_fake_minisweagent(monkeypatch, boom)
-    rc = gt.main([
-        "--cwd", str(tmp_path), "--model-path", "/m",
-        "--benchmark-script", "/b.sh", "--config", "/c.yaml",
-    ])
+    rc = gt.main(
+        [
+            "--cwd",
+            str(tmp_path),
+            "--model-path",
+            "/m",
+            "--benchmark-script",
+            "/b.sh",
+            "--config",
+            "/c.yaml",
+        ]
+    )
     out = json.loads(capsys.readouterr().out)
     assert rc == 1
     assert out["error_class"] == "RuntimeError"
@@ -252,15 +319,24 @@ def test_main_handles_systemexit(tmp_path, capsys, monkeypatch):
         ws = Path(kwargs["cwd"]) / "optimization_logs" / "gemm_tuning_x"
         ws.mkdir(parents=True)
         (ws / "final_report.json").write_text(
-            json.dumps({"status": "failed"}), encoding="utf-8",
+            json.dumps({"status": "failed"}),
+            encoding="utf-8",
         )
         raise SystemExit(3)
 
     _install_fake_minisweagent(monkeypatch, sysexit)
-    rc = gt.main([
-        "--cwd", str(tmp_path), "--model-path", "/m",
-        "--benchmark-script", "/b.sh", "--config", "/c.yaml",
-    ])
+    rc = gt.main(
+        [
+            "--cwd",
+            str(tmp_path),
+            "--model-path",
+            "/m",
+            "--benchmark-script",
+            "/b.sh",
+            "--config",
+            "/c.yaml",
+        ]
+    )
     out = json.loads(capsys.readouterr().out)
     assert rc == 1
     assert out["returncode"] == 3

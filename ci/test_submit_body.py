@@ -63,9 +63,7 @@ def test_default_inferencex_path_is_empty_string():
     """When no inferencex_path is given, the body key exists and is empty."""
     client = _make_client()
     body = _capture_body(client)
-    assert "inferencexPath" in body, (
-        "inferencexPath must always be present to prevent SaFE Zod default"
-    )
+    assert "inferencexPath" in body, "inferencexPath must always be present to prevent SaFE Zod default"
     assert body["inferencexPath"] == ""
 
 

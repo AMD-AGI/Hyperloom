@@ -23,7 +23,9 @@ from inference_optimizer.orchestrator.task_registry import Task
 # Test fixtures
 def _ctx(tmp_path: Path | None = None) -> RunnerContext:
     task = Task(
-        task_id="t-roofline-1", kind="roofline", state="running",
+        task_id="t-roofline-1",
+        kind="roofline",
+        state="running",
         params={"base_extra_args": "--mem-fraction-static=0.92"},
         idempotency_key="roofline:t-1",
         requires_lanes=["profile_lane"],
@@ -62,6 +64,7 @@ def _trace_analyze_success(*, snapshot_id_in_state: int = 1) -> dict:
 
 def _patch_subs(profile_result, ta_result):
     """Return patches for both sub-step callables."""
+
     async def fake_profile(ctx):
         if isinstance(profile_result, Exception):
             raise profile_result
@@ -366,8 +369,7 @@ def test_failed_helper_constructs_canonical_shape():
     assert "executed_at_iso" in f
     assert "sub_result" not in f
 
-    f2 = _failed("trace_analyze", "x",
-                 sub_result={"status": "failed", "error": "y", "extra": "ignored"})
+    f2 = _failed("trace_analyze", "x", sub_result={"status": "failed", "error": "y", "extra": "ignored"})
     assert f2["sub_result"] == {"status": "failed", "error": "y"}
     assert "extra" not in f2["sub_result"]
 
@@ -449,9 +451,9 @@ def _silent_backends() -> dict[str, object]:
     )
     return {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel":        MockKernelBackend(),
-        "critic":        MockCriticBackend(),
-        "robustness":    MockRobustnessBackend(),
+        "kernel": MockKernelBackend(),
+        "critic": MockCriticBackend(),
+        "robustness": MockRobustnessBackend(),
     }
 
 
@@ -520,8 +522,10 @@ def test_record_action_attempt_caps_roofline_history():
     s = SharedState()
     for i in range(25):
         s.record_action_attempt(
-            action="roofline", task_id=f"t-{i}",
-            status="succeeded", decision="promoted",
+            action="roofline",
+            task_id=f"t-{i}",
+            status="succeeded",
+            decision="promoted",
             result={"snapshot_id": i},
         )
     assert len(s.roofline_attempts) == 20
@@ -578,9 +582,7 @@ async def test_promote_roofline_records_audit_attempt(session_dir):
         _roofline_result(snapshot_id=1),
         task=_roofline_task(),
     )
-    assert len(s.roofline_attempts) == 1, (
-        "roofline must enter _AUDIT_ACTIONS so record_action_attempt fires"
-    )
+    assert len(s.roofline_attempts) == 1, "roofline must enter _AUDIT_ACTIONS so record_action_attempt fires"
     attempt = s.roofline_attempts[-1]
     assert attempt.get("status") == "succeeded"
     assert attempt.get("decision") == "promoted"
@@ -616,17 +618,16 @@ async def test_promote_roofline_does_not_remutate_state(session_dir):
 async def test_promote_roofline_non_dict_result_short_circuits(session_dir):
     coord = Coordinator(session_dir, backends=_silent_backends())
     await coord._promote_to_shared_state(
-        "roofline", None, task=_roofline_task(),  # type: ignore[arg-type]
+        "roofline",
+        None,
+        task=_roofline_task(),  # type: ignore[arg-type]
     )
     assert coord.shared_state.roofline_attempts == []
 
 
 # (formerly test_n11_strip_base64.py) — N11: strip base64 image data URLs from analysis.md.
 def test_strip_passes_text_through_when_no_base64_url():
-    md = (
-        "# Analysis\n\nNo images here, just text.\n"
-        "Some markdown link: [foo](https://example.com/bar)\n"
-    )
+    md = "# Analysis\n\nNo images here, just text.\nSome markdown link: [foo](https://example.com/bar)\n"
     out = SharedState._strip_base64_data_urls(md)
     assert out == md
 
@@ -636,8 +637,7 @@ def test_strip_empty_input_returns_empty():
 
 
 def test_strip_handles_none_gracefully():
-    assert SharedState._strip_base64_data_urls(None) is None or \
-           SharedState._strip_base64_data_urls(None) == ""
+    assert SharedState._strip_base64_data_urls(None) is None or SharedState._strip_base64_data_urls(None) == ""
 
 
 def test_strip_replaces_data_image_png_payload():
@@ -672,11 +672,7 @@ def test_strip_replaces_data_image_svg_xml_base64():
 
 
 def test_strip_replaces_multiple_images_independently():
-    md = (
-        "![a](data:image/png;base64,AAA)\n"
-        "text\n"
-        "![b](data:image/png;base64,BBB)\n"
-    )
+    md = "![a](data:image/png;base64,AAA)\ntext\n![b](data:image/png;base64,BBB)\n"
     out = SharedState._strip_base64_data_urls(md)
     assert "AAA" not in out and "BBB" not in out
     assert out.count("stripped") == 2
@@ -685,10 +681,7 @@ def test_strip_replaces_multiple_images_independently():
 
 
 def test_strip_does_not_touch_regular_image_urls():
-    md = (
-        "![chart](https://example.com/perf.png)\n"
-        "![fig](./local/figure.svg)\n"
-    )
+    md = "![chart](https://example.com/perf.png)\n![fig](./local/figure.svg)\n"
     out = SharedState._strip_base64_data_urls(md)
     assert out == md
 
@@ -702,6 +695,7 @@ def test_strip_preserves_empty_alt_text():
 
 def test_strip_reduces_real_r1_report_by_90pct_plus():
     import os
+
     p = "/wekafs/xiaofei/sessions/kernel-agent/runs/sessions/tracelens/analysis.md"
     if not os.path.exists(p):
         pytest.skip(f"sample analysis.md not present at {p}")
@@ -718,13 +712,11 @@ def test_strip_reduces_real_r1_report_by_90pct_plus():
     after = len(stripped)
     reduction_pct = (1 - after / before) * 100
     assert reduction_pct > 80, (
-        f"N11 must reduce real R1 analysis.md by ≥80%; "
-        f"got before={before} after={after} reduction={reduction_pct:.1f}%"
+        f"N11 must reduce real R1 analysis.md by ≥80%; got before={before} after={after} reduction={reduction_pct:.1f}%"
     )
     assert "Executive Summary" in stripped
     assert "Idle %" in stripped
-    assert "fmoe_fp8_blockscale_g1u1" in stripped or \
-           "MoE" in stripped
+    assert "fmoe_fp8_blockscale_g1u1" in stripped or "MoE" in stripped
 
 
 def test_format_analysis_md_full_strips_base64_before_injection():
@@ -794,7 +786,9 @@ from inference_optimizer.orchestrator.action_executors.roofline import (
 
 def _n26_ctx(tmp_path: Path) -> RunnerContext:
     task = Task(
-        task_id="t-n26-1", kind="roofline", state="running",
+        task_id="t-n26-1",
+        kind="roofline",
+        state="running",
         params={"base_extra_args": ""},
         idempotency_key="roofline:n26-1",
         requires_lanes=["profile_lane"],
@@ -812,7 +806,9 @@ def _profile_ok(trace: str = "/tmp/t.gz") -> dict:
 
 
 def _ta_empty_chunk_failure(
-    *, requested: str = "mixed", non_empty: list[str] | None = None,
+    *,
+    requested: str = "mixed",
+    non_empty: list[str] | None = None,
 ) -> dict:
     return {
         "status": "failed",
@@ -838,7 +834,9 @@ def _ta_empty_chunk_failure(
 
 
 def _ta_missing_chunk_failure(
-    *, requested: str = "decode_only", available: list[str] | None = None,
+    *,
+    requested: str = "decode_only",
+    available: list[str] | None = None,
 ) -> dict:
     return {
         "status": "failed",
@@ -897,22 +895,29 @@ def _run_roofline_captured_payload(tmp_path, *, reason: str) -> dict:
     state.record_trace_analyze = record_spy  # type: ignore[assignment]
 
     task = Task(
-        task_id=f"t-{reason}-1", kind="roofline", state="running",
+        task_id=f"t-{reason}-1",
+        kind="roofline",
+        state="running",
         params={"base_extra_args": "", "reason": reason},
         idempotency_key=f"roofline:{reason}-1",
         requires_lanes=["profile_lane"],
     )
     ctx = RunnerContext(
-        task=task, lease=None, extra={"session_dir": str(tmp_path)},
+        task=task,
+        lease=None,
+        extra={"session_dir": str(tmp_path)},
     )
 
     executor = RooflineExecutor(shared_state=state)
-    with patch(
-        "inference_optimizer.orchestrator.action_executors.profile.profile_executor",
-        new=fake_profile,
-    ), patch(
-        "inference_optimizer.orchestrator.kernel_request_handlers.trace_analyze_handler",
-        new=fake_ta,
+    with (
+        patch(
+            "inference_optimizer.orchestrator.action_executors.profile.profile_executor",
+            new=fake_profile,
+        ),
+        patch(
+            "inference_optimizer.orchestrator.kernel_request_handlers.trace_analyze_handler",
+            new=fake_ta,
+        ),
     ):
         result = asyncio.run(executor(ctx))
 
@@ -930,7 +935,8 @@ def test_watermark_roofline_tags_current_best_arm(tmp_path):
     """A non-prelude roofline explicitly tags arm=current_best (no reliance on
     transient recorder inference)."""
     payload = _run_roofline_captured_payload(
-        tmp_path, reason="explore_keep_watermark",
+        tmp_path,
+        reason="explore_keep_watermark",
     )
     assert payload.get("roofline_arm") == "current_best"
 
@@ -971,9 +977,12 @@ def test_extract_returns_none_for_unrelated_warning():
 def test_extract_returns_none_for_empty_result():
     assert _extract_steady_state_retry_mode({}) is None
     assert _extract_steady_state_retry_mode({"status": "ok"}) is None
-    assert _extract_steady_state_retry_mode(  # type: ignore[arg-type]
-        None
-    ) is None
+    assert (
+        _extract_steady_state_retry_mode(  # type: ignore[arg-type]
+            None
+        )
+        is None
+    )
 
 
 def test_extract_skips_blank_mode_entries():
@@ -1015,7 +1024,8 @@ async def test_auto_retry_succeeds_on_alternate_mode(tmp_path):
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\nCompute 60%, Idle 40%\n", encoding="utf-8")
     fail = _ta_empty_chunk_failure(
-        requested="mixed", non_empty=["prefilldecode"],
+        requested="mixed",
+        non_empty=["prefilldecode"],
     )
     succ = _ta_ok(report_md=md)
     p1, p2, calls = _n26_patch_subs(_profile_ok(), [fail, succ])
@@ -1043,7 +1053,8 @@ async def test_auto_retry_succeeds_on_missing_chunk(tmp_path):
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\nCompute 80%, Idle 20%\n", encoding="utf-8")
     fail = _ta_missing_chunk_failure(
-        requested="decode_only", available=["mixed", "prefilldecode"],
+        requested="decode_only",
+        available=["mixed", "prefilldecode"],
     )
     succ = _ta_ok(report_md=md)
     p1, p2, calls = _n26_patch_subs(_profile_ok(), [fail, succ])
@@ -1098,7 +1109,8 @@ async def test_no_retry_on_unrelated_failure(tmp_path):
 @pytest.mark.asyncio
 async def test_retry_failure_propagates_without_third_attempt(tmp_path):
     fail1 = _ta_empty_chunk_failure(
-        requested="mixed", non_empty=["prefilldecode"],
+        requested="mixed",
+        non_empty=["prefilldecode"],
     )
     fail2 = {
         "status": "failed",
@@ -1131,7 +1143,8 @@ async def test_retry_failure_propagates_without_third_attempt(tmp_path):
 @pytest.mark.asyncio
 async def test_retry_exception_propagates(tmp_path):
     fail = _ta_empty_chunk_failure(
-        requested="mixed", non_empty=["prefilldecode"],
+        requested="mixed",
+        non_empty=["prefilldecode"],
     )
 
     async def fake_profile(ctx):
@@ -1147,12 +1160,15 @@ async def test_retry_exception_propagates(tmp_path):
 
     state = _state()
     executor = RooflineExecutor(shared_state=state)
-    with patch(
-        "inference_optimizer.orchestrator.action_executors.profile.profile_executor",
-        new=fake_profile,
-    ), patch(
-        "inference_optimizer.orchestrator.kernel_request_handlers.trace_analyze_handler",
-        new=fake_ta,
+    with (
+        patch(
+            "inference_optimizer.orchestrator.action_executors.profile.profile_executor",
+            new=fake_profile,
+        ),
+        patch(
+            "inference_optimizer.orchestrator.kernel_request_handlers.trace_analyze_handler",
+            new=fake_ta,
+        ),
     ):
         result = await executor(_n26_ctx(tmp_path))
 
@@ -1167,7 +1183,8 @@ async def test_retry_success_stamps_n26_metadata(tmp_path):
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\nCompute 60%, Idle 40%\n", encoding="utf-8")
     fail = _ta_empty_chunk_failure(
-        requested="mixed", non_empty=["prefilldecode"],
+        requested="mixed",
+        non_empty=["prefilldecode"],
     )
     succ = _ta_ok(report_md=md)
 
@@ -1190,12 +1207,15 @@ async def test_retry_success_stamps_n26_metadata(tmp_path):
     state.record_trace_analyze = record_spy  # type: ignore[assignment]
 
     executor = RooflineExecutor(shared_state=state)
-    with patch(
-        "inference_optimizer.orchestrator.action_executors.profile.profile_executor",
-        new=fake_profile,
-    ), patch(
-        "inference_optimizer.orchestrator.kernel_request_handlers.trace_analyze_handler",
-        new=fake_ta,
+    with (
+        patch(
+            "inference_optimizer.orchestrator.action_executors.profile.profile_executor",
+            new=fake_profile,
+        ),
+        patch(
+            "inference_optimizer.orchestrator.kernel_request_handlers.trace_analyze_handler",
+            new=fake_ta,
+        ),
     ):
         result = await executor(_n26_ctx(tmp_path))
 
@@ -1212,7 +1232,8 @@ async def test_retry_works_when_operator_started_with_non_mixed(tmp_path):
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\nCompute 60%, Idle 40%\n", encoding="utf-8")
     fail = _ta_empty_chunk_failure(
-        requested="prefilldecode", non_empty=["decode_only"],
+        requested="prefilldecode",
+        non_empty=["decode_only"],
     )
     succ = _ta_ok(report_md=md)
     p1, p2, calls = _n26_patch_subs(_profile_ok(), [fail, succ])
@@ -1250,7 +1271,7 @@ async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):
         "capture_traces_present": True,
         "issues": ["[3] main trace ... no execute_*/user_annotation ..."],
     }
-    ta = _trace_analyze_success()          # hot_kernels: []
+    ta = _trace_analyze_success()  # hot_kernels: []
     ta["trace_report_path"] = str(md)
 
     p1, p2 = _patch_subs(profile, ta)
@@ -1264,10 +1285,7 @@ async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):
     warnings = state.last_trace_analyze.get("trace_health_warnings") or []
     codes = [w.get("code") for w in warnings if isinstance(w, dict)]
     assert "cuda_graph_attribution_degraded" in codes, warnings
-    w = next(
-        w for w in warnings
-        if w.get("code") == "cuda_graph_attribution_degraded"
-    )
+    w = next(w for w in warnings if w.get("code") == "cuda_graph_attribution_degraded")
     assert w["capture_traces_present"] is True
     assert "--enforce-eager" in w["message"]
 

@@ -32,6 +32,7 @@ backend degrades coverage without failing the read. Session/attempt reads are
 local-only at the dispatcher layer, so the composite delegates those to the
 first source purely for direct-use completeness.
 """
+
 from __future__ import annotations
 
 import json
@@ -53,13 +54,25 @@ _AUTHORITY_RANK = {
 
 # List-valued arbor fields that get dedup-unioned across a dedup group.
 _LIST_UNION_FIELDS = (
-    "what_worked", "what_failed", "remaining_gaps", "prs_tested",
-    "pitfalls", "lessons", "evidence_refs", "sessions",
+    "what_worked",
+    "what_failed",
+    "remaining_gaps",
+    "prs_tested",
+    "pitfalls",
+    "lessons",
+    "evidence_refs",
+    "sessions",
 )
 # Scalar/dict arbor fields back-filled onto the base when the base value is empty.
 _BACKFILL_FIELDS = (
-    "best_config", "best_throughput", "framework_version", "last_profiled",
-    "stack_fingerprint", "provenance", "created_at", "updated_at",
+    "best_config",
+    "best_throughput",
+    "framework_version",
+    "last_profiled",
+    "stack_fingerprint",
+    "provenance",
+    "created_at",
+    "updated_at",
 )
 
 # Per-source fetch floor so a low caller ``limit`` (e.g. get_recipe's limit=1)
@@ -171,7 +184,7 @@ def _union_lists(
     contributors: list[Any] = []
     for row in rows:
         src = row.get("_source")
-        for item in (row.get(field) or []):
+        for item in row.get(field) or []:
             try:
                 key = json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
             except (TypeError, ValueError):
@@ -226,9 +239,7 @@ def _merge_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
                     field_sources[field] = other["_source"]
                 break
 
-    base["_sources"] = _dedup_preserve(
-        [r.get("_source") for r in ordered if r.get("_source")]
-    )
+    base["_sources"] = _dedup_preserve([r.get("_source") for r in ordered if r.get("_source")])
     base["_field_sources"] = field_sources
     base.pop("_source", None)
     return base
@@ -251,9 +262,7 @@ class CompositeRemoteRecipeClient:
                 each source's ``_name`` or class name.
         """
         self._sources = [s for s in sources if s is not None]
-        self._names = names or [
-            getattr(s, "_name", None) or type(s).__name__ for s in self._sources
-        ]
+        self._names = names or [getattr(s, "_name", None) or type(s).__name__ for s in self._sources]
 
     @property
     def enabled(self) -> bool:
@@ -271,11 +280,7 @@ class CompositeRemoteRecipeClient:
             The enabled sources paired with their display names, in precedence
             order.
         """
-        return [
-            (self._names[i], s)
-            for i, s in enumerate(self._sources)
-            if getattr(s, "enabled", False)
-        ]
+        return [(self._names[i], s) for i, s in enumerate(self._sources) if getattr(s, "enabled", False)]
 
     def _fan_out_search(self, *, name: str, source: Any, kwargs: dict[str, Any]) -> list[dict[str, Any]]:
         """Run one source's search, tag + normalize each row. Best-effort.
@@ -437,8 +442,13 @@ class CompositeRemoteRecipeClient:
         """
         return self._merged_search(
             per_source_limit=max(int(limit), _FETCH_FLOOR),
-            kwargs={"label_match": None, "limit": limit, "metric_filters": None,
-                    "updated_since": None, "order_by": "updated_at DESC"},
+            kwargs={
+                "label_match": None,
+                "limit": limit,
+                "metric_filters": None,
+                "updated_since": None,
+                "order_by": "updated_at DESC",
+            },
         )[: int(limit)]
 
     def _first_active(self) -> Any | None:

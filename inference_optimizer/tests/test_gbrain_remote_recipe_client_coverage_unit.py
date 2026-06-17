@@ -2,6 +2,7 @@
 
 """Supplemental coverage for gbrain_remote_client: MCP envelope parsing,
 scan pagination, metric filters, label-match edges, and env construction."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -39,7 +40,9 @@ class _RawResp:
 
 def _patch_raw(monkeypatch, raw: str) -> None:
     monkeypatch.setattr(
-        grc.urllib.request, "urlopen", lambda req, timeout=None: _RawResp(raw),
+        grc.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _RawResp(raw),
     )
 
 
@@ -72,10 +75,7 @@ def test_mcp_call_event_stream_framing_non_dict(monkeypatch) -> None:
 
 
 def test_mcp_call_event_stream_returns_parsed_content(monkeypatch) -> None:
-    body = (
-        'data: {"jsonrpc":"2.0","id":"1","result":'
-        '{"content":[{"text":"{\\"ok\\": true}"}]}}\n'
-    )
+    body = 'data: {"jsonrpc":"2.0","id":"1","result":{"content":[{"text":"{\\"ok\\": true}"}]}}\n'
     _patch_raw(monkeypatch, body)
     assert _mcp().call("get_page", {}) == {"ok": True}
 
@@ -111,9 +111,7 @@ def test_json_list_variants() -> None:
 
 def test_best_config_from_attrs_empty_and_filled() -> None:
     assert _best_config_from_attrs({}) == {}
-    out = _best_config_from_attrs(
-        {"best_config_args": "--x 1", "best_config_envs": {"A": 2}}
-    )
+    out = _best_config_from_attrs({"best_config_args": "--x 1", "best_config_envs": {"A": 2}})
     assert out["extra_server_args"] == "--x 1"
     assert out["extra_envs"] == {"A": "2"}
 
@@ -154,8 +152,7 @@ class _FakeMcp:
         self.calls.append((tool, dict(args)))
         if tool == "list_pages":
             items = [
-                {"slug": s, "type": "recipe", "updated_at": fm.get("updated_at", "")}
-                for s, fm in self.pages.items()
+                {"slug": s, "type": "recipe", "updated_at": fm.get("updated_at", "")} for s, fm in self.pages.items()
             ]
             after = args.get("updated_after")
             if after is not None:
@@ -205,16 +202,19 @@ def test_get_recipe_validation() -> None:
 
 
 def test_search_updated_since_and_order(monkeypatch) -> None:
-    c = _client({
-        "r1": _recipe_page("Qwen3-32B", "mi300x", "2026-01-01T00:00:00Z"),
-        "r2": _recipe_page("Qwen3-32B", "mi355x", "2026-03-01T00:00:00Z"),
-    })
+    c = _client(
+        {
+            "r1": _recipe_page("Qwen3-32B", "mi300x", "2026-01-01T00:00:00Z"),
+            "r2": _recipe_page("Qwen3-32B", "mi355x", "2026-03-01T00:00:00Z"),
+        }
+    )
     # updated_since filters out the older row
     rows = c.search(label_match={"model": "Qwen3-32B"}, updated_since="2026-02-01T00:00:00Z")
     assert len(rows) == 1
     # ascending order reverses the default newest-first ordering
     rows_asc = c.search(
-        label_match={"model": "Qwen3-32B"}, order_by=grc.C.ORDER_BY_UPDATED_AT_ASC,
+        label_match={"model": "Qwen3-32B"},
+        order_by=grc.C.ORDER_BY_UPDATED_AT_ASC,
     )
     assert [r["labels"]["hardware"] for r in rows_asc][0] == "mi300x"
 
@@ -226,10 +226,12 @@ def test_search_metric_filter() -> None:
 
 
 def test_list_recent_returns_rows() -> None:
-    c = _client({
-        "r1": _recipe_page("m1", "mi300x", "2026-01-01T00:00:00Z"),
-        "r2": _recipe_page("m2", "mi355x", "2026-02-01T00:00:00Z"),
-    })
+    c = _client(
+        {
+            "r1": _recipe_page("m1", "mi300x", "2026-01-01T00:00:00Z"),
+            "r2": _recipe_page("m2", "mi355x", "2026-02-01T00:00:00Z"),
+        }
+    )
     rows = c.list_recent(limit=10)
     assert len(rows) == 2
     # newest first
