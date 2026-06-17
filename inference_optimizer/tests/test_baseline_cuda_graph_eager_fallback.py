@@ -17,7 +17,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-import yaml
 
 from inference_optimizer.orchestrator.action_executors import (
     baseline as baseline_module,
@@ -33,13 +32,10 @@ from inference_optimizer.orchestrator.shared_state import SharedState
 
 def test_cuda_graph_capture_markers_detected():
     assert _is_cuda_graph_capture_failure(
-        "torch.AcceleratorError: HIP error: operation not permitted "
-        "when stream is capturing"
+        "torch.AcceleratorError: HIP error: operation not permitted when stream is capturing"
     )
     # Non-OOM capture failure (stream-capture incompatibility) IS recoverable.
-    assert _is_cuda_graph_capture_failure(
-        "Capture cuda graph failed: HIP error: operation not permitted"
-    )
+    assert _is_cuda_graph_capture_failure("Capture cuda graph failed: HIP error: operation not permitted")
     assert _is_cuda_graph_capture_failure("hipErrorStreamCaptureUnsupported")
 
 
@@ -48,12 +44,9 @@ def test_oom_capture_failure_not_flagged():
     # Disabling cuda-graph does NOT recover OOM (eager peaks can be higher), so
     # it must NOT arm the one-shot fallback; let it fall to subprocess_nonzero.
     assert not _is_cuda_graph_capture_failure(
-        "Exception: Capture cuda graph failed: HIP out of memory. "
-        "Tried to allocate 4.78 GiB."
+        "Exception: Capture cuda graph failed: HIP out of memory. Tried to allocate 4.78 GiB."
     )
-    assert not _is_cuda_graph_capture_failure(
-        "Capture cuda graph failed: torch.OutOfMemoryError: HIP out of memory"
-    )
+    assert not _is_cuda_graph_capture_failure("Capture cuda graph failed: torch.OutOfMemoryError: HIP out of memory")
 
 
 def test_unrelated_earlier_oom_does_not_mask_capture_failure():
@@ -71,20 +64,15 @@ def test_unrelated_earlier_oom_does_not_mask_capture_failure():
 def test_compile_error_capture_failure_not_flagged():
     # Bare "Capture cuda graph failed" rooted in a compile/lowering error is
     # NOT recoverable by disabling cuda-graph; it must stay a weak signal only.
-    assert not _is_cuda_graph_capture_failure(
-        "Capture cuda graph failed: LoweringException: AssertionError"
-    )
-    assert not _is_cuda_graph_capture_failure(
-        "Capture cuda graph failed\n  CompilationError: invalid kernel"
-    )
+    assert not _is_cuda_graph_capture_failure("Capture cuda graph failed: LoweringException: AssertionError")
+    assert not _is_cuda_graph_capture_failure("Capture cuda graph failed\n  CompilationError: invalid kernel")
 
 
 def test_strong_marker_ignores_compile_error_in_context():
     # A strong stream-capture marker arms the fallback even if a compile error
     # sits nearby; compile-error exclusion only gates the bare/weak marker.
     assert _is_cuda_graph_capture_failure(
-        "AssertionError: shape mismatch\n"
-        "operation not permitted when stream is capturing"
+        "AssertionError: shape mismatch\noperation not permitted when stream is capturing"
     )
 
 
@@ -93,8 +81,7 @@ def test_strong_and_weak_same_line_with_compile_error_is_recoverable():
     # compile error in context, must be RECOVERABLE — strong wins, the
     # weak-only compile gate must not demote it (false negative).
     assert _is_cuda_graph_capture_failure(
-        "Capture cuda graph failed: LoweringException: operation not "
-        "permitted when stream is capturing"
+        "Capture cuda graph failed: LoweringException: operation not permitted when stream is capturing"
     )
 
 
@@ -112,9 +99,7 @@ def test_strong_marker_with_adjacent_unrelated_oom_warning_is_recoverable():
 def test_strong_marker_with_oom_on_same_line_not_flagged():
     # OOM directly on the strong marker line IS a real OOM-rooted capture
     # failure; disabling cuda-graph cannot recover it.
-    assert not _is_cuda_graph_capture_failure(
-        "HIP out of memory; operation not permitted when stream is capturing"
-    )
+    assert not _is_cuda_graph_capture_failure("HIP out of memory; operation not permitted when stream is capturing")
 
 
 def test_weak_marker_with_distant_oom_not_flagged():
@@ -148,19 +133,14 @@ def test_with_cuda_graph_disabled_is_idempotent():
     assert _with_cuda_graph_disabled("--mem-fraction-static=0.8", "sglang") == (
         "--mem-fraction-static=0.8 --disable-cuda-graph"
     )
-    assert _with_cuda_graph_disabled("--disable-cuda-graph", "sglang") == (
-        "--disable-cuda-graph"
-    )
-    assert _with_cuda_graph_disabled("--enforce-eager", "vllm") == (
-        "--enforce-eager"
-    )
-    assert _with_cuda_graph_disabled(
-        "--a --disable-cuda-graph --b", "sglang"
-    ).count("--disable-cuda-graph") == 1
+    assert _with_cuda_graph_disabled("--disable-cuda-graph", "sglang") == ("--disable-cuda-graph")
+    assert _with_cuda_graph_disabled("--enforce-eager", "vllm") == ("--enforce-eager")
+    assert _with_cuda_graph_disabled("--a --disable-cuda-graph --b", "sglang").count("--disable-cuda-graph") == 1
     # Token-level dedup: a longer flag must not block the real one.
-    assert _with_cuda_graph_disabled(
-        "--disable-cuda-graph-extra=1", "sglang"
-    ) == "--disable-cuda-graph-extra=1 --disable-cuda-graph"
+    assert (
+        _with_cuda_graph_disabled("--disable-cuda-graph-extra=1", "sglang")
+        == "--disable-cuda-graph-extra=1 --disable-cuda-graph"
+    )
 
 
 def test_eager_fallback_is_consumed_once(tmp_path: Path):
@@ -216,8 +196,12 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
 
 
 def _run_executor_with_server_log(
-    tmp_path: Path, server_log_text: str, *, framework: str | None = "sglang",
-    eager_armed: bool = False, shared_state: SharedState | None = None,
+    tmp_path: Path,
+    server_log_text: str,
+    *,
+    framework: str | None = "sglang",
+    eager_armed: bool = False,
+    shared_state: SharedState | None = None,
     make_workspace: bool = False,
 ) -> tuple[dict, dict]:
     """Run BaselineExecutor.__call__ with a mocked Magpie that writes a
@@ -251,9 +235,7 @@ def _run_executor_with_server_log(
             (ws / "benchmark_report.json").write_text("{}", encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 1, "", "boom")
 
-    real_materialize = (
-        baseline_module.materialize_config_with_envs
-    )
+    real_materialize = baseline_module.materialize_config_with_envs
 
     def spy_materialize(config_path, output_dir, *args, **kwargs):
         captured["extra_server_args"] = kwargs.get("extra_server_args", "")
@@ -273,13 +255,16 @@ def _run_executor_with_server_log(
     if framework is not None:
         task_params["framework"] = framework
     ctx = _make_ctx(task_params)
-    with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
-        side_effect=fake_run,
-    ), patch.object(
-        baseline_module, "materialize_config_with_envs",
-        side_effect=spy_materialize,
+    with (
+        patch(
+            "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
+            side_effect=fake_run,
+        ),
+        patch.object(
+            baseline_module,
+            "materialize_config_with_envs",
+            side_effect=spy_materialize,
+        ),
     ):
         result = asyncio.run(executor(ctx))
     return result, captured
@@ -302,7 +287,9 @@ def test_executor_consumes_flag_and_injects_disable_flag(tmp_path: Path):
     # #6: with the eager flag armed, the next baseline must consume it and the
     # disable-cuda-graph flag must actually reach materialization (launch args).
     result, captured = _run_executor_with_server_log(
-        tmp_path, "boot failed\n", eager_armed=True,
+        tmp_path,
+        "boot failed\n",
+        eager_armed=True,
     )
     assert result["status"] == "failed"
     assert "--disable-cuda-graph" in captured["extra_server_args"]
@@ -311,14 +298,18 @@ def test_executor_consumes_flag_and_injects_disable_flag(tmp_path: Path):
 
 
 def test_executor_keeps_flag_armed_when_framework_unknown(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ):
     # Unknown framework cannot pick a safe flag (sglang's --disable-cuda-graph
     # would break a vLLM retry). The one-shot must stay ARMED (not consumed) so
     # a later baseline with a known framework can still apply it.
     monkeypatch.delenv("FRAMEWORK", raising=False)
     result, captured = _run_executor_with_server_log(
-        tmp_path, "boot failed\n", framework=None, eager_armed=True,
+        tmp_path,
+        "boot failed\n",
+        framework=None,
+        eager_armed=True,
     )
     assert result["status"] == "failed"
     assert "--disable-cuda-graph" not in captured["extra_server_args"]
@@ -329,7 +320,9 @@ def test_executor_keeps_flag_armed_when_framework_unknown(
 
 def test_executor_no_inject_when_flag_not_armed(tmp_path: Path):
     result, captured = _run_executor_with_server_log(
-        tmp_path, "boot failed\n", eager_armed=False,
+        tmp_path,
+        "boot failed\n",
+        eager_armed=False,
     )
     assert result["status"] == "failed"
     assert "--disable-cuda-graph" not in captured["extra_server_args"]
@@ -347,7 +340,9 @@ def test_executor_capture_wins_over_server_init_dead_invalid_measurement(
         "operation not permitted when stream is capturing\n"
     )
     result, _ = _run_executor_with_server_log(
-        tmp_path, log_text, make_workspace=True,
+        tmp_path,
+        log_text,
+        make_workspace=True,
     )
     assert result["status"] == "failed"
     assert result["error_class"] == "cuda_graph_capture_failed"

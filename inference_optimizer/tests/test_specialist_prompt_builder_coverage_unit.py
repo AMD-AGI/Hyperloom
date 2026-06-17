@@ -6,9 +6,6 @@ from __future__ import annotations
 
 import pytest
 
-from inference_optimizer.orchestrator.system_prompts import (
-    specialist_prompt_builder as spb,
-)
 from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
@@ -34,11 +31,23 @@ _DOMAIN_KEYS = (
 @pytest.mark.parametrize("framework", ["vllm", "atom"])
 def test_build_for_each_domain_and_framework(domain_key, framework):
     sys_p, user_p = build_specialist_prompts_for_domain(
-        task_id="t1", domain_key=domain_key, framework=framework,
-        gpu_type="MI300X", tp=2, hbm_gb=192.0, peak_tflops=1300.0,
-        precision="fp8", conc=64, isl=1024, osl=512, max_model_len=8192,
-        arch_notes="MoE 8x7B", target_gap_notes="competitor at 2x",
-        gap_canonical_id="gap.x", gap_layer="kernel", gap_symptom="slow",
+        task_id="t1",
+        domain_key=domain_key,
+        framework=framework,
+        gpu_type="MI300X",
+        tp=2,
+        hbm_gb=192.0,
+        peak_tflops=1300.0,
+        precision="fp8",
+        conc=64,
+        isl=1024,
+        osl=512,
+        max_model_len=8192,
+        arch_notes="MoE 8x7B",
+        target_gap_notes="competitor at 2x",
+        gap_canonical_id="gap.x",
+        gap_layer="kernel",
+        gap_symptom="slow",
         gap_evidence={"k": 1},
     )
     assert sys_p
@@ -77,42 +86,59 @@ def _rich_inputs(**overrides):
         roofline_evidence={
             "roofline_snapshot_id": 7,
             "executive_summary": {
-                "compute_pct": 70.0, "idle_pct": 10.0,
-                "comm_pct": 3.0, "top_bottleneck": "MoE",
+                "compute_pct": 70.0,
+                "idle_pct": 10.0,
+                "comm_pct": 3.0,
+                "top_bottleneck": "MoE",
             },
             "kernel_roofline_top15": [
-                {"kernel_id": "k1", "name": "gemm", "gpu_pct": 30.0,
-                 "bound_type": "compute", "arithmetic_intensity": 12.3,
-                 "efficiency_percent": 55.0, "compute_utilization_pct": 60.0,
-                 "bandwidth_utilization_pct": 40.0,
-                 "recommended_actions": ["fuse"]},
+                {
+                    "kernel_id": "k1",
+                    "name": "gemm",
+                    "gpu_pct": 30.0,
+                    "bound_type": "compute",
+                    "arithmetic_intensity": 12.3,
+                    "efficiency_percent": 55.0,
+                    "compute_utilization_pct": 60.0,
+                    "bandwidth_utilization_pct": 40.0,
+                    "recommended_actions": ["fuse"],
+                },
                 "skip-non-dict",
             ],
             "hot_kernels_top15": [
-                {"kernel_id": "h1", "name": "attn", "gpu_pct": 20.0,
-                 "bottleneck": "memory", "source_file": "attn.py"},
+                {"kernel_id": "h1", "name": "attn", "gpu_pct": 20.0, "bottleneck": "memory", "source_file": "attn.py"},
             ],
             "analysis_md_path": "/tmp/analysis.md",
         },
         warm_start_recipe={"best_config": {"x": "1"}},
         warm_start_lessons=[
-            {"confidence": 0.9, "attrs": {
-                "statement": "enable cudagraph",
-                "measured_impact": {"gain_pct": 5.0, "throughput_after": 100.0,
-                                    "stack_depth_at_apply": 2,
-                                    "measured_at": "2026-01-02T00:00:00"},
-                "validated_count": 3,
-                "source_session_ids": ["s1", "s2"],
-                "framework_version": "0.6.1",
-            }},
+            {
+                "confidence": 0.9,
+                "attrs": {
+                    "statement": "enable cudagraph",
+                    "measured_impact": {
+                        "gain_pct": 5.0,
+                        "throughput_after": 100.0,
+                        "stack_depth_at_apply": 2,
+                        "measured_at": "2026-01-02T00:00:00",
+                    },
+                    "validated_count": 3,
+                    "source_session_ids": ["s1", "s2"],
+                    "framework_version": "0.6.1",
+                },
+            },
             {"attrs": {}},  # filtered (no statement)
         ],
         warm_start_pitfalls=[
-            {"confidence": 0.8, "attrs": {
-                "description": "do not enforce eager",
-                "severity": "high", "validated_count": 2,
-                "source_session_id": "s9",
-            }},
+            {
+                "confidence": 0.8,
+                "attrs": {
+                    "description": "do not enforce eager",
+                    "severity": "high",
+                    "validated_count": 2,
+                    "source_session_id": "s9",
+                },
+            },
             {"attrs": {}},  # filtered
         ],
         pr_feed=[{"title": "Fix MoE", "url": "http://pr/1", "labels": ["perf"]}],
@@ -128,11 +154,11 @@ def test_build_rich_user_prompt_sections():
     sys_p, user_p = build_specialist_prompts(_rich_inputs())
     assert "TraceLens snapshot #7" in user_p
     assert "Executive Summary" in user_p
-    assert "`k1`" in user_p          # kernel roofline table
-    assert "`h1`" in user_p          # hot kernels table
+    assert "`k1`" in user_p  # kernel roofline table
+    assert "`h1`" in user_p  # hot kernels table
     assert "find-recipe result" in user_p
     assert "enable cudagraph" in user_p
-    assert "+5.00%" in user_p        # measured_impact dict render
+    assert "+5.00%" in user_p  # measured_impact dict render
     assert "[from vllm@0.6.1, you're on 0.6.2]" in user_p  # version note
     assert "do not enforce eager" in user_p
     assert "Fix MoE" in user_p
@@ -142,7 +168,8 @@ def test_build_rich_user_prompt_sections():
 
 def test_cold_start_directive():
     inp = SpecialistPromptInputs(
-        task_id="t", domain=get_domain("serving_specialist"),
+        task_id="t",
+        domain=get_domain("serving_specialist"),
     )
     _, user_p = build_specialist_prompts(inp)
     assert "COLD-START MODE" in user_p
@@ -150,7 +177,8 @@ def test_cold_start_directive():
 
 def test_research_hints_fallback():
     inp = SpecialistPromptInputs(
-        task_id="t", domain=get_domain("serving_specialist"),
+        task_id="t",
+        domain=get_domain("serving_specialist"),
         research_hints="prior: enable aiter",
     )
     _, user_p = build_specialist_prompts(inp)
@@ -159,7 +187,8 @@ def test_research_hints_fallback():
 
 def test_pr_monitor_unavailable():
     inp = SpecialistPromptInputs(
-        task_id="t", domain=get_domain("serving_specialist"),
+        task_id="t",
+        domain=get_domain("serving_specialist"),
         pr_monitor_available=False,
     )
     _, user_p = build_specialist_prompts(inp)
@@ -183,8 +212,7 @@ def test_scope_freeform():
 
 
 def test_bench_block_and_auto_retry():
-    inp = _rich_inputs(bench=True, mode="patch",
-                       auto_retry_reason="timeout on prior attempt")
+    inp = _rich_inputs(bench=True, mode="patch", auto_retry_reason="timeout on prior attempt")
     sys_p, _ = build_specialist_prompts(inp)
     assert "In-loop micro-bench" in sys_p
     assert "Auto-retry notice" in sys_p
@@ -201,8 +229,10 @@ def test_render_measured_impact_variants():
 
 def test_format_version_note_empty_when_same_or_unknown():
     inp = SpecialistPromptInputs(
-        task_id="t", domain=get_domain("serving_specialist"),
-        framework="vllm", framework_version="1.0",
+        task_id="t",
+        domain=get_domain("serving_specialist"),
+        framework="vllm",
+        framework_version="1.0",
     )
     assert _format_version_note(inp, {"framework_version": "1.0"}) == ""
     assert _format_version_note(inp, {}) == ""

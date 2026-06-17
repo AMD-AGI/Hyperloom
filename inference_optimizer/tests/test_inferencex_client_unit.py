@@ -2,6 +2,7 @@
 
 """Unit tests for the InferenceX HTTP client (env resolvers, SSL context,
 and the never-raises ``fetch_rows`` retry / decode contract)."""
+
 from __future__ import annotations
 
 import ssl
@@ -134,24 +135,24 @@ class _FakeResp:
 
 
 def test_fetch_raw_plain_200(monkeypatch):
-    monkeypatch.setattr(ix.urllib.request, "urlopen",
-                        lambda req, timeout=None, context=None: _FakeResp(body=b"[1]"))
+    monkeypatch.setattr(ix.urllib.request, "urlopen", lambda req, timeout=None, context=None: _FakeResp(body=b"[1]"))
     assert ix._fetch_raw("http://x") == b"[1]"
 
 
 def test_fetch_raw_gzip_200(monkeypatch):
     import gzip
+
     payload = gzip.compress(b"[2]")
     monkeypatch.setattr(
-        ix.urllib.request, "urlopen",
+        ix.urllib.request,
+        "urlopen",
         lambda req, timeout=None, context=None: _FakeResp(body=payload, encoding="gzip"),
     )
     assert ix._fetch_raw("http://x") == b"[2]"
 
 
 def test_fetch_raw_non_200_raises(monkeypatch):
-    monkeypatch.setattr(ix.urllib.request, "urlopen",
-                        lambda req, timeout=None, context=None: _FakeResp(code=404))
+    monkeypatch.setattr(ix.urllib.request, "urlopen", lambda req, timeout=None, context=None: _FakeResp(code=404))
     with pytest.raises(ix.InferenceXFetchError):
         ix._fetch_raw("http://x")
 

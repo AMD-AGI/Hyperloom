@@ -7,6 +7,7 @@ surface the SAME champion for a given canonical id. Equivalence is
 champion-level (canonical id, best_config, best_throughput, experiential-list
 presence). No network: gbrain gets a fake MCP, cortex a fake HTTP transport.
 """
+
 from __future__ import annotations
 
 import json
@@ -139,25 +140,43 @@ class _Spec:
 
 SPECS = [
     _Spec(
-        model="Qwen/Qwen3-32B", hardware="mi300x", framework="sglang",
-        framework_version="0.5.11", precision="fp8",
-        args="--cuda-graph-max-bs 256", envs={"SGLANG_X": "1"},
+        model="Qwen/Qwen3-32B",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.5.11",
+        precision="fp8",
+        args="--cuda-graph-max-bs 256",
+        envs={"SGLANG_X": "1"},
         throughput=5430.9,
-        what_worked=[{"id": "w1"}], pitfalls=[{"id": "p1"}], lessons=[{"id": "l1"}],
+        what_worked=[{"id": "w1"}],
+        pitfalls=[{"id": "p1"}],
+        lessons=[{"id": "l1"}],
     ),
     _Spec(
-        model="meta-llama/Llama-3-70B", hardware="mi300x", framework="vllm",
-        framework_version="0.6.0", precision="fp16",
-        args="--max-num-seqs 512", envs={},
+        model="meta-llama/Llama-3-70B",
+        hardware="mi300x",
+        framework="vllm",
+        framework_version="0.6.0",
+        precision="fp16",
+        args="--max-num-seqs 512",
+        envs={},
         throughput=3200.0,
-        what_worked=[], pitfalls=[{"id": "p2"}], lessons=[],
+        what_worked=[],
+        pitfalls=[{"id": "p2"}],
+        lessons=[],
     ),
     _Spec(
-        model="Qwen/Qwen3-32B", hardware="mi355x", framework="sglang",
-        framework_version="0.5.11", precision="fp8",
-        args="--attention-backend fa3", envs={"FOO": "bar"},
+        model="Qwen/Qwen3-32B",
+        hardware="mi355x",
+        framework="sglang",
+        framework_version="0.5.11",
+        precision="fp8",
+        args="--attention-backend fa3",
+        envs={"FOO": "bar"},
         throughput=6100.0,
-        what_worked=[{"id": "w3"}], pitfalls=[], lessons=[{"id": "l3"}],
+        what_worked=[{"id": "w3"}],
+        pitfalls=[],
+        lessons=[{"id": "l3"}],
     ),
 ]
 
@@ -172,8 +191,7 @@ class _FakeMcp:
     def call(self, tool: str, args: dict[str, Any]) -> Any:
         if tool == "list_pages":
             return [
-                {"slug": s, "type": "recipe", "updated_at": fm.get("updated_at", "")}
-                for s, fm in self.pages.items()
+                {"slug": s, "type": "recipe", "updated_at": fm.get("updated_at", "")} for s, fm in self.pages.items()
             ]
         if tool == "get_page":
             fm = self.pages.get(args.get("slug"))
@@ -201,12 +219,7 @@ class _FakeCortexTransport:
             lm = body.get(C.F_LABEL_MATCH) or {}
             limit = int(body.get(C.F_LIMIT, 50) or 50)
             matched = [
-                r
-                for r in self.rows
-                if all(
-                    str((r.get("labels") or {}).get(k, "")) == str(v)
-                    for k, v in lm.items()
-                )
+                r for r in self.rows if all(str((r.get("labels") or {}).get(k, "")) == str(v) for k, v in lm.items())
             ]
             return {C.F_RECIPES: matched[: limit if limit > 0 else None]}
         return {}
@@ -217,7 +230,9 @@ class _FakeCortexTransport:
 
 def _gbrain_dispatcher(local: LocalRecipeStore) -> RecipeKB:
     client = GbrainRemoteRecipeClient(
-        base_url="http://gbrain.test", token="tok", enabled=True,
+        base_url="http://gbrain.test",
+        token="tok",
+        enabled=True,
     )
     client._mcp = _FakeMcp(  # type: ignore[assignment]
         {f"recipe/{i}": s.gbrain_page() for i, s in enumerate(SPECS)}
@@ -227,7 +242,9 @@ def _gbrain_dispatcher(local: LocalRecipeStore) -> RecipeKB:
 
 def _cortex_dispatcher(local: LocalRecipeStore) -> RecipeKB:
     client = RemoteRecipeClient(
-        kb_url="http://cortex.test", enabled=True, foreground=True,
+        kb_url="http://cortex.test",
+        enabled=True,
+        foreground=True,
     )
     client._transport = _FakeCortexTransport(  # type: ignore[assignment]
         [s.cortex_v2_row() for s in SPECS]
@@ -285,9 +302,7 @@ def test_search_subset_label_parity(tmp_path) -> None:
 
     cids_g = sorted(r["canonical_id"] for r in rows_g)
     cids_c = sorted(r["canonical_id"] for r in rows_c)
-    expected = sorted(
-        s.cid for s in SPECS if cid_to_path_components(s.cid)[0] == model_slug
-    )
+    expected = sorted(s.cid for s in SPECS if cid_to_path_components(s.cid)[0] == model_slug)
     assert cids_g == cids_c == expected
     by_g = {r["canonical_id"]: _champion(r) for r in rows_g}
     by_c = {r["canonical_id"]: _champion(r) for r in rows_c}
@@ -327,11 +342,7 @@ def test_gbrain_best_config_is_warm_replay_consumable(tmp_path) -> None:
     assert row is not None
     best_config = row["best_config"]
 
-    bc_args = str(
-        best_config.get("extra_server_args")
-        or best_config.get("args")
-        or ""
-    ).strip()
+    bc_args = str(best_config.get("extra_server_args") or best_config.get("args") or "").strip()
     bc_envs = best_config.get("extra_envs") or best_config.get("envs") or {}
 
     assert bc_args == spec.args
@@ -352,9 +363,13 @@ def test_gbrain_transport_error_falls_back_to_local(tmp_path) -> None:
     local = LocalRecipeStore(root=tmp_path)
     local.put_recipe(
         canonical_id=spec.cid,
-        model=model_s, hardware=hw_s, framework=fw_s,
-        framework_version=fwv_s, precision=prec_s,
-        best_config=spec.best_config, best_throughput=spec.throughput,
+        model=model_s,
+        hardware=hw_s,
+        framework=fw_s,
+        framework_version=fwv_s,
+        precision=prec_s,
+        best_config=spec.best_config,
+        best_throughput=spec.throughput,
     )
 
     class _BoomMcp:
@@ -362,7 +377,9 @@ def test_gbrain_transport_error_falls_back_to_local(tmp_path) -> None:
             raise GbrainRemoteError("gbrain down")
 
     client = GbrainRemoteRecipeClient(
-        base_url="http://gbrain.test", token="tok", enabled=True,
+        base_url="http://gbrain.test",
+        token="tok",
+        enabled=True,
     )
     client._mcp = _BoomMcp()  # type: ignore[assignment]
     kb = RecipeKB(local=local, remote=client)

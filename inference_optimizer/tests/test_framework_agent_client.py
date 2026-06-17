@@ -23,19 +23,13 @@ def _write_fake_fa(
 
 
 def test_repo_url_for_framework_known():
-    assert fac.repo_url_for_framework("sglang") == (
-        "https://github.com/sgl-project/sglang.git"
-    )
-    assert fac.repo_url_for_framework("vllm") == (
-        "https://github.com/ROCm/vllm.git"
-    )
+    assert fac.repo_url_for_framework("sglang") == ("https://github.com/sgl-project/sglang.git")
+    assert fac.repo_url_for_framework("vllm") == ("https://github.com/ROCm/vllm.git")
 
 
 def test_repo_url_for_framework_atom():
     """atom resolves to ROCm/ATOM whether or not ``framework_agent`` is importable."""
-    assert fac.repo_url_for_framework("atom") == (
-        "https://github.com/ROCm/ATOM.git"
-    )
+    assert fac.repo_url_for_framework("atom") == ("https://github.com/ROCm/ATOM.git")
 
 
 def test_repo_url_for_framework_unknown_returns_empty():
@@ -69,7 +63,7 @@ def test_fallback_dict_has_atom_entry():
 
 
 def test_resolve_fa_binary_prefers_env_var(tmp_path, monkeypatch):
-    fa_path = _write_fake_fa(tmp_path, body='#!/usr/bin/env bash\nexit 0\n')
+    fa_path = _write_fake_fa(tmp_path, body="#!/usr/bin/env bash\nexit 0\n")
     monkeypatch.setenv("FA_BIN", str(fa_path))
     monkeypatch.setenv("PATH", "")
     assert fac._resolve_fa_binary() == str(fa_path)

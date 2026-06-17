@@ -46,25 +46,26 @@ def test_sanitize_script_name_empty_returns_none():
     assert sanitize_script_name("   ") is None
 
 
-@pytest.mark.parametrize("bad", [
-    "../etc/passwd.sh",
-    "scripts/sglang.sh",
-    "no_extension",
-    "with space.sh",
-    "trailing.SH",            # case-sensitive *.sh
-    "../sglang_mi300x.sh",
-    "sglang_mi300x.sh; rm -rf /",
-    "$(evil).sh",
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "../etc/passwd.sh",
+        "scripts/sglang.sh",
+        "no_extension",
+        "with space.sh",
+        "trailing.SH",  # case-sensitive *.sh
+        "../sglang_mi300x.sh",
+        "sglang_mi300x.sh; rm -rf /",
+        "$(evil).sh",
+    ],
+)
 def test_sanitize_script_name_rejects_unsafe(bad):
     with pytest.raises(ValueError):
         sanitize_script_name(bad)
 
 
 def test_sanitize_result_dir_accepts_paths():
-    assert sanitize_result_dir("/workspace/hyperloom/runs/baseline/t1") == (
-        "/workspace/hyperloom/runs/baseline/t1"
-    )
+    assert sanitize_result_dir("/workspace/hyperloom/runs/baseline/t1") == ("/workspace/hyperloom/runs/baseline/t1")
     assert sanitize_result_dir("runs/baseline/t1") == "runs/baseline/t1"
     assert sanitize_result_dir(" /tmp/leak ") == "/tmp/leak"
 
@@ -75,16 +76,19 @@ def test_sanitize_result_dir_empty_returns_none():
     assert sanitize_result_dir("   ") is None
 
 
-@pytest.mark.parametrize("bad", [
-    "/tmp/with space",
-    "/tmp/leak;rm -rf /",
-    "/tmp/$(evil)",
-    "/tmp/leak`whoami`",
-    "/tmp/leak\nrm",
-    "/tmp/leak|rm",
-    "/tmp/leak&rm",
-    "/tmp/leak<other",
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "/tmp/with space",
+        "/tmp/leak;rm -rf /",
+        "/tmp/$(evil)",
+        "/tmp/leak`whoami`",
+        "/tmp/leak\nrm",
+        "/tmp/leak|rm",
+        "/tmp/leak&rm",
+        "/tmp/leak<other",
+    ],
+)
 def test_sanitize_result_dir_rejects_unsafe(bad):
     with pytest.raises(ValueError):
         sanitize_result_dir(bad)
@@ -129,7 +133,8 @@ def test_materialize_config_with_envs_pins_benchmark_script_after_gpu_pop(
     out.mkdir()
 
     materialized = materialize_config_with_envs(
-        base, out,
+        base,
+        out,
         model_path="/wekafs/models/DeepSeek-R1",
         gpu_type="mi300x",
         benchmark_script="sglang_mi300x.sh",
@@ -148,7 +153,8 @@ def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
     out.mkdir()
 
     materialized = materialize_config_with_envs(
-        base, out,
+        base,
+        out,
         gpu_type="mi300x",
     )
     cfg = yaml.safe_load(materialized.read_text())
@@ -197,7 +203,11 @@ def test_qwen36_materialize_enables_client_and_server_trust(tmp_path):
 
 
 def _write_yaml_with_server_args(
-    path: Path, *, framework: str, env_key: str, server_args: str,
+    path: Path,
+    *,
+    framework: str,
+    env_key: str,
+    server_args: str,
 ) -> None:
     """Like ``_write_yaml`` but seeds a framework server-args env in the YAML."""
     cfg: dict = {
@@ -207,7 +217,10 @@ def _write_yaml_with_server_args(
             "precision": "bf16",
             "run_mode": "local",
             "envs": {
-                "TP": 1, "CONC": 8, "ISL": 256, "OSL": 256,
+                "TP": 1,
+                "CONC": 8,
+                "ISL": 256,
+                "OSL": 256,
                 env_key: server_args,
             },
             "timeout_seconds": 600,
@@ -229,21 +242,22 @@ def test_materialize_dedups_duplicate_vllm_attention_backend(tmp_path):
     materialized config (vLLM v0.21.0 crashes EngineCoreProc on a duplicate)."""
     base = tmp_path / "base.yaml"
     _write_yaml_with_server_args(
-        base, framework="vllm", env_key="EXTRA_VLLM_ARGS",
+        base,
+        framework="vllm",
+        env_key="EXTRA_VLLM_ARGS",
         server_args="--attention-backend ROCM_AITER_FA",
     )
     out = tmp_path / "out"
     out.mkdir()
 
     materialized = materialize_config_with_envs(
-        base, out,
+        base,
+        out,
         model_path="/wekafs/models/Qwen-Qwen3-8B",
         gpu_type="mi300x",
         extra_server_args="--attention-backend ROCM_FLASH",
     )
-    vllm_args = yaml.safe_load(
-        materialized.read_text()
-    )["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    vllm_args = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
 
     assert vllm_args.count("--attention-backend") == 1, vllm_args
     # last-wins: the variant override survives, the YAML base is dropped.
@@ -256,21 +270,22 @@ def test_materialize_keeps_sglang_repeated_attention_backend(tmp_path):
     server), so materialize must NOT dedup it."""
     base = tmp_path / "base.yaml"
     _write_yaml_with_server_args(
-        base, framework="sglang", env_key="EXTRA_SGLANG_ARGS",
+        base,
+        framework="sglang",
+        env_key="EXTRA_SGLANG_ARGS",
         server_args="--attention-backend aiter",
     )
     out = tmp_path / "out"
     out.mkdir()
 
     materialized = materialize_config_with_envs(
-        base, out,
+        base,
+        out,
         model_path="/wekafs/models/Qwen-Qwen3-8B",
         gpu_type="mi300x",
         extra_server_args="--attention-backend triton",
     )
-    sglang_args = yaml.safe_load(
-        materialized.read_text()
-    )["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+    sglang_args = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
 
     assert sglang_args.count("--attention-backend") == 2, sglang_args
 
@@ -299,7 +314,9 @@ def _write_yaml_with_tp(path: Path, tp: int) -> None:
 
 
 def test_materialize_config_with_envs_clamps_tp_to_visible_gpus(
-    tmp_path, monkeypatch, caplog,
+    tmp_path,
+    monkeypatch,
+    caplog,
 ):
     """A 4-GPU pod must not launch sglang/vllm with ``TP=8``; regression: the materializer is now the single source of truth and clamps TP to the visible GPU count."""
     base = tmp_path / "base.yaml"
@@ -322,7 +339,8 @@ def test_materialize_config_with_envs_clamps_tp_to_visible_gpus(
 
 
 def test_materialize_config_with_envs_clamp_respects_env_override(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """When the operator sets ``$TP`` the clamp still fires; ``DISABLE_TP_CLAMP=1`` is the documented bypass for a deliberate oversubscribed launch."""
     base = tmp_path / "base.yaml"
@@ -346,7 +364,8 @@ def test_materialize_config_with_envs_clamp_respects_env_override(
 
 
 def test_materialize_config_with_envs_no_clamp_when_visible_zero(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """When ``_visible_gpu_count`` returns 0 (CPU-only / rocm-smi failure) the materializer must NOT clamp to 0; it leaves the YAML TP intact."""
     base = tmp_path / "base.yaml"
@@ -375,22 +394,26 @@ def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
 
     ws = slot / "benchmark_sglang_20260513_010101"
     ws.mkdir(parents=True)
-    (ws / "benchmark_report.json").write_text(json.dumps({
-        "success": True,
-        "framework": "sglang",
-        "model": "/wekafs/models/Qwen-Qwen3-8B",
-        "throughput": {
-            "request_throughput": tput / 256,
-            "output_throughput": tput,
-            "total_token_throughput": tput * 2,
-            "completed_requests": 64,
-            "duration_seconds": 25.0,
-        },
-        "latency": {
-            "ttft": {"mean_ms": 100.0, "p99_ms": 120.0},
-            "e2el": {"mean_ms": 2000.0, "p99_ms": 2300.0},
-        },
-    }))
+    (ws / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "framework": "sglang",
+                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "throughput": {
+                    "request_throughput": tput / 256,
+                    "output_throughput": tput,
+                    "total_token_throughput": tput * 2,
+                    "completed_requests": 64,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {
+                    "ttft": {"mean_ms": 100.0, "p99_ms": 120.0},
+                    "e2el": {"mean_ms": 2000.0, "p99_ms": 2300.0},
+                },
+            }
+        )
+    )
     return ws
 
 
@@ -424,18 +447,19 @@ def test_baseline_executor_forwards_override_to_yaml_and_env(tmp_path):
         default_config_path=base,
         session_dir=tmp_path,
     )
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "model_path": "/wekafs/models/DeepSeek-R1",
-        "gpu_type": "mi300x",
-        "benchmark_script": "sglang_mi300x.sh",
-        "result_dir": str(tmp_path / "redirect_leak"),
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "model_path": "/wekafs/models/DeepSeek-R1",
+            "gpu_type": "mi300x",
+            "benchmark_script": "sglang_mi300x.sh",
+            "result_dir": str(tmp_path / "redirect_leak"),
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -468,8 +492,7 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -515,18 +538,14 @@ def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    assert captured["env"].get("MAGPIE_INFERENCEX_PATH") == (
-        "/wekafs/hyperloom/InferenceX"
-    ), (
-        "MAGPIE_INFERENCEX_PATH must equal $INFERENCEX_PATH so Magpie "
-        "loads the patched checkout (#210 root cause)"
+    assert captured["env"].get("MAGPIE_INFERENCEX_PATH") == ("/wekafs/hyperloom/InferenceX"), (
+        "MAGPIE_INFERENCEX_PATH must equal $INFERENCEX_PATH so Magpie loads the patched checkout (#210 root cause)"
     )
 
 
@@ -543,15 +562,16 @@ def test_baseline_executor_rejects_bad_param(tmp_path):
         default_config_path=base,
         session_dir=tmp_path,
     )
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "benchmark_script": "../etc/passwd.sh",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "benchmark_script": "../etc/passwd.sh",
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -574,15 +594,16 @@ def test_baseline_executor_rejects_bad_result_dir(tmp_path):
         default_config_path=base,
         session_dir=tmp_path,
     )
-    ctx = _make_ctx({
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-        "result_dir": "/tmp/leak;rm -rf /",
-    })
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "result_dir": "/tmp/leak;rm -rf /",
+        }
+    )
 
     with patch(
-        "inference_optimizer.orchestrator.action_executors.baseline."
-        "run_with_session_kill",
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))

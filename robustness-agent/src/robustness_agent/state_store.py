@@ -105,7 +105,8 @@ class DetectorStateStore:
         except OSError as exc:
             log.warning(
                 "state_store: cannot read %s: %s — starting empty",
-                self._path, exc,
+                self._path,
+                exc,
             )
             return
         try:
@@ -113,13 +114,13 @@ class DetectorStateStore:
         except json.JSONDecodeError as exc:
             log.warning(
                 "state_store: malformed JSON at %s: %s — starting empty",
-                self._path, exc,
+                self._path,
+                exc,
             )
             return
         if not isinstance(parsed, dict):
             log.warning(
-                "state_store: top-level JSON at %s is not an object — "
-                "starting empty",
+                "state_store: top-level JSON at %s is not an object — starting empty",
                 self._path,
             )
             return
@@ -141,7 +142,9 @@ class DetectorStateStore:
             self._dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             log.warning(
-                "state_store: cannot create %s: %s", self._dir, exc,
+                "state_store: cannot create %s: %s",
+                self._dir,
+                exc,
             )
             return
         try:
@@ -166,7 +169,8 @@ class DetectorStateStore:
         except (OSError, TypeError, ValueError) as exc:
             log.warning(
                 "state_store: flush_atomic to %s failed: %s",
-                self._path, exc,
+                self._path,
+                exc,
             )
 
     # ------------------------------------------------------------------
@@ -197,9 +201,7 @@ class DetectorStateStore:
             TypeError: If ``payload`` is not a dict.
         """
         if not isinstance(payload, dict):
-            raise TypeError(
-                f"save_slot payload must be a dict, got {type(payload).__name__}"
-            )
+            raise TypeError(f"save_slot payload must be a dict, got {type(payload).__name__}")
         self._data[name] = dict(payload)
         self._dirty = True
 

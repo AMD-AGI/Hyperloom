@@ -11,8 +11,7 @@ from inference_optimizer.orchestrator.coordinator import (
 
 
 _CLEAN_STACK = (
-    "--schedule-policy lpm --cuda-graph-bs 1 2 4 8 16 24 32 48 64 80 "
-    "--mem-fraction-static 0.92 --page-size 16"
+    "--schedule-policy lpm --cuda-graph-bs 1 2 4 8 16 24 32 48 64 80 --mem-fraction-static 0.92 --page-size 16"
 )
 
 
@@ -32,10 +31,7 @@ def test_merge_appends_delta_candidate() -> None:
 
 
 def test_dedupe_preserves_cuda_graph_bs_multi_values() -> None:
-    args = (
-        "--schedule-policy lpm --cuda-graph-bs 1 2 4 8 16 24 32 48 64 80 "
-        "--mem-fraction-static 0.92 --page-size 16"
-    )
+    args = "--schedule-policy lpm --cuda-graph-bs 1 2 4 8 16 24 32 48 64 80 --mem-fraction-static 0.92 --page-size 16"
     assert _dedupe_extra_server_args(args) == args
 
 

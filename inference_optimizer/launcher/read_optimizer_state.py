@@ -5,6 +5,7 @@
 Usage:
     python inference_optimizer/launcher/read_optimizer_state.py SESSION_DIR
 """
+
 from __future__ import annotations
 
 import argparse
@@ -50,13 +51,8 @@ def _format_lifecycle_event(event: dict[str, Any]) -> str:
     """
     duration = f" {event['duration_s']}s" if event.get("duration_s") is not None else ""
     detail = f" [{event['detail']}]" if event.get("detail") else ""
-    artifacts = " ".join(
-        f"{key}={value}" for key, value in (event.get("artifacts") or {}).items()
-    )
-    line = (
-        f"#{event.get('seq')} {event.get('label')} [{event.get('phase')}] "
-        f"{event.get('status')}{duration}{detail}"
-    )
+    artifacts = " ".join(f"{key}={value}" for key, value in (event.get("artifacts") or {}).items())
+    line = f"#{event.get('seq')} {event.get('label')} [{event.get('phase')}] {event.get('status')}{duration}{detail}"
     if artifacts:
         line += f" -> {artifacts}"
     return line

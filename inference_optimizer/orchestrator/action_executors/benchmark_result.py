@@ -24,9 +24,7 @@ log = logging.getLogger(__name__)
 # Default rescue path: scripts hardcoding ``--result-dir /workspace/``
 # leak to ``/workspace/inferencex_result.json``. Extend/replace via
 # ``$INFERENCE_OPTIMIZER_RESCUE_PATHS`` (see :func:`_rescue_candidate_paths`).
-_DEFAULT_RESCUE_PATHS: tuple[Path, ...] = (
-    Path("/workspace/inferencex_result.json"),
-)
+_DEFAULT_RESCUE_PATHS: tuple[Path, ...] = (Path("/workspace/inferencex_result.json"),)
 
 
 # Wrapper-side diagnostic files hardcoded under ``/workspace/`` (server
@@ -145,10 +143,7 @@ def _candidate_raw_jsons(workspace: Path) -> list[Path]:
         list[Path]: Candidate ``*.json`` result paths (excluding
         ``benchmark_report.json``), ordered baseline-before-profile.
     """
-    paths = [
-        p for p in workspace.rglob("*.json")
-        if p.name != "benchmark_report.json"
-    ]
+    paths = [p for p in workspace.rglob("*.json") if p.name != "benchmark_report.json"]
     return sorted(
         paths,
         key=lambda p: (
@@ -226,9 +221,7 @@ def _rescue_candidate_paths(
         candidates.append(path)
 
     env_raw = os.environ.get("INFERENCE_OPTIMIZER_RESCUE_PATHS", "").strip()
-    env_entries = [
-        part.strip() for part in env_raw.split(":") if part.strip()
-    ] if env_raw else []
+    env_entries = [part.strip() for part in env_raw.split(":") if part.strip()] if env_raw else []
     for entry in env_entries:
         p = Path(entry)
         if p.is_dir():
@@ -282,7 +275,9 @@ def _materialize_rescue_into_workspace(
     except OSError as exc:
         log.warning(
             "benchmark_result: failed to copy rescued result %s -> %s: %s",
-            rescue_path, destination, exc,
+            rescue_path,
+            destination,
+            exc,
         )
         return None
     return destination
@@ -346,7 +341,8 @@ def harvest_leaked_artifacts(
     except OSError as exc:
         log.warning(
             "benchmark_result.harvest: cannot prepare destination=%s: %s",
-            destination, exc,
+            destination,
+            exc,
         )
         return harvested
     try:
@@ -388,9 +384,7 @@ def harvest_leaked_artifacts(
                         mtime = match.stat().st_mtime
                     except OSError:
                         continue
-                    if mtime + _MTIME_GATE_SLACK_SEC < float(
-                        subprocess_started_unix
-                    ):
+                    if mtime + _MTIME_GATE_SLACK_SEC < float(subprocess_started_unix):
                         continue
                 destination_path = destination / match.name
                 try:
@@ -398,7 +392,9 @@ def harvest_leaked_artifacts(
                 except OSError as exc:
                     log.warning(
                         "benchmark_result.harvest: copy %s -> %s failed: %s",
-                        match, destination_path, exc,
+                        match,
+                        destination_path,
+                        exc,
                     )
                     continue
                 harvested.append((match, destination_path))
@@ -431,9 +427,7 @@ def _merge_raw_result(
     if measurement.get("request_throughput") is None:
         measurement["request_throughput"] = _to_float(raw.get("request_throughput"))
     if measurement.get("total_token_throughput") is None:
-        measurement["total_token_throughput"] = _to_float(
-            raw.get("total_token_throughput")
-        )
+        measurement["total_token_throughput"] = _to_float(raw.get("total_token_throughput"))
     if measurement.get("completed_requests") is None:
         measurement["completed_requests"] = _first_int(
             raw.get("completed_requests"),
@@ -500,9 +494,7 @@ def extract_benchmark_measurement(
         "model": report.get("model"),
         "request_throughput": _to_float(throughput.get("request_throughput")),
         "output_throughput": _to_float(throughput.get("output_throughput")),
-        "total_token_throughput": _to_float(
-            throughput.get("total_token_throughput")
-        ),
+        "total_token_throughput": _to_float(throughput.get("total_token_throughput")),
         "completed_requests": _first_int(
             throughput.get("completed_requests"),
             throughput.get("completed"),
@@ -537,10 +529,7 @@ def extract_benchmark_measurement(
 
     # Second-chance salvage from Magpie leak destinations when the
     # in-workspace search found no usable measurement (mtime-gated).
-    if (
-        not measurement["valid_measurement"]
-        and workspace is not None
-    ):
+    if not measurement["valid_measurement"] and workspace is not None:
         for rescue_path in _rescue_candidate_paths(
             workspace,
             subprocess_started_unix=subprocess_started_unix,
@@ -553,17 +542,15 @@ def extract_benchmark_measurement(
             # NFS clone stays self-contained. Best-effort: on copy failure
             # we fall back to the leak path rather than drop the measurement.
             materialized = _materialize_rescue_into_workspace(
-                rescue_path, workspace,
+                rescue_path,
+                workspace,
             )
             recorded_path = materialized if materialized is not None else rescue_path
             _merge_raw_result(measurement, raw, source_path=recorded_path)
             if is_valid_measurement(measurement):
                 warnings.append(f"rescued_from_leaked_path:{rescue_path}")
                 if materialized is None:
-                    warnings.append(
-                        "rescued_copy_into_workspace_failed: "
-                        f"{rescue_path}"
-                    )
+                    warnings.append(f"rescued_copy_into_workspace_failed: {rescue_path}")
                 break
         _derive_tpot_if_missing(measurement, report)
         measurement["valid_measurement"] = is_valid_measurement(measurement)
@@ -612,9 +599,7 @@ def _resolve_osl(report: dict[str, Any] | None) -> int | None:
     for section_key in ("config", "request", "params", "workload"):
         section = report.get(section_key)
         if isinstance(section, dict):
-            candidates.extend(
-                section.get(k) for k in ("osl", "output_len", "max_tokens")
-            )
+            candidates.extend(section.get(k) for k in ("osl", "output_len", "max_tokens"))
     for value in candidates:
         n = _to_int(value)
         if n is not None and n > 0:
@@ -639,12 +624,7 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
         return False
     output_tput = _to_float(result.get("output_throughput"))
     completed = _to_int(result.get("completed_requests"))
-    return (
-        output_tput is not None
-        and output_tput > 0
-        and completed is not None
-        and completed > 0
-    )
+    return output_tput is not None and output_tput > 0 and completed is not None and completed > 0
 
 
 # ── Approximate throughput for killed-overtime variants ──
@@ -811,7 +791,8 @@ def estimate_killed_variant_throughput(
     """
     for log_path in _find_server_logs(slot):
         estimate = estimate_output_throughput_from_server_log(
-            log_path, warmup_skip_frac=warmup_skip_frac,
+            log_path,
+            warmup_skip_frac=warmup_skip_frac,
         )
         if estimate is not None:
             return estimate

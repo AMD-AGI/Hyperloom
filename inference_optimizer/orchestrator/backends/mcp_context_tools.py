@@ -109,9 +109,7 @@ class ContextProvider:
         Returns:
             The proposal-scores summary string.
         """
-        return self._safe(
-            self.shared_state.to_proposal_scores_summary, "proposal_scores"
-        )
+        return self._safe(self.shared_state.to_proposal_scores_summary, "proposal_scores")
 
     def intervention_mix(self) -> str:
         """Return the intervention-mix summary projection.
@@ -119,9 +117,7 @@ class ContextProvider:
         Returns:
             The intervention-mix summary string.
         """
-        return self._safe(
-            self.shared_state.to_intervention_mix_summary, "intervention_mix"
-        )
+        return self._safe(self.shared_state.to_intervention_mix_summary, "intervention_mix")
 
     def why_denied(self, top_k: int = 6) -> str:
         """Return a summary of recent policy denials.
@@ -175,12 +171,12 @@ class ContextProvider:
         """
         if self.recent_outcomes_reader is None:
             return "(recent outcomes reader not wired)"
-        return self._safe(
-            lambda: self.recent_outcomes_reader(top_k), "recent_outcomes"
-        )
+        return self._safe(lambda: self.recent_outcomes_reader(top_k), "recent_outcomes")
 
     def run_action_now(
-        self, action_name: str = "", params: dict[str, Any] | None = None,
+        self,
+        action_name: str = "",
+        params: dict[str, Any] | None = None,
     ) -> str:
         """Run a whitelisted lane-light action inline.
 
@@ -323,9 +319,7 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
 
 
 CONTEXT_TOOL_NAMES: tuple[str, ...] = tuple(s[0] for s in CONTEXT_TOOL_SPECS)
-CONTEXT_TOOL_QUALIFIED_NAMES: tuple[str, ...] = tuple(
-    _qualified(n) for n in CONTEXT_TOOL_NAMES
-)
+CONTEXT_TOOL_QUALIFIED_NAMES: tuple[str, ...] = tuple(_qualified(n) for n in CONTEXT_TOOL_NAMES)
 
 
 def _resolve_sdk(sdk_module: Any | None) -> Any | None:
@@ -348,7 +342,8 @@ def _resolve_sdk(sdk_module: Any | None) -> Any | None:
 
 
 def _make_handler(
-    provider: ContextProvider, method_name: str,
+    provider: ContextProvider,
+    method_name: str,
 ) -> Callable[[dict[str, Any]], Any]:
     """Build an async MCP handler returning the provider method's string.
 
@@ -395,7 +390,9 @@ def _make_handler(
         # Observability: make on-demand context pulls visible.
         log.info(
             "context_tool pull: %s args=%s -> %d chars",
-            method_name, kwargs or {}, len(text),
+            method_name,
+            kwargs or {},
+            len(text),
         )
         return {"content": [{"type": "text", "text": text}]}
 
@@ -429,9 +426,7 @@ def build_context_tools_server(
     if tool_factory is None:
         tool_factory = getattr(sdk, "tool", None) if sdk is not None else None
     if server_factory is None:
-        server_factory = (
-            getattr(sdk, "create_sdk_mcp_server", None) if sdk is not None else None
-        )
+        server_factory = getattr(sdk, "create_sdk_mcp_server", None) if sdk is not None else None
     if tool_factory is None or server_factory is None:
         log.info(
             "context-tools MCP server unavailable (sdk=%s).",

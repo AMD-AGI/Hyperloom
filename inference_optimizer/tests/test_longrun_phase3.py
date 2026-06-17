@@ -44,7 +44,10 @@ def conn(tmp_path):
 async def test_reclaim_expired_running_orphan(conn):
     reg = TaskRegistry(conn)
     t = await reg.create(
-        kind="bench", params={}, idempotency_key="k1", lease_ttl_sec=60,
+        kind="bench",
+        params={},
+        idempotency_key="k1",
+        lease_ttl_sec=60,
     )
     await reg.transition(t.task_id, "running")
     # now far past updated_at + lease_ttl → orphaned.
@@ -60,11 +63,17 @@ async def test_reclaim_expired_running_orphan(conn):
 async def test_reclaim_leaves_fresh_and_no_ttl_running(conn):
     reg = TaskRegistry(conn)
     fresh = await reg.create(
-        kind="bench", params={}, idempotency_key="fresh", lease_ttl_sec=600,
+        kind="bench",
+        params={},
+        idempotency_key="fresh",
+        lease_ttl_sec=600,
     )
     await reg.transition(fresh.task_id, "running")
     no_ttl = await reg.create(
-        kind="bench", params={}, idempotency_key="nottl", lease_ttl_sec=0,
+        kind="bench",
+        params={},
+        idempotency_key="nottl",
+        lease_ttl_sec=0,
     )
     await reg.transition(no_ttl.task_id, "running")
     # now == updated_at → fresh task age 0 < ttl; no-ttl task never expires.
@@ -80,7 +89,10 @@ async def test_reclaim_leaves_fresh_and_no_ttl_running(conn):
 async def test_reclaim_respects_lease_window(conn):
     reg = TaskRegistry(conn)
     t = await reg.create(
-        kind="bench", params={}, idempotency_key="k", lease_ttl_sec=600,
+        kind="bench",
+        params={},
+        idempotency_key="k",
+        lease_ttl_sec=600,
     )
     await reg.transition(t.task_id, "running")
     # Within the lease window → not reclaimed.
@@ -103,8 +115,11 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     from inference_optimizer.paths import make_session_dir as _msd
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.orchestrator.backends import (
-        MockBackend, MockCriticBackend, MockKernelBackend,
-        MockRobustnessBackend, ScriptedPlan,
+        MockBackend,
+        MockCriticBackend,
+        MockKernelBackend,
+        MockRobustnessBackend,
+        ScriptedPlan,
     )
     from .conftest import seed_target_analysis_marker
 
@@ -139,7 +154,10 @@ async def test_soft_restart_runs_at_loopback(cyclic_coordinator):
     _arm_sweep_loopback(st)
     # An orphaned running task from the prior cycle.
     t = await c.tasks.create(
-        kind="bench", params={}, idempotency_key="orphan", lease_ttl_sec=1,
+        kind="bench",
+        params={},
+        idempotency_key="orphan",
+        lease_ttl_sec=1,
     )
     await c.tasks.transition(t.task_id, "running")
     # Backdate updated_at so the 1s lease is already expired.
@@ -166,11 +184,13 @@ async def test_soft_restart_preserves_best_and_ledger(cyclic_coordinator):
     _arm_sweep_loopback(st)
     st.current_best = {"tput": 123.0, "extra_server_args": "--foo"}
     st.optimization_stack = [{"name": "v1", "gain_pct": 5.0}]
-    st.apply_explore_search_update({
-        "schema_version": 1,
-        "tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}},
-        "rejected": [{"name": "a", "fingerprint": "fp_a"}],
-    })
+    st.apply_explore_search_update(
+        {
+            "schema_version": 1,
+            "tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}},
+            "rejected": [{"name": "a", "fingerprint": "fp_a"}],
+        }
+    )
 
     await c._advance_phase_if_needed()
 
@@ -190,7 +210,10 @@ async def test_soft_restart_can_be_disabled(cyclic_coordinator, monkeypatch):
     st = c.shared_state
     _arm_sweep_loopback(st)
     t = await c.tasks.create(
-        kind="bench", params={}, idempotency_key="orphan2", lease_ttl_sec=1,
+        kind="bench",
+        params={},
+        idempotency_key="orphan2",
+        lease_ttl_sec=1,
     )
     await c.tasks.transition(t.task_id, "running")
     await c.db.execute(

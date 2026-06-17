@@ -24,7 +24,7 @@ from ..recipe_kb import RecipeKB, recipe_canonical_id
 from ..recipe_snapshot_constants import detect_framework_version
 
 # Recipe snapshot severity tags (schema has no fixed enum).
-_SEVERITY_CRASH:   str = "crash"
+_SEVERITY_CRASH: str = "crash"
 _SEVERITY_REGRESS: str = "regress"
 
 # Bounded transient-failure auto-retry for specialist dispatches: a subprocess
@@ -72,7 +72,6 @@ from .objective import Objective, TimeOnlyObjective
 from .policy import (
     PolicyDenied,
     PolicyGate,
-    RESEARCH_LANE_NAME,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from .gpu_pool import (
@@ -93,10 +92,6 @@ from .trace.llm_trace import LLMCallRecord, append_llm_call
 from .action_executors.benchmark_result import is_valid_measurement
 from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     _BASELINE_FINGERPRINT_KEYS,
-    _BASELINE_SELF_LOOP_THRESHOLD,
-    _DEFAULT_ROOFLINE_WATERMARK_RATIO,
-    _MULTI_VALUE_SGLANG_FLAGS,
-    _ROOFLINE_WATERMARK_RATIO_ENV,
     _baseline_params_fingerprint,
     _dedupe_extra_server_args,
     _infer_model_class_from_config,
@@ -113,11 +108,16 @@ log = logging.getLogger(__name__)
 
 
 # Audit-trail kinds (must match shared_state._AUDIT_ACTIONS); kernel-owned actions excluded.
-_AUDIT_ACTIONS: frozenset[str] = frozenset({
-    "baseline", "profile", "sweep", "explore",
-    # Composite roofline runs profile + trace_analyze atomically.
-    "roofline",
-})
+_AUDIT_ACTIONS: frozenset[str] = frozenset(
+    {
+        "baseline",
+        "profile",
+        "sweep",
+        "explore",
+        # Composite roofline runs profile + trace_analyze atomically.
+        "roofline",
+    }
+)
 
 # Default per-repo candidate cap for ``fa phase-discover`` (FRAMEWORK_PR).
 DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES: int = 8
@@ -131,10 +131,16 @@ FORCE_STALLED_KEEP_ROUNDS: int = 12
 
 # Result keys surfaced in delegated_result inbox line; first match wins per group.
 _OUTCOME_GAIN_KEYS: tuple[str, ...] = (
-    "validated_gain_pct", "gain_pct", "predicted_gain_pct", "delta_pct",
+    "validated_gain_pct",
+    "gain_pct",
+    "predicted_gain_pct",
+    "delta_pct",
 )
 _OUTCOME_TPUT_KEYS: tuple[str, ...] = (
-    "tokens_per_s", "tput", "throughput", "tput_tok_s",
+    "tokens_per_s",
+    "tput",
+    "throughput",
+    "tput_tok_s",
 )
 _OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome")
 
@@ -174,9 +180,7 @@ def _format_inbox_event(m: "Message") -> str:
     payload = m.payload if isinstance(m.payload, dict) else {}
     # DESIGN §13.1: canonical inbox header ordering downstream parsers anchor on.
     if getattr(m, "msg_id", None):
-        head = (
-            f"seq={m.seq} msg_id={m.msg_id} from={m.from_agent} topic={topic}"
-        )
+        head = f"seq={m.seq} msg_id={m.msg_id} from={m.from_agent} topic={topic}"
     else:
         head = f"seq={m.seq} from={m.from_agent} topic={topic}"
 
@@ -203,9 +207,7 @@ def _format_inbox_event(m: "Message") -> str:
             parts.append(f"error={str(error)[:200]!r}")
         return " ".join(parts)
 
-    if topic in ("policy_denial", "denial") or (
-        topic == "observation" and payload.get("kind") == "policy_denial"
-    ):
+    if topic in ("policy_denial", "denial") or (topic == "observation" and payload.get("kind") == "policy_denial"):
         return (
             f"{head} action={payload.get('action_name')!r} "
             f"rule={payload.get('rule')!r} "
@@ -248,16 +250,32 @@ class PendingProposal:
 # payload (inputs) or result (outputs) so operators can see where a step's
 # artifacts went without enumerating every per-handler return shape.
 _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
-    "trace_input", "trace_dir", "candidates_path", "analysis_md_path",
-    "kernel_candidates", "best_artifact_path", "patch_path", "target_file",
-    "workspace", "workspace_path", "out_dir", "output_dir", "run_dir",
-    "report_path", "json_path", "md_path", "tracelens_agent_transcript",
+    "trace_input",
+    "trace_dir",
+    "candidates_path",
+    "analysis_md_path",
+    "kernel_candidates",
+    "best_artifact_path",
+    "patch_path",
+    "target_file",
+    "workspace",
+    "workspace_path",
+    "out_dir",
+    "output_dir",
+    "run_dir",
+    "report_path",
+    "json_path",
+    "md_path",
+    "tracelens_agent_transcript",
     "tracelens_agent_report",
     # TraceLens analysis outputs surfaced by trace_analyze_handler — the
     # analysis.md report, its alias, the per-run audit summary, the roofline
     # sidecar and the CLI log — so operators can reach them from lifecycle END.
-    "trace_report_path", "analysis_report_path", "tracelens_summary_path",
-    "kernel_roofline_path", "cli_log_path",
+    "trace_report_path",
+    "analysis_report_path",
+    "tracelens_summary_path",
+    "kernel_roofline_path",
+    "cli_log_path",
 )
 
 
@@ -376,16 +394,17 @@ class Coordinator:
         # ProposalScorer facade (advisory only, never gates).
         self._proposal_scorer: Any = proposal_scorer
         # Phase budget percentages, normalised once at construction.
-        self._phase_budget_pct: dict[str, float] = _phase_state.normalize_budget_pct(
-            phase_budget_pct
-        )
+        self._phase_budget_pct: dict[str, float] = _phase_state.normalize_budget_pct(phase_budget_pct)
         # Specialist stale scan threshold (seconds).
         try:
             self._specialist_stale_sec: float = max(
                 0.0,
-                float(os.environ.get(
-                    "INFERENCE_OPTIMIZER_SPECIALIST_STALE_SEC", "600",
-                )),
+                float(
+                    os.environ.get(
+                        "INFERENCE_OPTIMIZER_SPECIALIST_STALE_SEC",
+                        "600",
+                    )
+                ),
             )
         except ValueError:
             self._specialist_stale_sec = 600.0
@@ -396,10 +415,7 @@ class Coordinator:
         # Validate every reactor has a backend wired.
         for name in self.role_registry:
             if name not in backends:
-                raise ValueError(
-                    f"missing backend for role {name!r} "
-                    f"(provide via Coordinator(backends={{...}}))"
-                )
+                raise ValueError(f"missing backend for role {name!r} (provide via Coordinator(backends={{...}}))")
         self.backends = dict(backends)
 
         # Persistence layer
@@ -411,7 +427,9 @@ class Coordinator:
         self.tasks = TaskRegistry(self.db)
         self.cursors = CursorStore(self.db)
         self.sub = sub_agent_runner or SubAgentRunner(
-            self.locks, self.tasks, session_dir=self.session_dir,
+            self.locks,
+            self.tasks,
+            session_dir=self.session_dir,
         )
 
         # Persistent session state (state.json) — load existing for resume.
@@ -429,9 +447,7 @@ class Coordinator:
         self.sub.shared_state = self.shared_state
         self.gpu_specialist_pool = SpecialistGpuPool(
             self.db,
-            gpu_ids=resolve_gpu_specialist_devices(
-                int(getattr(self.shared_state, "gpu_specialist_capacity", 0) or 0)
-            ),
+            gpu_ids=resolve_gpu_specialist_devices(int(getattr(self.shared_state, "gpu_specialist_capacity", 0) or 0)),
         )
         # Dispatcher re-scan poll: while awaiting in-flight tasks, re-scan the
         # queue at this cadence so a queued GPU task starts the moment its lane
@@ -441,18 +457,14 @@ class Coordinator:
         try:
             self._dispatcher_poll_sec = max(
                 0.05,
-                float(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_DISPATCHER_POLL_SECONDS", "10"
-                    )
-                    or 10.0
-                ),
+                float(os.environ.get("INFERENCE_OPTIMIZER_DISPATCHER_POLL_SECONDS", "10") or 10.0),
             )
         except (TypeError, ValueError):
             self._dispatcher_poll_sec = 10.0
         # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
         try:
             from ..storage.schema import set_lane_capacity as _set_lane_capacity
+
             cap = int(self.shared_state.research_lane_capacity or 0)
             if cap >= 0:
                 _set_lane_capacity(self.db.raw, "research_lane", cap)
@@ -470,11 +482,8 @@ class Coordinator:
         self._resumed_from = self._detect_resume_state()
         # Derive model_class once at boot if not supplied; never overwrite a resume.
         if not (self.shared_state.model_class or "").strip():
-            self.shared_state.model_class = (
-                self._model_class_override
-                or _infer_model_class_from_config(
-                    self.shared_state.model_path or os.environ.get("MODEL_PATH", "")
-                )
+            self.shared_state.model_class = self._model_class_override or _infer_model_class_from_config(
+                self.shared_state.model_path or os.environ.get("MODEL_PATH", "")
             )
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
@@ -483,16 +492,16 @@ class Coordinator:
         self._orchestration_seeded: bool = False
         # Orchestration working-memory checkpoint policy + tracker (plan Step 4).
         from . import orchestration_memory as _orch_mem
+
         self._checkpoint_policy = _orch_mem.CheckpointPolicy()
         self._checkpoint_tracker = _orch_mem.CheckpointTracker(
             last_phase=str(getattr(self.shared_state, "phase", "") or ""),
         )
         # Disable checkpointing entirely via env.
-        self._checkpoint_enabled: bool = (
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_DISABLE_ORCH_CHECKPOINT", "",
-            ).strip().lower() not in {"1", "true", "yes", "on"}
-        )
+        self._checkpoint_enabled: bool = os.environ.get(
+            "INFERENCE_OPTIMIZER_DISABLE_ORCH_CHECKPOINT",
+            "",
+        ).strip().lower() not in {"1", "true", "yes", "on"}
         # Seed memory rendered into the next full SEED push (resume recovery source).
         self._orchestration_seed_memory: str = _orch_mem.render_memory_for_seed(
             dict(getattr(self.shared_state, "orchestration_memory", {}) or {})
@@ -502,9 +511,12 @@ class Coordinator:
         try:
             self._no_progress_threshold: int = max(
                 1,
-                int(os.environ.get(
-                    "INFERENCE_OPTIMIZER_NO_PROGRESS_TICKS", "15",
-                )),
+                int(
+                    os.environ.get(
+                        "INFERENCE_OPTIMIZER_NO_PROGRESS_TICKS",
+                        "15",
+                    )
+                ),
             )
         except ValueError:
             self._no_progress_threshold = 15
@@ -513,10 +525,12 @@ class Coordinator:
         try:
             self._maintenance_every_ticks: int = max(
                 0,
-                int(os.environ.get(
-                    "INFERENCE_OPTIMIZER_MAINTENANCE_EVERY_TICKS",
-                    str(MAINTENANCE_EVERY_TICKS),
-                )),
+                int(
+                    os.environ.get(
+                        "INFERENCE_OPTIMIZER_MAINTENANCE_EVERY_TICKS",
+                        str(MAINTENANCE_EVERY_TICKS),
+                    )
+                ),
             )
         except ValueError:
             self._maintenance_every_ticks = MAINTENANCE_EVERY_TICKS
@@ -528,13 +542,14 @@ class Coordinator:
         # 24), whose real budget is not even known here at __init__ (it is set
         # later in ``run()``). Keeping the assignment unconditional is therefore
         # harmless: short runs stay anchored on the whole session.
-        if _phase_state.is_cyclic_phases_enabled() and float(
-            getattr(self.shared_state, "cycle_minutes", 0) or 0
-        ) <= 0:
+        if _phase_state.is_cyclic_phases_enabled() and float(getattr(self.shared_state, "cycle_minutes", 0) or 0) <= 0:
             try:
-                _cycle_hours = float(os.environ.get(
-                    "INFERENCE_OPTIMIZER_CYCLE_HOURS", str(DEFAULT_CYCLE_HOURS),
-                ))
+                _cycle_hours = float(
+                    os.environ.get(
+                        "INFERENCE_OPTIMIZER_CYCLE_HOURS",
+                        str(DEFAULT_CYCLE_HOURS),
+                    )
+                )
             except ValueError:
                 _cycle_hours = DEFAULT_CYCLE_HOURS
             self.shared_state.cycle_minutes = max(1.0, _cycle_hours * 60.0)
@@ -542,36 +557,32 @@ class Coordinator:
         # R6: medium-intensity soft restart at each macro-cycle boundary
         # (reap/prune/clear-caches + compacted-memory conversation reset). On by
         # default in cyclic mode; opt out via the env flag.
-        self._cycle_soft_restart: bool = (
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART", "",
-            ).strip().lower() not in {"1", "true", "yes", "on"}
-        )
+        self._cycle_soft_restart: bool = os.environ.get(
+            "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART",
+            "",
+        ).strip().lower() not in {"1", "true", "yes", "on"}
         # The soft restart's inference-server deep-clean kills lingering server
         # processes (vLLM/SGLang/atom workers). It is safe at a cycle boundary
         # (no benchmark in flight) but is the highest-blast-radius step, so it is
         # separately gated and defaults ON within the soft restart; opt out via
         # the env flag (tests set it to avoid touching real /proc).
-        self._cycle_restart_servers: bool = (
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART", "",
-            ).strip().lower() not in {"1", "true", "yes", "on"}
-        )
+        self._cycle_restart_servers: bool = os.environ.get(
+            "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART",
+            "",
+        ).strip().lower() not in {"1", "true", "yes", "on"}
 
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
-        self._backend_error_streak: dict[str, int] = {
-            name: 0 for name in self.role_registry
-        }
-        self._backend_error_alarm_armed: dict[str, bool] = {
-            name: True for name in self.role_registry
-        }
+        self._backend_error_streak: dict[str, int] = {name: 0 for name in self.role_registry}
+        self._backend_error_alarm_armed: dict[str, bool] = {name: True for name in self.role_registry}
         try:
             self._backend_error_streak_threshold: int = max(
                 1,
-                int(os.environ.get(
-                    "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
-                    "5",
-                )),
+                int(
+                    os.environ.get(
+                        "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
+                        "5",
+                    )
+                ),
             )
         except ValueError:
             self._backend_error_streak_threshold = 5
@@ -579,9 +590,7 @@ class Coordinator:
         # Stable tick order from the live role_registry (NOT the cached
         # module-level roles_for_run, which keeps "kernel" under --no-kernel).
         _CANONICAL_ORDER = ("orchestration", "kernel", "critic", "robustness")
-        self._tick_roles: tuple[str, ...] = tuple(
-            r for r in _CANONICAL_ORDER if r in self.role_registry
-        )
+        self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
         # Action registry — yaml catalogue mapping action_name → metadata;
         # load failure falls back to ``None`` (handled gracefully).
@@ -591,11 +600,19 @@ class Coordinator:
             log.exception("Coordinator: failed to load ActionRegistry.")
             self.action_registry = None
         # Inline fast-action execution (Path A / A3): run cheap lane-light action in-turn. Default ON.
-        _inline_raw = os.environ.get(
-            "INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS", "",
-        ).strip().lower()
+        _inline_raw = (
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS",
+                "",
+            )
+            .strip()
+            .lower()
+        )
         self._inline_fast_actions_enabled: bool = _inline_raw not in {
-            "0", "false", "no", "off",
+            "0",
+            "false",
+            "no",
+            "off",
         }
         self._coordinator_loop: asyncio.AbstractEventLoop | None = None
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
@@ -693,7 +710,9 @@ class Coordinator:
         }
 
     async def _maybe_run_maintenance_tick(
-        self, *, tick: int,
+        self,
+        *,
+        tick: int,
     ) -> dict[str, Any] | None:
         """Periodic in-process maintenance (R5 reaper + R4 DB retention).
 
@@ -722,9 +741,7 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — maintenance never aborts the run loop
             log.exception("maintenance: serving-lease reap failed")
         try:
-            summary["gpu_leases_reaped"] = (
-                await self.gpu_specialist_pool.reap_expired()
-            )
+            summary["gpu_leases_reaped"] = await self.gpu_specialist_pool.reap_expired()
         except Exception:  # noqa: BLE001
             log.exception("maintenance: gpu-lease reap failed")
         # R6 watchdog/self-heal: reclaim orphaned running tasks whose execution
@@ -738,6 +755,7 @@ class Coordinator:
             log.exception("maintenance: running-task reclaim failed")
         try:
             from . import db_maintenance as _db_maint
+
             res = await _db_maint.run_db_retention(self.db, self.cursors)
             summary["events_pruned"] = res.events_deleted
             summary["tasks_pruned"] = res.tasks_deleted
@@ -780,7 +798,7 @@ class Coordinator:
             usage = shutil.disk_usage(str(self.session_dir))
         except OSError:
             return None
-        free_gb = usage.free / (1024.0 ** 3)
+        free_gb = usage.free / (1024.0**3)
         used_frac = usage.used / usage.total if usage.total else 0.0
         summary: dict[str, Any] = {
             "free_gb": round(free_gb, 2),
@@ -791,8 +809,8 @@ class Coordinator:
             if state_path.is_file() and state_path.stat().st_size > self._STATE_JSON_WARN_BYTES:
                 log.warning(
                     "maintenance: state.json is %.1f MB (soft cap %.0f MB)",
-                    state_path.stat().st_size / (1024.0 ** 2),
-                    self._STATE_JSON_WARN_BYTES / (1024.0 ** 2),
+                    state_path.stat().st_size / (1024.0**2),
+                    self._STATE_JSON_WARN_BYTES / (1024.0**2),
                 )
         except OSError:
             pass
@@ -811,7 +829,7 @@ class Coordinator:
             if len(task_dirs) <= self._DISK_RUNS_KEEP_PER_ACTION:
                 continue
             task_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            for stale in task_dirs[self._DISK_RUNS_KEEP_PER_ACTION:]:
+            for stale in task_dirs[self._DISK_RUNS_KEEP_PER_ACTION :]:
                 try:
                     shutil.rmtree(stale, ignore_errors=True)
                     removed += 1
@@ -821,12 +839,18 @@ class Coordinator:
         if removed:
             log.info(
                 "maintenance: low disk (free=%.1fGB used=%.0f%%) pruned %d run dirs",
-                free_gb, used_frac * 100.0, removed,
+                free_gb,
+                used_frac * 100.0,
+                removed,
             )
         return summary
 
     async def _maybe_checkpoint_orchestration(
-        self, *, tick: int, phase_changed: bool = False, force: bool = False,
+        self,
+        *,
+        tick: int,
+        phase_changed: bool = False,
+        force: bool = False,
     ) -> bool:
         """Compact the orchestration conversation into durable memory (plan Step 4).
 
@@ -887,9 +911,7 @@ class Coordinator:
             parsed = _orch_mem.parse_checkpoint_reply(raw_text)
             seq = 0
             try:
-                row = self.bus.db.fetchone_sync(
-                    "SELECT COALESCE(MAX(seq), 0) AS s FROM events"
-                )
+                row = self.bus.db.fetchone_sync("SELECT COALESCE(MAX(seq), 0) AS s FROM events")
                 seq = int(row["s"]) if row else 0
             except Exception:  # noqa: BLE001
                 seq = 0
@@ -897,9 +919,7 @@ class Coordinator:
                 parsed,
                 seq=seq,
                 tick=tick,
-                previous=dict(
-                    getattr(self.shared_state, "orchestration_memory", {}) or {}
-                ),
+                previous=dict(getattr(self.shared_state, "orchestration_memory", {}) or {}),
             )
             self.shared_state.orchestration_memory = record
             try:
@@ -907,9 +927,7 @@ class Coordinator:
             except Exception:  # noqa: BLE001
                 log.exception("Coordinator: failed to persist orchestration_memory")
             # Reset so the next turn re-seeds from the compacted memory.
-            self._orchestration_seed_memory = _orch_mem.render_memory_for_seed(
-                record
-            )
+            self._orchestration_seed_memory = _orch_mem.render_memory_for_seed(record)
             self._reset_orchestration_conversation()
             tracker.reset(
                 tick=tick,
@@ -917,7 +935,8 @@ class Coordinator:
                 phase=str(getattr(self.shared_state, "phase", "") or ""),
             )
             await self._record_observation(
-                "coordinator", "observation",
+                "coordinator",
+                "observation",
                 {
                     "kind": "orchestration_checkpoint",
                     "tick": tick,
@@ -939,6 +958,7 @@ class Coordinator:
             return
         try:
             from .backends.mcp_context_tools import ContextProvider
+
             provider = ContextProvider(
                 shared_state=self.shared_state,
                 inbox_reader=self._context_inbox_reader,
@@ -963,8 +983,7 @@ class Coordinator:
         """
         try:
             rows = self.bus.db.fetchall_sync(
-                "SELECT * FROM events WHERE seq > ? AND "
-                "(to_agent = ? OR to_agent = '*') ORDER BY seq ASC",
+                "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq ASC",
                 (int(since_seq or 0), "orchestration"),
             )
         except Exception as exc:  # noqa: BLE001
@@ -972,6 +991,7 @@ class Coordinator:
         if not rows:
             return "(no inbox events)"
         from .message_bus import Message
+
         msgs = [Message.from_row(r) for r in rows]
         lines = [_format_inbox_event(m) for m in msgs[-40:]]
         return "\n".join(lines)
@@ -993,9 +1013,7 @@ class Coordinator:
             k = 8
         try:
             rows = self.bus.db.fetchall_sync(
-                "SELECT * FROM events WHERE topic IN "
-                "('delegated_result', 'review_verdict') "
-                "ORDER BY seq DESC LIMIT ?",
+                "SELECT * FROM events WHERE topic IN ('delegated_result', 'review_verdict') ORDER BY seq DESC LIMIT ?",
                 (k,),
             )
         except Exception as exc:  # noqa: BLE001
@@ -1003,6 +1021,7 @@ class Coordinator:
         if not rows:
             return "(no recent outcomes)"
         from .message_bus import Message
+
         # Flip newest-first query to newest-last for chronological reading.
         msgs = [Message.from_row(r) for r in rows][::-1]
         lines = ["=== Recent action outcomes (newest last) ==="]
@@ -1010,9 +1029,12 @@ class Coordinator:
         return "\n".join(lines)
 
     # Inline fast-action execution (Path A / A3); deny report/session_breakdown (CLOSE artifacts).
-    _INLINE_ACTION_DENY: frozenset[str] = frozenset({
-        "report", "session_breakdown",
-    })
+    _INLINE_ACTION_DENY: frozenset[str] = frozenset(
+        {
+            "report",
+            "session_breakdown",
+        }
+    )
 
     def _inline_action_whitelist(self) -> frozenset[str]:
         """Derive the set of actions safe to run inline (A3): lane-light, registered executor, not in _INLINE_ACTION_DENY. PolicyGate remains the real security boundary.
@@ -1043,7 +1065,9 @@ class Coordinator:
         return frozenset(allowed)
 
     def _run_action_now_sync(
-        self, action_name: str, params: dict[str, Any] | None = None,
+        self,
+        action_name: str,
+        params: dict[str, Any] | None = None,
     ) -> str:
         """Bridge callable for the ``run_action_now`` context tool (A3): marshals the executor coroutine onto the Coordinator loop and blocks with a timeout.
 
@@ -1081,18 +1105,17 @@ class Coordinator:
         try:
             timeout_s = float(
                 os.environ.get(
-                    "INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S", "120",
-                ) or 120
+                    "INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S",
+                    "120",
+                )
+                or 120
             )
         except (TypeError, ValueError):
             timeout_s = 120.0
         try:
             fut = asyncio.run_coroutine_threadsafe(coro, loop)
         except RuntimeError as exc:
-            return (
-                f"(run_action_now: could not schedule on coordinator loop: "
-                f"{exc!r})"
-            )
+            return f"(run_action_now: could not schedule on coordinator loop: {exc!r})"
         try:
             return fut.result(timeout=timeout_s)
         except FuturesTimeoutError:
@@ -1107,7 +1130,9 @@ class Coordinator:
             return f"(run_action_now: {name!r} errored: {exc!r})"
 
     async def _run_action_now(
-        self, action_name: str, params: dict[str, Any],
+        self,
+        action_name: str,
+        params: dict[str, Any],
     ) -> str:
         """Coordinator-loop coroutine that runs a whitelisted action inline through PolicyGate + SubAgentRunner, publishing a delegated_result for audit/inbox parity.
 
@@ -1120,6 +1145,7 @@ class Coordinator:
             already-in-flight notice, or the rendered delegated_result line.
         """
         from .message_bus import Message
+
         # PolicyGate parity (R1): validate synthetic delegate intent so phase/role/paths/red-line gates apply.
         intent = Intent(
             type=IntentType.DELEGATE,
@@ -1137,20 +1163,15 @@ class Coordinator:
         seq_denied = self._sequence_denial_for_action(action_name, params)
         if seq_denied is not None:
             await self._record_policy_denied(
-                "orchestration", intent, seq_denied, action_name=action_name,
+                "orchestration",
+                intent,
+                seq_denied,
+                action_name=action_name,
             )
-            return (
-                f"(run_action_now: {action_name!r} denied: "
-                f"{str(getattr(seq_denied, 'hint', seq_denied))[:200]})"
-            )
+            return f"(run_action_now: {action_name!r} denied: {str(getattr(seq_denied, 'hint', seq_denied))[:200]})"
         lanes, ttl = self._registry_lanes_ttl(action_name)
-        content_fp = hashlib.sha1(
-            json.dumps(params or {}, sort_keys=True, default=str).encode()
-        ).hexdigest()[:10]
-        key = (
-            f"inline:orchestration:{action_name}:"
-            f"t{int(self.shared_state.tick or 0)}:{content_fp}"
-        )
+        content_fp = hashlib.sha1(json.dumps(params or {}, sort_keys=True, default=str).encode()).hexdigest()[:10]
+        key = f"inline:orchestration:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=action_name,
             params=dict(params or {}),
@@ -1159,7 +1180,11 @@ class Coordinator:
             lease_ttl_sec=ttl,
         )
         if was_existing and task.state not in (
-            "queued", "succeeded", "failed", "cancelled", "needs_manual_review",
+            "queued",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "needs_manual_review",
         ):
             return (
                 f"(run_action_now: an identical {action_name!r} task is "
@@ -1167,23 +1192,34 @@ class Coordinator:
             )
         result = await self.sub.run_task(task)
         result_payload = {
-            "task_id": task.task_id, "kind": task.kind,
-            "state": result.state, "result": result.result,
+            "task_id": task.task_id,
+            "kind": task.kind,
+            "state": result.state,
+            "result": result.result,
             "error": result.error,
         }
         try:
-            await self.bus.append_and_seq(Message.new(
-                "coordinator", "*", "delegated_result",
-                {**result_payload, "inline": True},
-            ))
+            await self.bus.append_and_seq(
+                Message.new(
+                    "coordinator",
+                    "*",
+                    "delegated_result",
+                    {**result_payload, "inline": True},
+                )
+            )
         except Exception:  # noqa: BLE001 — audit best-effort
             log.exception(
                 "run_action_now: failed to append delegated_result for %s",
                 task.task_id,
             )
-        rendered = _format_inbox_event(Message.new(
-            "coordinator", "orchestration", "delegated_result", result_payload,
-        ))
+        rendered = _format_inbox_event(
+            Message.new(
+                "coordinator",
+                "orchestration",
+                "delegated_result",
+                result_payload,
+            )
+        )
         return f"inline run complete: {rendered}"
 
     def _context_analysis_reader(self) -> str:
@@ -1205,6 +1241,7 @@ class Coordinator:
         if path:
             try:
                 from pathlib import Path as _Path
+
                 return _Path(path).read_text(encoding="utf-8")
             except OSError as exc:
                 return f"(analysis.md unreadable at {path}: {exc!r})"
@@ -1366,17 +1403,15 @@ class Coordinator:
             # cli already T0'd or resume picked up the sid; gate up here to skip the import.
             return
         # Derive workload / hw from SharedState.
-        workload = (
-            getattr(state, "model_name", "") or "unknown_model"
-        )
+        workload = getattr(state, "model_name", "") or "unknown_model"
         hw = getattr(state, "gpu_type", "") or "unknown_gpu"
         # marathon_dispatch_id mirrors the cli path: the hyperloom-internal manifest session id.
         extra_attrs = {
             "marathon_dispatch_id": getattr(state, "session_id", "") or "",
-            "framework":   getattr(state, "framework", "") or "",
+            "framework": getattr(state, "framework", "") or "",
             "model_class": getattr(state, "model_class", "") or "",
-            "claw_session_id":  getattr(state, "claw_session_id", "") or "",
-            "sandbox_user_id":  getattr(state, "sandbox_user_id", "") or "",
+            "claw_session_id": getattr(state, "claw_session_id", "") or "",
+            "sandbox_user_id": getattr(state, "sandbox_user_id", "") or "",
             # boot_origin is a dev-debug label, NOT written to KB; distinguishes SDK-fallback from cli path.
             "boot_origin": "coordinator_fallback",
         }
@@ -1396,9 +1431,9 @@ class Coordinator:
             )
         except Exception:  # noqa: BLE001 — defensive; helper is itself best-effort
             log.exception(
-                "Coordinator T0 fallback: run_t0_anchor raised "
-                "(workload=%s, hw=%s); warm_start stays empty",
-                workload, hw,
+                "Coordinator T0 fallback: run_t0_anchor raised (workload=%s, hw=%s); warm_start stays empty",
+                workload,
+                hw,
             )
 
     def _kernel_enabled(self) -> bool:
@@ -1409,9 +1444,7 @@ class Coordinator:
             ``kernel_enabled`` flag is set.
         """
         # Mirror persisted kernel_enabled flag; --no-kernel removes the kernel role.
-        return "kernel" in self.role_registry and bool(
-            getattr(self.shared_state, "kernel_enabled", True)
-        )
+        return "kernel" in self.role_registry and bool(getattr(self.shared_state, "kernel_enabled", True))
 
     def _explore_enabled(self) -> bool:
         """Whether the EXPLORE phase is enabled for this run.
@@ -1438,9 +1471,7 @@ class Coordinator:
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
             # Default True to match SharedState.framework_phase_enabled + cli resume fallback (cli.py:3231).
-            framework_phase_enabled=bool(
-                getattr(state, "framework_phase_enabled", True)
-            ),
+            framework_phase_enabled=bool(getattr(state, "framework_phase_enabled", True)),
             explore_enabled=self._explore_enabled(),
             max_hours=max_hours_arg,
         )
@@ -1455,10 +1486,7 @@ class Coordinator:
             return  # already there
         prior = state.phase
         # Consume escalate hint after a hint-driven transition so the next tick re-evaluates fresh.
-        if isinstance(evidence, dict) and (
-            evidence.get("evidence") == "llm_escalation"
-            or "hint" in evidence
-        ):
+        if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
             state.consume_pending_escalate_hint()
         # Terminal transition (target=CLOSE): mirror vocab stop_reason onto state via ENUM-validated writer.
         if (
@@ -1502,9 +1530,7 @@ class Coordinator:
             and isinstance(evidence, dict)
             and "no_gain_cycle_streak_effective" in evidence
         ):
-            state.no_gain_cycle_streak = int(
-                evidence.get("no_gain_cycle_streak_effective", 0) or 0
-            )
+            state.no_gain_cycle_streak = int(evidence.get("no_gain_cycle_streak_effective", 0) or 0)
         state.record_phase_transition(
             to_phase=target,
             reason=reason,
@@ -1532,19 +1558,25 @@ class Coordinator:
             log.exception("Coordinator: save after phase transition failed")
         log.info(
             "Coordinator.phase: %s → %s (reason=%s)",
-            prior or "<unset>", target, reason,
+            prior or "<unset>",
+            target,
+            reason,
         )
         try:
-            await self.bus.append_and_seq(Message.new(
-                "coordinator", "*", "event",
-                {
-                    "kind":       "phase_transition",
-                    "from_phase": prior or "",
-                    "to_phase":   target,
-                    "reason":     reason,
-                    "evidence":   evidence,
-                },
-            ))
+            await self.bus.append_and_seq(
+                Message.new(
+                    "coordinator",
+                    "*",
+                    "event",
+                    {
+                        "kind": "phase_transition",
+                        "from_phase": prior or "",
+                        "to_phase": target,
+                        "reason": reason,
+                        "evidence": evidence,
+                    },
+                )
+            )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: phase_transition event bus write failed")
         # Phase-entry side effects are additive; hook failures are logged but never roll back the transition.
@@ -1572,14 +1604,10 @@ class Coordinator:
         state.macro_cycle = prior_cycle + 1
         # R7: carry the effective no-gain streak computed by should_reloop.
         if isinstance(evidence, dict) and "no_gain_cycle_streak_effective" in evidence:
-            state.no_gain_cycle_streak = int(
-                evidence.get("no_gain_cycle_streak_effective", 0) or 0
-            )
+            state.no_gain_cycle_streak = int(evidence.get("no_gain_cycle_streak_effective", 0) or 0)
         # Anchor gain for the cycle we are about to start.
         try:
-            state.gain_at_cycle_start = float(
-                getattr(state, "cumulative_gain_validated", 0.0) or 0.0
-            )
+            state.gain_at_cycle_start = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
         except (TypeError, ValueError):
             state.gain_at_cycle_start = 0.0
         # Reset per-cycle counters (fresh plateau/dispatch budget for the cycle).
@@ -1604,14 +1632,18 @@ class Coordinator:
         state.last_sweep = {}
         state.last_conc_sweep = {}
         log.info(
-            "Coordinator: macro-cycle reloop %d → %d (no_gain_streak=%d, "
-            "gain_anchor=%.4f)",
-            prior_cycle, state.macro_cycle, state.no_gain_cycle_streak,
+            "Coordinator: macro-cycle reloop %d → %d (no_gain_streak=%d, gain_anchor=%.4f)",
+            prior_cycle,
+            state.macro_cycle,
+            state.no_gain_cycle_streak,
             state.gain_at_cycle_start,
         )
 
     async def _run_cycle_soft_restart(
-        self, *, prior_cycle: int, new_cycle: int,
+        self,
+        *,
+        prior_cycle: int,
+        new_cycle: int,
     ) -> dict[str, Any] | None:
         """R6: medium-intensity soft restart at a macro-cycle boundary.
 
@@ -1664,9 +1696,7 @@ class Coordinator:
         except Exception:  # noqa: BLE001
             log.exception("cycle soft-restart: serving-lease reap failed")
         try:
-            summary["gpu_leases_reaped"] = (
-                await self.gpu_specialist_pool.reap_expired()
-            )
+            summary["gpu_leases_reaped"] = await self.gpu_specialist_pool.reap_expired()
         except Exception:  # noqa: BLE001
             log.exception("cycle soft-restart: gpu-lease reap failed")
         # 2b) Reclaim orphaned running tasks (lease expired) → failed so they
@@ -1681,6 +1711,7 @@ class Coordinator:
         # 3) Prune the events/tasks DB (strictly below the resume anchor).
         try:
             from . import db_maintenance as _db_maint
+
             res = await _db_maint.run_db_retention(self.db, self.cursors)
             summary["events_pruned"] = res.events_deleted
             summary["tasks_pruned"] = res.tasks_deleted
@@ -1705,11 +1736,14 @@ class Coordinator:
                 log.exception("cycle soft-restart: server restart failed")
         log.info(
             "cycle soft-restart %d → %d: %s",
-            int(prior_cycle), int(new_cycle), summary,
+            int(prior_cycle),
+            int(new_cycle),
+            summary,
         )
         try:
             await self._record_observation(
-                "coordinator", "observation",
+                "coordinator",
+                "observation",
                 {"kind": "cycle_soft_restart", **summary},
             )
         except Exception:  # noqa: BLE001
@@ -1725,6 +1759,7 @@ class Coordinator:
         cycle boundary where no benchmark is in flight.
         """
         from .action_executors._grid_runner import _kill_stale_servers
+
         _kill_stale_servers()
 
     async def _on_phase_entered(self, *, from_phase: str, to_phase: str) -> None:
@@ -1793,13 +1828,15 @@ class Coordinator:
             results = plane.pr_feed_warm_all_domains()
             total_prs = sum(len(prs) for prs, _w in results.values())
             log.info(
-                "EXPLORE entry (from=%s): warmed pr_feed across %d "
-                "domains (total PRs cached=%d)",
-                from_phase or "<unknown>", len(results), total_prs,
+                "EXPLORE entry (from=%s): warmed pr_feed across %d domains (total PRs cached=%d)",
+                from_phase or "<unknown>",
+                len(results),
+                total_prs,
             )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.warning(
-                "EXPLORE entry: pr_feed_warm_all_domains failed: %r", exc,
+                "EXPLORE entry: pr_feed_warm_all_domains failed: %r",
+                exc,
             )
 
     async def _on_enter_framework_pr(self, *, from_phase: str) -> None:
@@ -1841,9 +1878,7 @@ class Coordinator:
             # an empty batch list means no pump-initiated authoring is outstanding, so
             # an LLM-proposed integrate_patch must NOT keep FRAMEWORK_PR open (else the
             # phase livelocks under a large budget — no discover, no done, no advance).
-            discovered_batch = bool(
-                getattr(self.shared_state, "framework_pr_batches", None) or []
-            )
+            discovered_batch = bool(getattr(self.shared_state, "framework_pr_batches", None) or [])
             if (
                 discovered_batch
                 and getattr(self.shared_state, "framework_pr_authoring_enabled", False)
@@ -1852,11 +1887,10 @@ class Coordinator:
                 return
             # Discover a fresh batch; only DISCOVER_FAILURE_RETRY_LIMIT consecutive failures or an empty-but-valid payload mark the phase done.
             from . import framework_agent_client as _fa_client
+
             ok = await self._discover_next_framework_pr_batch()
             if not ok:
-                failures = int(
-                    getattr(state, "framework_pr_discover_failures", 0) or 0
-                )
+                failures = int(getattr(state, "framework_pr_discover_failures", 0) or 0)
                 if failures >= _fa_client.DISCOVER_FAILURE_RETRY_LIMIT or failures == 0:
                     # Retries exhausted or clean empty payload — both real exits; stamp a summary row.
                     self._record_framework_pr_phase_done(
@@ -1885,27 +1919,27 @@ class Coordinator:
         verdict = await self._critic_review_framework_pr_candidate(next_candidate)
         if verdict.get("verdict") == "reject":
             cand_id = str(
-                next_candidate.get("candidate_id")
-                or next_candidate.get("pr_url")
-                or "",
+                next_candidate.get("candidate_id") or next_candidate.get("pr_url") or "",
             )
             progress = getattr(state, "framework_pr_phase_progress", None)
             if not isinstance(progress, list):
                 progress = []
                 state.framework_pr_phase_progress = progress
-            progress.append({
-                "candidate_id": cand_id,
-                "batch_id":     next_candidate.get("batch_id") or "",
-                "task_id":      None,
-                "status":       "critic_denied",
-                "rationale":    str(verdict.get("rationale") or ""),
-                "ts":           datetime.now(timezone.utc).isoformat(),
-            })
+            progress.append(
+                {
+                    "candidate_id": cand_id,
+                    "batch_id": next_candidate.get("batch_id") or "",
+                    "task_id": None,
+                    "status": "critic_denied",
+                    "rationale": str(verdict.get("rationale") or ""),
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            )
             state.save(self.session_dir)
             log.info(
-                "FRAMEWORK_PR: critic rejected candidate=%s batch=%s "
-                "rationale=%r",
-                cand_id, next_candidate.get("batch_id") or "",
+                "FRAMEWORK_PR: critic rejected candidate=%s batch=%s rationale=%r",
+                cand_id,
+                next_candidate.get("batch_id") or "",
                 str(verdict.get("rationale") or "")[:200],
             )
             return
@@ -1948,7 +1982,8 @@ class Coordinator:
         return False
 
     async def _enqueue_framework_pr_authoring_specialist(
-        self, candidate: dict[str, Any],
+        self,
+        candidate: dict[str, Any],
     ) -> None:
         """Dispatch a write-capable specialist seeded with ``candidate`` (Inv-5.1: flows through autosubmit → Critic → integrate_patch → bench → KEEP/REVERT).
 
@@ -1958,54 +1993,40 @@ class Coordinator:
                 authoring task and provenance markers.
         """
         state = self.shared_state
-        cand_id = str(
-            candidate.get("candidate_id")
-            or candidate.get("pr_url")
-            or candidate.get("ref")
-            or ""
-        )
+        cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
         batch_id = str(candidate.get("batch_id") or "")
-        gap_cid = (
-            str(candidate.get("gap_canonical_id") or "").strip()
-            or f"gap.framework_pr.{cand_id}"
-        )
+        gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework_pr.{cand_id}"
         title = str(candidate.get("title") or "").strip()
         pr_url = str(candidate.get("pr_url") or "").strip()
         diff_url = str(candidate.get("diff_url") or "").strip()
-        notes = "\n".join([
-            "FRAMEWORK_PR AUTHORING TASK.",
-            "",
-            "A candidate upstream PR was discovered as a lead for this gap.",
-            "Study it as INSPIRATION, then author your OWN source patch into",
-            "your worktree. You are NOT limited to copying the PR's diff — go",
-            "beyond it where the live source + profile evidence justify a",
-            "stronger or more targeted change. If, after reading the source,",
-            "the upstream change is already optimal, you may reproduce its",
-            "essential edit, but prefer a patch tailored to this model /",
-            "hardware / workload.",
-            "",
-            f"- PR title: {title or '(none)'}",
-            f"- PR url: {pr_url or '(none)'}",
-            f"- Unified diff: {diff_url or '(none)'}"
-            " (fetch with WebFetch to read the upstream change)",
-            "",
-            "Deliverable: a unified-diff patch file in your worktree, listed in",
-            "``patches_written``. The Coordinator applies + benches it and",
-            "decides KEEP/REVERT; you do not benchmark.",
-        ])
+        notes = "\n".join(
+            [
+                "FRAMEWORK_PR AUTHORING TASK.",
+                "",
+                "A candidate upstream PR was discovered as a lead for this gap.",
+                "Study it as INSPIRATION, then author your OWN source patch into",
+                "your worktree. You are NOT limited to copying the PR's diff — go",
+                "beyond it where the live source + profile evidence justify a",
+                "stronger or more targeted change. If, after reading the source,",
+                "the upstream change is already optimal, you may reproduce its",
+                "essential edit, but prefer a patch tailored to this model /",
+                "hardware / workload.",
+                "",
+                f"- PR title: {title or '(none)'}",
+                f"- PR url: {pr_url or '(none)'}",
+                f"- Unified diff: {diff_url or '(none)'} (fetch with WebFetch to read the upstream change)",
+                "",
+                "Deliverable: a unified-diff patch file in your worktree, listed in",
+                "``patches_written``. The Coordinator applies + benches it and",
+                "decides KEEP/REVERT; you do not benchmark.",
+            ]
+        )
         params: dict[str, Any] = {
             "domain": "serving_specialist",
             "gap_canonical_id": gap_cid,
-            "gap_symptom": (
-                title
-                or f"Author a framework source patch inspired by "
-                f"{pr_url or cand_id}"
-            ),
+            "gap_symptom": (title or f"Author a framework source patch inspired by {pr_url or cand_id}"),
             "gap_layer": "framework",
-            "framework": str(
-                candidate.get("framework")
-                or getattr(state, "framework", "") or ""
-            ).strip().lower(),
+            "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
             # Provenance markers so the dispatcher-side bridge recognises an authored FRAMEWORK_PR patch.
             "framework_pr_authoring": True,
             "framework_pr_candidate_id": cand_id,
@@ -2028,16 +2049,23 @@ class Coordinator:
             idempotency_key=idem,
             requires_lanes=["research_lane"],
             allowed_tools=[
-                "Read", "Grep", "Glob", "Write", "Edit", "Bash",
-                "WebSearch", "WebFetch",
+                "Read",
+                "Grep",
+                "Glob",
+                "Write",
+                "Edit",
+                "Bash",
+                "WebSearch",
+                "WebFetch",
             ],
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=3600,
         )
         log.info(
-            "FRAMEWORK_PR: dispatched authoring specialist candidate=%s "
-            "batch=%s gap=%s",
-            cand_id, batch_id, gap_cid,
+            "FRAMEWORK_PR: dispatched authoring specialist candidate=%s batch=%s gap=%s",
+            cand_id,
+            batch_id,
+            gap_cid,
         )
 
     def _select_next_framework_pr_candidate(self) -> dict[str, Any] | None:
@@ -2065,12 +2093,7 @@ class Coordinator:
         for cand in candidates:
             if not isinstance(cand, dict):
                 continue
-            cand_id = str(
-                cand.get("candidate_id")
-                or cand.get("pr_url")
-                or cand.get("ref")
-                or ""
-            )
+            cand_id = str(cand.get("candidate_id") or cand.get("pr_url") or cand.get("ref") or "")
             if cand_id and cand_id not in processed:
                 return cand
         return None
@@ -2097,7 +2120,7 @@ class Coordinator:
                     cand.get("candidate_id")
                     or cand.get("pr_url")
                     or cand.get("ref")
-                    or f"{cand.get('repo','')}-{cand.get('pr_number','')}"
+                    or f"{cand.get('repo', '')}-{cand.get('pr_number', '')}"
                 )
                 if cid:
                     ids.add(cid)
@@ -2149,6 +2172,7 @@ class Coordinator:
         # Cross-repo: the pr_intel_specialist repo set (owner/name -> URL).
         try:
             from .specialist_domains import get_domain
+
             domain = get_domain("pr_intel_specialist")
             for repo in getattr(domain, "pr_repos", ()) or ():
                 repo = str(repo or "").strip()
@@ -2167,7 +2191,10 @@ class Coordinator:
         return urls
 
     def _record_framework_pr_phase_done(
-        self, *, reason: str, failure_count: int,
+        self,
+        *,
+        reason: str,
+        failure_count: int,
     ) -> None:
         """Append a framework_pr_phase_done row to phase_history describing why the pump gave up.
 
@@ -2181,14 +2208,17 @@ class Coordinator:
             if not isinstance(history, list):
                 return
             from . import framework_agent_client as _fa_client
-            history.append({
-                "event":              "framework_pr_phase_done",
-                "reason":             reason,
-                "failure_count":      int(failure_count),
-                "retry_limit":        int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT),
-                "batches_discovered": len(getattr(state, "framework_pr_batches", None) or []),
-                "ts":                 datetime.now(timezone.utc).isoformat(),
-            })
+
+            history.append(
+                {
+                    "event": "framework_pr_phase_done",
+                    "reason": reason,
+                    "failure_count": int(failure_count),
+                    "retry_limit": int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT),
+                    "batches_discovered": len(getattr(state, "framework_pr_batches", None) or []),
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            )
         except Exception:  # noqa: BLE001 — defensive
             pass
 
@@ -2214,13 +2244,16 @@ class Coordinator:
         directed_gap = ""
         try:
             from .action_executors._framework_gap_composer import compose_gap
+
             directed_gap, directed_keywords = compose_gap(
                 framework=framework,
                 gpu_type=str(getattr(state, "gpu_type", "") or ""),
                 model_class=str(getattr(state, "model_class", "") or ""),
                 precision=str(getattr(state, "precision", "") or ""),
                 profile_kernel_breakdown_path=getattr(
-                    state, "last_profile_kernel_breakdown", None,
+                    state,
+                    "last_profile_kernel_breakdown",
+                    None,
                 ),
                 tried_refs=self._framework_pr_tried_refs(),
             )
@@ -2232,31 +2265,33 @@ class Coordinator:
             for g in gap_list:
                 if not isinstance(g, dict):
                     continue
-                gaps.append({
-                    "gap_canonical_id": str(g.get("canonical_id") or ""),
-                    "gap_description":  str(
-                        g.get("symptom") or g.get("description") or ""
-                    ),
-                })
+                gaps.append(
+                    {
+                        "gap_canonical_id": str(g.get("canonical_id") or ""),
+                        "gap_description": str(g.get("symptom") or g.get("description") or ""),
+                    }
+                )
         except Exception:  # noqa: BLE001 — defensive
             gaps = []
         if directed_gap:
             # Prepend the directed gap so fa's search leads with bottleneck-aware phrasing; de-dup.
             existing = {str(g.get("gap_description") or "") for g in gaps}
             if directed_gap not in existing:
-                gaps.insert(0, {
-                    "gap_canonical_id": "directed",
-                    "gap_description":  directed_gap,
-                })
+                gaps.insert(
+                    0,
+                    {
+                        "gap_canonical_id": "directed",
+                        "gap_description": directed_gap,
+                    },
+                )
         if not gaps:
             gaps = [{"gap_canonical_id": "", "gap_description": ""}]
         timeout_sec = float(
-            getattr(self, "framework_pr_discover_timeout_sec", 0.0)
-            or _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
+            getattr(self, "framework_pr_discover_timeout_sec", 0.0) or _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
         )
-        max_candidates = int(
-            getattr(state, "framework_pr_max_candidates", 0) or 0
-        ) or DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES
+        max_candidates = (
+            int(getattr(state, "framework_pr_max_candidates", 0) or 0) or DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES
+        )
         # Cross-repo: query every pr_intel_specialist repo so discovery isn't confined to one framework repo.
         repo_urls = self._framework_pr_discover_repo_urls(framework)
         payload: dict[str, Any] | None = None
@@ -2265,9 +2300,7 @@ class Coordinator:
         any_call_ok = False
         last_exc: Exception | None = None
         # Spread the phase timeout across repos so one slow repo can't blow the whole budget.
-        per_repo_timeout = (
-            timeout_sec / float(len(repo_urls)) if repo_urls else timeout_sec
-        )
+        per_repo_timeout = timeout_sec / float(len(repo_urls)) if repo_urls else timeout_sec
         per_repo_timeout = max(per_repo_timeout, 30.0)
         for repo_url in repo_urls:
             try:
@@ -2286,7 +2319,8 @@ class Coordinator:
                 last_exc = exc
                 log.warning(
                     "fa phase-discover failed for repo_url=%r: %r",
-                    repo_url, exc,
+                    repo_url,
+                    exc,
                 )
                 continue
             any_call_ok = True
@@ -2296,28 +2330,29 @@ class Coordinator:
                 batch_id = str((repo_payload or {}).get("batch_id") or "")
             repo_cands = (repo_payload or {}).get("candidates") or []
             if isinstance(repo_cands, list):
-                merged_candidates.extend(
-                    c for c in repo_cands if isinstance(c, dict)
-                )
+                merged_candidates.extend(c for c in repo_cands if isinstance(c, dict))
         if not any_call_ok:
             failures = int(getattr(state, "framework_pr_discover_failures", 0) or 0) + 1
             state.framework_pr_discover_failures = failures
             log.warning(
-                "fa phase-discover failed across all %d repo(s) "
-                "(attempt %d/%d): %r",
-                len(repo_urls), failures,
-                _fa_client.DISCOVER_FAILURE_RETRY_LIMIT, last_exc,
+                "fa phase-discover failed across all %d repo(s) (attempt %d/%d): %r",
+                len(repo_urls),
+                failures,
+                _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
+                last_exc,
             )
             try:
                 history = getattr(state, "phase_history", None)
                 if isinstance(history, list):
-                    history.append({
-                        "event":   "framework_pr_discover_failed",
-                        "attempt": failures,
-                        "limit":   _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
-                        "error":   repr(last_exc),
-                        "ts":      datetime.now(timezone.utc).isoformat(),
-                    })
+                    history.append(
+                        {
+                            "event": "framework_pr_discover_failed",
+                            "attempt": failures,
+                            "limit": _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
+                            "error": repr(last_exc),
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
             except Exception:  # noqa: BLE001 — defensive
                 pass
             state.save(self.session_dir)
@@ -2337,24 +2372,20 @@ class Coordinator:
         for c in merged_candidates:
             if not isinstance(c, dict):
                 continue
-            cand_id = str(
-                c.get("pr_url") or c.get("ref")
-                or f"{c.get('repo','')}-{c.get('pr_number','')}"
-            )
+            cand_id = str(c.get("pr_url") or c.get("ref") or f"{c.get('repo', '')}-{c.get('pr_number', '')}")
             if cand_id and cand_id in seen_ids:
                 continue
             seen_ids.add(cand_id)
             # Stamp the candidate's repo URL so the executor knows same-repo (fetchable) vs foreign (diff_url).
-            discovered_repo_url = str(
-                c.get("repo_url") or c.get("discovered_repo_url")
-                or primary_repo_url
+            discovered_repo_url = str(c.get("repo_url") or c.get("discovered_repo_url") or primary_repo_url)
+            norm.append(
+                {
+                    **c,
+                    "candidate_id": cand_id,
+                    "batch_id": batch_id,
+                    "discovered_repo_url": discovered_repo_url,
+                }
             )
-            norm.append({
-                **c,
-                "candidate_id": cand_id,
-                "batch_id": batch_id,
-                "discovered_repo_url": discovered_repo_url,
-            })
         if not norm:
             return False
         batch_entry = {
@@ -2370,7 +2401,8 @@ class Coordinator:
         state.save(self.session_dir)
         log.info(
             "FRAMEWORK_PR: discovered batch=%s with %d candidates",
-            batch_id or "<unset>", len(norm),
+            batch_id or "<unset>",
+            len(norm),
         )
         return True
 
@@ -2392,13 +2424,10 @@ class Coordinator:
             "candidate": candidate,
             "batch_id": candidate.get("batch_id") or "",
             "base_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
-            "framework": str(
-                candidate.get("framework")
-                or getattr(state, "framework", "") or ""
-            ).strip().lower(),
+            "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
         }
         cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or "")
-        idem = f"framework_pr:{candidate.get('batch_id','')}:{cand_id}"
+        idem = f"framework_pr:{candidate.get('batch_id', '')}:{cand_id}"
         try:
             await self.tasks.create_or_return_existing(
                 kind="framework_pr",
@@ -2412,26 +2441,30 @@ class Coordinator:
             )
             log.info(
                 "FRAMEWORK_PR: enqueued candidate=%s batch=%s",
-                cand_id, candidate.get("batch_id") or "",
+                cand_id,
+                candidate.get("batch_id") or "",
             )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.warning(
                 "FRAMEWORK_PR: failed to enqueue candidate=%s: %r",
-                cand_id, exc,
+                cand_id,
+                exc,
             )
             # Record enqueue_failed progress row so the candidate is skipped next tick (else the loop spins).
             progress = getattr(state, "framework_pr_phase_progress", None)
             if not isinstance(progress, list):
                 progress = []
                 state.framework_pr_phase_progress = progress
-            progress.append({
-                "candidate_id": cand_id,
-                "batch_id":     candidate.get("batch_id") or "",
-                "task_id":      None,
-                "status":       "enqueue_failed",
-                "error":        repr(exc),
-                "ts":           datetime.now(timezone.utc).isoformat(),
-            })
+            progress.append(
+                {
+                    "candidate_id": cand_id,
+                    "batch_id": candidate.get("batch_id") or "",
+                    "task_id": None,
+                    "status": "enqueue_failed",
+                    "error": repr(exc),
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            )
             state.save(self.session_dir)
 
     _CRITIC_PRIORS_DECISION_TAIL: int = 5
@@ -2449,14 +2482,16 @@ class Coordinator:
         decisions: list[dict[str, Any]] = []
         try:
             raw_decisions = getattr(state, "framework_pr_critic_decisions", None) or []
-            for row in raw_decisions[-self._CRITIC_PRIORS_DECISION_TAIL:]:
+            for row in raw_decisions[-self._CRITIC_PRIORS_DECISION_TAIL :]:
                 if not isinstance(row, dict):
                     continue
-                decisions.append({
-                    "candidate_id": str(row.get("candidate_id") or ""),
-                    "verdict":      str(row.get("verdict") or ""),
-                    "rationale":    str(row.get("rationale") or "")[:200],
-                })
+                decisions.append(
+                    {
+                        "candidate_id": str(row.get("candidate_id") or ""),
+                        "verdict": str(row.get("verdict") or ""),
+                        "rationale": str(row.get("rationale") or "")[:200],
+                    }
+                )
         except Exception:  # noqa: BLE001
             decisions = []
         outcomes: list[dict[str, Any]] = []
@@ -2464,21 +2499,24 @@ class Coordinator:
             raw_progress = getattr(state, "framework_pr_phase_progress", None) or []
             terminal = {"kept", "reverted", "no_patch", "enqueue_failed", "critic_denied"}
             tail = [r for r in raw_progress if isinstance(r, dict) and str(r.get("status") or "") in terminal]
-            for row in tail[-self._CRITIC_PRIORS_OUTCOME_TAIL:]:
-                outcomes.append({
-                    "candidate_id": str(row.get("candidate_id") or ""),
-                    "status":       str(row.get("status") or ""),
-                    "gain_pct":     row.get("gain_pct"),
-                })
+            for row in tail[-self._CRITIC_PRIORS_OUTCOME_TAIL :]:
+                outcomes.append(
+                    {
+                        "candidate_id": str(row.get("candidate_id") or ""),
+                        "status": str(row.get("status") or ""),
+                        "gain_pct": row.get("gain_pct"),
+                    }
+                )
         except Exception:  # noqa: BLE001
             outcomes = []
         return {
             "recent_decisions": decisions,
-            "recent_outcomes":  outcomes,
+            "recent_outcomes": outcomes,
         }
 
     async def _critic_review_framework_pr_candidate(
-        self, candidate: dict[str, Any],
+        self,
+        candidate: dict[str, Any],
     ) -> dict[str, str]:
         """Ask the Critic backend whether to apply ``candidate``.
 
@@ -2495,9 +2533,7 @@ class Coordinator:
         """
         state = self.shared_state
         cand_id = str(
-            candidate.get("candidate_id")
-            or candidate.get("pr_url")
-            or "",
+            candidate.get("candidate_id") or candidate.get("pr_url") or "",
         )
         # Resume-safe cache lookup.
         cached = getattr(state, "framework_pr_critic_decisions", None)
@@ -2507,7 +2543,7 @@ class Coordinator:
                     continue
                 if str(row.get("candidate_id") or "") == cand_id and cand_id:
                     return {
-                        "verdict":   str(row.get("verdict") or "abstain"),
+                        "verdict": str(row.get("verdict") or "abstain"),
                         "rationale": str(row.get("rationale") or ""),
                     }
         critic_backend = self.backends.get("critic")
@@ -2519,28 +2555,25 @@ class Coordinator:
             f"framework_pr:{cand_id}".encode(),
         ).hexdigest()
         payload = {
-            "action":     "framework_pr",
-            "candidate":  {
-                "candidate_id":     cand_id,
-                "pr_url":           str(candidate.get("pr_url") or ""),
-                "diff_url":         str(candidate.get("diff_url") or ""),
-                "repo":             str(candidate.get("repo") or ""),
-                "ref":              str(candidate.get("ref") or ""),
-                "title":            str(candidate.get("title") or ""),
-                "framework":        str(candidate.get("framework") or ""),
+            "action": "framework_pr",
+            "candidate": {
+                "candidate_id": cand_id,
+                "pr_url": str(candidate.get("pr_url") or ""),
+                "diff_url": str(candidate.get("diff_url") or ""),
+                "repo": str(candidate.get("repo") or ""),
+                "ref": str(candidate.get("ref") or ""),
+                "title": str(candidate.get("title") or ""),
+                "framework": str(candidate.get("framework") or ""),
                 "gap_canonical_id": str(candidate.get("gap_canonical_id") or ""),
-                "rationale":        str(candidate.get("rationale") or ""),
+                "rationale": str(candidate.get("rationale") or ""),
             },
-            "batch_id":   candidate.get("batch_id") or "",
+            "batch_id": candidate.get("batch_id") or "",
             # Session-local priors (classified candidates + apply/bench outcomes); bounded to keep prompt compact.
-            "priors":     self._collect_framework_pr_priors(),
+            "priors": self._collect_framework_pr_priors(),
         }
-        prompt = (
-            f"seq=1 msg_id={msg_id} from=coordinator topic=proposal "
-            f"payload={json.dumps(payload, sort_keys=True)}"
-        )
+        prompt = f"seq=1 msg_id={msg_id} from=coordinator topic=proposal payload={json.dumps(payload, sort_keys=True)}"
         verdict_row: dict[str, str] = {
-            "verdict":   "abstain",
+            "verdict": "abstain",
             "rationale": "no verdict emitted",
         }
         try:
@@ -2553,10 +2586,11 @@ class Coordinator:
         except Exception as exc:  # noqa: BLE001 — defensive
             log.warning(
                 "FRAMEWORK_PR: critic call failed for candidate=%s: %r",
-                cand_id, exc,
+                cand_id,
+                exc,
             )
             verdict_row = {
-                "verdict":   "abstain",
+                "verdict": "abstain",
                 "rationale": f"critic call failed: {exc!r}",
             }
         else:
@@ -2579,11 +2613,9 @@ class Coordinator:
                 else:
                     mapped = "abstain"
                 verdict_row = {
-                    "verdict":   mapped,
+                    "verdict": mapped,
                     "rationale": str(
-                        ipayload.get("reasoning")
-                        or ipayload.get("rationale")
-                        or "",
+                        ipayload.get("reasoning") or ipayload.get("rationale") or "",
                     ),
                 }
                 break
@@ -2591,13 +2623,15 @@ class Coordinator:
         if not isinstance(decisions, list):
             decisions = []
             state.framework_pr_critic_decisions = decisions
-        decisions.append({
-            "candidate_id": cand_id,
-            "batch_id":     candidate.get("batch_id") or "",
-            "verdict":      verdict_row["verdict"],
-            "rationale":    verdict_row["rationale"],
-            "ts":           datetime.now(timezone.utc).isoformat(),
-        })
+        decisions.append(
+            {
+                "candidate_id": cand_id,
+                "batch_id": candidate.get("batch_id") or "",
+                "verdict": verdict_row["verdict"],
+                "rationale": verdict_row["rationale"],
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         state.save(self.session_dir)
         return verdict_row
 
@@ -2610,8 +2644,8 @@ class Coordinator:
         if not self._kernel_enabled():
             # Should not happen — --no-kernel routes EXPLORE → SWEEP.
             log.info(
-                "KERNEL entry hook fired with kernel_enabled=False "
-                "(from=%s)", from_phase or "<unknown>",
+                "KERNEL entry hook fired with kernel_enabled=False (from=%s)",
+                from_phase or "<unknown>",
             )
             return
         if not self._gemm_tuning_required_before_kernel_opt():
@@ -2645,19 +2679,21 @@ class Coordinator:
         self._promote_gemm_tuning_keep(result)
         self.shared_state.save(self.session_dir)
         status = str(result.get("status") or "unknown")
-        await self.bus.append_and_seq(Message.new(
-            "kernel",
-            "orchestration",
-            "response",
-            {
-                "in_reply_to": "",
-                "kind": "run_gemm_tuning_done",
-                "status": status,
-                "result": result,
-                "source": "kernel_entry_auto",
-            },
-            priority=1,
-        ))
+        await self.bus.append_and_seq(
+            Message.new(
+                "kernel",
+                "orchestration",
+                "response",
+                {
+                    "in_reply_to": "",
+                    "kind": "run_gemm_tuning_done",
+                    "status": status,
+                    "result": result,
+                    "source": "kernel_entry_auto",
+                },
+                priority=1,
+            )
+        )
         self._record_phase_entry_evidence(
             gemm_tuning={
                 "status": "done" if status in {"ok", "complete", "succeeded"} else status,
@@ -2714,10 +2750,7 @@ class Coordinator:
             "gain_pct": (speedup - 1.0) * 100.0,
             "tput": tuned_tput,
             "workspace": result.get("workspace"),
-            "extra_envs": (
-                {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": tuned_file}
-                if tuned_file else {}
-            ),
+            "extra_envs": ({"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": tuned_file} if tuned_file else {}),
             "source": "kernel_entry_auto",
             "ts": ts,
         }
@@ -2742,9 +2775,7 @@ class Coordinator:
         # GEMM's tuned benchmark is end-to-end serving, so it's already a validated stack measurement.
         self.shared_state.cumulative_gain_validated = self.shared_state.cumulative_gain
         self.shared_state.cumulative_gain_validated_ts = ts
-        self.shared_state.cumulative_gain_validated_stack_len = len(
-            self.shared_state.optimization_stack or []
-        )
+        self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack or [])
 
     def _should_continue_kernel_after_gemm(self) -> bool:
         """Decide whether to run source-level kernel_opt right after GEMM tuning.
@@ -2785,25 +2816,27 @@ class Coordinator:
                 "error_class": exc.__class__.__name__,
                 "error": repr(exc),
             }
-        await self.bus.append_and_seq(Message.new(
-            "kernel",
-            "orchestration",
-            "response",
-            {
-                "in_reply_to": "",
-                "kind": "run_optimization_done",
-                "status": result.get("status", "ok") if isinstance(result, dict) else "failed",
-                "result": result,
-                "source": "kernel_entry_auto_after_gemm",
-            },
-            priority=1,
-        ))
+        await self.bus.append_and_seq(
+            Message.new(
+                "kernel",
+                "orchestration",
+                "response",
+                {
+                    "in_reply_to": "",
+                    "kind": "run_optimization_done",
+                    "status": result.get("status", "ok") if isinstance(result, dict) else "failed",
+                    "result": result,
+                    "source": "kernel_entry_auto_after_gemm",
+                },
+                priority=1,
+            )
+        )
         if isinstance(result, dict) and not result.get("batch_mode"):
             self.shared_state.record_kernel_opt(result)
         self.shared_state.save(self.session_dir)
 
     # Auto-roofline — PRELUDE bootstrap + 10% watermark refresh anchored on last_roofline_tput.
-    _ROOFLINE_WATERMARK_RATIO: float = 1.10   # 10% step over last roofline
+    _ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 
     def _current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).
@@ -2842,9 +2875,7 @@ class Coordinator:
             return False
         if last_rl <= 0:
             try:
-                failure_streak = int(
-                    getattr(state, "roofline_failure_streak", 0) or 0
-                )
+                failure_streak = int(getattr(state, "roofline_failure_streak", 0) or 0)
             except (TypeError, ValueError):
                 failure_streak = 0
             if failure_streak <= 0:
@@ -2861,7 +2892,9 @@ class Coordinator:
         return cur / last_rl >= _resolve_roofline_watermark_ratio()
 
     async def _maybe_enqueue_watermark_roofline(
-        self, *, reason: str,
+        self,
+        *,
+        reason: str,
     ) -> bool:
         """Enqueue a fresh roofline if the watermark crossed; idempotency-keyed via ``reason``, stamps auto_roofline_pending_task_id. Returns True when enqueued.
 
@@ -2877,14 +2910,16 @@ class Coordinator:
             task = await self._enqueue_internal_analysis_task(reason=reason)
         except Exception as exc:  # noqa: BLE001 — defensive
             log.exception(
-                "watermark-roofline (%s): failed to enqueue: %r", reason, exc,
+                "watermark-roofline (%s): failed to enqueue: %r",
+                reason,
+                exc,
             )
             return False
         self.shared_state.auto_roofline_pending_task_id = task.task_id
         log.info(
-            "watermark-roofline (%s): enqueued task=%s "
-            "(cur=%.2f, last_roofline=%.2f, ratio>=%.2f)",
-            reason, task.task_id,
+            "watermark-roofline (%s): enqueued task=%s (cur=%.2f, last_roofline=%.2f, ratio>=%.2f)",
+            reason,
+            task.task_id,
             self._current_tput_from_validated_gain(),
             float(self.shared_state.last_roofline_tput or 0.0),
             self._ROOFLINE_WATERMARK_RATIO,
@@ -2897,9 +2932,13 @@ class Coordinator:
         Returns:
             ``"roofline"`` when roofline is enabled, else ``"profile"``.
         """
-        return "roofline" if bool(
-            getattr(self.shared_state, "enable_roofline", True),
-        ) else "profile"
+        return (
+            "roofline"
+            if bool(
+                getattr(self.shared_state, "enable_roofline", True),
+            )
+            else "profile"
+        )
 
     def _registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
         """Resolve ``(requires_lanes, lease_ttl_sec)`` from the ActionRegistry; lanes filtered to KNOWN_LANES, returns ([], 0) for unknown actions.
@@ -2917,10 +2956,7 @@ class Coordinator:
         meta = reg.get(kind)
         if meta is None:
             return [], 0
-        lanes = [
-            lane for lane in (getattr(meta, "requires_lanes", ()) or ())
-            if lane in KNOWN_LANES
-        ]
+        lanes = [lane for lane in (getattr(meta, "requires_lanes", ()) or ()) if lane in KNOWN_LANES]
         return lanes, int(getattr(meta, "lease_ttl_sec", 0) or 0)
 
     def _warm_recipe_proven_items(self) -> list[dict[str, str]]:
@@ -2977,11 +3013,7 @@ class Coordinator:
         es_raw = getattr(state, "explore_search", None) or {}
         es = dict(es_raw) if isinstance(es_raw, dict) else {}
         rejected = list(es.get("rejected") or [])
-        existing_fps = {
-            str(r.get("fingerprint") or "")
-            for r in rejected
-            if isinstance(r, dict)
-        }
+        existing_fps = {str(r.get("fingerprint") or "") for r in rejected if isinstance(r, dict)}
         existing_fps.discard("")
         added = 0
         tier = str((warm or {}).get("tier") or "")
@@ -2989,9 +3021,7 @@ class Coordinator:
             if not isinstance(row, dict):
                 continue
             args = str(
-                row.get("extra_sglang_args")
-                or row.get("args")
-                or "",
+                row.get("extra_sglang_args") or row.get("args") or "",
             ).strip()
             envs = row.get("extra_envs") or row.get("envs") or {}
             if not isinstance(envs, dict):
@@ -3002,33 +3032,37 @@ class Coordinator:
             if fp in existing_fps:
                 continue
             existing_fps.add(fp)
-            rejected.append({
-                "name":              str(row.get("name") or "")[:120],
-                "fingerprint":       fp,
-                "reason":            "warm_recipe_what_failed",
-                "extra_sglang_args": args,
-                "extra_envs":        dict(envs),
-                "source":            "warm_start_recipe",
-                "source_tier":       tier,
-                # Recipe-carried fields preserved for forensics; not used by the dedup gate.
-                "gain_pct":          row.get("gain_pct"),
-                "error_class":       row.get("error_class") or row.get("reason"),
-            })
+            rejected.append(
+                {
+                    "name": str(row.get("name") or "")[:120],
+                    "fingerprint": fp,
+                    "reason": "warm_recipe_what_failed",
+                    "extra_sglang_args": args,
+                    "extra_envs": dict(envs),
+                    "source": "warm_start_recipe",
+                    "source_tier": tier,
+                    # Recipe-carried fields preserved for forensics; not used by the dedup gate.
+                    "gain_pct": row.get("gain_pct"),
+                    "error_class": row.get("error_class") or row.get("reason"),
+                }
+            )
             added += 1
 
         if added:
             es["rejected"] = rejected
             state.explore_search = es
             log.info(
-                "warm-recipe history: injected %d what_failed rows into "
-                "explore_search.rejected (tier=%s)",
-                added, tier,
+                "warm-recipe history: injected %d what_failed rows into explore_search.rejected (tier=%s)",
+                added,
+                tier,
             )
         state.warm_history_injected = True
         return added
 
     async def _maybe_enqueue_warm_replay(
-        self, *, baseline_tput: float,
+        self,
+        *,
+        baseline_tput: float,
     ) -> "Task | None":
         """GAP 1 — enqueue a one-shot ``replay_warm_recipe`` task for a high-confidence T0 prior.
 
@@ -3186,9 +3220,12 @@ class Coordinator:
         )
         if not was_existing:
             log.info(
-                "PRELUDE: warm-replay enqueued task=%s (tier=%s conf=%.2f "
-                "expected_gain=%.2f baseline_tput=%.2f)",
-                task.task_id, tier, conf, expected_gain, baseline_tput,
+                "PRELUDE: warm-replay enqueued task=%s (tier=%s conf=%.2f expected_gain=%.2f baseline_tput=%.2f)",
+                task.task_id,
+                tier,
+                conf,
+                expected_gain,
+                baseline_tput,
             )
         state.warm_replay_attempted = True
         state.warm_replay_outcome = {
@@ -3203,7 +3240,10 @@ class Coordinator:
         return task
 
     def _promote_warm_replay(
-        self, result: dict, *, task: "Task | None" = None,
+        self,
+        result: dict,
+        *,
+        task: "Task | None" = None,
     ) -> None:
         """GAP 1 — interpret a ``replay_warm_recipe`` result: any measured uplift pushes warm config onto optimization_stack + current_best; failures set status and never propagate.
 
@@ -3231,7 +3271,8 @@ class Coordinator:
             state.save(self.session_dir)
             log.info(
                 "warm-replay failed (status=%s, error_class=%s)",
-                status, outcome.get("error_class"),
+                status,
+                outcome.get("error_class"),
             )
             return
         tput_raw = result.get("output_throughput")
@@ -3265,9 +3306,7 @@ class Coordinator:
             baseline_tput = float(state.baseline_tput or 0.0)
         if single_round_tput <= 0 or baseline_tput <= 0:
             outcome["status"] = "failed"
-            outcome["reason"] = (
-                f"invalid_tput tput={single_round_tput} baseline={baseline_tput}"
-            )
+            outcome["reason"] = f"invalid_tput tput={single_round_tput} baseline={baseline_tput}"
             state.warm_replay_outcome = outcome
             state.save(self.session_dir)
             return
@@ -3284,7 +3323,8 @@ class Coordinator:
             if measured_gain > 0 and measured_gain < historical_bar:
                 outcome["below_historical_reproduce_pct"] = True
                 outcome["historical_reproduce_bar_pct"] = round(
-                    historical_bar, 3,
+                    historical_bar,
+                    3,
                 )
         if reproduced:
             # R4-4 defense: an empty stack entry corrupts session_breakdown attribution; degrade gracefully when task=None.
@@ -3295,9 +3335,9 @@ class Coordinator:
                 outcome["status"] = "reproduced_but_no_params"
                 outcome["reason"] = "task.params missing extra_sglang_args/extra_envs"
                 log.warning(
-                    "warm-replay measured +%.2f%% but cannot push stack "
-                    "(task=%r has no warm args/envs)",
-                    measured_gain, task,
+                    "warm-replay measured +%.2f%% but cannot push stack (task=%r has no warm args/envs)",
+                    measured_gain,
+                    task,
                 )
                 state.warm_replay_outcome = outcome
                 state.save(self.session_dir)
@@ -3305,27 +3345,26 @@ class Coordinator:
             outcome["status"] = "reproduced"
             # Push warm best_config onto the stack (schema mirrors explore-KEEP); ts/workspace/gain_pct feed session_breakdown attribution.
             stack_entry = {
-                "action":            "replay_warm_recipe",
-                "name":              "warm_replay",
-                "variant_name":      "warm_replay",
+                "action": "replay_warm_recipe",
+                "name": "warm_replay",
+                "variant_name": "warm_replay",
                 # Canonical key matching EXPLORE-KEEP stack entries so downstream readers key on the same name.
                 "extra_server_args": warm_args,
-                "extra_envs":        warm_envs,
-                "tput":              float(single_round_tput),
-                "hot_tput":          float(hot_tput),
-                "gain_pct":          round(measured_gain, 3),
-                "workspace":         str(result.get("workspace") or ""),
-                "ts":                datetime.now(timezone.utc).isoformat(),
+                "extra_envs": warm_envs,
+                "tput": float(single_round_tput),
+                "hot_tput": float(hot_tput),
+                "gain_pct": round(measured_gain, 3),
+                "workspace": str(result.get("workspace") or ""),
+                "ts": datetime.now(timezone.utc).isoformat(),
                 # source_tier records the warm-recipe tier (exact/relative) for breakdown attribution.
-                "source_tier":       outcome.get("warm_recipe_tier", ""),
+                "source_tier": outcome.get("warm_recipe_tier", ""),
                 "source_confidence": outcome.get("warm_recipe_conf", 0.0),
             }
             # Resume safety: DO NOT clobber existing stack entries; recompute cumulative gain from baseline → current tput.
             state.optimization_stack = list(state.optimization_stack or [])
             # Idempotency guard: skip push if a prior promote run already pushed the warm_replay entry.
             already_pushed = any(
-                isinstance(e, dict) and e.get("action") == "replay_warm_recipe"
-                for e in state.optimization_stack
+                isinstance(e, dict) and e.get("action") == "replay_warm_recipe" for e in state.optimization_stack
             )
             if already_pushed:
                 log.info(
@@ -3344,9 +3383,7 @@ class Coordinator:
             total_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
             state.cumulative_gain = round(total_gain, 3)
             state.cumulative_gain_validated = round(total_gain, 3)
-            state.cumulative_gain_validated_stack_len = len(
-                state.optimization_stack
-            )
+            state.cumulative_gain_validated_stack_len = len(state.optimization_stack)
             state.current_best = {
                 "action": "warm_replay",
                 "name": "warm_replay",
@@ -3369,28 +3406,32 @@ class Coordinator:
             try:
                 journal = self._ensure_journal()
                 from .optimization_journal import KIND_OTHER, OUTCOME_KEEP
-                journal.append_entry(JournalEntry(
-                    phase=str(getattr(state, "phase", "PRELUDE")).upper() or "PRELUDE",
-                    iter=int(state.tick or 0),
-                    kind=KIND_OTHER,
-                    change=f"warm_replay({outcome.get('warm_recipe_tier', '?')}): {warm_args}",
-                    outcome=OUTCOME_KEEP,
-                    gain_pct=round(measured_gain, 3),
-                    throughput_after=tput,
-                    task_id=str(task.task_id if task is not None else ""),
-                    tick=int(state.tick or 0),
-                ))
+
+                journal.append_entry(
+                    JournalEntry(
+                        phase=str(getattr(state, "phase", "PRELUDE")).upper() or "PRELUDE",
+                        iter=int(state.tick or 0),
+                        kind=KIND_OTHER,
+                        change=f"warm_replay({outcome.get('warm_recipe_tier', '?')}): {warm_args}",
+                        outcome=OUTCOME_KEEP,
+                        gain_pct=round(measured_gain, 3),
+                        throughput_after=tput,
+                        task_id=str(task.task_id if task is not None else ""),
+                        tick=int(state.tick or 0),
+                    )
+                )
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("warm-replay journal append failed")
         else:
             outcome["status"] = "drift"
             outcome["reason"] = (
-                f"measured +{measured_gain:.2f}% below {min_reproduce * 100:.0f}%"
-                f" of expected +{expected_gain:.2f}%"
+                f"measured +{measured_gain:.2f}% below {min_reproduce * 100:.0f}% of expected +{expected_gain:.2f}%"
             )
             log.info(
                 "warm-replay DRIFT: measured=+%.2f%% < expected=+%.2f%% × %.0f%%",
-                measured_gain, expected_gain, min_reproduce * 100,
+                measured_gain,
+                expected_gain,
+                min_reproduce * 100,
             )
         state.warm_replay_outcome = outcome
         state.save(self.session_dir)
@@ -3428,14 +3469,15 @@ class Coordinator:
             )
             state.auto_roofline_pending_task_id = rl_task.task_id
             log.info(
-                "PRELUDE: baseline landed (tput=%.2f); auto-enqueued "
-                "initial %s task=%s",
-                float(baseline_tput), rl_task.kind, rl_task.task_id,
+                "PRELUDE: baseline landed (tput=%.2f); auto-enqueued initial %s task=%s",
+                float(baseline_tput),
+                rl_task.kind,
+                rl_task.task_id,
             )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.exception(
-                "PRELUDE: failed to enqueue initial analysis task "
-                "after baseline: %r", exc,
+                "PRELUDE: failed to enqueue initial analysis task after baseline: %r",
+                exc,
             )
 
     def _cycle_idem_suffix(self) -> str:
@@ -3481,6 +3523,7 @@ class Coordinator:
             # destabilize profiling and skew the baseline ceiling.
             try:
                 from .roofline_ceiling import read_baseline_server_args
+
                 bl_args = read_baseline_server_args(state).strip()
             except Exception:  # noqa: BLE001 — best-effort; empty falls through
                 bl_args = ""
@@ -3501,9 +3544,10 @@ class Coordinator:
         )
         if was_existing:
             log.info(
-                "internal-analysis task already exists (idempotent: "
-                "kind=%s task_id=%s, state=%s)",
-                kind, task.task_id, task.state,
+                "internal-analysis task already exists (idempotent: kind=%s task_id=%s, state=%s)",
+                kind,
+                task.task_id,
+                task.state,
             )
         return task
 
@@ -3538,6 +3582,7 @@ class Coordinator:
     async def _drain_pending_keep_integrates(self) -> None:
         """Bug #7: drain pending KEEP integrates inherited from KERNEL so sweep measures full current_best. Cap 10; failures → rejected_kernel_ids."""
         from .kernel_request_handlers import integrate_handler
+
         state = self.shared_state
         drained = 0
         max_drain = 10
@@ -3546,14 +3591,12 @@ class Coordinator:
             if not kid:
                 break
             log.info(
-                "SWEEP entry: draining pending KEEP integrate for "
-                "kernel_id=%s (drained %d so far)", kid, drained,
+                "SWEEP entry: draining pending KEEP integrate for kernel_id=%s (drained %d so far)",
+                kid,
+                drained,
             )
             try:
-                base = float(
-                    (state.current_best or {}).get("tput")
-                    or state.baseline_tput or 0.0
-                )
+                base = float((state.current_best or {}).get("tput") or state.baseline_tput or 0.0)
                 result = await integrate_handler(
                     {"kernel_id": kid, "base_tput": base},
                     session_dir=self.session_dir,
@@ -3565,8 +3608,9 @@ class Coordinator:
                 state.save(self.session_dir)
             except Exception as exc:  # noqa: BLE001 — never block SWEEP entry
                 log.exception(
-                    "SWEEP entry: integrate(%s) raised %r; marking "
-                    "rejected to prevent drain loop deadlock", kid, exc,
+                    "SWEEP entry: integrate(%s) raised %r; marking rejected to prevent drain loop deadlock",
+                    kid,
+                    exc,
                 )
                 if state.rejected_kernel_ids is None:
                     state.rejected_kernel_ids = []
@@ -3679,7 +3723,8 @@ class Coordinator:
             entry.pop("stack_validation_in_progress", None)
 
     def _stack_component_identities(
-        self, entries: list[dict[str, Any]],
+        self,
+        entries: list[dict[str, Any]],
     ) -> set[tuple[str, str, str]]:
         """Return (kernel_id, patch_path, target_file) tuples for stack members.
 
@@ -3727,7 +3772,8 @@ class Coordinator:
             entry["stack_validation_started_at"] = now
 
     def _clear_stack_validation_in_progress(
-        self, entries: list[dict[str, Any]],
+        self,
+        entries: list[dict[str, Any]],
     ) -> None:
         """Clear the in-flight stack guard for component integrate entries.
 
@@ -3776,7 +3822,8 @@ class Coordinator:
             self.shared_state.pending_stack_validation_apply_results or [],
         )
         in_progress = [
-            entry for entry in (self.shared_state.kernel_integrate_attempts or {}).values()
+            entry
+            for entry in (self.shared_state.kernel_integrate_attempts or {}).values()
             if isinstance(entry, dict) and entry.get("stack_validation_in_progress")
         ]
         if not partial_applies and not in_progress:
@@ -3790,8 +3837,7 @@ class Coordinator:
         self._clear_pending_stack_validation_checkpoints()
         self.shared_state.save(self.session_dir)
         log.warning(
-            "Recovered interrupted stack validation: reverted partial applies "
-            "and cleared in-progress guards",
+            "Recovered interrupted stack validation: reverted partial applies and cleared in-progress guards",
         )
         return True
 
@@ -3885,7 +3931,8 @@ class Coordinator:
         await self._finalize_stack_validation_outcome(stack, result)
 
     async def _run_kernel_stack_validation_e2e(
-        self, entries: list[dict[str, Any]],
+        self,
+        entries: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """Apply multiple kernel patches, run one E2E benchmark, then keep or revert the stack.
 
@@ -3930,9 +3977,7 @@ class Coordinator:
                 )
                 self.shared_state.save(self.session_dir)
                 if applied.get("status") != "ok":
-                    raise RuntimeError(
-                        f"stack patch apply failed for {entry.get('kernel_id')}: {applied}"
-                    )
+                    raise RuntimeError(f"stack patch apply failed for {entry.get('kernel_id')}: {applied}")
 
             workspace = runs_dir(self.session_dir, "integrate", f"integrate-stack-{stack_id}")
             workspace.mkdir(parents=True, exist_ok=True)
@@ -3944,10 +3989,7 @@ class Coordinator:
                     "config_path": self.shared_state.baseline_config_path,
                     "output_dir": str(workspace),
                     "timeout_sec": 20 * 60,
-                    "extra_server_args": (
-                        (self.shared_state.current_best or {}).get("extra_server_args")
-                        or ""
-                    ),
+                    "extra_server_args": ((self.shared_state.current_best or {}).get("extra_server_args") or ""),
                 },
                 idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
             )
@@ -3956,7 +3998,8 @@ class Coordinator:
             # baseline replica's constructor signature stays unchanged.
             bench_result = await BaselineExecutor(session_dir=self.session_dir)(
                 RunnerContext(
-                    task=fake_task, lease=None,
+                    task=fake_task,
+                    lease=None,
                     extra={"shared_state": self.shared_state},
                 )
             )
@@ -3975,24 +4018,11 @@ class Coordinator:
                 # negative-contribution stack past the 1% threshold.
                 current_best = self.shared_state.current_best or {}
                 current_best_tput = float(current_best.get("tput") or 0.0)
-                decision_base = (
-                    current_best_tput if current_best_tput > 0 else base_tput
-                )
+                decision_base = current_best_tput if current_best_tput > 0 else base_tput
                 new_tput = float(bench_result.get("output_throughput") or 0.0)
-                gain_pct = (
-                    (new_tput - base_tput) / base_tput * 100.0
-                    if base_tput > 0 else 0.0
-                )
-                incremental_gain_pct = (
-                    (new_tput - decision_base) / decision_base * 100.0
-                    if decision_base > 0 else 0.0
-                )
-                decision = (
-                    "KEEP"
-                    if incremental_gain_pct
-                    > KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
-                    else "REVERT"
-                )
+                gain_pct = (new_tput - base_tput) / base_tput * 100.0 if base_tput > 0 else 0.0
+                incremental_gain_pct = (new_tput - decision_base) / decision_base * 100.0 if decision_base > 0 else 0.0
+                decision = "KEEP" if incremental_gain_pct > KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT else "REVERT"
 
             result = {
                 "status": "ok",
@@ -4004,9 +4034,7 @@ class Coordinator:
                 "new_tput": new_tput,
                 "gain_pct": gain_pct,
                 "stack_incremental_gain_pct": incremental_gain_pct,
-                "stack_incremental_keep_threshold_pct": (
-                    KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
-                ),
+                "stack_incremental_keep_threshold_pct": (KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT),
                 "report_path": bench_result.get("report_path") if isinstance(bench_result, dict) else None,
                 "workspace": bench_result.get("workspace") if isinstance(bench_result, dict) else str(workspace),
                 "apply_result": {"status": "ok", "stack_apply_results": apply_results},
@@ -4019,19 +4047,13 @@ class Coordinator:
             if decision != "KEEP":
                 result["revert_result"] = {
                     "status": "ok",
-                    "stack_reverts": [
-                        _maybe_revert_kernel_patch(applied)
-                        for applied in reversed(apply_results)
-                    ],
+                    "stack_reverts": [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)],
                 }
             else:
                 result["revert_result"] = {"status": "skipped", "reason": "KEEP decision"}
             return result
         except Exception as exc:  # noqa: BLE001
-            reverts = [
-                _maybe_revert_kernel_patch(applied)
-                for applied in reversed(apply_results)
-            ]
+            reverts = [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)]
             return {
                 "status": "failed",
                 "decision": "REVERT",
@@ -4062,7 +4084,8 @@ class Coordinator:
             )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.exception(
-                "SWEEP entry hook: failed to enqueue auto-sweep: %r", exc,
+                "SWEEP entry hook: failed to enqueue auto-sweep: %r",
+                exc,
             )
             self._record_phase_entry_evidence(auto_sweep_error=repr(exc)[:240])
             return
@@ -4071,13 +4094,13 @@ class Coordinator:
         isl_osl = task.params.get("isl_osl_configs") or []
         conc_values = task.params.get("conc_values") or []
         # Combos = |conc_values| × |isl_osl_configs| (sweep fans out CONC × (ISL,OSL)).
-        combos = int(len(conc_values)) * int(len(isl_osl)) if (
-            conc_values and isl_osl
-        ) else 0
+        combos = int(len(conc_values)) * int(len(isl_osl)) if (conc_values and isl_osl) else 0
         log.info(
-            "SWEEP entry (from=%s): auto-enqueued sweep task=%s "
-            "(grid_source=%s, combos=%d)",
-            from_phase or "<unknown>", task.task_id, grid_source, combos,
+            "SWEEP entry (from=%s): auto-enqueued sweep task=%s (grid_source=%s, combos=%d)",
+            from_phase or "<unknown>",
+            task.task_id,
+            grid_source,
+            combos,
         )
         self._record_phase_entry_evidence(
             auto_sweep_enqueued=True,
@@ -4087,7 +4110,9 @@ class Coordinator:
         )
 
     async def _enqueue_internal_conc_sweep_task(
-        self, *, reason: str,
+        self,
+        *,
+        reason: str,
     ) -> Task | None:
         """Build + enqueue a Coordinator-internal ``conc_sweep`` task (caller checks conc_sweep_enabled). Idempotency key + PolicyGate singleton ensure ≤1 per SWEEP; returns None on error.
 
@@ -4104,7 +4129,7 @@ class Coordinator:
             "reason": str(reason),
             "concs": list(state.conc_sweep_concs or []),
             "variant_timeout_sec": int(state.conc_sweep_variant_timeout_sec or 0),
-            "total_budget_sec":    int(state.conc_sweep_total_budget_sec or 0),
+            "total_budget_sec": int(state.conc_sweep_total_budget_sec or 0),
         }
         try:
             task, was_existing = await self.tasks.create_or_return_existing(
@@ -4116,27 +4141,32 @@ class Coordinator:
             )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.exception(
-                "conc_sweep: failed to enqueue internal task: %r", exc,
+                "conc_sweep: failed to enqueue internal task: %r",
+                exc,
             )
             return None
         if was_existing:
             log.info(
-                "internal-conc_sweep task already exists (idempotent: "
-                "task_id=%s, state=%s)", task.task_id, task.state,
+                "internal-conc_sweep task already exists (idempotent: task_id=%s, state=%s)",
+                task.task_id,
+                task.state,
             )
         else:
             log.info(
-                "internal-conc_sweep task enqueued (task_id=%s reason=%s "
-                "concs=%s total_budget_sec=%s)",
-                task.task_id, reason,
-                params["concs"], params["total_budget_sec"],
+                "internal-conc_sweep task enqueued (task_id=%s reason=%s concs=%s total_budget_sec=%s)",
+                task.task_id,
+                reason,
+                params["concs"],
+                params["total_budget_sec"],
             )
         # Bug #11 fix: stamp evidence so PolicyGate's conc_sweep_phase_singleton denies later LLM conc_sweep.
         self._record_phase_entry_evidence(auto_conc_sweep_task_id=task.task_id)
         return task
 
     async def _enqueue_internal_sweep_task(
-        self, *, reason: str,
+        self,
+        *,
+        reason: str,
     ) -> Task:
         """Build + enqueue a Coordinator-internal ``sweep`` task. Grid priority: warm_start_recipe.sweep_grid then SKILL.md defaults. Idempotency key internal-sweep-<reason>.
 
@@ -4151,8 +4181,8 @@ class Coordinator:
         params: dict[str, Any] = {
             "source": grid_params["source"],
             "reason": str(reason),
-            "conc_values":      list(grid_params["conc_values"]),
-            "isl_osl_configs":  list(grid_params["isl_osl_configs"]),
+            "conc_values": list(grid_params["conc_values"]),
+            "isl_osl_configs": list(grid_params["isl_osl_configs"]),
             "num_prompts_factor": int(grid_params["num_prompts_factor"]),
         }
         if state.baseline_config_path:
@@ -4175,8 +4205,9 @@ class Coordinator:
         )
         if was_existing:
             log.info(
-                "internal-sweep task already exists (idempotent: "
-                "task_id=%s, state=%s)", task.task_id, task.state,
+                "internal-sweep task already exists (idempotent: task_id=%s, state=%s)",
+                task.task_id,
+                task.state,
             )
         return task
 
@@ -4246,10 +4277,7 @@ class Coordinator:
                 if isinstance(v, str) and ":" in v:
                     out.append(v)
                     continue
-                if (
-                    isinstance(v, (list, tuple)) and len(v) == 2
-                    and all(isinstance(x, (int, str)) for x in v)
-                ):
+                if isinstance(v, (list, tuple)) and len(v) == 2 and all(isinstance(x, (int, str)) for x in v):
                     out.append(f"{int(v[0])}:{int(v[1])}")
                     continue
                 return None
@@ -4279,14 +4307,13 @@ class Coordinator:
                 used_recipe = True
             if not used_recipe:
                 log.warning(
-                    "sweep recipe present but unusable (no recognisable "
-                    "fields); falling back to SKILL.md defaults"
+                    "sweep recipe present but unusable (no recognisable fields); falling back to SKILL.md defaults"
                 )
 
         return {
             "source": "cortex_recipe" if used_recipe else "skill_md_default",
-            "conc_values":        conc_values,
-            "isl_osl_configs":    isl_osl_configs,
+            "conc_values": conc_values,
+            "isl_osl_configs": isl_osl_configs,
             "num_prompts_factor": num_prompts_factor,
         }
 
@@ -4306,8 +4333,7 @@ class Coordinator:
         for row in reversed(history):
             if not isinstance(row, dict):
                 continue
-            if (row.get("to_phase") or "").strip().upper() != \
-                    _phase_state.PHASE_CLOSE:
+            if (row.get("to_phase") or "").strip().upper() != _phase_state.PHASE_CLOSE:
                 continue
             reason = (row.get("reason") or "").strip()
             if reason and _phase_state.is_valid_stop_reason(reason):
@@ -4322,8 +4348,7 @@ class Coordinator:
         Args:
             from_phase: The phase being left, used only for logging.
         """
-        log.info("CLOSE entered (from=%s); starting 5-step close sequence",
-                 from_phase or "<unknown>")
+        log.info("CLOSE entered (from=%s); starting 5-step close sequence", from_phase or "<unknown>")
         await self._record_close_step("sequencer_started", status="running")
 
         # stop_reason MUST persist BEFORE step 2's breakdown (collector derives it from state.json); fill only when blank, derive rather than hard-code time_exhausted.
@@ -4333,9 +4358,7 @@ class Coordinator:
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 — defensive
-                log.exception(
-                    "CLOSE: early stop_reason persist failed; step 5 will retry"
-                )
+                log.exception("CLOSE: early stop_reason persist failed; step 5 will retry")
 
         # CLOSE-entry auto-roofline (former N31) deleted in favour of EXPLORE/KERNEL-entry hooks.
 
@@ -4353,19 +4376,19 @@ class Coordinator:
             terminal_state = report_result.state
             if terminal_state in {"succeeded", None}:
                 await self._record_close_step(
-                    "report", status="done",
+                    "report",
+                    status="done",
                     task_id=report_task.task_id,
                 )
                 # #266: surface the final report location in the lifecycle
                 # log. report_executor writes final.{json,md} under
                 # reports_dir(session_dir); advertise whichever exist.
                 from ..session_paths import reports_dir as _reports_dir
+
                 _rd = _reports_dir(self.session_dir)
                 _artifacts = {
-                    "json_path": str(_rd / "final.json")
-                    if (_rd / "final.json").exists() else "",
-                    "md_path": str(_rd / "final.md")
-                    if (_rd / "final.md").exists() else "",
+                    "json_path": str(_rd / "final.json") if (_rd / "final.json").exists() else "",
+                    "md_path": str(_rd / "final.md") if (_rd / "final.md").exists() else "",
                 }
                 self._emit_lifecycle(
                     step="report",
@@ -4381,7 +4404,8 @@ class Coordinator:
                     detail=detail,
                 )
                 await self._record_close_step(
-                    "report", status="failed",
+                    "report",
+                    status="failed",
                     task_id=report_task.task_id,
                     detail=detail,
                 )
@@ -4393,7 +4417,9 @@ class Coordinator:
                 detail=repr(exc)[:240],
             )
             await self._record_close_step(
-                "report", status="failed", detail=repr(exc)[:240],
+                "report",
+                status="failed",
+                detail=repr(exc)[:240],
             )
 
         # Step 2: session_breakdown
@@ -4405,19 +4431,22 @@ class Coordinator:
             terminal_state = bd_result.state
             if terminal_state in {"succeeded", None}:
                 await self._record_close_step(
-                    "session_breakdown", status="done",
+                    "session_breakdown",
+                    status="done",
                     task_id=bd_task.task_id,
                 )
             else:
                 await self._record_close_step(
-                    "session_breakdown", status="failed",
+                    "session_breakdown",
+                    status="failed",
                     task_id=bd_task.task_id,
                     detail=f"task_state={terminal_state!r}",
                 )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.exception("CLOSE step 2 (session_breakdown) failed")
             await self._record_close_step(
-                "session_breakdown", status="failed",
+                "session_breakdown",
+                status="failed",
                 detail=repr(exc)[:240],
             )
 
@@ -4435,8 +4464,10 @@ class Coordinator:
                 flush_session,
                 record_session_breakdown,
             )
+
             flush_session(self.session_dir)
             from ..breakdown import patch_breakdown_langfuse
+
             patch_breakdown_langfuse(self.session_dir)
             # After the breakdown file is in its final (post-flush) form, attach
             # the complete JSON to the trace as a ``session_breakdown``
@@ -4445,7 +4476,9 @@ class Coordinator:
         except Exception as exc:  # noqa: BLE001 — defensive
             log.debug("CLOSE step 2.5 (langfuse flush) failed", exc_info=True)
             await self._record_close_step(
-                "langfuse_flush", status="failed", detail=repr(exc)[:240],
+                "langfuse_flush",
+                status="failed",
+                detail=repr(exc)[:240],
             )
 
         # ---------------- Step 2.6: artifact package -> /workspace -------
@@ -4459,23 +4492,29 @@ class Coordinator:
         # went in / what was missing.
         try:
             from ..breakdown import package_session_artifacts
+
             pkg_path = package_session_artifacts(
                 self.session_dir,
                 session_id=str(getattr(self.shared_state, "session_id", "") or ""),
             )
             if pkg_path is not None:
                 await self._record_close_step(
-                    "artifact_package", status="done", detail=str(pkg_path),
+                    "artifact_package",
+                    status="done",
+                    detail=str(pkg_path),
                 )
             else:
                 await self._record_close_step(
-                    "artifact_package", status="skipped",
+                    "artifact_package",
+                    status="skipped",
                     detail="no artifacts matched or dest unwritable",
                 )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.exception("CLOSE step 2.6 (artifact_package) failed")
             await self._record_close_step(
-                "artifact_package", status="failed", detail=repr(exc)[:240],
+                "artifact_package",
+                status="failed",
+                detail=repr(exc)[:240],
             )
 
         # ---------------- Step 4: fact finalize (Cortex commit) ----------
@@ -4490,7 +4529,9 @@ class Coordinator:
         except Exception as exc:  # noqa: BLE001 — defensive
             log.exception("CLOSE step 4 (fact_finalize) failed")
             await self._record_close_step(
-                "fact_finalize", status="failed", detail=repr(exc)[:240],
+                "fact_finalize",
+                status="failed",
+                detail=repr(exc)[:240],
             )
 
         # Step 3: (retired) NDJSON drain — no-op marker for close-step ledger consumers (v2 RecipeKB is local-only).
@@ -4506,14 +4547,15 @@ class Coordinator:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
             log.exception(
-                "CLOSE step 5 (close_sequence_done save) failed; cli.finally "
-                "will still write a safety-net breakdown"
+                "CLOSE step 5 (close_sequence_done save) failed; cli.finally will still write a safety-net breakdown"
             )
         await self._record_close_step("done", status="done")
         log.info("CLOSE 5-step sequencer complete")
 
     async def _enqueue_internal_report_task(
-        self, *, reason: str,
+        self,
+        *,
+        reason: str,
     ) -> Task:
         """Build + enqueue a Coordinator-internal ``report`` task (idempotency_key internal-report-<reason>).
 
@@ -4532,7 +4574,9 @@ class Coordinator:
                 log.info(
                     "internal-report task already enqueued by wall-clock "
                     "deadline path (task_id=%s, state=%s); sequencer will "
-                    "wait for it", task.task_id, task.state,
+                    "wait for it",
+                    task.task_id,
+                    task.state,
                 )
                 return task
             except Exception:  # noqa: BLE001 — TaskNotFound + friends
@@ -4540,9 +4584,9 @@ class Coordinator:
                 pass
 
         params: dict[str, Any] = {
-            "source":         "coordinator_internal",
-            "reason":         str(reason),
-            "session_dir":    str(self.session_dir),
+            "source": "coordinator_internal",
+            "reason": str(reason),
+            "session_dir": str(self.session_dir),
             "max_highlights": 50,
         }
         task, was_existing = await self.tasks.create_or_return_existing(
@@ -4560,18 +4604,20 @@ class Coordinator:
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001
-                log.exception(
-                    "internal-report: closing_report_task_id save failed"
-                )
+                log.exception("internal-report: closing_report_task_id save failed")
         if was_existing:
             log.info(
-                "internal-report task reused (idempotent: task_id=%s, "
-                "state=%s)", task.task_id, task.state,
+                "internal-report task reused (idempotent: task_id=%s, state=%s)",
+                task.task_id,
+                task.state,
             )
         return task
 
     async def _enqueue_internal_research_scout_task(
-        self, *, reason: str, round_id: int,
+        self,
+        *,
+        reason: str,
+        round_id: int,
     ) -> "Task | None":
         """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round, returns None on existing/failure (fail-soft).
 
@@ -4590,9 +4636,7 @@ class Coordinator:
         try:
             seen = sorted(self._framework_pr_known_candidate_ids())
         except Exception:  # noqa: BLE001 — defensive
-            seen = list(
-                getattr(self.shared_state, "research_scout_seen_pr_ids", []) or []
-            )
+            seen = list(getattr(self.shared_state, "research_scout_seen_pr_ids", []) or [])
         params: dict[str, Any] = {
             "domain": "research_scout_specialist",
             "gap_canonical_id": f"gap.research_scout.round{int(round_id)}",
@@ -4620,15 +4664,20 @@ class Coordinator:
                 idempotency_key=idempotency_key,
                 requires_lanes=["research_lane"],
                 allowed_tools=[
-                    "Read", "Grep", "Glob", "Write",
-                    "WebSearch", "WebFetch",
+                    "Read",
+                    "Grep",
+                    "Glob",
+                    "Write",
+                    "WebSearch",
+                    "WebFetch",
                 ],
                 side_effects=["writes_results"],
                 lease_ttl_sec=1800,
             )
         except Exception:  # noqa: BLE001 — TaskRegistry edge cases
             log.exception(
-                "research-scout: enqueue failed (round=%d)", int(round_id),
+                "research-scout: enqueue failed (round=%d)",
+                int(round_id),
             )
             return None
         if not was_existing:
@@ -4636,9 +4685,10 @@ class Coordinator:
             self.shared_state.research_scout_last_round = int(round_id)
             self.shared_state.save(self.session_dir)
             log.info(
-                "research-scout dispatched: task_id=%s round=%d reason=%s "
-                "runs=%d",
-                task.task_id, int(round_id), reason,
+                "research-scout dispatched: task_id=%s round=%d reason=%s runs=%d",
+                task.task_id,
+                int(round_id),
+                reason,
                 self.shared_state.research_scout_runs,
             )
         return task
@@ -4647,6 +4697,7 @@ class Coordinator:
         """Force-dispatch the PRELUDE research scout (not LLM-proposable); writes hints skeleton first."""
         try:
             from . import research_hints as _research_hints
+
             _research_hints.write_hints_skeleton(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: hints skeleton write failed")
@@ -4654,7 +4705,8 @@ class Coordinator:
             return
         try:
             await self._enqueue_internal_research_scout_task(
-                reason="prelude_initial", round_id=0,
+                reason="prelude_initial",
+                round_id=0,
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: PRELUDE dispatch failed")
@@ -4672,7 +4724,8 @@ class Coordinator:
             return
         try:
             await self._enqueue_internal_research_scout_task(
-                reason="explore_periodic", round_id=round_id,
+                reason="explore_periodic",
+                round_id=round_id,
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: EXPLORE re-dispatch failed")
@@ -4702,17 +4755,12 @@ class Coordinator:
             return None
         if not bool(getattr(state, "force_stalled_specialist_enabled", True)):
             return None
-        spec_thr = max(1, int(
-            getattr(state, "force_stalled_specialist_rounds", 0)
-            or FORCE_STALLED_SPECIALIST_ROUNDS
-        ))
-        keep_thr = max(1, int(
-            getattr(state, "force_stalled_keep_rounds", 0)
-            or FORCE_STALLED_KEEP_ROUNDS
-        ))
+        spec_thr = max(1, int(getattr(state, "force_stalled_specialist_rounds", 0) or FORCE_STALLED_SPECIALIST_ROUNDS))
+        keep_thr = max(1, int(getattr(state, "force_stalled_keep_rounds", 0) or FORCE_STALLED_KEEP_ROUNDS))
         try:
             stalled = state.stalled_domains(
-                specialist_threshold=spec_thr, keep_threshold=keep_thr,
+                specialist_threshold=spec_thr,
+                keep_threshold=keep_thr,
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("stalled-domain force: stalled_domains() failed")
@@ -4744,10 +4792,7 @@ class Coordinator:
                 payload={
                     "action_name": "specialist",
                     "params": params,
-                    "idempotency_key": (
-                        f"forced-stalled-{anchor}-round{round_id}"
-                        f"{self._cycle_idem_suffix()}"
-                    ),
+                    "idempotency_key": (f"forced-stalled-{anchor}-round{round_id}{self._cycle_idem_suffix()}"),
                 },
             )
             # Zero the counter up-front so a slow enqueue can't re-fire next
@@ -4756,14 +4801,17 @@ class Coordinator:
                 state.note_specialist_dispatched(anchor)
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
-                    "stalled-domain force: counter reset failed for %s", anchor,
+                    "stalled-domain force: counter reset failed for %s",
+                    anchor,
                 )
             try:
                 await self._handle_intent("orchestration", intent)
             except Exception:  # noqa: BLE001 — defensive, never crash the tick
                 log.exception(
-                    "stalled-domain force: dispatch failed for anchor=%s "
-                    "domain=%s gap=%s", anchor, dom.key, gap_cid,
+                    "stalled-domain force: dispatch failed for anchor=%s domain=%s gap=%s",
+                    anchor,
+                    dom.key,
+                    gap_cid,
                 )
                 continue
             try:
@@ -4771,9 +4819,13 @@ class Coordinator:
             except Exception:  # noqa: BLE001
                 log.exception("stalled-domain force: state save failed")
             log.info(
-                "stalled-domain force: dispatched domain=%s anchor=%s gap=%s "
-                "round=%d (spec_thr=%d keep_thr=%d)",
-                dom.key, anchor, gap_cid, round_id, spec_thr, keep_thr,
+                "stalled-domain force: dispatched domain=%s anchor=%s gap=%s round=%d (spec_thr=%d keep_thr=%d)",
+                dom.key,
+                anchor,
+                gap_cid,
+                round_id,
+                spec_thr,
+                keep_thr,
             )
             # One forced dispatch per tick keeps the scheduler calm.
             return None
@@ -4789,7 +4841,8 @@ class Coordinator:
         the standard specialist → explore pipeline. Fail-soft.
         """
         if os.getenv(
-            "INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW", "1",
+            "INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW",
+            "1",
         ).strip().lower() not in ("1", "true", "on", "yes"):
             return
         state = self.shared_state
@@ -4802,13 +4855,16 @@ class Coordinator:
         cycle = int(getattr(state, "macro_cycle", 0) or 0)
         try:
             from . import trajectory_reviewer as _trajectory_reviewer
+
             digest = _trajectory_reviewer.build_trajectory_digest(
-                self.session_dir, state,
+                self.session_dir,
+                state,
             )
         except Exception:  # noqa: BLE001 — defensive
             digest = ""
         direction, _pct = self._dominant_roofline_direction()
         from .roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
+
         hint = BOTTLENECK_DOMAIN_HINTS.get(direction)
         domain = hint[0] if hint else "serving_specialist"
         params: dict[str, Any] = {
@@ -4844,7 +4900,9 @@ class Coordinator:
         if not was_existing:
             log.info(
                 "trajectory-review dispatched: task_id=%s cycle=%d domain=%s",
-                task.task_id, cycle, domain,
+                task.task_id,
+                cycle,
+                domain,
             )
 
     def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
@@ -4862,18 +4920,21 @@ class Coordinator:
         hints = block.get("hints") or []
         try:
             added, dropped = _research_hints.append_hints(
-                self.session_dir, hints,
+                self.session_dir,
+                hints,
             )
             if dropped:
                 log.info(
-                    "research-scout: dropped %d sourceless hint(s)", dropped,
+                    "research-scout: dropped %d sourceless hint(s)",
+                    dropped,
                 )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: append_hints failed")
             added = 0
         try:
             _research_hints.write_competitor_target(
-                self.session_dir, block.get("competitor_target"),
+                self.session_dir,
+                block.get("competitor_target"),
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: competitor_target write failed")
@@ -4894,7 +4955,8 @@ class Coordinator:
             log.exception("research-scout: gap seeding failed")
         log.info(
             "research-scout harvested: hints_added=%d seen_pr_ids=%d",
-            added, len(self.shared_state.research_scout_seen_pr_ids or []),
+            added,
+            len(self.shared_state.research_scout_seen_pr_ids or []),
         )
 
     def _seed_gaps_from_research_hints(self) -> None:
@@ -4909,22 +4971,27 @@ class Coordinator:
             tags = hint.get("domain_tags") or []
             cid = f"gap.research_hint.{idx}"
             try:
-                self.shared_state.upsert_gap({
-                    "canonical_id": cid,
-                    "symptom": what,
-                    "layer": "research_hint",
-                    "severity": "medium",
-                    "domain_hint": str(tags[0]) if tags else "",
-                    "source": "research_scout",
-                    "provenance": str(hint.get("source") or ""),
-                })
+                self.shared_state.upsert_gap(
+                    {
+                        "canonical_id": cid,
+                        "symptom": what,
+                        "layer": "research_hint",
+                        "severity": "medium",
+                        "domain_hint": str(tags[0]) if tags else "",
+                        "source": "research_scout",
+                        "provenance": str(hint.get("source") or ""),
+                    }
+                )
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
-                    "research-scout: upsert_gap failed for %s", cid,
+                    "research-scout: upsert_gap failed for %s",
+                    cid,
                 )
 
     async def _enqueue_internal_session_breakdown_task(
-        self, *, reason: str,
+        self,
+        *,
+        reason: str,
     ) -> Task:
         """Build + enqueue a Coordinator-internal ``session_breakdown`` task; same idempotency contract as the report helper.
 
@@ -4936,8 +5003,8 @@ class Coordinator:
             :class:`Task`.
         """
         params: dict[str, Any] = {
-            "source":      "coordinator_internal",
-            "reason":      str(reason),
+            "source": "coordinator_internal",
+            "reason": str(reason),
             "session_dir": str(self.session_dir),
         }
         task, was_existing = await self.tasks.create_or_return_existing(
@@ -4951,13 +5018,17 @@ class Coordinator:
         )
         if was_existing:
             log.info(
-                "internal-session_breakdown task reused (idempotent: "
-                "task_id=%s, state=%s)", task.task_id, task.state,
+                "internal-session_breakdown task reused (idempotent: task_id=%s, state=%s)",
+                task.task_id,
+                task.state,
             )
         return task
 
     async def _wait_for_task_terminal(
-        self, task_id: str, *, timeout_sec: float,
+        self,
+        task_id: str,
+        *,
+        timeout_sec: float,
     ) -> str | None:
         """Poll the TaskRegistry until ``task_id`` reaches a terminal
         state, with a wall-clock timeout.
@@ -5026,9 +5097,9 @@ class Coordinator:
             steps = []
             evidence["close_steps"] = steps
         entry: dict[str, Any] = {
-            "step":   step,
+            "step": step,
             "status": status,
-            "ts":     datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(timezone.utc).isoformat(),
         }
         if task_id:
             entry["task_id"] = task_id
@@ -5039,7 +5110,9 @@ class Coordinator:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
             log.exception(
-                "close_step save failed for step=%r status=%r", step, status,
+                "close_step save failed for step=%r status=%r",
+                step,
+                status,
             )
 
     # Bounded test interface
@@ -5102,9 +5175,7 @@ class Coordinator:
                 agent=agent,
                 exc_type=type(exc).__name__,
                 message=str(exc),
-                traceback_text="".join(
-                    traceback.format_exception(type(exc), exc, exc.__traceback__)
-                ),
+                traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
             )
             self.shared_state.increment_crash_count()
             self.shared_state.save(self.session_dir)
@@ -5152,10 +5223,7 @@ class Coordinator:
         # Unbounded runs (max_minutes falsy) are capped at the container lifetime
         # so a long run always has a final wall-clock safety net; bounded runs
         # keep their explicit deadline unchanged.
-        effective_minutes = (
-            max_minutes if max_minutes
-            else _phase_state.DEFAULT_LONGRUN_MAX_MINUTES
-        )
+        effective_minutes = max_minutes if max_minutes else _phase_state.DEFAULT_LONGRUN_MAX_MINUTES
         deadline = time.monotonic() + effective_minutes * 60.0
         self._run_started_monotonic = time.monotonic()
         self._run_deadline = deadline
@@ -5210,9 +5278,7 @@ class Coordinator:
                                     tick=tick_n,
                                 )
                             except Exception:  # noqa: BLE001
-                                log.exception(
-                                    "Coordinator.run: orchestration checkpoint raised"
-                                )
+                                log.exception("Coordinator.run: orchestration checkpoint raised")
                     if not self._stop.is_set():
                         await self._pump_dispatcher_once()
                     # FRAMEWORK_PR phase pump: see ``tick()`` for rationale.
@@ -5254,11 +5320,7 @@ class Coordinator:
                 if objective.reached(self.shared_state):
                     stop_reason = "target_reached"
                     break
-                if (
-                    deadline is not None
-                    and time.monotonic() >= deadline
-                    and not in_closing
-                ):
+                if deadline is not None and time.monotonic() >= deadline and not in_closing:
                     if grace_sec <= 0:
                         stop_reason = "time_exhausted"
                         break
@@ -5268,23 +5330,22 @@ class Coordinator:
                     continue
                 if in_closing:
                     report_terminal = await self._closing_report_terminal()
-                    grace_blown = (
-                        closing_deadline is not None
-                        and time.monotonic() >= closing_deadline
-                    )
+                    grace_blown = closing_deadline is not None and time.monotonic() >= closing_deadline
                     if report_terminal or grace_blown:
                         if grace_blown and not report_terminal:
                             log.warning(
-                                "Coordinator: closing-grace exhausted (%.0fs) "
-                                "before report task %s finished",
+                                "Coordinator: closing-grace exhausted (%.0fs) before report task %s finished",
                                 grace_sec,
                                 self.shared_state.closing_report_task_id,
                             )
                         stop_reason = "time_exhausted"
                         break
-                if self.shared_state.recent_crash_count(
-                    window_sec=_CRASH_EMERGENCY_WINDOW_SEC,
-                ) >= crash_emergency_threshold:
+                if (
+                    self.shared_state.recent_crash_count(
+                        window_sec=_CRASH_EMERGENCY_WINDOW_SEC,
+                    )
+                    >= crash_emergency_threshold
+                ):
                     stop_reason = "emergency"
                     break
                 if max_ticks is not None and tick_n >= max_ticks:
@@ -5301,9 +5362,7 @@ class Coordinator:
                 # Brief wait between ticks to avoid CPU spin while staying signal-responsive; 0.0 keeps tests fast.
                 if tick_interval_sec > 0:
                     try:
-                        await asyncio.wait_for(
-                            self._stop.wait(), timeout=tick_interval_sec
-                        )
+                        await asyncio.wait_for(self._stop.wait(), timeout=tick_interval_sec)
                         stop_reason = "signal"
                         break
                     except asyncio.TimeoutError:
@@ -5319,9 +5378,9 @@ class Coordinator:
             )
             self.shared_state.save(self.session_dir)
             log.info(
-                "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
-                "cumulative_gain=%.2f%% max_minutes=%.0f",
-                tick_n, stop_reason or "unknown",
+                "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f cumulative_gain=%.2f%% max_minutes=%.0f",
+                tick_n,
+                stop_reason or "unknown",
                 self.shared_state.baseline_tput,
                 self.shared_state.cumulative_gain,
                 max_minutes_value,
@@ -5353,8 +5412,7 @@ class Coordinator:
         self.shared_state.save(self.session_dir)
 
         log.info(
-            "Coordinator: entering closing phase (grace=%.0fs); "
-            "enqueueing deterministic report task",
+            "Coordinator: entering closing phase (grace=%.0fs); enqueueing deterministic report task",
             grace_sec,
         )
 
@@ -5372,9 +5430,7 @@ class Coordinator:
                 "closing_phase: cancel of queued tasks failed (non-fatal)",
             )
 
-        idempotency_key = (
-            f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
-        )
+        idempotency_key = f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
         task, _existing = await self.tasks.create_or_return_existing(
             kind="report",
             params={
@@ -5390,15 +5446,19 @@ class Coordinator:
         self.shared_state.closing_report_task_id = task.task_id
         self.shared_state.save(self.session_dir)
 
-        await self.bus.append_and_seq(Message.new(
-            "coordinator", "*", "event",
-            {
-                "kind": "closing_phase_entered",
-                "task_id": task.task_id,
-                "grace_sec": float(grace_sec),
-                "closing_started_unix": closing_started,
-            },
-        ))
+        await self.bus.append_and_seq(
+            Message.new(
+                "coordinator",
+                "*",
+                "event",
+                {
+                    "kind": "closing_phase_entered",
+                    "task_id": task.task_id,
+                    "grace_sec": float(grace_sec),
+                    "closing_started_unix": closing_started,
+                },
+            )
+        )
         return closing_deadline
 
     async def _closing_report_terminal(self) -> bool:
@@ -5418,7 +5478,10 @@ class Coordinator:
         except TaskNotFound:
             return True
         return task.state in {
-            "succeeded", "failed", "cancelled", "needs_manual_review",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "needs_manual_review",
         }
 
     # Reactor
@@ -5447,11 +5510,15 @@ class Coordinator:
         # max_turns=0 → backend default; ClaudeBackend needs ≥2 for tool_use→tool_result→final-text.
         try:
             result: BackendTurnResult = await backend.run(
-                prompt=prompt, system_prompt=sys_prompt, tools=tools, max_turns=0,
+                prompt=prompt,
+                system_prompt=sys_prompt,
+                tools=tools,
+                max_turns=0,
             )
         except BackendError as exc:
             await self._record_observation(
-                "coordinator", "observation",
+                "coordinator",
+                "observation",
                 {"kind": "backend_error", "agent": agent_name, "error": repr(exc)},
             )
             await self._track_backend_error_streak(agent_name, exc)
@@ -5459,18 +5526,18 @@ class Coordinator:
         except NoIntentEmitted as exc:
             # No parseable intents; surface as observation so the next tick self-corrects instead of killing the run.
             await self._record_observation(
-                "coordinator", "observation",
-                {"kind": "no_intent_emitted", "agent": agent_name,
-                 "error": str(exc)[:500]},
+                "coordinator",
+                "observation",
+                {"kind": "no_intent_emitted", "agent": agent_name, "error": str(exc)[:500]},
             )
             return
         except Exception as exc:  # noqa: BLE001
             # Catch-all so one agent's bad turn never stops the loop (repeated crashes → emergency stop).
             log.exception("reactor pass for %s raised", agent_name)
             await self._record_observation(
-                "coordinator", "observation",
-                {"kind": "reactor_exception", "agent": agent_name,
-                 "error": f"{type(exc).__name__}: {str(exc)[:500]}"},
+                "coordinator",
+                "observation",
+                {"kind": "reactor_exception", "agent": agent_name, "error": f"{type(exc).__name__}: {str(exc)[:500]}"},
             )
             self._record_coordinator_exception(
                 stage="reactor_pass",
@@ -5499,7 +5566,9 @@ class Coordinator:
             await self._handle_intent(agent_name, intent)
 
     def _trace_reactor_llm_call(
-        self, agent_name: str, result: BackendTurnResult,
+        self,
+        agent_name: str,
+        result: BackendTurnResult,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a reactor turn.
 
@@ -5544,11 +5613,14 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — trace must never break the loop
             log.debug(
                 "full-trace: reactor llm_call append failed for %s",
-                agent_name, exc_info=True,
+                agent_name,
+                exc_info=True,
             )
 
     def _record_reactor_conversation(
-        self, agent_name: str, result: BackendTurnResult,
+        self,
+        agent_name: str,
+        result: BackendTurnResult,
     ) -> None:
         """Append one ``conversations.jsonl`` row for a reactor turn.
 
@@ -5586,11 +5658,14 @@ class Coordinator:
         except Exception:  # noqa: BLE001 — trace must never break the loop
             log.debug(
                 "full-trace: reactor conversation append failed for %s",
-                agent_name, exc_info=True,
+                agent_name,
+                exc_info=True,
             )
 
     async def _track_backend_error_streak(
-        self, agent_name: str, exc: BackendError,
+        self,
+        agent_name: str,
+        exc: BackendError,
     ) -> None:
         """Increment the per-agent ``BackendError`` streak; emit one backend_unhealthy event on crossing the threshold (re-arms only after a successful turn).
 
@@ -5601,13 +5676,11 @@ class Coordinator:
         new_value = self._backend_error_streak.get(agent_name, 0) + 1
         self._backend_error_streak[agent_name] = new_value
         threshold = self._backend_error_streak_threshold
-        if (
-            new_value >= threshold
-            and self._backend_error_alarm_armed.get(agent_name, True)
-        ):
+        if new_value >= threshold and self._backend_error_alarm_armed.get(agent_name, True):
             self._backend_error_alarm_armed[agent_name] = False
             await self._record_observation(
-                "coordinator", "observation",
+                "coordinator",
+                "observation",
                 {
                     "kind": "backend_unhealthy",
                     "agent": agent_name,
@@ -5649,11 +5722,13 @@ class Coordinator:
                 continue
             running_sec = max(0.0, now_unix - started_unix)
             if running_sec >= self._specialist_stale_sec:
-                stale.append({
-                    "task_id":         t.task_id,
-                    "kind":            t.kind,
-                    "running_seconds": running_sec,
-                })
+                stale.append(
+                    {
+                        "task_id": t.task_id,
+                        "kind": t.kind,
+                        "running_seconds": running_sec,
+                    }
+                )
         return stale
 
     async def _compose_prompt(self, agent_name: str) -> str:
@@ -5687,10 +5762,7 @@ class Coordinator:
         # Conversational delta gating (plan Step 3): first turn gets full SEED, later turns thin DELTA.
         push_full = True
         if agent_name == "orchestration":
-            push_full = (
-                not self._orchestration_conversational()
-                or not self._orchestration_seeded
-            )
+            push_full = not self._orchestration_conversational() or not self._orchestration_seeded
             if self._orchestration_conversational():
                 log.info(
                     "orchestration prompt mode=%s seeded=%s tick=%s",
@@ -5713,11 +5785,10 @@ class Coordinator:
             sections.append(self.shared_state.to_mission_summary())
             if self._run_deadline is not None and self._run_started_monotonic is not None:
                 remaining_min = max(
-                    0.0, (self._run_deadline - time.monotonic()) / 60.0,
+                    0.0,
+                    (self._run_deadline - time.monotonic()) / 60.0,
                 )
-                elapsed_min = (
-                    time.monotonic() - self._run_started_monotonic
-                ) / 60.0
+                elapsed_min = (time.monotonic() - self._run_started_monotonic) / 60.0
                 budget_min = self.shared_state.max_minutes or 0
                 sections.append("=== Time budget ===")
                 sections.append(
@@ -5733,17 +5804,12 @@ class Coordinator:
                     )
 
         # Time budget for Robustness — fires deadline_imminent → delegate(report) wind-down.
-        if (
-            agent_name == "robustness"
-            and self._run_deadline is not None
-            and self._run_started_monotonic is not None
-        ):
+        if agent_name == "robustness" and self._run_deadline is not None and self._run_started_monotonic is not None:
             remaining_min = max(
-                0.0, (self._run_deadline - time.monotonic()) / 60.0,
+                0.0,
+                (self._run_deadline - time.monotonic()) / 60.0,
             )
-            elapsed_min = (
-                time.monotonic() - self._run_started_monotonic
-            ) / 60.0
+            elapsed_min = (time.monotonic() - self._run_started_monotonic) / 60.0
             budget_min = self.shared_state.max_minutes or 0
             sections.append("=== Time budget ===")
             sections.append(
@@ -5794,6 +5860,7 @@ class Coordinator:
                 sections.append(gaps_block)
             try:
                 from . import research_hints as _research_hints
+
                 hints_block = _research_hints.summarise_for_prompt(
                     self.session_dir,
                 )
@@ -5855,8 +5922,10 @@ class Coordinator:
             if plateau_block:
                 try:
                     from . import trajectory_reviewer as _trajectory_reviewer
+
                     trajectory_block = _trajectory_reviewer.build_trajectory_digest(
-                        self.session_dir, self.shared_state,
+                        self.session_dir,
+                        self.shared_state,
                     )
                 except Exception:  # noqa: BLE001 — defensive
                     log.exception("Coordinator: trajectory review failed")
@@ -5915,21 +5984,14 @@ class Coordinator:
             try:
                 stale = await self._scan_stale_specialists()
                 running = await self.tasks.running()
-                specialist_running = sum(
-                    1 for t in (running or [])
-                    if (t.kind or "").strip() == "specialist"
-                )
+                specialist_running = sum(1 for t in (running or []) if (t.kind or "").strip() == "specialist")
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("Coordinator: specialist health scan failed")
                 stale, specialist_running = [], 0
-            stale_lines = [
-                f"  - task_id={row['task_id']} running_sec={int(row['running_seconds'])}"
-                for row in stale
-            ]
+            stale_lines = [f"  - task_id={row['task_id']} running_sec={int(row['running_seconds'])}" for row in stale]
             sections.append("=== Specialist health ===")
             sections.append(
-                f"running={specialist_running} stale={len(stale)} "
-                f"stale_threshold_sec={int(self._specialist_stale_sec)}"
+                f"running={specialist_running} stale={len(stale)} stale_threshold_sec={int(self._specialist_stale_sec)}"
             )
             if stale_lines:
                 sections.append("stale specialists (consider kill_task):")
@@ -6004,6 +6066,7 @@ class Coordinator:
         """
         try:
             from ..session_paths import target_baseline_json
+
             return target_baseline_json(self.session_dir).exists()
         except Exception:  # noqa: BLE001 — defensive; missing helper -> treat as done.
             return True
@@ -6035,17 +6098,19 @@ class Coordinator:
         action = str(action_name or "").strip()
         sequence_actions = {
             "target_analysis",
-            "baseline", "profile", "roofline",
-            "sweep", "report", "integrate", "explore",
+            "baseline",
+            "profile",
+            "roofline",
+            "sweep",
+            "report",
+            "integrate",
+            "explore",
         }
         if action not in sequence_actions:
             return None
         if self.shared_state.stop_reason:
             return None
-        if (
-            self.shared_state.baseline_tput <= 0
-            and action not in {"baseline", "target_analysis"}
-        ):
+        if self.shared_state.baseline_tput <= 0 and action not in {"baseline", "target_analysis"}:
             return PolicyDenied(
                 f"action={action!r} denied: baseline must run first",
                 rule="execution_order",
@@ -6054,7 +6119,9 @@ class Coordinator:
         return None
 
     def _sequence_denial_for_request(
-        self, target_agent: str, kind: str,
+        self,
+        target_agent: str,
+        kind: str,
     ) -> PolicyDenied | None:
         """Reject kernel requests that skip the baseline prerequisite (invariant: nothing kernel-side runs before baseline_tput > 0).
 
@@ -6092,7 +6159,8 @@ class Coordinator:
             bool: ``True`` when ``INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING`` is set.
         """
         return os.environ.get(
-            "INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "",
+            "INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING",
+            "",
         ).strip().lower() in {"1", "true", "yes", "on"}
 
     def _gemm_tuning_required_before_kernel_opt(self) -> bool:
@@ -6175,7 +6243,8 @@ class Coordinator:
             else:
                 # ASK_QUESTION / ANSWER / UPDATE_PERSONA — record for replay
                 await self._record_observation(
-                    source, "observation",
+                    source,
+                    "observation",
                     {"intent": it.value, "payload": intent.payload},
                 )
             await self._cursor_advance_to_latest(source)
@@ -6221,7 +6290,8 @@ class Coordinator:
         # Pruned families are advisory: proposal still queues, but the inbox carries an advisory note.
         if self.shared_state.is_pruned(action_name):
             await self._record_observation(
-                "coordinator", "observation",
+                "coordinator",
+                "observation",
                 {
                     "kind": "proposal_pruned_advisory",
                     "from": source,
@@ -6242,7 +6312,9 @@ class Coordinator:
             await self._record_policy_denied(source, intent, denied)
             return
         msg = Message.new(
-            source, "*", "proposal",
+            source,
+            "*",
+            "proposal",
             {**intent.payload, "needs_review": True},
             priority=1,
         )
@@ -6356,11 +6428,7 @@ class Coordinator:
         envs_raw = attrs.get("extra_envs") or params.get("extra_envs") or {}
         if not envs_raw and isinstance(result_dict, dict):
             envs_raw = result_dict.get("extra_envs") or {}
-        envs = (
-            {str(k): str(v) for k, v in envs_raw.items()}
-            if isinstance(envs_raw, dict)
-            else {}
-        )
+        envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
 
         if not args.strip() and not envs:
             return {}
@@ -6386,10 +6454,7 @@ class Coordinator:
         live_bc = live.get("best_config") if isinstance(live.get("best_config"), Mapping) else {}
         live_has_config = bool(
             read_extra_server_args(dict(live_bc)).strip()
-            or (
-                isinstance(live_bc.get("extra_envs"), Mapping)
-                and live_bc.get("extra_envs")
-            )
+            or (isinstance(live_bc.get("extra_envs"), Mapping) and live_bc.get("extra_envs"))
         )
         try:
             live_tput = float(live.get("best_throughput") or 0.0)
@@ -6448,8 +6513,7 @@ class Coordinator:
             live = self.cortex_kb.local.get_recipe(canonical_id=cid) or {}
         except Exception as exc:  # noqa: BLE001 — best-effort read
             log.info(
-                "_kb_amend_recipe: local get_recipe failed (%s); "
-                "proceeding with empty live",
+                "_kb_amend_recipe: local get_recipe failed (%s); proceeding with empty live",
                 exc,
             )
             live = {}
@@ -6465,13 +6529,30 @@ class Coordinator:
         overrides = dict(recipe_overrides or {})
         # Preserve T0-stamped top-level extras across the amend (caller's extras win).
         _reserved = {
-            "canonical_id", "version", "created_at", "updated_at",
-            "model", "hardware", "framework", "framework_version",
-            "precision", "best_config", "best_throughput",
-            "what_worked", "what_failed", "remaining_gaps",
-            "prs_tested", "pitfalls", "lessons", "last_profiled",
-            "stack_fingerprint", "sessions", "authority", "confidence",
-            "evidence_refs", "provenance",
+            "canonical_id",
+            "version",
+            "created_at",
+            "updated_at",
+            "model",
+            "hardware",
+            "framework",
+            "framework_version",
+            "precision",
+            "best_config",
+            "best_throughput",
+            "what_worked",
+            "what_failed",
+            "remaining_gaps",
+            "prs_tested",
+            "pitfalls",
+            "lessons",
+            "last_profiled",
+            "stack_fingerprint",
+            "sessions",
+            "authority",
+            "confidence",
+            "evidence_refs",
+            "provenance",
         }
         prior_extras = {k: v for k, v in live.items() if k not in _reserved}
         merged_extras = {**prior_extras, **(overrides.get("extras") or {})}
@@ -6485,59 +6566,57 @@ class Coordinator:
         if _mtype:
             merged_extras["model_type"] = _mtype
         put_kwargs: dict[str, Any] = {
-            "canonical_id":      cid,
-            "model":             ss.model_name or "unknown_model",
-            "hardware":          ss.gpu_type   or "unknown_gpu",
-            "framework":         framework,
+            "canonical_id": cid,
+            "model": ss.model_name or "unknown_model",
+            "hardware": ss.gpu_type or "unknown_gpu",
+            "framework": framework,
             "framework_version": framework_version,
-            "precision":         precision,
-            "best_config":       overrides.get("best_config")
-                                  if "best_config" in overrides
-                                  else dict(live.get("best_config") or {}),
-            "best_throughput":   overrides.get("best_throughput")
-                                  if "best_throughput" in overrides
-                                  else float(live.get("best_throughput") or 0.0),
-            "what_worked":       overrides.get("what_worked")
-                                  if "what_worked" in overrides
-                                  else list(live.get("what_worked") or []),
-            "what_failed":       overrides.get("what_failed")
-                                  if "what_failed" in overrides
-                                  else list(live.get("what_failed") or []),
-            "remaining_gaps":    overrides.get("remaining_gaps")
-                                  if "remaining_gaps" in overrides
-                                  else list(live.get("remaining_gaps") or []),
-            "prs_tested":        overrides.get("prs_tested")
-                                  if "prs_tested" in overrides
-                                  else list(live.get("prs_tested") or []),
-            "pitfalls":          pitfalls,
-            "lessons":           lessons,
-            "last_profiled":     overrides.get("last_profiled")
-                                  if "last_profiled" in overrides
-                                  else str(live.get("last_profiled") or ""),
+            "precision": precision,
+            "best_config": overrides.get("best_config")
+            if "best_config" in overrides
+            else dict(live.get("best_config") or {}),
+            "best_throughput": overrides.get("best_throughput")
+            if "best_throughput" in overrides
+            else float(live.get("best_throughput") or 0.0),
+            "what_worked": overrides.get("what_worked")
+            if "what_worked" in overrides
+            else list(live.get("what_worked") or []),
+            "what_failed": overrides.get("what_failed")
+            if "what_failed" in overrides
+            else list(live.get("what_failed") or []),
+            "remaining_gaps": overrides.get("remaining_gaps")
+            if "remaining_gaps" in overrides
+            else list(live.get("remaining_gaps") or []),
+            "prs_tested": overrides.get("prs_tested")
+            if "prs_tested" in overrides
+            else list(live.get("prs_tested") or []),
+            "pitfalls": pitfalls,
+            "lessons": lessons,
+            "last_profiled": overrides.get("last_profiled")
+            if "last_profiled" in overrides
+            else str(live.get("last_profiled") or ""),
             "stack_fingerprint": overrides.get("stack_fingerprint")
-                                  if "stack_fingerprint" in overrides
-                                  else dict(live.get("stack_fingerprint") or {}),
-            "sessions":          overrides.get("sessions")
-                                  if "sessions" in overrides
-                                  else list(live.get("sessions") or []),
-            "extras":            merged_extras,
+            if "stack_fingerprint" in overrides
+            else dict(live.get("stack_fingerprint") or {}),
+            "sessions": overrides.get("sessions") if "sessions" in overrides else list(live.get("sessions") or []),
+            "extras": merged_extras,
             # Preserve audit fields across the amend (else put_recipe resets them to defaults).
-            "authority":         overrides.get("authority")
-                                  if "authority" in overrides
-                                  else str(live.get("authority") or "EXPERIENTIAL"),
-            "confidence":        overrides.get("confidence")
-                                  if "confidence" in overrides
-                                  else float(live.get("confidence") or 0.85),
-            "evidence_refs":     overrides.get("evidence_refs")
-                                  if "evidence_refs" in overrides
-                                  else list(live.get("evidence_refs") or []),
-            "provenance":        {
-                "source":       "hyperloom-inference-optimizer",
-                "generator":    "coordinator",
+            "authority": overrides.get("authority")
+            if "authority" in overrides
+            else str(live.get("authority") or "EXPERIENTIAL"),
+            "confidence": overrides.get("confidence")
+            if "confidence" in overrides
+            else float(live.get("confidence") or 0.85),
+            "evidence_refs": overrides.get("evidence_refs")
+            if "evidence_refs" in overrides
+            else list(live.get("evidence_refs") or []),
+            "provenance": {
+                "source": "hyperloom-inference-optimizer",
+                "generator": "coordinator",
                 "generated_at": datetime.now(timezone.utc).isoformat(
                     timespec="microseconds",
                 ),
-                "details":      dict(provenance_details or {}),
+                "details": dict(provenance_details or {}),
             },
         }
         try:
@@ -6545,7 +6624,8 @@ class Coordinator:
             self._local_recipe_cache = None
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
-                "_kb_amend_recipe: put_recipe failed for cid=%s", cid,
+                "_kb_amend_recipe: put_recipe failed for cid=%s",
+                cid,
             )
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
@@ -6562,25 +6642,21 @@ class Coordinator:
         single_verdict = intent.payload.get("verdict")
         if pending is None:
             await self._record_observation(
-                "coordinator", "observation",
+                "coordinator",
+                "observation",
                 {
-                    "kind":         "verdict_for_unknown_proposal",
-                    "target":       target,
-                    "verdict":      single_verdict or "",
-                    "verdict_map":  bool(verdict_map),
+                    "kind": "verdict_for_unknown_proposal",
+                    "target": target,
+                    "verdict": single_verdict or "",
+                    "verdict_map": bool(verdict_map),
                 },
             )
             return
         verdict = str(single_verdict or "")
         if not verdict and isinstance(verdict_map, dict) and verdict_map:
-            sub_verdicts = [
-                str((entry or {}).get("verdict") or "").strip()
-                for entry in verdict_map.values()
-            ]
+            sub_verdicts = [str((entry or {}).get("verdict") or "").strip() for entry in verdict_map.values()]
             verdict = (
-                "approve" if "approve" in sub_verdicts
-                else "reject" if "reject" in sub_verdicts
-                else "needs_review"
+                "approve" if "approve" in sub_verdicts else "reject" if "reject" in sub_verdicts else "needs_review"
             )
         await self._handle_single_verdict(
             source=source,
@@ -6607,16 +6683,20 @@ class Coordinator:
         """
         pending.decided = True
         pending.verdict = verdict
-        await self.bus.append_and_seq(Message.new(
-            source, pending.from_agent, "review_verdict",
-            {
-                "target_proposal_msg_id": pending.proposal_msg_id,
-                "verdict":                verdict,
-                "reasoning":              reasoning,
-            },
-            priority=0 if verdict == "reject" else 1,
-            in_reply_to=pending.proposal_msg_id,
-        ))
+        await self.bus.append_and_seq(
+            Message.new(
+                source,
+                pending.from_agent,
+                "review_verdict",
+                {
+                    "target_proposal_msg_id": pending.proposal_msg_id,
+                    "verdict": verdict,
+                    "reasoning": reasoning,
+                },
+                priority=0 if verdict == "reject" else 1,
+                in_reply_to=pending.proposal_msg_id,
+            )
+        )
         # Mirror specialist / integrate_patch verdicts onto SharedState so
         # PolicyGate's integrate_patch gate can consult them on the next tick.
         try:
@@ -6625,16 +6705,15 @@ class Coordinator:
             pa_params = {}
         sid_candidate = ""
         if pending.action_name == "integrate_patch":
-            sid_candidate = str(
-                pa_params.get("specialist_task_id") or ""
-            ).strip()
+            sid_candidate = str(pa_params.get("specialist_task_id") or "").strip()
         elif pending.action_name == "specialist":
             # Critic verdict on the specialist proposal counts as the verdict on its patches; task_id is the key.
             sid_candidate = str(pending.task_id or "").strip()
         if sid_candidate and verdict:
             try:
                 self.shared_state.record_specialist_patch_verdict(
-                    sid_candidate, verdict,
+                    sid_candidate,
+                    verdict,
                 )
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 — best-effort mirror
@@ -6655,29 +6734,50 @@ class Coordinator:
         br = float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0)
         if br > 0:
             params.setdefault("baseline_runtime_sec", br)
-        kill_ratio = float(getattr(
-            self.shared_state, "explore_overtime_kill_ratio", 0.0,
-        ) or 0.0)
+        kill_ratio = float(
+            getattr(
+                self.shared_state,
+                "explore_overtime_kill_ratio",
+                0.0,
+            )
+            or 0.0
+        )
         if kill_ratio > 0:
             params.setdefault("explore_overtime_kill_ratio", kill_ratio)
-        variant_timeout_override = int(getattr(
-            self.shared_state, "explore_variant_timeout_sec_override", 0,
-        ) or 0)
+        variant_timeout_override = int(
+            getattr(
+                self.shared_state,
+                "explore_variant_timeout_sec_override",
+                0,
+            )
+            or 0
+        )
         if variant_timeout_override > 0:
             params.setdefault("variant_timeout_sec", variant_timeout_override)
-        safety_margin_override = float(getattr(
-            self.shared_state, "explore_variant_timeout_safety_margin", -1.0,
-        ))
+        safety_margin_override = float(
+            getattr(
+                self.shared_state,
+                "explore_variant_timeout_safety_margin",
+                -1.0,
+            )
+        )
         if safety_margin_override >= 0:
             params.setdefault(
-                "variant_timeout_safety_margin", safety_margin_override,
+                "variant_timeout_safety_margin",
+                safety_margin_override,
             )
-        history = list(getattr(
-            self.shared_state, "roofline_saturation_history", [],
-        ) or [])
+        history = list(
+            getattr(
+                self.shared_state,
+                "roofline_saturation_history",
+                [],
+            )
+            or []
+        )
         if history and isinstance(history[-1], dict):
             params.setdefault(
-                "roofline_saturation_snapshot", dict(history[-1]),
+                "roofline_saturation_snapshot",
+                dict(history[-1]),
             )
         # Thread the persisted explore_search ledger so ExploreExecutor's canonical_fingerprint dedup has cross-turn memory; setdefault keeps an explicit override.
         es = getattr(self.shared_state, "explore_search", None)
@@ -6703,9 +6803,11 @@ class Coordinator:
         if not _phase_state.is_cyclic_phases_enabled():
             return None
         from .action_executors._multi_node_env import is_multi_node
+
         cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
         return _phase_state.decaying_keep_threshold_pct(
-            cycle, multi_node=is_multi_node(),
+            cycle,
+            multi_node=is_multi_node(),
         )
 
     async def _materialize_approved_proposal(
@@ -6723,10 +6825,7 @@ class Coordinator:
         """
         params = dict(pending.payload.get("params") or {})
         # Filter the grid to the Critic-approved subset.
-        if (
-            pending.action_name == "explore"
-            and isinstance(params.get("grid"), list)
-        ):
+        if pending.action_name == "explore" and isinstance(params.get("grid"), list):
             stamped_grid: list[dict[str, Any]] = []
             for variant in params["grid"]:
                 if not isinstance(variant, dict):
@@ -6736,49 +6835,37 @@ class Coordinator:
                     continue
                 vname = str(variant.get("name") or "").strip()
                 # drop variants the Critic rejected before they hit the executor.
-                if (
-                    approved_variant_names is not None
-                    and vname not in approved_variant_names
-                ):
+                if approved_variant_names is not None and vname not in approved_variant_names:
                     continue
                 stamped_grid.append(dict(variant))
             params["grid"] = stamped_grid
             # Audit hint: how many variants the Critic filtered (surfaced as critic_filtered_count).
             if approved_variant_names is not None:
                 original_grid_len = len(
-                    [
-                        v for v in (pending.payload.get("params") or {}).get("grid", [])
-                        if isinstance(v, dict)
-                    ]
+                    [v for v in (pending.payload.get("params") or {}).get("grid", []) if isinstance(v, dict)]
                 )
                 params["critic_filtered_count"] = max(
-                    0, original_grid_len - len(approved_variant_names),
+                    0,
+                    original_grid_len - len(approved_variant_names),
                 )
         cb = self.shared_state.current_best or {}
-        cb_args = (
-            str(cb.get("extra_server_args") or "")
-            if isinstance(cb, dict) else ""
-        )
+        cb_args = str(cb.get("extra_server_args") or "") if isinstance(cb, dict) else ""
         if pending.action_name == "profile":
             # Stamp base_extra_args so post-task promotion records the server config that produced this trace.
             params.setdefault("base_extra_args", cb_args)
         if pending.action_name == "sweep":
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
-                else self.shared_state.baseline_tput
+            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 else self.shared_state.baseline_tput
             params.setdefault("base_tput", float(base or 0.0))
             params.setdefault("base_extra_args", cb_args)
             if self.shared_state.baseline_config_path:
-                params.setdefault(
-                    "config_path", self.shared_state.baseline_config_path
-                )
+                params.setdefault("config_path", self.shared_state.baseline_config_path)
         if pending.action_name == "explore":
             self._inject_explore_runtime_params(params)
             # Inject base_tput/base_extra_args tied to current_best (or baseline_tput); else _gain_pct
             # returns None and every variant lands FAILED. Explicit operator value wins via setdefault.
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
-                else self.shared_state.baseline_tput
+            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 else self.shared_state.baseline_tput
             params.setdefault("base_tput", float(base or 0.0))
             params.setdefault("base_extra_args", cb_args)
         if pending.action_name == "integrate_patch":
@@ -6796,7 +6883,8 @@ class Coordinator:
         if was_existing:
             # Key is unique per proposal; only a resume/replay collides. Record an observation, not a fresh decision.
             await self._record_observation(
-                "coordinator", "observation",
+                "coordinator",
+                "observation",
                 {
                     "kind": "proposal_materialize_skipped",
                     "reason": "duplicate_idempotency_key",
@@ -6810,12 +6898,20 @@ class Coordinator:
             return
         # proposal_msg_id is the resume contract for the deferred queue (see replay_for_resume): pairs a
         # materialize_blocked observation with a later approved_proposal decision as "drained".
-        await self.bus.append_and_seq(Message.new(
-            "coordinator", "*", "decision",
-            {"kind": "approved_proposal", "task_id": task.task_id,
-             "action_name": pending.action_name, "from_agent": pending.from_agent,
-             "proposal_msg_id": pending.proposal_msg_id},
-        ))
+        await self.bus.append_and_seq(
+            Message.new(
+                "coordinator",
+                "*",
+                "decision",
+                {
+                    "kind": "approved_proposal",
+                    "task_id": task.task_id,
+                    "action_name": pending.action_name,
+                    "from_agent": pending.from_agent,
+                    "proposal_msg_id": pending.proposal_msg_id,
+                },
+            )
+        )
 
     # DELEGATE
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
@@ -6834,7 +6930,8 @@ class Coordinator:
         action_name = intent.payload["action_name"]
         if self.shared_state.is_pruned(action_name):
             await self._record_observation(
-                "coordinator", "observation",
+                "coordinator",
+                "observation",
                 {
                     "kind": "delegate_pruned_advisory",
                     "from": source,
@@ -6853,7 +6950,10 @@ class Coordinator:
         )
         if denied is not None:
             await self._record_policy_denied(
-                source, intent, denied, action_name=action_name,
+                source,
+                intent,
+                denied,
+                action_name=action_name,
             )
             return
         # delegate explore runs variants directly (config/env grids are not source patches → no Critic pre-review).
@@ -6861,13 +6961,8 @@ class Coordinator:
         # idempotency_key is top-level per schema; treat a nested params value as a compat alias and strip it.
         nested_idempotency_key = params.pop("idempotency_key", None)
         # Plumb baseline's materialized YAML into grid-style tasks for the workload contract; setdefault lets delegator override.
-        if (
-            action_name in ("sweep", "explore")
-            and self.shared_state.baseline_config_path
-        ):
-            params.setdefault(
-                "config_path", self.shared_state.baseline_config_path
-            )
+        if action_name in ("sweep", "explore") and self.shared_state.baseline_config_path:
+            params.setdefault("config_path", self.shared_state.baseline_config_path)
         # Parity with _materialize_approved_proposal: direct delegates need the same operational knobs.
         if action_name == "explore":
             self._inject_explore_runtime_params(params)
@@ -6875,8 +6970,11 @@ class Coordinator:
             # Defensive getattr: lightweight state doubles in tests may omit current_best.
             cb = getattr(self.shared_state, "current_best", None) or {}
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
+            base = (
+                cb_tput
+                if isinstance(cb_tput, (int, float)) and cb_tput > 0
                 else getattr(self.shared_state, "baseline_tput", 0.0)
+            )
             params.setdefault("base_tput", float(base or 0.0))
         # Wave sugar: a specialist delegate carrying params.tasks=[...] fans
         # out into N standard freeform specialist tasks (scope=freeform,
@@ -6884,9 +6982,14 @@ class Coordinator:
         # normal SpecialistRunner + TaskRegistry + lease + reap path. This
         # preserves the low-cost wide-net recon that the retired
         # dynamic_specialist channel provided.
-        if action_name == "specialist" and isinstance(
-            params.get("tasks"), list,
-        ) and params["tasks"]:
+        if (
+            action_name == "specialist"
+            and isinstance(
+                params.get("tasks"),
+                list,
+            )
+            and params["tasks"]
+        ):
             await self._fan_out_specialist_wave(source, intent, params)
             return
         # Specialist pre-dispatch warmup: warm external-knowledge sections via KnowledgePlane (setdefault fills gaps).
@@ -6896,29 +6999,26 @@ class Coordinator:
         # Terminal collisions retry with -retry<N> (up to 5); non-terminal collisions → policy_denied.
         raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
         if not raw_key:
-            content_fp = hashlib.sha1(
-                json.dumps(params, sort_keys=True, default=str).encode()
-            ).hexdigest()[:10]
-            raw_key = (
-                f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:"
-                f"{content_fp}"
-            )
+            content_fp = hashlib.sha1(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest()[:10]
+            raw_key = f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
         idempotency_key = str(raw_key)
         terminal_states = {
-            "succeeded", "failed", "cancelled", "needs_manual_review",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "needs_manual_review",
         }
         task = None
         was_existing = False
         for attempt in range(6):
-            idempotency_key = (
-                str(raw_key) if attempt == 0 else f"{raw_key}-retry{attempt}"
-            )
+            idempotency_key = str(raw_key) if attempt == 0 else f"{raw_key}-retry{attempt}"
             lanes, ttl = self._registry_lanes_ttl(action_name)
             # Bench-enabled specialists serialize against the other GPU
             # benchmark/profile/server work via benchmark_lane (research_lane
             # alone conflicts with nothing).
             if action_name == "specialist":
                 from .specialist_profile import resolve_specialist_profile
+
                 if resolve_specialist_profile(params).grants_bench_tool:
                     lanes = tuple(dict.fromkeys((*lanes, "benchmark_lane")))
             task, was_existing = await self.tasks.create_or_return_existing(
@@ -6936,10 +7036,10 @@ class Coordinator:
                     f"delegated_result event instead of re-emitting the same key."
                 )
                 await self._record_policy_denied(
-                    source, intent,
+                    source,
+                    intent,
                     PolicyDenied(
-                        f"delegate{{action_name={action_name!r}}} duplicate "
-                        f"idempotency_key={idempotency_key!r}",
+                        f"delegate{{action_name={action_name!r}}} duplicate idempotency_key={idempotency_key!r}",
                         rule="duplicate_idempotency_key_running",
                         hint=hint,
                     ),
@@ -6952,7 +7052,8 @@ class Coordinator:
                 f"allocate a fresh idempotency_key after 5 retries"
             )
             await self._record_policy_denied(
-                source, intent,
+                source,
+                intent,
                 PolicyDenied(
                     f"delegate{{action_name={action_name!r}}} duplicate "
                     f"idempotency_key exhausted retries for {raw_key!r}",
@@ -6963,13 +7064,20 @@ class Coordinator:
             )
             return
         self.shared_state.reset_policy_denial_streak(action_name)
-        await self.bus.append_and_seq(Message.new(
-            "coordinator", "*", "event",
-            {"kind": "task_queued", "task_id": task.task_id, "source": source, "action": action_name},
-        ))
+        await self.bus.append_and_seq(
+            Message.new(
+                "coordinator",
+                "*",
+                "event",
+                {"kind": "task_queued", "task_id": task.task_id, "source": source, "action": action_name},
+            )
+        )
 
     def _record_framework_pr_authored_outcome(
-        self, *, task: "Task", result: Any,
+        self,
+        *,
+        task: "Task",
+        result: Any,
     ) -> None:
         """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK_PR progress ledger (else the gain is invisible). Attributed to the latest batch; only kept/reverted rows.
 
@@ -7002,17 +7110,15 @@ class Coordinator:
         gain = float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0
         progress_entry = {
             "candidate_id": cand_id,
-            "pr_url":       "",
-            "status":       status,
-            "provenance":   "authored",
-            "pre_tput":     float(
-                getattr(self.shared_state, "baseline_tput", 0.0) or 0.0
-            ),
-            "post_tput":    float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
-            "gain_pct":     gain,
-            "kept":         status == "kept",
-            "batch_id":     batch_id,
-            "ts":           datetime.now(timezone.utc).isoformat(),
+            "pr_url": "",
+            "status": status,
+            "provenance": "authored",
+            "pre_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
+            "post_tput": float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
+            "gain_pct": gain,
+            "kept": status == "kept",
+            "batch_id": batch_id,
+            "ts": datetime.now(timezone.utc).isoformat(),
         }
         if not isinstance(self.shared_state.framework_pr_phase_progress, list):
             self.shared_state.framework_pr_phase_progress = []
@@ -7034,13 +7140,18 @@ class Coordinator:
                 getattr(task, "task_id", "?"),
             )
         log.info(
-            "FRAMEWORK_PR: authored patch outcome candidate=%s batch=%s "
-            "status=%s gain=%.2f%%",
-            cand_id, batch_id, status, gain,
+            "FRAMEWORK_PR: authored patch outcome candidate=%s batch=%s status=%s gain=%.2f%%",
+            cand_id,
+            batch_id,
+            status,
+            gain,
         )
 
     async def _fan_out_specialist_wave(
-        self, source: str, intent: Intent, params: dict[str, Any],
+        self,
+        source: str,
+        intent: Intent,
+        params: dict[str, Any],
     ) -> None:
         """Fan a specialist delegate carrying ``params.tasks=[...]`` into N
         standard free-form specialist dispatches (scope=freeform, lane=cpu,
@@ -7061,9 +7172,7 @@ class Coordinator:
         for idx, task in enumerate(tasks):
             if not isinstance(task, dict):
                 continue
-            desc = str(
-                task.get("task_description") or task.get("task_summary") or ""
-            ).strip()
+            desc = str(task.get("task_description") or task.get("task_summary") or "").strip()
             if not desc:
                 continue
             sub_params = dict(shared)
@@ -7076,8 +7185,13 @@ class Coordinator:
             # gpu) take precedence over the shared params; then fall back to the
             # freeform recon defaults (research on the cpu lane).
             for carry in (
-                "mode", "bench", "lane", "model", "priority",
-                "timeout_minutes", "max_turns",
+                "mode",
+                "bench",
+                "lane",
+                "model",
+                "priority",
+                "timeout_minutes",
+                "max_turns",
             ):
                 if carry in task:
                     sub_params[carry] = task[carry]
@@ -7090,11 +7204,14 @@ class Coordinator:
             else:
                 sub_payload.pop("idempotency_key", None)
             await self._handle_delegate(
-                source, Intent(type=intent.type, payload=sub_payload),
+                source,
+                Intent(type=intent.type, payload=sub_payload),
             )
 
     async def _maybe_auto_retry_specialist(
-        self, task: "Task", result: "SubAgentResult",
+        self,
+        task: "Task",
+        result: "SubAgentResult",
     ) -> bool:
         """Re-enqueue a fresh specialist task on a transient infra failure.
 
@@ -7114,21 +7231,29 @@ class Coordinator:
             ``True`` when a retry was scheduled (caller must skip this
             attempt's bookkeeping); ``False`` otherwise.
         """
-        flag = os.environ.get(
-            "INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", "1",
-        ).strip().lower()
+        flag = (
+            os.environ.get(
+                "INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY",
+                "1",
+            )
+            .strip()
+            .lower()
+        )
         if flag in ("0", "false", "no", "off"):
             return False
         try:
-            cap = int(os.environ.get(
-                "INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY_MAX",
-                str(SPECIALIST_AUTO_RETRY_MAX),
-            ))
+            cap = int(
+                os.environ.get(
+                    "INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY_MAX",
+                    str(SPECIALIST_AUTO_RETRY_MAX),
+                )
+            )
         except (TypeError, ValueError):
             cap = SPECIALIST_AUTO_RETRY_MAX
         if cap <= 0:
             return False
         from .specialist_runner import classify_specialist_failure
+
         result_dict = result.result if isinstance(result.result, dict) else {}
         runner_status = str(result_dict.get("runner_status") or "")
         error = str(result.error or "")
@@ -7149,6 +7274,7 @@ class Coordinator:
         # bench-enabled specialists) so the retry contends for the same pools.
         lanes, ttl = self._registry_lanes_ttl("specialist")
         from .specialist_profile import resolve_specialist_profile
+
         if resolve_specialist_profile(retry_params).grants_bench_tool:
             lanes = list(dict.fromkeys((*lanes, "benchmark_lane")))
 
@@ -7174,7 +7300,8 @@ class Coordinator:
             # bookkeeping record this attempt rather than silently dropping it.
             return False
         await self._record_observation(
-            "coordinator", "observation",
+            "coordinator",
+            "observation",
             {
                 "kind": "specialist_auto_retry",
                 "task_id": task.task_id,
@@ -7186,9 +7313,12 @@ class Coordinator:
             },
         )
         log.info(
-            "specialist auto-retry: task=%s failure=%s attempt=%d/%d "
-            "re-enqueued as %s",
-            task.task_id, ftype.value, next_attempt, cap, new_task.task_id,
+            "specialist auto-retry: task=%s failure=%s attempt=%d/%d re-enqueued as %s",
+            task.task_id,
+            ftype.value,
+            next_attempt,
+            cap,
+            new_task.task_id,
         )
         return True
 
@@ -7228,7 +7358,8 @@ class Coordinator:
                 except Exception as exc:  # noqa: BLE001
                     log.warning(
                         "specialist warmup: pr_feed_warm(domain=%r) failed: %r",
-                        pr_dom, exc,
+                        pr_dom,
+                        exc,
                     )
                     continue
                 for p in prs:
@@ -7242,9 +7373,7 @@ class Coordinator:
             params.setdefault("pr_feed", [])
 
         if "pr_monitor_available" not in params:
-            params["pr_monitor_available"] = bool(
-                plane is not None and getattr(plane, "pr_monitor_enabled", True)
-            )
+            params["pr_monitor_available"] = bool(plane is not None and getattr(plane, "pr_monitor_enabled", True))
 
         # Cortex v1 subgraphs removed; keep field defaulted for stable SpecialistPromptInputs.
         params.setdefault("kb_subgraph", {})
@@ -7274,13 +7403,14 @@ class Coordinator:
         if "framework_source_roots" not in params:
             try:
                 from .framework_paths import resolve_source_file_allowlist
+
                 roots = resolve_source_file_allowlist()
                 if roots:
                     params["framework_source_roots"] = list(roots)
             except Exception as exc:  # noqa: BLE001
                 log.debug(
-                    "specialist warmup: framework_source_roots lookup "
-                    "failed: %r", exc,
+                    "specialist warmup: framework_source_roots lookup failed: %r",
+                    exc,
                 )
 
         # Hardware + workload hints from SharedState; else dataclass defaults win (e.g. tp=1 self-vetoes comm_specialist).
@@ -7305,9 +7435,7 @@ class Coordinator:
         if "arch_notes" not in params:
             from .shared_state import render_model_arch_compact
 
-            _arch_notes = render_model_arch_compact(
-                getattr(state, "model_arch", None)
-            )
+            _arch_notes = render_model_arch_compact(getattr(state, "model_arch", None))
             if _arch_notes:
                 params["arch_notes"] = _arch_notes
 
@@ -7323,6 +7451,7 @@ class Coordinator:
         if "research_hints" not in params:
             try:
                 from . import research_hints as _research_hints
+
                 _hints_block = _research_hints.summarise_for_prompt(
                     self.session_dir,
                 )
@@ -7333,10 +7462,7 @@ class Coordinator:
                 params["research_hints"] = _hints_block
 
         # Fill gap-specific anchors from the gaps[] ledger: stamp symptom/layer/domain_hint/attempts onto the task so the prompt has structured context.
-        gap_cid = (
-            str(params.get("gap_canonical_id") or "").strip()
-            or str(params.get("gap") or "").strip()
-        )
+        gap_cid = str(params.get("gap_canonical_id") or "").strip() or str(params.get("gap") or "").strip()
         if gap_cid:
             gap = state.find_gap(gap_cid)
             if gap is not None:
@@ -7360,11 +7486,7 @@ class Coordinator:
 
         # ROOFLINE EVIDENCE — pack bottleneck signals into roofline_evidence + analysis_md_path for the specialist.
         last_ta = getattr(state, "last_trace_analyze", None) or {}
-        if (
-            isinstance(last_ta, dict)
-            and last_ta.get("analysis_md_text")
-            and "roofline_evidence" not in params
-        ):
+        if isinstance(last_ta, dict) and last_ta.get("analysis_md_text") and "roofline_evidence" not in params:
             from .roofline_snapshot import extract_workload_summary
 
             analysis_path = str(last_ta.get("analysis_md_path") or "")
@@ -7374,8 +7496,9 @@ class Coordinator:
                     executive_summary = extract_workload_summary(analysis_path)
                 except Exception as exc:  # noqa: BLE001
                     log.warning(
-                        "specialist warmup: extract_workload_summary(%s) "
-                        "failed: %r", analysis_path, exc,
+                        "specialist warmup: extract_workload_summary(%s) failed: %r",
+                        analysis_path,
+                        exc,
                     )
                     executive_summary = {}
             hot_kernels = list(last_ta.get("hot_kernels_top15") or [])[:8]
@@ -7392,6 +7515,7 @@ class Coordinator:
         from inference_optimizer.orchestrator.policy import (
             DEFAULT_SPECIALIST_MAX_PROPOSALS,
         )
+
         params.setdefault("max_proposals", DEFAULT_SPECIALIST_MAX_PROPOSALS)
 
     @staticmethod
@@ -7406,11 +7530,11 @@ class Coordinator:
             A flat dict of the PR's summary fields.
         """
         return {
-            "repo":   str(getattr(pr, "repo", "")),
+            "repo": str(getattr(pr, "repo", "")),
             "number": int(getattr(pr, "number", 0) or 0),
-            "title":  str(getattr(pr, "title", "")),
-            "url":    str(getattr(pr, "url", "")),
-            "state":  str(getattr(pr, "state", "")),
+            "title": str(getattr(pr, "title", "")),
+            "url": str(getattr(pr, "url", "")),
+            "state": str(getattr(pr, "state", "")),
             "labels": list(getattr(pr, "labels", ()) or ()),
             "author": str(getattr(pr, "author", "")),
         }
@@ -7456,7 +7580,8 @@ class Coordinator:
                 )
         log.debug(
             "gaps refresh (reason=%s): %d gaps after merge",
-            reason, len(state.gaps),
+            reason,
+            len(state.gaps),
         )
 
     def _extract_gaps_from_baseline(self) -> list[dict[str, Any]]:
@@ -7473,36 +7598,28 @@ class Coordinator:
         anchor = self._gap_anchor_canonical_id()
         target_gap = float(getattr(state, "target_gap_pct", 0.0) or 0.0)
         if target_gap > 0.0:
-            severity = (
-                "high" if target_gap >= 10.0
-                else "medium" if target_gap >= 3.0
-                else "low"
+            severity = "high" if target_gap >= 10.0 else "medium" if target_gap >= 3.0 else "low"
+            gaps.append(
+                {
+                    "canonical_id": f"{anchor}#throughput_below_target",
+                    "symptom": (f"current_best is {target_gap:.1f}% short of --target-gain"),
+                    "layer": "framework",
+                    "severity": severity,
+                    "domain_hint": "serving_specialist",
+                    "source": "baseline",
+                }
             )
-            gaps.append({
-                "canonical_id": f"{anchor}#throughput_below_target",
-                "symptom": (
-                    f"current_best is {target_gap:.1f}% short of "
-                    f"--target-gain"
-                ),
-                "layer": "framework",
-                "severity": severity,
-                "domain_hint": "serving_specialist",
-                "source": "baseline",
-            })
         if state.baseline_failure_streak > 0:
-            gaps.append({
-                "canonical_id": f"{anchor}#baseline_unstable",
-                "symptom": (
-                    f"baseline crashed {state.baseline_failure_streak} "
-                    f"consecutive time(s)"
-                ),
-                "layer": "system",
-                "severity": (
-                    "high" if state.baseline_failure_streak >= 2 else "medium"
-                ),
-                "domain_hint": "system_specialist",
-                "source": "baseline",
-            })
+            gaps.append(
+                {
+                    "canonical_id": f"{anchor}#baseline_unstable",
+                    "symptom": (f"baseline crashed {state.baseline_failure_streak} consecutive time(s)"),
+                    "layer": "system",
+                    "severity": ("high" if state.baseline_failure_streak >= 2 else "medium"),
+                    "domain_hint": "system_specialist",
+                    "source": "baseline",
+                }
+            )
         return gaps
 
     def _extract_gaps_from_attempts(self) -> list[dict[str, Any]]:
@@ -7552,21 +7669,19 @@ class Coordinator:
         if isinstance(explore_search, dict):
             winners_hist = list(explore_search.get("winners_history") or [])
         recent_promotions = sum(
-            1 for w in winners_hist[-5:]
-            if isinstance(w, dict) and float(w.get("gain_pct") or 0.0) > 0.0
+            1 for w in winners_hist[-5:] if isinstance(w, dict) and float(w.get("gain_pct") or 0.0) > 0.0
         )
         if no_promote >= 3 and recent_promotions == 0:
-            gaps.append({
-                "canonical_id": f"{anchor}#explore_plateau",
-                "symptom": (
-                    f"{no_promote} consecutive grid rounds without a new "
-                    f"current_best"
-                ),
-                "layer": "framework",
-                "severity": "high" if no_promote >= 6 else "medium",
-                "domain_hint": "serving_specialist",
-                "source": "attempts",
-            })
+            gaps.append(
+                {
+                    "canonical_id": f"{anchor}#explore_plateau",
+                    "symptom": (f"{no_promote} consecutive grid rounds without a new current_best"),
+                    "layer": "framework",
+                    "severity": "high" if no_promote >= 6 else "medium",
+                    "domain_hint": "serving_specialist",
+                    "source": "attempts",
+                }
+            )
         return gaps
 
     @staticmethod
@@ -7591,7 +7706,10 @@ class Coordinator:
         return ("framework", "serving_specialist")
 
     def _record_explore_round_gaps(
-        self, *, task: "Task | None", result: dict[str, Any],
+        self,
+        *,
+        task: "Task | None",
+        result: dict[str, Any],
     ) -> None:
         """Append per-variant KEEP/REVERT outcomes to the matching gap (or the anchor gap as fallback).
 
@@ -7607,34 +7725,38 @@ class Coordinator:
         if not isinstance(per_variant, list) or not per_variant:
             return
         params = dict(task.params or {})
-        canonical = (
-            str(params.get("gap_canonical_id") or "").strip()
-            or self._gap_anchor_canonical_id()
-        )
+        canonical = str(params.get("gap_canonical_id") or "").strip() or self._gap_anchor_canonical_id()
         state = self.shared_state
         existing = state.find_gap(canonical)
         if existing is None:
-            state.upsert_gap({
-                "canonical_id": canonical,
-                "symptom": "explore round outcomes",
-                "layer": "framework",
-                "severity": "medium",
-                "domain_hint": "serving_specialist",
-                "source": "attempts",
-            })
+            state.upsert_gap(
+                {
+                    "canonical_id": canonical,
+                    "symptom": "explore round outcomes",
+                    "layer": "framework",
+                    "severity": "medium",
+                    "domain_hint": "serving_specialist",
+                    "source": "attempts",
+                }
+            )
         for outcome in per_variant:
             if not isinstance(outcome, dict):
                 continue
-            state.append_gap_attempt(canonical, {
-                "action": "explore",
-                "variant_name": str(outcome.get("variant_name") or ""),
-                "outcome": str(outcome.get("outcome") or "").upper(),
-                "gain_pct": outcome.get("gain_pct"),
-            })
+            state.append_gap_attempt(
+                canonical,
+                {
+                    "action": "explore",
+                    "variant_name": str(outcome.get("variant_name") or ""),
+                    "outcome": str(outcome.get("outcome") or "").upper(),
+                    "gain_pct": outcome.get("gain_pct"),
+                },
+            )
 
     # specialist_done bookkeeping
     async def _handle_specialist_done(
-        self, source: str, intent: Intent,
+        self,
+        source: str,
+        intent: Intent,
     ) -> None:
         """Handle a ``specialist_done`` intent (source ``specialist:<task_id>`` per Inv-5.3 / R3); bookkeeping in _record_specialist_result.
 
@@ -7656,11 +7778,14 @@ class Coordinator:
                 "specialist_done from source=%r references unknown "
                 "task_id=%r; skipping bookkeeping (R3 should have "
                 "denied; defense in depth)",
-                source, task_id,
+                source,
+                task_id,
             )
             return
         await self._record_specialist_result(
-            task=task, done_payload=payload, source=source,
+            task=task,
+            done_payload=payload,
+            source=source,
         )
 
     @staticmethod
@@ -7676,7 +7801,7 @@ class Coordinator:
         if not source:
             return ""
         if source.startswith(SPECIALIST_FROM_AGENT_PREFIX):
-            return source[len(SPECIALIST_FROM_AGENT_PREFIX):]
+            return source[len(SPECIALIST_FROM_AGENT_PREFIX) :]
         return ""
 
     # Multi-node only: cap on how many specialist proposal_set entries
@@ -7725,34 +7850,30 @@ class Coordinator:
                 the explore grid (capped at ``_MN_AUTO_EXPLORE_GRID_CAP``).
         """
         from .action_executors._multi_node_env import is_multi_node
+
         if not is_multi_node() or not proposals:
             return
         grid: list[dict[str, Any]] = []
         for i, p in enumerate(proposals[: self._MN_AUTO_EXPLORE_GRID_CAP]):
             if not isinstance(p, dict):
                 continue
-            args = str(
-                p.get("extra_args") or p.get("extra_server_args") or ""
-            ).strip()
+            args = str(p.get("extra_args") or p.get("extra_server_args") or "").strip()
             envs_raw = p.get("extra_envs")
-            envs = (
-                {str(k): str(v) for k, v in envs_raw.items()}
-                if isinstance(envs_raw, dict) else {}
-            )
+            envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
             # Drop entries with neither a server-arg nor an env override —
             # nothing for the restart to apply (e.g. research-only items).
             if not args and not envs:
                 continue
-            name = str(p.get("name") or "").strip() or (
-                f"{domain or 'specialist'}-{task.task_id[:8]}-{i}"
+            name = str(p.get("name") or "").strip() or (f"{domain or 'specialist'}-{task.task_id[:8]}-{i}")
+            grid.append(
+                {
+                    "name": name,
+                    "extra_args": args,
+                    "extra_envs": envs,
+                    "provenance": f"specialist:{domain}" if domain else "specialist",
+                    "note": str(p.get("reason") or "")[:200],
+                }
             )
-            grid.append({
-                "name": name,
-                "extra_args": args,
-                "extra_envs": envs,
-                "provenance": f"specialist:{domain}" if domain else "specialist",
-                "note": str(p.get("reason") or "")[:200],
-            })
         if not grid:
             return
         state = self.shared_state
@@ -7785,12 +7906,17 @@ class Coordinator:
             log.info(
                 "mn_auto_materialize: enqueued explore task_id=%s "
                 "(variants=%d, from specialist=%s domain=%s, existing=%s)",
-                etask.task_id, len(grid), task.task_id, domain, was_existing,
+                etask.task_id,
+                len(grid),
+                task.task_id,
+                domain,
+                was_existing,
             )
         except Exception:  # noqa: BLE001 — defensive; never block bookkeeping
             log.exception(
-                "mn_auto_materialize: failed to enqueue explore from "
-                "specialist=%s domain=%s", task.task_id, domain,
+                "mn_auto_materialize: failed to enqueue explore from specialist=%s domain=%s",
+                task.task_id,
+                domain,
             )
 
     async def _record_specialist_result(
@@ -7815,7 +7941,9 @@ class Coordinator:
         is_empty = bool(done_payload.get("empty")) or len(proposals) == 0
 
         round_entry = self._build_specialist_round_entry(
-            task=task, done_payload=done_payload, source=source,
+            task=task,
+            done_payload=done_payload,
+            source=source,
         )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing. Defensive.
         _scorer = getattr(self, "_proposal_scorer", None)
@@ -7824,9 +7952,7 @@ class Coordinator:
                 scores = await _scorer.score(
                     gap={
                         "domain": domain,
-                        "gap_canonical_id": done_payload.get(
-                            "gap_canonical_id", ""
-                        ),
+                        "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
                         "gap_symptom": (task.params or {}).get("gap_symptom"),
                         "gap_evidence": (task.params or {}).get("gap_evidence"),
                         "summary": done_payload.get("summary", ""),
@@ -7837,25 +7963,26 @@ class Coordinator:
                     round_entry["ensemble_scores"] = scores
             except Exception:  # noqa: BLE001 — advisory; never block
                 log.exception(
-                    "specialist bookkeeping: proposal scoring failed for "
-                    "task=%s (continuing without scores)", task.task_id,
+                    "specialist bookkeeping: proposal scoring failed for task=%s (continuing without scores)",
+                    task.task_id,
                 )
         try:
             self.shared_state.record_specialist_round(round_entry)
         except Exception:  # noqa: BLE001
             log.exception(
-                "specialist bookkeeping: record_specialist_round failed for "
-                "task=%s", task.task_id,
+                "specialist bookkeeping: record_specialist_round failed for task=%s",
+                task.task_id,
             )
 
         try:
             self.shared_state.bump_specialist_domain_empty_streak(
-                domain, empty=is_empty,
+                domain,
+                empty=is_empty,
             )
         except Exception:  # noqa: BLE001
             log.exception(
-                "specialist bookkeeping: bump_specialist_domain_empty_streak "
-                "failed for task=%s", task.task_id,
+                "specialist bookkeeping: bump_specialist_domain_empty_streak failed for task=%s",
+                task.task_id,
             )
 
         # Per-anchor coverage ledger (point 1): every specialist completion is
@@ -7866,28 +7993,28 @@ class Coordinator:
             self.shared_state.note_specialist_dispatched(domain)
         except Exception:  # noqa: BLE001
             log.exception(
-                "specialist bookkeeping: domain round-counter update failed "
-                "for task=%s", task.task_id,
+                "specialist bookkeeping: domain round-counter update failed for task=%s",
+                task.task_id,
             )
 
         try:
-            self.shared_state.update_last_specialist({
-                "task_id": task.task_id,
-                "domain": domain,
-                "gap_canonical_id": str(
-                    done_payload.get("gap_canonical_id") or ""
-                ),
-                "empty": is_empty,
-                "proposals_total": len(proposals),
-                "confidence": done_payload.get("confidence"),
-                "summary": str(done_payload.get("summary") or "")[:480],
-                "reason": str(done_payload.get("reason") or "")[:480],
-                "ts": datetime.now(timezone.utc).isoformat(),
-            })
+            self.shared_state.update_last_specialist(
+                {
+                    "task_id": task.task_id,
+                    "domain": domain,
+                    "gap_canonical_id": str(done_payload.get("gap_canonical_id") or ""),
+                    "empty": is_empty,
+                    "proposals_total": len(proposals),
+                    "confidence": done_payload.get("confidence"),
+                    "summary": str(done_payload.get("summary") or "")[:480],
+                    "reason": str(done_payload.get("reason") or "")[:480],
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            )
         except Exception:  # noqa: BLE001
             log.exception(
-                "specialist bookkeeping: update_last_specialist failed for "
-                "task=%s", task.task_id,
+                "specialist bookkeeping: update_last_specialist failed for task=%s",
+                task.task_id,
             )
 
         # Persist so a resume picks up the bookkeeping without re-running the specialist.
@@ -7900,7 +8027,8 @@ class Coordinator:
             )
 
         await self._record_observation(
-            source or "coordinator", "observation",
+            source or "coordinator",
+            "observation",
             {
                 "kind": "specialist_done_recorded",
                 "task_id": task.task_id,
@@ -7917,7 +8045,9 @@ class Coordinator:
         # no applicable variants. See :meth:`_maybe_materialize_mn_explore`.
         try:
             await self._maybe_materialize_mn_explore(
-                task=task, domain=domain, proposals=proposals,
+                task=task,
+                domain=domain,
+                proposals=proposals,
             )
         except Exception:  # noqa: BLE001 — defensive; never block bookkeeping
             log.exception(
@@ -7934,7 +8064,8 @@ class Coordinator:
         if domain == "session_steward_specialist":
             try:
                 await self._route_steward_verdict(
-                    task=task, done_payload=done_payload,
+                    task=task,
+                    done_payload=done_payload,
                 )
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
@@ -7950,23 +8081,27 @@ class Coordinator:
                 self._harvest_research_scout(done_payload)
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
-                    "research-scout harvest failed for task=%s", task.task_id,
+                    "research-scout harvest failed for task=%s",
+                    task.task_id,
                 )
 
         # Refresh the gaps ledger after a specialist round closes; record the verdict as a gap attempt.
         gap_cid = str(done_payload.get("gap_canonical_id") or "").strip()
         if gap_cid:
             try:
-                self.shared_state.append_gap_attempt(gap_cid, {
-                    "action": "specialist",
-                    "variant_name": domain,
-                    "outcome": "EMPTY" if is_empty else "PROPOSALS",
-                    "proposals_total": len(proposals),
-                })
+                self.shared_state.append_gap_attempt(
+                    gap_cid,
+                    {
+                        "action": "specialist",
+                        "variant_name": domain,
+                        "outcome": "EMPTY" if is_empty else "PROPOSALS",
+                        "proposals_total": len(proposals),
+                    },
+                )
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
-                    "specialist bookkeeping: append_gap_attempt failed for "
-                    "gap=%s", gap_cid,
+                    "specialist bookkeeping: append_gap_attempt failed for gap=%s",
+                    gap_cid,
                 )
         try:
             await self._refresh_gaps(reason="specialist_done")
@@ -7978,7 +8113,8 @@ class Coordinator:
         # B3: push specialist-authored patches to the Critic so integrate_patch can pass.
         try:
             await self._maybe_autosubmit_specialist_patches(
-                task=task, done_payload=done_payload,
+                task=task,
+                done_payload=done_payload,
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
@@ -8008,24 +8144,27 @@ class Coordinator:
         if phase == _phase_state.PHASE_EXPLORE:
             triggered, evidence = _phase_state.compute_plateau_explore(
                 state,
-                lookback=int(overrides.get(
-                    "explore_lookback",
-                    _phase_state.DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
-                )),
-                keep_gain_threshold_pct=float(overrides.get(
-                    "explore_keep_gain_pct",
-                    _phase_state.DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
-                )),
-                empty_streak_threshold=int(overrides.get(
-                    "explore_empty_streak",
-                    _phase_state.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
-                )),
+                lookback=int(
+                    overrides.get(
+                        "explore_lookback",
+                        _phase_state.DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
+                    )
+                ),
+                keep_gain_threshold_pct=float(
+                    overrides.get(
+                        "explore_keep_gain_pct",
+                        _phase_state.DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
+                    )
+                ),
+                empty_streak_threshold=int(
+                    overrides.get(
+                        "explore_empty_streak",
+                        _phase_state.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
+                    )
+                ),
             )
             if triggered:
-                lines.append(
-                    "EXPLORE plateau detected: low recent KEEP gain plus "
-                    "specialist empty streak."
-                )
+                lines.append("EXPLORE plateau detected: low recent KEEP gain plus specialist empty streak.")
                 lines.append(
                     "  recent_keep_gain_pct="
                     f"{evidence.get('recent_keep_gain_pct', 0.0)} "
@@ -8036,24 +8175,27 @@ class Coordinator:
         elif phase == _phase_state.PHASE_KERNEL:
             triggered, evidence = _phase_state.compute_plateau_kernel(
                 state,
-                lookback=int(overrides.get(
-                    "kernel_lookback",
-                    _phase_state.DEFAULT_PLATEAU_KERNEL_LOOKBACK,
-                )),
-                revert_streak_threshold=int(overrides.get(
-                    "kernel_revert_streak",
-                    _phase_state.DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
-                )),
-                keep_gain_threshold_pct=float(overrides.get(
-                    "kernel_keep_gain_pct",
-                    _phase_state.DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
-                )),
+                lookback=int(
+                    overrides.get(
+                        "kernel_lookback",
+                        _phase_state.DEFAULT_PLATEAU_KERNEL_LOOKBACK,
+                    )
+                ),
+                revert_streak_threshold=int(
+                    overrides.get(
+                        "kernel_revert_streak",
+                        _phase_state.DEFAULT_PLATEAU_KERNEL_REVERT_STREAK,
+                    )
+                ),
+                keep_gain_threshold_pct=float(
+                    overrides.get(
+                        "kernel_keep_gain_pct",
+                        _phase_state.DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT,
+                    )
+                ),
             )
             if triggered:
-                lines.append(
-                    "KERNEL plateau detected: REVERT streak or low recent "
-                    "KEEP gain."
-                )
+                lines.append("KERNEL plateau detected: REVERT streak or low recent KEEP gain.")
                 lines.append(
                     "  revert_streak="
                     f"{evidence.get('revert_streak', 0)} "
@@ -8064,20 +8206,21 @@ class Coordinator:
         elif phase == _phase_state.PHASE_FRAMEWORK_PR:
             triggered, evidence = _phase_state.compute_plateau_framework_pr(
                 state,
-                lookback=int(overrides.get(
-                    "framework_pr_lookback",
-                    _phase_state.DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK,
-                )),
-                keep_gain_threshold_pct=float(overrides.get(
-                    "framework_pr_keep_gain_pct",
-                    _phase_state.DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT,
-                )),
+                lookback=int(
+                    overrides.get(
+                        "framework_pr_lookback",
+                        _phase_state.DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK,
+                    )
+                ),
+                keep_gain_threshold_pct=float(
+                    overrides.get(
+                        "framework_pr_keep_gain_pct",
+                        _phase_state.DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT,
+                    )
+                ),
             )
             if triggered:
-                lines.append(
-                    "FRAMEWORK_PR plateau detected: recent batches all below "
-                    "keep-gain threshold."
-                )
+                lines.append("FRAMEWORK_PR plateau detected: recent batches all below keep-gain threshold.")
                 lines.append(
                     "  lookback="
                     f"{evidence.get('lookback', 0)} "
@@ -8086,10 +8229,7 @@ class Coordinator:
                 )
         if not lines:
             return ""
-        if (
-            phase == _phase_state.PHASE_EXPLORE
-            and _phase_state.is_cyclic_phases_enabled()
-        ):
+        if phase == _phase_state.PHASE_EXPLORE and _phase_state.is_cyclic_phases_enabled():
             lines.append(
                 "Note: in cyclic mode a detected EXPLORE plateau "
                 "deterministically advances EXPLORE → KERNEL (non-terminal "
@@ -8115,6 +8255,7 @@ class Coordinator:
             ``("", 0.0)`` when no snapshot exists.
         """
         from .roofline_snapshot import dominant_direction
+
         snaps = getattr(self.shared_state, "roofline_snapshots", None) or []
         if not snaps or not isinstance(snaps[-1], dict):
             return "", 0.0
@@ -8152,6 +8293,7 @@ class Coordinator:
             lines.append(f"  current_top_bottleneck={cur_top}")
         if direction:
             from .roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
+
             hint = BOTTLENECK_DOMAIN_HINTS.get(direction)
             if hint:
                 lines.append(
@@ -8166,10 +8308,7 @@ class Coordinator:
             "but prior sub-threshold variants whose measured gain now meets the "
             "decayed KEEP bar are unblocked for re-test."
         )
-        lines.append(
-            "Advisory only: pick the domain/tag yourself; this nudges focus, "
-            "it does not gate dispatch."
-        )
+        lines.append("Advisory only: pick the domain/tag yourself; this nudges focus, it does not gate dispatch.")
         return "\n".join(lines)
 
     def _acceptance_threshold_advisory_block(self) -> str:
@@ -8215,17 +8354,13 @@ class Coordinator:
             name = str(e.get("name") or e.get("fingerprint") or "")[:48]
             (now_unblocked if g >= keep else still_blocked).append((name, g))
         lines: list[str] = [
-            f"Current acceptance bar (macro_cycle={cycle}): "
-            f"KEEP>={keep:.2f}% stack_stable>={stable:.2f}%.",
+            f"Current acceptance bar (macro_cycle={cycle}): KEEP>={keep:.2f}% stack_stable>={stable:.2f}%.",
             "KEEP'd variants stay de-duped permanently; prior sub-threshold "
             "variants are de-duped only while below the current KEEP bar.",
         ]
         if now_unblocked:
             now_unblocked.sort(key=lambda p: p[1], reverse=True)
-            lines.append(
-                "Re-testable now (prior gain now clears the bar; re-propose if "
-                "still relevant):"
-            )
+            lines.append("Re-testable now (prior gain now clears the bar; re-propose if still relevant):")
             for name, g in now_unblocked[:8]:
                 lines.append(f"  {name}: prior gain {g:+.2f}% >= {keep:.2f}%")
         if still_blocked:
@@ -8256,11 +8391,7 @@ class Coordinator:
         tput = best.get("tput")
         tpot = best.get("tpot_mean_ms")
         tp = int(getattr(state, "tp", 0) or 0)
-        our_tput_per_gpu = (
-            float(tput) / tp
-            if isinstance(tput, (int, float)) and tput > 0 and tp > 0
-            else None
-        )
+        our_tput_per_gpu = float(tput) / tp if isinstance(tput, (int, float)) and tput > 0 and tp > 0 else None
         our_tpot_ms = float(tpot) if isinstance(tpot, (int, float)) and tpot > 0 else None
         conc = int(getattr(state, "conc", 0) or 0) or None
         gap = _research_hints.gap_analysis(
@@ -8293,15 +8424,8 @@ class Coordinator:
             tput = best.get("tput")
             tpot = best.get("tpot_mean_ms")
             tp = int(getattr(state, "tp", 0) or 0)
-            our_tput_per_gpu = (
-                float(tput) / tp
-                if isinstance(tput, (int, float)) and tput > 0 and tp > 0
-                else None
-            )
-            our_tpot_ms = (
-                float(tpot)
-                if isinstance(tpot, (int, float)) and tpot > 0 else None
-            )
+            our_tput_per_gpu = float(tput) / tp if isinstance(tput, (int, float)) and tput > 0 and tp > 0 else None
+            our_tpot_ms = float(tpot) if isinstance(tpot, (int, float)) and tpot > 0 else None
             conc = int(getattr(state, "conc", 0) or 0) or None
             gap = _research_hints.gap_analysis(
                 target,
@@ -8316,7 +8440,9 @@ class Coordinator:
         return str(gap.get("primary_gap") or "").strip() or None
 
     def _recent_proposed_variants(
-        self, *, max_rounds: int = 2,
+        self,
+        *,
+        max_rounds: int = 2,
     ) -> list[dict[str, Any]]:
         """Collect proposal_set rows from the most recent specialist rounds (deduped by name; fail-soft).
 
@@ -8328,7 +8454,8 @@ class Coordinator:
             A name-deduped list of proposal variant dicts.
         """
         rounds = [
-            r for r in (getattr(self.shared_state, "specialist_rounds", []) or [])
+            r
+            for r in (getattr(self.shared_state, "specialist_rounds", []) or [])
             if isinstance(r, dict) and isinstance(r.get("proposal_set"), list)
         ]
         out: list[dict[str, Any]] = []
@@ -8359,13 +8486,18 @@ class Coordinator:
             hints = _research_hints.load_hints(self.session_dir)
             primary_gap = self._current_primary_gap()
             return _research_hints.priors_match_summary(
-                variants, hints, primary_gap=primary_gap,
+                variants,
+                hints,
+                primary_gap=primary_gap,
             )
         except Exception:  # noqa: BLE001 — defensive
             return ""
 
     async def _maybe_autosubmit_specialist_patches(
-        self, *, task: "Task", done_payload: dict[str, Any],
+        self,
+        *,
+        task: "Task",
+        done_payload: dict[str, Any],
     ) -> None:
         """B3: auto-surface a specialist's source patches to the Critic via a synthetic integrate_patch proposal; idempotent per specialist.
 
@@ -8383,6 +8515,7 @@ class Coordinator:
             return
         # B4 guard: resolve patches_written against worktree + workspace; submit only when ≥1 real file exists.
         from ..session_paths import runs_dir as _runs_dir
+
         resolve_bases: list[Path] = []
         if self.session_dir is not None:
             spec_root = _runs_dir(Path(self.session_dir), "specialist", sid)
@@ -8397,7 +8530,8 @@ class Coordinator:
                 existing_patches.append(str(p))
         if not existing_patches:
             await self._record_observation(
-                "coordinator", "observation",
+                "coordinator",
+                "observation",
                 {
                     "kind": "specialist_patch_autosubmit_skipped_no_files",
                     "specialist_task_id": sid,
@@ -8436,7 +8570,9 @@ class Coordinator:
             },
         }
         msg = Message.new(
-            "coordinator", "*", "proposal",
+            "coordinator",
+            "*",
+            "proposal",
             {**propose_payload, "needs_review": True},
             priority=1,
         )
@@ -8449,7 +8585,8 @@ class Coordinator:
             payload=dict(propose_payload),
         )
         await self._record_observation(
-            "coordinator", "observation",
+            "coordinator",
+            "observation",
             {
                 "kind": "specialist_patch_autosubmitted_for_review",
                 "specialist_task_id": sid,
@@ -8462,8 +8599,8 @@ class Coordinator:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
-                "B3: save after specialist patch autosubmit failed for "
-                "task=%s", sid,
+                "B3: save after specialist patch autosubmit failed for task=%s",
+                sid,
             )
 
     def _build_specialist_round_entry(
@@ -8488,10 +8625,7 @@ class Coordinator:
         proposals = done_payload.get("proposal_set") or []
         if not isinstance(proposals, list):
             proposals = []
-        round_id = str(
-            (task.params or {}).get("round_id")
-            or task.task_id
-        )
+        round_id = str((task.params or {}).get("round_id") or task.task_id)
         truncated_from = done_payload.get("proposals_truncated_from")
         from .specialist_domains import normalize_dispatch_tags
 
@@ -8500,30 +8634,26 @@ class Coordinator:
         if not tags:
             tags = normalize_dispatch_tags(task.params or {})
         entry: dict[str, Any] = {
-            "round_id":          round_id,
-            "task_id":           task.task_id,
-            "source":            source or "coordinator",
-            "completed_at":      datetime.now(timezone.utc).isoformat(),
-            "domain":            str(done_payload.get("domain") or ""),
-            "tags":              list(tags),
-            "gap_canonical_id":  str(done_payload.get("gap_canonical_id") or ""),
-            "empty":             bool(done_payload.get("empty"))
-                                  or len(proposals) == 0,
-            "proposals_total":   len(proposals),
-            "proposal_set":      list(proposals),
-            "summary":           str(done_payload.get("summary") or "")[:480],
-            "reason":            str(done_payload.get("reason") or "")[:480],
-            "confidence":        done_payload.get("confidence"),
-            "new_findings":      list(done_payload.get("new_findings") or []),
-            "residual_questions": list(
-                done_payload.get("residual_questions") or []
-            ),
+            "round_id": round_id,
+            "task_id": task.task_id,
+            "source": source or "coordinator",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "domain": str(done_payload.get("domain") or ""),
+            "tags": list(tags),
+            "gap_canonical_id": str(done_payload.get("gap_canonical_id") or ""),
+            "empty": bool(done_payload.get("empty")) or len(proposals) == 0,
+            "proposals_total": len(proposals),
+            "proposal_set": list(proposals),
+            "summary": str(done_payload.get("summary") or "")[:480],
+            "reason": str(done_payload.get("reason") or "")[:480],
+            "confidence": done_payload.get("confidence"),
+            "new_findings": list(done_payload.get("new_findings") or []),
+            "residual_questions": list(done_payload.get("residual_questions") or []),
         }
         gpu_ids = done_payload.get("allocated_gpu_ids") or []
         if isinstance(gpu_ids, list) and gpu_ids:
             entry["allocated_gpu_ids"] = [
-                int(g) for g in gpu_ids
-                if isinstance(g, (int, str)) and str(g).strip().lstrip("-").isdigit()
+                int(g) for g in gpu_ids if isinstance(g, (int, str)) and str(g).strip().lstrip("-").isdigit()
             ]
         if isinstance(truncated_from, int) and truncated_from > len(proposals):
             entry["proposals_truncated_from"] = truncated_from
@@ -8568,16 +8698,15 @@ class Coordinator:
             # persist the coalesced tail anyway.
             terminal = status in ("END", "ERROR")
             now = time.monotonic()
-            if terminal or (
-                now - self._lifecycle_last_save
-                >= self._lifecycle_save_min_interval_s
-            ):
+            if terminal or (now - self._lifecycle_last_save >= self._lifecycle_save_min_interval_s):
                 self.shared_state.save(self.session_dir)
                 self._lifecycle_last_save = now
         except Exception:  # noqa: BLE001 — defensive
             log.debug(
                 "Coordinator: lifecycle emit failed (step=%s status=%s)",
-                step, status, exc_info=True,
+                step,
+                status,
+                exc_info=True,
             )
 
     async def _handle_request(self, source: str, intent: Intent) -> None:
@@ -8601,27 +8730,36 @@ class Coordinator:
             return
         # Always record the request on the bus so the kernel reactor (and tests/replay) can see it.
         request_msg = Message.new(
-            source, target_agent, "request", dict(intent.payload), priority=1,
+            source,
+            target_agent,
+            "request",
+            dict(intent.payload),
+            priority=1,
         )
         await self.bus.append_and_seq(request_msg)
 
         # Safety net: auto-reject when the target agent was removed (e.g. --no-kernel) so Orch doesn't hang.
         if target_agent not in self.role_registry:
-            await self.bus.append_and_seq(Message.new(
-                target_agent, source, "response",
-                {
-                    "in_reply_to": request_msg.msg_id,
-                    "kind": f"{kind}_done",
-                    "status": "failed",
-                    "result": {
+            await self.bus.append_and_seq(
+                Message.new(
+                    target_agent,
+                    source,
+                    "response",
+                    {
+                        "in_reply_to": request_msg.msg_id,
+                        "kind": f"{kind}_done",
                         "status": "failed",
-                        "error_class": "agent_disabled",
-                        "error": f"{target_agent} agent is disabled for this session",
+                        "result": {
+                            "status": "failed",
+                            "error_class": "agent_disabled",
+                            "error": f"{target_agent} agent is disabled for this session",
+                        },
+                        "source": "coordinator_auto_reject",
                     },
-                    "source": "coordinator_auto_reject",
-                },
-                in_reply_to=request_msg.msg_id, priority=1,
-            ))
+                    in_reply_to=request_msg.msg_id,
+                    priority=1,
+                )
+            )
             return
 
         # Programmatic shortcut: run a registered kernel handler inline + emit RESPONSE so a deterministic shell-tool invocation doesn't burn an LLM turn (see kernel_request_handlers.py).
@@ -8636,9 +8774,7 @@ class Coordinator:
                     and self.shared_state.last_trace_analyze
                     and not merged_payload.get("candidates_path")
                 ):
-                    cached_candidates_path = self.shared_state.last_trace_analyze.get(
-                        "candidates_path"
-                    )
+                    cached_candidates_path = self.shared_state.last_trace_analyze.get("candidates_path")
                     if cached_candidates_path:
                         merged_payload["candidates_path"] = cached_candidates_path
                 # Commit 1cd9f7d's roofline_json auto-inject is omitted here: Roofline-v2 caches under last_trace_analyze instead.
@@ -8660,9 +8796,7 @@ class Coordinator:
                     )
                 else:
                     rejected = (
-                        self.shared_state.find_rejected_kernel_patch(merged_payload)
-                        if kind == "integrate"
-                        else None
+                        self.shared_state.find_rejected_kernel_patch(merged_payload) if kind == "integrate" else None
                     )
                     if rejected is not None:
                         result = {
@@ -8691,13 +8825,8 @@ class Coordinator:
                         )
                     else:
                         # Inject base_tput from current_best.tput when an integrate request omits it (else 2nd/3rd multi-KEEP integrate fails base_tput > 0); operator value wins.
-                        if (
-                            kind == "integrate"
-                            and not merged_payload.get("base_tput")
-                        ):
-                            cb_tput = (
-                                self.shared_state.current_best or {}
-                            ).get("tput")
+                        if kind == "integrate" and not merged_payload.get("base_tput"):
+                            cb_tput = (self.shared_state.current_best or {}).get("tput")
                             if isinstance(cb_tput, (int, float)) and cb_tput > 0:
                                 merged_payload["base_tput"] = float(cb_tput)
 
@@ -8706,9 +8835,7 @@ class Coordinator:
                             "session_dir": self.session_dir,
                         }
                         if kind == "run_optimization":
-                            handler_kwargs["record_partial"] = (
-                                self._record_kernel_opt_partial
-                            )
+                            handler_kwargs["record_partial"] = self._record_kernel_opt_partial
                         # #266: bracket the programmatic kernel step with
                         # START / END lifecycle events so operators see the
                         # step ran, how long it took, and where its outputs
@@ -8730,26 +8857,23 @@ class Coordinator:
                         except Exception as exc:  # noqa: BLE001
                             log.exception(
                                 "kernel_request_handler[%s] crashed for source=%s",
-                                kind, source,
+                                kind,
+                                source,
                             )
                             result = {
                                 "status": "failed",
                                 "error_class": "handler_exception",
                                 "error": repr(exc),
                             }
-                        _lc_status = (
-                            "ERROR"
-                            if str(result.get("status", "")).lower()
-                            in ("failed", "error")
-                            else "END"
-                        )
+                        _lc_status = "ERROR" if str(result.get("status", "")).lower() in ("failed", "error") else "END"
                         _lc_detail = " ".join(
-                            str(p) for p in (
+                            str(p)
+                            for p in (
                                 result.get("decision"),
                                 result.get("status"),
-                                f"kernel={result.get('kernel_id')}"
-                                if result.get("kernel_id") else "",
-                            ) if p
+                                f"kernel={result.get('kernel_id')}" if result.get("kernel_id") else "",
+                            )
+                            if p
                         )
                         self._emit_lifecycle(
                             step=kind,
@@ -8758,31 +8882,30 @@ class Coordinator:
                             detail=_lc_detail,
                             duration_s=time.monotonic() - _lc_t0,
                         )
-                await self.bus.append_and_seq(Message.new(
-                    "kernel", source, "response",
-                    {
-                        "in_reply_to": request_msg.msg_id,
-                        "kind": f"{kind}_done",
-                        "status": result.get("status", "ok"),
-                        "result": result,
-                        "source": cache_hit_source or "programmatic_handler",
-                    },
-                    in_reply_to=request_msg.msg_id, priority=1,
-                ))
+                await self.bus.append_and_seq(
+                    Message.new(
+                        "kernel",
+                        source,
+                        "response",
+                        {
+                            "in_reply_to": request_msg.msg_id,
+                            "kind": f"{kind}_done",
+                            "status": result.get("status", "ok"),
+                            "result": result,
+                            "source": cache_hit_source or "programmatic_handler",
+                        },
+                        in_reply_to=request_msg.msg_id,
+                        priority=1,
+                    )
+                )
                 # Cache trace_analyze output (successful runs only) to short-circuit identical next-tick requests.
-                if (
-                    kind == "trace_analyze"
-                    and cache_hit_source is None
-                    and result.get("status") in ("ok", "succeeded")
-                ):
+                if kind == "trace_analyze" and cache_hit_source is None and result.get("status") in ("ok", "succeeded"):
                     self.shared_state.record_trace_analyze(merged_payload, result)
                     self.shared_state.save(self.session_dir)
                 # Mirror kernel-opt outcomes into SharedState so Orch sees decision/speedup next tick.
                 if kind == "run_optimization":
                     # Batch mode already streamed each sub-result; re-recording would double-count. Cache hits lack batch_mode.
-                    if not bool(
-                        isinstance(result, dict) and result.get("batch_mode")
-                    ):
+                    if not bool(isinstance(result, dict) and result.get("batch_mode")):
                         self.shared_state.record_kernel_opt(result)
                     self.shared_state.save(self.session_dir)
                     # Auto-enqueue integrate for KEEP'd kernels that haven't
@@ -8796,12 +8919,8 @@ class Coordinator:
                         self.shared_state.record_kernel_integrate_result(result)
                     decision = str(result.get("decision", "")).upper()
                     if decision == "KEEP":
-                        if isinstance(result, dict) and not result.get(
-                            "gap_canonical_id"
-                        ):
-                            payload_gap = str(
-                                merged_payload.get("gap_canonical_id") or ""
-                            ).strip()
+                        if isinstance(result, dict) and not result.get("gap_canonical_id"):
+                            payload_gap = str(merged_payload.get("gap_canonical_id") or "").strip()
                             if payload_gap:
                                 result["gap_canonical_id"] = payload_gap
                         await self._record_integrate_keep(result)
@@ -8845,9 +8964,7 @@ class Coordinator:
             "status": "ok",
             "candidates_path": candidates_path,
             "hot_kernels_top15": cached.get("hot_kernels_top15", []),
-            "reusable_native_kernel_ids": cached.get(
-                "reusable_native_kernel_ids", []
-            ),
+            "reusable_native_kernel_ids": cached.get("reusable_native_kernel_ids", []),
             "cached_at": cached.get("ts"),
             "note": "served from shared_state.last_trace_analyze cache",
         }
@@ -8867,10 +8984,16 @@ class Coordinator:
         # Locate the original requester so we can address the response.
         original = await self.bus.lookup_by_id(in_reply_to)
         target = original.from_agent if original else "*"
-        await self.bus.append_and_seq(Message.new(
-            source, target, "response",
-            dict(intent.payload), in_reply_to=in_reply_to, priority=1,
-        ))
+        await self.bus.append_and_seq(
+            Message.new(
+                source,
+                target,
+                "response",
+                dict(intent.payload),
+                in_reply_to=in_reply_to,
+                priority=1,
+            )
+        )
 
     # Robustness scheduling-police
     async def _handle_kill_task(self, source: str, intent: Intent) -> None:
@@ -8889,19 +9012,25 @@ class Coordinator:
             task = await self.tasks.get(task_id)
         except Exception:  # noqa: BLE001 — TaskNotFound
             await self._record_observation(
-                "coordinator", "observation",
+                "coordinator",
+                "observation",
                 {"kind": "kill_task_unknown", "task_id": task_id, "source": source},
             )
             return
         if task.state in ("queued", "running"):
             await self.tasks.transition(
-                task_id, "cancelled",
+                task_id,
+                "cancelled",
                 evidence={"reason": intent.payload.get("reason"), "by": source},
             )
-        await self.bus.append_and_seq(Message.new(
-            source, "*", "kill",
-            {"task_id": task_id, "reason": intent.payload.get("reason")},
-        ))
+        await self.bus.append_and_seq(
+            Message.new(
+                source,
+                "*",
+                "kill",
+                {"task_id": task_id, "reason": intent.payload.get("reason")},
+            )
+        )
 
     async def _handle_prune_branch(self, source: str, intent: Intent) -> None:
         """Prune an action family and cancel its in-flight tasks.
@@ -8918,12 +9047,19 @@ class Coordinator:
         if self.shared_state.add_pruned_family(family):
             self.shared_state.save(self.session_dir)
         cancelled = await self.tasks.cancel_family([family])
-        await self.bus.append_and_seq(Message.new(
-            source, "*", "event",
-            {"kind": "prune_branch", "family": family,
-             "cancelled_task_ids": cancelled,
-             "reason": intent.payload.get("reason")},
-        ))
+        await self.bus.append_and_seq(
+            Message.new(
+                source,
+                "*",
+                "event",
+                {
+                    "kind": "prune_branch",
+                    "family": family,
+                    "cancelled_task_ids": cancelled,
+                    "reason": intent.payload.get("reason"),
+                },
+            )
+        )
 
     async def _handle_force_dispatch(self, source: str, intent: Intent) -> None:
         """Handle a ``force_dispatch`` intent by emitting an event.
@@ -8936,11 +9072,18 @@ class Coordinator:
             intent: The ``force_dispatch`` intent carrying ``task_id``.
         """
         # P0-3 stub: emit an event; real dispatcher reordering lands in P0-5 with the priority queue.
-        await self.bus.append_and_seq(Message.new(
-            source, "*", "event",
-            {"kind": "force_dispatch", "task_id": intent.payload["task_id"],
-             "reason": intent.payload.get("reason")},
-        ))
+        await self.bus.append_and_seq(
+            Message.new(
+                source,
+                "*",
+                "event",
+                {
+                    "kind": "force_dispatch",
+                    "task_id": intent.payload["task_id"],
+                    "reason": intent.payload.get("reason"),
+                },
+            )
+        )
 
     async def _handle_escalate_strategy_change(self, source: str, intent: Intent) -> None:
         """Process ``escalate_strategy_change`` (KB_design §3.8 §7.3 + §3.13 M7 §5.3); broadcasts strategy_change, acts on closed-vocab hints, drops unknown (Inv-8.2).
@@ -8952,10 +9095,15 @@ class Coordinator:
         """
         payload = dict(intent.payload or {})
         # Always emit the broadcast first (back-compat with legacy contract tests).
-        await self.bus.append_and_seq(Message.new(
-            source, "*", "strategy_change",
-            payload, priority=0,
-        ))
+        await self.bus.append_and_seq(
+            Message.new(
+                source,
+                "*",
+                "strategy_change",
+                payload,
+                priority=0,
+            )
+        )
         from .phase_state import (
             ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
             ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
@@ -8966,6 +9114,7 @@ class Coordinator:
             is_pause_specialist_hint,
             is_valid_escalate_hint,
         )
+
         hint = str(payload.get("next_action_hint") or "").strip()
         if not hint or not is_valid_escalate_hint(hint):
             return
@@ -8973,7 +9122,8 @@ class Coordinator:
         now_ts = datetime.now(timezone.utc).isoformat()
         if hint == ESCALATE_HINT_EXTEND_EXPLORE_BUDGET:
             self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
-                self.shared_state.phase_budget_pct, phase=PHASE_EXPLORE,
+                self.shared_state.phase_budget_pct,
+                phase=PHASE_EXPLORE,
             )
             self.shared_state.last_consumed_escalate_hint = hint
             self.shared_state.last_consumed_escalate_hint_ts = now_ts
@@ -8981,7 +9131,8 @@ class Coordinator:
             return
         if hint == ESCALATE_HINT_EXTEND_KERNEL_BUDGET:
             self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
-                self.shared_state.phase_budget_pct, phase=PHASE_KERNEL,
+                self.shared_state.phase_budget_pct,
+                phase=PHASE_KERNEL,
             )
             self.shared_state.last_consumed_escalate_hint = hint
             self.shared_state.last_consumed_escalate_hint_ts = now_ts
@@ -8989,9 +9140,10 @@ class Coordinator:
             return
         # pause_specialist_<domain>: bump the per-domain empty-streak so the next EXPLORE round skips it.
         if is_pause_specialist_hint(hint):
-            domain = hint[len(ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX):]
+            domain = hint[len(ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX) :]
             self.shared_state.bump_specialist_domain_empty_streak(
-                domain, empty=True,
+                domain,
+                empty=True,
             )
             self.shared_state.last_consumed_escalate_hint = hint
             self.shared_state.last_consumed_escalate_hint_ts = now_ts
@@ -9014,14 +9166,23 @@ class Coordinator:
                 ``topic`` / ``to`` plus arbitrary message fields.
         """
         topic = intent.payload.get("topic", "observation")
-        if topic not in __import__("inference_optimizer.orchestrator.message_bus",
-                                    fromlist=["TOPIC_ALLOWLIST"]).TOPIC_ALLOWLIST:
+        if (
+            topic
+            not in __import__(
+                "inference_optimizer.orchestrator.message_bus", fromlist=["TOPIC_ALLOWLIST"]
+            ).TOPIC_ALLOWLIST
+        ):
             # Soft-degrade unknown topic per DESIGN §13.2.
             topic = "observation"
         to_agent = intent.payload.get("to") or "*"
-        await self.bus.append_and_seq(Message.new(
-            source, to_agent, topic, {k: v for k, v in intent.payload.items() if k != "to"},
-        ))
+        await self.bus.append_and_seq(
+            Message.new(
+                source,
+                to_agent,
+                topic,
+                {k: v for k, v in intent.payload.items() if k != "to"},
+            )
+        )
 
     async def _handle_alert(self, source: str, intent: Intent) -> None:
         """Broadcast an alert message, prioritized by severity.
@@ -9035,9 +9196,15 @@ class Coordinator:
                 ``severity`` plus alert detail.
         """
         prio = 0 if intent.payload.get("severity") == "high" else 1
-        await self.bus.append_and_seq(Message.new(
-            source, "*", "alert", dict(intent.payload), priority=prio,
-        ))
+        await self.bus.append_and_seq(
+            Message.new(
+                source,
+                "*",
+                "alert",
+                dict(intent.payload),
+                priority=prio,
+            )
+        )
 
     async def _handle_update_state(self, source: str, intent: Intent) -> None:
         """Apply agent-requested SharedState changes and report the result.
@@ -9054,15 +9221,23 @@ class Coordinator:
         # Apply to persistent SharedState (PolicyGate already enforced that
         # the source role can't write CORE_STATE_FIELDS unless allowed).
         applied = self.shared_state.apply_changes(
-            intent.payload["changes"], allow_core=False,
+            intent.payload["changes"],
+            allow_core=False,
         )
         if applied:
             self.shared_state.save(self.session_dir)
-        await self.bus.append_and_seq(Message.new(
-            source, "*", "observation",
-            {"kind": "update_state", "changes": applied,
-             "rejected": sorted(set(intent.payload["changes"]) - set(applied))},
-        ))
+        await self.bus.append_and_seq(
+            Message.new(
+                source,
+                "*",
+                "observation",
+                {
+                    "kind": "update_state",
+                    "changes": applied,
+                    "rejected": sorted(set(intent.payload["changes"]) - set(applied)),
+                },
+            )
+        )
 
     # Bookkeeping
     async def _record_policy_denied(
@@ -9086,20 +9261,22 @@ class Coordinator:
             action_name (str | None): Explicit action name override; falls back
                 to ``intent.payload['action_name']``.
         """
-        await self.bus.append_and_seq(Message.new(
-            "coordinator", source, "observation",
-            {
-                "kind": "policy_denied",
-                "intent_type": intent.type.value,
-                "rule": denied.rule,
-                "hint": denied.hint,
-                "reason": str(denied),
-            },
-            priority=0,
-        ))
-        resolved_action = action_name or str(
-            (intent.payload or {}).get("action_name") or ""
+        await self.bus.append_and_seq(
+            Message.new(
+                "coordinator",
+                source,
+                "observation",
+                {
+                    "kind": "policy_denied",
+                    "intent_type": intent.type.value,
+                    "rule": denied.rule,
+                    "hint": denied.hint,
+                    "reason": str(denied),
+                },
+                priority=0,
+            )
         )
+        resolved_action = action_name or str((intent.payload or {}).get("action_name") or "")
         # Streak counter is a fact for LLM self-correction only; system no longer auto-prunes or stops on it (long-run continuity over loop stop-loss).
         self.shared_state.record_policy_denial(
             action_name=resolved_action,
@@ -9170,17 +9347,22 @@ class Coordinator:
             log.info(
                 "auto-integrate: dispatching integrate for KEEP'd kernel %s "
                 "(IR-3 mandatory integration; recorded_attempts=%d)",
-                kid, recorded,
+                kid,
+                recorded,
             )
-            await self.bus.append_and_seq(Message.new(
-                "orchestration", "kernel", "request",
-                {
-                    "kind": "integrate",
-                    "kernel_id": kid,
-                    "source": "auto_integrate_after_kernel_opt",
-                },
-                priority=2,
-            ))
+            await self.bus.append_and_seq(
+                Message.new(
+                    "orchestration",
+                    "kernel",
+                    "request",
+                    {
+                        "kind": "integrate",
+                        "kernel_id": kid,
+                        "source": "auto_integrate_after_kernel_opt",
+                    },
+                    priority=2,
+                )
+            )
             self._auto_integrate_attempt_marks[kid] = recorded
 
     def _record_kernel_opt_partial(self, result: dict[str, Any]) -> None:
@@ -9220,17 +9402,10 @@ class Coordinator:
         cb = self.shared_state.current_best or {}
         # Read result via the compat helper (handles legacy extra_sglang_args); cb is migrated at load time.
         extra_args = (
-            read_extra_server_args(result)
-            or (
-                str(cb.get("extra_server_args") or "")
-                if isinstance(cb, dict) else ""
-            )
+            read_extra_server_args(result) or (str(cb.get("extra_server_args") or "") if isinstance(cb, dict) else "")
         ).strip()
         apply_result = result.get("apply_result") or {}
-        backup_manifest = (
-            apply_result.get("manifest_path")
-            if isinstance(apply_result, dict) else None
-        )
+        backup_manifest = apply_result.get("manifest_path") if isinstance(apply_result, dict) else None
         if not backup_manifest and isinstance(apply_result, dict):
             stack_applies = apply_result.get("stack_apply_results")
             if isinstance(stack_applies, list):
@@ -9251,9 +9426,7 @@ class Coordinator:
         }
         stack_kernel_ids = result.get("stack_kernel_ids")
         if isinstance(stack_kernel_ids, list) and stack_kernel_ids:
-            entry["stack_kernel_ids"] = [
-                str(kid) for kid in stack_kernel_ids if str(kid)
-            ]
+            entry["stack_kernel_ids"] = [str(kid) for kid in stack_kernel_ids if str(kid)]
         integrate_gap_cid = str(result.get("gap_canonical_id") or "").strip()
         if integrate_gap_cid:
             entry["gap_canonical_id"] = integrate_gap_cid
@@ -9287,21 +9460,15 @@ class Coordinator:
         }
         if self.shared_state.baseline_tput > 0:
             self.shared_state.cumulative_gain = (
-                (float(new_tput) - self.shared_state.baseline_tput)
-                / self.shared_state.baseline_tput * 100.0
+                (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
             )
             # Integrate KEEP is already rebench-validated: promote into cumulative_gain_validated + watermark.
             validated_gain = (
-                (float(new_tput) - self.shared_state.baseline_tput)
-                / self.shared_state.baseline_tput * 100.0
+                (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
             )
             self.shared_state.cumulative_gain_validated = float(validated_gain)
-            self.shared_state.cumulative_gain_validated_ts = (
-                datetime.now(timezone.utc).isoformat()
-            )
-            self.shared_state.cumulative_gain_validated_stack_len = len(
-                self.shared_state.optimization_stack
-            )
+            self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
             await self._maybe_enqueue_watermark_roofline(
                 reason="integrate_keep_watermark",
             )
@@ -9335,7 +9502,9 @@ class Coordinator:
         return result.get("status") != "failed"
 
     def _record_intervention_for_task(
-        self, task: "Task", result: Any,
+        self,
+        task: "Task",
+        result: Any,
     ) -> None:
         """PR-A8: log a completed task's change_type into SharedState.intervention_mix (explore → config; integrate_patch → code_patch_attempt or code_patch when kept). Best-effort.
 
@@ -9389,7 +9558,9 @@ class Coordinator:
             )
 
     async def _handle_unpromotable_result(
-        self, task: Task, result: dict[str, Any] | None,
+        self,
+        task: Task,
+        result: dict[str, Any] | None,
     ) -> None:
         """Record a failed / unpromotable task result into SharedState: append to last_action_failures (+ a failed attempts row for _AUDIT_ACTIONS); keep baseline failure_streak/stop_reason logic intact.
 
@@ -9405,9 +9576,7 @@ class Coordinator:
             audit_extras: dict[str, Any] = {}
             # Stamp baseline-params fingerprint so the self-loop denial helper detects "same params failed twice".
             if task.kind == "baseline":
-                audit_extras["fingerprint"] = _baseline_params_fingerprint(
-                    task.params
-                )
+                audit_extras["fingerprint"] = _baseline_params_fingerprint(task.params)
             self.shared_state.record_action_attempt(
                 action=task.kind,
                 task_id=task.task_id,
@@ -9445,10 +9614,7 @@ class Coordinator:
                     self.shared_state.set_stop_reason("baseline_failed")
             # One-shot eager fallback: a (non-OOM) cuda-graph capture failure is
             # often recoverable by disabling cuda-graph capture. Arm it once.
-            if (
-                err_class == "cuda_graph_capture_failed"
-                and not self.shared_state.baseline_eager_fallback
-            ):
+            if err_class == "cuda_graph_capture_failed" and not self.shared_state.baseline_eager_fallback:
                 self.shared_state.baseline_eager_fallback = True
                 log.warning(
                     "baseline %s hit cuda-graph capture failure; arming "
@@ -9469,10 +9635,7 @@ class Coordinator:
         if task.kind == "roofline":
             if hasattr(self.shared_state, "roofline_failure_streak"):
                 self.shared_state.roofline_failure_streak += 1
-            if (
-                self.shared_state.auto_roofline_pending_task_id
-                == task.task_id
-            ):
+            if self.shared_state.auto_roofline_pending_task_id == task.task_id:
                 self.shared_state.auto_roofline_pending_task_id = ""
             any_changed = True
             log.warning(
@@ -9488,9 +9651,14 @@ class Coordinator:
         if any_changed:
             self.shared_state.save(self.session_dir)
         if baseline_event_payload is not None:
-            await self.bus.append_and_seq(Message.new(
-                "coordinator", "*", "event", baseline_event_payload,
-            ))
+            await self.bus.append_and_seq(
+                Message.new(
+                    "coordinator",
+                    "*",
+                    "event",
+                    baseline_event_payload,
+                )
+            )
 
     async def _pump_dispatcher_once(self) -> None:
         """Dispatch queued tasks respecting per-lane capacity, re-scanning for
@@ -9544,7 +9712,9 @@ class Coordinator:
                 await self._reap_dispatched_task(task, maybe_result, gpu_lease)
 
     async def _spawn_fitting_queued(
-        self, *, exclude_ids: set[str],
+        self,
+        *,
+        exclude_ids: set[str],
     ) -> list[tuple[Task, "asyncio.Task[SubAgentResult]", Any]]:
         """Spawn every currently lane-fitting queued task not already in flight.
 
@@ -9578,9 +9748,9 @@ class Coordinator:
                     expanded = _expand_lanes(lanes_needed)
                 except ValueError:
                     log.warning(
-                        "dispatcher: task %s has unknown lane in %r; "
-                        "skipping until resolved",
-                        task.task_id, lanes_needed,
+                        "dispatcher: task %s has unknown lane in %r; skipping until resolved",
+                        task.task_id,
+                        lanes_needed,
                     )
                     continue
                 if not self._lanes_fit(expanded, holders, capacities):
@@ -9646,25 +9816,31 @@ class Coordinator:
                             await self.locks.release(lease)
                             for lane in lease.lanes:
                                 holders[lane] = max(
-                                    0, int(holders.get(lane, 0)) - 1,
+                                    0,
+                                    int(holders.get(lane, 0)) - 1,
                                 )
                         continue
                     extra_context["gpu_ids"] = list(gpu_lease.gpu_ids)
-            spawned.append((
-                task,
-                asyncio.create_task(
-                    self.sub.run_task(
-                        task,
-                        prebound_lease=lease,
-                        extra_context=extra_context,
+            spawned.append(
+                (
+                    task,
+                    asyncio.create_task(
+                        self.sub.run_task(
+                            task,
+                            prebound_lease=lease,
+                            extra_context=extra_context,
+                        ),
                     ),
-                ),
-                gpu_lease,
-            ))
+                    gpu_lease,
+                )
+            )
         return spawned
 
     async def _reap_dispatched_task(
-        self, task: Task, maybe_result: Any, gpu_lease: Any,
+        self,
+        task: Task,
+        maybe_result: Any,
+        gpu_lease: Any,
     ) -> None:
         """Run completion bookkeeping for one finished dispatched task.
 
@@ -9680,20 +9856,22 @@ class Coordinator:
             gpu_lease: The GPU specialist lease to release, or ``None``.
         """
         for (task, _, gpu_lease), maybe_result in zip(
-            [(task, None, gpu_lease)], [maybe_result],
+            [(task, None, gpu_lease)],
+            [maybe_result],
         ):
             if gpu_lease is not None:
                 try:
                     await self.gpu_specialist_pool.release(gpu_lease)
                 except Exception:  # noqa: BLE001 — defensive cleanup
                     log.exception(
-                        "dispatcher: failed to release GPU specialist lease "
-                        "for task=%s", task.task_id,
+                        "dispatcher: failed to release GPU specialist lease for task=%s",
+                        task.task_id,
                     )
             if isinstance(maybe_result, BaseException):
                 log.exception(
                     "dispatcher: spawned task %s raised: %r",
-                    task.task_id, maybe_result,
+                    task.task_id,
+                    maybe_result,
                 )
                 continue
             result: SubAgentResult = maybe_result
@@ -9712,12 +9890,20 @@ class Coordinator:
                         task.task_id,
                     )
             try:
-                await self.bus.append_and_seq(Message.new(
-                    "coordinator", "*", "delegated_result",
-                    {"task_id": task.task_id, "kind": task.kind,
-                     "state": result.state, "result": result.result,
-                     "error": result.error},
-                ))
+                await self.bus.append_and_seq(
+                    Message.new(
+                        "coordinator",
+                        "*",
+                        "delegated_result",
+                        {
+                            "task_id": task.task_id,
+                            "kind": task.kind,
+                            "state": result.state,
+                            "result": result.result,
+                            "error": result.error,
+                        },
+                    )
+                )
             except Exception as exc:  # noqa: BLE001
                 log.exception(
                     "dispatcher: failed to append delegated_result for task=%s",
@@ -9737,9 +9923,7 @@ class Coordinator:
                         await self._record_specialist_result(
                             task=task,
                             done_payload=done_payload,
-                            source=(
-                                f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"
-                            ),
+                            source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
                         )
                     except Exception:  # noqa: BLE001 — defensive
                         log.exception(
@@ -9769,34 +9953,32 @@ class Coordinator:
                         "framework_pr_authoring_enabled",
                         False,
                     )
-                    and (self.shared_state.phase or "").strip().upper()
-                    == _phase_state.PHASE_FRAMEWORK_PR
+                    and (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_PR
                 ):
                     try:
                         self._record_framework_pr_authored_outcome(
-                            task=task, result=result,
+                            task=task,
+                            result=result,
                         )
                     except Exception:  # noqa: BLE001 — defensive
                         log.exception(
-                            "FRAMEWORK_PR authored-outcome bridge failed "
-                            "for task=%s", task.task_id,
+                            "FRAMEWORK_PR authored-outcome bridge failed for task=%s",
+                            task.task_id,
                         )
             # Auto-promote succeeded results into CORE_STATE_FIELDS (Coordinator-only writer; DESIGN §14.5/§17.2); promotion needs task-specific invariants beyond no-throw.
-            kept = (
-                result.state == "succeeded"
-                and self._is_promotable_result(task.kind, result.result or {})
-            )
+            kept = result.state == "succeeded" and self._is_promotable_result(task.kind, result.result or {})
             try:
                 if kept:
                     await self._promote_to_shared_state(
-                        task.kind, result.result, task=task,
+                        task.kind,
+                        result.result,
+                        task=task,
                     )
                 else:
                     await self._handle_unpromotable_result(task, result.result)
             except Exception as exc:  # noqa: BLE001
                 log.exception(
-                    "dispatcher: promotion/unpromotable handling failed "
-                    "for task=%s",
+                    "dispatcher: promotion/unpromotable handling failed for task=%s",
                     task.task_id,
                 )
                 self._record_coordinator_exception(
@@ -9821,24 +10003,23 @@ class Coordinator:
                     continue
             # explore-round gap update: append per-variant KEEP/REVERT to the gap, then re-run the global refresh.
             if task.kind == "explore":
-                result_dict = (
-                    result.result if isinstance(result.result, dict) else {}
-                )
+                result_dict = result.result if isinstance(result.result, dict) else {}
                 try:
                     self._record_explore_round_gaps(
-                        task=task, result=result_dict,
+                        task=task,
+                        result=result_dict,
                     )
                 except Exception:  # noqa: BLE001 — defensive
                     log.exception(
-                        "gaps refresh: explore-round update failed for "
-                        "task=%s", task.task_id,
+                        "gaps refresh: explore-round update failed for task=%s",
+                        task.task_id,
                     )
                 try:
                     await self._refresh_gaps(reason="explore_round")
                 except Exception:  # noqa: BLE001 — defensive
                     log.exception(
-                        "gaps refresh: _refresh_gaps after explore failed "
-                        "for task=%s", task.task_id,
+                        "gaps refresh: _refresh_gaps after explore failed for task=%s",
+                        task.task_id,
                     )
 
     @staticmethod
@@ -9875,10 +10056,7 @@ class Coordinator:
             The hyperloom-local session id (cortex_session_id when set, else
             ``session_dir.name``).
         """
-        return (
-            str(getattr(self.shared_state, "cortex_session_id", "") or "")
-            or self.session_dir.name
-        )
+        return str(getattr(self.shared_state, "cortex_session_id", "") or "") or self.session_dir.name
 
     async def _fact_write_hook(
         self,
@@ -9899,11 +10077,7 @@ class Coordinator:
             result_dict = {}
         source_session_id = self._source_session_id()
         per_variant = result_dict.get("per_variant_outcomes")
-        if (
-            task.kind == "explore"
-            and isinstance(per_variant, list)
-            and per_variant
-        ):
+        if task.kind == "explore" and isinstance(per_variant, list) and per_variant:
             for vo in per_variant:
                 try:
                     self._record_fact_per_variant(
@@ -9913,7 +10087,8 @@ class Coordinator:
                     )
                 except Exception:  # noqa: BLE001 — defensive
                     log.exception(
-                        "fact-write per-variant failed (task=%s)", task.task_id,
+                        "fact-write per-variant failed (task=%s)",
+                        task.task_id,
                     )
         else:
             try:
@@ -9925,16 +10100,17 @@ class Coordinator:
                 )
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
-                    "fact-write per-task failed (task=%s)", task.task_id,
+                    "fact-write per-task failed (task=%s)",
+                    task.task_id,
                 )
         try:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive; never crash on save
             log.exception("fact-write SharedState.save failed")
 
-
     # Fact-write surface — journal + direct KB lesson/pitfall/recipe writes (the fact side of KB integration).
     PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0  # gain_pct ≤ this → pitfall
+
     def _ensure_journal(self) -> Journal:
         """Lazy-instantiate the per-session :class:`Journal` (load_or_create reads an existing file on resume).
 
@@ -9948,8 +10124,8 @@ class Coordinator:
             self._journal = Journal.load_or_create(
                 self.session_dir,
                 session_id=str(getattr(ss, "cortex_session_id", "") or "")
-                           or str(getattr(ss, "session_id", "") or "")
-                           or self.session_dir.name,
+                or str(getattr(ss, "session_id", "") or "")
+                or self.session_dir.name,
                 model=str(getattr(ss, "model_name", "") or ""),
                 hardware=str(getattr(ss, "gpu_type", "") or ""),
                 framework=str(getattr(ss, "framework", "") or ""),
@@ -9957,13 +10133,12 @@ class Coordinator:
             )
         else:
             # Backfill baseline once the baseline executor finishes.
-            existing.update_baseline(
-                float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0)
-            )
+            existing.update_baseline(float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0))
         return self._journal
 
     def _pitfall_severity_for(
-        self, result_dict: dict[str, Any] | None,
+        self,
+        result_dict: dict[str, Any] | None,
     ) -> str | None:
         """Decide whether a failed result warrants a pitfall row (Threshold-B): crash/oom/hang → SEVERITY_CRASH; gain_pct ≤ -5% → SEVERITY_REGRESS; else None.
 
@@ -10036,21 +10211,23 @@ class Coordinator:
             reason = None
         else:
             outcome = OUTCOME_REVERT
-            error_class = (str(result_dict.get("error_class") or "") or None)
-            reason = (str(result_dict.get("reason") or "") or None)
-        journal.append_entry(JournalEntry(
-            phase=self._journal_entry_phase(),
-            iter=int(self.shared_state.tick or 0),
-            kind=kind,
-            change=change,
-            outcome=outcome,
-            gain_pct=gain_pct,
-            throughput_after=throughput_after,
-            error_class=error_class,
-            reason=reason,
-            task_id=task.task_id,
-            tick=int(self.shared_state.tick or 0),
-        ))
+            error_class = str(result_dict.get("error_class") or "") or None
+            reason = str(result_dict.get("reason") or "") or None
+        journal.append_entry(
+            JournalEntry(
+                phase=self._journal_entry_phase(),
+                iter=int(self.shared_state.tick or 0),
+                kind=kind,
+                change=change,
+                outcome=outcome,
+                gain_pct=gain_pct,
+                throughput_after=throughput_after,
+                error_class=error_class,
+                reason=reason,
+                task_id=task.task_id,
+                tick=int(self.shared_state.tick or 0),
+            )
+        )
 
         if self.cortex_kb is None:
             return
@@ -10065,7 +10242,9 @@ class Coordinator:
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
         if kept and gain_pct is not None and gain_pct > 0:
             statement = self._build_statement(
-                change=change, gain_pct=gain_pct, kind="lesson",
+                change=change,
+                gain_pct=gain_pct,
+                kind="lesson",
             )
             impact = self._build_measured_impact(
                 gain_pct=gain_pct,
@@ -10086,18 +10265,18 @@ class Coordinator:
             # v2: append onto the recipe's lessons[] (no cross-recipe dedup).
             self._kb_amend_recipe(
                 append_lesson={
-                    "statement":       statement,
+                    "statement": statement,
                     "measured_impact": impact,
                 },
                 recipe_overrides=recipe_overrides or None,
                 provenance_details={
                     "source_session_id": source_session_id,
-                    "source_task_id":    task.task_id,
-                    "evidence":          list(evidence_refs or []),
-                    "applicable_models":   list(models or []),
+                    "source_task_id": task.task_id,
+                    "evidence": list(evidence_refs or []),
+                    "applicable_models": list(models or []),
                     "applicable_hardware": list(hardware or []),
-                    "extra":             dict(extra or {}),
-                    "now":               now_iso,
+                    "extra": dict(extra or {}),
+                    "now": now_iso,
                 },
             )
             return
@@ -10105,21 +10284,23 @@ class Coordinator:
         severity = self._pitfall_severity_for(result_dict)
         if severity is not None:
             description = self._build_statement(
-                change=change, severity=severity, kind="pitfall",
+                change=change,
+                severity=severity,
+                kind="pitfall",
             )
             self._kb_amend_recipe(
                 append_pitfall={
                     "description": description,
-                    "severity":    severity,
+                    "severity": severity,
                 },
                 provenance_details={
                     "source_session_id": source_session_id,
-                    "source_task_id":    task.task_id,
-                    "evidence":          list(evidence_refs or []),
-                    "applicable_models":   list(models or []),
+                    "source_task_id": task.task_id,
+                    "evidence": list(evidence_refs or []),
+                    "applicable_models": list(models or []),
                     "applicable_hardware": list(hardware or []),
-                    "extra":             dict(extra or {}),
-                    "now":               now_iso,
+                    "extra": dict(extra or {}),
+                    "now": now_iso,
                 },
             )
 
@@ -10227,51 +10408,55 @@ class Coordinator:
             throughput_after = None
         variant_attrs = variant_outcome.get("variant") or {}
         kind = classify_change_kind(
-            task.kind, variant_attrs if isinstance(variant_attrs, dict) else None,
+            task.kind,
+            variant_attrs if isinstance(variant_attrs, dict) else None,
         )
         # Ensure the change summary is variant-specific (else every explore variant writes an identical row).
         change_attrs = dict(variant_attrs) if isinstance(variant_attrs, dict) else {}
-        if not (
-            change_attrs.get("extra_sglang_args")
-            or change_attrs.get("extra_envs")
-            or change_attrs.get("name")
-        ) and variant_name:
+        if (
+            not (change_attrs.get("extra_sglang_args") or change_attrs.get("extra_envs") or change_attrs.get("name"))
+            and variant_name
+        ):
             change_attrs["name"] = variant_name
         change = summarize_change(task.kind, change_attrs, None)
         error_class = None
         reason = None
         if outcome == OUTCOME_REVERT:
-            error_class = (str(variant_outcome.get("error_class") or "") or None)
-            reason = (str(variant_outcome.get("reason") or "") or None)
+            error_class = str(variant_outcome.get("error_class") or "") or None
+            reason = str(variant_outcome.get("reason") or "") or None
         # Proposer attribution + per-variant measurement detail, carried from the
         # explore executor's per_variant_outcomes so the decision row records who
         # proposed the change and how it measured (beyond headline gain/tput).
         detail_metrics = {
             k: metrics[k]
             for k in (
-                "runtime_sec", "wall_clock_ratio_vs_baseline",
-                "stack_rebench_tput", "estimated_output_throughput",
+                "runtime_sec",
+                "wall_clock_ratio_vs_baseline",
+                "stack_rebench_tput",
+                "estimated_output_throughput",
             )
             if isinstance(metrics, dict) and metrics.get(k) is not None
         }
-        journal.append_entry(JournalEntry(
-            phase=self._journal_entry_phase(),
-            iter=int(self.shared_state.tick or 0),
-            kind=kind,
-            change=change,
-            outcome=outcome,
-            gain_pct=gain_pct,
-            throughput_after=throughput_after,
-            error_class=error_class,
-            reason=reason,
-            task_id=task.task_id,
-            variant_name=variant_name,
-            provenance=str(variant_outcome.get("provenance") or ""),
-            scope=str(variant_outcome.get("scope") or ""),
-            fingerprint=str(variant_outcome.get("fingerprint") or ""),
-            metrics=detail_metrics,
-            tick=int(self.shared_state.tick or 0),
-        ))
+        journal.append_entry(
+            JournalEntry(
+                phase=self._journal_entry_phase(),
+                iter=int(self.shared_state.tick or 0),
+                kind=kind,
+                change=change,
+                outcome=outcome,
+                gain_pct=gain_pct,
+                throughput_after=throughput_after,
+                error_class=error_class,
+                reason=reason,
+                task_id=task.task_id,
+                variant_name=variant_name,
+                provenance=str(variant_outcome.get("provenance") or ""),
+                scope=str(variant_outcome.get("scope") or ""),
+                fingerprint=str(variant_outcome.get("fingerprint") or ""),
+                metrics=detail_metrics,
+                tick=int(self.shared_state.tick or 0),
+            )
+        )
 
         if self.cortex_kb is None:
             return
@@ -10289,7 +10474,9 @@ class Coordinator:
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
         if outcome == OUTCOME_KEEP and gain_pct is not None and gain_pct > 0:
             statement = self._build_statement(
-                change=change, gain_pct=gain_pct, kind="lesson",
+                change=change,
+                gain_pct=gain_pct,
+                kind="lesson",
             )
             impact = self._build_measured_impact(
                 gain_pct=gain_pct,
@@ -10311,46 +10498,50 @@ class Coordinator:
             # (no cross-recipe dedup, see _record_fact_per_task).
             self._kb_amend_recipe(
                 append_lesson={
-                    "statement":       statement,
+                    "statement": statement,
                     "measured_impact": impact,
                 },
                 recipe_overrides=recipe_overrides or None,
                 provenance_details={
-                    "source_session_id":   source_session_id,
-                    "source_task_id":      task.task_id,
+                    "source_session_id": source_session_id,
+                    "source_task_id": task.task_id,
                     "source_variant_name": variant_name,
-                    "evidence":            list(evidence_refs or []),
-                    "applicable_models":   list(models or []),
+                    "evidence": list(evidence_refs or []),
+                    "applicable_models": list(models or []),
                     "applicable_hardware": list(hardware or []),
-                    "extra":               dict(extra or {}),
-                    "now":                 now_iso,
+                    "extra": dict(extra or {}),
+                    "now": now_iso,
                 },
             )
             return
 
-        severity = self._pitfall_severity_for({
-            **(metrics if isinstance(metrics, dict) else {}),
-            "error_class": variant_outcome.get("error_class"),
-            "status":      variant_outcome.get("outcome"),
-        })
+        severity = self._pitfall_severity_for(
+            {
+                **(metrics if isinstance(metrics, dict) else {}),
+                "error_class": variant_outcome.get("error_class"),
+                "status": variant_outcome.get("outcome"),
+            }
+        )
         if severity is not None:
             description = self._build_statement(
-                change=change, severity=severity, kind="pitfall",
+                change=change,
+                severity=severity,
+                kind="pitfall",
             )
             self._kb_amend_recipe(
                 append_pitfall={
                     "description": description,
-                    "severity":    severity,
+                    "severity": severity,
                 },
                 provenance_details={
-                    "source_session_id":   source_session_id,
-                    "source_task_id":      task.task_id,
+                    "source_session_id": source_session_id,
+                    "source_task_id": task.task_id,
                     "source_variant_name": variant_name,
-                    "evidence":            list(evidence_refs or []),
-                    "applicable_models":   list(models or []),
+                    "evidence": list(evidence_refs or []),
+                    "applicable_models": list(models or []),
                     "applicable_hardware": list(hardware or []),
-                    "extra":               dict(extra or {}),
-                    "now":                 now_iso,
+                    "extra": dict(extra or {}),
+                    "now": now_iso,
                 },
             )
 
@@ -10375,12 +10566,12 @@ class Coordinator:
         if model_name:
             out["model_name"] = model_name
         for src_attr, dst_key in (
-            ("precision",     "precision"),
-            ("tp",            "tp"),
-            ("ep",            "ep"),
-            ("conc",          "conc"),
-            ("isl",           "isl"),
-            ("osl",           "osl"),
+            ("precision", "precision"),
+            ("tp", "tp"),
+            ("ep", "ep"),
+            ("conc", "conc"),
+            ("isl", "isl"),
+            ("osl", "osl"),
             ("max_model_len", "max_model_len"),
         ):
             v = getattr(ss, src_attr, None)
@@ -10413,8 +10604,8 @@ class Coordinator:
                 if v and v != "unknown":
                     out["framework_version"] = v
             for src_key, dst_key in (
-                ("rocm",         "rocm_version"),
-                ("aiter",        "aiter_version"),
+                ("rocm", "rocm_version"),
+                ("aiter", "aiter_version"),
                 ("image_digest", "image_digest"),
             ):
                 v = str(fp_meta.get(src_key) or "").strip()
@@ -10491,21 +10682,21 @@ class Coordinator:
                         except (TypeError, ValueError):
                             e2e_tput = 0.0
                         break
-            out.append({
-                "kernel_id":     str(kid),
-                # source persisted under last_source_file; source_file is a legacy fallback.
-                "source_file":   str(
-                    e.get("last_source_file") or e.get("source_file") or ""
-                ),
-                "artifact_path": str(e.get("last_artifact_path") or ""),
-                "micro_speedup": micro,
-                "decision":      "KEEP",
-                "e2e_gain_pct":  e2e_gain,
-                "e2e_tput":      e2e_tput,
-                "e2e_decision":  e2e_decision,
-                "integrated":    integrated,
-                "ts":            str(e.get("last_ts") or e.get("ts") or ""),
-            })
+            out.append(
+                {
+                    "kernel_id": str(kid),
+                    # source persisted under last_source_file; source_file is a legacy fallback.
+                    "source_file": str(e.get("last_source_file") or e.get("source_file") or ""),
+                    "artifact_path": str(e.get("last_artifact_path") or ""),
+                    "micro_speedup": micro,
+                    "decision": "KEEP",
+                    "e2e_gain_pct": e2e_gain,
+                    "e2e_tput": e2e_tput,
+                    "e2e_decision": e2e_decision,
+                    "integrated": integrated,
+                    "ts": str(e.get("last_ts") or e.get("ts") or ""),
+                }
+            )
         return out
 
     def _collect_attempt_provenance(
@@ -10568,10 +10759,7 @@ class Coordinator:
         # warm-replay reader still key on it; reading the stale name would break warm-replay reproduction).
         best_config: dict[str, Any] = {}
         if isinstance(current_best, dict):
-            cb_args = (
-                current_best.get("extra_server_args")
-                or current_best.get("extra_sglang_args")
-            )
+            cb_args = current_best.get("extra_server_args") or current_best.get("extra_sglang_args")
             if cb_args:
                 best_config["extra_sglang_args"] = str(cb_args)
             for key in ("extra_envs", "args", "envs", "name", "tput", "accuracy"):
@@ -10592,9 +10780,7 @@ class Coordinator:
                 if stack_args:
                     best_config["extra_sglang_args"] = stack_args
         sediment_on = bool(getattr(ss, "recipe_sediment_enabled", True))
-        kept_sources, kept_by_gap, reverted_rows = (
-            self._collect_attempt_provenance() if sediment_on else ({}, {}, [])
-        )
+        kept_sources, kept_by_gap, reverted_rows = self._collect_attempt_provenance() if sediment_on else ({}, {}, [])
         what_worked: list[dict[str, Any]] = []
         for idx, entry in enumerate(opt_stack):
             if not isinstance(entry, dict):
@@ -10602,21 +10788,12 @@ class Coordinator:
             gain_per: float | None = None
             if idx < len(gain_per_stack):
                 gain_per = gain_per_stack[idx]
-            name = str(
-                entry.get("variant_name")
-                or entry.get("name")
-                or entry.get("kernel_id")
-                or ""
-            )
+            name = str(entry.get("variant_name") or entry.get("name") or entry.get("kernel_id") or "")
             row: dict[str, Any] = {
-                "name":              name,
-                "extra_sglang_args": str(
-                    entry.get("extra_server_args")
-                    or entry.get("extra_sglang_args")
-                    or ""
-                ),
-                "extra_envs":        dict(entry.get("extra_envs") or {}),
-                "gain_pct":          gain_per,
+                "name": name,
+                "extra_sglang_args": str(entry.get("extra_server_args") or entry.get("extra_sglang_args") or ""),
+                "extra_envs": dict(entry.get("extra_envs") or {}),
+                "gain_pct": gain_per,
             }
             # Prefer the entry's gap-id provenance (naming-independent); fall back to name/kernel_id match.
             entry_gap = str(entry.get("gap_canonical_id") or "").strip()
@@ -10631,54 +10808,53 @@ class Coordinator:
         what_failed: list[dict[str, Any]] = []
         for failure in last_failures[-10:]:
             if isinstance(failure, dict):
-                what_failed.append({
-                    "name":  str(failure.get("name") or failure.get("action") or ""),
-                    "reason": str(failure.get("reason") or failure.get("error_class") or ""),
-                })
+                what_failed.append(
+                    {
+                        "name": str(failure.get("name") or failure.get("action") or ""),
+                        "reason": str(failure.get("reason") or failure.get("error_class") or ""),
+                    }
+                )
         for rev in reverted_rows:
             what_failed.append(rev)
         kernel_optimizations = self._build_kernel_optimizations_from_state()
         cumulative_validated = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
         cumulative_total = float(getattr(ss, "cumulative_gain", 0.0) or 0.0)
-        validated_stack_len = int(
-            getattr(ss, "cumulative_gain_validated_stack_len", 0) or 0
-        )
+        validated_stack_len = int(getattr(ss, "cumulative_gain_validated_stack_len", 0) or 0)
         stack_fingerprint = getattr(ss, "stack_fingerprint", "") or ""
         # Workload-shape tags for shape-filtered warm-start queries (shared via _collect_workload_tags).
         workload_tags = self._collect_workload_tags()
         # framework_version left unset here (manifest-derived); the T0 backfill writes it.
         return {
-            "best_config":       best_config,
-            "best_throughput":   float(current_best.get("tput", 0.0))
-                                  if isinstance(current_best, dict) else 0.0,
-            "what_worked":       what_worked,
-            "what_failed":       what_failed,
+            "best_config": best_config,
+            "best_throughput": float(current_best.get("tput", 0.0)) if isinstance(current_best, dict) else 0.0,
+            "what_worked": what_worked,
+            "what_failed": what_failed,
             "kernel_optimizations": kernel_optimizations,
             "stack_fingerprint": {"sha": str(stack_fingerprint)} if stack_fingerprint else {},
-            "last_profiled":     str(getattr(ss, "cumulative_gain_validated_ts", "") or ""),
-            "workload":          workload_tags,
-            "sessions":          [{
-                "session_id":   str(getattr(ss, "cortex_session_id", "")
-                                    or self.session_dir.name),
-                "gain_pct":     cumulative_validated or cumulative_total,
-                "stack_len":    validated_stack_len or len(opt_stack),
-                # arbor-shape provenance so the session row is self-describing (before/after tput + knobs).
-                "throughput_before": float(getattr(ss, "baseline_tput", 0.0) or 0.0),
-                "throughput_after":  (
-                    float(current_best.get("tput", 0.0))
-                    if isinstance(current_best, dict) else 0.0
-                ),
-                "date":          datetime.now(timezone.utc).isoformat(),
-                "actions_taken": [
-                    nm for nm in (
-                        str(
-                            e.get("variant_name") or e.get("name")
-                            or e.get("action") or ""
-                        ).strip()
-                        for e in opt_stack if isinstance(e, dict)
-                    ) if nm
-                ],
-            }],
+            "last_profiled": str(getattr(ss, "cumulative_gain_validated_ts", "") or ""),
+            "workload": workload_tags,
+            "sessions": [
+                {
+                    "session_id": str(getattr(ss, "cortex_session_id", "") or self.session_dir.name),
+                    "gain_pct": cumulative_validated or cumulative_total,
+                    "stack_len": validated_stack_len or len(opt_stack),
+                    # arbor-shape provenance so the session row is self-describing (before/after tput + knobs).
+                    "throughput_before": float(getattr(ss, "baseline_tput", 0.0) or 0.0),
+                    "throughput_after": (
+                        float(current_best.get("tput", 0.0)) if isinstance(current_best, dict) else 0.0
+                    ),
+                    "date": datetime.now(timezone.utc).isoformat(),
+                    "actions_taken": [
+                        nm
+                        for nm in (
+                            str(e.get("variant_name") or e.get("name") or e.get("action") or "").strip()
+                            for e in opt_stack
+                            if isinstance(e, dict)
+                        )
+                        if nm
+                    ],
+                }
+            ],
         }
 
     def cortex_finalize_recipe_and_journal(self) -> None:
@@ -10689,9 +10865,7 @@ class Coordinator:
             cb = getattr(ss, "current_best", {}) or {}
             final_tput = float(cb.get("tput", 0.0)) if isinstance(cb, dict) else 0.0
             total_gain = float(
-                getattr(ss, "cumulative_gain_validated", 0.0)
-                or getattr(ss, "cumulative_gain", 0.0)
-                or 0.0,
+                getattr(ss, "cumulative_gain_validated", 0.0) or getattr(ss, "cumulative_gain", 0.0) or 0.0,
             )
             journal.finalize(
                 final_throughput=final_tput if final_tput > 0 else None,
@@ -10707,9 +10881,9 @@ class Coordinator:
         gpu_type = getattr(ss, "gpu_type", "") or ""
         if not model_name or not gpu_type:
             log.info(
-                "cortex finalize_recipe: missing model/hardware "
-                "(model=%r hardware=%r); skipping update_recipe",
-                model_name, gpu_type,
+                "cortex finalize_recipe: missing model/hardware (model=%r hardware=%r); skipping update_recipe",
+                model_name,
+                gpu_type,
             )
             return
         try:
@@ -10719,10 +10893,7 @@ class Coordinator:
 
             # sessions[] read-modify-write: read anchor, drop prior entry with our session_id (resume safety), append ours, write back.
             my_sessions = list(attrs["sessions"] or [])
-            my_session_ids = {
-                str((s or {}).get("session_id") or "")
-                for s in my_sessions if isinstance(s, dict)
-            }
+            my_session_ids = {str((s or {}).get("session_id") or "") for s in my_sessions if isinstance(s, dict)}
             # v2: read-modify-write the recipe row; sessions[] merged in-process under the cid flock so concurrent finalises don't tear.
             merged_sessions: list[dict[str, Any]] = list(my_sessions)
             existing_row: dict[str, Any] = {}
@@ -10732,7 +10903,7 @@ class Coordinator:
                     # Read the LOCAL row (authoritative for writes) so the merge + guard compare against it.
                     existing_row = self.cortex_kb.local.get_recipe(canonical_id=cid) or {}
                     existing_sessions: list[dict[str, Any]] = []
-                    for row in (existing_row.get("sessions") or []):
+                    for row in existing_row.get("sessions") or []:
                         if not isinstance(row, dict):
                             continue
                         if str(row.get("session_id") or "") in my_session_ids:
@@ -10750,12 +10921,9 @@ class Coordinator:
 
             # KEEP'd kernel optimizations ride the extras channel; merge with prior rows, dedup by kernel_id.
             kopts_new = list(attrs.get("kernel_optimizations") or [])
-            new_kids = {
-                str((k or {}).get("kernel_id") or "")
-                for k in kopts_new if isinstance(k, dict)
-            }
+            new_kids = {str((k or {}).get("kernel_id") or "") for k in kopts_new if isinstance(k, dict)}
             merged_kopts: list[dict[str, Any]] = list(kopts_new)
-            for prior in (existing_row.get("kernel_optimizations") or []):
+            for prior in existing_row.get("kernel_optimizations") or []:
                 if not isinstance(prior, dict):
                     continue
                 if str(prior.get("kernel_id") or "") in new_kids:
@@ -10767,26 +10935,19 @@ class Coordinator:
                 extras_payload["kernel_optimizations"] = merged_kopts
 
             overrides: dict[str, Any] = {
-                "what_worked":   attrs["what_worked"],
-                "what_failed":   attrs["what_failed"],
+                "what_worked": attrs["what_worked"],
+                "what_failed": attrs["what_failed"],
                 "last_profiled": attrs["last_profiled"],
-                "sessions":      merged_sessions,
-                "extras":        extras_payload,
+                "sessions": merged_sessions,
+                "extras": extras_payload,
             }
             # Overwrite best_config/best_throughput only on a real improvement (repro 20260531T144553Z: bare baseline clobbered a validated config): requires has_validated_win AND my_tput > live_tput.
             my_tput = float(attrs.get("best_throughput") or 0.0)
             cb_now = getattr(ss, "current_best", {}) or {}
-            cb_args_now = (
-                str(cb_now.get("extra_sglang_args") or "").strip()
-                if isinstance(cb_now, dict) else ""
-            )
-            validated_gain = float(
-                getattr(ss, "cumulative_gain_validated", 0.0) or 0.0
-            )
+            cb_args_now = str(cb_now.get("extra_sglang_args") or "").strip() if isinstance(cb_now, dict) else ""
+            validated_gain = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
             has_validated_win = bool(
-                (getattr(ss, "optimization_stack", []) or [])
-                or validated_gain > 0.0
-                or cb_args_now
+                (getattr(ss, "optimization_stack", []) or []) or validated_gain > 0.0 or cb_args_now
             )
             try:
                 live_tput = float(existing_row.get("best_throughput") or 0.0)
@@ -10817,8 +10978,12 @@ class Coordinator:
             log.exception("update_recipe raised unexpectedly")
 
     def _lift_to_current_best(
-        self, task_kind: str, best_tput: float, bv: dict[str, Any],
-        *, gap_canonical_id: str = "",
+        self,
+        task_kind: str,
+        best_tput: float,
+        bv: dict[str, Any],
+        *,
+        gap_canonical_id: str = "",
     ) -> None:
         """Update SharedState.current_best + recompute cumulative_gain; gap_canonical_id (when known) is stamped onto the stack entry so provenance resolves by gap id not name.
 
@@ -10839,21 +11004,15 @@ class Coordinator:
             base_args = str(previous.get("extra_server_args") or "").strip()
         candidate_args = ""
         if isinstance(bv, dict):
-            candidate_args = str(
-                bv.get("candidate_extra_server_args")
-                or bv.get("extra_server_args")
-                or ""
-            ).strip()
+            candidate_args = str(bv.get("candidate_extra_server_args") or bv.get("extra_server_args") or "").strip()
         full_args = ""
         if isinstance(bv, dict):
-            full_args = str(
-                bv.get("extra_server_args")
-                or bv.get("extra_sglang_args")
-                or ""
-            ).strip()
+            full_args = str(bv.get("extra_server_args") or bv.get("extra_sglang_args") or "").strip()
         # Build cumulative launch args without double-stacking; helper dedupes repeated --flag pairs (last wins).
         full_args = _merge_cumulative_extra_sglang_args(
-            base_args, candidate_args, full_args,
+            base_args,
+            candidate_args,
+            full_args,
         )
 
         variant_name = bv.get("name") if isinstance(bv, dict) else None
@@ -10869,14 +11028,9 @@ class Coordinator:
                     "action": task_kind,
                     "variant_name": variant_name,
                     "candidate_extra_server_args": candidate_args,
-                    "extra_envs": (
-                        dict(bv.get("extra_envs") or {})
-                        if isinstance(bv, dict) else {}
-                    ),
+                    "extra_envs": (dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}),
                     "tput": float(best_tput),
-                    "workspace": (
-                        bv.get("workspace") if isinstance(bv, dict) else None
-                    ),
+                    "workspace": (bv.get("workspace") if isinstance(bv, dict) else None),
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }
                 if gap_canonical_id:
@@ -10894,6 +11048,7 @@ class Coordinator:
                         from .action_executors._canonical_fingerprint import (
                             canonical_fingerprint,
                         )
+
                         fp_val = canonical_fingerprint(
                             candidate_args or full_args,
                             dict(bv.get("extra_envs") or {}),
@@ -10905,9 +11060,7 @@ class Coordinator:
                     stack_entry["provenance"] = prov_val
                 # Stable filter label for "what kind of optimization" (backend /
                 # param / env), so the stack can be sliced like the timeline.
-                _stack_envs = (
-                    dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
-                )
+                _stack_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
                 stack_entry["operation_kind"] = operation_kind_for(
                     task_kind,
                     classify_change_kind(
@@ -10915,9 +11068,7 @@ class Coordinator:
                         {"extra_server_args": candidate_args, "extra_envs": _stack_envs},
                     ),
                 )
-                _stack_scope = (
-                    str(bv.get("scope") or "").strip() if isinstance(bv, dict) else ""
-                )
+                _stack_scope = str(bv.get("scope") or "").strip() if isinstance(bv, dict) else ""
                 if _stack_scope:
                     stack_entry["scope"] = _stack_scope
                 self.shared_state.optimization_stack.append(stack_entry)
@@ -10934,9 +11085,7 @@ class Coordinator:
             "tput": float(best_tput),
             "variant_name": variant_name,
             "extra_server_args": full_args,
-            "extra_envs": (
-                dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
-            ),
+            "extra_envs": (dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}),
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
             "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
@@ -10945,8 +11094,7 @@ class Coordinator:
         }
         if self.shared_state.baseline_tput > 0:
             self.shared_state.cumulative_gain = (
-                (float(best_tput) - self.shared_state.baseline_tput)
-                / self.shared_state.baseline_tput * 100.0
+                (float(best_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
             )
 
     async def _promote_to_shared_state(
@@ -10999,7 +11147,8 @@ class Coordinator:
                         "%.1f as comparison anchor (hot measure %.1f kept "
                         "for reporting) — measurement parity with explore/"
                         "sweep variants",
-                        float(warmup_anchor), float(tput),
+                        float(warmup_anchor),
+                        float(tput),
                     )
                 else:
                     self.shared_state.baseline_tput = float(tput)
@@ -11044,39 +11193,28 @@ class Coordinator:
             anchor_tput = float(self.shared_state.baseline_tput or 0.0)
             self.shared_state.current_best = {
                 "action": "baseline",
-                "tput": (
-                    anchor_tput if anchor_tput > 0
-                    else (float(tput) if isinstance(tput, (int, float)) else None)
-                ),
-                "hot_tput": (
-                    float(tput) if isinstance(tput, (int, float)) else None
-                ),
+                "tput": (anchor_tput if anchor_tput > 0 else (float(tput) if isinstance(tput, (int, float)) else None)),
+                "hot_tput": (float(tput) if isinstance(tput, (int, float)) else None),
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
                 "workspace": result.get("workspace"),
             }
             changed = True
-            audit_decision = (
-                "promoted" if isinstance(tput, (int, float)) and tput > 0
-                else "discarded"
-            )
+            audit_decision = "promoted" if isinstance(tput, (int, float)) and tput > 0 else "discarded"
             audit_extras = {
                 "materialized_config": result.get("materialized_config"),
                 "accuracy": result.get("accuracy"),
-                "baseline_tput": (
-                    float(tput) if isinstance(tput, (int, float)) else None
-                ),
+                "baseline_tput": (float(tput) if isinstance(tput, (int, float)) else None),
                 # Stamp canonical params fingerprint so the self-loop denial helper compares run-vs-proposed (_baseline_params_fingerprint).
-                "fingerprint": _baseline_params_fingerprint(
-                    task.params if task is not None else None
-                ),
+                "fingerprint": _baseline_params_fingerprint(task.params if task is not None else None),
             }
             # seed the gaps[] ledger from baseline (best-effort).
             await self._refresh_gaps(reason="baseline_done")
             # PRELUDE bootstrap (post-baseline), ordering mandatory: (1) inject warm-recipe history, (2) warm-replay, (3) auto-analysis (deferred while replay in_flight, same GPU/port), (4) research scout.
             if (
-                isinstance(tput, (int, float)) and tput > 0
+                isinstance(tput, (int, float))
+                and tput > 0
                 and not (self.shared_state.auto_roofline_pending_task_id or "").strip()
             ):
                 # Step 1 — history injection (fires regardless of --no-warm-replay).
@@ -11096,13 +11234,12 @@ class Coordinator:
                 # hot bar (mirrors the baseline-promote invariant).
                 try:
                     await self._maybe_enqueue_warm_replay(
-                        baseline_tput=float(
-                            self.shared_state.baseline_tput or tput
-                        ),
+                        baseline_tput=float(self.shared_state.baseline_tput or tput),
                     )
                 except Exception as exc:  # noqa: BLE001 — defensive
                     log.exception(
-                        "PRELUDE: failed to enqueue warm-replay task: %r", exc,
+                        "PRELUDE: failed to enqueue warm-replay task: %r",
+                        exc,
                     )
                 # Step 3 — auto-analysis (roofline / profile); may defer.
                 await self._maybe_enqueue_prelude_initial_analysis_after_baseline(
@@ -11126,11 +11263,7 @@ class Coordinator:
                     "error_class": result.get("error_class"),
                     "error": result.get("error"),
                 }
-                if (
-                    task is not None
-                    and self.shared_state.auto_roofline_pending_task_id
-                    == task.task_id
-                ):
+                if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
                     self.shared_state.auto_roofline_pending_task_id = ""
                     changed = True
             else:
@@ -11141,10 +11274,7 @@ class Coordinator:
                     "output_throughput": result.get("output_throughput"),
                 }
             # Bug C fix: surface ProfileExecutor's trace path so Orch passes a real path to trace_analyze.
-            trace_path = (
-                result.get("main_trace_path")
-                or (result.get("trace_files") or [None])[0]
-            )
+            trace_path = result.get("main_trace_path") or (result.get("trace_files") or [None])[0]
             profile_status = str(result.get("status") or "")
             if profile_status == "failed" or result.get("error_class") == "no_trace_files":
                 self.shared_state.last_profile_status = "failed"
@@ -11157,9 +11287,7 @@ class Coordinator:
                 # Record the server config in effect for this trace so Orch can decide whether to re-profile.
                 profile_args = ""
                 if task is not None:
-                    profile_args = str(
-                        (task.params or {}).get("base_extra_args") or ""
-                    )
+                    profile_args = str((task.params or {}).get("base_extra_args") or "")
                 self.shared_state.last_profile_args = profile_args
                 # New trace invalidates the stale trace_analyze cache.
                 self.shared_state.last_trace_analyze = {}
@@ -11170,10 +11298,15 @@ class Coordinator:
             tput = result.get("output_throughput")
             cb = self.shared_state.current_best or {}
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            cur_best = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
+            cur_best = (
+                float(cb_tput)
+                if isinstance(cb_tput, (int, float)) and cb_tput > 0
                 else float(self.shared_state.baseline_tput or 0.0)
+            )
             if (
-                isinstance(tput, (int, float)) and tput > 0 and cur_best > 0
+                isinstance(tput, (int, float))
+                and tput > 0
+                and cur_best > 0
                 and (tput - cur_best) / cur_best * 100.0 >= 1.0
             ):
                 self.shared_state.current_best = {
@@ -11186,8 +11319,7 @@ class Coordinator:
                 }
                 if self.shared_state.baseline_tput > 0:
                     self.shared_state.cumulative_gain = (
-                        (float(tput) - self.shared_state.baseline_tput)
-                        / self.shared_state.baseline_tput * 100.0
+                        (float(tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
                     )
                 changed = True
             # On a successful profile, mirror the roofline-branch watermark handling: re-anchor
@@ -11197,11 +11329,7 @@ class Coordinator:
                 if anchor_tput > 0:
                     self.shared_state.last_roofline_tput = float(anchor_tput)
                     changed = True
-            if (
-                task is not None
-                and self.shared_state.auto_roofline_pending_task_id
-                == task.task_id
-            ):
+            if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
                 self.shared_state.auto_roofline_pending_task_id = ""
                 changed = True
         elif task_kind == "roofline":
@@ -11216,11 +11344,7 @@ class Coordinator:
                     "error": result.get("error"),
                 }
                 # Still clear the pending pointer so the watermark check can re-arm.
-                if (
-                    task is not None
-                    and self.shared_state.auto_roofline_pending_task_id
-                    == task.task_id
-                ):
+                if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
                     self.shared_state.auto_roofline_pending_task_id = ""
                     changed = True
             elif status == "succeeded":
@@ -11233,14 +11357,8 @@ class Coordinator:
                         if _last_ta.get("roofline_snapshot_id") is not None
                         else result.get("snapshot_id")
                     ),
-                    "last_profile_trace": (
-                        self.shared_state.last_profile_trace
-                        or result.get("last_profile_trace")
-                    ),
-                    "analysis_md_path": (
-                        _last_ta.get("analysis_md_path")
-                        or result.get("analysis_md_path")
-                    ),
+                    "last_profile_trace": (self.shared_state.last_profile_trace or result.get("last_profile_trace")),
+                    "analysis_md_path": (_last_ta.get("analysis_md_path") or result.get("analysis_md_path")),
                     "profile_workspace": result.get("profile_workspace"),
                     "degraded": bool(result.get("degraded", False)),
                 }
@@ -11269,17 +11387,12 @@ class Coordinator:
                     "(specialists / explore proceed without a fresh "
                     "analysis_md). No retry, no fallback.",
                     task.task_id if task else "?",
-                    str((task.params or {}).get("reason") or "")
-                    if task is not None else "",
+                    str((task.params or {}).get("reason") or "") if task is not None else "",
                     result.get("phase"),
                     result.get("error_class"),
                 )
             # Clear the pending pointer (matched by task id so an unrelated roofline can't clear another's anchor).
-            if (
-                task is not None
-                and self.shared_state.auto_roofline_pending_task_id
-                == task.task_id
-            ):
+            if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
                 self.shared_state.auto_roofline_pending_task_id = ""
                 changed = True
         elif task_kind == "explore":
@@ -11323,27 +11436,22 @@ class Coordinator:
                     prov = str(accepted.get("provenance") or "")
                     if prov.startswith("specialist:"):
                         try:
-                            self.shared_state.note_domain_keep(
-                                prov.split(":", 1)[1].strip()
-                            )
+                            self.shared_state.note_domain_keep(prov.split(":", 1)[1].strip())
                         except Exception:  # noqa: BLE001 — defensive
                             log.exception(
-                                "depth: note_domain_keep failed for "
-                                "provenance=%r", prov,
+                                "depth: note_domain_keep failed for provenance=%r",
+                                prov,
                             )
                     changed = True
                 # 4. Lift the best winner into current_best / optimization_stack (best_tput is post-rebench).
-                if (
-                    isinstance(best_winner, dict)
-                    and isinstance(best_tput, (int, float))
-                    and best_tput > 0
-                ):
+                if isinstance(best_winner, dict) and isinstance(best_tput, (int, float)) and best_tput > 0:
                     explore_gap_cid = (
-                        str((task.params or {}).get("gap_canonical_id") or "").strip()
-                        if task is not None else ""
+                        str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
                     )
                     self._lift_to_current_best(
-                        "explore", float(best_tput), best_winner,
+                        "explore",
+                        float(best_tput),
+                        best_winner,
                         gap_canonical_id=explore_gap_cid,
                     )
                     promoted = True
@@ -11355,22 +11463,13 @@ class Coordinator:
             if promoted:
                 # explore inlines the per-KEEP rebench, so promote it into cumulative_gain_validated +
                 # advance validated_stack_len so the TODO 4 stack-rebench guard clears immediately.
-                if (
-                    self.shared_state.baseline_tput > 0
-                    and isinstance(best_tput, (int, float))
-                    and best_tput > 0
-                ):
+                if self.shared_state.baseline_tput > 0 and isinstance(best_tput, (int, float)) and best_tput > 0:
                     validated_gain = (
-                        (float(best_tput) - self.shared_state.baseline_tput)
-                        / self.shared_state.baseline_tput * 100.0
+                        (float(best_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
                     )
                     self.shared_state.cumulative_gain_validated = float(validated_gain)
-                    self.shared_state.cumulative_gain_validated_ts = (
-                        datetime.now(timezone.utc).isoformat()
-                    )
-                    self.shared_state.cumulative_gain_validated_stack_len = len(
-                        self.shared_state.optimization_stack
-                    )
+                    self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+                    self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
                     # Watermark refresh: enqueue a fresh roofline once projected tput crosses +10% over the last.
                     await self._maybe_enqueue_watermark_roofline(
                         reason="explore_keep_watermark",
@@ -11380,47 +11479,35 @@ class Coordinator:
             audit_decision = "promoted" if promoted else "discarded"
             audit_extras = {
                 "round_id": round_id,
-                "winners_count": (
-                    len(winners) if isinstance(winners, list) else 0
-                ),
+                "winners_count": (len(winners) if isinstance(winners, list) else 0),
                 "losers_count": len(result.get("losers") or []),
                 "skipped_dup_count": len(result.get("skipped_dup") or []),
-                "best_variant_name": (
-                    best_winner.get("name")
-                    if isinstance(best_winner, dict) else None
-                ),
+                "best_variant_name": (best_winner.get("name") if isinstance(best_winner, dict) else None),
                 "best_gain_pct_vs_base": result.get("best_gain_pct"),
                 "output_throughput": best_tput,
                 "keep_unstable_count": len(result.get("keep_unstable_in_stack") or []),
-                "explore_grid_exhausted": bool(
-                    result.get("explore_grid_exhausted")
-                ),
+                "explore_grid_exhausted": bool(result.get("explore_grid_exhausted")),
             }
         elif task_kind == "framework_pr":
             # FRAMEWORK_PR per-candidate result: append a progress row, update the batch max-gain stat, and on
             # KEEP lift to current_best + optimization_stack + cumulative_gain_validated + watermark roofline.
             status = str(result.get("status") or "")
             candidate = result.get("candidate") or {}
-            cand_id = str(
-                candidate.get("candidate_id")
-                or candidate.get("pr_url")
-                or candidate.get("ref")
-                or ""
-            )
+            cand_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
             batch_id = str(result.get("batch_id") or candidate.get("batch_id") or "")
             delta_pct = result.get("delta_pct")
             new_tput = result.get("output_throughput")
             kept_flag = status == "kept"
             progress_entry = {
                 "candidate_id": cand_id,
-                "pr_url":       str(candidate.get("pr_url") or ""),
-                "status":       status,
-                "pre_tput":     float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
-                "post_tput":    float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
-                "gain_pct":     float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0,
-                "kept":         kept_flag,
-                "batch_id":     batch_id,
-                "ts":           datetime.now(timezone.utc).isoformat(),
+                "pr_url": str(candidate.get("pr_url") or ""),
+                "status": status,
+                "pre_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
+                "post_tput": float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
+                "gain_pct": float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0,
+                "kept": kept_flag,
+                "batch_id": batch_id,
+                "ts": datetime.now(timezone.utc).isoformat(),
             }
             if not isinstance(self.shared_state.framework_pr_phase_progress, list):
                 self.shared_state.framework_pr_phase_progress = []
@@ -11431,45 +11518,38 @@ class Coordinator:
                 for entry in reversed(batches):
                     if isinstance(entry, dict) and str(entry.get("batch_id") or "") == batch_id:
                         prev = float(entry.get("max_gain_pct_observed_in_batch") or 0.0)
-                        gain = (
-                            float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0
-                        )
+                        gain = float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0
                         if gain > prev:
                             entry["max_gain_pct_observed_in_batch"] = gain
                         break
             changed = True
             if kept_flag and isinstance(new_tput, (int, float)) and new_tput > 0:
                 lift = {
-                    "name":              f"framework-pr:{cand_id}",
-                    "variant_name":      cand_id,
+                    "name": f"framework-pr:{cand_id}",
+                    "variant_name": cand_id,
                     "candidate_extra_server_args": "",
-                    "extra_envs":        {},
-                    "workspace":         result.get("workspace"),
+                    "extra_envs": {},
+                    "workspace": result.get("workspace"),
                 }
                 self._lift_to_current_best("framework_pr", float(new_tput), lift)
                 if self.shared_state.baseline_tput > 0:
                     validated_gain = (
-                        (float(new_tput) - self.shared_state.baseline_tput)
-                        / self.shared_state.baseline_tput * 100.0
+                        (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
                     )
                     self.shared_state.cumulative_gain_validated = float(validated_gain)
-                    self.shared_state.cumulative_gain_validated_ts = (
-                        datetime.now(timezone.utc).isoformat()
-                    )
-                    self.shared_state.cumulative_gain_validated_stack_len = len(
-                        self.shared_state.optimization_stack
-                    )
+                    self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+                    self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
                     await self._maybe_enqueue_watermark_roofline(
                         reason="framework_pr_keep_watermark",
                     )
             audit_decision = "promoted" if kept_flag else "discarded"
             audit_extras = {
-                "candidate_id":   cand_id,
-                "batch_id":       batch_id,
-                "status":         status,
-                "delta_pct":      delta_pct,
+                "candidate_id": cand_id,
+                "batch_id": batch_id,
+                "status": status,
+                "delta_pct": delta_pct,
                 "output_throughput": new_tput,
-                "kept":           kept_flag,
+                "kept": kept_flag,
             }
         elif task_kind == "sweep":
             pareto = result.get("pareto_front") or []
@@ -11483,25 +11563,20 @@ class Coordinator:
                     "grid_size": result.get("grid_size"),
                     "best_overall": result.get("best_overall"),
                     "best_for_each_conc": result.get("best_for_each_conc"),
-                    "pareto_front_size": (
-                        len(pareto) if isinstance(pareto, list) else None
-                    ),
+                    "pareto_front_size": (len(pareto) if isinstance(pareto, list) else None),
                 },
             )
             self.shared_state.record_sweep(result)
             # Issue-E: sweep is discovery-only (never promotes) and MUST NOT mutate params_no_promote_streak.
             self.shared_state.save(self.session_dir)
             # SWEEP post-hook: chain conc_sweep after a succeeded sweep when opted in (best-effort, non-blocking).
-            if getattr(self.shared_state, "conc_sweep_enabled", False) and \
-                    result.get("status") == "succeeded":
+            if getattr(self.shared_state, "conc_sweep_enabled", False) and result.get("status") == "succeeded":
                 try:
                     await self._enqueue_internal_conc_sweep_task(
                         reason="post_sweep",
                     )
                 except Exception:  # noqa: BLE001 — never block SWEEP->CLOSE
-                    log.exception(
-                        "conc_sweep: post-sweep enqueue raised (non-fatal)"
-                    )
+                    log.exception("conc_sweep: post-sweep enqueue raised (non-fatal)")
             return
         elif task_kind == "conc_sweep":
             self.shared_state.record_action_attempt(
@@ -11511,21 +11586,15 @@ class Coordinator:
                 decision="discarded",
                 result=result,
                 extras={
-                    "was_skipped":      bool(result.get("was_skipped", False)),
-                    "skip_reason":      result.get("skip_reason"),
+                    "was_skipped": bool(result.get("was_skipped", False)),
+                    "skip_reason": result.get("skip_reason"),
                     "budget_exhausted": bool(result.get("budget_exhausted", False)),
                     "total_budget_sec": result.get("total_budget_sec"),
-                    "elapsed_sec":      result.get("elapsed_sec"),
-                    "best_speedup":     (
-                        (result.get("summary") or {}).get("best_speedup")
-                    ),
-                    "best_conc":        (
-                        (result.get("summary") or {}).get("best_conc")
-                    ),
-                    "successful_pairs": (
-                        (result.get("summary") or {}).get("successful_pairs")
-                    ),
-                    "report_path":      result.get("report_json_path"),
+                    "elapsed_sec": result.get("elapsed_sec"),
+                    "best_speedup": ((result.get("summary") or {}).get("best_speedup")),
+                    "best_conc": ((result.get("summary") or {}).get("best_conc")),
+                    "successful_pairs": ((result.get("summary") or {}).get("successful_pairs")),
+                    "report_path": result.get("report_json_path"),
                 },
             )
             # Bug #12 fix: write last_conc_sweep so exit_normal_sweep can fire conc_sweep_done without budget exhaustion.

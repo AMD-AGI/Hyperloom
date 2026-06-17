@@ -75,8 +75,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         pr_repos=("ROCm/aiter", "triton-lang/triton"),
         available_in="M6",
         description=(
-            "Reads aiter / sglang kernels / triton source; focuses on "
-            "attention, MoE, GEMM, fused attention paths."
+            "Reads aiter / sglang kernels / triton source; focuses on attention, MoE, GEMM, fused attention paths."
         ),
     ),
     SpecialistDomain(
@@ -85,10 +84,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         kb_anchor="communication",
         pr_repos=("ROCm/rccl", "nvidia/nccl"),
         available_in="M6",
-        description=(
-            "Focuses on collective communication, allreduce algorithms, "
-            "QuickReduce, topology."
-        ),
+        description=("Focuses on collective communication, allreduce algorithms, QuickReduce, topology."),
     ),
     SpecialistDomain(
         key="compiler_specialist",
@@ -96,10 +92,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         kb_anchor="compiler",
         pr_repos=("triton-lang/triton", "pytorch/pytorch"),
         available_in="M6",
-        description=(
-            "Focuses on torch.compile, inductor, triton codegen, AMDGCN, "
-            "register pressure."
-        ),
+        description=("Focuses on torch.compile, inductor, triton codegen, AMDGCN, register pressure."),
     ),
     SpecialistDomain(
         key="system_specialist",
@@ -117,8 +110,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="pr_intel_specialist",
         layer="cross-repo PR research",
         kb_anchor="pr_intelligence",
-        pr_repos=("ROCm/aiter", "sgl-project/sglang", "ROCm/vllm",
-                  "triton-lang/triton", "ROCm/rccl"),
+        pr_repos=("ROCm/aiter", "sgl-project/sglang", "ROCm/vllm", "triton-lang/triton", "ROCm/rccl"),
         available_in="M6",
         description=(
             "EXPLORE-phase per-gap PR top-up. Surveys PRs across known "
@@ -132,8 +124,14 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="research_scout_specialist",
         layer="proven-prior research / reference scripts / arch features",
         kb_anchor="research_scout",
-        pr_repos=("ROCm/aiter", "sgl-project/sglang", "ROCm/vllm",
-                  "triton-lang/triton", "ROCm/rccl", "NVIDIA/TensorRT-LLM"),
+        pr_repos=(
+            "ROCm/aiter",
+            "sgl-project/sglang",
+            "ROCm/vllm",
+            "triton-lang/triton",
+            "ROCm/rccl",
+            "NVIDIA/TensorRT-LLM",
+        ),
         available_in="M5",
         description=(
             "Read-only research collector dispatched at PRELUDE (and "
@@ -148,9 +146,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
 )
 
 
-SPECIALIST_DOMAIN_KEYS: frozenset[str] = frozenset(
-    d.key for d in SPECIALIST_DOMAINS
-)
+SPECIALIST_DOMAIN_KEYS: frozenset[str] = frozenset(d.key for d in SPECIALIST_DOMAINS)
 
 
 # Controlled knowledge-domain tag vocabulary derived from distinct
@@ -252,11 +248,10 @@ def normalize_dispatch_tags(params: dict) -> list[str]:
             tags.append((dom.kb_anchor or domain) if dom else domain)
     return list(dict.fromkeys(tags))
 
+
 # Active set — domains with fully-wired prompt templates. Matches the
 # full catalogue, so Orchestration never falls through to the generic template.
-SPECIALIST_DOMAINS_M5: frozenset[str] = frozenset(
-    d.key for d in SPECIALIST_DOMAINS
-)
+SPECIALIST_DOMAINS_M5: frozenset[str] = frozenset(d.key for d in SPECIALIST_DOMAINS)
 
 
 def get_domain(key: str) -> SpecialistDomain | None:

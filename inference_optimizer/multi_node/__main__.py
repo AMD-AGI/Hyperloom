@@ -4,6 +4,7 @@
 
 All real logic lives in :mod:`inference_optimizer.multi_node.cli`.
 """
+
 from __future__ import annotations
 
 import sys

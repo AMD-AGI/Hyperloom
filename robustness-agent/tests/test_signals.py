@@ -50,6 +50,7 @@ def _ctx(
 # Stall
 # ---------------------------------------------------------------------------
 
+
 def test_stall_emits_medium_when_agent_silent_past_threshold():
     now = 1_000.0
     ctx = _ctx(now_unix=now)
@@ -98,6 +99,7 @@ def test_stall_uses_iso_timestamps_too():
 # Crash
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     "crash_count,expected_name,expected_severity",
     [
@@ -122,6 +124,7 @@ def test_crash_signal_thresholds(crash_count, expected_name, expected_severity):
 # ---------------------------------------------------------------------------
 # Event
 # ---------------------------------------------------------------------------
+
 
 def test_repeated_policy_denied_emits_medium_alert():
     inbox = [
@@ -267,7 +270,9 @@ def test_idempotency_replay_fires_when_same_payload_distinct_keys():
     """B4: distinct idempotency_keys + same payload hash → MEDIUM alert."""
     inbox = [
         InboxItem(
-            seq=1, msg_id="m1", from_agent="orchestration",
+            seq=1,
+            msg_id="m1",
+            from_agent="orchestration",
             topic="proposal",
             payload={
                 "action_name": "validate_stack",
@@ -276,7 +281,9 @@ def test_idempotency_replay_fires_when_same_payload_distinct_keys():
             },
         ),
         InboxItem(
-            seq=2, msg_id="m2", from_agent="orchestration",
+            seq=2,
+            msg_id="m2",
+            from_agent="orchestration",
             topic="proposal",
             payload={
                 "action_name": "validate_stack",
@@ -287,7 +294,8 @@ def test_idempotency_replay_fires_when_same_payload_distinct_keys():
     ]
     ctx = _ctx(inbox=inbox)
     out = evaluate_event_signals(
-        ctx, SourceData(),
+        ctx,
+        SourceData(),
         config=EventConfig(idempotency_replay_threshold=2),
     )
     sym = next(s for s in out if s.name == "idempotency_replay")
@@ -299,7 +307,9 @@ def test_idempotency_replay_fires_when_same_payload_distinct_keys():
 def test_idempotency_replay_silent_when_payloads_differ():
     inbox = [
         InboxItem(
-            seq=1, msg_id="m1", from_agent="orchestration",
+            seq=1,
+            msg_id="m1",
+            from_agent="orchestration",
             topic="proposal",
             payload={
                 "action_name": "validate_stack",
@@ -308,7 +318,9 @@ def test_idempotency_replay_silent_when_payloads_differ():
             },
         ),
         InboxItem(
-            seq=2, msg_id="m2", from_agent="orchestration",
+            seq=2,
+            msg_id="m2",
+            from_agent="orchestration",
             topic="proposal",
             payload={
                 "action_name": "validate_stack",
@@ -326,7 +338,9 @@ def test_idempotency_replay_silent_when_no_key():
     """No idempotency_key at all → not a key-bypass attempt, skip."""
     inbox = [
         InboxItem(
-            seq=1, msg_id="m1", from_agent="orchestration",
+            seq=1,
+            msg_id="m1",
+            from_agent="orchestration",
             topic="proposal",
             payload={
                 "action_name": "validate_stack",
@@ -334,7 +348,9 @@ def test_idempotency_replay_silent_when_no_key():
             },
         ),
         InboxItem(
-            seq=2, msg_id="m2", from_agent="orchestration",
+            seq=2,
+            msg_id="m2",
+            from_agent="orchestration",
             topic="proposal",
             payload={
                 "action_name": "validate_stack",
@@ -399,6 +415,7 @@ def test_event_handles_combined_inbox_and_coordinator_events():
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
+
 
 def test_health_flags_failed_pod_as_high_severity():
     data = SourceData(
@@ -475,6 +492,7 @@ def test_health_does_not_flag_recently_started_pods_with_no_metrics():
 # ---------------------------------------------------------------------------
 # Classifier
 # ---------------------------------------------------------------------------
+
 
 def test_classifier_dedupes_same_subject_keeps_higher_severity():
     classifier = Classifier()

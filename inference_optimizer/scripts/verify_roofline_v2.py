@@ -154,8 +154,7 @@ def _wall_clock_min(state: dict[str, Any]) -> float:
                 break
     end_dt = _parse_iso(state.get("cumulative_gain_validated_ts"))
     if end_dt is None:
-        for action in ("validate_stack", "params", "backends",
-                       "sweep", "profile", "baseline"):
+        for action in ("validate_stack", "params", "backends", "sweep", "profile", "baseline"):
             attempts = state.get(f"{action}_attempts") or []
             if not attempts:
                 continue
@@ -332,9 +331,7 @@ def extract(session_dir: Path) -> SessionMetrics:
         return m
     m.has_state_json = True
     try:
-        m.cumulative_gain_validated_pct = float(
-            state.get("cumulative_gain_validated", 0.0)
-        )
+        m.cumulative_gain_validated_pct = float(state.get("cumulative_gain_validated", 0.0))
     except (TypeError, ValueError):
         m.cumulative_gain_validated_pct = 0.0
     m.wall_clock_min = _wall_clock_min(state)
@@ -363,9 +360,7 @@ def extract(session_dir: Path) -> SessionMetrics:
     m.discovered_flag_names = _flatten_discovered_flag_names(state)
     proposed = _extract_proposed_flags(state)
     if m.discovered_flag_names:
-        m.hallucinated_flag_count = sum(
-            1 for f in proposed if f not in m.discovered_flag_names
-        )
+        m.hallucinated_flag_count = sum(1 for f in proposed if f not in m.discovered_flag_names)
     m.analysis_md_referenced_count = _count_analysis_md_references(state)
 
     # Cache metrics — the backend surfaces these to backend.calls
@@ -374,12 +369,8 @@ def extract(session_dir: Path) -> SessionMetrics:
     # leave at 0.
     cache_metrics = state.get("tick_cache_metrics") or {}
     if isinstance(cache_metrics, dict):
-        m.cache_creation_input_tokens = int(
-            cache_metrics.get("cache_creation_input_tokens") or 0
-        )
-        m.cache_read_input_tokens = int(
-            cache_metrics.get("cache_read_input_tokens") or 0
-        )
+        m.cache_creation_input_tokens = int(cache_metrics.get("cache_creation_input_tokens") or 0)
+        m.cache_read_input_tokens = int(cache_metrics.get("cache_read_input_tokens") or 0)
         m.input_tokens = int(cache_metrics.get("input_tokens") or 0)
         m.output_tokens = int(cache_metrics.get("output_tokens") or 0)
     return m
@@ -421,7 +412,7 @@ def _format_action_seq(stack: list[dict[str, Any]]) -> str:
         kind = str(entry.get("kind") or entry.get("action") or "?")
         variant = entry.get("variant_name") or entry.get("variant_id") or ""
         parts.append(f"{kind}:{variant}" if variant else kind)
-    suffix = "" if len(stack) <= 12 else f" ...(+{len(stack)-12} more)"
+    suffix = "" if len(stack) <= 12 else f" ...(+{len(stack) - 12} more)"
     return ", ".join(parts) + suffix if parts else "(empty)"
 
 
@@ -439,9 +430,7 @@ def render(baseline: SessionMetrics, exp: SessionMetrics) -> str:
     Returns:
         str: Multi-line report text suitable for printing to stdout.
     """
-    delta_gain = (
-        exp.cumulative_gain_validated_pct - baseline.cumulative_gain_validated_pct
-    )
+    delta_gain = exp.cumulative_gain_validated_pct - baseline.cumulative_gain_validated_pct
     delta_wall = exp.wall_clock_min - baseline.wall_clock_min
     exp_cache = _cache_hit_rate(exp)
     base_cache = _cache_hit_rate(baseline)
@@ -460,9 +449,7 @@ def render(baseline: SessionMetrics, exp: SessionMetrics) -> str:
         out.append(f"  exp      ERROR: {exp.error}")
     out.append("")
     out.append("  " + "-" * 68)
-    out.append(
-        f"  {'metric':36s} {'baseline':>12s} {'exp':>12s} {'delta':>8s}"
-    )
+    out.append(f"  {'metric':36s} {'baseline':>12s} {'exp':>12s} {'delta':>8s}")
     out.append("  " + "-" * 68)
     rows: list[tuple[str, str, str, str]] = [
         (
@@ -509,9 +496,9 @@ def render(baseline: SessionMetrics, exp: SessionMetrics) -> str:
         ),
         (
             "cache_hit_rate",
-            f"{base_cache*100:>11.1f}%",
-            f"{exp_cache*100:>11.1f}%",
-            f"{(exp_cache-base_cache)*100:>+7.1f}%",
+            f"{base_cache * 100:>11.1f}%",
+            f"{exp_cache * 100:>11.1f}%",
+            f"{(exp_cache - base_cache) * 100:>+7.1f}%",
         ),
         (
             "analysis_md_referenced_count",
@@ -541,15 +528,9 @@ def render(baseline: SessionMetrics, exp: SessionMetrics) -> str:
     if delta_gain >= 5.0:
         verdict = "PASS — delta gain meets §10.2 hard target (≥ +5.0%)"
     elif delta_gain > 0:
-        verdict = (
-            f"PARTIAL — delta gain {delta_gain:+.3f}% positive but below "
-            "the +5% target"
-        )
+        verdict = f"PARTIAL — delta gain {delta_gain:+.3f}% positive but below the +5% target"
     else:
-        verdict = (
-            f"FAIL — delta gain {delta_gain:+.3f}% non-positive "
-            "(experiment regression / no improvement)"
-        )
+        verdict = f"FAIL — delta gain {delta_gain:+.3f}% non-positive (experiment regression / no improvement)"
     out.append(f"  VERDICT: {verdict}")
     out.append("  " + "=" * 68)
 
@@ -560,7 +541,7 @@ def render(baseline: SessionMetrics, exp: SessionMetrics) -> str:
         (
             "cache_hit_rate ≥ 50%",
             exp_cache >= 0.50,
-            f"{exp_cache*100:.1f}%",
+            f"{exp_cache * 100:.1f}%",
         ),
         (
             "analysis_md_referenced_count ≥ 3",
@@ -616,15 +597,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ``json`` attributes.
     """
     p = argparse.ArgumentParser(
-        description="Compare a baseline vs experiment Hyperloom session "
-                    "for Roofline-v2 verification (design §10.5).",
+        description="Compare a baseline vs experiment Hyperloom session for Roofline-v2 verification (design §10.5).",
     )
-    p.add_argument("--baseline", required=True, type=Path,
-                   help="Baseline session_dir (contains state.json)")
-    p.add_argument("--exp", required=True, type=Path,
-                   help="Experiment session_dir (contains state.json)")
-    p.add_argument("--json", action="store_true",
-                   help="Also emit a JSON summary on stderr (CI consumption)")
+    p.add_argument("--baseline", required=True, type=Path, help="Baseline session_dir (contains state.json)")
+    p.add_argument("--exp", required=True, type=Path, help="Experiment session_dir (contains state.json)")
+    p.add_argument("--json", action="store_true", help="Also emit a JSON summary on stderr (CI consumption)")
     return p.parse_args(argv)
 
 
@@ -668,17 +645,13 @@ def main(argv: list[str] | None = None) -> int:
             },
             "delta": {
                 "cumulative_gain_validated_pct": (
-                    exp.cumulative_gain_validated_pct
-                    - baseline.cumulative_gain_validated_pct
+                    exp.cumulative_gain_validated_pct - baseline.cumulative_gain_validated_pct
                 ),
                 "wall_clock_min": exp.wall_clock_min - baseline.wall_clock_min,
             },
         }
         sys.stderr.write(json.dumps(summary, indent=2) + "\n")
-    return _exit_code_for_delta(
-        exp.cumulative_gain_validated_pct
-        - baseline.cumulative_gain_validated_pct
-    )
+    return _exit_code_for_delta(exp.cumulative_gain_validated_pct - baseline.cumulative_gain_validated_pct)
 
 
 if __name__ == "__main__":

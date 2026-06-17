@@ -54,14 +54,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Render a Hyperloom session_breakdown.json to markdown.",
     )
-    p.add_argument("--input", "-i", required=True, type=Path,
-                   help="Path to session_breakdown.json")
-    p.add_argument("--output", "-o", type=Path, default=None,
-                   help="Output markdown path (defaults to <session_dir>/session_report.md)")
-    p.add_argument("--no-llm", action="store_true",
-                   help="Skip LLM narrative pass even if env vars are configured")
-    p.add_argument("--debug-dump", action="store_true",
-                   help="Also write LLM prompt + raw response next to the report")
+    p.add_argument("--input", "-i", required=True, type=Path, help="Path to session_breakdown.json")
+    p.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        default=None,
+        help="Output markdown path (defaults to <session_dir>/session_report.md)",
+    )
+    p.add_argument("--no-llm", action="store_true", help="Skip LLM narrative pass even if env vars are configured")
+    p.add_argument("--debug-dump", action="store_true", help="Also write LLM prompt + raw response next to the report")
     return p.parse_args(argv)
 
 
@@ -119,8 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     out_path = _resolve_output(args.input, args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(result.markdown)
-    log.info("wrote %s (%d bytes, used_llm=%s)",
-             out_path, len(result.markdown), result.used_llm)
+    log.info("wrote %s (%d bytes, used_llm=%s)", out_path, len(result.markdown), result.used_llm)
 
     if args.debug_dump:
         (out_path.parent / "session_report_prompt.json").write_text(result.llm_user_prompt)

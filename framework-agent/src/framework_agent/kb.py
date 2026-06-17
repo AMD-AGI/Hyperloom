@@ -75,14 +75,8 @@ def contribute_to_kb_for_framework(
     fw_dir = path_for_framework(framework)
     fw_dir.mkdir(parents=True, exist_ok=True)
     target = fw_dir / "empirical_kb.md"
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
-        "%Y-%m-%d %H:%M:%S UTC"
-    )
-    entry = (
-        f"\n\n---\n"
-        f"**[{timestamp}]** source=`{source}` session=`{session_id}`\n\n"
-        f"{finding}\n"
-    )
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    entry = f"\n\n---\n**[{timestamp}]** source=`{source}` session=`{session_id}`\n\n{finding}\n"
     with target.open("a") as f:
         f.write(entry)
     return target
@@ -91,7 +85,12 @@ def contribute_to_kb_for_framework(
 DOMAIN_KEYWORDS: dict[str, list[str]] = {
     "kernel": ["kernel", "gemm", "moe", "attention", "fmoe", "ck", "triton"],
     "communication": [
-        "allreduce", "nccl", "rccl", "quickreduce", "communication", "collective",
+        "allreduce",
+        "nccl",
+        "rccl",
+        "quickreduce",
+        "communication",
+        "collective",
     ],
     "compiler": ["compiler", "inductor", "codegen"],
     "framework": ["vllm", "sglang", "atom", "framework", "scheduler", "cuda_graph", "cudagraph"],
@@ -310,14 +309,8 @@ def contribute_to_kb(
     domain_dir = root / domain
     domain_dir.mkdir(parents=True, exist_ok=True)
     target = domain_dir / "empirical_kb.md"
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
-        "%Y-%m-%d %H:%M:%S UTC"
-    )
-    entry = (
-        f"\n\n---\n"
-        f"**[{timestamp}]** source=`{source}` session=`{session_id}`\n\n"
-        f"{finding}\n"
-    )
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    entry = f"\n\n---\n**[{timestamp}]** source=`{source}` session=`{session_id}`\n\n{finding}\n"
     with target.open("a") as f:
         f.write(entry)
     return target
@@ -436,9 +429,7 @@ def _synthesize_via_llm(
             "with the [claude] extra or reuse kernel-agent's install.sh"
         ) from exc
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
-        raise RuntimeError(
-            "claude_agent_sdk missing required attributes (query / ClaudeAgentOptions)"
-        )
+        raise RuntimeError("claude_agent_sdk missing required attributes (query / ClaudeAgentOptions)")
 
     prompt = _build_llm_prompt(domain, findings)
     options = sdk.ClaudeAgentOptions(model=model, system_prompt="")

@@ -19,8 +19,7 @@ from .. import session_paths
 
 log = logging.getLogger("hyperloom.research_hints")
 
-_HINT_FIELDS = ("what", "expected_impact", "accuracy_risk", "source",
-                "domain_tags", "status")
+_HINT_FIELDS = ("what", "expected_impact", "accuracy_risk", "source", "domain_tags", "status")
 
 
 def _coerce_hint(raw: Any) -> dict[str, Any] | None:
@@ -106,8 +105,7 @@ def _render_md(hints: list[dict[str, Any]]) -> str:
     lines = ["# Research Hints", ""]
     if not hints:
         lines += [
-            "_No proven priors collected yet (scout produced an empty set "
-            + "or all sources are unreachable)._",
+            "_No proven priors collected yet (scout produced an empty set " + "or all sources are unreachable)._",
             "",
         ]
         return "\n".join(lines)
@@ -170,7 +168,8 @@ def _persist(session_dir: Path, hints: list[dict[str, Any]]) -> None:
 
 
 def append_hints(
-    session_dir: Path, incoming: list[Any],
+    session_dir: Path,
+    incoming: list[Any],
 ) -> tuple[int, int]:
     """Append-merge ``incoming`` scout hints; returns ``(added, dropped)`` (dropped = missing-source rejects; duplicates not re-added).
 
@@ -221,7 +220,8 @@ def _coerce_per_conc(raw: Any) -> dict[str, Any] | None:
 
 
 def write_competitor_target(
-    session_dir: Path, target: Any,
+    session_dir: Path,
+    target: Any,
 ) -> bool:
     """Persist ``competitor_target.json`` after dropping sourceless rows; ``True`` when ≥1 sourced row was written.
 
@@ -295,7 +295,8 @@ def load_competitor_target(session_dir: Path) -> dict[str, Any] | None:
 
 
 def _match_target_row(
-    target: dict[str, Any], conc: int | None,
+    target: dict[str, Any],
+    conc: int | None,
 ) -> dict[str, Any] | None:
     """Pick the per-conc target row nearest ``conc`` (highest-throughput row when conc unknown).
 
@@ -395,8 +396,10 @@ def full_gap_summary(
     """
     if not gap:
         return ""
-    lines = ["External target gap (advisory) — competitor numbers are "
-             + "LLM-authored with sources; treat as direction, not a gate."]
+    lines = [
+        "External target gap (advisory) — competitor numbers are "
+        + "LLM-authored with sources; treat as direction, not a gate."
+    ]
     tg = gap.get("throughput_gap_pct")
     tr = gap.get("tpot_ratio")
     ig = gap.get("interactivity_gap_pct")
@@ -434,16 +437,51 @@ def _to_num(value: Any) -> float | None:
 
 # Direction keywords for cutting per-output-token latency (flag variants aligning with a dominant TPOT gap; advisory).
 _LATENCY_DIRECTION_KEYWORDS: tuple[str, ...] = (
-    "mtp", "speculative", "eagle", "medusa", "decode", "comm", "overlap",
-    "allreduce", "all_reduce", "quantized_allreduce", "cuda_graph",
-    "cudagraph", "fused", "fuse",
+    "mtp",
+    "speculative",
+    "eagle",
+    "medusa",
+    "decode",
+    "comm",
+    "overlap",
+    "allreduce",
+    "all_reduce",
+    "quantized_allreduce",
+    "cuda_graph",
+    "cudagraph",
+    "fused",
+    "fuse",
 )
 
-_STOPWORDS: frozenset[str] = frozenset({
-    "the", "and", "for", "with", "use", "using", "enable", "enabled",
-    "via", "this", "that", "from", "into", "per", "set", "than", "more",
-    "less", "when", "then", "case", "mode", "flag", "flags", "value",
-})
+_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "with",
+        "use",
+        "using",
+        "enable",
+        "enabled",
+        "via",
+        "this",
+        "that",
+        "from",
+        "into",
+        "per",
+        "set",
+        "than",
+        "more",
+        "less",
+        "when",
+        "then",
+        "case",
+        "mode",
+        "flag",
+        "flags",
+        "value",
+    }
+)
 
 
 def _tokens(text: str) -> set[str]:
@@ -504,8 +542,7 @@ def match_variants_to_priors(
             continue
         text = " ".join(
             str(variant.get(k) or "")
-            for k in ("name", "extra_server_args", "extra_sglang_args",
-                      "candidate_extra_server_args", "description")
+            for k in ("name", "extra_server_args", "extra_sglang_args", "candidate_extra_server_args", "description")
         )
         text += " " + " ".join(str(t) for t in (variant.get("domain_tags") or []))
         vtoks = _tokens(text)
@@ -513,10 +550,7 @@ def match_variants_to_priors(
         for what, toks in hint_tokens:
             if vtoks & toks:
                 matched_hints.append(what)
-        latency_aligned = bool(
-            latency_dominant
-            and any(kw in vtoks for kw in _LATENCY_DIRECTION_KEYWORDS)
-        )
+        latency_aligned = bool(latency_dominant and any(kw in vtoks for kw in _LATENCY_DIRECTION_KEYWORDS))
         if matched_hints or latency_aligned:
             out[name] = {
                 "hints": matched_hints,
@@ -544,7 +578,9 @@ def priors_match_summary(
         The advisory block text, or ``""`` when no variants match.
     """
     matches = match_variants_to_priors(
-        variants, hints, primary_gap=primary_gap,
+        variants,
+        hints,
+        primary_gap=primary_gap,
     )
     if not matches:
         return ""
@@ -566,7 +602,9 @@ def priors_match_summary(
 
 
 def summarise_for_prompt(
-    session_dir: Path, *, max_entries: int = 8,
+    session_dir: Path,
+    *,
+    max_entries: int = 8,
 ) -> str:
     """Compact advisory block of proven priors for the orchestration prompt (empty when none; advisory only).
 
@@ -587,15 +625,10 @@ def summarise_for_prompt(
     for h in hints[:max_entries]:
         impact = h["expected_impact"] or "?"
         risk = h["accuracy_risk"] or "?"
-        lines.append(
-            f"- {h['what']} (impact={impact}, accuracy_risk={risk}, "
-            f"source={h['source']})"
-        )
+        lines.append(f"- {h['what']} (impact={impact}, accuracy_risk={risk}, source={h['source']})")
     extra = len(hints) - max_entries
     if extra > 0:
-        lines.append(
-            f"... and {extra} more in research_hints.md."
-        )
+        lines.append(f"... and {extra} more in research_hints.md.")
     return "\n".join(lines)
 
 

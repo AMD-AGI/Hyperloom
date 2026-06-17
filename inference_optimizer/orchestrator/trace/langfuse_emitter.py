@@ -362,7 +362,8 @@ class LangfuseEmitter:
         # upload correlate on claw_session_id (fallback internal session id).
         self._manifest: dict[str, Any] = _load_json(_manifest_path(self.session_dir))
         self._session_label: str | None = lfmap.langfuse_session_id(
-            self._manifest, self.session_dir.name,
+            self._manifest,
+            self.session_dir.name,
         )
         self._trace_id: str | None = lfmap.derive_trace_id(
             lfmap.correlation_seed(self._manifest, self.session_dir.name),
@@ -377,17 +378,17 @@ class LangfuseEmitter:
         # ``disabled_reason`` is the gate that tripped when not enabled.
         self._disabled_reason: str | None = None
         self._counts: dict[str, int] = {
-            "generations_sent": 0,      # Generations successfully started
-            "generations_paired": 0,    # of which had both token + text halves
+            "generations_sent": 0,  # Generations successfully started
+            "generations_paired": 0,  # of which had both token + text halves
             "generations_text_only": 0,
             "generations_token_only": 0,
-            "scores_sent": 0,           # decision Scores created (span + trace)
-            "spans_opened": 0,          # phase + agent spans created
-            "ext_shards_read": 0,       # out-of-process ext/*.jsonl files swept
-            "breakdown_recorded": 0,    # 1 once the full SBD JSON was attached
-            "kb_spans_sent": 0,         # KB trace spans (assess/priors/recipe)
-            "recipe_audit_read": 0,     # recipe_snapshot/.audit.jsonl rows swept
-            "errors": 0,                # swallowed send failures
+            "scores_sent": 0,  # decision Scores created (span + trace)
+            "spans_opened": 0,  # phase + agent spans created
+            "ext_shards_read": 0,  # out-of-process ext/*.jsonl files swept
+            "breakdown_recorded": 0,  # 1 once the full SBD JSON was attached
+            "kb_spans_sent": 0,  # KB trace spans (assess/priors/recipe)
+            "recipe_audit_read": 0,  # recipe_snapshot/.audit.jsonl rows swept
+            "errors": 0,  # swallowed send failures
         }
         self._flushed = False
         self._enabled = self._init_client()
@@ -422,7 +423,8 @@ class LangfuseEmitter:
                 "langfuse: SDK not importable (%s: %s); live push disabled. "
                 "Install the optional dependency: pip install 'hyperloom-"
                 "inference_optimizer[trace]'.",
-                type(exc).__name__, exc,
+                type(exc).__name__,
+                exc,
             )
             return False
         try:
@@ -430,7 +432,9 @@ class LangfuseEmitter:
             self._client = get_client()
             log.info(
                 "langfuse: live push enabled (host=%s, session=%s, trace_id=%s)",
-                creds.get("LANGFUSE_HOST"), self._session_label, self._trace_id,
+                creds.get("LANGFUSE_HOST"),
+                self._session_label,
+                self._trace_id,
             )
             return True
         except Exception:  # noqa: BLE001
@@ -499,7 +503,9 @@ class LangfuseEmitter:
             root = self._ensure_root(start)
             span = _start_obs(
                 root,
-                name=f"phase:{phase}", as_type="span", start_time=start,
+                name=f"phase:{phase}",
+                as_type="span",
+                start_time=start,
                 metadata={"phase": phase},
             )
             self._phase_spans[phase] = span
@@ -524,7 +530,9 @@ class LangfuseEmitter:
             phase_span = self._ensure_phase_span(phase, start)
             span = _start_obs(
                 phase_span,
-                name=f"agent:{agent}", as_type="span", start_time=start,
+                name=f"agent:{agent}",
+                as_type="span",
+                start_time=start,
                 metadata={"phase": phase, "agent": agent},
             )
             self._agent_spans[key] = span
@@ -751,7 +759,9 @@ class LangfuseEmitter:
             # Stamp trace name/session_id too, so a session whose only trace
             # artifact is the breakdown (e.g. no LLM calls) is still grouped.
             _set_trace_attrs(
-                obs, name=self._trace_name(), session_id=self._session_label,
+                obs,
+                name=self._trace_name(),
+                session_id=self._session_label,
             )
             _end_obs(obs, None)
             self._counts["breakdown_recorded"] = 1
@@ -867,7 +877,10 @@ class LangfuseEmitter:
             step_span = self._open_decision_span(drow, phase, agent)
             for score in scores:
                 self._create_score(
-                    score, phase=phase, agent=agent, span=step_span,
+                    score,
+                    phase=phase,
+                    agent=agent,
+                    span=step_span,
                 )
             if step_span is not None:
                 self._safe_end(step_span)
@@ -897,7 +910,10 @@ class LangfuseEmitter:
         return p or lfmap.UNKNOWN_AGENT
 
     def _open_decision_span(
-        self, drow: dict[str, Any], phase: str, agent: str,
+        self,
+        drow: dict[str, Any],
+        phase: str,
+        agent: str,
     ) -> Any:
         """Open an ``optimization_step:<operation_kind>`` span for one decision.
 
@@ -915,11 +931,7 @@ class LangfuseEmitter:
             The opened ``optimization_step`` span, or ``None`` when no parent is
             open or the SDK rejects the call.
         """
-        parent = (
-            self._agent_spans.get((phase, agent))
-            or self._phase_spans.get(phase)
-            or self._root_span
-        )
+        parent = self._agent_spans.get((phase, agent)) or self._phase_spans.get(phase) or self._root_span
         if parent is None:
             return None
         dec = drow.get("decision") or {}
@@ -943,15 +955,21 @@ class LangfuseEmitter:
         md = {k: v for k, v in md.items() if v is not None}
         try:
             return _start_obs(
-                parent, name=f"optimization_step:{op_kind}",
-                as_type="span", metadata=md,
+                parent,
+                name=f"optimization_step:{op_kind}",
+                as_type="span",
+                metadata=md,
             )
         except Exception:  # noqa: BLE001
             log.debug("langfuse: open decision span failed", exc_info=True)
             return None
 
     def _create_score(
-        self, score: dict[str, Any], *, phase: str, agent: str,
+        self,
+        score: dict[str, Any],
+        *,
+        phase: str,
+        agent: str,
         span: Any = None,
     ) -> None:
         """Attach a Langfuse Score to a step span / agent span / the trace.
@@ -986,7 +1004,8 @@ class LangfuseEmitter:
         except Exception:  # noqa: BLE001
             self._counts["errors"] += 1
             log.debug(
-                "langfuse: create_score failed for %s", score.get("name"),
+                "langfuse: create_score failed for %s",
+                score.get("name"),
                 exc_info=True,
             )
 
@@ -1021,9 +1040,7 @@ class LangfuseEmitter:
             "trace_id": self._trace_id,
             "session_id": self._session_label,
             "correlated_on": (
-                "claw_session_id"
-                if str(self._manifest.get("claw_session_id") or "").strip()
-                else "internal_session_id"
+                "claw_session_id" if str(self._manifest.get("claw_session_id") or "").strip() else "internal_session_id"
             ),
             "counts": dict(self._counts),
             "counts_final": self._flushed,

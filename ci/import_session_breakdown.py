@@ -89,15 +89,15 @@ DEFAULT_IMAGES: Dict[str, str] = {
     # sglang profilerfix: rocprofiler captures HipGraphLaunch kernels (issue #352)
     # Pre-profilerfix image (restore when reverting): "harbor.core42.example-internal-host.invalid/proxy/lmsysorg/sglang:v0.5.11-rocm720-mi30x"
     "sglang": "harbor.core42.example-internal-host.invalid/proxy/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix",
-    "vllm":   "harbor.core42.example-internal-host.invalid/proxy/vllm/vllm-openai-rocm:v0.19.0",
+    "vllm": "harbor.core42.example-internal-host.invalid/proxy/vllm/vllm-openai-rocm:v0.19.0",
 }
 
 DEFAULT_DB = {
-    "host":     os.environ.get("PERF_RUNS_DB_HOST", "127.0.0.1"),
-    "port":     int(os.environ.get("PERF_RUNS_DB_PORT", "5432")),
-    "user":     os.environ.get("PERF_RUNS_DB_USER", "postgres"),
+    "host": os.environ.get("PERF_RUNS_DB_HOST", "127.0.0.1"),
+    "port": int(os.environ.get("PERF_RUNS_DB_PORT", "5432")),
+    "user": os.environ.get("PERF_RUNS_DB_USER", "postgres"),
     "password": os.environ.get("PERF_RUNS_DB_PASSWORD", ""),
-    "dbname":   os.environ.get("PERF_RUNS_DB_NAME", "primus-safe-db"),
+    "dbname": os.environ.get("PERF_RUNS_DB_NAME", "primus-safe-db"),
 }
 
 DEFAULT_TABLE = os.environ.get("PERF_RUNS_TABLE", "perf_runs_dev")
@@ -123,6 +123,7 @@ def _import_psycopg2():
     try:
         import psycopg2 as _pg
         from psycopg2.extras import Json as _Json
+
         return _pg, _Json
     except ImportError:
         sys.stderr.write(
@@ -136,6 +137,7 @@ def _import_psycopg2():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def safe_get(d: Any, *keys: str, default: Any = None) -> Any:
     """Walk a chain of nested dict keys, tolerating missing/None levels.
@@ -204,8 +206,8 @@ def derive_image_short(image: str) -> str:
     Returns:
         The shortened image string, or ``"unknown"`` when empty.
     """
-    img = image.split("@")[0]            # strip digest
-    img = img.split(":")[0]              # strip tag
+    img = image.split("@")[0]  # strip digest
+    img = img.split(":")[0]  # strip tag
     parts = [p for p in img.split("/") if p]
     if len(parts) >= 2:
         return "/".join(parts[-2:])
@@ -275,7 +277,10 @@ def detect_category(data: Dict) -> str:
     model_name = (safe_get(data, "workload", "model_name") or "").lower()
     if any(tag in model_name for tag in ("moe", "mixtral", "a3b", "a14b", "a22b")):
         return "MoE"
-    if any(tag in model_name for tag in ("-vl-", "vision", "llava", "internvl", "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl")):
+    if any(
+        tag in model_name
+        for tag in ("-vl-", "vision", "llava", "internvl", "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl")
+    ):
         return "VLM"
 
     return "Dense"
@@ -479,10 +484,10 @@ DEFAULT_PREC = "fp8"
 
 _RE_TP_IN_ARGS = re.compile(
     r"(?:"
-    r"\bTP\s*=\s*"                                      # env style: TP=8
-    r"|\btensor[_-]parallel[_-]size\s*=\s*"             # vllm kwargs
-    r"|\btp_size\s*=\s*"                                # sglang ServerArgs
-    r"|--tp\s+|--tp=\s*"                                # cmdline
+    r"\bTP\s*=\s*"  # env style: TP=8
+    r"|\btensor[_-]parallel[_-]size\s*=\s*"  # vllm kwargs
+    r"|\btp_size\s*=\s*"  # sglang ServerArgs
+    r"|--tp\s+|--tp=\s*"  # cmdline
     r"|--tensor[_-]parallel[_-]size[=\s]+"
     r")(\d+)",
     re.IGNORECASE,
@@ -507,7 +512,7 @@ def _collect_args_text(data: Dict) -> str:
     parts: list[str] = []
     for path in (
         ("baseline", "invocation", "framework_args"),
-        ("final",    "invocation", "framework_args"),
+        ("final", "invocation", "framework_args"),
         ("workload", "invocation", "framework_args"),
     ):
         v = safe_get(data, *path)
@@ -651,8 +656,8 @@ def resolve_workload_dims(data: Dict) -> Dict[str, Any]:
         parsed = _parse_int_from_args(rx, args)
         return parsed if parsed is not None else default
 
-    isl  = _pick("isl",  _RE_ISL_IN_ARGS,  DEFAULT_ISL)
-    osl  = _pick("osl",  _RE_OSL_IN_ARGS,  DEFAULT_OSL)
+    isl = _pick("isl", _RE_ISL_IN_ARGS, DEFAULT_ISL)
+    osl = _pick("osl", _RE_OSL_IN_ARGS, DEFAULT_OSL)
     conc = _pick("conc", _RE_CONC_IN_ARGS, DEFAULT_CONC)
 
     # duration_seconds
@@ -663,11 +668,11 @@ def resolve_workload_dims(data: Dict) -> Dict[str, Any]:
         duration_seconds = DEFAULT_DURATION_SECONDS
 
     return {
-        "prec":             prec,
-        "tp":               tp,
-        "isl":              isl,
-        "osl":              osl,
-        "conc":             conc,
+        "prec": prec,
+        "tp": tp,
+        "isl": isl,
+        "osl": osl,
+        "conc": conc,
         "duration_seconds": duration_seconds,
     }
 
@@ -696,8 +701,7 @@ def extract_row(data: Dict) -> Dict[str, Any]:
 
     # model_name sometimes arrives as a filesystem path; clean prefixes so the
     # leaderboard shows a HF-style name and unique_key stays comparable.
-    model_name = (_clean_model_name(workload.get("model_name"))
-                  or (workload.get("model_name") or "").strip())
+    model_name = _clean_model_name(workload.get("model_name")) or (workload.get("model_name") or "").strip()
     framework_name = (workload.get("framework") or "").strip()
     framework_ver = (workload.get("framework_version") or "").strip()
     framework_label = framework_name if not framework_ver else f"{framework_name} {framework_ver}"
@@ -728,45 +732,44 @@ def extract_row(data: Dict) -> Dict[str, Any]:
         gain_source = "missing"
 
     row: Dict[str, Any] = {
-        "model_name":                truncate(model_name, 255),
-        "framework":                 truncate(framework_label, 64),
-        "image":                     truncate(image, 512),
-        "category":                  truncate(detect_category(data), 32),
-        "prec":                      truncate(dims["prec"], 32),
-        "gain":                      gain_value,
-        "roofline":                  extract_roofline(data),
-        "duration_seconds":          dims["duration_seconds"],
-        "kernel_gain":               compute_kernel_gain(attribution_src),
-        "param_gain":                compute_param_gain(attribution_src),
-        "backend_gain":              compute_backend_gain(attribution_src),
-        "geak_gain":                 compute_geak_gain(attribution_src),
-        "oob_gain":                  compute_oob_gain(attribution_src),
-        "framework_gain":            compute_framework_gain(attribution),
+        "model_name": truncate(model_name, 255),
+        "framework": truncate(framework_label, 64),
+        "image": truncate(image, 512),
+        "category": truncate(detect_category(data), 32),
+        "prec": truncate(dims["prec"], 32),
+        "gain": gain_value,
+        "roofline": extract_roofline(data),
+        "duration_seconds": dims["duration_seconds"],
+        "kernel_gain": compute_kernel_gain(attribution_src),
+        "param_gain": compute_param_gain(attribution_src),
+        "backend_gain": compute_backend_gain(attribution_src),
+        "geak_gain": compute_geak_gain(attribution_src),
+        "oob_gain": compute_oob_gain(attribution_src),
+        "framework_gain": compute_framework_gain(attribution),
         "baseline_tok_per_s_per_gpu": baseline_tput,
-        "opt_tok_per_s_per_gpu":     opt_tput,
-        "tp":                        dims["tp"],
-        "isl":                       dims["isl"],
-        "osl":                       dims["osl"],
-        "conc":                      dims["conc"],
+        "opt_tok_per_s_per_gpu": opt_tput,
+        "tp": dims["tp"],
+        "isl": dims["isl"],
+        "osl": dims["osl"],
+        "conc": dims["conc"],
         # post_perf_runs.py's build_body rejects incomplete/baseline-failed
         # sessions, so anything POSTed is effectively a successful run.
-        "status":                    "success",
-        "version":                   truncate(code_rev, 64),
-        "unique_key":                truncate(derive_unique_key(model_name, image), 128),
-        "claw_session_id":           truncate(session.get("claw_session_id"), 128),
+        "status": "success",
+        "version": truncate(code_rev, 64),
+        "unique_key": truncate(derive_unique_key(model_name, image), 128),
+        "claw_session_id": truncate(session.get("claw_session_id"), 128),
     }
 
     # Derivation provenance, persisted by enrich_raw_data.
     row["_meta"] = {
-        "gain_source":           gain_source,
-        "validated_gain_pct":    float(validated_gain) if isinstance(validated_gain, (int, float)) else None,
-        "throughput_delta_pct":  throughput_delta_pct,
+        "gain_source": gain_source,
+        "validated_gain_pct": float(validated_gain) if isinstance(validated_gain, (int, float)) else None,
+        "throughput_delta_pct": throughput_delta_pct,
     }
 
     # Force missing attribution gains to 0.00 (never NULL) and round to 2dp for
     # the NUMERIC(8,2) target column.
-    for key in ("kernel_gain", "param_gain", "backend_gain",
-                "geak_gain", "oob_gain", "framework_gain"):
+    for key in ("kernel_gain", "param_gain", "backend_gain", "geak_gain", "oob_gain", "framework_gain"):
         v = row[key]
         if v is None:
             row[key] = 0.00
@@ -776,8 +779,7 @@ def extract_row(data: Dict) -> Dict[str, Any]:
     # Clip negative gains to 0 (only when present and < 0). Process-history paths
     # in raw_data keep negatives (meaningful for REVERT/NEEDS_REVIEW);
     # enrich_raw_data() mirrors this clip only on display-facing nested paths.
-    for key in ("gain", "kernel_gain", "param_gain", "backend_gain",
-                "geak_gain", "oob_gain", "framework_gain"):
+    for key in ("gain", "kernel_gain", "param_gain", "backend_gain", "geak_gain", "oob_gain", "framework_gain"):
         v = row.get(key)
         if isinstance(v, (int, float)) and v < 0:
             row[key] = 0.0
@@ -842,10 +844,10 @@ def enrich_raw_data(original: Dict, row: Dict[str, Any], meta: Optional[Dict] = 
         enriched["workload"] = workload
     workload_fallbacks_applied: Dict[str, Any] = {}
     for wl_key, row_key in (
-        ("tp",        "tp"),
-        ("isl",       "isl"),
-        ("osl",       "osl"),
-        ("conc",      "conc"),
+        ("tp", "tp"),
+        ("isl", "isl"),
+        ("osl", "osl"),
+        ("conc", "conc"),
         ("precision", "prec"),
     ):
         if not workload.get(wl_key):
@@ -873,47 +875,47 @@ def enrich_raw_data(original: Dict, row: Dict[str, Any], meta: Optional[Dict] = 
 
     final_block = enriched.get("final")
     if isinstance(final_block, dict):
-        _clip_neg(final_block, "cumulative_gain_pct_validated",     "final.cumulative_gain_pct_validated")
+        _clip_neg(final_block, "cumulative_gain_pct_validated", "final.cumulative_gain_pct_validated")
         _clip_neg(final_block, "cumulative_gain_pct_per_round_sum", "final.cumulative_gain_pct_per_round_sum")
-        _clip_neg(final_block, "e2e_gain_pct",                       "final.e2e_gain_pct")
+        _clip_neg(final_block, "e2e_gain_pct", "final.e2e_gain_pct")
 
     attr_block = enriched.get("attribution")
     if isinstance(attr_block, dict):
         src_block = attr_block.get("source_breakdown")
         if isinstance(src_block, dict):
-            _clip_neg(src_block, "oob_pct_of_total",  "attribution.source_breakdown.oob_pct_of_total")
+            _clip_neg(src_block, "oob_pct_of_total", "attribution.source_breakdown.oob_pct_of_total")
             _clip_neg(src_block, "geak_pct_of_total", "attribution.source_breakdown.geak_pct_of_total")
 
     meta = meta or {}
     enrichment = {
-        "imported_at_utc":            datetime.now(timezone.utc).isoformat(),
-        "importer":                   IMPORTER_NAME,
-        "importer_version":           IMPORTER_VERSION,
-        "unique_key":                 row["unique_key"],
-        "category":                   row["category"],
-        "image_used":                 row["image"],
-        "image_fallback_applied":     not session_image_was_present,
-        "duration_fallback_applied":  not session_duration_was_present,
+        "imported_at_utc": datetime.now(timezone.utc).isoformat(),
+        "importer": IMPORTER_NAME,
+        "importer_version": IMPORTER_VERSION,
+        "unique_key": row["unique_key"],
+        "category": row["category"],
+        "image_used": row["image"],
+        "image_fallback_applied": not session_image_was_present,
+        "duration_fallback_applied": not session_duration_was_present,
         "workload_fallbacks_applied": workload_fallbacks_applied,
-        "gain_pct":                   row["gain"],
-        "gain_source":                meta.get("gain_source"),
-        "validated_gain_pct":         meta.get("validated_gain_pct"),
-        "throughput_delta_pct":       meta.get("throughput_delta_pct"),
-        "kernel_gain_pct":            row["kernel_gain"],
-        "param_gain_pct":             row["param_gain"],
-        "backend_gain_pct":           row["backend_gain"],
-        "geak_gain_pct":              row["geak_gain"],
-        "oob_gain_pct":               row["oob_gain"],
-        "framework_gain_pct":         row["framework_gain"],
-        "raw_data_neg_gain_clipped":  raw_clip_applied,
-        "duration_seconds":           row["duration_seconds"],
-        "duration_pretty":            format_duration_pretty(row["duration_seconds"]),
-        "baseline_tput":              row["baseline_tok_per_s_per_gpu"],
-        "opt_tput":                   row["opt_tok_per_s_per_gpu"],
-        "status":                     row["status"],
-        "stop_reason":                session.get("stop_reason"),
-        "version":                    row["version"],
-        "claw_session_id":            row.get("claw_session_id"),
+        "gain_pct": row["gain"],
+        "gain_source": meta.get("gain_source"),
+        "validated_gain_pct": meta.get("validated_gain_pct"),
+        "throughput_delta_pct": meta.get("throughput_delta_pct"),
+        "kernel_gain_pct": row["kernel_gain"],
+        "param_gain_pct": row["param_gain"],
+        "backend_gain_pct": row["backend_gain"],
+        "geak_gain_pct": row["geak_gain"],
+        "oob_gain_pct": row["oob_gain"],
+        "framework_gain_pct": row["framework_gain"],
+        "raw_data_neg_gain_clipped": raw_clip_applied,
+        "duration_seconds": row["duration_seconds"],
+        "duration_pretty": format_duration_pretty(row["duration_seconds"]),
+        "baseline_tput": row["baseline_tok_per_s_per_gpu"],
+        "opt_tput": row["opt_tok_per_s_per_gpu"],
+        "status": row["status"],
+        "stop_reason": session.get("stop_reason"),
+        "version": row["version"],
+        "claw_session_id": row.get("claw_session_id"),
     }
     enriched["_enrichment"] = enrichment
     return enriched
@@ -947,6 +949,7 @@ def safe_table(name: str) -> str:
 # ---------------------------------------------------------------------------
 # SQL builders
 # ---------------------------------------------------------------------------
+
 
 def build_upsert_sql(table: str) -> str:
     """Build the parameterised INSERT ... ON CONFLICT upsert for local mode.
@@ -1017,15 +1020,13 @@ def build_create_unique_index_sql(table: str) -> str:
             upsert's ``ON CONFLICT (unique_key)`` clause works.
     """
     table = safe_table(table)
-    return (
-        f"CREATE UNIQUE INDEX IF NOT EXISTS {table}_unique_key_idx "
-        f"ON {table}(unique_key);"
-    )
+    return f"CREATE UNIQUE INDEX IF NOT EXISTS {table}_unique_key_idx ON {table}(unique_key);"
 
 
 # ---------------------------------------------------------------------------
 # MODE A: local psycopg2
 # ---------------------------------------------------------------------------
+
 
 def connect_local(args: argparse.Namespace):
     """Open a psycopg2 connection for local mode.
@@ -1045,8 +1046,7 @@ def connect_local(args: argparse.Namespace):
     url = os.environ.get("PERF_RUNS_DB_URL") or args.db_url
     if url:
         return pg.connect(url)
-    kwargs = dict(host=args.host, port=args.port,
-                  user=args.user, dbname=args.dbname)
+    kwargs = dict(host=args.host, port=args.port, user=args.user, dbname=args.dbname)
     if args.password:
         kwargs["password"] = args.password
     return pg.connect(**kwargs)
@@ -1083,6 +1083,7 @@ def upsert_row_local(conn, row: Dict[str, Any], sql: str) -> Tuple[int, bool]:
 # ---------------------------------------------------------------------------
 # MODE B: ssh + kubectl exec + psql (no local DB driver needed)
 # ---------------------------------------------------------------------------
+
 
 def _dollar_tag(content: str, base: str = "perf") -> str:
     """Find a PostgreSQL dollar-quote tag that does not appear in ``content``.
@@ -1256,7 +1257,8 @@ def build_ssh_kubectl_psql(hop1: str, namespace: str, user: str, dbname: str) ->
     )
     return [
         "ssh",
-        "-o", "StrictHostKeyChecking=accept-new",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
         hop1,
         remote_cmd,
     ]
@@ -1284,8 +1286,7 @@ def execute_remote_sql(sql: str, *, hop1: str, namespace: str, user: str, dbname
     err = proc.stderr.decode("utf-8", errors="replace")
     if proc.returncode != 0:
         raise RuntimeError(
-            f"psql via ssh+kubectl failed (exit={proc.returncode}):\n"
-            f"--- stderr ---\n{err}\n--- stdout ---\n{out}\n"
+            f"psql via ssh+kubectl failed (exit={proc.returncode}):\n--- stderr ---\n{err}\n--- stdout ---\n{out}\n"
         )
     return out, err
 
@@ -1293,6 +1294,7 @@ def execute_remote_sql(sql: str, *, hop1: str, namespace: str, user: str, dbname
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def iter_json_files(paths: Iterable[str], scan_dir: Optional[str]) -> List[Path]:
     """Expand input paths and an optional scan dir into a unique file list.
@@ -1342,8 +1344,11 @@ def looks_like_session_breakdown(data: Any) -> bool:
     """
     if not isinstance(data, dict):
         return False
-    return ("workload" in data and "baseline" in data and "session" in data) or \
-           "schema_version" in data and "session_breakdown" in str(data.get("schema_version", ""))
+    return (
+        ("workload" in data and "baseline" in data and "session" in data)
+        or "schema_version" in data
+        and "session_breakdown" in str(data.get("schema_version", ""))
+    )
 
 
 def looks_like_v1_flat_schema(data: Any) -> bool:
@@ -1374,6 +1379,7 @@ def looks_like_v1_flat_schema(data: Any) -> bool:
 # ---------------------------------------------------------------------------
 # Universal migrator -- handles every schema variant we've seen in the wild
 # ---------------------------------------------------------------------------
+
 
 def _deep_get(d: Any, *path, default=None):
     """Descend nested dicts by a sequence of keys, tolerating gaps.
@@ -1439,7 +1445,7 @@ def _clean_model_name(raw: Any) -> Optional[str]:
     s = raw.strip()
     for prefix in ("/wekafs/models/", "/workspace/", "/data/models/"):
         if s.startswith(prefix):
-            s = s[len(prefix):]
+            s = s[len(prefix) :]
             break
     return s.strip("/") or None
 
@@ -1515,12 +1521,14 @@ def migrate_universal_to_v2(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
 
-    model_name = _clean_model_name(_first_truthy(
-        raw.get("model_name"),
-        raw.get("model"),
-        _deep_get(raw, "workload", "model_name"),
-        _deep_get(raw, "workload", "model"),
-    ))
+    model_name = _clean_model_name(
+        _first_truthy(
+            raw.get("model_name"),
+            raw.get("model"),
+            _deep_get(raw, "workload", "model_name"),
+            _deep_get(raw, "workload", "model"),
+        )
+    )
     if not model_name:
         return None
 
@@ -1618,11 +1626,13 @@ def migrate_universal_to_v2(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # workload-dim defaults
     isl = _first_truthy(raw.get("isl"), _deep_get(raw, "workload", "isl"))
     osl = _first_truthy(raw.get("osl"), _deep_get(raw, "workload", "osl"))
-    conc = _first_truthy(raw.get("conc"), raw.get("concurrency"),
-                         _deep_get(raw, "workload", "conc"),
-                         _deep_get(raw, "workload", "concurrency"))
-    precision_raw = _first_truthy(raw.get("precision"),
-                                  _deep_get(raw, "workload", "precision"))
+    conc = _first_truthy(
+        raw.get("conc"),
+        raw.get("concurrency"),
+        _deep_get(raw, "workload", "conc"),
+        _deep_get(raw, "workload", "concurrency"),
+    )
+    precision_raw = _first_truthy(raw.get("precision"), _deep_get(raw, "workload", "precision"))
     precision = precision_raw.lower() if isinstance(precision_raw, str) else None
 
     # duration
@@ -1632,19 +1642,25 @@ def migrate_universal_to_v2(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         raw.get("session_duration_seconds"),
     ):
         if _is_pos_number(v):
-            duration_s = int(v); break
+            duration_s = int(v)
+            break
     if duration_s is None:
-        for minutes_field in ("wall_clock_minutes", "elapsed_minutes",
-                              "elapsed_minutes_before_sandbox_restart",
-                              "budget_used_minutes"):
+        for minutes_field in (
+            "wall_clock_minutes",
+            "elapsed_minutes",
+            "elapsed_minutes_before_sandbox_restart",
+            "budget_used_minutes",
+        ):
             v = raw.get(minutes_field)
             if _is_pos_number(v):
-                duration_s = int(v * 60); break
+                duration_s = int(v * 60)
+                break
     if duration_s is None:
         for hours_field in ("budget_used_hours", "wall_clock_hours"):
             v = raw.get(hours_field)
             if _is_pos_number(v):
-                duration_s = int(v * 3600); break
+                duration_s = int(v * 3600)
+                break
 
     # session id (use as claw_session_id fallback)
     session_id = _first_truthy(
@@ -1660,32 +1676,35 @@ def migrate_universal_to_v2(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     return {
         "workload": {
-            "model_name":        model_name,
-            "framework":         framework,
-            "framework_version": _first_truthy(raw.get("framework_version"),
-                                               _deep_get(raw, "workload", "framework_version")) or "",
-            "tp":                tp,
-            "isl":               isl,
-            "osl":               osl,
-            "conc":              conc,
-            "precision":         precision,
+            "model_name": model_name,
+            "framework": framework,
+            "framework_version": _first_truthy(
+                raw.get("framework_version"), _deep_get(raw, "workload", "framework_version")
+            )
+            or "",
+            "tp": tp,
+            "isl": isl,
+            "osl": osl,
+            "conc": conc,
+            "precision": precision,
             "invocation": {"framework_args": ""},
         },
         "baseline": {"throughput_tok_s_per_gpu": baseline_per_gpu},
         "final": {
-            "throughput_tok_s_per_gpu":      opt_per_gpu,
+            "throughput_tok_s_per_gpu": opt_per_gpu,
             "cumulative_gain_pct_validated": gain,
         },
         "session": {
             "session_duration_seconds": duration_s,
-            "claw_session_id":          session_id,
-            "code_revision":            _first_truthy(
+            "claw_session_id": session_id,
+            "code_revision": _first_truthy(
                 raw.get("hyperloom_source_commit"),
                 raw.get("hyperloom_commit"),
                 _deep_get(raw, "session", "code_revision"),
-            ) or "",
-            "image":                    image,
-            "stop_reason":              "",
+            )
+            or "",
+            "image": image,
+            "stop_reason": "",
         },
         "_universal_source": raw,  # provenance
     }
@@ -1749,16 +1768,16 @@ def migrate_v1_to_v2(v1: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "workload": {
-            "model_name":        v1.get("model"),
-            "framework":         framework_lower,
+            "model_name": v1.get("model"),
+            "framework": framework_lower,
             "framework_version": fw_ver,
-            "tp":                tp,
-            "ep":                v1.get("ep"),
-            "isl":               v1.get("isl"),
-            "osl":               v1.get("osl"),
-            "conc":              v1.get("conc"),
-            "precision":         (v1.get("precision") or "").lower() if isinstance(v1.get("precision"), str) else None,
-            "gpu_type":          v1.get("gpu_type"),
+            "tp": tp,
+            "ep": v1.get("ep"),
+            "isl": v1.get("isl"),
+            "osl": v1.get("osl"),
+            "conc": v1.get("conc"),
+            "precision": (v1.get("precision") or "").lower() if isinstance(v1.get("precision"), str) else None,
+            "gpu_type": v1.get("gpu_type"),
             "invocation": {
                 "framework_args": "",  # V1 didn't preserve the launcher arg string
             },
@@ -1770,7 +1789,7 @@ def migrate_v1_to_v2(v1: Dict[str, Any]) -> Dict[str, Any]:
             },
         },
         "final": {
-            "throughput_tok_s_per_gpu":    best_per_gpu,
+            "throughput_tok_s_per_gpu": best_per_gpu,
             "cumulative_gain_pct_validated": v1.get("gain_pct"),
             "benchmark": {
                 "output_throughput": v1.get("best_tput"),
@@ -1778,10 +1797,10 @@ def migrate_v1_to_v2(v1: Dict[str, Any]) -> Dict[str, Any]:
         },
         "session": {
             "session_duration_seconds": duration_s,
-            "claw_session_id":          v1.get("claw_session_id") or v1.get("session_id"),
-            "code_revision":            v1.get("hyperloom_source_commit") or v1.get("hyperloom_commit") or "",
-            "image":                    v1.get("image"),  # usually None -> derive_image() falls back
-            "stop_reason":              "",
+            "claw_session_id": v1.get("claw_session_id") or v1.get("session_id"),
+            "code_revision": v1.get("hyperloom_source_commit") or v1.get("hyperloom_commit") or "",
+            "image": v1.get("image"),  # usually None -> derive_image() falls back
+            "stop_reason": "",
         },
         # Stash the original V1 payload so raw_data preserves provenance.
         "_v1_source": v1,
@@ -1859,33 +1878,37 @@ def main():
     parser.add_argument("paths", nargs="*", help="JSON files or directories to import")
     parser.add_argument("--dir", help="Additionally scan a directory recursively for *.json")
     parser.add_argument("--dry-run", action="store_true", help="Parse but do not write to the DB")
-    parser.add_argument("--table", default=DEFAULT_TABLE,
-                        help=f"Destination table (default: {DEFAULT_TABLE})")
+    parser.add_argument("--table", default=DEFAULT_TABLE, help=f"Destination table (default: {DEFAULT_TABLE})")
 
     # Mode selection
-    parser.add_argument("--mode", choices=("ssh-kubectl", "local"),
-                        default="ssh-kubectl",
-                        help="Connection mode (default: ssh-kubectl)")
+    parser.add_argument(
+        "--mode", choices=("ssh-kubectl", "local"), default="ssh-kubectl", help="Connection mode (default: ssh-kubectl)"
+    )
 
     # ssh-kubectl mode
-    parser.add_argument("--hop1", default=DEFAULT_SSH_HOP1,
-                        help=f"SSH jump host (default: {DEFAULT_SSH_HOP1})")
-    parser.add_argument("--namespace", default=DEFAULT_K8S_NAMESPACE,
-                        help=f"K8s namespace (default: {DEFAULT_K8S_NAMESPACE})")
-    parser.add_argument("--batch-size", type=int, default=20,
-                        help="Number of rows per SSH+psql invocation in ssh-kubectl mode")
+    parser.add_argument("--hop1", default=DEFAULT_SSH_HOP1, help=f"SSH jump host (default: {DEFAULT_SSH_HOP1})")
+    parser.add_argument(
+        "--namespace", default=DEFAULT_K8S_NAMESPACE, help=f"K8s namespace (default: {DEFAULT_K8S_NAMESPACE})"
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=20, help="Number of rows per SSH+psql invocation in ssh-kubectl mode"
+    )
 
     # local mode
-    parser.add_argument("--db-url", default=os.environ.get("PERF_RUNS_DB_URL"),
-                        help="Full postgresql:// URL (overrides individual flags, local mode)")
+    parser.add_argument(
+        "--db-url",
+        default=os.environ.get("PERF_RUNS_DB_URL"),
+        help="Full postgresql:// URL (overrides individual flags, local mode)",
+    )
     parser.add_argument("--host", default=DEFAULT_DB["host"])
     parser.add_argument("--port", type=int, default=DEFAULT_DB["port"])
     parser.add_argument("--user", default=DEFAULT_DB["user"])
     parser.add_argument("--password", default=DEFAULT_DB["password"])
     parser.add_argument("--dbname", default=DEFAULT_DB["dbname"])
 
-    parser.add_argument("--skip-index-check", action="store_true",
-                        help="Do not attempt to create the unique index on unique_key")
+    parser.add_argument(
+        "--skip-index-check", action="store_true", help="Do not attempt to create the unique index on unique_key"
+    )
 
     args = parser.parse_args()
 
@@ -1991,23 +2014,21 @@ def _run_ssh_kubectl_mode(args: argparse.Namespace, files: List[Path]) -> None:
         args (argparse.Namespace): Parsed CLI args.
         files (List[Path]): JSON files to import.
     """
-    print(
-        f"== ssh-kubectl mode: hop1={args.hop1} ns={args.namespace} "
-        f"db={args.dbname} table={args.table} ==")
+    print(f"== ssh-kubectl mode: hop1={args.hop1} ns={args.namespace} db={args.dbname} table={args.table} ==")
 
     # Optionally ensure the unique index (one round trip).
     if not args.skip_index_check:
         try:
             execute_remote_sql(
                 build_create_unique_index_sql(args.table) + "\n",
-                hop1=args.hop1, namespace=args.namespace,
-                user=args.user, dbname=args.dbname,
+                hop1=args.hop1,
+                namespace=args.namespace,
+                user=args.user,
+                dbname=args.dbname,
             )
             print("[ok] unique index ensured")
         except Exception as e:
-            sys.stderr.write(
-                f"[WARN] could not ensure unique index on {args.table}(unique_key): {e}\n"
-            )
+            sys.stderr.write(f"[WARN] could not ensure unique index on {args.table}(unique_key): {e}\n")
 
     # Parse all files first; collect valid (path, row) pairs.
     parsed: List[Tuple[Path, Dict[str, Any]]] = []
@@ -2024,7 +2045,7 @@ def _run_ssh_kubectl_mode(args: argparse.Namespace, files: List[Path]) -> None:
     batch_size = max(1, int(args.batch_size))
     ok = 0
     for i in range(0, len(parsed), batch_size):
-        chunk = parsed[i:i + batch_size]
+        chunk = parsed[i : i + batch_size]
         sql_parts = ["BEGIN;\n"]
         for _, row in chunk:
             sql_parts.append(build_upsert_statement_inline(row, args.table))
@@ -2033,8 +2054,11 @@ def _run_ssh_kubectl_mode(args: argparse.Namespace, files: List[Path]) -> None:
 
         try:
             execute_remote_sql(
-                sql, hop1=args.hop1, namespace=args.namespace,
-                user=args.user, dbname=args.dbname,
+                sql,
+                hop1=args.hop1,
+                namespace=args.namespace,
+                user=args.user,
+                dbname=args.dbname,
             )
             for f, row in chunk:
                 print(f"[UPSERT] {f}")
@@ -2042,16 +2066,17 @@ def _run_ssh_kubectl_mode(args: argparse.Namespace, files: List[Path]) -> None:
                 print()
             ok += len(chunk)
         except Exception as e:
-            sys.stderr.write(
-                f"[ERROR] batch {i // batch_size} ({len(chunk)} files) failed: {e}\n"
-            )
+            sys.stderr.write(f"[ERROR] batch {i // batch_size} ({len(chunk)} files) failed: {e}\n")
             # Retry one-by-one to identify the bad file.
             for f, row in chunk:
                 try:
                     single_sql = "BEGIN;\n" + build_upsert_statement_inline(row, args.table) + "COMMIT;\n"
                     execute_remote_sql(
-                        single_sql, hop1=args.hop1, namespace=args.namespace,
-                        user=args.user, dbname=args.dbname,
+                        single_sql,
+                        hop1=args.hop1,
+                        namespace=args.namespace,
+                        user=args.user,
+                        dbname=args.dbname,
                     )
                     print(f"[UPSERT/retry] {f}")
                     print(format_row_summary(row))

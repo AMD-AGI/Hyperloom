@@ -5,6 +5,7 @@
 Usage:
     python inference_optimizer/launcher/preflight_optimizer.py MODEL_PATH
 """
+
 from __future__ import annotations
 
 import argparse

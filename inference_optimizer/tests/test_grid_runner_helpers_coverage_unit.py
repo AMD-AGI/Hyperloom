@@ -3,12 +3,12 @@
 """Supplemental coverage for _grid_runner pure helpers: multi-node cuda-graph
 advisory, compatibility filter model-class drop, runtime override env branches,
 report parsing, and per-variant yaml env injection."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-import pytest
 import yaml
 
 from inference_optimizer.orchestrator.action_executors import _grid_runner as gr
@@ -78,7 +78,9 @@ def test_runtime_overrides_model_precision_and_gpu_no_framework(monkeypatch) -> 
         monkeypatch.delenv(k, raising=False)
     bench: dict = {}  # no framework -> benchmark_script popped
     gr.apply_runtime_benchmark_overrides(
-        bench, model_path="/models/x", gpu_type="mi355x",
+        bench,
+        model_path="/models/x",
+        gpu_type="mi355x",
     )
     assert bench["model"] == "/models/x"
     assert bench["precision"] == "fp8"
@@ -113,7 +115,9 @@ def test_runtime_overrides_explicit_benchmark_script_wins(monkeypatch) -> None:
         monkeypatch.delenv(k, raising=False)
     bench = {"framework": "vllm"}
     gr.apply_runtime_benchmark_overrides(
-        bench, gpu_type="mi300x", benchmark_script="custom.sh",
+        bench,
+        gpu_type="mi300x",
+        benchmark_script="custom.sh",
     )
     assert bench["benchmark_script"] == "custom.sh"
 
@@ -135,7 +139,8 @@ def test_parse_report_non_dict(tmp_path: Path) -> None:
 
 def test_parse_report_valid(tmp_path: Path) -> None:
     (tmp_path / "benchmark_report.json").write_text(
-        json.dumps({"output_throughput": 100.0}), encoding="utf-8",
+        json.dumps({"output_throughput": 100.0}),
+        encoding="utf-8",
     )
     assert gr._parse_report(tmp_path) == {"output_throughput": 100.0}
 
@@ -149,7 +154,10 @@ def test_build_variant_yaml_injects_extra_envs(tmp_path: Path) -> None:
     )
     variant = _variant("v1", "--foo 1", envs={"USE_AITER": "1"})
     out = gr._build_variant_yaml(
-        base, "", variant, output_subdir=tmp_path / "v1",
+        base,
+        "",
+        variant,
+        output_subdir=tmp_path / "v1",
     )
     cfg = yaml.safe_load(out.read_text(encoding="utf-8"))
     envs = cfg["benchmark"]["envs"]
@@ -164,17 +172,22 @@ def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
     the materialized YAML must contain each flag only once (last wins)."""
     base = tmp_path / "base.yaml"
     base.write_text(
-        yaml.safe_dump({
-            "benchmark": {
-                "framework": "vllm",
-                "envs": {"EXTRA_VLLM_ARGS": "--attention-backend ROCM_ATTN"},
-            },
-        }),
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "envs": {"EXTRA_VLLM_ARGS": "--attention-backend ROCM_ATTN"},
+                },
+            }
+        ),
         encoding="utf-8",
     )
     variant = _variant("v1", "--attention-backend ROCM_AITER_FA")
     out = gr._build_variant_yaml(
-        base, "", variant, output_subdir=tmp_path / "v1",
+        base,
+        "",
+        variant,
+        output_subdir=tmp_path / "v1",
     )
     cfg = yaml.safe_load(out.read_text(encoding="utf-8"))
     args = cfg["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
@@ -186,10 +199,7 @@ def test_shell_safe_dedupe_leaves_json_arg_untouched() -> None:
     """When a space/JSON-valued flag is present, dedupe must leave the whole
     string untouched (the unquoted $EXTRA_*_ARGS expansion downstream cannot
     round-trip a quoted value anyway, so mangling it is worse than skipping)."""
-    args = (
-        '--json-model-override-args {"rope_scaling":null} '
-        "--context-length 8192 --context-length 4096"
-    )
+    args = '--json-model-override-args {"rope_scaling":null} --context-length 8192 --context-length 4096'
     out = gr._shell_safe_dedupe(args)
     assert out == args, f"JSON-bearing string must be left as-is: {out}"
 
@@ -203,9 +213,7 @@ def test_shell_safe_dedupe_leaves_multi_value_arg_untouched() -> None:
 
 def test_shell_safe_dedupe_normalizes_equals_form() -> None:
     """#520: --flag=value and --flag value must dedupe to one (last wins)."""
-    out = gr._shell_safe_dedupe(
-        "--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA"
-    )
+    out = gr._shell_safe_dedupe("--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA")
     assert out.count("--attention-backend") == 1, out
     assert "ROCM_AITER_FA" in out, "last-wins should keep the later value"
     assert "ROCM_ATTN" not in out

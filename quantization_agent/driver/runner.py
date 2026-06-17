@@ -57,9 +57,7 @@ def _import_sdk() -> tuple[Any, Any]:
     try:
         import claude_agent_sdk as sdk  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover - exercised via injection seams in tests
-        raise RuntimeError(
-            "claude_agent_sdk not installed; run the quantization-agent installer"
-        ) from exc
+        raise RuntimeError("claude_agent_sdk not installed; run the quantization-agent installer") from exc
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
         raise RuntimeError("claude_agent_sdk missing query / ClaudeAgentOptions")
     return sdk.query, sdk.ClaudeAgentOptions
@@ -158,9 +156,7 @@ def build_attempt_prompt(
     retry_block = ""
     if attempt_number > 1 and previous_outcome:
         hint = (
-            f"\n- Fix hypothesis from prior attempt: {fix_hypothesis_path}"
-            if fix_hypothesis_path is not None
-            else ""
+            f"\n- Fix hypothesis from prior attempt: {fix_hypothesis_path}" if fix_hypothesis_path is not None else ""
         )
         retry_block = (
             f"\n\n## Retry context\nThis is attempt #{attempt_number}. The previous "
@@ -290,10 +286,7 @@ async def run_one_attempt(
     sdk_error = ""
 
     if log:
-        log(
-            f"quantization-agent SDK runner: workspace={workspace} "
-            f"quark_root={quark_root} attempt={attempt_number}"
-        )
+        log(f"quantization-agent SDK runner: workspace={workspace} quark_root={quark_root} attempt={attempt_number}")
 
     try:
         async for message in sdk_query_factory(prompt=prompt, options=options):
