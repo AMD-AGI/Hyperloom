@@ -6125,8 +6125,10 @@ def collect_perfskills(
             pp = Path(str(p))
             if pp.is_absolute() and str(pp).startswith(str(session_dir)):
                 return _rel(pp, session_dir)
-        except (ValueError, OSError):
-            pass
+        except (ValueError, OSError) as exc:
+            # Relativizing is cosmetic: keep the absolute path on failure and
+            # record the reason per the collector's warnings contract.
+            warnings.append(f"perfskills: failed to relativize path {p!r}: {exc}")
         return p
 
     status = str(result.get("status") or "unknown")

@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 def _read_json(path: Path) -> dict:
@@ -63,8 +66,11 @@ def _write_benchmark_report(
         (out_dir / "benchmark_report.json").write_text(
             json.dumps(report, indent=2), encoding="utf-8",
         )
-    except OSError:
-        pass
+    except OSError as exc:
+        # Best-effort reporting: a failed benchmark_report.json write must never
+        # break the sweep, so log and continue instead of propagating.
+        log.warning("perfskills_sweep: could not write %s: %s",
+                    out_dir / "benchmark_report.json", exc)
 
 
 def _serving_gpus(tp: int) -> str:
