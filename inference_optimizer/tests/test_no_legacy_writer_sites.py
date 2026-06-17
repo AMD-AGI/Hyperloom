@@ -72,14 +72,26 @@ ALLOWED_FILES: dict[str, str] = {
     # ``read_extra_server_args`` mention the legacy key inline in the
     # surrounding code comment to document why the call goes through
     # the helper.
-    "inference_optimizer/orchestrator/coordinator.py": "comments explain the read_extra_server_args call at the LLM "
-    "intent / sub-agent envelope read boundaries",
-    "inference_optimizer/orchestrator/coordinator_helpers.py": "holds the extracted _merge_cumulative_extra_sglang_args helper "
-    "that merges the legacy KB best_config arg stacks",
-    "inference_optimizer/orchestrator/kernel_request_handlers.py": "comments explain the read_extra_server_args call at the "
-    "integrate_patch sub-agent envelope read boundary",
-    "robustness-agent/tests/test_signals_repeated_payload.py": "regression test that legacy + canonical envelopes hash to "
-    "the same fingerprint",
+    "inference_optimizer/orchestrator/coordinator.py":
+        "comments explain the read_extra_server_args call at the LLM "
+        "intent / sub-agent envelope read boundaries",
+    "inference_optimizer/orchestrator/result_recorder.py":
+        "result-recording / fact-synthesis methods extracted verbatim from "
+        "coordinator.py (phase 1B); same read_extra_server_args envelope-read "
+        "boundaries as the coordinator they came from",
+    "inference_optimizer/orchestrator/coordinator_helpers.py":
+        "holds the extracted _merge_cumulative_extra_sglang_args helper "
+        "that merges the legacy KB best_config arg stacks",
+    "inference_optimizer/orchestrator/kernel_request_handlers.py":
+        "comments explain the read_extra_server_args call at the "
+        "integrate_patch sub-agent envelope read boundary; also holds the "
+        "kernel-decision write-owner functions folded back from the former "
+        "shared_state_kernel.py (phase 6C), carrying the same legacy "
+        "extra_sglang_args read surface",
+    "robustness-agent/tests/test_signals_repeated_payload.py":
+        "regression test that legacy + canonical envelopes hash to "
+        "the same fingerprint",
+
     # Regression tests parametrise the ``_load_materialized_workload_metadata``
     # reader over (sglang, vllm, atom) including stray-EXTRA_SGLANG_ARGS
     # cases for atom YAMLs, so the test source mentions the legacy name
