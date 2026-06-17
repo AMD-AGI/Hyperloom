@@ -75,6 +75,13 @@ def categorize_variant(
     """Return the set of roofline directions a variant's flags target.
 
     An empty set means the variant is uncategorized (no advisory).
+
+    Args:
+        extra_args: Extra server-arg string for the variant, or None.
+        extra_envs: Mapping of extra environment variables, or None.
+
+    Returns:
+        Frozenset of roofline direction names the variant targets.
     """
     cats: set[str] = set()
     args = (extra_args or "").strip()
