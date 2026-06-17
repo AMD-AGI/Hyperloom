@@ -55,6 +55,15 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
     Returns ``(private_key_path, public_key_str)``. Idempotent: if the key
     already exists it is reused (so retries of ``create-dynamo`` keep the same
     authorized key that the running pods already trust).
+
+    Args:
+        dest_dir: Directory to create (or reuse) the keypair under.
+
+    Returns:
+        A ``(private_key_path, public_key_str)`` tuple.
+
+    Raises:
+        RuntimeError: If ``ssh-keygen`` exits non-zero.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     priv = dest_dir / "mn_id_ed25519"
@@ -99,6 +108,17 @@ def ssh_run(
     ``command`` is run via ``bash -lc`` on the remote so login-shell PATH and
     the framework venv resolve. Does not raise on non-zero exit — the caller
     inspects ``.returncode`` / ``.stdout`` / ``.stderr``.
+
+    Args:
+        host: The target host/IP.
+        command: The shell command to run remotely.
+        key_path: Path to the private SSH key.
+        port: The remote sshd port.
+        user: The remote login user.
+        timeout: Subprocess timeout in seconds.
+
+    Returns:
+        The completed SSH subprocess (not raised on non-zero exit).
     """
     argv = [
         "ssh",
@@ -136,6 +156,21 @@ def ssh_run_script(
     the SSH-launched framework child. A bare ``ssh host cmd`` does NOT forward
     the controller's environment, and these keys are not in the pod's container
     env, so they must be injected explicitly here.
+
+    Args:
+        host: The target host/IP.
+        script_text: The script body to ship and run.
+        interpreter: Interpreter used to run the script (e.g. ``python3``).
+        script_args: Arguments appended verbatim after the script path.
+        key_path: Path to the private SSH key.
+        port: The remote sshd port.
+        user: The remote login user.
+        timeout: Subprocess timeout in seconds.
+        remote_path: Destination path for the decoded script on the pod.
+        env: Optional ``KEY=VAL`` assignments prepended before the interpreter.
+
+    Returns:
+        The completed SSH subprocess.
     """
     enc = base64.b64encode(script_text.encode("utf-8")).decode("ascii")
     env_prefix = ""
@@ -168,6 +203,18 @@ def ssh_run_bash_with_env(
     ``export`` lines and the whole script is piped over SSH **stdin** — so
     secrets never appear in argv or on the pod's disk. Used by the OOB pod
     install (needs OOB_API_KEY / OOB_BASE_URL).
+
+    Args:
+        host: The target host/IP.
+        script_text: The script body run via ``bash -s``.
+        env: Environment variables exported before the script, or ``None``.
+        key_path: Path to the private SSH key.
+        port: The remote sshd port.
+        user: The remote login user.
+        timeout: Subprocess timeout in seconds.
+
+    Returns:
+        The completed SSH subprocess.
     """
     prologue = "\n".join(
         f"export {k}={shlex.quote(str(v))}" for k, v in (env or {}).items()
@@ -190,7 +237,19 @@ def probe_ssh(
     user: str = "root",
     timeout: int = 20,
 ) -> bool:
-    """Return True iff a trivial SSH command succeeds (pod reachable + key OK)."""
+    """Return True iff a trivial SSH command succeeds (pod reachable + key OK).
+
+    Args:
+        host: The target host/IP.
+        key_path: Path to the private SSH key.
+        port: The remote sshd port.
+        user: The remote login user.
+        timeout: Subprocess timeout in seconds.
+
+    Returns:
+        ``True`` when a trivial probe command succeeds (pod reachable and key
+        accepted), ``False`` otherwise (including on timeout).
+    """
     try:
         cp = ssh_run(host, "echo mn_ssh_ok", key_path=key_path, port=port,
                      user=user, timeout=timeout)

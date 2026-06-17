@@ -59,7 +59,17 @@ def render_invocation_block(
     invocation: Any,
     session_image: Any,
 ) -> str:
-    """Render an ``### Invocation`` markdown block, or "" when absent/empty."""
+    """Render an ``### Invocation`` markdown block, or "" when absent/empty.
+
+    Args:
+        invocation: Invocation record (dict) describing framework args,
+            environment overrides and config/log paths.
+        session_image: Container image associated with the session, if any.
+
+    Returns:
+        The rendered markdown block, or an empty string when the invocation
+        is missing or has nothing to show.
+    """
     if not isinstance(invocation, dict):
         return ""
     framework_args = str(invocation.get("framework_args") or "").strip()
