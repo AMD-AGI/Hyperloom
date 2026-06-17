@@ -541,23 +541,35 @@ def main():
         # The harness's --correctness mode prints no timing, so a bench that
         # reuses the correctness command can never measure latency (RCA root
         # cause 3). Run the harness's --benchmark mode instead (it emits
-        # GEAK_RESULT_LATENCY_MS); fall back to the verbatim command if the
-        # harness has no --correctness flag to rewrite.
+        # GEAK_RESULT_LATENCY_MS). aiter op_tests are different: they have no
+        # --benchmark flag (they benchmark by default and log "avg: N us/iter"),
+        # so appending the flag would argparse-error -> run them verbatim.
+        is_aiter = ("/aiter/" in TEST_COMMAND) or ("op_tests" in TEST_COMMAND)
         bench_command = TEST_COMMAND
         if "--correctness" in TEST_COMMAND:
             bench_command = TEST_COMMAND.replace("--correctness", "--benchmark")
-        elif "--benchmark" not in TEST_COMMAND:
+        elif not is_aiter and "--benchmark" not in TEST_COMMAND:
             bench_command = TEST_COMMAND + " --benchmark"
         rc, out = _run_harness(bench_command)
+        # Parse latency, most specific first:
+        #   1. GEAK_RESULT_LATENCY_MS (generated harness)
+        #   2. median_ms / wall_ms (other harnesses)
+        #   3. aiter perftest "avg: <N> us/iter" -> ms = us/1000
+        #   4. bare "<N> ms"
         m = re.search(r"GEAK_RESULT_LATENCY_MS\\s*[:=]\\s*([0-9.]+)", out)
         if not m:
             m = re.search(r"(?:median_ms|wall_ms)\\s*[:=]\\s*([0-9.]+)", out)
-        if not m:
-            ms = re.findall(r"([0-9]+\\.[0-9]+)\\s*ms\\b", out)
-            if ms:
-                print(f"wall_ms: {{ms[-1]}}")
-        else:
+        if m:
             print(f"wall_ms: {{m.group(1)}}")
+        else:
+            us = re.findall(r"avg:\\s*([0-9.]+)\\s*us/iter", out)
+            if us:
+                # min across measured shapes = the kernel's best timing.
+                print(f"wall_ms: {{min(float(u) for u in us) / 1000.0:.6f}}")
+            else:
+                ms = re.findall(r"([0-9]+\\.[0-9]+)\\s*ms\\b", out)
+                if ms:
+                    print(f"wall_ms: {{ms[-1]}}")
         sys.exit(0 if rc == 0 else 1)
 
     rc, out = _run_harness()

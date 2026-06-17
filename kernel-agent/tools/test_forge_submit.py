@@ -335,6 +335,28 @@ def test_adapter_bench_mode_rewrites_correctness_to_benchmark(tmp_path):
     assert "wall_ms: 4.2000" in out.stdout, out.stdout + out.stderr
 
 
+def test_adapter_bench_parses_aiter_us_per_iter(tmp_path):
+    """B: aiter op_tests have no --benchmark flag (benchmark by default) and log
+    'avg: N us/iter'. The adapter must run them verbatim and convert us->ms."""
+    harness = tmp_path / "aiter" / "op_tests" / "test_activation.py"
+    harness.parent.mkdir(parents=True)
+    # Emulate aiter perftest output; error out if a --benchmark flag is appended
+    # (aiter argparse would reject it).
+    harness.write_text(
+        "import sys\n"
+        "if '--benchmark' in sys.argv:\n"
+        "    sys.stderr.write('error: unrecognized arguments: --benchmark\\n'); sys.exit(2)\n"
+        "print('avg: 2500.0 us/iter from cuda.Event')\n"
+        "print('avg: 1800.0 us/iter from cuda.Event')\n"
+    )
+    test_command = f"{sys.executable} {harness}"
+    driver = forge_submit._build_driver_adapter(test_command, str(tmp_path), tmp_path)
+    import subprocess as _sp
+    out = _sp.run([sys.executable, driver, "--bench-mode"], capture_output=True, text=True)
+    # min(2500,1800)=1800 us -> 1.8 ms; and no --benchmark was appended.
+    assert "wall_ms: 1.8" in out.stdout, out.stdout + out.stderr
+
+
 def test_report_informational_timing_not_kept_does_not_trigger_keep(tmp_path):
     """When not kept, the report records observed timing for post-mortem but must
     NOT be parsed as a KEEP-worthy speedup (no false KEEP)."""
