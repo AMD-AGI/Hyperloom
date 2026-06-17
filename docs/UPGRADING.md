@@ -40,11 +40,12 @@ your override.
 Same for `WORKSPACE_PATH` — the kernel-agent ignores it (with a
 warning); rename to `USER_DATA_PATH`.
 
-### Required: pass `--model-class` if you relied on automatic classification
+### Recommended: review `--model-class` if you relied on live classification
 
-The `classify` action was removed. Any launcher that depended on the
-Coordinator deriving `model_class` from `config.json` must now supply
-it on the CLI:
+The live `classify` action was removed. Current Coordinator boot still infers
+and persists `model_class` from model metadata or model-path family keywords
+when possible, but launchers that know the class should pass it explicitly to
+avoid a generic fallback:
 
 ```diff
 inference_optimizer optimize \
@@ -60,8 +61,9 @@ Supported `--model-class` values (non-exhaustive; see
 `inference_optimizer/SKILL.md` §"Model classes"): `dense`, `moe`,
 `moe_mla`, `moe_mla_nsa`, `mxfp4_moe`, `hybrid_attention`.
 
-If `--model-class` is omitted, the Coordinator falls back to a
-generic dense prior — likely sub-optimal for MoE / MLA / NSA models.
+If `--model-class` is omitted and inference cannot determine the family, the
+Coordinator falls back to a generic dense prior — likely sub-optimal for MoE /
+MLA / NSA models.
 
 ### Required: pass `--compare-against-gpu` to opt into InferenceX reference fetching
 
@@ -84,7 +86,8 @@ Earlier launchers may have waited for the Coordinator to emit a
 ```diff
 # launcher.sh
 - inference_optimizer optimize ... # expects setup as first action
-+ bash "$REPO_ROOT/kernel-agent/scripts/install.sh"
++ . "${USER_DATA_PATH:-/workspace/hyperloom}/runtime/local-setup.env.sh"
++ bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"
 + . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 + ray stop --force; ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true; ray start --head --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
 + inference_optimizer optimize ...
@@ -92,11 +95,10 @@ Earlier launchers may have waited for the Coordinator to emit a
 
 ### Recommended: review the `KERNEL_OPT_BACKEND_ORDER` default
 
-The default kernel-opt ladder is now `geak,claude,codex` (and
-`cursor` when `$CURSOR_API_KEY` is set). If you had a custom order
-hard-coded (e.g. `claude,geak`), confirm it's still optimal — GEAK
-gets a longer per-attempt budget (90 min vs 60 min for the others) and
-is intentionally raced first.
+The default kernel-opt ladder is now `forge,geak`. OOB backends (`claude`,
+`codex`, `cursor`) run only when explicitly listed in `KERNEL_OPT_BACKEND_ORDER`
+and `cursor` still requires `$CURSOR_API_KEY`. If you had a custom order
+hard-coded (e.g. `claude,geak`), confirm it is still intentional.
 
 ### Recommended: set `INFERENCE_OPTIMIZER_RESCUE_PATHS` if you use model-specific benchmark scripts
 
@@ -113,9 +115,10 @@ recover any leaked `result.json` files written to hardcoded
 ### Recommended: stop expecting `standalone_analysis.md` / `tracelens_report.md`
 
 The kernel-agent no longer aliases the TraceLens v0.3 report. The
-canonical path is now `analysis_report_path` returned by
-`select_kernels_handler` (which points at
-`$USER_DATA_PATH/kernel-agent/runs/<session_id>/tracelens/analysis.md`).
+canonical analysis path is now surfaced by the `trace_analyze` request
+handler as `trace_report_path` and forwarded to the lifecycle as
+`analysis_report_path` (pointing at
+`$SESSION_DIR/kernel-agent/runs/<session_id>/tracelens/analysis.md`).
 The `--compat-report-path` argument was removed.
 
 ### Optional: enable PMC roofline
@@ -133,12 +136,12 @@ unchanged (silently dropped).
 
 ### Schema compatibility
 
-`session_breakdown.json` carries the same `schema_version` value
-(`hyperloom.session_breakdown.v1`) in 0.5.x and 0.6.0. No downstream
-consumer changes are required — but several new optional fields were
-added (e.g. `final.invocation`, `kernel_lifecycle.*`). Consumers
-should tolerate unknown keys (they should already; see
-[`INTEGRATION_SESSION_BREAKDOWN.md`](INTEGRATION_SESSION_BREAKDOWN.md)).
+`session_breakdown.json` currently emits either
+`hyperloom.session_breakdown.v2` or `hyperloom.session_breakdown.v3.0`
+depending on the aggregation path. The `v3.0` file is additive and
+wire-compatible for `v2` consumers that tolerate unknown fields. Consumers must
+not gate on exact string equality; accept the v2/v3 family as described in
+[`INTEGRATION_SESSION_BREAKDOWN.md`](INTEGRATION_SESSION_BREAKDOWN.md).
 
 ---
 
@@ -161,7 +164,7 @@ training-mode build:
 For any minor / patch upgrade:
 
 1. Pull the new Hyperloom revision into `$REPO_ROOT`.
-2. Re-run `bash "$REPO_ROOT/kernel-agent/scripts/install.sh"`. The
+2. Re-run `bash "$REPO_ROOT/inference_optimizer/scripts/install.sh"`. The
    installer is idempotent: it picks up new GEAK / TraceLens versions,
    refreshes the auth-proxy, and regenerates `kernel-agent.env.sh`.
 3. Re-source the env file:
@@ -172,8 +175,8 @@ For any minor / patch upgrade:
    verify `manifest.json` and `state.json` are intact, then run
    `inference_optimizer optimize --resume`.
 
-Upgrades **do not** touch `$INFERENCE_OPTIMIZER_KB_ROOT` or
-`$USER_DATA_PATH`. Your KB and historical sessions are preserved.
+Upgrades **do not** touch `HYPERLOOM_LOCAL_KB_ROOT` or `$USER_DATA_PATH`.
+Your local KB and historical sessions are preserved.
 
 ---
 

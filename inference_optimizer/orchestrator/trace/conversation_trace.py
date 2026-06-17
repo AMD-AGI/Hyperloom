@@ -93,6 +93,12 @@ def redact_secrets(text: str) -> str:
     redacted line still reads sensibly, only the secret material is
     replaced with ``[REDACTED]``. Returns ``text`` unchanged when it
     carries no recognizable secret shape.
+
+    Args:
+        text: Raw text that may embed secret values.
+
+    Returns:
+        The text with recognizable secret values replaced by ``[REDACTED]``.
     """
     if not text:
         return text
@@ -144,7 +150,14 @@ def _coerce_optional_int(value: Any) -> int | None:
 
 
 def _coerce_text(value: Any) -> str:
-    """Normalize a prompt / response field to a (possibly empty) string."""
+    """Normalize a prompt / response field to a (possibly empty) string.
+
+    Args:
+        value: Arbitrary prompt/response value.
+
+    Returns:
+        The value as a string, or ``""`` when ``None``.
+    """
     if value is None:
         return ""
     return value if isinstance(value, str) else str(value)
@@ -173,7 +186,11 @@ class ConversationRecord:
 
     def to_row(self) -> dict[str, Any]:
         """Serialize to the on-disk row dict, stamping ``ts`` and redacting
-        the prompt / response text."""
+        the prompt / response text.
+
+        Returns:
+            The on-disk conversation row dict.
+        """
         return {
             "session_id": str(self.session_id),
             "ts": _now_iso(),
@@ -191,7 +208,15 @@ class ConversationRecord:
 
 
 def _validate_row(row: dict[str, Any]) -> None:
-    """Fail fast if ``row`` deviates from the closed schema."""
+    """Fail fast if ``row`` deviates from the closed schema.
+
+    Args:
+        row: A serialized conversation row dict.
+
+    Raises:
+        ConversationRowError: If the row has extra/missing fields, an empty
+            ``session_id``, or an unknown ``component``.
+    """
     keys = set(row.keys())
     extra = sorted(keys - _ROW_FIELDS)
     missing = sorted(_ROW_FIELDS - keys)
@@ -229,6 +254,15 @@ def append_conversation(
 
     A schema violation (:class:`ConversationRowError`) is *not* swallowed:
     that is a programming error at the call site and must surface in tests.
+
+    Args:
+        session_dir: Session directory used to resolve the ledger path.
+        record: The conversation record to serialize and append.
+        target: Optional override destination (e.g. an ext shard path);
+            defaults to the session's conversations ledger.
+
+    Raises:
+        ConversationRowError: If the serialized row violates the schema.
     """
     row = record.to_row()
     _validate_row(row)

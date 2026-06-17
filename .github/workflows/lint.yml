@@ -1,0 +1,103 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+name: Lint
+
+# Static analysis on push and pull_request for all branches. Skips when every
+# changed file matches paths-ignore (same list as ``tests-coverage.yml``).
+#
+# Ruff reads ``[tool.ruff]`` / ``[tool.ruff.lint]`` in ``pyproject.toml``. Step
+# ``continue-on-error: true`` keeps results advisory until the finding backlog
+# is cleared; then set those flags to ``false`` so merge gates can require a
+# green Lint job.
+#
+# Pylint: ``--errors-only`` limits output to fatal/error-severity messages
+# (not convention or refactor hints). Multiple first-party packages are checked
+# after editable installs + ``PYTHONPATH`` for critic ``runtime`` and
+# ``quantization_agent`` (see the ``pylint`` job run script).
+on:
+  push:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE*"
+      - "COPYRIGHT"
+      - "CODEOWNERS"
+      - ".gitattributes"
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE*"
+      - "COPYRIGHT"
+      - "CODEOWNERS"
+      - ".gitattributes"
+
+permissions:
+  contents: read
+
+jobs:
+  ruff:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install Ruff
+        run: |
+          pip install --upgrade pip
+          pip install "ruff>=0.8,<1"
+
+      - name: Ruff check
+        id: ruff_check
+        continue-on-error: true
+        run: ruff check .
+
+      - name: Ruff format (check only)
+        id: ruff_format
+        continue-on-error: true
+        run: ruff format --check .
+
+      - name: Advisory notice when Ruff failed
+        if: >-
+          always() &&
+          (steps.ruff_check.outcome == 'failure' ||
+           steps.ruff_format.outcome == 'failure')
+        run: |
+          echo "::warning::Ruff reported issues (advisory: step uses continue-on-error). Flip to hard-fail in this workflow after backlog is zero."
+
+  pylint:
+    name: pylint (errors-only, multi-package)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install Pylint and editable packages
+        run: |
+          pip install --upgrade pip
+          pip install "pylint>=3.0,<4"
+          pip install -e ".[test]"
+          pip install -e "robustness-agent/.[test]"
+          pip install -e "framework-agent/."
+
+      - name: Pylint (errors only)
+        continue-on-error: true
+        env:
+          # critic-agent: top-level package is ``runtime``; repo root for
+          # ``quantization_agent`` (not installed as its own distribution here).
+          PYTHONPATH: >-
+            ${{ github.workspace }}/critic-agent:${{ github.workspace }}
+        run: |
+          pylint --errors-only \
+            inference_optimizer \
+            robustness_agent \
+            framework_agent \
+            runtime \
+            quantization_agent

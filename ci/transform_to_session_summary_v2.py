@@ -82,9 +82,17 @@ def safe_get(d: Any, *keys: str, default: Any = None) -> Any:
 # ---------------------------------------------------------------------------
 
 def _patch_baseline(data: Dict) -> List[str]:
-    """Mirror `extra_server_args` / `extra_envs` onto `baseline` (which lacks
-    them) from baseline.invocation. Reads the legacy ``extra_sglang_args`` key
-    but always writes the canonical ``extra_server_args``.
+    """Mirror ``extra_server_args`` / ``extra_envs`` onto ``baseline``.
+
+    Fills the fields from ``baseline.invocation`` when ``baseline`` lacks
+    them. Reads the legacy ``extra_sglang_args`` key but always writes the
+    canonical ``extra_server_args``.
+
+    Args:
+        data: The session summary data dict (mutated in place).
+
+    Returns:
+        Human-readable notes describing each patch applied.
     """
     notes = []
     baseline = data.get("baseline")

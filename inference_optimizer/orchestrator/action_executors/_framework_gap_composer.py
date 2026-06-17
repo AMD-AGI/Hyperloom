@@ -54,6 +54,12 @@ def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str
     sorted-by-time list or dict with ``top_kernels``). Best-effort: returns ""
     when the path is empty/unreadable or no kernel matches
     :data:`_OP_TO_KEYWORD`, and the caller falls back to manifest-only gap.
+
+    Args:
+        breakdown_path: Path to the kernel breakdown JSON, or None.
+
+    Returns:
+        One canonical bottleneck keyword, or "" when none is found.
     """
     if not breakdown_path:
         return ""
@@ -101,6 +107,12 @@ def _normalize_model_class(model_class: str) -> str:
 
     Same canonicalisation rule (lowercase, -/+/space → _) every other
     ``model_class`` consumer uses, keeping the gap token grep-friendly.
+
+    Args:
+        model_class: Raw model-class label.
+
+    Returns:
+        The canonical lowercase token, or "" when the input is empty.
     """
     raw = (model_class or "").strip().lower()
     if not raw:
@@ -113,6 +125,13 @@ def _model_class_to_search_token(model_class: str) -> str:
 
     fa's anti-correlation table activates on ``dense`` / ``moe``, so the gap
     must carry one of those rather than granular IO labels (``moe_mla`` ...).
+
+    Args:
+        model_class: Raw model-class label.
+
+    Returns:
+        An fa-friendly architectural token (``moe`` / ``dense`` / canonical
+        token), or "" when the input is empty.
     """
     mc = _normalize_model_class(model_class)
     if not mc:
@@ -140,9 +159,21 @@ def compose_gap(
     ``profile_kernel_breakdown_path`` (when present) adds a bottleneck keyword.
     ``tried_refs`` is accepted for forward-compat but currently unused.
 
-    Returns ``(gap_description, keywords)``: a free-text gap phrase for
-    fa's PR search, and a lowercased/deduped/sorted explicit keyword list
-    (non-empty when any of framework/gpu_type/model_class/bottleneck is known).
+    Args:
+        framework: Inference framework name.
+        gpu_type: Target GPU type.
+        model_class: Model-class label (canonicalised to a search token).
+        precision: Workload precision.
+        profile_kernel_breakdown_path: Optional path to the kernel breakdown
+            JSON used to derive a bottleneck keyword.
+        tried_refs: Previously tried PR refs; accepted for forward-compat but
+            currently unused.
+
+    Returns:
+        A ``(gap_description, keywords)`` tuple: a free-text gap phrase for
+        fa's PR search, and a lowercased/deduped/sorted explicit keyword list
+        (non-empty when any of framework/gpu_type/model_class/bottleneck is
+        known).
     """
     fw = (framework or "").strip().lower()
     gpu = (gpu_type or "").strip().lower()

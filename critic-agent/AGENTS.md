@@ -29,9 +29,11 @@ return `emit.json["critic_decision_review"]` instead.
 |---|---|
 | `WORKSPACE_PATH` | Skill-asset root the runtime resolves prompts against (NOT an artefact root). Hyperloom sets this to `$REPO_ROOT` automatically; defaults to `/workspace` for standalone use. |
 | `CRITIC_SESSION_MEMORY_DIR` | Persistent volume for per-session memory (default `/var/lib/critic-session-memory`). Mount as PVC. |
-| `CRITIC_KB_CLIENT_MODE` | `live` to talk to the KB service, `inmemory` for dry-run / local tests. |
-| `KB_BASE_URL` | KB service URL when `CRITIC_KB_CLIENT_MODE=live`. |
-| `KB_TIMEOUT_MS` | HTTP timeout for KB calls (default 10000). |
+| `CRITIC_KB_CLIENT_MODE` | Critic runtime prior-store mode. `inmemory` is the default used by Hyperloom; set `live` only when deliberately wiring the standalone critic KB client. |
+| `KB_BASE_URL` | Required only when `CRITIC_KB_CLIENT_MODE=live`; unused by the default `inmemory` path. |
+| `CORTEX_KB_URL` | Optional Cortex KB URL for best-effort per-proposal `/v2/reasoning/assess` enrichment. Unset means no remote assess calls. |
+| `CORTEX_KB_HTTP_TIMEOUT_SEC` | HTTP timeout for optional Cortex assess calls. |
+| `KB_TIMEOUT_MS` | HTTP timeout for the standalone live KB client (default 10000). |
 | `KB_RETRY_MAX` | KB retry budget (default 3). |
 | `KB_DEAD_LETTER_DIR` | PVC mount for dead-letter JSONL files. |
 | `KB_WRITE_ENABLED` | Set to `false` to disable KB writes globally. |

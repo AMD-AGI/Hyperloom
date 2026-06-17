@@ -26,6 +26,15 @@ def parse_call_timeout_env(env_name: str, *, default: float) -> float:
 
     Returns ``default`` (logging a WARNING) when the env var is unset, empty,
     or not a positive finite float — a malformed knob must not be fatal.
+
+    Args:
+        env_name: Name of the environment variable holding the timeout seconds.
+        default: Fallback timeout in seconds used when the env var is missing
+            or malformed.
+
+    Returns:
+        The parsed positive finite timeout in seconds, or ``default`` on any
+        miss or parse error.
     """
     raw = os.environ.get(env_name)
     if raw is None or not raw.strip():
@@ -76,10 +85,29 @@ class RetryPolicy:
 
         Malformed values fall back to the dataclass default for that field.
         ``<prefix>_ATTEMPTS=1`` (or ``0``) disables retry.
+
+        Args:
+            prefix: The environment-variable prefix to read the policy fields
+                from.
+
+        Returns:
+            A :class:`RetryPolicy` populated from the environment, with
+            per-field fallback to the dataclass defaults.
         """
         d = cls()
 
         def _num(suffix: str, default: float, *, cast: Callable[[float], Any]):
+            """Read ``<prefix>_<suffix>`` as a number, falling back to ``default``.
+
+            Args:
+                suffix: The env-var suffix appended to ``prefix``.
+                default: Fallback returned when the var is unset or invalid.
+                cast: Callable applied to the parsed float for the final value.
+
+            Returns:
+                The cast parsed value, or ``default`` when missing, non-finite,
+                negative, or unparseable.
+            """
             raw = os.environ.get(f"{prefix}_{suffix}")
             if raw is None or not raw.strip():
                 return default
@@ -102,7 +130,15 @@ class RetryPolicy:
         )
 
     def delay_for(self, attempt: int) -> float:
-        """Backoff delay (seconds) before retry ``attempt`` (1-based prior attempt)."""
+        """Backoff delay (seconds) before retry ``attempt`` (1-based prior attempt).
+
+        Args:
+            attempt: The 1-based number of the prior attempt that just failed.
+
+        Returns:
+            The backoff delay in seconds (capped at ``max_delay_s`` plus
+            optional jitter).
+        """
         raw = self.base_delay_s * (self.multiplier ** max(0, attempt - 1))
         capped = min(self.max_delay_s, raw)
         if self.jitter_s > 0:
@@ -122,6 +158,21 @@ async def retry_with_backoff(
 
     Re-raises the last exception once ``policy.max_attempts`` is exhausted. The
     ``sleep`` seam keeps tests deterministic (inject a no-op / fake clock).
+
+    Args:
+        fn: The zero-arg awaitable factory to invoke each attempt.
+        policy: The retry policy bounding attempts and backoff delay.
+        retry_on: The exception types that trigger a retry.
+        sleep: Awaitable sleep used between attempts (injectable for tests).
+        on_retry: Optional callback ``(attempt, exc, delay)`` invoked before
+            each retry; its own exceptions are swallowed.
+
+    Returns:
+        The successful result of ``fn()``.
+
+    Raises:
+        BaseException: Re-raises the last exception from ``fn()`` once
+            ``policy.max_attempts`` is exhausted.
     """
     attempt = 0
     while True:
