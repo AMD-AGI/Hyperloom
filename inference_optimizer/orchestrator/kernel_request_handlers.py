@@ -3034,8 +3034,12 @@ async def integrate_handler(
     )
     log.info("integrate_handler: apply_result=%s", apply_result)
     if apply_result.get("status") == "failed":
+        # Apply crash: the patch was never measured. Stamp a fault error_class
+        # (top-level, not just nested in apply_result) so SharedState routes
+        # this through the fault retry budget instead of the REVERT quota.
         return {
             "status": "failed",
+            "error_class": "apply_failed",
             "error": "kernel patch apply failed",
             "decision": "REVERT",
             "apply_result": apply_result,
@@ -3153,8 +3157,20 @@ async def integrate_handler(
 
     if not is_valid_measurement(bench_result):
         revert_result = _maybe_revert_kernel_patch(apply_result)
+        # The re-baseline server crashed / timed out / produced no usable
+        # measurement, so the patch was never fairly scored. Surface a fault
+        # error_class at the top level — propagating the re-baseline's own
+        # error_class when present (e.g. subprocess_timeout) and otherwise
+        # defaulting to bench_exception — so this routes through the fault
+        # retry budget rather than being discarded as a genuine REVERT.
+        rebaseline_error_class = (
+            str((bench_result or {}).get("error_class") or "").strip()
+            if isinstance(bench_result, dict)
+            else ""
+        ) or "bench_exception"
         return {
             "status": "failed",
+            "error_class": rebaseline_error_class,
             "error": "re-baseline did not succeed",
             "decision": "REVERT",
             "rebaseline_detail": bench_result,
