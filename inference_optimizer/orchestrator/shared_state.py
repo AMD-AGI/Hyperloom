@@ -2778,7 +2778,6 @@ class SharedState:
                     forced_arm,
                 )
                 forced_arm = ""
-            achieved_tput = 0.0
             cb = self.current_best if isinstance(self.current_best, dict) else {}
             cb_tput = cb.get("tput")
             if forced_arm == "baseline":

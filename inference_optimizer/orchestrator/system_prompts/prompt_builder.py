@@ -138,9 +138,7 @@ def _section_session_context(
         "anything outside that set returns `policy_denied` with rule",
         "`phase_incompatible`. The 6-phase chain is:",
         "  PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE",
-        "Disabled phases (see PHASE CONTRACT below) are skipped but keep "
-        "their place in the chain. Transitions are Coordinator-owned "
-        "(you cannot write phase).",
+        "Disabled phases (see PHASE CONTRACT below) are skipped but keep their place in the chain. Transitions are Coordinator-owned (you cannot write phase).",
     ]
 
 
