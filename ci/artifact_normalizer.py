@@ -93,8 +93,18 @@ def _first_of(data: dict[str, Any], *keys: str) -> Any | None:
 
 
 def _first_nested(data: dict[str, Any], *paths: str) -> Any | None:
-    """Return the first non-None value from dotted paths (compat across the
-    several flat and nested ci_metrics schemas agents have emitted)."""
+    """Return the first non-None value found among dotted paths.
+
+    Provides compatibility across the several flat and nested ci_metrics
+    schemas agents have emitted.
+
+    Args:
+        data: The mapping to traverse.
+        *paths: Dotted key paths, probed in order.
+
+    Returns:
+        The first resolved value, or ``None`` when no path resolves.
+    """
     for path in paths:
         cur: Any = data
         ok = True
@@ -528,8 +538,14 @@ def normalize_task_result(
 ) -> dict[str, Any]:
     """Normalize one task artifact directory.
 
-    ``manifest_record`` is caller-supplied task metadata; metrics are read
-    from files under ``task_dir``.
+    Args:
+        task_dir: Directory containing the task's collected artifacts.
+        manifest_record: Caller-supplied task metadata.
+        run: Optional run-level context merged into the result.
+
+    Returns:
+        The normalized result dict (schema-versioned) with metrics read from
+        files under ``task_dir``.
     """
     warnings: list[str] = []
 
@@ -605,6 +621,15 @@ def collect_normalized_results(
     """Normalize CI-collected artifacts using submission manifests.
 
     GitHub Actions adapter around ``normalize_task_result``.
+
+    Args:
+        artifacts_dir: Root directory of collected task artifacts.
+        manifests_dir: Directory tree holding ``submission_manifest.json``
+            files.
+        run: Optional run-level context merged into each result.
+
+    Returns:
+        One normalized result dict per task record across all manifests.
     """
     results: list[dict[str, Any]] = []
     manifest_files = sorted(manifests_dir.rglob("submission_manifest.json"))
