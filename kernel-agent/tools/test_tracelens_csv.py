@@ -2224,6 +2224,30 @@ def test_classify_patchability_rejects_missing_source_file():
     assert "source file not resolved" in reason
 
 
+def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
+    """RCA root cause 2: a csrc/cpp_itfs/*.py host launcher (device code is in a
+    sibling .cuh/.cpp.jinja) must be skipped, not edited."""
+    src = "/wekafs/aiter/csrc/cpp_itfs/pa/pa_ragged.py"
+    # Make the reusable-root gate pass deterministically regardless of host env.
+    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/wekafs/aiter/",))
+    reusable, reason = tla.classify_patchability(
+        {"name": "paged_attention_ragged", "source_file": src, "source_type": "python"},
+    )
+    assert reusable is False
+    assert "cpp_itfs host launcher" in reason
+
+
+def test_classify_patchability_keeps_cpp_itfs_device_source(monkeypatch):
+    """The real device source (.cuh) under cpp_itfs stays reusable."""
+    src = "/wekafs/aiter/csrc/cpp_itfs/pa/pa_kernels.cuh"
+    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/wekafs/aiter/",))
+    reusable, reason = tla.classify_patchability(
+        {"name": "paged_attention", "source_file": src, "source_type": "hip_cpp"},
+    )
+    assert reusable is True
+    assert reason == ""
+
+
 def test_classify_patchability_rejects_vendor_blas_name_markers():
     """Vendor BLAS / collective name markers are rejected even under a reusable framework root."""
     for marker_name in (

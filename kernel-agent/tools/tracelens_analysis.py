@@ -1166,7 +1166,19 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
         return False, (f"runtime-generated (torch.compile / Inductor cache): {source_file}")
     lower_file = source_file.lower()
     if not any(root in lower_file for root in _reusable_roots()):
-        return False, (f"source not under a reusable framework root: {source_file}")
+        return False, (
+            f"source not under a reusable framework root: {source_file}"
+        )
+    # cpp_itfs host-launcher guard (RCA root cause 2): files under aiter's
+    # csrc/cpp_itfs/ that are .py are host drivers — the real GPU code lives in
+    # sibling .cuh / .cpp.jinja. If the deterministic resolver didn't promote it
+    # to the device source, editing the .py always fails the smoke test ->
+    # REVERT. Skip it so the candidate doesn't burn a forge/geak attempt.
+    if "/csrc/cpp_itfs/" in lower_file and lower_file.endswith(".py"):
+        return False, (
+            f"cpp_itfs host launcher (device code is in sibling .cuh/.cpp.jinja, "
+            f"not this .py): {source_file}"
+        )
     source_type = candidate.get("source_type")
     if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
         return False, (f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}")
