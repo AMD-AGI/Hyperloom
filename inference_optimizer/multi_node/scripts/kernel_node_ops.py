@@ -40,11 +40,30 @@ _STREAM_TAIL_BYTES = 32 * 1024
 
 
 def _safe_name(value: str) -> str:
+    """Sanitize a string into a filesystem-safe filename token.
+
+    Args:
+        value (str): the raw string to sanitize.
+
+    Returns:
+        str: the sanitized token (alphanumerics and ``._-`` kept, others
+            replaced with ``_``), truncated to 80 chars and defaulting to
+            ``"patch"`` when empty.
+    """
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
     return cleaned[:80] or "patch"
 
 
 def _atomic_write_bytes(target: Path, data: bytes) -> None:
+    """Atomically write ``data`` to ``target`` via a temp file and ``os.replace``.
+
+    Args:
+        target (Path): the destination file path (parent dirs are created).
+        data (bytes): the bytes to write.
+
+    Raises:
+        Exception: re-raised if writing fails (the temp file is removed first).
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_str = tempfile.mkstemp(
         prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent),
@@ -64,6 +83,16 @@ def _atomic_write_bytes(target: Path, data: bytes) -> None:
 
 
 def _emit(payload: dict) -> int:
+    """Print ``payload`` as JSON to stdout and return a process exit code.
+
+    Args:
+        payload (dict): the result document to emit (its ``status`` selects the
+            exit code).
+
+    Returns:
+        int: ``0`` when ``status`` is a success state (``ok`` / ``restored`` /
+            ``noop_missing_backup``), else ``1``.
+    """
     sys.stdout.write(json.dumps(payload, indent=2) + "\n")
     sys.stdout.flush()
     return 0 if str(payload.get("status", "")).lower() in ("ok", "restored",
@@ -71,6 +100,19 @@ def _emit(payload: dict) -> int:
 
 
 def _do_apply(a: argparse.Namespace) -> int:
+    """Back up the target, write the base64 patch, and compile-check .py targets.
+
+    Backs up ``--target-path`` into ``--backup-dir``, atomically writes the
+    decoded ``--patch-b64``, and for ``.py`` targets runs ``py_compile`` with
+    auto-revert on syntax error. Emits a JSON result document on stdout.
+
+    Args:
+        a (argparse.Namespace): parsed ``apply`` arguments (``target_path``,
+            ``patch_b64``, ``backup_dir``, ``kernel_id``).
+
+    Returns:
+        int: the process exit code from emitting the result (``0`` on success).
+    """
     host = socket.gethostname()
     target = Path(a.target_path)
     if not target.is_file():
@@ -105,6 +147,18 @@ def _do_apply(a: argparse.Namespace) -> int:
 
 
 def _do_revert(a: argparse.Namespace) -> int:
+    """Restore the target file from its backup copy.
+
+    Emits a JSON result document on stdout (``noop_missing_backup`` when the
+    backup is absent, ``restored`` on success).
+
+    Args:
+        a (argparse.Namespace): parsed ``revert`` arguments (``target_path``,
+            ``backup_path``).
+
+    Returns:
+        int: the process exit code from emitting the result.
+    """
     host = socket.gethostname()
     target = Path(a.target_path)
     backup = Path(a.backup_path)
@@ -118,6 +172,22 @@ def _do_revert(a: argparse.Namespace) -> int:
 
 
 def _do_bench(a: argparse.Namespace) -> int:
+    """Stage files into the workspace, run the bench command, read back artifacts.
+
+    Decodes ``--files-b64-json`` into ``--workspace`` (rejecting absolute or
+    ``..`` paths), runs ``--bench-command`` under bash with a timeout, then
+    collects ``--result-glob`` artifacts (skipping oversized ones). Emits a JSON
+    result document on stdout.
+
+    Args:
+        a (argparse.Namespace): parsed ``bench`` arguments (``workspace``,
+            ``bench_command``, ``files_b64_json``, ``result_glob``,
+            ``timeout_sec``).
+
+    Returns:
+        int: the process exit code from emitting the result (``0`` when the
+            bench command exited zero).
+    """
     host = socket.gethostname()
     ws = Path(a.workspace)
     ws.mkdir(parents=True, exist_ok=True)
@@ -186,6 +256,12 @@ def _do_bench(a: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    """Parse the subcommand and dispatch to apply / revert / bench.
+
+    Returns:
+        int: the subcommand's exit code, or ``2`` when no known subcommand
+            matched (after printing help to stderr).
+    """
     p = argparse.ArgumentParser(prog="kernel_node_ops.py")
     sub = p.add_subparsers(dest="command", required=True)
 

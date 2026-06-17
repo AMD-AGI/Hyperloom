@@ -139,6 +139,13 @@ def _migrate_leases_v1_to_v2(cur: sqlite3.Cursor) -> bool:
     ``(lane, holder_id)``). Returns True when a migration ran, False when
     already migrated / unknown shape. Snapshots rows, recreates the table,
     re-inserts; runs inside the caller's BEGIN IMMEDIATE.
+
+    Args:
+        cur: Open SQLite cursor within the caller's transaction.
+
+    Returns:
+        ``True`` when a migration ran, ``False`` when already migrated or the
+        table has an unknown shape.
     """
     try:
         cur.execute("PRAGMA table_info(leases)")
@@ -193,7 +200,11 @@ def _migrate_leases_v1_to_v2(cur: sqlite3.Cursor) -> bool:
 
 def _seed_default_lane_capacity(cur: sqlite3.Cursor) -> None:
     """Idempotently insert default capacity rows; existing rows are left
-    alone so a resume preserves the operator's choice."""
+    alone so a resume preserves the operator's choice.
+
+    Args:
+        cur: Open SQLite cursor within the caller's transaction.
+    """
     for lane, capacity in DEFAULT_LANE_CAPACITIES.items():
         cur.execute(
             "INSERT OR IGNORE INTO lane_capacity(lane, capacity) "
@@ -265,6 +276,12 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
     """Idempotently create all tables, run the leases PK migration, seed
     lane_capacity defaults, and record the schema version. Single
     transaction so readers never see an intermediate schema.
+
+    Args:
+        conn: Open database connection.
+
+    Returns:
+        The current (max) recorded schema version.
     """
     cur = conn.cursor()
     try:
