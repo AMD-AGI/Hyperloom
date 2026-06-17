@@ -80,6 +80,9 @@ def test_generates_aiter_harness(tmp_path):
     import ast
     ast.parse(code)
     assert hr.test_command.endswith("--correctness")
+    # Finding 1: event-timing fallback is actually wired (not dead code) for the
+    # us-is-None path.
+    assert "_event_time_ms(lambda:" in code
 
 
 def test_dtype_fp16_mapping(tmp_path):

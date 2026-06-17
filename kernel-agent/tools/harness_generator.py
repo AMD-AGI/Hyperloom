@@ -985,8 +985,17 @@ def main():
     us = ret.get("us")
     err = ret.get("err")
     if a.benchmark or a.full_benchmark or a.profile:
+        ms = None
         if us is not None:
-            print(f"GEAK_RESULT_LATENCY_MS={float(us) / 1000.0:.6f}")
+            ms = float(us) / 1000.0  # aiter run_perftest reports us/iter
+        else:
+            # Fallback: time a re-invocation of the test fn with GPU events.
+            try:
+                ms = _event_time_ms(lambda: __TEST_FN_NAME__(**kw))
+            except Exception as exc:  # noqa: BLE001
+                print(f"benchmark: error ({type(exc).__name__}: {exc})")
+        if ms is not None:
+            print(f"GEAK_RESULT_LATENCY_MS={ms:.6f}")
         sys.exit(0)
     # correctness: aiter checkAllclose returns an error ratio (lower is better).
     if err is None:
