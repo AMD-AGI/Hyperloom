@@ -41,20 +41,22 @@ log = logging.getLogger(__name__)
 
 
 # Canonical, ordered field contract for one ``conversations.jsonl`` row.
-_ROW_FIELDS: frozenset[str] = frozenset({
-    "session_id",
-    "ts",
-    "component",
-    "role",
-    "task_id",
-    "dyn_id",
-    "tick",
-    "phase",
-    "turn",
-    "model",
-    "prompt",
-    "response",
-})
+_ROW_FIELDS: frozenset[str] = frozenset(
+    {
+        "session_id",
+        "ts",
+        "component",
+        "role",
+        "task_id",
+        "dyn_id",
+        "tick",
+        "phase",
+        "turn",
+        "model",
+        "prompt",
+        "response",
+    }
+)
 
 
 class ConversationRowError(ValueError):
@@ -221,21 +223,14 @@ def _validate_row(row: dict[str, Any]) -> None:
     extra = sorted(keys - _ROW_FIELDS)
     missing = sorted(_ROW_FIELDS - keys)
     if extra or missing:
-        raise ConversationRowError(
-            f"conversations row violates closed schema: "
-            f"extra={extra!r} missing={missing!r}"
-        )
+        raise ConversationRowError(f"conversations row violates closed schema: extra={extra!r} missing={missing!r}")
     session_id = row.get("session_id")
     if not isinstance(session_id, str) or not session_id.strip():
-        raise ConversationRowError(
-            f"conversations row requires a non-empty 'session_id'; got "
-            f"{session_id!r}"
-        )
+        raise ConversationRowError(f"conversations row requires a non-empty 'session_id'; got {session_id!r}")
     component = row.get("component")
     if component not in VALID_COMPONENTS:
         raise ConversationRowError(
-            f"conversations row 'component'={component!r} is not one of "
-            f"{sorted(VALID_COMPONENTS)!r}"
+            f"conversations row 'component'={component!r} is not one of {sorted(VALID_COMPONENTS)!r}"
         )
 
 
@@ -274,7 +269,9 @@ def append_conversation(
     except OSError as exc:
         log.warning(
             "conversation_trace: append failed for component=%s session_id=%s: %r",
-            record.component, record.session_id, exc,
+            record.component,
+            record.session_id,
+            exc,
         )
 
     # Second sink (opt-in): mirror in-process conversation text to Langfuse
@@ -290,9 +287,7 @@ def append_conversation(
 
 # Sanity guard: dataclass fields (minus the write-time ``ts``) must stay
 # in lockstep with the on-disk row schema.
-_DATACLASS_FIELDS: frozenset[str] = frozenset(
-    f.name for f in fields(ConversationRecord)
-)
+_DATACLASS_FIELDS: frozenset[str] = frozenset(f.name for f in fields(ConversationRecord))
 assert _DATACLASS_FIELDS | {"ts"} == _ROW_FIELDS, (
     "ConversationRecord fields drifted from _ROW_FIELDS: "
     f"dataclass={sorted(_DATACLASS_FIELDS)} row={sorted(_ROW_FIELDS)}"

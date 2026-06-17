@@ -73,13 +73,15 @@ def _kernel_rows(kernels: list[dict[str, Any]]) -> list[list[Any]]:
     """
     rows: list[list[Any]] = []
     for k in kernels[:_MAX_KERNEL_ROWS]:
-        rows.append([
-            k.get("kernel_id") or "—",
-            (k.get("name") or "")[:60],
-            k.get("gpu_pct"),
-            k.get("duration_us"),
-            k.get("bottleneck") or "—",
-        ])
+        rows.append(
+            [
+                k.get("kernel_id") or "—",
+                (k.get("name") or "")[:60],
+                k.get("gpu_pct"),
+                k.get("duration_us"),
+                k.get("bottleneck") or "—",
+            ]
+        )
     return rows
 
 
@@ -131,27 +133,33 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         launch = run.get("launch") or {}
         tool = outputs.get("tool") or "—"
         parts.append(f"**Run `{run_id}`** (task={run.get('task_id') or '—'}, tool={tool})")
-        parts.append(md_kv_list([
-            ("ts", run.get("ts")),
-            ("framework", run.get("framework")),
-            ("profile_config", run.get("profile_config_path")),
-            ("framework_args", (launch.get("framework_args") or "")[:160]),
-            ("framework_args_source", launch.get("framework_args_source")),
-            ("benchmark_report", artifacts.get("benchmark_report_path")),
-            ("tracelens_status_json", artifacts.get("tracelens_status_json")),
-            ("kernel_summary_csv", artifacts.get("kernel_summary_csv")),
-            ("trace_paths", len(artifacts.get("trace_paths") or [])),
-        ]))
+        parts.append(
+            md_kv_list(
+                [
+                    ("ts", run.get("ts")),
+                    ("framework", run.get("framework")),
+                    ("profile_config", run.get("profile_config_path")),
+                    ("framework_args", (launch.get("framework_args") or "")[:160]),
+                    ("framework_args_source", launch.get("framework_args_source")),
+                    ("benchmark_report", artifacts.get("benchmark_report_path")),
+                    ("tracelens_status_json", artifacts.get("tracelens_status_json")),
+                    ("kernel_summary_csv", artifacts.get("kernel_summary_csv")),
+                    ("trace_paths", len(artifacts.get("trace_paths") or [])),
+                ]
+            )
+        )
         summary = outputs.get("analysis_summary")
         if summary:
             parts.append(f"- **analysis_summary**: {str(summary)[:500]}")
         kernels = outputs.get("top_kernels") or []
         if kernels:
             parts.append("")
-            parts.append(md_table(
-                ["kernel_id", "name", "gpu_pct", "duration_us", "bottleneck"],
-                _kernel_rows(kernels),
-            ))
+            parts.append(
+                md_table(
+                    ["kernel_id", "name", "gpu_pct", "duration_us", "bottleneck"],
+                    _kernel_rows(kernels),
+                )
+            )
             if len(kernels) > _MAX_KERNEL_ROWS:
                 parts.append(f"_Showing top {_MAX_KERNEL_ROWS} of {len(kernels)} kernels._")
         log_rel = artifacts.get("tracelens_log")
@@ -159,10 +167,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             tail = _read_log_tail(session_root, str(log_rel))
             if tail:
                 parts.append("")
-                parts.append(
-                    f"<details><summary>CLI log tail ({_CLI_LOG_TAIL_LINES} lines max): "
-                    f"`{log_rel}`</summary>"
-                )
+                parts.append(f"<details><summary>CLI log tail ({_CLI_LOG_TAIL_LINES} lines max): `{log_rel}`</summary>")
                 parts.append("")
                 parts.append("```")
                 parts.append(tail)

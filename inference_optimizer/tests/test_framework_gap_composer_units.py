@@ -18,6 +18,7 @@ from inference_optimizer.orchestrator.action_executors._framework_gap_composer i
 
 # normalisation helpers
 
+
 class TestNormalizeModelClass:
     @pytest.mark.parametrize(
         "raw, expected",
@@ -50,6 +51,7 @@ class TestModelClassSearchToken:
 
 # _extract_bottleneck_from_breakdown
 
+
 class TestExtractBottleneck:
     def test_returns_empty_when_path_blank(self):
         assert _extract_bottleneck_from_breakdown("") == ""
@@ -65,24 +67,41 @@ class TestExtractBottleneck:
 
     def test_dict_with_top_kernels(self, tmp_path):
         path = tmp_path / "br.json"
-        path.write_text(json.dumps({"top_kernels": [
-            {"name": "attn_fwd_paged"},
-            {"name": "gemm_a16w16"},
-        ]}))
+        path.write_text(
+            json.dumps(
+                {
+                    "top_kernels": [
+                        {"name": "attn_fwd_paged"},
+                        {"name": "gemm_a16w16"},
+                    ]
+                }
+            )
+        )
         assert _extract_bottleneck_from_breakdown(path) == "attention"
 
     def test_dict_with_rows_alias(self, tmp_path):
         path = tmp_path / "br.json"
-        path.write_text(json.dumps({"rows": [
-            {"kernel": "moe_ck_tile_fused"},
-        ]}))
+        path.write_text(
+            json.dumps(
+                {
+                    "rows": [
+                        {"kernel": "moe_ck_tile_fused"},
+                    ]
+                }
+            )
+        )
         assert _extract_bottleneck_from_breakdown(path) == "moe"
 
     def test_list_payload(self, tmp_path):
         path = tmp_path / "br.json"
-        path.write_text(json.dumps([
-            "rmsnorm_kernel", "softmax_kernel",
-        ]))
+        path.write_text(
+            json.dumps(
+                [
+                    "rmsnorm_kernel",
+                    "softmax_kernel",
+                ]
+            )
+        )
         assert _extract_bottleneck_from_breakdown(path) == "norm"
 
     def test_no_match_returns_empty(self, tmp_path):
@@ -92,6 +111,7 @@ class TestExtractBottleneck:
 
 
 # compose_gap
+
 
 class TestComposeGap:
     def test_minimal_inputs(self):

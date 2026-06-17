@@ -36,12 +36,14 @@ def test_skeleton_always_present(tmp_path: Path):
 
 
 def test_append_drops_sourceless_and_dedups(tmp_path: Path):
-    added, dropped = research_hints.append_hints(tmp_path, [
-        {"what": "chunked prefill", "source": "ROCm/vllm#1",
-         "domain_tags": ["serving"]},
-        {"what": "no source"},
-        {"what": "chunked prefill", "source": "ROCm/vllm#1"},
-    ])
+    added, dropped = research_hints.append_hints(
+        tmp_path,
+        [
+            {"what": "chunked prefill", "source": "ROCm/vllm#1", "domain_tags": ["serving"]},
+            {"what": "no source"},
+            {"what": "chunked prefill", "source": "ROCm/vllm#1"},
+        ],
+    )
     assert (added, dropped) == (1, 1)
     hints = research_hints.load_hints(tmp_path)
     assert len(hints) == 1
@@ -49,12 +51,18 @@ def test_append_drops_sourceless_and_dedups(tmp_path: Path):
 
 
 def test_append_is_additive_across_runs(tmp_path: Path):
-    research_hints.append_hints(tmp_path, [
-        {"what": "a", "source": "s1"},
-    ])
-    research_hints.append_hints(tmp_path, [
-        {"what": "b", "source": "s2"},
-    ])
+    research_hints.append_hints(
+        tmp_path,
+        [
+            {"what": "a", "source": "s1"},
+        ],
+    )
+    research_hints.append_hints(
+        tmp_path,
+        [
+            {"what": "b", "source": "s2"},
+        ],
+    )
     whats = {h["what"] for h in research_hints.load_hints(tmp_path)}
     assert whats == {"a", "b"}
 
@@ -67,25 +75,29 @@ def test_skeleton_does_not_clobber_existing(tmp_path: Path):
 
 # 3. competitor_target source contract
 def test_competitor_target_requires_per_conc_source(tmp_path: Path):
-    ok = research_hints.write_competitor_target(tmp_path, {
-        "gpu": "MI300X",
-        "per_conc": [
-            {"conc": 8, "tput_per_gpu": 1000, "source": "mlperf"},
-            {"conc": 16, "tput_per_gpu": 900},
-        ],
-    })
-    assert ok is True
-    data = json.loads(
-        session_paths.competitor_target_json(tmp_path).read_text()
+    ok = research_hints.write_competitor_target(
+        tmp_path,
+        {
+            "gpu": "MI300X",
+            "per_conc": [
+                {"conc": 8, "tput_per_gpu": 1000, "source": "mlperf"},
+                {"conc": 16, "tput_per_gpu": 900},
+            ],
+        },
     )
+    assert ok is True
+    data = json.loads(session_paths.competitor_target_json(tmp_path).read_text())
     assert len(data["per_conc"]) == 1
     assert data["per_conc"][0]["source"] == "mlperf"
 
 
 def test_competitor_target_all_sourceless_writes_nothing(tmp_path: Path):
-    ok = research_hints.write_competitor_target(tmp_path, {
-        "per_conc": [{"conc": 8, "tput_per_gpu": 1000}],
-    })
+    ok = research_hints.write_competitor_target(
+        tmp_path,
+        {
+            "per_conc": [{"conc": 8, "tput_per_gpu": 1000}],
+        },
+    )
     assert ok is False
     assert not session_paths.competitor_target_json(tmp_path).exists()
 
@@ -108,7 +120,9 @@ def test_scout_counters_and_seen_pr_roundtrip():
 async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
     from inference_optimizer.orchestrator.agent_role import default_role_registry
     from inference_optimizer.orchestrator.backends.mock_backend import (
-        MockBackend, MockTurn, ScriptedPlan,
+        MockBackend,
+        MockTurn,
+        ScriptedPlan,
     )
     from inference_optimizer.orchestrator.coordinator import Coordinator
 
@@ -130,13 +144,19 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
     )
 
     task = await coord._enqueue_internal_research_scout_task(
-        reason="test", round_id=0,
+        reason="test",
+        round_id=0,
     )
 
     assert task is not None
     assert task.params["readonly"] is True
     assert task.allowed_tools == [
-        "Read", "Grep", "Glob", "Write", "WebSearch", "WebFetch",
+        "Read",
+        "Grep",
+        "Glob",
+        "Write",
+        "WebSearch",
+        "WebFetch",
     ]
     assert "Bash" not in task.allowed_tools
     assert "Edit" not in task.allowed_tools

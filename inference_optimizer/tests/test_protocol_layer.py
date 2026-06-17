@@ -56,11 +56,7 @@ def test_intent_type_no_objection_or_vote():
 
 
 def test_validate_envelope_minimal_ok():
-    envelope = {
-        "intents": [
-            {"intent_type": "send_message", "payload": {"topic": "observation"}}
-        ]
-    }
+    envelope = {"intents": [{"intent_type": "send_message", "payload": {"topic": "observation"}}]}
     intents = validate_envelope(envelope)
     assert len(intents) == 1
     assert intents[0].type == IntentType.SEND_MESSAGE
@@ -68,14 +64,16 @@ def test_validate_envelope_minimal_ok():
 
 def test_validate_envelope_review_verdict_payload():
     envelope = {
-        "intents": [{
-            "intent_type": "review_verdict",
-            "payload": {
-                "target_proposal_msg_id": "abc123",
-                "verdict": "approve",
-                "reasoning": "matches KB entry kb-7",
-            },
-        }]
+        "intents": [
+            {
+                "intent_type": "review_verdict",
+                "payload": {
+                    "target_proposal_msg_id": "abc123",
+                    "verdict": "approve",
+                    "reasoning": "matches KB entry kb-7",
+                },
+            }
+        ]
     }
     intents = validate_envelope(envelope)
     assert intents[0].type == IntentType.REVIEW_VERDICT
@@ -120,8 +118,7 @@ def test_topic_allowlist_v06_changes():
 @pytest.mark.asyncio
 async def test_message_bus_append_assigns_seq(db):
     bus = MessageBus(db)
-    msg = Message.new("Orchestration", "Kernel", "request",
-                      {"target_agent": "kernel", "kind": "trace_analyze"})
+    msg = Message.new("Orchestration", "Kernel", "request", {"target_agent": "kernel", "kind": "trace_analyze"})
     seq = await bus.append_and_seq(msg)
     assert seq >= 1
     assert msg.seq == seq
@@ -146,12 +143,13 @@ async def test_message_bus_priority_out_of_range(db):
 @pytest.mark.asyncio
 async def test_message_bus_tail_filters_by_to_agent_with_broadcast(db):
     bus = MessageBus(db)
-    await bus.append_and_seq(Message.new("Critic", "Orchestration", "review_verdict",
-                                          {"target_proposal_msg_id": "p1", "verdict": "approve"}))
-    await bus.append_and_seq(Message.new("Robustness", "*", "alert",
-                                          {"severity": "high", "summary": "stall"}))
-    await bus.append_and_seq(Message.new("Critic", "Kernel", "review_verdict",
-                                          {"target_proposal_msg_id": "p2", "verdict": "reject"}))
+    await bus.append_and_seq(
+        Message.new("Critic", "Orchestration", "review_verdict", {"target_proposal_msg_id": "p1", "verdict": "approve"})
+    )
+    await bus.append_and_seq(Message.new("Robustness", "*", "alert", {"severity": "high", "summary": "stall"}))
+    await bus.append_and_seq(
+        Message.new("Critic", "Kernel", "review_verdict", {"target_proposal_msg_id": "p2", "verdict": "reject"})
+    )
     msgs = await bus.tail(to_agent="Orchestration")
     topics = {(m.from_agent, m.to_agent) for m in msgs}
     assert ("Critic", "Orchestration") in topics
@@ -203,7 +201,10 @@ async def test_resource_lock_acquire_release(db):
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     lease = await locks.acquire_many(
         ["workspace_mutation"],
-        holder_id="h1", task_id="t1", action="patch_applier", ttl_sec=60,
+        holder_id="h1",
+        task_id="t1",
+        action="patch_applier",
+        ttl_sec=60,
     )
     assert lease.lanes == ("workspace_mutation",)
     assert "workspace_mutation" in await locks.active_lanes()
@@ -216,11 +217,19 @@ async def test_resource_lock_acquire_release(db):
 async def test_resource_lock_lane_busy_rolls_back(db):
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     a = await locks.acquire_many(
-        ["benchmark_lane"], holder_id="ha", task_id="ta", action="bench_runner", ttl_sec=60,
+        ["benchmark_lane"],
+        holder_id="ha",
+        task_id="ta",
+        action="bench_runner",
+        ttl_sec=60,
     )
     with pytest.raises(LaneBusy) as exc:
         await locks.acquire_many(
-            ["benchmark_lane"], holder_id="hb", task_id="tb", action="bench_runner", ttl_sec=60,
+            ["benchmark_lane"],
+            holder_id="hb",
+            task_id="tb",
+            action="bench_runner",
+            ttl_sec=60,
         )
     assert "benchmark_lane" in exc.value.busy_lanes
     # Original lease should still be intact (atomic rollback)
@@ -233,11 +242,19 @@ async def test_resource_lock_cross_lane_conflict_blocks_profile_during_bench(db)
     """benchmark_lane held → profile_lane acquire must fail (DESIGN §3.5.3)."""
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     bench = await locks.acquire_many(
-        ["benchmark_lane"], holder_id="hb", task_id="tb", action="bench_runner", ttl_sec=60,
+        ["benchmark_lane"],
+        holder_id="hb",
+        task_id="tb",
+        action="bench_runner",
+        ttl_sec=60,
     )
     with pytest.raises(LaneBusy):
         await locks.acquire_many(
-            ["profile_lane"], holder_id="hp", task_id="tp", action="profile_runner", ttl_sec=60,
+            ["profile_lane"],
+            holder_id="hp",
+            task_id="tp",
+            action="profile_runner",
+            ttl_sec=60,
         )
     await locks.release(bench)
 
@@ -247,7 +264,11 @@ async def test_resource_lock_unknown_lane_rejected(db):
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     with pytest.raises(ValueError, match="unknown lane"):
         await locks.acquire_many(
-            ["bogus_lane"], holder_id="h", task_id="t", action="x", ttl_sec=60,
+            ["bogus_lane"],
+            holder_id="h",
+            task_id="t",
+            action="x",
+            ttl_sec=60,
         )
 
 
@@ -255,13 +276,21 @@ async def test_resource_lock_unknown_lane_rejected(db):
 async def test_resource_lock_heartbeat_and_stale_release(db):
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     lease = await locks.acquire_many(
-        ["profile_lane"], holder_id="h1", task_id="t1", action="profile_runner", ttl_sec=60,
+        ["profile_lane"],
+        holder_id="h1",
+        task_id="t1",
+        action="profile_runner",
+        ttl_sec=60,
     )
     await locks.heartbeat(lease, ttl_sec=120)
     # Wrong holder release must not delete the row
     fake = type(lease)(
-        holder_id="other", task_id="t1", action="profile_runner",
-        lanes=lease.lanes, acquired_at=lease.acquired_at, expires_at=lease.expires_at,
+        holder_id="other",
+        task_id="t1",
+        action="profile_runner",
+        lanes=lease.lanes,
+        acquired_at=lease.acquired_at,
+        expires_at=lease.expires_at,
     )
     n = await locks.release(fake)
     assert n == 0
@@ -274,7 +303,10 @@ async def test_resource_lock_heartbeat_and_stale_release(db):
 async def test_resource_lock_reap_expired_emits_event(db):
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     lease = await locks.acquire_many(
-        ["workspace_mutation"], holder_id="h1", task_id="t1", action="patch_applier",
+        ["workspace_mutation"],
+        holder_id="h1",
+        task_id="t1",
+        action="patch_applier",
         ttl_sec=0,  # expires immediately
     )
     time.sleep(0.01)

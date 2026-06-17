@@ -28,7 +28,8 @@ def test_validate_credentials_passes_when_both_present(clean_creds_env):
 
 
 def test_validate_credentials_exits_2_when_safe_api_key_missing(
-    clean_creds_env, capsys,
+    clean_creds_env,
+    capsys,
 ):
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
     with pytest.raises(SystemExit) as exc_info:
@@ -41,7 +42,8 @@ def test_validate_credentials_exits_2_when_safe_api_key_missing(
 
 
 def test_validate_credentials_exits_2_when_openai_base_url_missing(
-    clean_creds_env, capsys,
+    clean_creds_env,
+    capsys,
 ):
     clean_creds_env.setenv("SAFE_API_KEY", "sk-fake")
     with pytest.raises(SystemExit) as exc_info:
@@ -92,7 +94,8 @@ def test_resolve_gpu_type_agreement_silent():
 def test_resolve_gpu_type_disagreement_probe_always_wins():
     """On disagreement the probe wins unconditionally and warns loudly."""
     gpu, warns = cli._resolve_gpu_type(
-        user_specified="mi300x", probed="mi355x",
+        user_specified="mi300x",
+        probed="mi355x",
     )
     assert gpu == "mi355x"
     assert len(warns) == 1
@@ -124,7 +127,7 @@ def test_emit_launch_info_prints_kv_sentinel(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "HYPERLOOM_LAUNCH " in out
     line = [ln for ln in out.splitlines() if ln.startswith("HYPERLOOM_LAUNCH")][0]
-    body = line[len("HYPERLOOM_LAUNCH "):]
+    body = line[len("HYPERLOOM_LAUNCH ") :]
     parsed = dict(token.split("=", 1) for token in body.split(" "))
     assert parsed["pid"] == "12345"
     assert parsed["session_dir"] == str(session_dir)
@@ -181,11 +184,15 @@ def test_emit_launch_info_no_file_no_extra_print(tmp_path, capsys):
 # CLI flag wiring (parser end-to-end)
 def test_parser_accepts_launch_info_file():
     parser = cli._build_parser()
-    ns = parser.parse_args([
-        "optimize",
-        "--model", "/models/test",
-        "--launch-info-file", "/tmp/launch.json",
-    ])
+    ns = parser.parse_args(
+        [
+            "optimize",
+            "--model",
+            "/models/test",
+            "--launch-info-file",
+            "/tmp/launch.json",
+        ]
+    )
     assert ns.launch_info_file == "/tmp/launch.json"
 
 
@@ -199,13 +206,23 @@ def test_parser_does_not_expose_removed_bypass_flags():
     """Regression guard: --no-creds-check and --gpu-type-force must stay removed."""
     parser = cli._build_parser()
     with pytest.raises(SystemExit):
-        parser.parse_args([
-            "optimize", "--model", "/m", "--no-creds-check",
-        ])
+        parser.parse_args(
+            [
+                "optimize",
+                "--model",
+                "/m",
+                "--no-creds-check",
+            ]
+        )
     with pytest.raises(SystemExit):
-        parser.parse_args([
-            "optimize", "--model", "/m", "--gpu-type-force",
-        ])
+        parser.parse_args(
+            [
+                "optimize",
+                "--model",
+                "/m",
+                "--gpu-type-force",
+            ]
+        )
 
 
 # _clean_stale_aiter_locks
@@ -252,7 +269,8 @@ def _make_aiter_tree(root):
 def test_clean_stale_aiter_locks_deletes_stale_keeps_fresh(tmp_path):
     layout = _make_aiter_tree(tmp_path)
     stats = cli._clean_stale_aiter_locks(
-        aiter_jit_dir=tmp_path, stale_minutes=5,
+        aiter_jit_dir=tmp_path,
+        stale_minutes=5,
     )
     assert stats["deleted"] == 3
     assert stats["skipped_fresh"] == 2
@@ -281,7 +299,8 @@ def test_clean_stale_aiter_locks_respects_stale_minutes(tmp_path):
     moderately_old = time.time() - 4 * 60  # 4 min ago
     os.utime(tmp_path / "lock_module_x", (moderately_old, moderately_old))
     stats = cli._clean_stale_aiter_locks(
-        aiter_jit_dir=tmp_path, stale_minutes=10,
+        aiter_jit_dir=tmp_path,
+        stale_minutes=10,
     )
     assert stats["deleted"] == 0
     assert stats["skipped_fresh"] == 1
@@ -289,7 +308,8 @@ def test_clean_stale_aiter_locks_respects_stale_minutes(tmp_path):
 
 
 def test_clean_stale_aiter_locks_auto_discovers_via_env_override(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """``$INFERENCE_OPTIMIZER_AITER_JIT_DIR`` resolves when no explicit dir is passed."""
     (tmp_path / "build").mkdir()

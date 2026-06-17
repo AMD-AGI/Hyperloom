@@ -92,7 +92,7 @@ def load_domain_repos(path: Path | None = None) -> dict[str, DomainRepos]:
         log.warning("domain_repos: failed to parse %s: %s", target, exc)
         return {}
     out: dict[str, DomainRepos] = {}
-    for domain_key, entry in (raw.items() if isinstance(raw, dict) else []):
+    for domain_key, entry in raw.items() if isinstance(raw, dict) else []:
         if not isinstance(entry, dict):
             continue
         if domain_key not in SPECIALIST_DOMAIN_KEYS:
@@ -108,18 +108,12 @@ def load_domain_repos(path: Path | None = None) -> dict[str, DomainRepos]:
             repos = ()
             is_wildcard = True
         elif isinstance(repos_field, list):
-            repos = tuple(
-                str(r).strip() for r in repos_field
-                if isinstance(r, str) and r.strip()
-            )
+            repos = tuple(str(r).strip() for r in repos_field if isinstance(r, str) and r.strip())
         else:
             repos = ()
         kw_raw = entry.get("default_keywords") or []
         if isinstance(kw_raw, list):
-            keywords = tuple(
-                str(k).strip() for k in kw_raw
-                if isinstance(k, str) and k.strip()
-            )
+            keywords = tuple(str(k).strip() for k in kw_raw if isinstance(k, str) and k.strip())
         else:
             keywords = ()
         out[str(domain_key)] = DomainRepos(
@@ -344,6 +338,7 @@ class KnowledgePlane:
         warnings.extend(fetch_warnings)
         self.last_warnings = warnings
         return prs, warnings
+
 
 __all__ = [
     "DOMAIN_REPOS_WILDCARD",

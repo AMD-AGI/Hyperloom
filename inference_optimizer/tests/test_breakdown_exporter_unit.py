@@ -14,6 +14,7 @@ from inference_optimizer.breakdown import exporter as ex
 
 # ---- _load_state / _load_manifest ----
 
+
 def test_load_state_missing(tmp_path):
     warnings = []
     assert ex._load_state(tmp_path, warnings) == {}
@@ -47,6 +48,7 @@ def test_load_manifest_parse_error(tmp_path):
 
 # ---- _safe_collect ----
 
+
 def test_safe_collect_success():
     assert ex._safe_collect("x", lambda: 42, []) == 42
 
@@ -67,6 +69,7 @@ def test_safe_collect_exception_with_default():
 
 # ---- _json_default ----
 
+
 def test_json_default_path():
     assert ex._json_default(Path("/x")) == "/x"
 
@@ -81,6 +84,7 @@ def test_json_default_typeerror():
 
 
 # ---- build ----
+
 
 def test_build_empty_session(tmp_path):
     out = ex.build(tmp_path)
@@ -99,6 +103,7 @@ def test_build_include_transcripts_via_env(tmp_path, monkeypatch):
 
 # ---- write_breakdown_json ----
 
+
 def test_write_breakdown_json(tmp_path):
     target = ex.write_breakdown_json(tmp_path)
     assert target.name == ex.BREAKDOWN_FILENAME
@@ -116,12 +121,14 @@ def test_write_breakdown_json_custom_output(tmp_path):
 
 # ---- patch_breakdown_langfuse ----
 
+
 def test_patch_breakdown_langfuse_no_breakdown(tmp_path):
     # No receipt and no breakdown file -> False.
     assert ex.patch_breakdown_langfuse(tmp_path) is False
 
 
 # ---- write_minimal_final_report ----
+
 
 def test_write_minimal_final_report_creates(tmp_path):
     target = ex.write_minimal_final_report(tmp_path)

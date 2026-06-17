@@ -59,37 +59,39 @@ class LocalHealthConfig:
 
 
 # HIGH-severity log patterns; anything else from ``local_log_errors`` falls back to MEDIUM.
-_HIGH_SEVERITY_PATTERNS: frozenset[str] = frozenset({
-    # Existing OOM / fatal-signal patterns.
-    "CUDA out of memory",
-    "hipErrorOutOfMemory",
-    "HIP out of memory",
-    "NCCL error",
-    "OOMKilled",
-    "core dumped",
-    "Segmentation fault",
-    # D1 — vLLM v1 EngineCore crashes (you've-seen-this case).
-    r"Engine core .* died",
-    r"RuntimeError: Engine core initialization failed",
-    # D1 — model architecture mismatch.
-    r"MLA.*not supported",
-    r"MTP draft .* unavailable",
-    # D1 — aiter / hipcc compilation hard fail.
-    r"aiter .* compilation failed",
-    r"hipcc .* signal",
-    # D1 — accuracy gate / model load — drop here, do not retry.
-    r"accuracy .* gate failed",
-    r"MMLU .* below threshold",
-    r"Failed to load checkpoint",
-    # D1 — KFD resource exhaustion (≠ OOM but equally terminal).
-    r"cudaErrorOutOfDevice",
-    r"HSA_STATUS_ERROR_OUT_OF_RESOURCES",
-    # D1 — matrix library errors.
-    r"ROCblas.*Status\s*\d+",
-    r"hipBLAS.*Error",
-    # E5 — critic-agent runtime stuck → demand operator switch to mock.
-    r"runtime\.cli .* timed out after \d+s",
-})
+_HIGH_SEVERITY_PATTERNS: frozenset[str] = frozenset(
+    {
+        # Existing OOM / fatal-signal patterns.
+        "CUDA out of memory",
+        "hipErrorOutOfMemory",
+        "HIP out of memory",
+        "NCCL error",
+        "OOMKilled",
+        "core dumped",
+        "Segmentation fault",
+        # D1 — vLLM v1 EngineCore crashes (you've-seen-this case).
+        r"Engine core .* died",
+        r"RuntimeError: Engine core initialization failed",
+        # D1 — model architecture mismatch.
+        r"MLA.*not supported",
+        r"MTP draft .* unavailable",
+        # D1 — aiter / hipcc compilation hard fail.
+        r"aiter .* compilation failed",
+        r"hipcc .* signal",
+        # D1 — accuracy gate / model load — drop here, do not retry.
+        r"accuracy .* gate failed",
+        r"MMLU .* below threshold",
+        r"Failed to load checkpoint",
+        # D1 — KFD resource exhaustion (≠ OOM but equally terminal).
+        r"cudaErrorOutOfDevice",
+        r"HSA_STATUS_ERROR_OUT_OF_RESOURCES",
+        # D1 — matrix library errors.
+        r"ROCblas.*Status\s*\d+",
+        r"hipBLAS.*Error",
+        # E5 — critic-agent runtime stuck → demand operator switch to mock.
+        r"runtime\.cli .* timed out after \d+s",
+    }
+)
 
 
 def evaluate_local_health_signals(
@@ -139,9 +141,7 @@ def _server_unreachable(data: SourceData) -> list[Symptom]:
     bad = [entry for entry in data.local_server_health if not entry.get("reachable")]
     if not bad:
         return []
-    severity = (
-        SymptomSeverity.HIGH if len(bad) == len(data.local_server_health) else SymptomSeverity.MEDIUM
-    )
+    severity = SymptomSeverity.HIGH if len(bad) == len(data.local_server_health) else SymptomSeverity.MEDIUM
     out: list[Symptom] = []
     for entry in bad:
         url = str(entry.get("url") or "")
@@ -160,9 +160,9 @@ def _server_unreachable(data: SourceData) -> list[Symptom]:
                 subject={"url": url},
                 source="local",
                 suggestion=(
-                    "delegate(server_lifecycle) to restart the inference "
-                    "server" if severity is SymptomSeverity.HIGH else
-                    "monitor; alert orchestration if it persists"
+                    "delegate(server_lifecycle) to restart the inference server"
+                    if severity is SymptomSeverity.HIGH
+                    else "monitor; alert orchestration if it persists"
                 ),
             )
         )
@@ -192,9 +192,7 @@ def _log_error_symptoms(data: SourceData) -> list[Symptom]:
 
     out: list[Symptom] = []
     for pattern, hits in by_pattern.items():
-        severity = (
-            SymptomSeverity.HIGH if pattern in _HIGH_SEVERITY_PATTERNS else SymptomSeverity.MEDIUM
-        )
+        severity = SymptomSeverity.HIGH if pattern in _HIGH_SEVERITY_PATTERNS else SymptomSeverity.MEDIUM
         out.append(
             Symptom(
                 name="log_error_pattern",
@@ -307,10 +305,7 @@ def _disk_pressure_symptoms(
             Symptom(
                 name="disk_pressure",
                 severity=severity,
-                summary=(
-                    f"disk {mountpoint!r} at {used_pct:.0f}% used "
-                    f"({used_gb}/{total_gb} GiB, free={free_gb} GiB)"
-                ),
+                summary=(f"disk {mountpoint!r} at {used_pct:.0f}% used ({used_gb}/{total_gb} GiB, free={free_gb} GiB)"),
                 evidence={
                     "mountpoint": mountpoint,
                     "used_pct": used_pct,
@@ -325,8 +320,8 @@ def _disk_pressure_symptoms(
                 suggestion=(
                     "prune_branch(profile) — profile traces dominate "
                     "$USER_DATA_PATH disk; consider archiving older runs"
-                    if severity is SymptomSeverity.HIGH else
-                    "observe; rotate logs and clean old runs/* if used_pct keeps climbing"
+                    if severity is SymptomSeverity.HIGH
+                    else "observe; rotate logs and clean old runs/* if used_pct keeps climbing"
                 ),
             )
         )
@@ -392,8 +387,8 @@ def _shm_pressure_symptoms(
                 suggestion=(
                     "lower TP or restart pod with --shm-size; the next "
                     "validate_stack will likely fail with shared memory error"
-                    if severity is SymptomSeverity.HIGH else
-                    "monitor; restart the affected server if SHM keeps climbing"
+                    if severity is SymptomSeverity.HIGH
+                    else "monitor; restart the affected server if SHM keeps climbing"
                 ),
             )
         )
@@ -474,9 +469,9 @@ def _fd_pressure_symptoms(
             severity=severity,
             summary=(
                 f"file-descriptor usage {used_pct:.0f}% on pid "
-                f"{fd_info.get('pid','?')} "
-                f"(used={fd_info.get('used','?')}, "
-                f"limit={fd_info.get('limit','?')})"
+                f"{fd_info.get('pid', '?')} "
+                f"(used={fd_info.get('used', '?')}, "
+                f"limit={fd_info.get('limit', '?')})"
             ),
             evidence={
                 "pid": fd_info.get("pid"),
@@ -492,9 +487,8 @@ def _fd_pressure_symptoms(
                 "escalate_strategy_change: long-running session has leaked "
                 "file descriptors; consider restarting Coordinator + "
                 "resume to clear them"
-                if severity is SymptomSeverity.HIGH else
-                "monitor; if used_pct keeps climbing the next agent_stall "
-                "likely traces back here"
+                if severity is SymptomSeverity.HIGH
+                else "monitor; if used_pct keeps climbing the next agent_stall likely traces back here"
             ),
         )
     ]

@@ -18,7 +18,7 @@ from .llm_prompt import SYSTEM_PROMPT, build_user_prompt, parse_llm_response
 
 # Import every renderer module for its @register_renderer side effect.
 # REGISTRY order is decoupled from layout; :data:`SECTION_GROUPS` drives it.
-from ._renderers import (   # noqa: F401  (side-effect imports)
+from ._renderers import (  # noqa: F401  (side-effect imports)
     session as _r_session,
     workload as _r_workload,
     baseline as _r_baseline,
@@ -44,21 +44,23 @@ from ._renderers import (   # noqa: F401  (side-effect imports)
 # orchestration phases. ``telemetry`` is dropped (GPU monitor data is
 # consistently broken on real wekafs sessions).
 SECTION_GROUPS: list[tuple[str, list[str]]] = [
-    ("Session & Workload",          ["session", "workload"]),
-    ("Performance Results",          ["baseline", "final", "roofline", "attribution"]),
-    ("Capability Search",            ["capability_summary",
-                                      "param_search",
-                                      "decision_journal",
-                                      "sweep"]),
-    ("Kernel Optimization",          ["kernel_lifecycle",
-                                      "kernel_profiling",
-                                      "kernel_decision_path",
-                                      "geak_invocations",
-                                      "oob_invocations",
-                                      "critic_robustness"]),
-    ("Run Trace",                    ["phase_timeline"]),
+    ("Session & Workload", ["session", "workload"]),
+    ("Performance Results", ["baseline", "final", "roofline", "attribution"]),
+    ("Capability Search", ["capability_summary", "param_search", "decision_journal", "sweep"]),
+    (
+        "Kernel Optimization",
+        [
+            "kernel_lifecycle",
+            "kernel_profiling",
+            "kernel_decision_path",
+            "geak_invocations",
+            "oob_invocations",
+            "critic_robustness",
+        ],
+    ),
+    ("Run Trace", ["phase_timeline"]),
     # source_files lists synthesis inputs; data_provenance explains per-section coverage.
-    ("Source Artifacts",             ["source_files", "data_provenance"]),
+    ("Source Artifacts", ["source_files", "data_provenance"]),
 ]
 
 __all__ = [
@@ -196,8 +198,7 @@ def _stitch(
 
     by_id = {s.section_id: s for s in sections}
     for group_title, ids in SECTION_GROUPS:
-        live = [by_id[sid] for sid in ids
-                if sid in by_id and not by_id[sid].skipped]
+        live = [by_id[sid] for sid in ids if sid in by_id and not by_id[sid].skipped]
         if not live:
             # All sections skipped → drop the H2 header too.
             continue
@@ -230,12 +231,13 @@ def _deterministic_exec_summary(g: GlobalFacts) -> str:
         The rendered executive-summary markdown block.
     """
     out: list[str] = []
-    out.append(f"- {g.headline} (stop_reason={g.stop_reason or 'unset'}, "
-               f"elapsed={g.elapsed_minutes or 0:.0f}min, objective={g.objective}).")
+    out.append(
+        f"- {g.headline} (stop_reason={g.stop_reason or 'unset'}, "
+        f"elapsed={g.elapsed_minutes or 0:.0f}min, objective={g.objective})."
+    )
     out.append(f"- Workload: {g.workload_summary}.")
     if g.gain_attribution_lines:
-        out.append(f"- Gain attribution ({g.attribution_method}): "
-                   + "; ".join(g.gain_attribution_lines))
+        out.append(f"- Gain attribution ({g.attribution_method}): " + "; ".join(g.gain_attribution_lines))
     else:
         out.append(f"- No measurable gain recorded ({g.attribution_method}).")
     funnel = g.kernel_pipeline_funnel
@@ -246,8 +248,7 @@ def _deterministic_exec_summary(g: GlobalFacts) -> str:
         f"rejected={funnel['rejected']}, partial={funnel['partial']})."
     )
     if g.capabilities_not_attempted:
-        out.append("- Capabilities never invoked: "
-                   + ", ".join(f"`{c}`" for c in g.capabilities_not_attempted) + ".")
+        out.append("- Capabilities never invoked: " + ", ".join(f"`{c}`" for c in g.capabilities_not_attempted) + ".")
     if g.data_quality_flags:
         out.append("- **Data quality flags**:")
         for f in g.data_quality_flags:
@@ -267,9 +268,11 @@ def _render_global_facts_block(g: GlobalFacts) -> str:
     funnel = g.kernel_pipeline_funnel
     out: list[str] = []
     out.append(f"- **Headline**: {g.headline}")
-    out.append(f"- **Stop reason**: `{g.stop_reason or 'unset'}` · "
-               f"elapsed `{g.elapsed_minutes or 0:.1f} min` · "
-               f"objective `{g.objective}`")
+    out.append(
+        f"- **Stop reason**: `{g.stop_reason or 'unset'}` · "
+        f"elapsed `{g.elapsed_minutes or 0:.1f} min` · "
+        f"objective `{g.objective}`"
+    )
     out.append(f"- **Workload**: {g.workload_summary}")
     out.append(
         f"- **Kernel pipeline**: detected={funnel['detected']} → "
@@ -277,10 +280,10 @@ def _render_global_facts_block(g: GlobalFacts) -> str:
         f"adopted={funnel['adopted']} (partial={funnel['partial']}, "
         f"reverted={funnel['reverted']}, rejected={funnel['rejected']})"
     )
-    out.append("- **Capabilities kept**: "
-               + (", ".join(f"`{c}`" for c in g.capabilities_kept) or "none"))
-    out.append("- **Capabilities not attempted**: "
-               + (", ".join(f"`{c}`" for c in g.capabilities_not_attempted) or "none"))
+    out.append("- **Capabilities kept**: " + (", ".join(f"`{c}`" for c in g.capabilities_kept) or "none"))
+    out.append(
+        "- **Capabilities not attempted**: " + (", ".join(f"`{c}`" for c in g.capabilities_not_attempted) or "none")
+    )
     out.append(f"- **Gain attribution** ({g.attribution_method}):")
     if g.gain_attribution_lines:
         for line in g.gain_attribution_lines:

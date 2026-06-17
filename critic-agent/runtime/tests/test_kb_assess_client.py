@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import urllib.error
-from io import BytesIO
 
 import pytest
 
@@ -52,8 +51,11 @@ def test_assess_posts_to_v2_reasoning_assess(monkeypatch):
 
     client = KBAssessClient("http://kb.local", timeout_sec=2.0)
     out = client.assess(
-        focus={"model": "Qwen3-14B"}, params={"kv_cache_dtype": "fp8"},
-        envs={"VLLM_USE_AITER": "1"}, args="--quantization fp8")
+        focus={"model": "Qwen3-14B"},
+        params={"kv_cache_dtype": "fp8"},
+        envs={"VLLM_USE_AITER": "1"},
+        args="--quantization fp8",
+    )
 
     assert out == {"reasonable": "supported", "verdicts": []}
     assert captured["url"] == f"http://kb.local{ASSESS_PATH}"

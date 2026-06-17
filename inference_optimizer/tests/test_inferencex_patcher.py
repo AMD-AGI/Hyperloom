@@ -72,9 +72,7 @@ def test_second_call_is_a_noop(fake_inferencex):
     rc = ensure_benchmark_lib_patched(fake_inferencex)
     assert rc is True
     after_second = (fake_inferencex / "benchmarks" / "benchmark_lib.sh").read_text()
-    assert after_first == after_second, (
-        "Second call mutated the file — patch is not idempotent"
-    )
+    assert after_first == after_second, "Second call mutated the file — patch is not idempotent"
 
 
 def test_patched_line_appears_exactly_once(fake_inferencex):
@@ -87,23 +85,25 @@ def test_patched_line_appears_exactly_once(fake_inferencex):
 
 # Backward-compatibility: patched line reduces to original when NUM_PROMPTS unset.
 def test_patch_is_backward_compatible_when_num_prompts_unset(
-    fake_inferencex, tmp_path, monkeypatch,
+    fake_inferencex,
+    tmp_path,
+    monkeypatch,
 ):
     """The patched line evaluates identically to the original when NUM_PROMPTS is unset."""
     import shutil
     import subprocess
+
     if shutil.which("bash") is None:
         pytest.skip("bash unavailable in this environment")
     ensure_benchmark_lib_patched(fake_inferencex)
     snippet = (
-        'max_concurrency=42\n'
-        'unset NUM_PROMPTS\n'
-        'num_prompts="${NUM_PROMPTS:-$max_concurrency}"\n'
-        'echo "$num_prompts"\n'
+        'max_concurrency=42\nunset NUM_PROMPTS\nnum_prompts="${NUM_PROMPTS:-$max_concurrency}"\necho "$num_prompts"\n'
     )
     out = subprocess.run(
         ["bash", "-c", snippet],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     assert out.stdout.strip() == "42"
 
@@ -112,18 +112,18 @@ def test_patched_line_uses_num_prompts_when_set(fake_inferencex):
     """When NUM_PROMPTS env IS set, it wins over the hard-coded reset."""
     import shutil
     import subprocess
+
     if shutil.which("bash") is None:
         pytest.skip("bash unavailable in this environment")
     ensure_benchmark_lib_patched(fake_inferencex)
     snippet = (
-        'max_concurrency=42\n'
-        'NUM_PROMPTS=999\n'
-        'num_prompts="${NUM_PROMPTS:-$max_concurrency}"\n'
-        'echo "$num_prompts"\n'
+        'max_concurrency=42\nNUM_PROMPTS=999\nnum_prompts="${NUM_PROMPTS:-$max_concurrency}"\necho "$num_prompts"\n'
     )
     out = subprocess.run(
         ["bash", "-c", snippet],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     assert out.stdout.strip() == "999"
 
@@ -242,47 +242,31 @@ def test_benchmark_serving_patch_adds_profile_extra_body_lookup(
     fake_inferencex_with_benchmark_serving,
 ):
     """The patched line reads ``PROFILE_EXTRA_BODY`` from env, keeping the literal dict as the JSON fallback."""
-    src = (
-        fake_inferencex_with_benchmark_serving / "utils" / "bench_serving"
-        / "benchmark_serving.py"
-    )
+    src = fake_inferencex_with_benchmark_serving / "utils" / "bench_serving" / "benchmark_serving.py"
     rc = ensure_benchmark_serving_patched(fake_inferencex_with_benchmark_serving)
     assert rc is True
     text = src.read_text(encoding="utf-8")
-    assert "PROFILE_EXTRA_BODY" in text, (
-        "patched file must reference PROFILE_EXTRA_BODY env var"
-    )
-    assert _BS_LEGACY_LINE not in text, (
-        "legacy hardcoded extra_body line must be replaced, not retained"
-    )
+    assert "PROFILE_EXTRA_BODY" in text, "patched file must reference PROFILE_EXTRA_BODY env var"
+    assert _BS_LEGACY_LINE not in text, "legacy hardcoded extra_body line must be replaced, not retained"
     # JSON-form default (lowercase ``true``) survives as the unset-env fallback.
-    assert (
-        '{"num_steps": 1, "merge_profiles": true, "profile_by_stage": true}'
-        in text
-    )
+    assert '{"num_steps": 1, "merge_profiles": true, "profile_by_stage": true}' in text
 
 
 def test_benchmark_serving_patch_is_idempotent(
     fake_inferencex_with_benchmark_serving,
 ):
     """Second call short-circuits on the sentinel — file content stable."""
-    src = (
-        fake_inferencex_with_benchmark_serving / "utils" / "bench_serving"
-        / "benchmark_serving.py"
-    )
-    assert ensure_benchmark_serving_patched(
-        fake_inferencex_with_benchmark_serving
-    ) is True
+    src = fake_inferencex_with_benchmark_serving / "utils" / "bench_serving" / "benchmark_serving.py"
+    assert ensure_benchmark_serving_patched(fake_inferencex_with_benchmark_serving) is True
     snapshot = src.read_text(encoding="utf-8")
-    assert ensure_benchmark_serving_patched(
-        fake_inferencex_with_benchmark_serving
-    ) is True
+    assert ensure_benchmark_serving_patched(fake_inferencex_with_benchmark_serving) is True
     assert src.read_text(encoding="utf-8") == snapshot
     assert snapshot.count("PROFILE_EXTRA_BODY") == 1
 
 
 def test_benchmark_serving_patch_returns_false_when_path_missing(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """A tmpdir without the benchmark_serving.py file must fail-soft."""
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
@@ -307,17 +291,16 @@ def test_benchmark_serving_patch_returns_false_when_legacy_line_missing(
 
 
 def test_benchmark_serving_patch_uses_env_var_when_no_explicit_path(
-    fake_inferencex_with_benchmark_serving, monkeypatch,
+    fake_inferencex_with_benchmark_serving,
+    monkeypatch,
 ):
     """Honours ``$INFERENCEX_PATH`` when no explicit path is passed."""
     monkeypatch.setenv(
-        "INFERENCEX_PATH", str(fake_inferencex_with_benchmark_serving),
+        "INFERENCEX_PATH",
+        str(fake_inferencex_with_benchmark_serving),
     )
     assert ensure_benchmark_serving_patched(None) is True
-    src = (
-        fake_inferencex_with_benchmark_serving / "utils" / "bench_serving"
-        / "benchmark_serving.py"
-    )
+    src = fake_inferencex_with_benchmark_serving / "utils" / "bench_serving" / "benchmark_serving.py"
     assert "PROFILE_EXTRA_BODY" in src.read_text(encoding="utf-8")
 
 
@@ -326,27 +309,23 @@ def test_benchmark_serving_patched_line_is_executable_python(
 ):
     """The patched line must be syntactically valid Python and honour PROFILE_EXTRA_BODY."""
     ensure_benchmark_serving_patched(fake_inferencex_with_benchmark_serving)
-    src = (
-        fake_inferencex_with_benchmark_serving / "utils" / "bench_serving"
-        / "benchmark_serving.py"
-    )
+    src = fake_inferencex_with_benchmark_serving / "utils" / "bench_serving" / "benchmark_serving.py"
     text = src.read_text(encoding="utf-8")
-    patched_line = next(
-        ln for ln in text.splitlines() if "PROFILE_EXTRA_BODY" in ln
-    )
+    patched_line = next(ln for ln in text.splitlines() if "PROFILE_EXTRA_BODY" in ln)
     expr = patched_line.strip()
     assert expr.startswith("extra_body="), expr
-    expr = expr[len("extra_body="):].rstrip(",")
+    expr = expr[len("extra_body=") :].rstrip(",")
     compile(expr, "<patched>", "eval")
     import os
+
     os.environ.pop("PROFILE_EXTRA_BODY", None)
     result = eval(expr, {"__builtins__": __builtins__})  # noqa: PGH001
     assert result == {
-        "num_steps": 1, "merge_profiles": True, "profile_by_stage": True,
+        "num_steps": 1,
+        "merge_profiles": True,
+        "profile_by_stage": True,
     }, f"unexpected default extra_body: {result!r}"
-    os.environ["PROFILE_EXTRA_BODY"] = (
-        '{"num_steps": 10, "shape_discovery": true, "roofline_annotations": true}'
-    )
+    os.environ["PROFILE_EXTRA_BODY"] = '{"num_steps": 10, "shape_discovery": true, "roofline_annotations": true}'
     try:
         result_env = eval(expr, {"__builtins__": __builtins__})  # noqa: PGH001
         assert result_env == {
@@ -361,7 +340,8 @@ def test_benchmark_serving_patched_line_is_executable_python(
 # #210 fix (Deval comments 4 + 6): patch every InferenceX root, not just
 # $INFERENCEX_PATH — Magpie loads its bundled $MAGPIE_DIR/InferenceX at runtime.
 def _make_inferencex_tree_with_serving(
-    root: Path, profile_by_stage: bool = True,
+    root: Path,
+    profile_by_stage: bool = True,
 ) -> Path:
     """Build a minimal ``<root>/utils/bench_serving/benchmark_serving.py`` fixture."""
     bench_dir = root / "utils" / "bench_serving"
@@ -370,7 +350,7 @@ def _make_inferencex_tree_with_serving(
     f.write_text(
         "async def x():\n"
         "    await async_request(\n"
-        "                                         api_url=base + \"/start_profile\",\n"
+        '                                         api_url=base + "/start_profile",\n'
         "                                         prompt_len=test_prompt_len,\n"
         "                                         output_len=test_output_len,\n"
         '                                         extra_body={"num_steps": 1, '
@@ -383,7 +363,8 @@ def _make_inferencex_tree_with_serving(
 
 
 def test_discover_inferencex_roots_dedupes_when_paths_resolve_same(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """When both paths resolve to the SAME directory, discovery returns one entry, not two."""
     inferencex = tmp_path / "InferenceX"
@@ -399,7 +380,8 @@ def test_discover_inferencex_roots_dedupes_when_paths_resolve_same(
 
 
 def test_discover_inferencex_roots_includes_both_when_paths_differ(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """The #210 case: distinct ``$INFERENCEX_PATH`` and ``$MAGPIE_DIR/InferenceX`` both show up so both get patched."""
     inferencex_external = tmp_path / "external" / "InferenceX"
@@ -416,7 +398,8 @@ def test_discover_inferencex_roots_includes_both_when_paths_differ(
 
 
 def test_discover_inferencex_roots_when_only_magpie_dir_set(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """With only ``$MAGPIE_DIR`` set, Magpie's bundled InferenceX is still discovered."""
     magpie_dir = tmp_path / "Magpie"
@@ -436,7 +419,8 @@ def test_discover_inferencex_roots_returns_empty_when_nothing_set(monkeypatch):
 
 
 def test_ensure_benchmark_serving_patched_patches_both_roots_when_they_differ(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """End-to-end #210 invariant: distinct roots → both ``benchmark_serving.py`` files get patched."""
     external = tmp_path / "external" / "InferenceX"
@@ -452,16 +436,13 @@ def test_ensure_benchmark_serving_patched_patches_both_roots_when_they_differ(
     assert rc is True
     text_external = f_external.read_text(encoding="utf-8")
     text_magpie = f_magpie.read_text(encoding="utf-8")
-    assert "PROFILE_EXTRA_BODY" in text_external, (
-        "$INFERENCEX_PATH file must be patched"
-    )
-    assert "PROFILE_EXTRA_BODY" in text_magpie, (
-        "$MAGPIE_DIR/InferenceX file must ALSO be patched (the #210 fix)"
-    )
+    assert "PROFILE_EXTRA_BODY" in text_external, "$INFERENCEX_PATH file must be patched"
+    assert "PROFILE_EXTRA_BODY" in text_magpie, "$MAGPIE_DIR/InferenceX file must ALSO be patched (the #210 fix)"
 
 
 def test_ensure_benchmark_serving_patched_returns_true_when_only_magpie_path_present(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """When ``$INFERENCEX_PATH`` lacks ``benchmark_serving.py`` but Magpie's copy has it, the patcher still succeeds."""
     external = tmp_path / "external" / "InferenceX"
@@ -478,16 +459,17 @@ def test_ensure_benchmark_serving_patched_returns_true_when_only_magpie_path_pre
 
 
 def test_ensure_benchmark_lib_patched_patches_both_roots_when_they_differ(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Same multi-root contract for ``benchmark_lib.sh``."""
     legacy = (
         "#!/usr/bin/env bash\n"
         "run_benchmark_serving() {\n"
-        "    local num_prompts=\"\"\n"
-        "    local max_concurrency=\"\"\n"
-        "    if [[ \"${PROFILE:-}\" == \"1\" ]]; then\n"
-        "        num_prompts=\"$max_concurrency\"\n"
+        '    local num_prompts=""\n'
+        '    local max_concurrency=""\n'
+        '    if [[ "${PROFILE:-}" == "1" ]]; then\n'
+        '        num_prompts="$max_concurrency"\n'
         "    fi\n"
         "}\n"
     )

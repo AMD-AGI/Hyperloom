@@ -2,6 +2,7 @@
 
 """Unit tests for the stdlib PR Monitor REST client (config resolution, the
 fail-soft HTTP helper, endpoint wrappers, and ``pr_feed_warm`` budgeting)."""
+
 from __future__ import annotations
 
 import json
@@ -28,10 +29,9 @@ class _FakeResp:
 
 def _stub_urlopen(monkeypatch, body):
     monkeypatch.setattr(
-        pm.urllib.request, "urlopen",
-        lambda req, timeout=None: _FakeResp(
-            body if isinstance(body, bytes) else json.dumps(body).encode()
-        ),
+        pm.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _FakeResp(body if isinstance(body, bytes) else json.dumps(body).encode()),
     )
 
 
@@ -120,27 +120,31 @@ def test_healthz_ok_and_fail(monkeypatch):
     c = pm.PRMonitorClient(base_url="http://x")
     _stub_urlopen(monkeypatch, {"status": "ok"})
     assert c.healthz() is True
-    monkeypatch.setattr(c, "_get_json",
-                        lambda *a, **k: (_ for _ in ()).throw(pm.PRMonitorError("x")))
+    monkeypatch.setattr(c, "_get_json", lambda *a, **k: (_ for _ in ()).throw(pm.PRMonitorError("x")))
     assert c.healthz() is False
 
 
 def test_list_repos_variants(monkeypatch):
     c = pm.PRMonitorClient(base_url="http://x")
-    monkeypatch.setattr(c, "_get_json", lambda *a, **k: {"items": [
-        {"repo_name": "a/b", "is_active": True},
-        {"name": "c/d"},
-        {"repo_name": "skip", "is_active": False},
-        "e/f",
-        {"repo_name": ""},
-    ]})
+    monkeypatch.setattr(
+        c,
+        "_get_json",
+        lambda *a, **k: {
+            "items": [
+                {"repo_name": "a/b", "is_active": True},
+                {"name": "c/d"},
+                {"repo_name": "skip", "is_active": False},
+                "e/f",
+                {"repo_name": ""},
+            ]
+        },
+    )
     assert c.list_repos() == ["a/b", "c/d", "e/f"]
 
 
 def test_list_repos_failure_and_nonlist(monkeypatch):
     c = pm.PRMonitorClient(base_url="http://x")
-    monkeypatch.setattr(c, "_get_json",
-                        lambda *a, **k: (_ for _ in ()).throw(pm.PRMonitorError("x")))
+    monkeypatch.setattr(c, "_get_json", lambda *a, **k: (_ for _ in ()).throw(pm.PRMonitorError("x")))
     assert c.list_repos() == []
     monkeypatch.setattr(c, "_get_json", lambda *a, **k: {"items": "nope"})
     assert c.list_repos() == []
@@ -150,23 +154,35 @@ def test_get_pr_success_and_failure(monkeypatch):
     c = pm.PRMonitorClient(base_url="http://x")
     monkeypatch.setattr(c, "_get_json", lambda *a, **k: {"number": 7})
     assert c.get_pr("a/b", 7) == {"number": 7}
-    monkeypatch.setattr(c, "_get_json",
-                        lambda *a, **k: (_ for _ in ()).throw(pm.PRMonitorError("x")))
+    monkeypatch.setattr(c, "_get_json", lambda *a, **k: (_ for _ in ()).throw(pm.PRMonitorError("x")))
     assert c.get_pr("a/b", 7) is None
 
 
 # ---- list_prs -------------------------------------------------------------
 def _rich_items():
     return [
-        {"number": 1, "title": " feat ", "html_url": "http://pr/1",
-         "state": "open", "labels": [{"name": "kernel"}, "perf", None],
-         "author": {"login": "alice"}, "merged_at": "", "updated_at": "t2",
-         "body": "x" * 300},
-        {"pr_number": 2, "url": "http://pr/2", "title": "fix",
-         "labels": "not-a-list", "author": "bob", "updated_at": "t1"},
-        {"number": 0},          # non-positive number -> skip
-        {"number": "bad"},      # unparseable -> skip
-        "not-a-dict",           # skip
+        {
+            "number": 1,
+            "title": " feat ",
+            "html_url": "http://pr/1",
+            "state": "open",
+            "labels": [{"name": "kernel"}, "perf", None],
+            "author": {"login": "alice"},
+            "merged_at": "",
+            "updated_at": "t2",
+            "body": "x" * 300,
+        },
+        {
+            "pr_number": 2,
+            "url": "http://pr/2",
+            "title": "fix",
+            "labels": "not-a-list",
+            "author": "bob",
+            "updated_at": "t1",
+        },
+        {"number": 0},  # non-positive number -> skip
+        {"number": "bad"},  # unparseable -> skip
+        "not-a-dict",  # skip
     ]
 
 
@@ -181,15 +197,13 @@ def test_list_prs_success_and_cache(monkeypatch):
     assert prs[0].body_snippet.endswith("…")
     assert prs[1].url == "http://pr/2"
     # second call served from cache
-    monkeypatch.setattr(c, "_get_json",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("net")))
+    monkeypatch.setattr(c, "_get_json", lambda *a, **k: (_ for _ in ()).throw(AssertionError("net")))
     assert [p.number for p in c.list_prs("a/b", limit=0)] == [1, 2]
 
 
 def test_list_prs_failure_and_nonlist(monkeypatch):
     c = pm.PRMonitorClient(base_url="http://x")
-    monkeypatch.setattr(c, "_get_json",
-                        lambda *a, **k: (_ for _ in ()).throw(pm.PRMonitorError("x")))
+    monkeypatch.setattr(c, "_get_json", lambda *a, **k: (_ for _ in ()).throw(pm.PRMonitorError("x")))
     assert c.list_prs("a/b") == []
     c2 = pm.PRMonitorClient(base_url="http://x")
     monkeypatch.setattr(c2, "_get_json", lambda *a, **k: {"items": "nope"})
@@ -212,14 +226,11 @@ def test_pr_feed_warm_empty_repos():
 def test_pr_feed_warm_success_with_keywords(monkeypatch):
     c = pm.PRMonitorClient(base_url="http://x")
     rows = [
-        pm.PRSummary(repo="a/b", number=1, title="fused moe kernel",
-                     url="u1", state="open", updated_at="t2"),
-        pm.PRSummary(repo="a/b", number=2, title="unrelated docs",
-                     url="u2", state="open", updated_at="t1"),
+        pm.PRSummary(repo="a/b", number=1, title="fused moe kernel", url="u1", state="open", updated_at="t2"),
+        pm.PRSummary(repo="a/b", number=2, title="unrelated docs", url="u2", state="open", updated_at="t1"),
     ]
     monkeypatch.setattr(c, "_list_prs_raising", lambda *a, **k: rows)
-    out, warns = c.pr_feed_warm(["a/b"], keywords=["moe"],
-                                now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    out, warns = c.pr_feed_warm(["a/b"], keywords=["moe"], now=datetime(2026, 1, 1, tzinfo=timezone.utc))
     assert [p.number for p in out] == [1]
     assert warns == []
 
@@ -244,6 +255,7 @@ def test_pr_feed_warm_budget_exhausted(monkeypatch):
     monkeypatch.setattr(c, "_list_prs_raising", lambda *a, **k: [])
     # zero budget with monotonic always past the deadline
     import inference_optimizer.orchestrator.pr_monitor as mod
+
     times = iter([100.0, 100.0, 200.0, 300.0])
     monkeypatch.setattr(mod, "_matches_keywords", pm._matches_keywords)
     out, warns = c.pr_feed_warm(["a/b"], total_budget_sec=0.0)
@@ -254,8 +266,7 @@ def test_pr_feed_warm_budget_exhausted(monkeypatch):
 # ---- _list_prs_raising re-raises ------------------------------------------
 def test_list_prs_raising_propagates(monkeypatch):
     c = pm.PRMonitorClient(base_url="http://x")
-    monkeypatch.setattr(c, "_get_json",
-                        lambda *a, **k: (_ for _ in ()).throw(pm.PRMonitorError("x")))
+    monkeypatch.setattr(c, "_get_json", lambda *a, **k: (_ for _ in ()).throw(pm.PRMonitorError("x")))
     with pytest.raises(pm.PRMonitorError):
         c._list_prs_raising("a/b")
 
@@ -275,17 +286,16 @@ def test_list_prs_raising_nonlist(monkeypatch):
 
 # ---- helpers --------------------------------------------------------------
 def test_matches_keywords():
-    pr = pm.PRSummary(repo="a/b", number=1, title="Fused MoE",
-                      url="u", state="open", labels=("perf",),
-                      body_snippet="speedup")
+    pr = pm.PRSummary(
+        repo="a/b", number=1, title="Fused MoE", url="u", state="open", labels=("perf",), body_snippet="speedup"
+    )
     assert pm._matches_keywords(pr, []) is True
     assert pm._matches_keywords(pr, ["moe"]) is True
     assert pm._matches_keywords(pr, ["nomatch"]) is False
 
 
 def test_pr_summary_to_dict():
-    pr = pm.PRSummary(repo="a/b", number=3, title="t", url="u", state="open",
-                      labels=("x", "y"))
+    pr = pm.PRSummary(repo="a/b", number=3, title="t", url="u", state="open", labels=("x", "y"))
     d = pr.to_dict()
     assert d["labels"] == ["x", "y"]
     assert d["number"] == 3

@@ -107,6 +107,7 @@ def test_phase_cap_binds_on_session_term_for_short_runs():
 
 def test_phase_cap_binds_on_24h_reference_for_unbounded_runs():
     import math
+
     st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=0)
     cap = ps.phase_cap_seconds(st)
     # 24h * 0.45 (ceil to minutes) is far below the 14-day proportional term.
@@ -123,9 +124,7 @@ def test_unbounded_explore_exits_when_cap_exceeded(monkeypatch):
     monkeypatch.setenv(CYCLIC_ENV, "0")
     now = 1_000_000.0
     # Started just over the 24h*0.45 cap ago, unbounded run.
-    cap = ps.phase_cap_seconds(
-        SharedState(phase=ps.PHASE_EXPLORE, max_minutes=0)
-    )
+    cap = ps.phase_cap_seconds(SharedState(phase=ps.PHASE_EXPLORE, max_minutes=0))
     st = SharedState(
         phase=ps.PHASE_EXPLORE,
         max_minutes=0,
@@ -168,10 +167,7 @@ def test_recent_crash_count_ages_out_old_crashes():
     st = SharedState(session_id="t")
     now = 1_000_000.0
     # 24 crashes inside the window, 24 well outside it.
-    st.crash_timestamps = (
-        [now - 25 * 3600 for _ in range(24)]
-        + [now - 60 for _ in range(24)]
-    )
+    st.crash_timestamps = [now - 25 * 3600 for _ in range(24)] + [now - 60 for _ in range(24)]
     st.crash_count = 48
     assert st.recent_crash_count(window_sec=24 * 3600, now=now) == 24
 

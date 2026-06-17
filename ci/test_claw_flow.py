@@ -59,8 +59,7 @@ def main():
 
                 if etype == "statusUpdate":
                     agent_status = evt.get("agentStatus", "")
-                    log.info("  SSE [statusUpdate] agentStatus=%s brief=%s",
-                             agent_status, evt.get("brief", ""))
+                    log.info("  SSE [statusUpdate] agentStatus=%s brief=%s", agent_status, evt.get("brief", ""))
                     if agent_status == "stopped":
                         final_status["value"] = "completed"
                         break
@@ -73,14 +72,12 @@ def main():
                         content = content[:100]
                     log.info("  SSE [chat] role=%s content=%s", role, content)
                 elif etype == "sandboxStatus":
-                    log.info("  SSE [sandboxStatus] phase=%s status=%s",
-                             evt.get("phase", "?"), evt.get("status", "?"))
+                    log.info("  SSE [sandboxStatus] phase=%s status=%s", evt.get("phase", "?"), evt.get("status", "?"))
                 elif etype == "chatDelta":
                     delta = evt.get("delta", {})
                     log.info("  SSE [chatDelta] content=%s", (delta.get("content") or "")[:60])
                 elif etype == "toolUsed":
-                    log.info("  SSE [toolUsed] tool=%s status=%s",
-                             evt.get("tool", "?"), evt.get("status", "?"))
+                    log.info("  SSE [toolUsed] tool=%s status=%s", evt.get("tool", "?"), evt.get("status", "?"))
                 elif etype == "liveStatus":
                     log.info("  SSE [liveStatus] %s", evt.get("text", ""))
                 elif etype == "error":
