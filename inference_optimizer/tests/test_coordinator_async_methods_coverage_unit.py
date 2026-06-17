@@ -110,6 +110,38 @@ async def test_unpromotable_baseline_fast_arg_errors_stop_after_two(
 
 
 @pytest.mark.asyncio
+async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
+    coord: Coordinator,
+) -> None:
+    """Mixed subprocess_nonzero + fast_exit_arg_error failures must still
+    fast-fail once 3 total baseline failures accrue — neither per-class streak
+    reaches its own threshold, so the combined backstop is what stops the run
+    (P5: otherwise the session burns the whole budget -> time_exhausted)."""
+    def _task() -> Task:
+        return Task(
+            task_id="bl-mixed", kind="baseline", state="running",
+            params={"config_path": "baseline.yaml"},
+            idempotency_key="bl-mixed",
+        )
+    subproc = {"status": "failed", "error_class": "subprocess_nonzero",
+               "error": "boom"}
+    argerr = {"status": "failed", "error_class": "fast_exit_arg_error",
+              "error": "bad arg"}
+
+    await coord._handle_unpromotable_result(_task(), subproc)
+    await coord._handle_unpromotable_result(_task(), argerr)
+    assert coord.shared_state.stop_reason not in (
+        "baseline_failed", "baseline_arg_error",
+    )
+    await coord._handle_unpromotable_result(_task(), subproc)
+    # failure_streak=2 (<3) and arg_error_streak reset to 0 — neither per-class
+    # threshold trips, but 3 total failures does.
+    assert coord.shared_state.baseline_failure_streak == 2
+    assert coord.shared_state.baseline_total_failures == 3
+    assert coord.shared_state.stop_reason == "baseline_failed"
+
+
+@pytest.mark.asyncio
 async def test_promote_profile_succeeded_records_trace(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
     await coord._promote_to_shared_state("profile", {

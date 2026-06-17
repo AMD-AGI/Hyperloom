@@ -48,6 +48,9 @@ DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop: the threshold counts only
 # crashes within this many seconds so old crashes age out on long runs/resume.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
+# Combined baseline-failure backstop: fast-fail after this many TOTAL baseline
+# failures (any error_class), so mixed classes can't dodge the per-class streaks.
+_BASELINE_MAX_TOTAL_FAILURES: int = 3
 from . import phase_state as _phase_state
 from .optimization_journal import (
     Journal,
@@ -8551,6 +8554,17 @@ class Coordinator:
                 self.shared_state.baseline_arg_error_streak = 0
                 if self.shared_state.baseline_failure_streak >= 3:
                     self.shared_state.set_stop_reason("baseline_failed")
+            # Combined backstop (P5): mixed error_classes split the per-class
+            # streaks above so neither reaches its threshold and the session
+            # burns the whole budget -> time_exhausted. Count ALL baseline
+            # failures and fast-fail at the same 3-failure intent.
+            self.shared_state.baseline_total_failures += 1
+            if (
+                self.shared_state.baseline_total_failures
+                >= _BASELINE_MAX_TOTAL_FAILURES
+                and not self.shared_state.stop_reason
+            ):
+                self.shared_state.set_stop_reason("baseline_failed")
             # One-shot eager fallback: a (non-OOM) cuda-graph capture failure is
             # often recoverable by disabling cuda-graph capture. Arm it once.
             if (

@@ -357,6 +357,10 @@ class SharedState:
     baseline_accuracy: float = 0.0
     baseline_failure_streak: int = 0
     baseline_arg_error_streak: int = 0
+    # Combined backstop: ANY baseline failure (regardless of error_class) counts
+    # here. Mixed classes split the per-class streaks above so neither hits its
+    # threshold; this total catches that and fast-fails (P5 anti time-exhaustion).
+    baseline_total_failures: int = 0
     # One-shot: cuda-graph capture failure asks the next baseline to retry
     # by disabling cuda-graph capture (framework-correct flag injected by the
     # BaselineExecutor). Set on failure, consumed by BaselineExecutor.
