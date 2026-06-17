@@ -59,7 +59,18 @@ def _now_iso() -> str:
 
 
 def _expand_lanes(lanes: list[str]) -> list[str]:
-    """Expand requested lanes by transitive conflicts; sorted deterministically."""
+    """Expand requested lanes by transitive conflicts; sorted deterministically.
+
+    Args:
+        lanes: Requested lane names to expand.
+
+    Returns:
+        The requested lanes plus their conflicting lanes, sorted for
+        deterministic ordering.
+
+    Raises:
+        ValueError: If any requested lane is not a known lane.
+    """
     out: set[str] = set()
     for lane in lanes:
         if lane not in KNOWN_LANES:
@@ -138,6 +149,21 @@ class SqliteLeaseBackend:
 
         Same-holder retries are idempotent; raises :class:`LaneFull` (at cap)
         or :class:`LaneBusy` (different-holder conflict). Inv-7.1: serving lanes default capacity 1.
+
+        Args:
+            lanes: Lanes to acquire; transitive conflicts are co-acquired.
+            holder_id: Identifier of the lease holder.
+            task_id: Identifier of the task acquiring the lanes.
+            action: Action label recorded with the lease.
+            ttl_sec: Lease time-to-live in seconds.
+
+        Returns:
+            The acquired ``Lease`` covering the expanded set of lanes.
+
+        Raises:
+            ValueError: If ``lanes`` is empty.
+            LaneFull: If a lane is at (or disabled by) its capacity cap.
+            LaneBusy: If a capacity-1 lane is held by a different holder.
         """
         if not lanes:
             raise ValueError("acquire_many called with no lanes")
@@ -264,7 +290,16 @@ class SqliteLeaseBackend:
         )
 
     async def heartbeat(self, lease: Lease, *, ttl_sec: int) -> None:
-        """Refresh ``expires_at`` for every lane this holder owns (keyed on ``(lane, holder_id)`` PK)."""
+        """Refresh ``expires_at`` for every lane this holder owns (keyed on ``(lane, holder_id)`` PK).
+
+        Args:
+            lease: The lease whose lanes should be refreshed.
+            ttl_sec: New lifetime in seconds from now.
+
+        Raises:
+            StaleLeaseError: If the number of rows updated does not match the
+                lease's lane count (the lease no longer belongs to us).
+        """
         new_expires_iso = datetime.fromtimestamp(
             time.time() + ttl_sec, tz=timezone.utc
         ).isoformat()
@@ -306,7 +341,11 @@ class SqliteLeaseBackend:
     async def reap_expired(self) -> list[dict]:
         """Sweep expired rows; emits one ``lease_expired`` event per stale
         (lane, holder_id) row. Reaps only TTL-fired holders, leaving live
-        holders on a multi-holder lane untouched."""
+        holders on a multi-holder lane untouched.
+
+        Returns:
+            The reaped lease rows as dicts, one per deleted (lane, holder_id).
+        """
         now_iso_str = _now_iso()
         reaped: list[dict] = []
         async with self.db.transaction() as cur:
@@ -448,6 +487,14 @@ class ResourceLockManager:
 
         Returns the :class:`Lease` on success, ``None`` when any lane is
         busy or full (both LaneBusy and LaneFull map to None; retry next tick).
+
+        Args:
+            lanes: Lanes to acquire.
+            **kwargs: Forwarded to :meth:`acquire_many` (``holder_id`` /
+                ``task_id`` / ``action`` / ``ttl_sec``).
+
+        Returns:
+            The acquired ``Lease``, or ``None`` when any lane is busy or full.
         """
         try:
             return await self.acquire_many(lanes, **kwargs)

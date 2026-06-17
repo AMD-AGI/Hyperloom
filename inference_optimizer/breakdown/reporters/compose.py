@@ -221,7 +221,14 @@ def _stitch(
 
 
 def _deterministic_exec_summary(g: GlobalFacts) -> str:
-    """Fallback exec summary when no LLM is configured / it failed; lists every data-quality flag."""
+    """Fallback exec summary when no LLM is configured / it failed; lists every data-quality flag.
+
+    Args:
+        g: Global facts used to populate the summary lines.
+
+    Returns:
+        The rendered executive-summary markdown block.
+    """
     out: list[str] = []
     out.append(f"- {g.headline} (stop_reason={g.stop_reason or 'unset'}, "
                f"elapsed={g.elapsed_minutes or 0:.0f}min, objective={g.objective}).")
@@ -249,7 +256,14 @@ def _deterministic_exec_summary(g: GlobalFacts) -> str:
 
 
 def _render_global_facts_block(g: GlobalFacts) -> str:
-    """Render :class:`GlobalFacts` as a compact key-value block for cross-checking the report."""
+    """Render :class:`GlobalFacts` as a compact key-value block for cross-checking the report.
+
+    Args:
+        g: Global facts to render as a key-value block.
+
+    Returns:
+        The rendered markdown key-value block.
+    """
     funnel = g.kernel_pipeline_funnel
     out: list[str] = []
     out.append(f"- **Headline**: {g.headline}")

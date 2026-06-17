@@ -74,9 +74,16 @@ def render_prompt(merged: dict, *, pr_mode: bool = False,
                   gh_token: str | None = None) -> str:
     """Render the agent prompt for the inference_optimizer skill.
 
-    pr_mode=False (default): prompt_template.md against /wekafs/HyperloomV2.
-    pr_mode=True: prompt_template_pr.md, agent git-clones PR head; requires
-    git_ref (PR head sha) and gh_token (clones AMD-AGI/Hyperloom).
+    Args:
+        merged: Merged model/run config (workload dims, benchmarks, image).
+        pr_mode: When False, use ``prompt_template.md`` against
+            ``/wekafs/HyperloomV2``; when True, use ``prompt_template_pr.md``
+            so the agent git-clones the PR head.
+        git_ref: PR head SHA; required when ``pr_mode`` is True.
+        gh_token: GitHub token used to clone AMD-AGI/Hyperloom in PR mode.
+
+    Returns:
+        The rendered prompt string.
     """
     isl, osl = merged["isl_osl_configs"][0]
     ifx_text = format_benchmark_for_prompt(
@@ -223,7 +230,17 @@ def run_model(
 ) -> dict:
     """Execute the full optimization flow for a single model.
 
-    pr_mode + git_ref + gh_token are forwarded to render_prompt. See its docstring.
+    Args:
+        claw: The Claw client used to launch and poll the sandbox.
+        merged: Merged model/run config.
+        nfs_base: NFS base path for result collection.
+        sandbox_timeout: Sandbox wait deadline in seconds.
+        pr_mode: Forwarded to :func:`render_prompt` (PR-CI mode).
+        git_ref: PR head SHA; forwarded to :func:`render_prompt`.
+        gh_token: GitHub token; forwarded to :func:`render_prompt`.
+
+    Returns:
+        A result dict describing the run outcome and collected artifacts.
     """
     model_name = merged["model_hf"].split("/")[-1]
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
