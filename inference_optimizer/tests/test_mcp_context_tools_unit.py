@@ -7,7 +7,6 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-import pytest
 
 from inference_optimizer.orchestrator.backends import mcp_context_tools as mct
 
@@ -61,7 +60,8 @@ def test_why_denied_via_shared_state():
 
 def test_why_denied_via_reader():
     p = mct.ContextProvider(
-        shared_state=_shared_state(), denial_reader=lambda k: f"reader({k})",
+        shared_state=_shared_state(),
+        denial_reader=lambda k: f"reader({k})",
     )
     assert p.why_denied(top_k=2) == "reader(2)"
 
@@ -87,7 +87,8 @@ def test_recent_outcomes_not_wired_and_wired():
     p = mct.ContextProvider(shared_state=_shared_state())
     assert "not wired" in p.recent_outcomes()
     p2 = mct.ContextProvider(
-        shared_state=_shared_state(), recent_outcomes_reader=lambda k: f"out({k})",
+        shared_state=_shared_state(),
+        recent_outcomes_reader=lambda k: f"out({k})",
     )
     assert p2.recent_outcomes(4) == "out(4)"
 
@@ -110,6 +111,7 @@ def test_tool_name_tuples():
 
 # ---- _resolve_sdk ----
 
+
 def test_resolve_sdk_explicit():
     sentinel = object()
     assert mct._resolve_sdk(sentinel) is sentinel
@@ -124,6 +126,7 @@ def test_resolve_sdk_import_error(monkeypatch):
 
 
 # ---- _make_handler ----
+
 
 async def test_make_handler_success():
     p = mct.ContextProvider(shared_state=_shared_state())
@@ -175,6 +178,7 @@ async def test_make_handler_exception():
 
 # ---- build_context_tools_server ----
 
+
 def test_build_server_unavailable_without_factories():
     p = mct.ContextProvider(shared_state=_shared_state())
     assert mct.build_context_tools_server(p, sdk_module=object()) is None
@@ -196,7 +200,9 @@ def test_build_server_with_fake_factories():
         return "SERVER"
 
     out = mct.build_context_tools_server(
-        p, tool_factory=tool_factory, server_factory=server_factory,
+        p,
+        tool_factory=tool_factory,
+        server_factory=server_factory,
     )
     assert out == "SERVER"
     assert created["name"] == mct.MCP_SERVER_NAME

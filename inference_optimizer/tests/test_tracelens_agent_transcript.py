@@ -57,35 +57,35 @@ def test_run_tracelens_skill_writes_agent_transcript(tmp_path):
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
         yield AssistantMessage(content=[TextBlock("starting analysis")])
-        yield AssistantMessage(content=[
-            ToolUseBlock(name="Bash", input={"command": "ls"}, id="tu_42"),
-        ])
+        yield AssistantMessage(
+            content=[
+                ToolUseBlock(name="Bash", input={"command": "ls"}, id="tu_42"),
+            ]
+        )
         yield ResultMessage(result="done", usage={"input_tokens": 10})
 
-    res = asyncio.run(tlr.run_tracelens_skill(
-        skill_path=tmp_path / "skill.md",
-        trace_path=tmp_path / "trace.json.gz",
-        output_dir=output_dir,
-        tracelens_root=tmp_path,
-        tracelens_internal_root=tmp_path / "TraceLens-internal",
-        platform="MI300X",
-        framework="sglang",
-        analysis_mode="default",
-        capture_folder=None,
-        budget_minutes=1,
-        sdk_query_factory=_fake_query,
-        sdk_options_cls=_FakeOptions,
-    ))
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI300X",
+            framework="sglang",
+            analysis_mode="default",
+            capture_folder=None,
+            budget_minutes=1,
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        )
+    )
 
     transcript_path = output_dir / "agent_transcript.jsonl"
     assert transcript_path.exists()
     assert res.artifact_paths["tracelens_agent_transcript"] == str(transcript_path)
 
-    lines = [
-        json.loads(line)
-        for line in transcript_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    lines = [json.loads(line) for line in transcript_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(lines) == 3
     tool_blocks = [
         block
@@ -93,11 +93,7 @@ def test_run_tracelens_skill_writes_agent_transcript(tmp_path):
         for block in record.get("content", [])
         if block.get("block") in ("ToolUseBlock", "ServerToolUseBlock")
     ]
-    assert any(
-        block.get("name") == "Bash"
-        and block.get("input", {}).get("command") == "ls"
-        for block in tool_blocks
-    )
+    assert any(block.get("name") == "Bash" and block.get("input", {}).get("command") == "ls" for block in tool_blocks)
     assert any(record.get("usage", {}).get("input_tokens") == 10 for record in lines)
 
 
@@ -118,20 +114,21 @@ def test_transcript_failure_never_aborts_run(tmp_path):
         (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
         yield _Message(content=[_Unserializable()])
 
-    res = asyncio.run(tlr.run_tracelens_skill(
-        skill_path=tmp_path / "skill.md",
-        trace_path=tmp_path / "trace.json.gz",
-        output_dir=output_dir,
-        tracelens_root=tmp_path,
-        tracelens_internal_root=tmp_path / "TraceLens-internal",
-        platform="MI300X",
-        framework="sglang",
-        analysis_mode="default",
-        capture_folder=None,
-        budget_minutes=1,
-        sdk_query_factory=_fake_query,
-        sdk_options_cls=_FakeOptions,
-    ))
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI300X",
+            framework="sglang",
+            analysis_mode="default",
+            capture_folder=None,
+            budget_minutes=1,
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        )
+    )
 
     assert res.report_path.exists()
-

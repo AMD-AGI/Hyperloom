@@ -57,6 +57,14 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     ``port`` (int) and ``reason`` (str, populated when ineligible).
     Reuse is single-node only, requires a Magpie built-in script, and is
     incompatible with torch_profiler.
+
+    Args:
+        materialized_config_path: Path to the materialized benchmark YAML to
+            inspect.
+
+    Returns:
+        A dict with ``eligible`` (bool), ``framework`` (str), ``port`` (int)
+        and ``reason`` (str, populated when ineligible).
     """
     info: dict[str, Any] = {
         "eligible": False,
@@ -79,23 +87,17 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
         info["port"] = REUSE_PORT_DEFAULT
 
     from ._multi_node_env import is_multi_node
+
     if is_multi_node():
         info["reason"] = "multi-node (server_lifecycle is local-only)"
         return info
 
     script_name = Path(str(bench.get("benchmark_script") or "")).name
     if script_name not in MAGPIE_BUILTIN_SCRIPTS:
-        info["reason"] = (
-            f"benchmark_script={script_name!r} is not a Magpie built-in "
-            f"({sorted(MAGPIE_BUILTIN_SCRIPTS)})"
-        )
+        info["reason"] = f"benchmark_script={script_name!r} is not a Magpie built-in ({sorted(MAGPIE_BUILTIN_SCRIPTS)})"
         return info
 
-    profiler_on = bool(
-        (bench.get("profiler") or {})
-        .get("torch_profiler", {})
-        .get("enabled")
-    )
+    profiler_on = bool((bench.get("profiler") or {}).get("torch_profiler", {}).get("enabled"))
     if profiler_on:
         info["reason"] = "torch_profiler enabled (incompatible with reuse)"
         return info
@@ -105,17 +107,30 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
 
 
 def inject_lifecycle(
-    bench: dict[str, Any], *, cleanup: bool, pid_dir: Path | str, port: int,
+    bench: dict[str, Any],
+    *,
+    cleanup: bool,
+    pid_dir: Path | str,
+    port: int,
 ) -> None:
     """Mutate ``bench`` in place to enable the server_lifecycle protocol.
 
     Both rounds share ``pid_dir`` + ``port`` so round 2 re-attaches; only
     ``cleanup`` differs (round 1 persists, round 2 tears down).
+
+    Args:
+        bench: The benchmark config dict to mutate in place.
+        cleanup: Whether this round tears the server down (``False`` for round
+            1, ``True`` for round 2).
+        pid_dir: Shared directory for the server pid/meta files.
+        port: HTTP port pinned for the persistent server.
     """
-    ready_timeout = int(os.environ.get(
-        "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC",
-        SERVER_READY_TIMEOUT_SEC,
-    ))
+    ready_timeout = int(
+        os.environ.get(
+            "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC",
+            SERVER_READY_TIMEOUT_SEC,
+        )
+    )
     bench["server_lifecycle"] = {
         "enabled": True,
         "cleanup": bool(cleanup),
@@ -129,12 +144,20 @@ def inject_lifecycle(
 
 
 def teardown_lifecycle_server(
-    *, pid_dir: Path | str, framework: str, port: int,
+    *,
+    pid_dir: Path | str,
+    framework: str,
+    port: int,
 ) -> None:
     """Best-effort teardown of a persistent server left by a lifecycle round.
 
     Idempotent and never raises (safe in ``finally``); a no-op on the happy
     path, real work only on abnormal paths.
+
+    Args:
+        pid_dir: Directory holding the server pid/meta files.
+        framework: Framework name used to key the pid/meta filenames.
+        port: HTTP port used to key the pid/meta filenames.
     """
     base = Path(pid_dir)
     tag = f"{framework}_{port}"
@@ -165,8 +188,10 @@ def teardown_lifecycle_server(
         if _process_group_alive(pgid):
             _signal_group(pgid, signal.SIGKILL)
         log.info(
-            "server_lifecycle teardown — reaped persistent server "
-            "pgid=%d (%s:%d)", pgid, framework, port,
+            "server_lifecycle teardown — reaped persistent server pgid=%d (%s:%d)",
+            pgid,
+            framework,
+            port,
         )
     for p in (pid_file, meta_file):
         try:

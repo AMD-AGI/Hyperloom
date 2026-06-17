@@ -81,6 +81,7 @@ class QuantSkillRunResult:
 # counter file
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _read_counter(workspace: Path) -> int:
     """Read the persisted requantize-attempt counter.
 
@@ -117,6 +118,7 @@ def _bump_counter(workspace: Path) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 # interactive prompt
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _resolve_interactive(interactive: bool | None) -> bool:
     """Resolve the effective interactive mode.
@@ -161,12 +163,21 @@ def _ask_operator(message: str) -> bool:
 # retry decision
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _has_fix_hypothesis(workspace: Path, attempt_number: int) -> bool:
     """Look for the hypothesis written by SKILL.md for the NEXT attempt.
 
     Per §A.10, before re-running quark-torch-ptq SKILL.md must drop a concrete fix
     plan at ``fix_hypothesis_attempt_<next>.md``. Absence is the gate that
     prevents blind retries.
+
+    Args:
+        workspace: Workspace directory to inspect.
+        attempt_number: The current attempt number; the next attempt's
+            hypothesis file is ``attempt_number + 1``.
+
+    Returns:
+        ``True`` if the next attempt's fix-hypothesis file exists.
     """
 
     return (workspace / f"fix_hypothesis_attempt_{attempt_number + 1}.md").is_file()
@@ -200,7 +211,20 @@ def _decide_next_step(
     max_requantize_attempts: int,
     counter: int,
 ) -> _RetryDecision:
-    """Decide whether to retry, accept, or stop after one attempt."""
+    """Decide whether to retry, accept, or stop after one attempt.
+
+    Args:
+        outcome: The classified outcome of the just-finished attempt.
+        workspace: Attempt workspace directory.
+        attempt_number: Zero-based index of the attempt just completed.
+        interactive: Whether operator prompts are allowed.
+        max_requantize_attempts: Cap on requantize retries.
+        counter: Current value of the persisted requantize counter.
+
+    Returns:
+        A :class:`_RetryDecision` describing whether to retry, promote, or
+        terminate, plus a debugging note.
+    """
 
     if outcome is None or outcome in SUCCESS_TAGS:
         return _RetryDecision(retry=False, note="")
@@ -220,8 +244,7 @@ def _decide_next_step(
     if outcome == OutcomeId.eval_gap_exceeded:
         # #21: decision point, not a re-run candidate.
         if interactive and _ask_operator(
-            f"[quantization-agent] Eval gap exceeded ({outcome}). "
-            f"Accept partial result? [y/N]: "
+            f"[quantization-agent] Eval gap exceeded ({outcome}). Accept partial result? [y/N]: "
         ):
             return _RetryDecision(
                 retry=False,
@@ -255,6 +278,7 @@ def _decide_next_step(
 # main entry
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 async def quantize_via_prompt(
     prompt: str,
     *,
@@ -269,11 +293,25 @@ async def quantize_via_prompt(
 ) -> QuantSkillRunResult:
     """Run the quantization-agent against ``prompt`` and return a result.
 
-    All inputs except ``prompt`` and ``workspace`` are optional. ``quark_root``
-    falls back to ``$QUARK_ROOT`` then to a hard error (mapped to
-    ``quark_root_missing`` at the assessment level). The threshold resolves
-    per ``_eval.resolve_threshold``; the interactive flag per
-    ``_resolve_interactive``.
+    ``quark_root`` falls back to ``$QUARK_ROOT`` then to a hard error
+    (mapped to ``quark_root_missing`` at the assessment level). The
+    threshold resolves per ``_eval.resolve_threshold``; the interactive
+    flag per ``_resolve_interactive``.
+
+    Args:
+        prompt: The quantization instruction prompt.
+        workspace: Directory for attempt artifacts (created if needed).
+        quark_root: Quark checkout root; falls back to ``$QUARK_ROOT``.
+        interactive: Force interactive operator prompts; auto-resolved
+            when ``None``.
+        acceptable_eval_gap: Maximum tolerated relative accuracy gap.
+        max_requantize_attempts: Cap on requantize retries.
+        model: Optional model identifier passed to the runner.
+        runner_fn: Override for the single-attempt runner (testing hook).
+        log: Optional line-logging callback.
+
+    Returns:
+        The assembled :class:`QuantSkillRunResult`.
     """
 
     workspace_path = Path(workspace).resolve()
@@ -287,7 +325,8 @@ async def quantize_via_prompt(
     quark_root_path = Path(quark_root).expanduser()
     if not quark_root_path.is_dir():
         return _build_failed_bootstrap_result(
-            workspace_path, OutcomeId.quark_root_missing,
+            workspace_path,
+            OutcomeId.quark_root_missing,
             f"quark_root path does not exist or is not a directory: {quark_root_path} "
             f"(set $QUARK_ROOT or pass quark_root=; default is {DEFAULT_QUARK_ROOT}"
             + (f", clone from {DEFAULT_QUARK_GIT_URL}" if DEFAULT_QUARK_GIT_URL else "")
@@ -354,9 +393,7 @@ async def quantize_via_prompt(
             )
         attempt_n += 1
 
-    assessment = build_assessment(
-        attempts_list, workspace=workspace_path, artifacts=artifacts, notes=tuple(notes)
-    )
+    assessment = build_assessment(attempts_list, workspace=workspace_path, artifacts=artifacts, notes=tuple(notes))
 
     status = derive_status(assessment, artifacts)  # type: ignore[arg-type]
     quantized_model_dir = (
@@ -377,6 +414,14 @@ def _build_failed_bootstrap_result(
     note: str,
 ) -> QuantSkillRunResult:
     """Fast-path failure that bypasses the SDK (used for bootstrap errors).
+
+    Args:
+        workspace: Workspace directory for the (failed) attempt.
+        outcome: The bootstrap-level outcome to record.
+        note: Human-readable note attached to the assessment.
+
+    Returns:
+        A well-formed failed :class:`QuantSkillRunResult`.
 
     Produces a well-formed ``QuantSkillRunResult`` so callers can branch on
     ``status`` / ``assessment.final`` without special-casing pre-flight

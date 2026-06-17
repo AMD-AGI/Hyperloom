@@ -2,7 +2,7 @@
 
 本文面向需要从 Langfuse trace / `session_breakdown.json` 中评估 **知识库（KB）是否被使用、命中了什么、是否影响了决策** 的同事。
 
-适用代码版本：`feature/haiskong/trace-kb-provenance`（在 `main` 之上，新增了 recipe-KB 两条通路 gbrain / cortex 的分别归因）。文末单列一节说明 **PR #561 历史数据** 能提取什么、与本版本的差异。
+适用代码版本：`feature/haiskong/trace-v4`（在最新 `main` 之上，含 PR #587 的 7 元组 canonical identity + config-donor warm-replay；新增了 recipe-KB 两条通路 gbrain / cortex 的分别归因）。文末单列一节说明 **PR #561 历史数据** 能提取什么、与本版本的差异。
 
 ---
 
@@ -37,7 +37,8 @@
   "hit": true,
   "candidates": 2,                  // 合并后候选数
   "request": {
-    "canonical_id": "inference:qwen-qwen3-32b:mi300x:sglang:0.5.11:fp8",
+    // 7 元组（#587）：prefix:model:hardware:framework:fw_version:precision:model_type:architectures
+    "canonical_id": "inference:qwen-qwen3-32b:mi300x:sglang:0.5.11:fp8:causal_lm:qwen3",
     "prefer_keys": ["conc","ep","framework_version","isl","max_model_len","osl","tp"],
     "label_match": null
   },
@@ -60,7 +61,9 @@
 - `hit && best_config_nonempty == true` → 拿到了**可用**的历史最优配置（真正能暖启动）。
 - `hit && best_config_nonempty == false` → 命中了条目但配置为空（冷启动占位），会被降级 `seed_only`，不注入实际配置。
 - `result.best_config_source` / `result.sources` → **gbrain 还是 cortex 提供了配置**（评价两条路贡献的核心字段）。
-- `source_candidates` → 每条路覆盖度。
+- `source_candidates` → 每条路覆盖度。两条归因字段现在在 composite 的 `get_recipe` 快路径（slug 直读）与 `search` 慢路径下均会落库。
+
+> **config-donor 解耦（#587）**：当身份匹配的 recipe 自身没有可执行 `best_config`（约 47% 的 seed-only / 空配置行）时，warm-replay 会从同架构 sibling “借用” 一份冠军配置。此时**最终应用的配置来自 donor 那一行**，其 KB 通路可能与身份匹配行不同；`warm_start_recipe_source`（见 2.4）据此按 donor 路归因，而不是身份匹配路。
 
 ### 2.2 `kb_priors:iter_N`（critic 历史先验）
 
@@ -113,7 +116,7 @@
   "cortex_session_id": "...",
   "warm_start_recipe_seen": true,
   "warm_start_recipe_tier": "exact",      // exact / relative / seed_only / miss
-  "warm_start_recipe_source": "gbrain",   // 最终应用的recipe来自哪条路（本版本新增）
+  "warm_start_recipe_source": "gbrain",   // 最终应用的recipe来自哪条路（本版本新增；config-donor 场景下指向 donor 路）
   "warm_history_injected": true,
   "recipe_snapshot_reads": {
     "count": 2, "hits": 2,
@@ -226,8 +229,8 @@ PR561 时代的 recipe 审计 **只记录到 `remote: "composite"` 层**，不�
 
 ## 6. 相关代码位置
 
-- recipe 审计与两条路归因：`recipe_kb/dispatcher.py::_read_audit_event`、`recipe_kb/composite_remote.py::_merged_search`
-- warm-start 来源归属：`orchestrator/cortex_t0.py::_warm_recipe_source`
+- recipe 审计与两条路归因：`recipe_kb/dispatcher.py::_read_audit_event`、`recipe_kb/composite_remote.py::get_recipe`（快路径）与 `::_merged_search`（慢路径，均 stamp `_source_candidates` / `_sources` / `_field_sources`）
+- warm-start 来源归属（含 config-donor 维度）：`orchestrator/cortex_t0.py::_warm_recipe_source` / `_row_best_config_source`（与 #587 的 `_find_config_donor` 协同）
 - critic KB 审计：`orchestrator/backends/critic_agent.py::_build_kb_assess_trace / _build_kb_priors_trace`，`critic-agent/runtime/decision_reviewer.py::_inject_kb_assess`
-- span 落库：`orchestrator/trace/langfuse_emitter.py::record_kb_span`
+- span 落库：`orchestrator/trace/langfuse_emitter.py::record_kb_span`；out-of-process token 经 `ext/*.jsonl` 由 `_flush_ext_shards` 回填
 - 汇总：`breakdown/collectors.py::collect_kb_provenance`，schema 见 `breakdown/schema.py::KBProvenance`

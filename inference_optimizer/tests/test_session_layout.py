@@ -56,9 +56,7 @@ def test_make_session_dir_creates_full_skeleton(tmp_path, monkeypatch):
     for sub in paths._SESSION_SKELETON:
         assert (sd / sub).is_dir(), f"missing per-session skeleton subdir: {sub}"
     for sub in paths._WORKSPACE_SKELETON:
-        assert (paths.workspace_root() / sub).is_dir(), (
-            f"missing workspace skeleton subdir: {sub}"
-        )
+        assert (paths.workspace_root() / sub).is_dir(), f"missing workspace skeleton subdir: {sub}"
     # Re-running must be idempotent.
     sd2 = paths.make_session_dir()
     assert sd2 == sd
@@ -87,6 +85,7 @@ def test_make_session_dir_per_model_ts_layout(tmp_path, monkeypatch):
     # Timestamp shape: YYYYMMDDTHHMMSSZ
     assert len(sd.name) == 16 and sd.name.endswith("Z") and "T" in sd.name
     import os as _os
+
     assert _os.environ[paths.ENV_CURRENT_SESSION_DIR] == str(sd)
     assert paths.session_dir() == sd
     for sub in paths._SESSION_SKELETON:
@@ -128,12 +127,14 @@ def test_make_session_dir_overwrites_stale_pin(tmp_path, monkeypatch):
     sd2 = paths.make_session_dir(model_name="B")
     assert sd1 != sd2
     import os as _os
+
     assert _os.environ[paths.ENV_CURRENT_SESSION_DIR] == str(sd2)
     assert paths.session_dir() == sd2
 
 
 def test_find_latest_per_session_dir_returns_none_on_empty(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """No per-session subdir under workspace_root -> None."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
@@ -142,7 +143,8 @@ def test_find_latest_per_session_dir_returns_none_on_empty(
 
 
 def test_find_latest_per_session_dir_picks_lex_latest_ts(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Lex-sort on the YYYYMMDDTHHMMSSZ name picks the latest ts (robust to mtime touches)."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
@@ -156,7 +158,8 @@ def test_find_latest_per_session_dir_picks_lex_latest_ts(
 
 
 def test_find_latest_per_session_dir_no_model_scans_all(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """No model_name -> scan all model_basename subdirs for the latest ts across the workspace."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
@@ -171,7 +174,8 @@ def test_find_latest_per_session_dir_no_model_scans_all(
 
 
 def test_find_latest_per_session_dir_skips_workspace_shared(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """workspace-shared subdirs (runtime/, logs/) must not be mistaken for model_basename subdirs."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
@@ -187,7 +191,8 @@ def test_find_latest_per_session_dir_skips_workspace_shared(
 
 
 def test_find_latest_per_session_dir_ignores_non_ts_dirs(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Only YYYYMMDDTHHMMSSZ-shaped dir names count as ts subdirs."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
@@ -250,7 +255,8 @@ def test_write_manifest_writes_v1_schema(tmp_path, monkeypatch):
 # manifest "dependencies" block — records each upstream's SHA/remote so we can
 # answer "which upstream did this run hit?" (install.sh clones fresh per install).
 def test_manifest_records_dependencies_block_empty_when_envs_unset(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     monkeypatch.delenv("MAGPIE_DIR", raising=False)
@@ -264,7 +270,8 @@ def test_manifest_records_dependencies_block_empty_when_envs_unset(
 
 
 def test_manifest_records_dependencies_block_picks_up_git_metadata(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Plant two fake git checkouts and confirm we capture both SHA and origin URL."""
     import subprocess
@@ -305,7 +312,8 @@ def test_manifest_records_dependencies_block_picks_up_git_metadata(
 
 
 def test_manifest_dependencies_block_is_fail_soft_on_non_repo_paths(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Path exists but isn't a git checkout -> path is recorded, sha/remote stay empty."""
     not_a_repo = tmp_path / "plain_dir"
@@ -317,15 +325,21 @@ def test_manifest_dependencies_block_is_fail_soft_on_non_repo_paths(
     sd = paths.make_session_dir()
     m = write_manifest(sd, args=None, session_id="non-repo-deps")
     assert m["dependencies"]["magpie"] == {
-        "path": str(not_a_repo), "commit": "", "remote": "",
+        "path": str(not_a_repo),
+        "commit": "",
+        "remote": "",
     }
     assert m["dependencies"]["inferencex"] == {
-        "path": "", "commit": "", "remote": "",
+        "path": "",
+        "commit": "",
+        "remote": "",
     }
 
 
 def test_manifest_pod_local_dependency_warning_matches_default_policy(
-    tmp_path, monkeypatch, caplog,
+    tmp_path,
+    monkeypatch,
+    caplog,
 ):
     from inference_optimizer import manifest
 
@@ -394,7 +408,9 @@ async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
     sub = SubAgentRunner(locks, tasks, session_dir=sd)
     sub.register_executor("baseline", runner)
     task = await tasks.create(
-        kind="baseline", params={}, idempotency_key="ws-test-1",
+        kind="baseline",
+        params={},
+        idempotency_key="ws-test-1",
     )
     res = await sub.run_task(task)
     db.close()
@@ -422,7 +438,9 @@ async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
     sub = SubAgentRunner(locks, tasks, session_dir=sd)
     sub.register_executor("target_analysis", runner)
     task = await tasks.create(
-        kind="target_analysis", params={}, idempotency_key="target-analysis-test-1",
+        kind="target_analysis",
+        params={},
+        idempotency_key="target-analysis-test-1",
     )
     await sub.run_task(task)
     db.close()
@@ -477,8 +495,7 @@ def test_policy_source_file_allowlist_passes(tmp_path):
             "kind": "trace_analyze_done",
             "result": {
                 "hot_kernels": [
-                    {"kernel_id": "k1",
-                     "source_file": "/sgl-workspace/aiter/csrc/attn.cu"},
+                    {"kernel_id": "k1", "source_file": "/sgl-workspace/aiter/csrc/attn.cu"},
                 ],
             },
         },
@@ -495,8 +512,7 @@ def test_policy_source_file_outside_allowlist_denied(tmp_path):
             "kind": "trace_analyze_done",
             "result": {
                 "hot_kernels": [
-                    {"kernel_id": "k1",
-                     "source_file": "/random/path/attn.cu"},
+                    {"kernel_id": "k1", "source_file": "/random/path/attn.cu"},
                 ],
             },
         },

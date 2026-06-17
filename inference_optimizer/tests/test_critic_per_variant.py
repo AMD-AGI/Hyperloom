@@ -54,10 +54,13 @@ def _make_gate(shared_state: SharedState | None = None) -> PolicyGate:
 
 
 def _make_intent(payload: dict[str, Any]) -> Intent:
-    return Intent(type=IntentType.DELEGATE, payload={
-        "action_name": INTEGRATE_PATCH_ACTION_NAME,
-        "params": payload,
-    })
+    return Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": INTEGRATE_PATCH_ACTION_NAME,
+            "params": payload,
+        },
+    )
 
 
 def test_policy_denies_integrate_patch_without_specialist_task_id():
@@ -124,10 +127,12 @@ def test_policy_bypass_critic_overrides_gate():
     s.record_specialist_patch_verdict("t-spec-6", "reject")
     s.phase = "EXPLORE"
     gate = _make_gate(s)
-    intent = _make_intent({
-        "specialist_task_id": "t-spec-6",
-        "bypass_critic": True,
-    })
+    intent = _make_intent(
+        {
+            "specialist_task_id": "t-spec-6",
+            "bypass_critic": True,
+        }
+    )
     # Critic gate bypassed; phase check still applies.
     gate.validate_intent("orchestration", intent)
 
@@ -142,20 +147,25 @@ def test_policy_permissive_verdicts_constant_covers_expected_set():
 
 # 3. Executor defense in depth
 def _write_specialist_workspace_with_patch(
-    session_dir: Path, task_id: str,
+    session_dir: Path,
+    task_id: str,
 ) -> Path:
     workspace = session_dir / "runs" / "specialist" / task_id
     (workspace / "worktree" / "patches").mkdir(parents=True, exist_ok=True)
     patch_file = workspace / "worktree" / "patches" / "001_test.patch"
     patch_file.write_text("dummy patch contents\n")
-    (workspace / "specialist_done.json").write_text(json.dumps({
-        "gap_canonical_id": "gap.test",
-        "domain": "serving_specialist",
-        "proposal_set": [],
-        "patches_written": ["patches/001_test.patch"],
-        "empty": False,
-        "summary": "PR-A7 executor defense-in-depth fixture",
-    }))
+    (workspace / "specialist_done.json").write_text(
+        json.dumps(
+            {
+                "gap_canonical_id": "gap.test",
+                "domain": "serving_specialist",
+                "proposal_set": [],
+                "patches_written": ["patches/001_test.patch"],
+                "empty": False,
+                "summary": "PR-A7 executor defense-in-depth fixture",
+            }
+        )
+    )
     return workspace
 
 
@@ -197,6 +207,7 @@ async def test_executor_proceeds_when_verdict_is_approve(tmp_path: Path):
     """No short-circuit when the recorded verdict is approve."""
     import os
     import subprocess
+
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -211,25 +222,22 @@ async def test_executor_proceeds_when_verdict_is_approve(tmp_path: Path):
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True, env=env)
     subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True, env=env)
 
-    patch_text = (
-        "diff --git a/src.py b/src.py\n"
-        "--- a/src.py\n"
-        "+++ b/src.py\n"
-        "@@ -1 +1 @@\n"
-        "-x = 1\n"
-        "+x = 2\n"
-    )
+    patch_text = "diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
     workspace = session_dir / "runs" / "specialist" / "t-spec-y"
     (workspace / "worktree" / "patches").mkdir(parents=True, exist_ok=True)
     (workspace / "worktree" / "patches" / "001.patch").write_text(patch_text)
-    (workspace / "specialist_done.json").write_text(json.dumps({
-        "gap_canonical_id": "gap.ok",
-        "domain": "serving_specialist",
-        "proposal_set": [],
-        "patches_written": ["patches/001.patch"],
-        "empty": False,
-        "summary": "approved",
-    }))
+    (workspace / "specialist_done.json").write_text(
+        json.dumps(
+            {
+                "gap_canonical_id": "gap.ok",
+                "domain": "serving_specialist",
+                "proposal_set": [],
+                "patches_written": ["patches/001.patch"],
+                "empty": False,
+                "summary": "approved",
+            }
+        )
+    )
     state = SharedState()
     state.record_specialist_patch_verdict("t-spec-y", "approve")
 

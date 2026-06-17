@@ -2,22 +2,14 @@
 
 """Unit tests for the universal patch-safety contract (diff structural checks,
 git grounding, missing-target detection, and quantitative-claim guards)."""
+
 from __future__ import annotations
 
-from pathlib import Path
 
 from inference_optimizer.orchestrator import specialist_patch_safety as ps
 
 
-_DIFF = (
-    "diff --git a/foo.py b/foo.py\n"
-    "index 111..222 100644\n"
-    "--- a/foo.py\n"
-    "+++ b/foo.py\n"
-    "@@ -1,2 +1,2 @@\n"
-    "-old\n"
-    "+new\n"
-)
+_DIFF = "diff --git a/foo.py b/foo.py\nindex 111..222 100644\n--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n-old\n+new\n"
 
 
 # ---- path helpers ---------------------------------------------------------
@@ -46,12 +38,7 @@ def test_patch_targets_missing(tmp_path):
 
 
 def test_patch_targets_missing_dev_null_exempt(tmp_path):
-    create = (
-        "--- /dev/null\n"
-        "+++ b/newfile.py\n"
-        "@@ -0,0 +1 @@\n"
-        "+content\n"
-    )
+    create = "--- /dev/null\n+++ b/newfile.py\n@@ -0,0 +1 @@\n+content\n"
     assert ps.patch_targets_missing(create, tmp_path) == []
 
 
@@ -89,8 +76,7 @@ def test_patch_escapes_tree():
 def test_cross_domain_rule_descriptors():
     desc = ps.cross_domain_rule_descriptors()
     assert len(desc) == len(ps.CROSS_DOMAIN_RULES)
-    assert {"rule_id", "description", "failure_verdict",
-            "failure_reason_code"} <= set(desc[0])
+    assert {"rule_id", "description", "failure_verdict", "failure_reason_code"} <= set(desc[0])
 
 
 # ---- PatchGroundingResult.is_garbage --------------------------------------
@@ -109,12 +95,7 @@ def test_ground_not_diff():
 
 
 def test_ground_path_escape():
-    escape_diff = (
-        "--- a/foo.py\n"
-        "+++ b/../../escape.py\n"
-        "@@ -1 +1 @@\n"
-        "-old\n+new\n"
-    )
+    escape_diff = "--- a/foo.py\n+++ b/../../escape.py\n@@ -1 +1 @@\n-old\n+new\n"
     res = ps.ground_patch_text(escape_diff, base_checkout=None)
     assert res.verdict == ps.GROUND_PATH_ESCAPE
 
@@ -223,14 +204,12 @@ def test_vet_patches(tmp_path, monkeypatch):
         stderr = ""
 
     monkeypatch.setattr(ps.subprocess, "run", lambda *a, **k: _Proc())
-    kept, dropped, grounding = ps.vet_patches(
-        [str(good), str(bad)], base_checkout=tmp_path)
+    kept, dropped, grounding = ps.vet_patches([str(good), str(bad)], base_checkout=tmp_path)
     assert str(good) in kept
     assert any(d["verdict"] == ps.GROUND_NOT_DIFF for d in dropped)
 
 
 def test_vet_patches_unreadable(tmp_path):
-    kept, dropped, grounding = ps.vet_patches(
-        [str(tmp_path / "missing.patch")], base_checkout=None)
+    kept, dropped, grounding = ps.vet_patches([str(tmp_path / "missing.patch")], base_checkout=None)
     assert kept == []
     assert dropped[0]["verdict"] == "unreadable"

@@ -33,13 +33,15 @@ def write_specialist_mcp_config(
     Returns ``None`` when no MCP server is wireable (caller leaves
     ``--mcp-config`` off). Idempotent.
 
-    Parameters
-    ----------
-    session_dir
-        Session root; file lands at
-        ``<session_dir>/runtime/<SPECIALIST_MCP_CONFIG_FILENAME>``.
-    pr_monitor_mcp_url
-        ``KnowledgePlane.specialist_mcp_url()`` — empty means disabled.
+    Args:
+        session_dir: Session root; the file lands at
+            ``<session_dir>/runtime/<SPECIALIST_MCP_CONFIG_FILENAME>``.
+        pr_monitor_mcp_url: ``KnowledgePlane.specialist_mcp_url()``; empty
+            means disabled.
+
+    Returns:
+        The written config file path, or ``None`` when no MCP server is
+        wireable.
     """
     servers: dict[str, dict[str, Any]] = {}
     pr_url = (pr_monitor_mcp_url or "").strip()
@@ -51,8 +53,7 @@ def write_specialist_mcp_config(
 
     if not servers:
         log.info(
-            "specialist_mcp_config: no MCP servers to wire "
-            "(pr_monitor disabled?); skipping config file generation"
+            "specialist_mcp_config: no MCP servers to wire (pr_monitor disabled?); skipping config file generation"
         )
         return None
 
@@ -66,7 +67,8 @@ def write_specialist_mcp_config(
     )
     log.info(
         "specialist_mcp_config: wrote %s (servers=%s)",
-        cfg_path, sorted(servers.keys()),
+        cfg_path,
+        sorted(servers.keys()),
     )
     return cfg_path
 

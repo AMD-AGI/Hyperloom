@@ -48,13 +48,15 @@ def _now_iso() -> str:
 # trace_analyze fails with one of these warnings carrying ``non_empty_modes``,
 # re-issue ONCE with the first non-empty mode (from TraceLens's splitter, not
 # a local heuristic). Single-retry to prevent loops.
-_AUTO_RETRY_WARNING_CODES = frozenset({
-    "steady_state_chunk_empty",
-    "steady_state_chunk_missing",
-    # low-quality chunk (non-empty but busy_ratio below threshold with a
-    # better alternate); same recovery path via ``non_empty_modes``.
-    "steady_state_chunk_low_quality",
-})
+_AUTO_RETRY_WARNING_CODES = frozenset(
+    {
+        "steady_state_chunk_empty",
+        "steady_state_chunk_missing",
+        # low-quality chunk (non-empty but busy_ratio below threshold with a
+        # better alternate); same recovery path via ``non_empty_modes``.
+        "steady_state_chunk_low_quality",
+    }
+)
 
 
 def _extract_steady_state_retry_mode(
@@ -62,9 +64,13 @@ def _extract_steady_state_retry_mode(
 ) -> "tuple[str, dict[str, Any]] | None":
     """Inspect a failed trace_analyze result for a steady-state recovery hint.
 
-    Returns ``(mode, warning_dict)`` when a recovery warning carries an
-    alternate in ``non_empty_modes`` / ``available_modes`` (first one picked,
-    splitter-sorted); ``None`` otherwise (caller falls to ``_failed()``).
+    Args:
+        ta_result: The failed trace_analyze result to inspect for warnings.
+
+    Returns:
+        ``(mode, warning_dict)`` when a recovery warning carries an alternate
+        in ``non_empty_modes`` / ``available_modes`` (first one picked,
+        splitter-sorted); ``None`` otherwise (caller falls to ``_failed()``).
     """
     if not isinstance(ta_result, dict):
         return None
@@ -78,11 +84,7 @@ def _extract_steady_state_retry_mode(
             continue
         # Both warnings name the splitter-accepted alternates
         # (non_empty_modes / available_modes).
-        modes = (
-            w.get("non_empty_modes")
-            or w.get("available_modes")
-            or []
-        )
+        modes = w.get("non_empty_modes") or w.get("available_modes") or []
         if not isinstance(modes, list):
             continue
         for candidate in modes:
@@ -93,7 +95,14 @@ def _extract_steady_state_retry_mode(
 
 def _extract_trace_path(profile_result: dict[str, Any]) -> str:
     """Pick the trace path like Coordinator's ``_promote_to_shared_state``:
-    prefer ``main_trace_path`` (merged), else ``trace_files[0]``."""
+    prefer ``main_trace_path`` (merged), else ``trace_files[0]``.
+
+    Args:
+        profile_result: The profile sub-step result to read the trace from.
+
+    Returns:
+        The resolved trace path, or an empty string if none is present.
+    """
     if not isinstance(profile_result, dict):
         return ""
     direct = profile_result.get("main_trace_path")
@@ -117,6 +126,15 @@ def _failed(
 
     ``phase`` names the failed sub-step (profile / profile_no_trace /
     trace_analyze); ``sub_result`` is pruned to known keys for audit.
+
+    Args:
+        phase: Name of the failed sub-step.
+        error: Human-readable error message.
+        sub_result: The failed sub-step's result, pruned to known keys for
+            audit when provided.
+
+    Returns:
+        The canonical failure result dict.
     """
     out: dict[str, Any] = {
         "status": "failed",
@@ -128,9 +146,15 @@ def _failed(
     if isinstance(sub_result, dict):
         out["sub_result"] = {
             k: sub_result.get(k)
-            for k in ("status", "error", "error_class",
-                      "main_trace_path", "trace_files",
-                      "analysis_md_path", "hot_kernels")
+            for k in (
+                "status",
+                "error",
+                "error_class",
+                "main_trace_path",
+                "trace_files",
+                "analysis_md_path",
+                "hot_kernels",
+            )
             if k in sub_result
         }
     return out
@@ -227,18 +251,19 @@ class RooflineExecutor:
                 last_error = f"profile_executor raised: {exc!r}"
                 log.warning(
                     "roofline profile attempt %d/%d failed (exception): %s",
-                    attempt, _PROFILE_MAX_ATTEMPTS, last_error,
+                    attempt,
+                    _PROFILE_MAX_ATTEMPTS,
+                    last_error,
                 )
                 continue
             if not isinstance(profile_result, dict):
                 last_phase = "profile"
-                last_error = (
-                    f"profile_executor returned non-dict: "
-                    f"{type(profile_result).__name__}"
-                )
+                last_error = f"profile_executor returned non-dict: {type(profile_result).__name__}"
                 log.warning(
                     "roofline profile attempt %d/%d failed (bad return): %s",
-                    attempt, _PROFILE_MAX_ATTEMPTS, last_error,
+                    attempt,
+                    _PROFILE_MAX_ATTEMPTS,
+                    last_error,
                 )
                 continue
             trace_path = _extract_trace_path(profile_result)
@@ -254,42 +279,44 @@ class RooflineExecutor:
                     log.warning(
                         "roofline profile attempt %d/%d returned status=%r "
                         "but produced trace=%s; continuing to trace_analyze",
-                        attempt, _PROFILE_MAX_ATTEMPTS,
-                        profile_result.get("status"), trace_path,
+                        attempt,
+                        _PROFILE_MAX_ATTEMPTS,
+                        profile_result.get("status"),
+                        trace_path,
                     )
                     break
                 last_phase = "profile"
-                last_error = str(
-                    profile_result.get("error") or "profile sub-step failed"
-                )
+                last_error = str(profile_result.get("error") or "profile sub-step failed")
                 log.warning(
                     "roofline profile attempt %d/%d failed: %s",
-                    attempt, _PROFILE_MAX_ATTEMPTS, last_error,
+                    attempt,
+                    _PROFILE_MAX_ATTEMPTS,
+                    last_error,
                 )
                 continue
             if not trace_path:
                 last_phase = "profile_no_trace"
                 last_error = (
-                    "profile succeeded but no trace_path in result "
-                    "(missing both main_trace_path and trace_files[0])"
+                    "profile succeeded but no trace_path in result (missing both main_trace_path and trace_files[0])"
                 )
                 log.warning(
                     "roofline profile attempt %d/%d: no trace path",
-                    attempt, _PROFILE_MAX_ATTEMPTS,
+                    attempt,
+                    _PROFILE_MAX_ATTEMPTS,
                 )
                 continue
             # Success
             if attempt > 1:
                 log.info(
                     "roofline profile succeeded on attempt %d/%d",
-                    attempt, _PROFILE_MAX_ATTEMPTS,
+                    attempt,
+                    _PROFILE_MAX_ATTEMPTS,
                 )
             break
         else:
             return _failed(
                 last_phase,
-                f"all {_PROFILE_MAX_ATTEMPTS} profile attempts failed; "
-                f"last: {last_error}",
+                f"all {_PROFILE_MAX_ATTEMPTS} profile attempts failed; last: {last_error}",
                 sub_result=profile_result,
             )
 
@@ -300,9 +327,7 @@ class RooflineExecutor:
         # clear happens only on the trace_analyze failure path below.
         self.shared_state.last_profile_trace = str(trace_path)
         self.shared_state.last_profile_status = "succeeded"
-        self.shared_state.last_profile_args = str(
-            (ctx.task.params or {}).get("base_extra_args") or ""
-        )
+        self.shared_state.last_profile_args = str((ctx.task.params or {}).get("base_extra_args") or "")
 
         # ---- Step 2: trace_analyze ----------------------------------------
         # Pin the snapshot's arm so the ceiling's precision is anchored to the
@@ -313,11 +338,7 @@ class RooflineExecutor:
         # Pin every roofline's arm explicitly so the ceiling precision never
         # relies on a transient current_best inference: PRELUDE measures the
         # baseline arm; all other reasons (watermark etc.) measure current_best.
-        roofline_arm = (
-            "baseline"
-            if str(_task_params.get("reason") or "") == "prelude_initial"
-            else "current_best"
-        )
+        roofline_arm = "baseline" if str(_task_params.get("reason") or "") == "prelude_initial" else "current_best"
         ta_payload: dict[str, Any] = {"trace_input": str(trace_path)}
         if roofline_arm:
             ta_payload["roofline_arm"] = roofline_arm
@@ -354,9 +375,7 @@ class RooflineExecutor:
                 # Marker against retry loops; single-retry is enforced by not
                 # re-entering this block regardless of the second outcome.
                 "_n26_auto_retry": True,
-                "_n26_retry_from_mode": (
-                    source_warning.get("requested_mode") or ""
-                ),
+                "_n26_retry_from_mode": (source_warning.get("requested_mode") or ""),
             }
             if roofline_arm:
                 ta_payload_retry["roofline_arm"] = roofline_arm
@@ -369,10 +388,7 @@ class RooflineExecutor:
                 self.shared_state.last_trace_analyze = {}
                 return _failed(
                     "trace_analyze",
-                    (
-                        f"trace_analyze_handler raised on N26 auto-retry "
-                        f"(mode={retry_mode}): {exc!r}"
-                    ),
+                    (f"trace_analyze_handler raised on N26 auto-retry (mode={retry_mode}): {exc!r}"),
                 )
             if not isinstance(ta_result, dict):
                 self.shared_state.last_trace_analyze = {}
@@ -387,14 +403,15 @@ class RooflineExecutor:
             # Stamp ``n26_auto_retry`` so the recorder / prompt surface
             # "snapshot came from an auto-retry" (best-effort).
             if isinstance(ta_result, dict):
-                ta_result.setdefault("n26_auto_retry", {
-                    "applied": True,
-                    "from_mode": (
-                        source_warning.get("requested_mode") or "mixed"
-                    ),
-                    "to_mode": retry_mode,
-                    "source_warning_code": source_warning.get("code"),
-                })
+                ta_result.setdefault(
+                    "n26_auto_retry",
+                    {
+                        "applied": True,
+                        "from_mode": (source_warning.get("requested_mode") or "mixed"),
+                        "to_mode": retry_mode,
+                        "source_warning_code": source_warning.get("code"),
+                    },
+                )
 
         if ta_result.get("status") != "ok":
             self.shared_state.last_trace_analyze = {}
@@ -405,15 +422,9 @@ class RooflineExecutor:
             )
 
         # #431: trace_analyze status=ok but ZERO hot kernels means cuda-graph capture folded per-kernel time into hipGraphLaunch wrappers (degraded input, not a TraceLens failure). Append a trace_health_warnings entry so the LLM re-profiles in eager mode instead of reading top=[] as "no kernels".
-        hot = (
-            ta_result.get("hot_kernels_top15")
-            or ta_result.get("hot_kernels")
-            or []
-        )
+        hot = ta_result.get("hot_kernels_top15") or ta_result.get("hot_kernels") or []
         trace_health = profile_result.get("trace_health") or {}
-        attribution_degraded = bool(
-            not hot and trace_health.get("per_kernel_attribution_degraded")
-        )
+        attribution_degraded = bool(not hot and trace_health.get("per_kernel_attribution_degraded"))
         if attribution_degraded:
             warning = {
                 "code": "cuda_graph_attribution_degraded",
@@ -427,9 +438,7 @@ class RooflineExecutor:
                     "EXTRA_VLLM_ARGS) so per-step annotations fire, or enable "
                     "a capture-fold fallback over capture_traces/."
                 ),
-                "capture_traces_present": bool(
-                    trace_health.get("capture_traces_present")
-                ),
+                "capture_traces_present": bool(trace_health.get("capture_traces_present")),
             }
             health = list(ta_result.get("trace_health_warnings") or [])
             health.append(warning)
@@ -457,9 +466,7 @@ class RooflineExecutor:
                     "trace_input": str(trace_path),
                     "analysis_md_path": str(cached.get("analysis_md_path") or ""),
                     "candidates_path": str(cached.get("candidates_path") or ""),
-                    "kernel_roofline_path": str(
-                        cached.get("kernel_roofline_path") or ""
-                    ),
+                    "kernel_roofline_path": str(cached.get("kernel_roofline_path") or ""),
                 },
                 detail=f"hot_kernels={len(hot)}",
                 duration_s=time.monotonic() - _lc_t0,
@@ -512,8 +519,15 @@ class RooflineExecutor:
         Bypasses SubAgentRunner's child Task creation (avoids double task
         accounting); the child carries kind="profile" + same params and
         inherits the lease (no profile_lane re-acquire).
+
+        Args:
+            parent_ctx: The parent runner context to derive the child from.
+
+        Returns:
+            A child ``RunnerContext`` for the profile sub-step.
         """
         from ..task_registry import Task
+
         parent_task = parent_ctx.task
         sub_task = Task(
             task_id=f"{parent_task.task_id}-profile",
@@ -534,7 +548,14 @@ class RooflineExecutor:
 
 
 def make_roofline_executor(*, shared_state: Any) -> RooflineExecutor:
-    """Production factory used by `cli._register_executors`."""
+    """Production factory used by `cli._register_executors`.
+
+    Args:
+        shared_state: The SharedState instance the executor will mutate.
+
+    Returns:
+        A configured ``RooflineExecutor``.
+    """
     return RooflineExecutor(shared_state=shared_state)
 
 

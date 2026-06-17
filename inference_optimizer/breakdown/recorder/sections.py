@@ -24,59 +24,69 @@ SectionShape = Literal["item", "singleton"]
 # Producer-written sections and their fragment shape. Payloads match the
 # corresponding ``schema.py`` TypedDict so assembly is structure-preserving.
 SECTION_SHAPES: dict[str, SectionShape] = {
-    "session":                     "singleton",
-    "workload":                    "singleton",
-    "baseline":                    "singleton",
-    "final":                       "singleton",
-    "phase_timeline":              "item",
-    "geak_invocations":            "item",
-    "oob_invocations":             "item",
-    "forge_invocations":           "item",
-    "kernel_lifecycle":            "singleton",
-    "explore_search":              "singleton",
-    "sweep":                       "singleton",
-    "critic_robustness":           "singleton",
+    "session": "singleton",
+    "workload": "singleton",
+    "baseline": "singleton",
+    "final": "singleton",
+    "phase_timeline": "item",
+    "geak_invocations": "item",
+    "oob_invocations": "item",
+    "forge_invocations": "item",
+    "kernel_lifecycle": "singleton",
+    "explore_search": "singleton",
+    "sweep": "singleton",
+    "critic_robustness": "singleton",
     # Author-time item substreams composed into the ``critic_robustness``
     # singleton at assembly (recorded per-iteration so the backend's workdir
     # pruning never erases history).
-    "critic_iterations":           "item",
-    "robustness_signals":          "item",
-    "telemetry":                   "singleton",
-    "kb_provenance":               "singleton",
-    "specialist_runs":             "item",
-    "optimization_stack":          "item",
-    "kernel_roofline":             "singleton",
+    "critic_iterations": "item",
+    "robustness_signals": "item",
+    "telemetry": "singleton",
+    "kb_provenance": "singleton",
+    "specialist_runs": "item",
+    "optimization_stack": "item",
+    "kernel_roofline": "singleton",
     "kernel_optimization_summary": "singleton",
-    "conc_sweep_summary":          "singleton",
-    "roofline":                    "item",
-    "roofline_progress":           "singleton",
+    "conc_sweep_summary": "singleton",
+    "roofline": "item",
+    "roofline_progress": "singleton",
     # Kernel-major lifecycle substreams. Recorded by their respective owners at
     # author time and folded into the ``kernel_journey`` view at assembly (same
     # compose-on-read pattern as ``critic_robustness``); none of these leak into
     # the breakdown envelope on their own.
-    "kernel_discovery":            "item",  # one per hot-kernel discovery run (tracelens/roofline)
-    "kernel_dispatch":             "item",  # one per kernel: dispatched? which backends?
-    "kernel_backend_result":       "item",  # one per backend attempt (geak/oob)
-    "kernel_e2e":                  "item",  # one per kernel: e2e integrate gain
+    "kernel_discovery": "item",  # one per hot-kernel discovery run (tracelens/roofline)
+    "kernel_dispatch": "item",  # one per kernel: dispatched? which backends?
+    "kernel_backend_result": "item",  # one per backend attempt (geak/oob)
+    "kernel_e2e": "item",  # one per kernel: e2e integrate gain
     # Authoritative external-tool versions (geak/tracelens/claude/codex/...),
     # one item per tool (idempotent by tool name); folded into the top-level
     # ``versions`` map at assembly.
-    "versions":                    "item",
+    "versions": "item",
 }
 
 # Sections computed at finalize from in-memory state, never written as
 # fragments. Listed so the assembler can distinguish "expected absent" from
 # "missing producer".
-DERIVED_SECTIONS: frozenset[str] = frozenset({
-    "capability_summary",
-    "attribution",
-    "phase_segments",
-    "source_files",
-})
+DERIVED_SECTIONS: frozenset[str] = frozenset(
+    {
+        "capability_summary",
+        "attribution",
+        "phase_segments",
+        "source_files",
+    }
+)
 
 
 def section_shape(section: str) -> SectionShape | None:
-    """Return the declared shape for ``section`` (``None`` if unregistered)."""
+    """Return the declared shape for ``section`` (``None`` if unregistered).
+
+    Args:
+        section: The breakdown section name to look up.
+
+    Returns:
+        The declared section shape (``"item"`` / ``"singleton"``), or ``None``
+        when the section is not registered.
+    """
     return SECTION_SHAPES.get(section)
 
 

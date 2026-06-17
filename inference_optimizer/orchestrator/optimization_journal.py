@@ -26,19 +26,19 @@ log = logging.getLogger(__name__)
 JOURNAL_FILENAME: str = "optimization_journal.json"
 
 # Outcome literals — keep stable (consumed by render scripts + KB fact-write hooks).
-OUTCOME_KEEP:        str = "KEEP"
-OUTCOME_REVERT:      str = "REVERT"
-OUTCOME_NO_PROMOTE:  str = "no_promote"
+OUTCOME_KEEP: str = "KEEP"
+OUTCOME_REVERT: str = "REVERT"
+OUTCOME_NO_PROMOTE: str = "no_promote"
 
 # Change-kind vocabulary — coarse dashboard grouping. Extend by appending; don't reuse old strings.
-KIND_BACKEND:      str = "backend"      # --attention-backend, kv_cache_dtype, ...
-KIND_PARAM:        str = "param"        # --max-num-batched-tokens, --gpu-memory-utilization, ...
-KIND_ENV:          str = "env"          # ROCm / vLLM env vars
-KIND_KERNEL_FILE:  str = "kernel_file"  # kernel-opt patch on a specific file
-KIND_INTEGRATE:    str = "integrate"    # framework PR / patch integration
-KIND_BASELINE:     str = "baseline"
-KIND_PROFILE:      str = "profile"
-KIND_OTHER:        str = "other"
+KIND_BACKEND: str = "backend"  # --attention-backend, kv_cache_dtype, ...
+KIND_PARAM: str = "param"  # --max-num-batched-tokens, --gpu-memory-utilization, ...
+KIND_ENV: str = "env"  # ROCm / vLLM env vars
+KIND_KERNEL_FILE: str = "kernel_file"  # kernel-opt patch on a specific file
+KIND_INTEGRATE: str = "integrate"  # framework PR / patch integration
+KIND_BASELINE: str = "baseline"
+KIND_PROFILE: str = "profile"
+KIND_OTHER: str = "other"
 
 
 def _optional_int(value: Any) -> int | None:
@@ -48,6 +48,13 @@ def _optional_int(value: Any) -> int | None:
     written before D1 has no ``tick`` key, and a corrupted value must not
     crash :meth:`JournalEntry.from_dict` (the journal is a best-effort
     audit artifact loaded on resume).
+
+    Args:
+        value: The value to coerce to an int.
+
+    Returns:
+        The coerced int, or ``None`` when the value is absent or not
+        convertible.
     """
     if value is None:
         return None
@@ -61,43 +68,43 @@ def _optional_int(value: Any) -> int | None:
 class JournalEntry:
     """One KEEP / REVERT / no_promote decision (``None`` distinguishes "not measured" from "measured zero")."""
 
-    phase:             str
-    iter:              int
-    kind:              str
-    change:            str
-    outcome:           str
-    gain_pct:          float | None = None
-    throughput_after:  float | None = None
-    error_class:       str | None = None
-    reason:            str | None = None
+    phase: str
+    iter: int
+    kind: str
+    change: str
+    outcome: str
+    gain_pct: float | None = None
+    throughput_after: float | None = None
+    error_class: str | None = None
+    reason: str | None = None
     # Predicted (pre-measurement) gain for this change, when the proposer
     # supplied one (PendingProposal / critic verdict). Persisted alongside the
     # measured ``gain_pct`` so the decision-trace collector can surface a
     # predicted-vs-realized calibration signal. ``None`` (stripped by
     # ``to_dict``) when no prediction was available (e.g. default-grid sweeps).
     predicted_gain_pct: float | None = None
-    task_id:           str = ""
-    variant_name:      str = ""
-    ts:                str = ""
+    task_id: str = ""
+    variant_name: str = ""
+    ts: str = ""
     # Proposer attribution (who proposed this change). ``provenance`` is the raw
     # explore label (``llm_direct`` / ``default_grid`` / ``specialist:<domain>``);
     # ``scope`` is the orthogonal specialist dial (domain / domains / freeform);
     # ``fingerprint`` is the variant join key into ``explore_search``. All empty
     # on non-explore rows and on legacy journals (stripped by ``to_dict``).
-    provenance:        str = ""
-    scope:             str = ""
-    fingerprint:       str = ""
+    provenance: str = ""
+    scope: str = ""
+    fingerprint: str = ""
     # Per-variant measurement detail beyond the headline gain/throughput
     # (runtime_sec / wall_clock_ratio_vs_baseline / stack_rebench_tput /
     # estimated_output_throughput). Empty dict stripped by ``to_dict``.
-    metrics:           dict[str, Any] = field(default_factory=dict)
+    metrics: dict[str, Any] = field(default_factory=dict)
     # Full-trace D1: orchestrator tick at the moment of decision. Lets the
     # decision-trace collector join this KEEP/REVERT row to the LLM calls
     # recorded for the same tick. Defaults to ``None`` (not 0) so older
     # journals — and call sites that don't know the tick — are stripped by
     # ``to_dict`` and remain indistinguishable from "tick unknown" rather
     # than masquerading as the pre-first-increment tick 0.
-    tick:              int | None = None
+    tick: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Strip ``None`` values so the file stays compact and JSON-diffable.
@@ -109,10 +116,7 @@ class JournalEntry:
         raw = dataclasses.asdict(self)
         # Strip None, empty strings, and empty containers ({} / []) so the file
         # stays compact and byte-diffable (an unset ``metrics`` dict vanishes).
-        return {
-            k: v for k, v in raw.items()
-            if v is not None and v != "" and v != {} and v != []
-        }
+        return {k: v for k, v in raw.items() if v is not None and v != "" and v != {} and v != []}
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> JournalEntry:
@@ -146,10 +150,20 @@ class JournalEntry:
         )
 
     def dedupe_key(self) -> tuple[str, int, str, str, str, str, str]:
-        """Dedup tuple for resume replay (includes variant_name + task_id so same-tick siblings don't collide)."""
+        """Dedup tuple for resume replay (includes variant_name + task_id so same-tick siblings don't collide).
+
+        Returns:
+            A tuple of ``(phase, iter, kind, change, outcome, variant_name,
+            task_id)`` uniquely identifying this decision for dedup.
+        """
         return (
-            self.phase, self.iter, self.kind, self.change,
-            self.outcome, self.variant_name, self.task_id,
+            self.phase,
+            self.iter,
+            self.kind,
+            self.change,
+            self.outcome,
+            self.variant_name,
+            self.task_id,
         )
 
 
@@ -157,15 +171,15 @@ class JournalEntry:
 class Journal:
     """In-memory representation of the journal file (mutations write through to disk before returning)."""
 
-    session_id:           str
-    model:                str
-    hardware:             str
-    framework:            str = ""
-    baseline_throughput:  float = 0.0
-    final_throughput:     float | None = None
-    total_gain_pct:       float | None = None
-    entries:              list[JournalEntry] = field(default_factory=list)
-    path:                 Path = field(default_factory=Path)
+    session_id: str
+    model: str
+    hardware: str
+    framework: str = ""
+    baseline_throughput: float = 0.0
+    final_throughput: float | None = None
+    total_gain_pct: float | None = None
+    entries: list[JournalEntry] = field(default_factory=list)
+    path: Path = field(default_factory=Path)
 
     # Construction
     @classmethod
@@ -179,32 +193,42 @@ class Journal:
         framework: str = "",
         baseline_throughput: float = 0.0,
     ) -> Journal:
-        """Return the existing journal if on disk, else mint a new one (on-disk header fields win only when the caller leaves them empty)."""
+        """Return the existing journal if on disk, else mint a new one (on-disk header fields win only when the caller leaves them empty).
+
+        Args:
+            session_dir: The session directory whose ``reports/`` holds the
+                journal file.
+            session_id: Session identifier used when minting a new journal.
+            model: Model identifier used when minting a new journal.
+            hardware: Hardware identifier used when minting a new journal.
+            framework: Optional framework identifier for a new journal.
+            baseline_throughput: Optional baseline throughput for a new journal.
+
+        Returns:
+            The loaded or newly created ``Journal`` instance.
+        """
         path = cls._journal_path(session_dir)
         if path.exists():
             try:
                 blob = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError) as exc:
                 log.warning(
-                    "optimization_journal: failed to parse %s (%s); "
-                    "recreating fresh", path, exc,
+                    "optimization_journal: failed to parse %s (%s); recreating fresh",
+                    path,
+                    exc,
                 )
                 blob = {}
         else:
             blob = {}
 
         entries_raw = blob.get("entries") or []
-        entries = [
-            JournalEntry.from_dict(e) for e in entries_raw if isinstance(e, dict)
-        ]
+        entries = [JournalEntry.from_dict(e) for e in entries_raw if isinstance(e, dict)]
         journal = cls(
             session_id=str(blob.get("session_id") or session_id),
             model=str(blob.get("model") or model),
             hardware=str(blob.get("hardware") or hardware),
             framework=str(blob.get("framework") or framework),
-            baseline_throughput=float(
-                blob.get("baseline_throughput") or baseline_throughput
-            ),
+            baseline_throughput=float(blob.get("baseline_throughput") or baseline_throughput),
             final_throughput=blob.get("final_throughput"),
             total_gain_pct=blob.get("total_gain_pct"),
             entries=entries,
@@ -228,7 +252,15 @@ class Journal:
 
     # Mutation
     def append_entry(self, entry: JournalEntry) -> bool:
-        """Append a decision row and flush; ``False`` on duplicate dedupe_key (resume replay safety)."""
+        """Append a decision row and flush; ``False`` on duplicate dedupe_key (resume replay safety).
+
+        Args:
+            entry: The decision row to append; its ``ts`` is stamped when empty.
+
+        Returns:
+            ``True`` when the entry was appended and flushed, ``False`` when a
+            row with the same dedupe key already exists.
+        """
         if not entry.ts:
             entry.ts = _now_iso()
         key = entry.dedupe_key()
@@ -245,7 +277,14 @@ class Journal:
         final_throughput: float | None = None,
         total_gain_pct: float | None = None,
     ) -> None:
-        """Update top-level summary fields and flush (called once at CLOSE; partial finalize allowed)."""
+        """Update top-level summary fields and flush (called once at CLOSE; partial finalize allowed).
+
+        Args:
+            final_throughput: Final measured throughput; left unchanged when
+                ``None``.
+            total_gain_pct: Total gain percentage over baseline; left unchanged
+                when ``None``.
+        """
         if final_throughput is not None:
             self.final_throughput = float(final_throughput)
         if total_gain_pct is not None:
@@ -253,7 +292,12 @@ class Journal:
         self._flush()
 
     def update_baseline(self, baseline_throughput: float) -> None:
-        """Late-binding setter for the baseline measurement (no-op on non-positive, to avoid erasing a real value with a stale 0)."""
+        """Late-binding setter for the baseline measurement (no-op on non-positive, to avoid erasing a real value with a stale 0).
+
+        Args:
+            baseline_throughput: The measured baseline throughput; ignored when
+                non-positive.
+        """
         if baseline_throughput and baseline_throughput > 0:
             self.baseline_throughput = float(baseline_throughput)
             self._flush()
@@ -280,14 +324,14 @@ class Journal:
             dict[str, Any]: The journal as a JSON-serialisable dict.
         """
         out: dict[str, Any] = {
-            "session_id":          self.session_id,
-            "model":               self.model,
-            "hardware":            self.hardware,
-            "framework":           self.framework,
+            "session_id": self.session_id,
+            "model": self.model,
+            "hardware": self.hardware,
+            "framework": self.framework,
             "baseline_throughput": self.baseline_throughput,
-            "final_throughput":    self.final_throughput,
-            "total_gain_pct":      self.total_gain_pct,
-            "entries":             [e.to_dict() for e in self.entries],
+            "final_throughput": self.final_throughput,
+            "total_gain_pct": self.total_gain_pct,
+            "entries": [e.to_dict() for e in self.entries],
         }
         return out
 
@@ -299,22 +343,39 @@ def _now_iso() -> str:
     Returns:
         str: The current UTC timestamp with a ``Z`` suffix.
     """
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
-        "+00:00", "Z",
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace(
+            "+00:00",
+            "Z",
+        )
     )
 
 
 def _variant_args(variant: dict[str, Any]) -> str:
-    """Read a variant's server-arg string, canonical (``extra_server_args``) first with a legacy ``extra_sglang_args`` fallback."""
-    return str(
-        variant.get("extra_server_args")
-        or variant.get("extra_sglang_args")
-        or ""
-    )
+    """Read a variant's server-arg string, canonical (``extra_server_args``) first with a legacy ``extra_sglang_args`` fallback.
+
+    Args:
+        variant: The variant dict to read server args from.
+
+    Returns:
+        The server-arg string, or an empty string when neither key is present.
+    """
+    return str(variant.get("extra_server_args") or variant.get("extra_sglang_args") or "")
 
 
 def classify_change_kind(task_kind: str, variant: dict[str, Any] | None = None) -> str:
-    """Map a task / variant to a ``KIND_*`` value (priority: env-only > kernel_file > integrate > backend > param)."""
+    """Map a task / variant to a ``KIND_*`` value (priority: env-only > kernel_file > integrate > backend > param).
+
+    Args:
+        task_kind: The task kind to classify.
+        variant: Optional variant dict inspected for server args and envs when
+            the task kind alone is not decisive.
+
+    Returns:
+        The matching ``KIND_*`` constant.
+    """
     kind = (task_kind or "").lower()
     if kind in ("kernel_opt", "deep_kernel_analysis", "operator_tuning"):
         return KIND_KERNEL_FILE
@@ -341,7 +402,7 @@ def classify_change_kind(task_kind: str, variant: dict[str, Any] | None = None) 
 # for non-explore steps (baseline / profile / roofline / sweep / framework_pr).
 _OP_KIND_RENAME: dict[str, str] = {
     KIND_KERNEL_FILE: "kernel_opt",
-    KIND_INTEGRATE:   "kernel_integrate",
+    KIND_INTEGRATE: "kernel_integrate",
 }
 
 
@@ -352,6 +413,13 @@ def operation_kind_for(action: str, kind: str = "") -> str:
     ``kernel_integrate``; ``baseline`` / ``profile`` / ``roofline`` / ``sweep``.
     Prefers the fine change-kind, falling back to the action when the kind is
     absent or ``other``.
+
+    Args:
+        action: The action name, used as the fallback label.
+        kind: The fine change-kind; preferred when present and not ``other``.
+
+    Returns:
+        The stable ``operation_kind`` label.
     """
     k = (kind or "").lower()
     if k and k != KIND_OTHER:
@@ -370,6 +438,12 @@ def proposer_for(provenance: str) -> str:
     ``specialist:<domain>`` is kept verbatim (so a trace can filter on the exact
     specialist); ``llm_direct`` / ``legacy:*`` / empty collapse to
     ``orchestration``; ``default_grid`` becomes ``grid``.
+
+    Args:
+        provenance: The explore provenance label to map.
+
+    Returns:
+        The stable proposer/component name.
     """
     p = (provenance or "").strip()
     if not p or p == "llm_direct" or p.startswith("legacy:"):
@@ -384,7 +458,18 @@ def summarize_change(
     variant: dict[str, Any] | None = None,
     result_dict: dict[str, Any] | None = None,
 ) -> str:
-    """Human-readable one-line description used as the ``change`` field (falls back to task kind)."""
+    """Human-readable one-line description used as the ``change`` field (falls back to task kind).
+
+    Args:
+        task_kind: The task kind, used as a fallback label.
+        variant: Optional variant dict whose server args, envs, or name supply
+            the description.
+        result_dict: Optional result dict mined for identifiers (kernel id,
+            patch path, PR url) when no variant detail is available.
+
+    Returns:
+        A one-line human-readable description of the change.
+    """
     if isinstance(variant, dict):
         name = str(variant.get("name") or "").strip()
         args = _variant_args(variant).strip()

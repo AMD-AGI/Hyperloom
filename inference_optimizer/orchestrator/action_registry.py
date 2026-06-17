@@ -49,66 +49,92 @@ from ..paths import asset_actions_dir
 
 
 # ``family`` is a prompt grouping label only; no runtime scheduler uses it.
-VALID_FAMILIES: frozenset[str] = frozenset({
-    "prep", "analysis", "shallow", "deep_kernel",
-    "long", "creative", "resilience",
-})
+VALID_FAMILIES: frozenset[str] = frozenset(
+    {
+        "prep",
+        "analysis",
+        "shallow",
+        "deep_kernel",
+        "long",
+        "creative",
+        "resilience",
+    }
+)
 
 VALID_BACKENDS: frozenset[str] = frozenset({"claude", "codex"})
 
 # Coarse-grained pipeline phase for prompt_builder grouping; prompt-advisory
 # only (the real state machine lives in :mod:`phase_state`).
-VALID_PIPELINE_PHASES: frozenset[str] = frozenset({
-    "prep",        # target_analysis / baseline / warm replay
-    "measure",     # baseline (gates explore)
-    "explore",     # explore / specialists / patch integration
-    "analysis",    # profile / roofline / deep_kernel_analysis
-    "deep",        # kernel_opt / integrate / operator_tuning / vendor_kernel_config
-    "validate",    # reserved; stack validation is inlined into explore
-    "finalize",    # report
-    "support",     # recover (the rest were retired)
-})
+VALID_PIPELINE_PHASES: frozenset[str] = frozenset(
+    {
+        "prep",  # target_analysis / baseline / warm replay
+        "measure",  # baseline (gates explore)
+        "explore",  # explore / specialists / patch integration
+        "analysis",  # profile / roofline / deep_kernel_analysis
+        "deep",  # kernel_opt / integrate / operator_tuning / vendor_kernel_config
+        "validate",  # reserved; stack validation is inlined into explore
+        "finalize",  # report
+        "support",  # recover (the rest were retired)
+    }
+)
 
 # Per-action verdict policy class — selects which Critic prompt rule set
 # applies; never a hidden hard gate.
-VALID_VERDICT_CLASSES: frozenset[str] = frozenset({
-    "archival", "exploration", "promotion",
-})
+VALID_VERDICT_CLASSES: frozenset[str] = frozenset(
+    {
+        "archival",
+        "exploration",
+        "promotion",
+    }
+)
 
 # Default classifier for live actions; yaml ``verdict_class`` overrides.
 # Unknown names fall back to ``"exploration"`` (safest non-deadlocking default).
 _DEFAULT_VERDICT_CLASS: dict[str, str] = {
     # archival — transcribe state, no new measurement
-    "report":                  "archival",
-    "session_breakdown":       "archival",
-    "target_analysis":         "archival",
+    "report": "archival",
+    "session_breakdown": "archival",
+    "target_analysis": "archival",
     # promotion — mutate optimization_stack + claim gain
-    "integrate":               "promotion",
+    "integrate": "promotion",
     # exploration — everything else (run benchmarks to generate data)
-    "baseline":                "exploration",
-    "roofline":                "exploration",
-    "sweep":                   "exploration",
-    "conc_sweep":              "exploration",
-    "kernel_opt":              "exploration",
-    "gemm_tuning":             "exploration",
-    "operator_tuning":         "exploration",
-    "vendor_kernel_config":    "exploration",
-    "deep_kernel_analysis":    "exploration",
-    "recover":                 "exploration",
+    "baseline": "exploration",
+    "roofline": "exploration",
+    "sweep": "exploration",
+    "conc_sweep": "exploration",
+    "kernel_opt": "exploration",
+    "gemm_tuning": "exploration",
+    "operator_tuning": "exploration",
+    "vendor_kernel_config": "exploration",
+    "deep_kernel_analysis": "exploration",
+    "recover": "exploration",
 }
 _DEFAULT_VERDICT_CLASS_FALLBACK: str = "exploration"
 
 
 def default_verdict_class_for(action_name: str) -> str:
-    """Look up the default ``verdict_class``; falls back to ``"exploration"``."""
+    """Look up the default ``verdict_class``; falls back to ``"exploration"``.
+
+    Args:
+        action_name: The action name to look up.
+
+    Returns:
+        The mapped verdict class, or ``"exploration"`` when unmapped.
+    """
     return _DEFAULT_VERDICT_CLASS.get(
-        action_name, _DEFAULT_VERDICT_CLASS_FALLBACK,
+        action_name,
+        _DEFAULT_VERDICT_CLASS_FALLBACK,
     )
 
 
 _REQUIRED_FIELDS: tuple[str, ...] = (
-    "name", "family", "cost_minutes_p50", "cost_minutes_p75",
-    "expected_gain_pct", "accuracy_risk", "crash_risk",
+    "name",
+    "family",
+    "cost_minutes_p50",
+    "cost_minutes_p75",
+    "expected_gain_pct",
+    "accuracy_risk",
+    "crash_risk",
 )
 
 
@@ -168,35 +194,26 @@ class ActionMetadata:
         """
         for field_name in _REQUIRED_FIELDS:
             if field_name not in data:
-                raise ActionRegistryError(
-                    f"action {expected_name!r}: missing required field {field_name!r}"
-                )
+                raise ActionRegistryError(f"action {expected_name!r}: missing required field {field_name!r}")
         if data["name"] != expected_name:
             raise ActionRegistryError(
-                f"action filename stem {expected_name!r} does not match "
-                f"yaml field name={data['name']!r}"
+                f"action filename stem {expected_name!r} does not match yaml field name={data['name']!r}"
             )
         if data["family"] not in VALID_FAMILIES:
             raise ActionRegistryError(
-                f"action {expected_name!r}: family {data['family']!r} not in "
-                f"{sorted(VALID_FAMILIES)!r}"
+                f"action {expected_name!r}: family {data['family']!r} not in {sorted(VALID_FAMILIES)!r}"
             )
         gain = data["expected_gain_pct"]
         if not (isinstance(gain, (list, tuple)) and len(gain) == 2):
-            raise ActionRegistryError(
-                f"action {expected_name!r}: expected_gain_pct must be [low, high]"
-            )
+            raise ActionRegistryError(f"action {expected_name!r}: expected_gain_pct must be [low, high]")
         for ratio_field in ("accuracy_risk", "crash_risk"):
             v = float(data[ratio_field])
             if not (0.0 <= v <= 1.0):
-                raise ActionRegistryError(
-                    f"action {expected_name!r}: {ratio_field}={v} not in 0..1"
-                )
+                raise ActionRegistryError(f"action {expected_name!r}: {ratio_field}={v} not in 0..1")
         backend = str(data.get("preferred_backend", "claude"))
         if backend not in VALID_BACKENDS:
             raise ActionRegistryError(
-                f"action {expected_name!r}: preferred_backend={backend!r} not in "
-                f"{sorted(VALID_BACKENDS)!r}"
+                f"action {expected_name!r}: preferred_backend={backend!r} not in {sorted(VALID_BACKENDS)!r}"
             )
         # prompt-builder fields — all optional with safe defaults.
         cost_p50 = float(data["cost_minutes_p50"])
@@ -204,36 +221,32 @@ class ActionMetadata:
         pipeline_phase = str(data.get("pipeline_phase", "explore")).strip() or "explore"
         if pipeline_phase not in VALID_PIPELINE_PHASES:
             raise ActionRegistryError(
-                f"action {expected_name!r}: pipeline_phase={pipeline_phase!r} not in "
-                f"{sorted(VALID_PIPELINE_PHASES)!r}"
+                f"action {expected_name!r}: pipeline_phase={pipeline_phase!r} not in {sorted(VALID_PIPELINE_PHASES)!r}"
             )
         typical_runtime_min_raw = data.get("typical_runtime_min")
         try:
-            typical_runtime_min = (
-                float(typical_runtime_min_raw)
-                if typical_runtime_min_raw is not None
-                else cost_p50
-            )
+            typical_runtime_min = float(typical_runtime_min_raw) if typical_runtime_min_raw is not None else cost_p50
         except (TypeError, ValueError) as exc:
             raise ActionRegistryError(
-                f"action {expected_name!r}: typical_runtime_min must be a "
-                f"number, got {typical_runtime_min_raw!r}"
+                f"action {expected_name!r}: typical_runtime_min must be a number, got {typical_runtime_min_raw!r}"
             ) from exc
         if typical_runtime_min < 0:
             raise ActionRegistryError(
-                f"action {expected_name!r}: typical_runtime_min must be >= 0, "
-                f"got {typical_runtime_min}"
+                f"action {expected_name!r}: typical_runtime_min must be >= 0, got {typical_runtime_min}"
             )
         # verdict_class — yaml override wins, else table default; validated against allowlist.
-        verdict_class = str(
-            data.get("verdict_class") or "",
-        ).strip().lower()
+        verdict_class = (
+            str(
+                data.get("verdict_class") or "",
+            )
+            .strip()
+            .lower()
+        )
         if not verdict_class:
             verdict_class = default_verdict_class_for(expected_name)
         if verdict_class not in VALID_VERDICT_CLASSES:
             raise ActionRegistryError(
-                f"action {expected_name!r}: verdict_class={verdict_class!r} "
-                f"not in {sorted(VALID_VERDICT_CLASSES)!r}"
+                f"action {expected_name!r}: verdict_class={verdict_class!r} not in {sorted(VALID_VERDICT_CLASSES)!r}"
             )
         return cls(
             name=str(data["name"]),
@@ -293,14 +306,10 @@ class ActionRegistry:
         try:
             import yaml  # type: ignore[import-untyped]
         except ImportError as exc:  # pragma: no cover
-            raise ActionRegistryError(
-                "PyYAML is required to load action metadata; pip install PyYAML"
-            ) from exc
+            raise ActionRegistryError("PyYAML is required to load action metadata; pip install PyYAML") from exc
 
         if not self.meta_dir.is_dir():
-            raise ActionRegistryError(
-                f"actions meta directory not found: {self.meta_dir}"
-            )
+            raise ActionRegistryError(f"actions meta directory not found: {self.meta_dir}")
 
         cache: dict[str, ActionMetadata] = {}
         for path in sorted(self.meta_dir.glob("*.yaml")):
@@ -360,9 +369,7 @@ class ActionRegistry:
             ActionRegistryError: If ``family`` is not a known family.
         """
         if family not in VALID_FAMILIES:
-            raise ActionRegistryError(
-                f"family={family!r} not in {sorted(VALID_FAMILIES)!r}"
-            )
+            raise ActionRegistryError(f"family={family!r} not in {sorted(VALID_FAMILIES)!r}")
         return [a for a in self.all() if a.family == family]
 
 

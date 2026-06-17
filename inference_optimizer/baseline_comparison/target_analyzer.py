@@ -140,10 +140,7 @@ def _format_report_md(summary: BaselineSummary) -> str:
         lines.append("| conc | decode_tp | tput/GPU | mean_tpot (ms) |")
         lines.append("| ---: | ---: | ---: | ---: |")
         for p in summary.all_concurrencies:
-            lines.append(
-                f"| {p.conc} | {p.decode_tp} "
-                f"| {p.tput_per_gpu:.1f} | {p.mean_tpot_ms:.3f} |"
-            )
+            lines.append(f"| {p.conc} | {p.decode_tp} | {p.tput_per_gpu:.1f} | {p.mean_tpot_ms:.3f} |")
         lines.append("")
 
     lines.append(
@@ -178,6 +175,7 @@ def _persist(
         target_analysis_report_md,
         target_baseline_json,
     )
+
     out_dir = target_analysis_dir(session_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     json_path = target_baseline_json(session_dir)
@@ -196,7 +194,15 @@ def _target_row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
     Returns ``None`` when ``tput_per_gpu`` is missing or non-positive.
     ``tpot_ms`` is the per-output-token latency; ``interactivity`` (when
     present) is informational only and not folded into the point shape.
+
+    Args:
+        row: A single ``per_conc`` mapping from the competitor target data.
+
+    Returns:
+        A ``BaselinePoint`` built from the row, or ``None`` when the row has
+        no usable positive ``tput_per_gpu``.
     """
+
     def _fnum(key: str) -> float:
         """Read a float field from the enclosing ``row``.
 
@@ -253,6 +259,20 @@ def analyze(
     ``reason`` mirrors ``status`` with finer granularity:
     ``ok`` / ``model_mapping_miss`` / ``no_target_gpu_configured`` /
     ``no_competitor_target``.
+
+    Args:
+        session_dir: Session directory used to load competitor data and
+            persist the resulting summary.
+        model_path: Model path or name to map to a canonical display name.
+        compare_against_gpu: Target GPU to compare against; when empty the
+            analysis is skipped.
+        framework: Optional framework name recorded on the query.
+        precision: Optional precision label recorded on the query.
+        isl: Optional input sequence length recorded on the query.
+        osl: Optional output sequence length recorded on the query.
+
+    Returns:
+        The persisted ``BaselineSummary`` describing the comparison outcome.
     """
     from ..orchestrator import research_hints
 
@@ -275,10 +295,7 @@ def analyze(
             best=None,
             status="skipped",
             reason="model_mapping_miss",
-            warning=(
-                f"model name mapping miss for {model_path!r}; "
-                "no display name found"
-            ),
+            warning=(f"model name mapping miss for {model_path!r}; no display name found"),
             source=LLM_AUTHORED_SOURCE,
         )
         _persist(summary, session_dir=session_dir)
@@ -310,10 +327,7 @@ def analyze(
             best=None,
             status="no_match",
             reason="no_competitor_target",
-            warning=(
-                "no sourced competitor_target.json available "
-                "(research scout disabled or produced no targets)"
-            ),
+            warning=("no sourced competitor_target.json available (research scout disabled or produced no targets)"),
             source=LLM_AUTHORED_SOURCE,
         )
         _persist(summary, session_dir=session_dir)
@@ -321,9 +335,7 @@ def analyze(
 
     all_points = _dedup_by_conc(points)
     best = max(points, key=lambda p: p.tput_per_gpu)
-    target_sources = sorted({
-        str(r.get("source")).strip() for r in rows if str(r.get("source") or "").strip()
-    })
+    target_sources = sorted({str(r.get("source")).strip() for r in rows if str(r.get("source") or "").strip()})
     summary = BaselineSummary(
         query=query,
         fetched_at=now,
@@ -332,9 +344,7 @@ def analyze(
         all_concurrencies=all_points,
         status="ok",
         reason="ok",
-        warning=(
-            "sources: " + "; ".join(target_sources) if target_sources else ""
-        ),
+        warning=("sources: " + "; ".join(target_sources) if target_sources else ""),
         source=LLM_AUTHORED_SOURCE,
     )
     _persist(summary, session_dir=session_dir)

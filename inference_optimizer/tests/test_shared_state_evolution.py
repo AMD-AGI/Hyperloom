@@ -89,14 +89,14 @@ def test_fact_layer_fields_survive_v06_resume(tmp_path):
     for key, expected in _FACT_LAYER_PAYLOAD.items():
         actual = getattr(loaded, key)
         assert actual == expected, (
-            f"fact-layer field {key!r} drifted across migration "
-            f"(was {expected!r}, now {actual!r})"
+            f"fact-layer field {key!r} drifted across migration (was {expected!r}, now {actual!r})"
         )
 
 
 def test_fact_layer_md5_matches_post_save(tmp_path):
     """Inv-10.1 stronger form — a migration + save round-trip keeps the fact-layer projection byte-identical."""
     import hashlib
+
     sd = tmp_path / "session"
     sd.mkdir()
     payload = dict(_FACT_LAYER_PAYLOAD)
@@ -105,18 +105,14 @@ def test_fact_layer_md5_matches_post_save(tmp_path):
 
     def _fact_md5(state: SharedState) -> str:
         projection = {k: getattr(state, k) for k in _FACT_LAYER_PAYLOAD}
-        return hashlib.md5(
-            json.dumps(projection, sort_keys=True).encode("utf-8")
-        ).hexdigest()
+        return hashlib.md5(json.dumps(projection, sort_keys=True).encode("utf-8")).hexdigest()
 
     loaded = SharedState.load_or_init(sd)
     md5_before = _fact_md5(loaded)
     loaded.save(sd)
     reloaded = SharedState.load_or_init(sd)
     md5_after = _fact_md5(reloaded)
-    assert md5_before == md5_after, (
-        "fact-layer md5 changed across migration + save round-trip"
-    )
+    assert md5_before == md5_after, "fact-layer md5 changed across migration + save round-trip"
 
 
 # 3. Inv-10.3 — migration idempotence
@@ -146,13 +142,9 @@ def test_v08_payload_short_circuits_migration(monkeypatch, caplog):
         "session_id": "fresh-v08",
         "baseline_tput": 100.0,
     }
-    with caplog.at_level(logging.INFO,
-                          logger="inference_optimizer.orchestrator.shared_state"):
+    with caplog.at_level(logging.INFO, logger="inference_optimizer.orchestrator.shared_state"):
         SharedState.from_dict(payload)
-    migrated = [
-        r for r in caplog.records
-        if "v0.8 §3.10: state.json migrated" in r.getMessage()
-    ]
+    migrated = [r for r in caplog.records if "v0.8 §3.10: state.json migrated" in r.getMessage()]
     assert migrated == [], "fresh v0.8 payload should not log a migration line"
 
 
@@ -165,13 +157,9 @@ def test_v06_migration_log_lists_scoreboard_drop(monkeypatch, caplog):
         "baseline_tput": 100.0,
         "action_scores": {"backends": {"base_score": 5.0}},
     }
-    with caplog.at_level(logging.INFO,
-                          logger="inference_optimizer.orchestrator.shared_state"):
+    with caplog.at_level(logging.INFO, logger="inference_optimizer.orchestrator.shared_state"):
         SharedState.from_dict(payload)
-    migrated = [
-        r for r in caplog.records
-        if "v0.8 §3.10: state.json migrated" in r.getMessage()
-    ]
+    migrated = [r for r in caplog.records if "v0.8 §3.10: state.json migrated" in r.getMessage()]
     assert migrated, "v0.6 payload should log a migration line"
     msg = migrated[0].getMessage()
     assert "v1 → v2" in msg or "v1 \u2192 v2" in msg
@@ -190,14 +178,10 @@ def test_lenient_mode_allows_continue_on_fact_field_drop(monkeypatch, caplog):
         "session_id": "legacy",
         "baseline_tput": 100.0,
     }
-    with caplog.at_level(logging.WARNING,
-                          logger="inference_optimizer.orchestrator.shared_state"):
+    with caplog.at_level(logging.WARNING, logger="inference_optimizer.orchestrator.shared_state"):
         loaded = SharedState.from_dict(payload)
     assert loaded.session_id == "legacy"
-    warned = [
-        r for r in caplog.records
-        if "Inv-10.1 violation" in r.getMessage()
-    ]
+    warned = [r for r in caplog.records if "Inv-10.1 violation" in r.getMessage()]
     assert warned, "lenient mode should still log a WARNING about the drop"
 
 
@@ -219,6 +203,7 @@ def test_strict_mode_raises_on_fact_field_drop(monkeypatch):
 def test_reset_state_backs_up_state_json(tmp_path):
     """KB_design §3.10 §5.3 — ``--reset-state`` renames state.json so the next load starts blank."""
     from inference_optimizer.cli import _reset_state_file
+
     sd = tmp_path / "session"
     sd.mkdir()
     payload = dict(_FACT_LAYER_PAYLOAD)
@@ -235,6 +220,7 @@ def test_reset_state_backs_up_state_json(tmp_path):
 
 def test_reset_state_is_safe_when_no_state_file(tmp_path):
     from inference_optimizer.cli import _reset_state_file
+
     sd = tmp_path / "session"
     sd.mkdir()
     _reset_state_file(sd)
@@ -244,39 +230,64 @@ def test_reset_state_is_safe_when_no_state_file(tmp_path):
 # 7. CLI flag wiring
 def test_cli_exposes_migration_mode_flag():
     from inference_optimizer.cli import _build_parser
+
     parser = _build_parser()
-    args = parser.parse_args([
-        "optimize",
-        "--model", "/tmp/dummy",
-        "--migration-mode", "lenient",
-    ])
+    args = parser.parse_args(
+        [
+            "optimize",
+            "--model",
+            "/tmp/dummy",
+            "--migration-mode",
+            "lenient",
+        ]
+    )
     assert args.migration_mode == "lenient"
-    args2 = parser.parse_args([
-        "optimize", "--model", "/tmp/dummy",
-    ])
+    args2 = parser.parse_args(
+        [
+            "optimize",
+            "--model",
+            "/tmp/dummy",
+        ]
+    )
     assert args2.migration_mode in ("strict", "lenient")
 
 
 def test_cli_rejects_unknown_migration_mode():
     from inference_optimizer.cli import _build_parser
+
     parser = _build_parser()
     with pytest.raises(SystemExit):
-        parser.parse_args([
-            "optimize", "--model", "/tmp/dummy",
-            "--migration-mode", "ultra",
-        ])
+        parser.parse_args(
+            [
+                "optimize",
+                "--model",
+                "/tmp/dummy",
+                "--migration-mode",
+                "ultra",
+            ]
+        )
 
 
 def test_cli_exposes_reset_state_flag():
     from inference_optimizer.cli import _build_parser
+
     parser = _build_parser()
-    args = parser.parse_args([
-        "optimize", "--model", "/tmp/dummy", "--reset-state",
-    ])
+    args = parser.parse_args(
+        [
+            "optimize",
+            "--model",
+            "/tmp/dummy",
+            "--reset-state",
+        ]
+    )
     assert args.reset_state is True
-    args2 = parser.parse_args([
-        "optimize", "--model", "/tmp/dummy",
-    ])
+    args2 = parser.parse_args(
+        [
+            "optimize",
+            "--model",
+            "/tmp/dummy",
+        ]
+    )
     assert args2.reset_state is False
 
 
@@ -284,6 +295,7 @@ def test_cli_exposes_reset_state_flag():
 def test_core_state_fields_contains_v08_new_additions():
     """KB_design §3.10 §6.2 — the v0.8 §4.1 new fields are locked in CORE_STATE_FIELDS."""
     from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
+
     must_be_locked = {
         "phase",
         "phase_started_ts",
@@ -302,9 +314,7 @@ def test_core_state_fields_contains_v08_new_additions():
         "current_best",
     }
     missing = must_be_locked - CORE_STATE_FIELDS
-    assert not missing, (
-        f"v0.8 §3.10 requires these to be CORE: {sorted(missing)}"
-    )
+    assert not missing, f"v0.8 §3.10 requires these to be CORE: {sorted(missing)}"
 
 
 def test_policy_blocks_llm_phase_write():
@@ -313,11 +323,14 @@ def test_policy_blocks_llm_phase_write():
         default_role_registry,
     )
     from inference_optimizer.protocol.intent import (
-        Intent, IntentType,
+        Intent,
+        IntentType,
     )
     from inference_optimizer.orchestrator.policy import (
-        PolicyDenied, PolicyGate,
+        PolicyDenied,
+        PolicyGate,
     )
+
     gate = PolicyGate(role_registry=default_role_registry())
     intent = Intent(
         type=IntentType.UPDATE_STATE,
@@ -333,11 +346,14 @@ def test_policy_blocks_llm_schema_version_write():
         default_role_registry,
     )
     from inference_optimizer.protocol.intent import (
-        Intent, IntentType,
+        Intent,
+        IntentType,
     )
     from inference_optimizer.orchestrator.policy import (
-        PolicyDenied, PolicyGate,
+        PolicyDenied,
+        PolicyGate,
     )
+
     gate = PolicyGate(role_registry=default_role_registry())
     intent = Intent(
         type=IntentType.UPDATE_STATE,
@@ -353,11 +369,14 @@ def test_policy_blocks_llm_optimization_stack_write():
         default_role_registry,
     )
     from inference_optimizer.protocol.intent import (
-        Intent, IntentType,
+        Intent,
+        IntentType,
     )
     from inference_optimizer.orchestrator.policy import (
-        PolicyDenied, PolicyGate,
+        PolicyDenied,
+        PolicyGate,
     )
+
     gate = PolicyGate(role_registry=default_role_registry())
     intent = Intent(
         type=IntentType.UPDATE_STATE,
@@ -371,9 +390,9 @@ def test_policy_blocks_llm_optimization_stack_write():
 def test_search_ledgers_in_core_state_fields():
     """KB_design §3.10 §6.2 — the ``explore_search`` ledger is locked as CORE (KB_gaps/Gap-14)."""
     from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
+
     assert "explore_search" in CORE_STATE_FIELDS, (
-        "'explore_search' must be in CORE_STATE_FIELDS so LLM "
-        "update_state cannot rewrite the search ledger"
+        "'explore_search' must be in CORE_STATE_FIELDS so LLM update_state cannot rewrite the search ledger"
     )
 
 
@@ -384,11 +403,14 @@ def test_policy_blocks_llm_search_ledger_write(field_name):
         default_role_registry,
     )
     from inference_optimizer.protocol.intent import (
-        Intent, IntentType,
+        Intent,
+        IntentType,
     )
     from inference_optimizer.orchestrator.policy import (
-        PolicyDenied, PolicyGate,
+        PolicyDenied,
+        PolicyGate,
     )
+
     gate = PolicyGate(role_registry=default_role_registry())
     intent = Intent(
         type=IntentType.UPDATE_STATE,

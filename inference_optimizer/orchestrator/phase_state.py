@@ -21,12 +21,12 @@ from ..protocol.action_surfaces import (
 
 
 # Phase identifiers + ordering (monotonic chain)
-PHASE_PRELUDE      = "PRELUDE"
+PHASE_PRELUDE = "PRELUDE"
 PHASE_FRAMEWORK_PR = "FRAMEWORK_PR"
-PHASE_EXPLORE      = "EXPLORE"
-PHASE_KERNEL       = "KERNEL"
-PHASE_SWEEP        = "SWEEP"
-PHASE_CLOSE        = "CLOSE"
+PHASE_EXPLORE = "EXPLORE"
+PHASE_KERNEL = "KERNEL"
+PHASE_SWEEP = "SWEEP"
+PHASE_CLOSE = "CLOSE"
 
 PHASE_NAMES: tuple[str, ...] = (
     PHASE_PRELUDE,
@@ -40,49 +40,95 @@ PHASE_INDEX: dict[str, int] = {name: i for i, name in enumerate(PHASE_NAMES)}
 
 
 def phase_index(phase: str) -> int:
-    """Return monotonic index of ``phase`` (Inv-2.1 check); unknown → -1."""
+    """Return monotonic index of ``phase`` (Inv-2.1 check); unknown → -1.
+
+    Args:
+        phase (str): Phase name; stripped and upper-cased before lookup.
+
+    Returns:
+        int: The phase's position in :data:`PHASE_NAMES`, or ``-1`` when unknown.
+    """
     return PHASE_INDEX.get((phase or "").strip().upper(), -1)
 
 
 # Phase ↔ allowed action set: ALLOWED passes R1 phase_incompatible but
 # Coordinator-auto actions stay out of PROPOSABLE so LLM proposals are denied.
 PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
-    PHASE_PRELUDE: frozenset({
-        "target_analysis", "baseline", "roofline", "profile", "recover",
-    }),
-    PHASE_FRAMEWORK_PR: frozenset({
-        # Coordinator-internal; integrate_patch is the Critic-gated consume side.
-        "framework_pr", "integrate_patch", "roofline", "profile", "recover",
-    }),
-    PHASE_EXPLORE: frozenset({
-        # merged grid runner + LLM specialist dispatch.
-        "explore", "specialist",
-        # Specialist source patches apply only through integrate_patch.
-        "integrate_patch",
-        # roofline/profile auto-enqueued on cumulative_gain_validated watermark.
-        "roofline", "profile",
-        "recover",
-    }),
-    PHASE_KERNEL: frozenset({
-        # KERNEL_OWNED_ACTIONS from policy.py.
-        "kernel_opt", "integrate", "deep_kernel_analysis",
-        "operator_tuning", "vendor_kernel_config", "gemm_tuning",
-        "roofline", "profile",
-        "recover",
-    }),
-    PHASE_SWEEP: frozenset({
-        # conc_sweep: Coordinator-internal post-sweep CONC-ladder benchmark; discovery-only.
-        "sweep", "conc_sweep", "recover",
-    }),
-    PHASE_CLOSE: frozenset({
-        "report", "session_breakdown",
-        "recover",
-    }),
+    PHASE_PRELUDE: frozenset(
+        {
+            "target_analysis",
+            "baseline",
+            "roofline",
+            "profile",
+            "recover",
+        }
+    ),
+    PHASE_FRAMEWORK_PR: frozenset(
+        {
+            # Coordinator-internal; integrate_patch is the Critic-gated consume side.
+            "framework_pr",
+            "integrate_patch",
+            "roofline",
+            "profile",
+            "recover",
+        }
+    ),
+    PHASE_EXPLORE: frozenset(
+        {
+            # merged grid runner + LLM specialist dispatch.
+            "explore",
+            "specialist",
+            # Specialist source patches apply only through integrate_patch.
+            "integrate_patch",
+            # roofline/profile auto-enqueued on cumulative_gain_validated watermark.
+            "roofline",
+            "profile",
+            "recover",
+        }
+    ),
+    PHASE_KERNEL: frozenset(
+        {
+            # KERNEL_OWNED_ACTIONS from policy.py.
+            "kernel_opt",
+            "integrate",
+            "deep_kernel_analysis",
+            "operator_tuning",
+            "vendor_kernel_config",
+            "gemm_tuning",
+            "roofline",
+            "profile",
+            "recover",
+        }
+    ),
+    PHASE_SWEEP: frozenset(
+        {
+            # conc_sweep: Coordinator-internal post-sweep CONC-ladder benchmark; discovery-only.
+            "sweep",
+            "conc_sweep",
+            "recover",
+        }
+    ),
+    PHASE_CLOSE: frozenset(
+        {
+            "report",
+            "session_breakdown",
+            "recover",
+        }
+    ),
 }
 
 
 def is_action_allowed_in_phase(action_name: str, phase: str) -> bool:
-    """Return True iff ``action_name`` is in the phase allowlist (R1; unknown phase → deny)."""
+    """Return True iff ``action_name`` is in the phase allowlist (R1; unknown phase → deny).
+
+    Args:
+        action_name (str): Candidate action name; stripped before comparison.
+        phase (str): Phase name; stripped and upper-cased before lookup.
+
+    Returns:
+        bool: True when ``action_name`` is allowed in ``phase``; False for an
+        unknown phase or a non-member action.
+    """
     allowed = PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper())
     if allowed is None:
         return False
@@ -90,7 +136,15 @@ def is_action_allowed_in_phase(action_name: str, phase: str) -> bool:
 
 
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
-    """Return ``PHASE_ALLOWED_ACTIONS[phase]`` as a sorted tuple (deterministic)."""
+    """Return ``PHASE_ALLOWED_ACTIONS[phase]`` as a sorted tuple (deterministic).
+
+    Args:
+        phase (str): Phase name; stripped and upper-cased before lookup.
+
+    Returns:
+        tuple[str, ...]: The phase's allowed actions sorted ascending, or an
+        empty tuple for an unknown phase.
+    """
     return tuple(sorted(PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper(), frozenset())))
 
 
@@ -103,7 +157,16 @@ PHASE_LLM_PROPOSABLE_ACTIONS: dict[str, frozenset[str]] = {
 
 
 def is_action_llm_proposable_in_phase(action_name: str, phase: str) -> bool:
-    """Return True iff ``action_name`` is LLM-proposable in ``phase`` (unknown → deny)."""
+    """Return True iff ``action_name`` is LLM-proposable in ``phase`` (unknown → deny).
+
+    Args:
+        action_name (str): Candidate action name; stripped before comparison.
+        phase (str): Phase name; stripped and upper-cased before lookup.
+
+    Returns:
+        bool: True when ``action_name`` is LLM-proposable in ``phase``; False
+        for an unknown phase or a non-member action.
+    """
     proposable = PHASE_LLM_PROPOSABLE_ACTIONS.get((phase or "").strip().upper())
     if proposable is None:
         return False
@@ -111,10 +174,16 @@ def is_action_llm_proposable_in_phase(action_name: str, phase: str) -> bool:
 
 
 def llm_proposable_actions_for(phase: str) -> tuple[str, ...]:
-    """Return ``PHASE_LLM_PROPOSABLE_ACTIONS[phase]`` sorted (deterministic)."""
-    return tuple(sorted(
-        PHASE_LLM_PROPOSABLE_ACTIONS.get((phase or "").strip().upper(), frozenset())
-    ))
+    """Return ``PHASE_LLM_PROPOSABLE_ACTIONS[phase]`` sorted (deterministic).
+
+    Args:
+        phase (str): Phase name; stripped and upper-cased before lookup.
+
+    Returns:
+        tuple[str, ...]: The phase's LLM-proposable actions sorted ascending,
+        or an empty tuple for an unknown phase.
+    """
+    return tuple(sorted(PHASE_LLM_PROPOSABLE_ACTIONS.get((phase or "").strip().upper(), frozenset())))
 
 
 # Interleave mode (env-flagged): widen EXPLORE/KERNEL proposable sets; chain stays monotonic.
@@ -124,12 +193,22 @@ PHASE_INTERLEAVE_ENV: str = "INFERENCE_OPTIMIZER_PHASE_INTERLEAVE"
 _INTERLEAVE_EXPLORE_EXTRAS: frozenset[str] = KERNEL_OWNED_ACTIONS
 
 # KERNEL interleave adds the explore-side proposable triple.
-_INTERLEAVE_KERNEL_EXTRAS: frozenset[str] = frozenset({
-    "explore", "specialist", "integrate_patch",
-})
+_INTERLEAVE_KERNEL_EXTRAS: frozenset[str] = frozenset(
+    {
+        "explore",
+        "specialist",
+        "integrate_patch",
+    }
+)
+
 
 def is_phase_interleave_enabled() -> bool:
-    """Return True when EXPLORE↔KERNEL interleave is enabled (default OFF; env opt-in knob)."""
+    """Return True when EXPLORE↔KERNEL interleave is enabled (default OFF; env opt-in knob).
+
+    Returns:
+        bool: True when ``$INFERENCE_OPTIMIZER_PHASE_INTERLEAVE`` is one of
+        ``1``/``true``/``yes``/``on`` (case-insensitive); False otherwise.
+    """
     raw = (os.environ.get(PHASE_INTERLEAVE_ENV) or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
@@ -148,6 +227,16 @@ def llm_proposable_actions_for_with_interleave(
     disabled the EXPLORE phase. ``specialist`` / ``integrate_patch`` stay
     available because KERNEL legitimately uses them (specialist research +
     patch integration).
+
+    Args:
+        phase (str): Phase name; stripped and upper-cased before lookup.
+        interleave (bool | None): Force interleave on/off; ``None`` resolves it
+            from :func:`is_phase_interleave_enabled`.
+        explore_enabled (bool): When False (``--no-explore``), strip ``explore``
+            from the KERNEL interleave extras.
+
+    Returns:
+        frozenset[str]: The active LLM-proposable action set for ``phase``.
     """
     key = (phase or "").strip().upper()
     base = PHASE_LLM_PROPOSABLE_ACTIONS.get(key, frozenset())
@@ -173,115 +262,130 @@ def is_action_llm_proposable_in_phase_with_interleave(
     explore_enabled: bool = True,
 ) -> bool:
     """Mirror of :func:`is_action_llm_proposable_in_phase` honoring the
-    interleave flag (and the ``--no-explore`` KERNEL grey-channel strip)."""
+    interleave flag (and the ``--no-explore`` KERNEL grey-channel strip).
+
+    Args:
+        action_name (str): Candidate action name; stripped before comparison.
+        phase (str): Phase name; stripped and upper-cased before lookup.
+        interleave (bool | None): Force interleave on/off; ``None`` resolves it
+            from :func:`is_phase_interleave_enabled`.
+        explore_enabled (bool): When False, strip ``explore`` from the KERNEL
+            interleave extras.
+
+    Returns:
+        bool: True when ``action_name`` is in the active interleave-aware
+        proposable set for ``phase``.
+    """
     proposable = llm_proposable_actions_for_with_interleave(
-        phase, interleave=interleave, explore_enabled=explore_enabled,
+        phase,
+        interleave=interleave,
+        explore_enabled=explore_enabled,
     )
     return (action_name or "").strip() in proposable
 
 
 # phase_exit_reasons vocab
-PHASE_EXIT_REASONS: frozenset[str] = frozenset({
-    # Normal exits
-    "prelude_done",
-    "plateau_explore",
-    "plateau_kernel",
-    "explore_phase_budget_exhausted",
-    "kernel_phase_budget_exhausted",
-    "explore_budget_cap",               # EXPLORE → next phase at the absolute per-phase wall-clock cap (long/unbounded runs)
-    "kernel_budget_cap",                # KERNEL → SWEEP at the absolute per-phase wall-clock cap
-    "sweep_budget_cap",                 # SWEEP → reloop/CLOSE at the absolute per-phase wall-clock cap
-    "sweep_done",
-    "conc_sweep_done",                  # SWEEP → CLOSE when conc_sweep settles
-    "sweep_budget_exhausted",
-    "no_kernel_skipped",                # EXPLORE → SWEEP when kernel disabled
-    "kernel_phase_aborted_no_trace",    # KERNEL → SWEEP when profile fails
-    "explore_force_exit_low_budget",    # EXPLORE → next phase below operator force-exit thresholds
-    "explore_no_more_leverage",         # EXPLORE → KERNEL (non-terminal): plateau / skip_to_sweep exhausts the explore lever
-    "kernel_no_more_leverage",          # KERNEL → SWEEP (non-terminal) via skip_to_sweep
-    # FRAMEWORK_PR phase transitions.
-    "framework_pr_phase_done",          # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
-    "framework_pr_plateau",             # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
-    "framework_pr_force_exit_low_budget",  # FRAMEWORK_PR → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
-    # R1/R7 cyclic phase machine back-edge reasons (written by compute_next_phase).
-    "cycle_reloop",                     # SWEEP → FRAMEWORK_PR/EXPLORE; opens a new macro-cycle while budget + leverage remain
-    "global_converged",                 # SWEEP → CLOSE; cyclic leverage exhausted across macro-cycles (also a terminal stop_reason)
-
-    # Terminal exits (any phase → CLOSE)
-    "robustness_escalated",
-    "target_reached",
-    "time_exhausted",
-    "time_exhausted_during_prelude",
-    "user_stop_requested",
-    "cortex_t0_failed",
-    "cortex_drain_failed",
-    "cortex_commit_failed",
-    "prelude_baseline_failed",
-    "prelude_policy_loop",
-    "policy_loop",
-    "crash_threshold_exceeded",
-    "baseline_failed",                  # live baseline-failure marker
-    "emergency",
-    "max_ticks",
-    "signal",
-
-    # Construction sentinel — first phase_history entry on fresh session.
-    "phase_entered",
-})
+PHASE_EXIT_REASONS: frozenset[str] = frozenset(
+    {
+        # Normal exits
+        "prelude_done",
+        "plateau_explore",
+        "plateau_kernel",
+        "explore_phase_budget_exhausted",
+        "kernel_phase_budget_exhausted",
+        "explore_budget_cap",  # EXPLORE → next phase at the absolute per-phase wall-clock cap (long/unbounded runs)
+        "kernel_budget_cap",  # KERNEL → SWEEP at the absolute per-phase wall-clock cap
+        "sweep_budget_cap",  # SWEEP → reloop/CLOSE at the absolute per-phase wall-clock cap
+        "sweep_done",
+        "conc_sweep_done",  # SWEEP → CLOSE when conc_sweep settles
+        "sweep_budget_exhausted",
+        "no_kernel_skipped",  # EXPLORE → SWEEP when kernel disabled
+        "kernel_phase_aborted_no_trace",  # KERNEL → SWEEP when profile fails
+        "explore_force_exit_low_budget",  # EXPLORE → next phase below operator force-exit thresholds
+        "explore_no_more_leverage",  # EXPLORE → KERNEL (non-terminal): plateau / skip_to_sweep exhausts the explore lever
+        "kernel_no_more_leverage",  # KERNEL → SWEEP (non-terminal) via skip_to_sweep
+        # FRAMEWORK_PR phase transitions.
+        "framework_pr_phase_done",  # FRAMEWORK_PR → EXPLORE normal completion (no more candidates)
+        "framework_pr_plateau",  # FRAMEWORK_PR → EXPLORE; 3 consecutive batches with no candidate ≥1% gain
+        "framework_pr_force_exit_low_budget",  # FRAMEWORK_PR → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
+        # R1/R7 cyclic phase machine back-edge reasons (written by compute_next_phase).
+        "cycle_reloop",  # SWEEP → FRAMEWORK_PR/EXPLORE; opens a new macro-cycle while budget + leverage remain
+        "global_converged",  # SWEEP → CLOSE; cyclic leverage exhausted across macro-cycles (also a terminal stop_reason)
+        # Terminal exits (any phase → CLOSE)
+        "robustness_escalated",
+        "target_reached",
+        "time_exhausted",
+        "time_exhausted_during_prelude",
+        "user_stop_requested",
+        "cortex_t0_failed",
+        "cortex_drain_failed",
+        "cortex_commit_failed",
+        "prelude_baseline_failed",
+        "prelude_policy_loop",
+        "policy_loop",
+        "crash_threshold_exceeded",
+        "baseline_failed",  # live baseline-failure marker
+        "emergency",
+        "max_ticks",
+        "signal",
+        # Construction sentinel — first phase_history entry on fresh session.
+        "phase_entered",
+    }
+)
 
 
 # stop_reason vocab
-STOP_REASON_VOCAB: frozenset[str] = frozenset({
-    # Legacy sentinels — kept for backward compat (resume from old sessions).
-    "target_reached",
-    "time_exhausted",
-    "max_ticks",
-    "policy_loop",
-    "baseline_failed",
-    "emergency",
-    "coordinator_exception",
-    "signal",
-    "unknown",
-    "custom",
-
-    # Newer reasons.
-    "crash_threshold_exceeded",
-    "robustness_escalated",
-    "user_stop_requested",
-    "prelude_baseline_failed",
-    "prelude_policy_loop",
-    "time_exhausted_during_prelude",
-    "cortex_t0_failed",
-    "cortex_drain_failed",
-    "cortex_commit_failed",
-    "plateau_explore",
-    "plateau_kernel",
-    "no_kernel_skipped",
-    "sweep_done",
-    "conc_sweep_done",
-    "explore_force_exit_low_budget",
-    "framework_pr_phase_done",
-    "framework_pr_plateau",
-    "framework_pr_force_exit_low_budget",
-    # R7: cyclic phase machine exhausted leverage across macro-cycles.
-    "global_converged",
-
-    # Context-window preflight: max_position_embeddings can't hold ISL+OSL.
-    "model_context_window_too_small",
-    # Model-arch preflight: multimodal/vision model unsupported.
-    "unsupported_model_arch",
-    # Pre-run model-config compatibility preflight
-    # (``cli._preflight_model_config_compat``): config.json is present but
-    # corrupt/non-dict, or declares RoPE scaling without any max-position
-    # field — both make vLLM/transformers crash at config load (e.g.
-    # "'PreTrainedConfig' object has no attribute 'max_position_embeddings'").
-    # Fail fast instead of booting a server that dies in engine init.
-    "model_config_incompatible",
-    # Baseline arg-validation fast-exit (#522): >=2 consecutive baseline
-    # attempts exited <30s on a bad CLI arg (e.g. invalid --attention-backend);
-    # deterministic, so stop instead of burning the slow-baseline retry budget.
-    "baseline_arg_error",
-})
+STOP_REASON_VOCAB: frozenset[str] = frozenset(
+    {
+        # Legacy sentinels — kept for backward compat (resume from old sessions).
+        "target_reached",
+        "time_exhausted",
+        "max_ticks",
+        "policy_loop",
+        "baseline_failed",
+        "emergency",
+        "coordinator_exception",
+        "signal",
+        "unknown",
+        "custom",
+        # Newer reasons.
+        "crash_threshold_exceeded",
+        "robustness_escalated",
+        "user_stop_requested",
+        "prelude_baseline_failed",
+        "prelude_policy_loop",
+        "time_exhausted_during_prelude",
+        "cortex_t0_failed",
+        "cortex_drain_failed",
+        "cortex_commit_failed",
+        "plateau_explore",
+        "plateau_kernel",
+        "no_kernel_skipped",
+        "sweep_done",
+        "conc_sweep_done",
+        "explore_force_exit_low_budget",
+        "framework_pr_phase_done",
+        "framework_pr_plateau",
+        "framework_pr_force_exit_low_budget",
+        # R7: cyclic phase machine exhausted leverage across macro-cycles.
+        "global_converged",
+        # Context-window preflight: max_position_embeddings can't hold ISL+OSL.
+        "model_context_window_too_small",
+        # Model-arch preflight: multimodal/vision model unsupported.
+        "unsupported_model_arch",
+        # Pre-run model-config compatibility preflight
+        # (``cli._preflight_model_config_compat``): config.json is present but
+        # corrupt/non-dict, or declares RoPE scaling without any max-position
+        # field — both make vLLM/transformers crash at config load (e.g.
+        # "'PreTrainedConfig' object has no attribute 'max_position_embeddings'").
+        # Fail fast instead of booting a server that dies in engine init.
+        "model_config_incompatible",
+        # Baseline arg-validation fast-exit (#522): >=2 consecutive baseline
+        # attempts exited <30s on a bad CLI arg (e.g. invalid --attention-backend);
+        # deterministic, so stop instead of burning the slow-baseline retry budget.
+        "baseline_arg_error",
+    }
+)
 
 
 def is_valid_stop_reason(value: str) -> bool:
@@ -318,9 +422,9 @@ def is_valid_phase_exit_reason(value: str) -> bool:
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
     PHASE_EXPLORE: 0.45,
-    PHASE_KERNEL:  0.38,
-    PHASE_SWEEP:   0.12,
-    PHASE_CLOSE:   0.02,
+    PHASE_KERNEL: 0.38,
+    PHASE_SWEEP: 0.12,
+    PHASE_CLOSE: 0.02,
 }
 
 # Wall-clock ceiling for an unbounded run (``max_minutes`` == 0): the container
@@ -334,17 +438,17 @@ PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES: int = 24 * 60
 
 
 # Plateau judgment defaults (CLI --plateau-* flags); kept here for pure callers + tests.
-DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT:    float = 0.5
-DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK:     int   = 3
-DEFAULT_PLATEAU_EXPLORE_LOOKBACK:         int   = 5
-DEFAULT_PLATEAU_KERNEL_REVERT_STREAK:     int   = 3
-DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT:     float = 0.5
-DEFAULT_PLATEAU_KERNEL_LOOKBACK:          int   = 5
+DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT: float = 0.5
+DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK: int = 3
+DEFAULT_PLATEAU_EXPLORE_LOOKBACK: int = 5
+DEFAULT_PLATEAU_KERNEL_REVERT_STREAK: int = 3
+DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT: float = 0.5
+DEFAULT_PLATEAU_KERNEL_LOOKBACK: int = 5
 
 # EXPLORE hard force-exit thresholds (IR-6 HARD time gate; overrides plateau).
 # Fires when remaining wall-clock < HOURS_REMAINING OR EXPLORE budget fraction < BUDGET_PCT.
 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
-DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT:      float = 0.20
+DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT: float = 0.20
 
 # IR-6 under phase interleave (fix B): when EXPLORE↔KERNEL interleave is on,
 # the original "leave 3h so the *separate* KERNEL phase can run" rationale is
@@ -355,11 +459,11 @@ DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT:      float = 0.20
 # spends the bulk of the budget because it is also doing KERNEL work). Both are
 # overridable via the explicit thresholds the caller passes.
 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING_INTERLEAVE: float = 1.0
-DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE:      float = 0.0
+DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE: float = 0.0
 
 # FRAMEWORK_PR plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
-DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK:                 int   = 3
-DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT:            float = 1.0
+DEFAULT_FRAMEWORK_PR_PLATEAU_LOOKBACK: int = 3
+DEFAULT_FRAMEWORK_PR_PLATEAU_KEEP_GAIN_PCT: float = 1.0
 DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO: float = 0.6
 
 
@@ -425,9 +529,16 @@ def is_cyclic_phases_enabled() -> bool:
     when enabled, the macro-cycle behaviour additionally requires a
     long/unbounded budget (see :func:`is_long_run`) so short bounded runs never
     loop in practice.
+
+    Returns:
+        bool: True unless ``$INFERENCE_OPTIMIZER_CYCLIC_PHASES`` is set to a
+        falsy value (``0``/``false``/``no``/``off``).
     """
     return os.environ.get(PHASE_CYCLIC_ENV, "").strip().lower() not in {
-        "0", "false", "no", "off",
+        "0",
+        "false",
+        "no",
+        "off",
     }
 
 
@@ -449,6 +560,13 @@ def is_long_run(state: Any) -> bool:
     runs longer than :data:`DEFAULT_LONGRUN_THRESHOLD_MINUTES` are "long".
     Everything ``≤ 24h`` is a short bounded run and must behave like the legacy
     monotonic chain.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``max_minutes``.
+
+    Returns:
+        bool: True for unbounded runs (``max_minutes`` == 0) or bounded runs
+        longer than :data:`DEFAULT_LONGRUN_THRESHOLD_MINUTES`.
     """
     mm = _max_minutes(state)
     if mm <= 0:
@@ -457,6 +575,16 @@ def is_long_run(state: Any) -> bool:
 
 
 def _cumulative_gain_validated(state: Any) -> float:
+    """Return ``state.cumulative_gain_validated``, defensively coerced to float.
+
+    Args:
+        state (Any): Frozen SharedState view exposing
+            ``cumulative_gain_validated``.
+
+    Returns:
+        float: The validated cumulative gain, or ``0.0`` when missing or
+        non-numeric.
+    """
     try:
         return float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
     except (TypeError, ValueError):
@@ -481,6 +609,23 @@ def should_reloop_to_explore(
     Loops back iff cyclic mode is on AND below the macro-cycle safety cap AND
     the run has not globally converged (R7: ``no_gain_cycles`` consecutive
     no-gain cycles) AND enough session budget remains to use a fresh cycle.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        now_unix (float | None): Override for the current time; defaults to
+            wall-clock resolution when None.
+        max_cycles (int): Safety ceiling on macro-cycles.
+        min_remaining_sec (float): Minimum session seconds that must remain to
+            justify opening a new cycle.
+        no_gain_cycles (int): Consecutive no-gain cycles that mark global
+            convergence (R7).
+        min_gain_pct (float | None): Per-cycle gain bar; ``None`` uses the
+            decaying KEEP threshold for the cycle.
+
+    Returns:
+        tuple[bool, dict[str, Any]]: ``(reloop, evidence)`` — whether to open a
+        new macro-cycle, and the evidence map (including the effective no-gain
+        streak and any ``reloop_blocked`` reason).
     """
     cycle = int(getattr(state, "macro_cycle", 0) or 0)
     evidence: dict[str, Any] = {"cyclic": is_cyclic_phases_enabled(), "macro_cycle": cycle}
@@ -500,10 +645,7 @@ def should_reloop_to_explore(
     # own (decaying) KEEP bar, so once even the relaxed bar is unmet for
     # ``no_gain_cycles`` cycles in a row the run converges instead of looping
     # forever on sub-threshold noise.
-    effective_min_gain = (
-        decaying_keep_threshold_pct(cycle) if min_gain_pct is None
-        else float(min_gain_pct)
-    )
+    effective_min_gain = decaying_keep_threshold_pct(cycle) if min_gain_pct is None else float(min_gain_pct)
     cur_gain = _cumulative_gain_validated(state)
     start_gain = float(getattr(state, "gain_at_cycle_start", 0.0) or 0.0)
     cycle_gained = (cur_gain - start_gain) > effective_min_gain
@@ -537,28 +679,31 @@ def should_reloop_to_explore(
 
 
 # escalate_strategy_change hint vocabulary. Closed enum; unknown hints logged, never change phase.
-ESCALATE_HINT_SKIP_TO_KERNEL:      str = "skip_to_kernel"
-ESCALATE_HINT_SKIP_TO_SWEEP:       str = "skip_to_sweep"
-ESCALATE_HINT_SKIP_TO_CLOSE:       str = "skip_to_close"
+ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
+ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
+ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
 ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
-ESCALATE_HINT_EXTEND_KERNEL_BUDGET:  str = "extend_kernel_budget"
+ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
 ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX: str = "pause_specialist_"
 
 # ``skip_to_sweep`` is the non-terminal "exhausted the current lever" signal:
 # from EXPLORE it advances to KERNEL (switch lever, via ``explore_no_more_leverage``);
 # from KERNEL it winds down to SWEEP → CLOSE (via ``kernel_no_more_leverage``).
 # Unlike terminal ``skip_to_close``, it never ends the run on its own.
-ESCALATE_HINT_VOCAB: frozenset[str] = frozenset({
-    ESCALATE_HINT_SKIP_TO_KERNEL,
-    ESCALATE_HINT_SKIP_TO_SWEEP,
-    ESCALATE_HINT_SKIP_TO_CLOSE,
-    ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-    ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
-})
+ESCALATE_HINT_VOCAB: frozenset[str] = frozenset(
+    {
+        ESCALATE_HINT_SKIP_TO_KERNEL,
+        ESCALATE_HINT_SKIP_TO_SWEEP,
+        ESCALATE_HINT_SKIP_TO_CLOSE,
+        ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
+        ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
+    }
+)
 
 # ``extend_*_budget`` hints raise a phase budget by DELTA up to CAP.
-ESCALATE_HINT_BUDGET_BUMP_DELTA: float = 0.05   # +5 percentage points per hint
-ESCALATE_HINT_BUDGET_BUMP_CAP:   float = 0.80   # absolute ceiling
+ESCALATE_HINT_BUDGET_BUMP_DELTA: float = 0.05  # +5 percentage points per hint
+ESCALATE_HINT_BUDGET_BUMP_CAP: float = 0.80  # absolute ceiling
+
 
 # True when a hint string is structurally a pause-specialist directive.
 def is_pause_specialist_hint(hint: str) -> bool:
@@ -584,7 +729,15 @@ def is_pause_specialist_hint(hint: str) -> bool:
 
 
 def is_valid_escalate_hint(hint: str) -> bool:
-    """Return True for any hint Coordinator should act on (closed vocab + ``pause_specialist_<domain>``)."""
+    """Return True for any hint Coordinator should act on (closed vocab + ``pause_specialist_<domain>``).
+
+    Args:
+        hint (str): Candidate escalate hint string; stripped before comparison.
+
+    Returns:
+        bool: True when ``hint`` is in :data:`ESCALATE_HINT_VOCAB` or is a
+        structural ``pause_specialist_<domain>`` directive.
+    """
     return (hint or "").strip() in ESCALATE_HINT_VOCAB or is_pause_specialist_hint(hint)
 
 
@@ -595,7 +748,20 @@ def apply_escalate_budget_bump(
     delta: float = ESCALATE_HINT_BUDGET_BUMP_DELTA,
     cap: float = ESCALATE_HINT_BUDGET_BUMP_CAP,
 ) -> dict[str, float]:
-    """Return a budget map with ``phase`` raised by ``delta`` (capped at 80%)."""
+    """Return a budget map with ``phase`` raised by ``delta`` (capped at 80%).
+
+    Args:
+        current_budget_pct (dict[str, float] | None): Existing ``phase -> pct``
+            map; ``None`` starts from the defaults.
+        phase (str): Phase to raise; stripped and upper-cased. An unknown phase
+            returns the input map unchanged.
+        delta (float): Percentage-point increment to apply.
+        cap (float): Absolute ceiling for the resulting fraction.
+
+    Returns:
+        dict[str, float]: A normalized budget map with ``phase`` bumped by
+        ``delta`` and clamped to ``[0.0, cap]``.
+    """
     phase_key = (phase or "").strip().upper()
     if phase_key not in PHASE_NAMES:
         return dict(current_budget_pct or {})
@@ -609,7 +775,16 @@ def apply_escalate_budget_bump(
 def normalize_budget_pct(
     budget: dict[str, float] | None,
 ) -> dict[str, float]:
-    """Return a sanitized ``phase -> pct`` mapping (budgets are upper bounds, not renormalized to 1.0)."""
+    """Return a sanitized ``phase -> pct`` mapping (budgets are upper bounds, not renormalized to 1.0).
+
+    Args:
+        budget (dict[str, float] | None): Raw ``phase -> pct`` overrides;
+            unknown phases and out-of-range / unparseable values are dropped.
+
+    Returns:
+        dict[str, float]: The defaults overlaid with the valid overrides (each
+        in the ``(0.0, 1.0]`` range).
+    """
     out = dict(DEFAULT_PHASE_BUDGET_PCT)
     if not budget:
         return out
@@ -629,10 +804,19 @@ def normalize_budget_pct(
 
 # Pure judgment helpers (used by Coordinator at each tick end)
 def _now_unix(state: Any) -> float:
-    """Resolve the "now" timestamp; tests can inject ``state._now_unix``."""
+    """Resolve the "now" timestamp; tests can inject ``state._now_unix``.
+
+    Args:
+        state (Any): Frozen SharedState view; may expose a callable
+            ``_now_unix`` override for tests.
+
+    Returns:
+        float: Current time in seconds since the epoch.
+    """
     if hasattr(state, "_now_unix") and callable(state._now_unix):
         return float(state._now_unix())  # type: ignore[attr-defined]
     import time as _time
+
     return _time.time()
 
 
@@ -656,7 +840,14 @@ def _phase_started_unix(state: Any) -> float:
 
 
 def _pending_escalate_hint(state: Any) -> str:
-    """Return a pending escalate hint to act on this tick (unknown hints → empty)."""
+    """Return a pending escalate hint to act on this tick (unknown hints → empty).
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``pending_escalate_hint``.
+
+    Returns:
+        str: The pending hint when it is a recognized escalate hint, else ``""``.
+    """
     raw = str(getattr(state, "pending_escalate_hint", "") or "").strip()
     if not raw:
         return ""
@@ -735,7 +926,19 @@ def phase_budget_remaining_seconds(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> float | None:
-    """Return seconds remaining in the current phase's budget (``None`` when budget window 0 = unlimited)."""
+    """Return seconds remaining in the current phase's budget (``None`` when budget window 0 = unlimited).
+
+    Args:
+        state (Any): Frozen SharedState view.
+        budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
+            to ``state.phase_budget_pct`` when None.
+        now_unix (float | None): Override for the current time.
+
+    Returns:
+        float | None: Non-negative seconds left in the current phase's budget,
+        or ``None`` when the budget window is unlimited or the phase has no
+        allocated fraction.
+    """
     mm = _budget_minutes(state)
     if mm <= 0:
         return None
@@ -748,7 +951,15 @@ def phase_budget_remaining_seconds(
 
 
 def effective_max_minutes(state: Any) -> float:
-    """Session minutes for deadline/cap math; unbounded runs use the 14-day ceiling."""
+    """Session minutes for deadline/cap math; unbounded runs use the 14-day ceiling.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``max_minutes``.
+
+    Returns:
+        float: ``max_minutes`` when positive, else
+        :data:`DEFAULT_LONGRUN_MAX_MINUTES` (the unbounded-run ceiling).
+    """
     mm = _max_minutes(state)
     return mm if mm > 0 else float(DEFAULT_LONGRUN_MAX_MINUTES)
 
@@ -785,7 +996,18 @@ def phase_cap_exceeded(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> bool:
-    """True when time spent in the current phase has reached its absolute cap."""
+    """True when time spent in the current phase has reached its absolute cap.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
+            to ``state.phase_budget_pct`` when None.
+        now_unix (float | None): Override for the current time.
+
+    Returns:
+        bool: True when phase-elapsed time has reached the absolute cap; False
+        when no cap applies.
+    """
     cap = phase_cap_seconds(state, budget_pct=budget_pct)
     if cap is None:
         return False
@@ -794,9 +1016,22 @@ def phase_cap_exceeded(
 
 # EXPLORE hard force-exit (HARD time gate)
 def session_remaining_seconds(
-    state: Any, *, now_unix: float | None = None,
+    state: Any,
+    *,
+    now_unix: float | None = None,
 ) -> float | None:
-    """Total wall-clock seconds remaining for the session (``None`` when ``max_minutes`` 0 or ``start_ts`` unparseable)."""
+    """Total wall-clock seconds remaining for the session (``None`` when ``max_minutes`` 0 or ``start_ts`` unparseable).
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``max_minutes`` and
+            ``start_ts``.
+        now_unix (float | None): Accepted for signature parity; the deadline is
+            computed against the current UTC time.
+
+    Returns:
+        float | None: Non-negative seconds left in the session, or ``None``
+        when ``max_minutes`` is 0 or ``start_ts`` is missing/unparseable.
+    """
     mm = _max_minutes(state)
     if mm <= 0:
         return None
@@ -805,6 +1040,7 @@ def session_remaining_seconds(
         return None
     try:
         from datetime import datetime, timezone
+
         start = datetime.fromisoformat(start_ts)
         if start.tzinfo is None:
             start = start.replace(tzinfo=timezone.utc)
@@ -833,6 +1069,20 @@ def should_force_exit_explore(
     CLOSE-buffer (the "reserve 3h for a separate KERNEL phase" rationale no
     longer applies because kernel work runs inside EXPLORE). Explicit
     non-default thresholds from the caller always win.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        hours_remaining_threshold (float): Session-hours-remaining gate;
+            non-positive disables it.
+        budget_pct_threshold (float): Phase-budget-fraction gate; non-positive
+            disables it.
+        budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
+            to ``state.phase_budget_pct`` when None.
+        now_unix (float | None): Override for the current time.
+
+    Returns:
+        tuple[bool, dict[str, Any]]: ``(fired, evidence)`` — whether HARD
+        force-exit fires, and the evidence map recording which gate(s) fired.
     """
     if is_phase_interleave_enabled():
         if float(hours_remaining_threshold) == DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING:
@@ -840,9 +1090,9 @@ def should_force_exit_explore(
         if float(budget_pct_threshold) == DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT:
             budget_pct_threshold = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE
     evidence: dict[str, Any] = {
-        "hours_remaining_threshold":  float(hours_remaining_threshold),
-        "budget_pct_threshold":       float(budget_pct_threshold),
-        "interleave_aware_ir6":       bool(is_phase_interleave_enabled()),
+        "hours_remaining_threshold": float(hours_remaining_threshold),
+        "budget_pct_threshold": float(budget_pct_threshold),
+        "interleave_aware_ir6": bool(is_phase_interleave_enabled()),
     }
     fired = False
     fired_reasons: list[str] = []
@@ -860,27 +1110,22 @@ def should_force_exit_explore(
             fired_reasons.append("session_remaining")
 
     phase_remaining = phase_budget_remaining_seconds(
-        state, budget_pct=budget_pct, now_unix=now_unix,
+        state,
+        budget_pct=budget_pct,
+        now_unix=now_unix,
     )
     if phase_remaining is not None:
         # Express remaining as a fraction of the phase's total budget (per-cycle
         # window in cyclic mode, else the whole run).
         mm = _budget_minutes(state)
-        budget = normalize_budget_pct(
-            budget_pct or getattr(state, "phase_budget_pct", None)
-        )
+        budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
         pct_alloc = budget.get((getattr(state, "phase", "") or "").upper(), 0.0)
         if mm > 0 and pct_alloc > 0:
             phase_total_sec = mm * 60.0 * pct_alloc
-            remaining_pct = (
-                phase_remaining / phase_total_sec if phase_total_sec > 0 else 0.0
-            )
+            remaining_pct = phase_remaining / phase_total_sec if phase_total_sec > 0 else 0.0
             evidence["phase_remaining_pct"] = round(remaining_pct, 4)
             evidence["phase_remaining_seconds"] = round(phase_remaining, 2)
-            if (
-                pct_threshold_enabled
-                and remaining_pct <= float(budget_pct_threshold)
-            ):
+            if pct_threshold_enabled and remaining_pct <= float(budget_pct_threshold):
                 fired = True
                 fired_reasons.append("phase_remaining_pct")
 
@@ -900,6 +1145,20 @@ def compute_plateau_explore(
 
     Trigger (AND, KB_design §3.8 §5.1): recent_keep_gain < threshold AND
     recent_empty_streak >= empty_streak_threshold.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``explore_search`` and
+            ``specialist_rounds``.
+        lookback (int): Window of recent winners to sum for keep-gain;
+            non-positive disables the judgment.
+        keep_gain_threshold_pct (float): Keep-gain floor below which the gain
+            arm trips.
+        empty_streak_threshold (int): Trailing empty specialist-round count that
+            trips the streak arm.
+
+    Returns:
+        tuple[bool, dict[str, Any]]: ``(triggered, evidence)`` — whether the
+        plateau fired, and the supporting evidence map.
     """
     if lookback <= 0:
         return False, {"reason": "lookback_disabled"}
@@ -950,9 +1209,7 @@ def compute_plateau_explore(
             proposals = 0
         try:
             kept = int(
-                row.get("proposals_kept")
-                if row.get("proposals_kept") is not None
-                else row.get("kept_count") or 0,
+                row.get("proposals_kept") if row.get("proposals_kept") is not None else row.get("kept_count") or 0,
             )
         except (TypeError, ValueError):
             kept = 0
@@ -966,18 +1223,15 @@ def compute_plateau_explore(
         else:
             break
 
-    triggered = (
-        recent_keep_gain < keep_gain_threshold_pct
-        and streak >= empty_streak_threshold
-    )
+    triggered = recent_keep_gain < keep_gain_threshold_pct and streak >= empty_streak_threshold
     return triggered, {
-        "recent_keep_gain_pct":     round(recent_keep_gain, 4),
-        "keep_gain_threshold_pct":  keep_gain_threshold_pct,
-        "empty_streak":             int(streak),
-        "empty_streak_threshold":   empty_streak_threshold,
-        "lookback":                 int(lookback),
-        "winners_seen":             len(recent_winners),
-        "specialist_rounds_seen":   len(specialist_rounds),
+        "recent_keep_gain_pct": round(recent_keep_gain, 4),
+        "keep_gain_threshold_pct": keep_gain_threshold_pct,
+        "empty_streak": int(streak),
+        "empty_streak_threshold": empty_streak_threshold,
+        "lookback": int(lookback),
+        "winners_seen": len(recent_winners),
+        "specialist_rounds_seen": len(specialist_rounds),
     }
 
 
@@ -992,6 +1246,20 @@ def compute_plateau_kernel(
 
     Trigger (OR, KB_design §3.8 §5.2 — weaker than explore's AND): revert_streak
     >= threshold OR recent_keep_gain < keep_gain_threshold_pct.
+
+    Args:
+        state (Any): Frozen SharedState view exposing
+            ``kernel_integrate_attempts``.
+        lookback (int): Window of recent integrate attempts to inspect;
+            non-positive disables the judgment.
+        revert_streak_threshold (int): Trailing REVERT/NEEDS_REVIEW streak that
+            trips the streak arm; non-positive disables the judgment.
+        keep_gain_threshold_pct (float): Keep-gain floor below which the gain
+            arm trips.
+
+    Returns:
+        tuple[bool, dict[str, Any]]: ``(triggered, evidence)`` — whether the
+        plateau fired, and the supporting evidence map.
     """
     lookback = int(lookback or 0)
     revert_streak_threshold = int(revert_streak_threshold or 0)
@@ -1005,7 +1273,7 @@ def compute_plateau_kernel(
 
     # Flatten the integrate attempt log into a time-ordered list, take the
     # last ``lookback`` rows.
-    flat: list[tuple[str, str, float]] = []   # (decision, ts, gain_pct)
+    flat: list[tuple[str, str, float]] = []  # (decision, ts, gain_pct)
     for ent in integ_attempts.values():
         if not isinstance(ent, dict):
             continue
@@ -1028,11 +1296,11 @@ def compute_plateau_kernel(
     # Empty-data guard: empty ledger (KERNEL just entered) must NOT auto-trigger plateau (would skip kernel phase).
     if not recent:
         return False, {
-            "reason":                   "no_kernel_attempts_yet",
-            "revert_streak_threshold":  int(revert_streak_threshold),
-            "keep_gain_threshold_pct":  keep_gain_threshold_pct,
-            "lookback":                 int(lookback),
-            "attempts_seen":            0,
+            "reason": "no_kernel_attempts_yet",
+            "revert_streak_threshold": int(revert_streak_threshold),
+            "keep_gain_threshold_pct": keep_gain_threshold_pct,
+            "lookback": int(lookback),
+            "attempts_seen": 0,
         }
 
     # REVERT streak from the tail.
@@ -1045,17 +1313,14 @@ def compute_plateau_kernel(
     # KEEP-gain sum across the same lookback window.
     recent_keep_gain = sum(g for d, _t, g in recent if d == "KEEP")
 
-    triggered = (
-        revert_streak >= revert_streak_threshold
-        or recent_keep_gain < keep_gain_threshold_pct
-    )
+    triggered = revert_streak >= revert_streak_threshold or recent_keep_gain < keep_gain_threshold_pct
     return triggered, {
-        "revert_streak":            int(revert_streak),
-        "revert_streak_threshold":  int(revert_streak_threshold),
-        "recent_keep_gain_pct":     round(recent_keep_gain, 4),
-        "keep_gain_threshold_pct":  keep_gain_threshold_pct,
-        "lookback":                 int(lookback),
-        "attempts_seen":            len(recent),
+        "revert_streak": int(revert_streak),
+        "revert_streak_threshold": int(revert_streak_threshold),
+        "recent_keep_gain_pct": round(recent_keep_gain, 4),
+        "keep_gain_threshold_pct": keep_gain_threshold_pct,
+        "lookback": int(lookback),
+        "attempts_seen": len(recent),
     }
 
 
@@ -1064,6 +1329,14 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
     """Return ``(stop_reason, evidence)`` for a phase-orthogonal stop.
 
     Priority: 1. ``skip_to_close`` → ``robustness_escalated``; 2. Coordinator ``stop_reason``.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``stop_reason`` and any
+            pending escalate hint.
+
+    Returns:
+        tuple[str, dict[str, Any]] | None: ``(stop_reason, evidence)`` for a
+        phase-orthogonal stop, or ``None`` when none applies.
     """
     hint = _pending_escalate_hint(state)
     if hint == ESCALATE_HINT_SKIP_TO_CLOSE:
@@ -1083,7 +1356,14 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
 
 # per-phase judgments
 def warm_replay_in_flight(state: Any) -> bool:
-    """True while the PRELUDE warm-recipe replay task has not finished (PRELUDE must not exit until False — GPU contention)."""
+    """True while the PRELUDE warm-recipe replay task has not finished (PRELUDE must not exit until False — GPU contention).
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``warm_replay_outcome``.
+
+    Returns:
+        bool: True when the warm-replay outcome status is ``in_flight``.
+    """
     outcome = getattr(state, "warm_replay_outcome", None) or {}
     if not isinstance(outcome, dict):
         return False
@@ -1091,7 +1371,16 @@ def warm_replay_in_flight(state: Any) -> bool:
 
 
 def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
-    """``baseline_tput > 0`` and warm-replay settled → ``prelude_done`` (else ``None``)."""
+    """``baseline_tput > 0`` and warm-replay settled → ``prelude_done`` (else ``None``).
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``baseline_tput`` and the
+            warm-replay outcome.
+
+    Returns:
+        tuple[str, dict[str, Any]] | None: ``("prelude_done", evidence)`` when
+        the baseline succeeded and warm-replay has settled, else ``None``.
+    """
     if warm_replay_in_flight(state):
         return None
     try:
@@ -1139,8 +1428,7 @@ def abort_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     # Treat cortex_t0_failed / time_exhausted_during_prelude etc. as a PRELUDE
     # abort so phase_history captures the boundary.
     sr = (getattr(state, "stop_reason", "") or "").strip()
-    if sr in ("cortex_t0_failed", "time_exhausted_during_prelude",
-              "prelude_policy_loop", "user_stop_requested"):
+    if sr in ("cortex_t0_failed", "time_exhausted_during_prelude", "prelude_policy_loop", "user_stop_requested"):
         return sr, {"reason_origin": "shared_state.stop_reason"}
     return None
 
@@ -1159,6 +1447,20 @@ def exit_normal_explore(
     → ``plateau_explore``; 2. ``skip_to_sweep`` / detected plateau →
     ``explore_no_more_leverage`` (non-terminal; routes to KERNEL to switch
     lever); 3. phase budget exhausted.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
+            to ``state.phase_budget_pct`` when None.
+        now_unix (float | None): Override for the current time.
+        force_exit_hours_remaining (float): Session-hours-remaining force-exit
+            threshold.
+        force_exit_budget_pct (float): Phase-budget-fraction force-exit
+            threshold.
+
+    Returns:
+        tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the EXPLORE
+        exit, or ``None`` when EXPLORE should continue.
     """
     forced, force_ev = should_force_exit_explore(
         state,
@@ -1197,7 +1499,9 @@ def exit_normal_explore(
                 **plateau_ev,
             }
     remaining = phase_budget_remaining_seconds(
-        state, budget_pct=budget_pct, now_unix=now_unix,
+        state,
+        budget_pct=budget_pct,
+        now_unix=now_unix,
     )
     if remaining is not None and remaining <= 0:
         return "explore_phase_budget_exhausted", {
@@ -1220,6 +1524,16 @@ def exit_normal_kernel(
 
     Priority: 1. ``skip_to_close`` defers to global terminal; 2. ``skip_to_sweep``
     → ``kernel_no_more_leverage`` (non-terminal); 3. phase budget exhausted.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
+            to ``state.phase_budget_pct`` when None.
+        now_unix (float | None): Override for the current time.
+
+    Returns:
+        tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the KERNEL
+        exit, or ``None`` when KERNEL should continue.
     """
     if _pending_escalate_hint(state) == ESCALATE_HINT_SKIP_TO_SWEEP:
         return "kernel_no_more_leverage", {
@@ -1229,7 +1543,9 @@ def exit_normal_kernel(
     rejected = getattr(state, "rejected_kernel_ids", None) or []
     rejected_count = len(rejected) if isinstance(rejected, list) else 0
     remaining = phase_budget_remaining_seconds(
-        state, budget_pct=budget_pct, now_unix=now_unix,
+        state,
+        budget_pct=budget_pct,
+        now_unix=now_unix,
     )
     if remaining is not None and remaining <= 0:
         return "kernel_phase_budget_exhausted", {
@@ -1253,6 +1569,17 @@ def exit_normal_sweep(
     """SWEEP normal exit: sweep_done OR conc_sweep_done OR budget exhausted.
 
     Bug #12: conc_sweep completion emits an exit so a singleton-blocked sweep doesn't idle.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``last_sweep`` and
+            ``last_conc_sweep``.
+        budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
+            to ``state.phase_budget_pct`` when None.
+        now_unix (float | None): Override for the current time.
+
+    Returns:
+        tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the SWEEP
+        exit, or ``None`` when SWEEP should continue.
     """
     last_sweep = getattr(state, "last_sweep", None) or {}
     if isinstance(last_sweep, dict):
@@ -1265,7 +1592,9 @@ def exit_normal_sweep(
         if cs_status in ("succeeded", "partial", "completed", "skipped"):
             return "conc_sweep_done", {"conc_sweep_status": cs_status}
     remaining = phase_budget_remaining_seconds(
-        state, budget_pct=budget_pct, now_unix=now_unix,
+        state,
+        budget_pct=budget_pct,
+        now_unix=now_unix,
     )
     if remaining is not None and remaining <= 0:
         return "sweep_budget_exhausted", {
@@ -1281,7 +1610,15 @@ def exit_normal_sweep(
 # Transition decision (the only function the Coordinator calls each tick)
 def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
     """Pull operator-tuned plateau thresholds off
-    :attr:`SharedState.plateau_overrides` (empty → library defaults)."""
+    :attr:`SharedState.plateau_overrides` (empty → library defaults).
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``plateau_overrides``.
+
+    Returns:
+        dict[str, Any]: A copy of the overrides mapping, or an empty dict when
+        unset or non-dict.
+    """
     overrides = getattr(state, "plateau_overrides", None) or {}
     return dict(overrides) if isinstance(overrides, dict) else {}
 
@@ -1290,7 +1627,18 @@ def _framework_pr_batch_is_complete(
     batch: dict[str, Any],
     progress_by_batch: dict[str, int],
 ) -> bool:
-    """A FRAMEWORK_PR batch is complete iff every candidate has a terminal-status row in ``framework_pr_phase_progress`` (guards the plateau judge)."""
+    """A FRAMEWORK_PR batch is complete iff every candidate has a terminal-status row in ``framework_pr_phase_progress`` (guards the plateau judge).
+
+    Args:
+        batch (dict[str, Any]): A FRAMEWORK_PR batch carrying ``candidates`` and
+            ``batch_id``.
+        progress_by_batch (dict[str, int]): Per-batch count of recorded progress
+            rows, keyed by batch id.
+
+    Returns:
+        bool: True when every candidate in the batch has a progress row (or the
+        batch has no candidates).
+    """
     candidates = batch.get("candidates") or []
     if not isinstance(candidates, list) or not candidates:
         return True
@@ -1312,19 +1660,27 @@ def compute_plateau_framework_pr(
 
     Triggers when the last ``lookback`` fully-processed batches each carry
     ``max_gain_pct_observed_in_batch < keep_gain_threshold_pct``. Advisory-only.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``framework_pr_batches``
+            and ``framework_pr_phase_progress``.
+        lookback (int): Number of fully-processed trailing batches to inspect;
+            non-positive disables the judgment.
+        keep_gain_threshold_pct (float): Per-batch max-gain floor each batch
+            must fall below to trip the plateau.
+
+    Returns:
+        tuple[bool, dict[str, Any]]: ``(triggered, evidence)`` — whether the
+        plateau fired, and the supporting evidence map.
     """
     batches = getattr(state, "framework_pr_batches", None) or []
     lookback_int = int(lookback or 0)
     base_evidence = {
-        "lookback":                lookback_int,
+        "lookback": lookback_int,
         "keep_gain_pct_threshold": float(keep_gain_threshold_pct),
-        "batch_max_gains":         [],
+        "batch_max_gains": [],
     }
-    if (
-        not isinstance(batches, list)
-        or lookback_int <= 0
-        or len(batches) < lookback_int
-    ):
+    if not isinstance(batches, list) or lookback_int <= 0 or len(batches) < lookback_int:
         return False, base_evidence
     progress = getattr(state, "framework_pr_phase_progress", None) or []
     progress_by_batch: dict[str, int] = {}
@@ -1345,23 +1701,27 @@ def compute_plateau_framework_pr(
     max_gains: list[float] = []
     for entry in complete_tail:
         try:
-            max_gains.append(
-                float(entry.get("max_gain_pct_observed_in_batch") or 0.0)
-            )
+            max_gains.append(float(entry.get("max_gain_pct_observed_in_batch") or 0.0))
         except (TypeError, ValueError):
             max_gains.append(0.0)
-    triggered = bool(max_gains) and all(
-        g < float(keep_gain_threshold_pct) for g in max_gains
-    )
+    triggered = bool(max_gains) and all(g < float(keep_gain_threshold_pct) for g in max_gains)
     return triggered, {
-        "lookback":                lookback_int,
+        "lookback": lookback_int,
         "keep_gain_pct_threshold": float(keep_gain_threshold_pct),
-        "batch_max_gains":         list(reversed(max_gains)),
+        "batch_max_gains": list(reversed(max_gains)),
     }
 
 
 def _framework_pr_pending_candidate_count(state: Any) -> int:
-    """Count candidates discovered into a batch but missing a progress row."""
+    """Count candidates discovered into a batch but missing a progress row.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``framework_pr_batches``
+            and ``framework_pr_phase_progress``.
+
+    Returns:
+        int: Total candidates across all batches that lack a progress row.
+    """
     batches = getattr(state, "framework_pr_batches", None) or []
     if not isinstance(batches, list) or not batches:
         return 0
@@ -1390,14 +1750,25 @@ def exit_normal_framework_pr(
     *,
     max_hours: float | None = None,
     now_unix: float | None = None,
-    force_exit_hours_remaining_ratio: float = (
-        DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO
-    ),
+    force_exit_hours_remaining_ratio: float = (DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO),
 ) -> tuple[str, dict[str, Any]] | None:
     """FRAMEWORK_PR normal exit.
 
     Priority: 0. HARD force-exit when remaining < ratio*max_hours →
     ``framework_pr_force_exit_low_budget``; 1. ``framework_pr_phase_done``; else ``None``.
+
+    Args:
+        state (Any): Frozen SharedState view; may expose a ``remaining_minutes``
+            callable and ``framework_pr_phase_done`` flag.
+        max_hours (float | None): Session wall-clock budget in hours; enables
+            the force-exit gate when positive.
+        now_unix (float | None): Override for the current time.
+        force_exit_hours_remaining_ratio (float): Fraction of ``max_hours``
+            below which the force-exit gate fires.
+
+    Returns:
+        tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the
+        FRAMEWORK_PR exit, or ``None`` when the phase should continue.
     """
     if max_hours and max_hours > 0:
         remaining_min_fn = getattr(state, "remaining_minutes", None)
@@ -1413,11 +1784,11 @@ def exit_normal_framework_pr(
         threshold_minutes = float(force_exit_hours_remaining_ratio) * float(max_hours) * 60.0
         if remaining_minutes < threshold_minutes:
             return "framework_pr_force_exit_low_budget", {
-                "evidence":               "force_exit",
-                "remaining_minutes":      remaining_minutes,
-                "threshold_minutes":      threshold_minutes,
-                "hours_remaining_ratio":  float(force_exit_hours_remaining_ratio),
-                "max_hours":              float(max_hours),
+                "evidence": "force_exit",
+                "remaining_minutes": remaining_minutes,
+                "threshold_minutes": threshold_minutes,
+                "hours_remaining_ratio": float(force_exit_hours_remaining_ratio),
+                "max_hours": float(max_hours),
                 "pending_candidate_count": _framework_pr_pending_candidate_count(state),
             }
 
@@ -1433,7 +1804,16 @@ def exit_normal_framework_pr(
 
 def _post_prelude_target(*, explore_enabled: bool, kernel_enabled: bool) -> str:
     """First active phase after PRELUDE / FRAMEWORK_PR: EXPLORE, else KERNEL,
-    else SWEEP (``--no-explore`` / ``--no-kernel`` collapse the chain)."""
+    else SWEEP (``--no-explore`` / ``--no-kernel`` collapse the chain).
+
+    Args:
+        explore_enabled (bool): Whether the EXPLORE phase is enabled.
+        kernel_enabled (bool): Whether the KERNEL phase is enabled.
+
+    Returns:
+        str: ``PHASE_EXPLORE``, ``PHASE_KERNEL``, or ``PHASE_SWEEP`` depending on
+        which phases are enabled.
+    """
     if explore_enabled:
         return PHASE_EXPLORE
     if kernel_enabled:
@@ -1454,6 +1834,22 @@ def compute_next_phase(
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
     Priority (Inv-8.2 + §3.8 §7.1): global terminal first, then abort > exit_terminal > exit_normal.
+
+    Args:
+        state (Any): Frozen SharedState view exposing the current ``phase``.
+        kernel_enabled (bool): Whether the KERNEL phase is enabled.
+        budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
+            to ``state.phase_budget_pct`` when None.
+        now_unix (float | None): Override for the current time.
+        framework_phase_enabled (bool): Whether the FRAMEWORK_PR phase runs
+            after PRELUDE.
+        explore_enabled (bool): Whether the EXPLORE phase is enabled.
+        max_hours (float | None): Session wall-clock budget in hours (used by
+            the FRAMEWORK_PR force-exit gate).
+
+    Returns:
+        tuple[str, str, dict[str, Any]] | None: ``(next_phase, reason,
+        evidence)`` when a transition fires, else ``None``.
     """
     current = (getattr(state, "phase", "") or "").strip().upper() or PHASE_PRELUDE
     overrides = _resolve_plateau_overrides(state)
@@ -1478,7 +1874,8 @@ def compute_next_phase(
             # Framework off → first active phase; ``explore_skipped`` stamped
             # when EXPLORE is bypassed.
             target = _post_prelude_target(
-                explore_enabled=explore_enabled, kernel_enabled=kernel_enabled,
+                explore_enabled=explore_enabled,
+                kernel_enabled=kernel_enabled,
             )
             evidence = dict(norm[1])
             if target != PHASE_EXPLORE:
@@ -1491,15 +1888,18 @@ def compute_next_phase(
             state,
             max_hours=max_hours,
             now_unix=now_unix,
-            force_exit_hours_remaining_ratio=float(overrides.get(
-                "framework_pr_force_exit_hours_ratio",
-                DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO,
-            )),
+            force_exit_hours_remaining_ratio=float(
+                overrides.get(
+                    "framework_pr_force_exit_hours_ratio",
+                    DEFAULT_FRAMEWORK_PR_FORCE_EXIT_HOURS_REMAINING_RATIO,
+                )
+            ),
         )
         if norm is not None:
             # FRAMEWORK_PR → EXPLORE (or KERNEL/SWEEP when collapsed).
             target = _post_prelude_target(
-                explore_enabled=explore_enabled, kernel_enabled=kernel_enabled,
+                explore_enabled=explore_enabled,
+                kernel_enabled=kernel_enabled,
             )
             evidence = dict(norm[1])
             if target != PHASE_EXPLORE:
@@ -1512,14 +1912,18 @@ def compute_next_phase(
             state,
             budget_pct=budget_pct,
             now_unix=now_unix,
-            force_exit_hours_remaining=float(overrides.get(
-                "force_exit_hours_remaining",
-                DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
-            )),
-            force_exit_budget_pct=float(overrides.get(
-                "force_exit_budget_pct",
-                DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
-            )),
+            force_exit_hours_remaining=float(
+                overrides.get(
+                    "force_exit_hours_remaining",
+                    DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
+                )
+            ),
+            force_exit_budget_pct=float(
+                overrides.get(
+                    "force_exit_budget_pct",
+                    DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
+                )
+            ),
         )
         if norm is not None:
             # Exhausted EXPLORE leverage (plateau / skip_to_sweep) is not
@@ -1527,9 +1931,14 @@ def compute_next_phase(
             # it. Only when KERNEL is disabled does EXPLORE wind down to SWEEP.
             if kernel_enabled:
                 return PHASE_KERNEL, norm[0], norm[1]
-            return PHASE_SWEEP, "no_kernel_skipped", {
-                "passed_through_reason": norm[0], **norm[1],
-            }
+            return (
+                PHASE_SWEEP,
+                "no_kernel_skipped",
+                {
+                    "passed_through_reason": norm[0],
+                    **norm[1],
+                },
+            )
         return None
 
     if current == PHASE_KERNEL:
@@ -1554,12 +1963,16 @@ def compute_next_phase(
                 # (also picks up newly-merged upstream PRs) when enabled, else
                 # EXPLORE. The Coordinator resets that phase's per-cycle state so
                 # it does not instantly self-skip as "already done".
-                reloop_target = (
-                    PHASE_FRAMEWORK_PR if framework_phase_enabled else PHASE_EXPLORE
+                reloop_target = PHASE_FRAMEWORK_PR if framework_phase_enabled else PHASE_EXPLORE
+                return (
+                    reloop_target,
+                    "cycle_reloop",
+                    {
+                        **norm[1],
+                        **reloop_ev,
+                        "loopback": True,
+                    },
                 )
-                return reloop_target, "cycle_reloop", {
-                    **norm[1], **reloop_ev, "loopback": True,
-                }
             # R7: if cyclic looping was blocked because leverage is exhausted
             # (global convergence) or the safety cap is hit, terminate the run
             # with a terminal stop_reason instead of idling in CLOSE until the
@@ -1567,9 +1980,15 @@ def compute_next_phase(
             # deadline (non-terminal CLOSE), matching the monotonic chain.
             blocked = str(reloop_ev.get("reloop_blocked") or "")
             if blocked in ("global_converged", "max_cycles"):
-                return PHASE_CLOSE, "global_converged", {
-                    **norm[1], **reloop_ev, "terminal": True,
-                }
+                return (
+                    PHASE_CLOSE,
+                    "global_converged",
+                    {
+                        **norm[1],
+                        **reloop_ev,
+                        "terminal": True,
+                    },
+                )
             return PHASE_CLOSE, norm[0], {**norm[1], **reloop_ev}
         return None
 
@@ -1592,15 +2011,29 @@ def make_history_row(
 
     ``cycle`` stamps the R1 macro-cycle this transition belongs to (0 for the
     first pass / legacy non-cyclic runs).
+
+    Args:
+        from_phase (str): Source phase name; normalized to upper-case.
+        to_phase (str): Destination phase name; normalized to upper-case.
+        reason (str): Transition reason; stripped, left unvalidated for resume
+            tools.
+        evidence (dict[str, Any] | None): Supporting evidence; copied (``None``
+            → empty dict).
+        ts (str): ISO timestamp string for the transition.
+        ts_unix (float): Unix timestamp for the transition.
+        cycle (int): R1 macro-cycle index this transition belongs to.
+
+    Returns:
+        dict[str, Any]: The canonical phase_history row.
     """
     return {
         "from_phase": (from_phase or "").strip().upper(),
-        "to_phase":   (to_phase or "").strip().upper(),
-        "reason":     (reason or "").strip(),
-        "evidence":   dict(evidence or {}),
-        "ts":         ts,
-        "ts_unix":    float(ts_unix or 0.0),
-        "cycle":      int(cycle or 0),
+        "to_phase": (to_phase or "").strip().upper(),
+        "reason": (reason or "").strip(),
+        "evidence": dict(evidence or {}),
+        "ts": ts,
+        "ts_unix": float(ts_unix or 0.0),
+        "cycle": int(cycle or 0),
     }
 
 
@@ -1630,21 +2063,23 @@ LIFECYCLE_STATUS_ERROR = "ERROR"
 # phase's ENTER implies the previous one finished, so phase rows are never
 # expected to have a matching END (see SKILL.md reading tip).
 LIFECYCLE_STATUS_ENTER = "ENTER"
-LIFECYCLE_STATUSES: frozenset[str] = frozenset({
-    LIFECYCLE_STATUS_START,
-    LIFECYCLE_STATUS_END,
-    LIFECYCLE_STATUS_ERROR,
-    LIFECYCLE_STATUS_ENTER,
-})
+LIFECYCLE_STATUSES: frozenset[str] = frozenset(
+    {
+        LIFECYCLE_STATUS_START,
+        LIFECYCLE_STATUS_END,
+        LIFECYCLE_STATUS_ERROR,
+        LIFECYCLE_STATUS_ENTER,
+    }
+)
 
 # Human-friendly labels for the six coordinator phases.
 PHASE_HUMAN_LABELS: dict[str, str] = {
-    PHASE_PRELUDE:      "Prelude (baseline + roofline)",
+    PHASE_PRELUDE: "Prelude (baseline + roofline)",
     PHASE_FRAMEWORK_PR: "Framework PR",
-    PHASE_EXPLORE:      "Explore (params / backends)",
-    PHASE_KERNEL:       "Kernel optimization",
-    PHASE_SWEEP:        "Concurrency sweep",
-    PHASE_CLOSE:        "Close (report)",
+    PHASE_EXPLORE: "Explore (params / backends)",
+    PHASE_KERNEL: "Kernel optimization",
+    PHASE_SWEEP: "Concurrency sweep",
+    PHASE_CLOSE: "Close (report)",
 }
 
 # Human-friendly labels for the lifecycle *steps* surfaced to operators,
@@ -1653,15 +2088,15 @@ PHASE_HUMAN_LABELS: dict[str, str] = {
 # names; several map to the same label because the simplified #266 pipeline
 # collapses multiple internal steps.
 LIFECYCLE_STEP_LABELS: dict[str, str] = {
-    "roofline":          "TraceLens",
-    "trace_analyze":     "TraceLens",
-    "run_gemm_tuning":   "GEMM tuning",
-    "run_optimization":  "GEAK",
-    "integrate":         "Integrate",
-    "apply_patch":       "Integrate",
-    "explore":           "Validate (stack rebench)",
-    "sweep":             "Concurrency sweep",
-    "report":            "Report",
+    "roofline": "TraceLens",
+    "trace_analyze": "TraceLens",
+    "run_gemm_tuning": "GEMM tuning",
+    "run_optimization": "GEAK",
+    "integrate": "Integrate",
+    "apply_patch": "Integrate",
+    "explore": "Validate (stack rebench)",
+    "sweep": "Concurrency sweep",
+    "report": "Report",
     "session_breakdown": "Report (session breakdown)",
 }
 
@@ -1672,6 +2107,13 @@ def lifecycle_label(name: str) -> str:
     Falls back to the phase-label table, then to the verbatim name, so an
     unmapped step still produces a sensible event rather than an empty
     label.
+
+    Args:
+        name (str): A coordinator step or phase name; stripped before lookup.
+
+    Returns:
+        str: The mapped step label, else the mapped phase label, else the
+        verbatim ``name``.
     """
     key = (name or "").strip()
     if key in LIFECYCLE_STEP_LABELS:
@@ -1701,20 +2143,33 @@ def make_lifecycle_event(
     that want the strict check go through :data:`LIFECYCLE_STATUSES`.
     Empty / ``None`` artifact values are dropped so the rendered event only
     advertises paths that actually exist.
+
+    Args:
+        step (str): Machine step/handler name.
+        status (str): Event status (e.g. START/END/ENTER); not hard-validated.
+        phase (str): Active coordinator phase; normalized to upper-case.
+        label (str | None): Human-friendly label; resolved via
+            :func:`lifecycle_label` when None.
+        artifacts (dict[str, str] | None): Artifact paths; empty/None values are
+            dropped.
+        detail (str): Free-form detail string; stripped.
+        duration_s (float | None): Optional duration in seconds; omitted when
+            unparseable.
+        seq (int): Monotonic sequence number for the event.
+        ts (str): ISO timestamp string for the event.
+
+    Returns:
+        dict[str, Any]: The canonical lifecycle event row.
     """
     event: dict[str, Any] = {
-        "seq":    int(seq),
-        "ts":     ts,
-        "phase":  (phase or "").strip().upper(),
-        "step":   (step or "").strip(),
-        "label":  (label or lifecycle_label(step)),
+        "seq": int(seq),
+        "ts": ts,
+        "phase": (phase or "").strip().upper(),
+        "step": (step or "").strip(),
+        "label": (label or lifecycle_label(step)),
         "status": (status or "").strip().upper(),
         "detail": (detail or "").strip(),
-        "artifacts": {
-            str(k): str(v)
-            for k, v in (artifacts or {}).items()
-            if v not in (None, "")
-        },
+        "artifacts": {str(k): str(v) for k, v in (artifacts or {}).items() if v not in (None, "")},
     }
     if duration_s is not None:
         try:
@@ -1724,6 +2179,135 @@ def make_lifecycle_event(
             # failing event creation: lifecycle logging is operator-facing
             # diagnostics and must never break the orchestration loop.
             pass
+    return event
+
+
+# ---------------------------------------------------------------------------
+# Phase-transition / lifecycle write-owner functions (folded back from the
+# former shared_state_phase.py satellite; phase 6B). They take ``state`` first
+# and own the phase_history / lifecycle bookkeeping, which belongs to this
+# phase-state domain (they build rows via make_history_row / make_lifecycle_event
+# defined above). ``SharedState`` keeps forwarding shims so existing callers
+# (``state.record_phase_transition`` etc.) are unchanged.
+# ---------------------------------------------------------------------------
+def record_phase_transition(
+    state,
+    *,
+    to_phase: str,
+    reason: str,
+    evidence: dict[str, Any] | None = None,
+    ts: str | None = None,
+    ts_unix: float | None = None,
+) -> dict[str, Any]:
+    """Append a phase_history row and atomically update ``phase`` fields; ``phase``/``phase_history`` are CORE_STATE_FIELDS so LLM update_state is rejected. Returns the inserted row.
+
+    Args:
+        to_phase (str): The phase being entered.
+        reason (str): The transition reason (from ``PHASE_EXIT_REASONS``).
+        evidence (dict[str, Any] | None): Optional structured evidence
+            attached to the history row.
+        ts (str | None): Optional ISO timestamp; defaults to now (UTC).
+        ts_unix (float | None): Optional Unix epoch matching ``ts``;
+            defaults to the current time.
+
+    Returns:
+        dict[str, Any]: The inserted phase_history row.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    import time as _time
+    from .shared_state import _PHASE_HISTORY_CAP
+
+    now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
+    now_unix = float(ts_unix if ts_unix is not None else _time.time())
+    row = make_history_row(
+        from_phase=state.phase or "",
+        to_phase=to_phase,
+        reason=reason,
+        evidence=evidence,
+        ts=now_ts,
+        ts_unix=now_unix,
+        cycle=int(getattr(state, "macro_cycle", 0) or 0),
+    )
+    history = list(state.phase_history or [])
+    history.append(row)
+    if len(history) > _PHASE_HISTORY_CAP:
+        history = history[-_PHASE_HISTORY_CAP:]
+    state.phase_history = history
+    state.phase = row["to_phase"]
+    state.phase_started_ts = now_ts
+    state.phase_started_unix = now_unix
+    return row
+
+
+def record_lifecycle_event(
+    state,
+    *,
+    step: str,
+    status: str,
+    phase: str | None = None,
+    label: str | None = None,
+    artifacts: dict[str, str] | None = None,
+    detail: str = "",
+    duration_s: float | None = None,
+    ts: str | None = None,
+) -> dict[str, Any]:
+    """Append a structured lifecycle event (#266, method 1).
+
+    Each event marks a phase/step boundary so operators can see — in
+    state.json, and via the launcher in chat — that a phase ran, where
+    its outputs went, and which artifact feeds the next phase.
+
+    ``step`` is the machine step/handler name (e.g. ``trace_analyze``);
+    ``label`` defaults to the human-friendly name from
+    :data:`LIFECYCLE_STEP_LABELS` so both naming dimensions are carried.
+    ``phase`` defaults to the current coordinator phase. ``seq`` is
+    monotonic across the cap so consumers can order events even after the
+    oldest rows are trimmed.
+
+    Coordinator-only writer (``policy.CORE_STATE_FIELDS`` guards
+    ``lifecycle`` so an LLM ``update_state`` cannot forge events).
+    Returns the inserted row.
+
+    Args:
+        step (str): The machine step/handler name (e.g. ``trace_analyze``).
+        status (str): The boundary status (e.g. ``START`` / ``END`` /
+            ``ERROR``).
+        phase (str | None): The owning phase; defaults to the current
+            coordinator phase.
+        label (str | None): Human-friendly step name; defaults to the
+            mapping in ``phase_state.LIFECYCLE_STEP_LABELS``.
+        artifacts (dict[str, str] | None): Optional produced-artifact
+            path map recorded on the event.
+        detail (str): Optional free-text detail.
+        duration_s (float | None): Optional step duration in seconds.
+        ts (str | None): Optional ISO timestamp; defaults to now (UTC).
+
+    Returns:
+        dict[str, Any]: The inserted lifecycle event row.
+    """
+    from .shared_state import _LIFECYCLE_CAP, _now_iso
+
+    events = state.lifecycle
+    if events is None:
+        events = state.lifecycle = []
+    next_seq = (int(events[-1].get("seq", -1)) + 1) if events else 0
+    event = make_lifecycle_event(
+        step=step,
+        status=status,
+        phase=(phase if phase is not None else (state.phase or "")),
+        label=label,
+        artifacts=artifacts,
+        detail=detail,
+        duration_s=duration_s,
+        seq=next_seq,
+        ts=ts or _now_iso(),
+    )
+    # Append in place and trim only when over the cap, so the common
+    # per-step-boundary path is an O(1) append rather than copying the
+    # whole list on every call.
+    events.append(event)
+    if len(events) > _LIFECYCLE_CAP:
+        del events[: -_LIFECYCLE_CAP]
     return event
 
 

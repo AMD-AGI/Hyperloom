@@ -19,6 +19,7 @@ import httpx
 
 # ── Public types ────────────────────────────────────────────────────────
 
+
 @dataclass(frozen=True)
 class SearchHit:
     """One normalized search result entry."""
@@ -73,7 +74,10 @@ class ProviderError(RuntimeError):
 # ── Tavily ──────────────────────────────────────────────────────────────
 
 _TAVILY_FRESHNESS_DAYS: dict[str, int] = {
-    "day": 1, "week": 7, "month": 30, "year": 365,
+    "day": 1,
+    "week": 7,
+    "month": 30,
+    "year": 365,
 }
 
 
@@ -157,7 +161,10 @@ class TavilyProvider:
 # ── Serper ──────────────────────────────────────────────────────────────
 
 _SERPER_FRESHNESS_TBS: dict[str, str] = {
-    "day": "qdr:d", "week": "qdr:w", "month": "qdr:m", "year": "qdr:y",
+    "day": "qdr:d",
+    "week": "qdr:w",
+    "month": "qdr:m",
+    "year": "qdr:y",
 }
 
 
@@ -247,6 +254,7 @@ class SerperProvider:
 
 # ── helpers ─────────────────────────────────────────────────────────────
 
+
 def _hostname_in(url: str, denylist: tuple[str, ...]) -> bool:
     """Report whether a URL's host matches or is a subdomain of a denylist.
 
@@ -262,6 +270,7 @@ def _hostname_in(url: str, denylist: tuple[str, ...]) -> bool:
         return False
     try:
         from urllib.parse import urlparse
+
         host = (urlparse(url).hostname or "").lower()
     except (ValueError, AttributeError):
         return False

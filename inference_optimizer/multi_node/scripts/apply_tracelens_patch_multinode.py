@@ -49,7 +49,9 @@ _EXTRA_SENTINEL_MARKERS: tuple[str, ...] = (
 
 # Path within the TraceLens checkout that hosts the patch sets.
 _PATCH_TREE_REL = (
-    "examples", "custom_workflows", "inference_analysis",
+    "examples",
+    "custom_workflows",
+    "inference_analysis",
     "sglang_roofline_patches",
 )
 
@@ -58,14 +60,26 @@ _GIT_TIMEOUT_SEC = 30
 
 
 def _log(msg: str) -> None:
-    """Stderr-only timestamped log line (stdout is reserved for the final JSON)."""
+    """Stderr-only timestamped log line (stdout is reserved for the final JSON).
+
+    Args:
+        msg: The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[tracelens_patch_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _versioned_patches_subdir_name(version: str) -> str | None:
-    """``0.5.11`` -> ``sglang_0_5_11`` (tolerates ``-rc1`` / ``+local`` suffixes)."""
+    """``0.5.11`` -> ``sglang_0_5_11`` (tolerates ``-rc1`` / ``+local`` suffixes).
+
+    Args:
+        version: The sglang version string to convert.
+
+    Returns:
+        str | None: The versioned subdir name, or ``None`` if ``version`` is
+        empty or not a dotted numeric form.
+    """
     text = (version or "").strip()
     if not text:
         return None
@@ -77,7 +91,16 @@ def _versioned_patches_subdir_name(version: str) -> str | None:
 
 
 def _resolve_sglang_install(sglang_module_path: Path) -> tuple[Path, int] | None:
-    """Decide ``(apply_root, -p<N> strip)`` from any sglang anchor (wheel/editable/namespace-dir layouts); ``None`` if unrecognised."""
+    """Decide ``(apply_root, -p<N> strip)`` from any sglang anchor (wheel/editable/namespace-dir layouts); ``None`` if unrecognised.
+
+    Args:
+        sglang_module_path: A path anchored in the sglang install (module
+            file, submodule file, or namespace dir).
+
+    Returns:
+        tuple[Path, int] | None: The ``(apply_root, strip_level)`` pair, or
+        ``None`` if the layout is not recognised.
+    """
     resolved = sglang_module_path.resolve()
     # Pass 1: walk up to the ``sglang/`` package dir (the one with a ``srt/`` subdir).
     pkg_dir: Path | None = None
@@ -125,7 +148,15 @@ def _all_markers_present(path: Path, markers: tuple[str, ...]) -> bool:
 
 
 def _run_git(args: tuple[str, ...], cwd: Path) -> tuple[int, str, str]:
-    """Run ``git <args>``; return ``(rc, stdout, stderr)`` (never raises on non-zero exit)."""
+    """Run ``git <args>``; return ``(rc, stdout, stderr)`` (never raises on non-zero exit).
+
+    Args:
+        args: The git subcommand and arguments (without the leading ``git``).
+        cwd: Working directory to run git in.
+
+    Returns:
+        tuple[int, str, str]: The ``(returncode, stdout, stderr)`` triple.
+    """
     proc = subprocess.run(  # noqa: S603
         ["git", *args],
         cwd=str(cwd),
@@ -143,7 +174,19 @@ def _apply_on_pod(
     tracelens_internal_root: str,
     sglang_version_pin: str | None,
 ) -> dict[str, Any]:
-    """Apply (or verify) the TraceLens SGLang patch set on this pod; never raises (failures become ``status=failed``)."""
+    """Apply (or verify) the TraceLens SGLang patch set on this pod; never raises (failures become ``status=failed``).
+
+    Args:
+        tracelens_root: Path to the public TraceLens checkout on the pod.
+        tracelens_internal_root: Path to the TraceLens-internal checkout
+            (reserved; not consumed by current patch logic).
+        sglang_version_pin: Optional advisory version pin, logged on mismatch.
+
+    Returns:
+        dict[str, Any]: The per-pod summary with ``status`` (``applied``,
+        ``skipped``, or ``failed``), resolved version, applied patches, and
+        elapsed time.
+    """
     host = socket.gethostname()
     started = time.time()
     result: dict[str, Any] = {
@@ -168,12 +211,14 @@ def _apply_on_pod(
         version = ""
         try:
             from sglang.version import __version__ as _sv  # type: ignore[import-not-found]
+
             version = (_sv or "").strip()
         except Exception:  # noqa: BLE001
             pass
         if not version:
             try:
                 import importlib.metadata as _md
+
                 version = (_md.version("sglang") or "").strip()
             except Exception:  # noqa: BLE001
                 pass
@@ -181,10 +226,7 @@ def _apply_on_pod(
             version = (getattr(sglang, "__version__", "") or "").strip()
         result["sglang_version"] = version or None
         if sglang_version_pin and version and version != sglang_version_pin:
-            _log(
-                f"version pin {sglang_version_pin!r} != installed {version!r} "
-                "— proceeding (pin is advisory)"
-            )
+            _log(f"version pin {sglang_version_pin!r} != installed {version!r} — proceeding (pin is advisory)")
 
         # Install-root anchor: sglang.__file__ (editable), else the
         # scheduler_profiler_mixin submodule file, else sglang.__path__[0].
@@ -194,6 +236,7 @@ def _apply_on_pod(
         else:
             try:
                 import sglang.srt.managers.scheduler_profiler_mixin as _spm  # type: ignore[import-not-found]
+
                 if _spm.__file__:
                     anchor_path = Path(_spm.__file__)
             except Exception:  # noqa: BLE001
@@ -228,9 +271,8 @@ def _apply_on_pod(
             sentinel_path = apply_root / Path(*Path(_SENTINEL_RELPATH).parts[2:])
             extra_sentinel = apply_root / Path(*Path(_EXTRA_SENTINEL_RELPATH).parts[2:])
 
-        if (
-            _all_markers_present(sentinel_path, _SENTINEL_MARKERS)
-            and _all_markers_present(extra_sentinel, _EXTRA_SENTINEL_MARKERS)
+        if _all_markers_present(sentinel_path, _SENTINEL_MARKERS) and _all_markers_present(
+            extra_sentinel, _EXTRA_SENTINEL_MARKERS
         ):
             result["status"] = "skipped"
             result["patches_skipped_already_present"] = True
@@ -239,17 +281,13 @@ def _apply_on_pod(
         subdir = _versioned_patches_subdir_name(version)
         if subdir is None:
             result["status"] = "failed"
-            result["error"] = (
-                f"cannot derive per-version patches subdir from version "
-                f"{version!r}"
-            )
+            result["error"] = f"cannot derive per-version patches subdir from version {version!r}"
             return result
         patches_dir = Path(tracelens_root, *_PATCH_TREE_REL, subdir)
         if not patches_dir.is_dir():
             result["status"] = "failed"
             result["error"] = (
-                f"TraceLens patches dir missing: {patches_dir} "
-                "(upgrade TraceLens to Hyperloom_integration_v0.3.1+)"
+                f"TraceLens patches dir missing: {patches_dir} (upgrade TraceLens to Hyperloom_integration_v0.3.1+)"
             )
             return result
         patches = tuple(sorted(patches_dir.glob("*.patch")))
@@ -262,33 +300,30 @@ def _apply_on_pod(
         strip_arg = f"-p{strip}"
         for p in patches:
             rc, _, stderr = _run_git(
-                ("apply", "--check", strip_arg, str(p)), apply_root,
+                ("apply", "--check", strip_arg, str(p)),
+                apply_root,
             )
             if rc != 0:
                 result["status"] = "failed"
-                result["error"] = (
-                    f"git apply --check {strip_arg} {p.name} failed "
-                    f"(rc={rc}): {stderr.strip()[:240]}"
-                )
+                result["error"] = f"git apply --check {strip_arg} {p.name} failed (rc={rc}): {stderr.strip()[:240]}"
                 return result
 
         # Apply for real; track applied for rollback on mid-set failure.
         applied: list[Path] = []
         for p in patches:
             rc, _, stderr = _run_git(
-                ("apply", strip_arg, str(p)), apply_root,
+                ("apply", strip_arg, str(p)),
+                apply_root,
             )
             if rc != 0:
                 _log(f"apply failed at {p.name} (rc={rc}); rolling back {len(applied)} patches")
                 for prev in reversed(applied):
                     _run_git(
-                        ("apply", "-R", strip_arg, str(prev)), apply_root,
+                        ("apply", "-R", strip_arg, str(prev)),
+                        apply_root,
                     )
                 result["status"] = "failed"
-                result["error"] = (
-                    f"git apply {strip_arg} {p.name} failed (rc={rc}): "
-                    f"{stderr.strip()[:240]}"
-                )
+                result["error"] = f"git apply {strip_arg} {p.name} failed (rc={rc}): {stderr.strip()[:240]}"
                 return result
             applied.append(p)
             result["patches_applied"].append(p.name)
@@ -335,14 +370,17 @@ def _fanout_to_all_nodes(
         node_id = n["NodeID"]
         opts = actor_apply.options(
             scheduling_strategy=NodeAffinitySchedulingStrategy(
-                node_id=node_id, soft=False,
+                node_id=node_id,
+                soft=False,
             ),
         )
-        actors.append(opts.remote(
-            tracelens_root=tracelens_root,
-            tracelens_internal_root=tracelens_internal_root,
-            sglang_version_pin=sglang_version_pin,
-        ))
+        actors.append(
+            opts.remote(
+                tracelens_root=tracelens_root,
+                tracelens_internal_root=tracelens_internal_root,
+                sglang_version_pin=sglang_version_pin,
+            )
+        )
     results = ray.get(actors)
     return list(results)
 
@@ -369,7 +407,7 @@ def main() -> int:
         "--tracelens-internal-root",
         default=os.environ.get("TRACELENS_INTERNAL_ROOT", ""),
         help="path to TraceLens-internal checkout (default: $TRACELENS_INTERNAL_ROOT). "
-             "Reserved for future use; not consumed by current patch logic.",
+        "Reserved for future use; not consumed by current patch logic.",
     )
     parser.add_argument(
         "--sglang-version-pin",
@@ -380,27 +418,35 @@ def main() -> int:
         "--local",
         action="store_true",
         help="patch THIS pod only (no ray fan-out). Used by the dynamo SSH "
-             "backend, which ships+runs this script on each GPU pod directly. "
-             "ray is never imported in this mode.",
+        "backend, which ships+runs this script on each GPU pod directly. "
+        "ray is never imported in this mode.",
     )
     args = parser.parse_args()
 
     if not args.tracelens_root or not Path(args.tracelens_root).is_dir():
-        print(json.dumps({
-            "status": "failed",
-            "error": (
-                f"--tracelens-root invalid or missing: {args.tracelens_root!r}"
-            ),
-            "per_pod": [],
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "error": (f"--tracelens-root invalid or missing: {args.tracelens_root!r}"),
+                    "per_pod": [],
+                },
+                indent=2,
+            )
+        )
         return 2
 
     if shutil.which("git") is None:
-        print(json.dumps({
-            "status": "failed",
-            "error": "git not on PATH in pod image",
-            "per_pod": [],
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "error": "git not on PATH in pod image",
+                    "per_pod": [],
+                },
+                indent=2,
+            )
+        )
         return 2
 
     # --local: dynamo SSH backend. Patch only this pod (no ray). The caller
@@ -423,11 +469,16 @@ def main() -> int:
             sglang_version_pin=args.sglang_version_pin or None,
         )
     except Exception as e:  # noqa: BLE001
-        print(json.dumps({
-            "status": "failed",
-            "error": f"ray fan-out aborted: {type(e).__name__}: {e}",
-            "per_pod": [],
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "error": f"ray fan-out aborted: {type(e).__name__}: {e}",
+                    "per_pod": [],
+                },
+                indent=2,
+            )
+        )
         return 3
 
     # Aggregate: overall is ``applied`` only if every pod succeeded
@@ -443,10 +494,16 @@ def main() -> int:
     if overall == "applied" and not any_fresh:
         overall = "skipped"  # every pod already patched
 
-    print(json.dumps({
-        "status": overall,
-        "per_pod": per_pod,
-    }, indent=2, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "status": overall,
+                "per_pod": per_pod,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0 if overall in ("applied", "skipped") else 1
 
 

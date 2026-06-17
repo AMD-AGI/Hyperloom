@@ -245,14 +245,16 @@ async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path
         def set_stop_reason(self, value: str) -> str:
             self.stop_reason = value
             return value
+
     coord.shared_state = _BareState()
-    coord.role_registry = {}   # _kernel_enabled() reads role_registry
+    coord.role_registry = {}  # _kernel_enabled() reads role_registry
     coord.cortex_kb = None
 
     class _StubTaskRegistry:
         async def create_or_return_existing(self, **kwargs):
             from inference_optimizer.orchestrator.task_registry import Task
             import uuid as _uuid
+
             return Task(
                 task_id=_uuid.uuid4().hex,
                 kind=kwargs["kind"],
@@ -263,10 +265,15 @@ async def test_on_phase_entered_only_explore_fires_pr_feed_warmup(tmp_path: Path
 
         async def get(self, task_id):
             from inference_optimizer.orchestrator.task_registry import Task
+
             return Task(
-                task_id=task_id, kind="report", state="succeeded",
-                params={}, idempotency_key="",
+                task_id=task_id,
+                kind="report",
+                state="succeeded",
+                params={},
+                idempotency_key="",
             )
+
     coord.tasks = _StubTaskRegistry()
 
     await coord._on_phase_entered(from_phase="PRELUDE", to_phase="KERNEL")
@@ -299,7 +306,9 @@ def test_bootstrap_writes_status_marker_when_disabled(tmp_path: Path):
 
     args = _build_args(pr_monitor_enabled=False)
     _bootstrap_knowledge_plane(
-        args, cortex_client=None, session_dir=tmp_path,
+        args,
+        cortex_client=None,
+        session_dir=tmp_path,
     )
     marker = pr_monitor_status_json(tmp_path)
     assert marker.exists(), "status marker should be written"
@@ -309,7 +318,8 @@ def test_bootstrap_writes_status_marker_when_disabled(tmp_path: Path):
 
 
 def test_bootstrap_marker_records_ir3_auto_degrade(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ):
     """IR-3 auto-degrade: marker shows ``enabled=False`` + ``ir3_auto`` in status_text."""
     from inference_optimizer.cli import _bootstrap_knowledge_plane
@@ -332,7 +342,8 @@ def test_bootstrap_marker_records_ir3_auto_degrade(
         "from_args",
         classmethod(
             lambda cls, **kw: _Stub(
-                url=kw.get("url") or "", enabled=kw.get("enabled", True),
+                url=kw.get("url") or "",
+                enabled=kw.get("enabled", True),
             ),
         ),
     )
@@ -342,7 +353,9 @@ def test_bootstrap_marker_records_ir3_auto_degrade(
         pr_monitor_url="https://pr-monitor.test",
     )
     _bootstrap_knowledge_plane(
-        args, cortex_client=None, session_dir=tmp_path,
+        args,
+        cortex_client=None,
+        session_dir=tmp_path,
     )
     marker = pr_monitor_status_json(tmp_path)
     payload = json.loads(marker.read_text())
@@ -360,14 +373,18 @@ def test_collect_kb_provenance_surfaces_pr_monitor_disabled_warning(
 
     marker = pr_monitor_status_json(tmp_path)
     marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(json.dumps({
-        "enabled": False,
-        "url": "",
-        "reachable": False,
-        "mcp_url": "",
-        "window_days": 30,
-        "status_text": "disabled (--degraded-pr)",
-    }))
+    marker.write_text(
+        json.dumps(
+            {
+                "enabled": False,
+                "url": "",
+                "reachable": False,
+                "mcp_url": "",
+                "window_days": 30,
+                "status_text": "disabled (--degraded-pr)",
+            }
+        )
+    )
 
     warnings_list: list = []
     collect_kb_provenance(
@@ -387,14 +404,18 @@ def test_collect_kb_provenance_surfaces_pr_monitor_unreachable_warning(
 
     marker = pr_monitor_status_json(tmp_path)
     marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(json.dumps({
-        "enabled": True,
-        "url": "https://pr-monitor.test",
-        "reachable": False,
-        "mcp_url": "https://pr-monitor.test/mcp/",
-        "window_days": 30,
-        "status_text": "unreachable at https://pr-monitor.test",
-    }))
+    marker.write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "url": "https://pr-monitor.test",
+                "reachable": False,
+                "mcp_url": "https://pr-monitor.test/mcp/",
+                "window_days": 30,
+                "status_text": "unreachable at https://pr-monitor.test",
+            }
+        )
+    )
 
     warnings_list: list = []
     collect_kb_provenance(
@@ -415,14 +436,18 @@ def test_collect_kb_provenance_no_warning_when_plane_healthy(
 
     marker = pr_monitor_status_json(tmp_path)
     marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(json.dumps({
-        "enabled": True,
-        "url": "https://pr-monitor.test",
-        "reachable": True,
-        "mcp_url": "https://pr-monitor.test/mcp/",
-        "window_days": 30,
-        "status_text": "REST https://pr-monitor.test (window=30d)",
-    }))
+    marker.write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "url": "https://pr-monitor.test",
+                "reachable": True,
+                "mcp_url": "https://pr-monitor.test/mcp/",
+                "window_days": 30,
+                "status_text": "REST https://pr-monitor.test (window=30d)",
+            }
+        )
+    )
 
     warnings_list: list = []
     collect_kb_provenance(
@@ -431,8 +456,9 @@ def test_collect_kb_provenance_no_warning_when_plane_healthy(
         manifest={},
         warnings=warnings_list,
     )
-    assert not any(w.startswith("pr_monitor:") for w in warnings_list), \
+    assert not any(w.startswith("pr_monitor:") for w in warnings_list), (
         f"healthy plane should emit no pr_monitor warning, got: {warnings_list}"
+    )
 
 
 def test_collect_kb_provenance_no_warning_when_marker_missing(
@@ -440,6 +466,7 @@ def test_collect_kb_provenance_no_warning_when_marker_missing(
 ):
     """A missing marker must not produce spurious warnings — absence ≠ failure."""
     from inference_optimizer.breakdown.collectors import collect_kb_provenance
+
     warnings_list: list = []
     collect_kb_provenance(
         tmp_path,
@@ -459,11 +486,18 @@ def test_collect_kb_provenance_summarises_recipe_snapshot_reads(
 
     audit = recipe_snapshot_audit_jsonl(tmp_path)
     audit.parent.mkdir(parents=True, exist_ok=True)
-    audit.write_text("\n".join(json.dumps(r) for r in [
-        {"method": "get_recipe", "remote": "gbrain", "resolution": "remote", "hit": True},
-        {"method": "get_recipe", "remote": "gbrain", "resolution": "remote_miss", "hit": False},
-        {"method": "get_recipe", "remote": "cortex", "resolution": "local", "hit": True},
-    ]) + "\n", encoding="utf-8")
+    audit.write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                {"method": "get_recipe", "remote": "gbrain", "resolution": "remote", "hit": True},
+                {"method": "get_recipe", "remote": "gbrain", "resolution": "remote_miss", "hit": False},
+                {"method": "get_recipe", "remote": "cortex", "resolution": "local", "hit": True},
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     out = collect_kb_provenance(tmp_path, state={}, manifest={}, warnings=[])
     rs = out["recipe_snapshot_reads"]
@@ -478,6 +512,7 @@ def test_collect_kb_provenance_recipe_reads_empty_when_no_audit(
     tmp_path: Path,
 ):
     from inference_optimizer.breakdown.collectors import collect_kb_provenance
+
     out = collect_kb_provenance(tmp_path, state={}, manifest={}, warnings=[])
     assert out["recipe_snapshot_reads"]["count"] == 0
     assert out["recipe_snapshot_reads"]["hits"] == 0
@@ -530,6 +565,7 @@ def test_collect_kb_provenance_surfaces_warm_start_recipe_source(
 def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:
     """Pin the dest-name + default contract the bootstrap reads."""
     from inference_optimizer.cli import _build_parser
+
     parser = _build_parser()
     return parser.parse_args(["optimize", "--degraded-kb", *extra])
 
@@ -551,16 +587,22 @@ def test_cli_degraded_pr_sets_flag_true():
 
 
 def test_cli_pr_monitor_url_override_reaches_namespace():
-    args = _parse_optimize_args([
-        "--pr-monitor-url", "https://localhost:8080/v1",
-    ])
+    args = _parse_optimize_args(
+        [
+            "--pr-monitor-url",
+            "https://localhost:8080/v1",
+        ]
+    )
     assert args.pr_monitor_url == "https://localhost:8080/v1"
 
 
 def test_cli_pr_monitor_mcp_url_override_reaches_namespace():
-    args = _parse_optimize_args([
-        "--pr-monitor-mcp-url", "https://localhost:8080/mcp/",
-    ])
+    args = _parse_optimize_args(
+        [
+            "--pr-monitor-mcp-url",
+            "https://localhost:8080/mcp/",
+        ]
+    )
     assert args.pr_monitor_mcp_url == "https://localhost:8080/mcp/"
 
 
@@ -570,7 +612,8 @@ def test_cli_pr_feed_window_days_override_reaches_namespace():
 
 
 def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ):
     """KB_gaps/Gap-16 — argparse ``args`` values propagate into the KnowledgePlane."""
     from inference_optimizer.cli import _bootstrap_knowledge_plane
@@ -601,13 +644,20 @@ def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
         ),
     )
 
-    args = _parse_optimize_args([
-        "--pr-monitor-url", "https://my-pr-monitor.example/v1",
-        "--pr-monitor-mcp-url", "https://my-pr-monitor.example/mcp/",
-        "--pr-feed-window-days", "14",
-    ])
+    args = _parse_optimize_args(
+        [
+            "--pr-monitor-url",
+            "https://my-pr-monitor.example/v1",
+            "--pr-monitor-mcp-url",
+            "https://my-pr-monitor.example/mcp/",
+            "--pr-feed-window-days",
+            "14",
+        ]
+    )
     plane = _bootstrap_knowledge_plane(
-        args, cortex_client=None, session_dir=tmp_path,
+        args,
+        cortex_client=None,
+        session_dir=tmp_path,
     )
     assert "my-pr-monitor.example" in constructed_urls[-1]
     assert plane.pr_feed_window_days == 14

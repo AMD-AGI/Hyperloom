@@ -57,24 +57,24 @@ async def _noop_prep(ctx) -> dict:
 # wired; adding a real-executor action MUST update this (test_action_catalogue
 # enforces consistency with session_paths._runs_actions()).
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
-    "baseline":          baseline_executor,
+    "baseline": baseline_executor,
     # replay_warm_recipe reuses BaselineExecutor (same Magpie subprocess,
     # applies warm_start_recipe.best_config; Coordinator interprets it via
     # _promote_replay_warm_recipe).
     "replay_warm_recipe": baseline_executor,
     # profile: Coordinator-internal (--no-enable-roofline path); PolicyGate
     # denies LLM-proposed delegate.
-    "profile":           profile_executor,
-    "explore":           explore_executor,
-    "sweep":             sweep_executor,
+    "profile": profile_executor,
+    "explore": explore_executor,
+    "sweep": sweep_executor,
     # conc_sweep: Coordinator-internal post-sweep concurrency comparison
     # (disable via --no-enable-conc-sweep); LLM-proposed conc_sweep denied.
-    "conc_sweep":        conc_sweep_executor,
-    "report":            report_executor,
+    "conc_sweep": conc_sweep_executor,
+    "report": report_executor,
     "session_breakdown": session_breakdown_executor,
     # recover cleans up leaked VRAM owners (optional rocm-smi --gpureset
     # behind HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1).
-    "recover":           recover_executor,
+    "recover": recover_executor,
 }
 
 # Kernel-owned kinds (dispatched via request{target_agent='kernel'}); no-op
@@ -92,6 +92,15 @@ def _build_specialist_executor(
     SpecialistRunner). Production uses the subprocess dispatcher (claude in a
     per-task worktree); --specialist-dispatch-mode / missing claude falls back
     to the in-process ClaudeBackend.
+
+    Args:
+        args: Parsed CLI arguments (specialist model, turns, dispatch mode).
+        session_dir: The current session directory.
+        knowledge_plane: The live KnowledgePlane used to wire MCP config.
+
+    Returns:
+        Callable[[Any], Awaitable[dict]]: An async executor that runs a
+        specialist and returns a result envelope dict.
     """
     import shutil
 
@@ -102,18 +111,10 @@ def _build_specialist_executor(
     )
     from .orchestrator.specialist_subprocess import SpecialistSubprocessConfig
 
-    claude_model = (
-        (getattr(args, "specialist_model", None) or args.claude_model)
-        .strip()
-    )
+    claude_model = (getattr(args, "specialist_model", None) or args.claude_model).strip()
     max_turns = int(getattr(args, "specialist_max_turns", 8) or 8)
-    per_turn_max_seconds = float(
-        getattr(args, "specialist_per_turn_max_seconds", 600.0) or 600.0
-    )
-    dispatch_mode = (
-        str(getattr(args, "specialist_dispatch_mode", "subprocess") or "subprocess")
-        .strip().lower()
-    )
+    per_turn_max_seconds = float(getattr(args, "specialist_per_turn_max_seconds", 600.0) or 600.0)
+    dispatch_mode = str(getattr(args, "specialist_dispatch_mode", "subprocess") or "subprocess").strip().lower()
 
     # Root the specialist worktree at the same set the prompt + PolicyGate
     # path-validator already trust.
@@ -130,9 +131,7 @@ def _build_specialist_executor(
         # Operator --specialist-mcp-config wins; else auto-generate one from
         # the live KnowledgePlane so the subprocess has the PR Monitor MCP
         # server wired (without it mcp__pr_monitor__* tools resolve to nothing).
-        mcp_config_path: str | None = str(
-            getattr(args, "specialist_mcp_config", "") or ""
-        ) or None
+        mcp_config_path: str | None = str(getattr(args, "specialist_mcp_config", "") or "") or None
         if mcp_config_path is None and knowledge_plane is not None:
             try:
                 pr_mcp_url = knowledge_plane.specialist_mcp_url()
@@ -160,6 +159,7 @@ def _build_specialist_executor(
             knowledge_plane=knowledge_plane,
         )
     else:
+
         def _backend_factory(domain: Any) -> Any:
             """Build an in-process Claude backend for a specialist domain.
 
@@ -171,7 +171,8 @@ def _build_specialist_executor(
             """
             # in-process Claude path (fallback).
             return ClaudeBackend(
-                model=claude_model, max_turns_default=max_turns,
+                model=claude_model,
+                max_turns_default=max_turns,
             )
 
         runner = SpecialistRunner(
@@ -186,7 +187,15 @@ def _build_specialist_executor(
     async def _executor(ctx: Any) -> dict:
         """Adapter SubAgentRunner.run_task -> SpecialistRunner.run. Always
         returns a dict (even on failure); runner_status preserves the
-        SpecialistRunResult distinctions for breakdown analytics."""
+        SpecialistRunResult distinctions for breakdown analytics.
+
+        Args:
+            ctx: The action context passed by ``SubAgentRunner.run_task``.
+
+        Returns:
+            dict: A result envelope with runner status, task/domain ids,
+            transcript paths, and any allocated GPU ids.
+        """
         run_result = await runner.run(ctx)
         return {
             "runner_status": run_result.status,
@@ -200,9 +209,7 @@ def _build_specialist_executor(
             "done_path": run_result.done_path,
             "error": run_result.error,
             "notes": list(run_result.notes or []),
-            "allocated_gpu_ids": list(
-                (run_result.specialist_done or {}).get("allocated_gpu_ids") or []
-            ),
+            "allocated_gpu_ids": list((run_result.specialist_done or {}).get("allocated_gpu_ids") or []),
         }
 
     return _executor
@@ -220,6 +227,13 @@ def _register_executors(
     _REAL_EXECUTORS_FULL set, kernel-owned no-ops (skipped when no_kernel),
     the always-wired Coordinator-internal executors, and the optional
     specialist executor.
+
+    Args:
+        coordinator: The live Coordinator to register executors on.
+        no_kernel: When True, skip wiring the kernel-owned no-op executors.
+        compare_against_gpu: Optional GPU type for the target-analysis executor.
+        session_dir: Optional session directory passed to executors.
+        specialist_executor: Optional specialist executor to register.
     """
     for kind, fn in _REAL_EXECUTORS_FULL.items():
         coordinator.sub.register_executor(kind, fn)
@@ -262,7 +276,8 @@ def _register_executors(
                     "register_executors: %r missing from sub-agent registry "
                     "(no_kernel=%s); PRELUDE analysis task will fail with "
                     "no_executor",
-                    required_kind, no_kernel,
+                    required_kind,
+                    no_kernel,
                 )
 
     if no_kernel:

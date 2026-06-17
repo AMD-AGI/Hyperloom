@@ -11,6 +11,7 @@ from inference_optimizer.orchestrator.trace import parse_usage as pu
 
 # ---- _coerce_optional_int ----
 
+
 def test_coerce_optional_int():
     assert pu._coerce_optional_int(None) is None
     assert pu._coerce_optional_int("5") == 5
@@ -19,6 +20,7 @@ def test_coerce_optional_int():
 
 
 # ---- normalize_usage ----
+
 
 def test_normalize_usage_none_and_empty():
     assert pu.normalize_usage(None) is None
@@ -33,8 +35,10 @@ def test_normalize_usage_all_none():
 def test_normalize_usage_valid():
     out = pu.normalize_usage({"input_tokens": 10, "output_tokens": "20", "extra": 1})
     assert out == {
-        "input_tokens": 10, "output_tokens": 20,
-        "cache_creation_input_tokens": None, "cache_read_input_tokens": None,
+        "input_tokens": 10,
+        "output_tokens": 20,
+        "cache_creation_input_tokens": None,
+        "cache_read_input_tokens": None,
     }
 
 
@@ -181,6 +185,7 @@ def test_summarize_tool_input_clips_long():
 
 # ---- parse_claude_stream_json_usage ----
 
+
 def test_parse_claude_usage_missing(tmp_path):
     assert pu.parse_claude_stream_json_usage(tmp_path / "no.log") is None
 
@@ -205,6 +210,7 @@ def test_parse_claude_usage_no_usage(tmp_path):
 
 
 # ---- parse_claude_stream_json_response ----
+
 
 def test_parse_claude_response_result_wins(tmp_path):
     log = tmp_path / "p.log"
@@ -238,6 +244,7 @@ def test_parse_claude_response_no_text(tmp_path):
 
 # ---- parse_oob_json_usage ----
 
+
 def test_parse_oob_empty():
     assert pu.parse_oob_json_usage("") is None
     assert pu.parse_oob_json_usage("   ") is None
@@ -259,6 +266,7 @@ def test_parse_oob_nothing():
 
 
 # ---- parse_geak_usage ----
+
 
 def test_parse_geak_none_and_empty():
     assert pu.parse_geak_usage(None) is None
@@ -282,6 +290,7 @@ def test_parse_geak_no_usage():
 
 
 # ---- _find_usage_in_obj ----
+
 
 def test_find_usage_token_usage_key():
     assert pu._find_usage_in_obj({"token_usage": {"x": 1}}) == {"x": 1}

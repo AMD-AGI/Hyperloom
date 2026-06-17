@@ -93,8 +93,11 @@ def test_package_includes_curated_excludes_noise(tmp_path: Path) -> None:
 
     # curated present
     for rel in (
-        "session_breakdown.json", "state.json", "manifest.json",
-        "reports/final.json", "reports/final.md",
+        "session_breakdown.json",
+        "state.json",
+        "manifest.json",
+        "reports/final.json",
+        "reports/final.md",
         "reports/optimization_journal.json",
         "reports/kernel_optimization_summary.json",
         "reports/kernel_roofline.json",
@@ -171,7 +174,9 @@ def test_empty_session_returns_none(tmp_path: Path) -> None:
 
 def test_missing_session_dir_returns_none(tmp_path: Path) -> None:
     out = package_session_artifacts(
-        tmp_path / "does-not-exist", session_id="x", dest_root=tmp_path / "ws",
+        tmp_path / "does-not-exist",
+        session_id="x",
+        dest_root=tmp_path / "ws",
     )
     assert out is None
 

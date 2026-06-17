@@ -3,6 +3,7 @@
 """Coverage for ``cli_backends``: per-role backend construction (mock/agent
 choices, kernel selection, validation errors), advisory proposal-scorer
 wiring, robustness-server detection, and robustness option overrides."""
+
 from __future__ import annotations
 
 import argparse
@@ -21,17 +22,24 @@ def _stub_backends(monkeypatch):
     monkeypatch.setattr(clib, "MockCriticBackend", lambda: ("mock_critic",))
     monkeypatch.setattr(clib, "MockRobustnessBackend", lambda: ("mock_rob",))
     monkeypatch.setattr(
-        clib, "CriticAgentBackend", lambda **kw: ("critic_agent", kw),
+        clib,
+        "CriticAgentBackend",
+        lambda **kw: ("critic_agent", kw),
     )
     monkeypatch.setattr(
-        clib, "RobustnessAgentBackend", lambda **kw: ("rob_agent", kw),
+        clib,
+        "RobustnessAgentBackend",
+        lambda **kw: ("rob_agent", kw),
     )
 
 
 def _build(**over):
     kwargs = dict(
-        claude_model="claude-x", codex_model="codex-y", kernel_codex=False,
-        critic_choice="mock", session_dir=Path("/tmp/s"),
+        claude_model="claude-x",
+        codex_model="codex-y",
+        kernel_codex=False,
+        critic_choice="mock",
+        session_dir=Path("/tmp/s"),
     )
     kwargs.update(over)
     return clib._build_backends(**kwargs)
@@ -93,7 +101,8 @@ def test_proposal_scorer_disabled() -> None:
 
 def test_proposal_scorer_empty_models_returns_none() -> None:
     args = argparse.Namespace(
-        no_proposal_scoring=False, proposal_scorer_models="  ,  ",
+        no_proposal_scoring=False,
+        proposal_scorer_models="  ,  ",
     )
     assert clib._build_proposal_scorer(args) is None
 
@@ -109,7 +118,8 @@ def test_proposal_scorer_default_models(monkeypatch) -> None:
 def test_proposal_scorer_explicit_models(monkeypatch) -> None:
     monkeypatch.setattr(clib, "ProposalScorer", lambda **kw: ("scorer", kw))
     args = argparse.Namespace(
-        no_proposal_scoring=False, proposal_scorer_models="m1, m2",
+        no_proposal_scoring=False,
+        proposal_scorer_models="m1, m2",
     )
     out = clib._build_proposal_scorer(args)
     assert out[1]["models"] == ("m1", "m2")
@@ -134,8 +144,11 @@ def test_robustness_options_single_node_minimal(monkeypatch) -> None:
     for k in clib._MULTI_NODE_WORKLOAD_UID_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
     args = argparse.Namespace(
-        robustness_server_url=None, robustness_llm_rca=None, nodes=1,
-        robustness_workload_uid=None, robustness_disable_local_probe=None,
+        robustness_server_url=None,
+        robustness_llm_rca=None,
+        nodes=1,
+        robustness_workload_uid=None,
+        robustness_disable_local_probe=None,
         robustness_enable_cluster_pod_metrics=None,
         robustness_pod_metrics_categories=None,
     )
@@ -149,7 +162,9 @@ def test_robustness_options_multi_node_defaults(monkeypatch) -> None:
     for k in clib._MULTI_NODE_WORKLOAD_UID_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
     args = argparse.Namespace(
-        robustness_server_url="http://rob", robustness_llm_rca=True, nodes=4,
+        robustness_server_url="http://rob",
+        robustness_llm_rca=True,
+        nodes=4,
         robustness_workload_uid="wl-1",
         robustness_disable_local_probe=None,
         robustness_enable_cluster_pod_metrics=None,
@@ -172,8 +187,11 @@ def test_robustness_options_workload_uid_from_env(monkeypatch) -> None:
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("RAY_JOB_ID", "ray-42")
     args = argparse.Namespace(
-        robustness_server_url=None, robustness_llm_rca=None, nodes=1,
-        robustness_workload_uid=None, robustness_disable_local_probe=None,
+        robustness_server_url=None,
+        robustness_llm_rca=None,
+        nodes=1,
+        robustness_workload_uid=None,
+        robustness_disable_local_probe=None,
         robustness_enable_cluster_pod_metrics=None,
         robustness_pod_metrics_categories=None,
     )

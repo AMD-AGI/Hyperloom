@@ -39,9 +39,7 @@ def test_configure_logging_idempotent(caplog: pytest.LogCaptureFixture) -> None:
     configure_logging(level="DEBUG")
     configure_logging(level="DEBUG")
     root = logging.getLogger("framework_agent")
-    assert sum(
-        1 for h in root.handlers if isinstance(h, logging.StreamHandler)
-    ) == 1
+    assert sum(1 for h in root.handlers if isinstance(h, logging.StreamHandler)) == 1
 
 
 def test_configure_logging_resolves_env_level(monkeypatch: pytest.MonkeyPatch) -> None:

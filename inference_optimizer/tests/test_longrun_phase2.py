@@ -48,9 +48,7 @@ def _plateaued_explore_state(
     # No winners → recent_keep_gain 0 < threshold.
     st.explore_search = {"schema_version": 1, "winners_history": []}
     # Three trailing empty specialist rounds → empty_streak >= 3.
-    st.specialist_rounds = [
-        {"proposals_total": 0, "proposals_kept": 0} for _ in range(3)
-    ]
+    st.specialist_rounds = [{"proposals_total": 0, "proposals_kept": 0} for _ in range(3)]
     if top_bottleneck:
         st.roofline_snapshots = [{"snapshot_id": 1, "top_bottleneck": top_bottleneck}]
     return st
@@ -97,8 +95,11 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     from inference_optimizer.paths import make_session_dir as _msd
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.orchestrator.backends import (
-        MockBackend, MockCriticBackend, MockKernelBackend,
-        MockRobustnessBackend, ScriptedPlan,
+        MockBackend,
+        MockCriticBackend,
+        MockKernelBackend,
+        MockRobustnessBackend,
+        ScriptedPlan,
     )
     from .conftest import seed_target_analysis_marker
 
@@ -147,14 +148,16 @@ def test_redirect_advisory_renders_with_suggested_domain(cyclic_coordinator):
     st.macro_cycle = 2
     st.mark_bottleneck_switch(prev_bottleneck="MoE_fused")
     # A fresh roofline whose dominant direction is comm.
-    st.roofline_snapshots = [{
-        "snapshot_id": 2,
-        "top_bottleneck": "MoE_fused",
-        "compute_pct": 20.0,
-        "idle_pct": 5.0,
-        "comm_pct": 70.0,
-        "roofline_bound_kind": "compute",
-    }]
+    st.roofline_snapshots = [
+        {
+            "snapshot_id": 2,
+            "top_bottleneck": "MoE_fused",
+            "compute_pct": 20.0,
+            "idle_pct": 5.0,
+            "comm_pct": 70.0,
+            "roofline_bound_kind": "compute",
+        }
+    ]
     block = c._bottleneck_redirect_advisory_block()
     assert "plateaued_bottleneck=MoE_fused" in block
     assert "comm_specialist" in block
@@ -192,9 +195,9 @@ def test_acceptance_threshold_advisory_lists_unblocked(cyclic_coordinator):
     }
     block = c._acceptance_threshold_advisory_block()
     assert "KEEP>=0.40%" in block
-    assert "v_hi" in block          # 0.6% >= 0.40% → re-testable
-    assert "v_lo" in block          # 0.2% < 0.40% → reference only
-    assert "v_keep" not in block    # KEEP'd → never surfaced for re-test
+    assert "v_hi" in block  # 0.6% >= 0.40% → re-testable
+    assert "v_lo" in block  # 0.2% < 0.40% → reference only
+    assert "v_keep" not in block  # KEEP'd → never surfaced for re-test
 
 
 def test_acceptance_threshold_advisory_empty_first_cycle(cyclic_coordinator):
@@ -205,7 +208,8 @@ def test_acceptance_threshold_advisory_empty_first_cycle(cyclic_coordinator):
 
 
 def test_acceptance_threshold_advisory_empty_when_cyclic_off(
-    cyclic_coordinator, monkeypatch,
+    cyclic_coordinator,
+    monkeypatch,
 ):
     c = cyclic_coordinator
     monkeypatch.setenv(CYCLIC_ENV, "0")
@@ -241,28 +245,32 @@ def test_mark_switch_falls_back_to_live_top_bottleneck():
 # ==========================================================================
 def test_tested_and_rejected_stamped_with_macro_cycle():
     st = SharedState(session_id="t", macro_cycle=0)
-    st.apply_explore_search_update({
-        "schema_version": 1,
-        "tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}},
-        "rejected": [{"name": "a", "fingerprint": "fp_a"}],
-    })
+    st.apply_explore_search_update(
+        {
+            "schema_version": 1,
+            "tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}},
+            "rejected": [{"name": "a", "fingerprint": "fp_a"}],
+        }
+    )
     assert st.explore_search["tested"]["fp_a"]["cycle"] == 0
     assert st.explore_search["rejected"][0]["cycle"] == 0
 
     # Next cycle: a new rejection is bucketed under cycle 1; the old one keeps
     # its cycle-0 attribution (never re-explored, just re-attributed-safe).
     st.macro_cycle = 1
-    st.apply_explore_search_update({
-        "schema_version": 1,
-        "tested": {
-            "fp_a": {"name": "a", "fingerprint": "fp_a", "cycle": 0},
-            "fp_b": {"name": "b", "fingerprint": "fp_b"},
-        },
-        "rejected": [
-            {"name": "a", "fingerprint": "fp_a", "cycle": 0},
-            {"name": "b", "fingerprint": "fp_b"},
-        ],
-    })
+    st.apply_explore_search_update(
+        {
+            "schema_version": 1,
+            "tested": {
+                "fp_a": {"name": "a", "fingerprint": "fp_a", "cycle": 0},
+                "fp_b": {"name": "b", "fingerprint": "fp_b"},
+            },
+            "rejected": [
+                {"name": "a", "fingerprint": "fp_a", "cycle": 0},
+                {"name": "b", "fingerprint": "fp_b"},
+            ],
+        }
+    )
     tested = st.explore_search["tested"]
     assert tested["fp_a"]["cycle"] == 0
     assert tested["fp_b"]["cycle"] == 1
@@ -274,11 +282,13 @@ def test_veto_fingerprints_bucketed_by_bottleneck():
     st = SharedState(session_id="t", macro_cycle=0)
     # cycle 0 worked the MoE bottleneck.
     st.roofline_snapshots = [{"snapshot_id": 1, "top_bottleneck": "MoE_fused"}]
-    st.apply_explore_search_update({
-        "schema_version": 1,
-        "tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}},
-        "rejected": [{"name": "a", "fingerprint": "fp_a"}],
-    })
+    st.apply_explore_search_update(
+        {
+            "schema_version": 1,
+            "tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}},
+            "rejected": [{"name": "a", "fingerprint": "fp_a"}],
+        }
+    )
     assert st.explore_search["tested"]["fp_a"]["bottleneck"] == "MoE_fused"
     assert st.explore_search["rejected"][0]["bottleneck"] == "MoE_fused"
 
@@ -286,15 +296,16 @@ def test_veto_fingerprints_bucketed_by_bottleneck():
     # while the old one keeps its MoE attribution.
     st.macro_cycle = 1
     st.roofline_snapshots = [{"snapshot_id": 2, "top_bottleneck": "all_reduce"}]
-    st.apply_explore_search_update({
-        "schema_version": 1,
-        "tested": {
-            "fp_a": {"name": "a", "fingerprint": "fp_a", "cycle": 0,
-                     "bottleneck": "MoE_fused"},
-            "fp_b": {"name": "b", "fingerprint": "fp_b"},
-        },
-        "rejected": [],
-    })
+    st.apply_explore_search_update(
+        {
+            "schema_version": 1,
+            "tested": {
+                "fp_a": {"name": "a", "fingerprint": "fp_a", "cycle": 0, "bottleneck": "MoE_fused"},
+                "fp_b": {"name": "b", "fingerprint": "fp_b"},
+            },
+            "rejected": [],
+        }
+    )
     tested = st.explore_search["tested"]
     assert tested["fp_a"]["bottleneck"] == "MoE_fused"
     assert tested["fp_b"]["bottleneck"] == "all_reduce"

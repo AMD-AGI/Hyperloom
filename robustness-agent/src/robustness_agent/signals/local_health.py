@@ -59,37 +59,39 @@ class LocalHealthConfig:
 
 
 # HIGH-severity log patterns; anything else from ``local_log_errors`` falls back to MEDIUM.
-_HIGH_SEVERITY_PATTERNS: frozenset[str] = frozenset({
-    # Existing OOM / fatal-signal patterns.
-    "CUDA out of memory",
-    "hipErrorOutOfMemory",
-    "HIP out of memory",
-    "NCCL error",
-    "OOMKilled",
-    "core dumped",
-    "Segmentation fault",
-    # D1 — vLLM v1 EngineCore crashes (you've-seen-this case).
-    r"Engine core .* died",
-    r"RuntimeError: Engine core initialization failed",
-    # D1 — model architecture mismatch.
-    r"MLA.*not supported",
-    r"MTP draft .* unavailable",
-    # D1 — aiter / hipcc compilation hard fail.
-    r"aiter .* compilation failed",
-    r"hipcc .* signal",
-    # D1 — accuracy gate / model load — drop here, do not retry.
-    r"accuracy .* gate failed",
-    r"MMLU .* below threshold",
-    r"Failed to load checkpoint",
-    # D1 — KFD resource exhaustion (≠ OOM but equally terminal).
-    r"cudaErrorOutOfDevice",
-    r"HSA_STATUS_ERROR_OUT_OF_RESOURCES",
-    # D1 — matrix library errors.
-    r"ROCblas.*Status\s*\d+",
-    r"hipBLAS.*Error",
-    # E5 — critic-agent runtime stuck → demand operator switch to mock.
-    r"runtime\.cli .* timed out after \d+s",
-})
+_HIGH_SEVERITY_PATTERNS: frozenset[str] = frozenset(
+    {
+        # Existing OOM / fatal-signal patterns.
+        "CUDA out of memory",
+        "hipErrorOutOfMemory",
+        "HIP out of memory",
+        "NCCL error",
+        "OOMKilled",
+        "core dumped",
+        "Segmentation fault",
+        # D1 — vLLM v1 EngineCore crashes (you've-seen-this case).
+        r"Engine core .* died",
+        r"RuntimeError: Engine core initialization failed",
+        # D1 — model architecture mismatch.
+        r"MLA.*not supported",
+        r"MTP draft .* unavailable",
+        # D1 — aiter / hipcc compilation hard fail.
+        r"aiter .* compilation failed",
+        r"hipcc .* signal",
+        # D1 — accuracy gate / model load — drop here, do not retry.
+        r"accuracy .* gate failed",
+        r"MMLU .* below threshold",
+        r"Failed to load checkpoint",
+        # D1 — KFD resource exhaustion (≠ OOM but equally terminal).
+        r"cudaErrorOutOfDevice",
+        r"HSA_STATUS_ERROR_OUT_OF_RESOURCES",
+        # D1 — matrix library errors.
+        r"ROCblas.*Status\s*\d+",
+        r"hipBLAS.*Error",
+        # E5 — critic-agent runtime stuck → demand operator switch to mock.
+        r"runtime\.cli .* timed out after \d+s",
+    }
+)
 
 
 def evaluate_local_health_signals(
@@ -139,9 +141,7 @@ def _server_unreachable(data: SourceData) -> list[Symptom]:
     bad = [entry for entry in data.local_server_health if not entry.get("reachable")]
     if not bad:
         return []
-    severity = (
-        SymptomSeverity.HIGH if len(bad) == len(data.local_server_health) else SymptomSeverity.MEDIUM
-    )
+    severity = SymptomSeverity.HIGH if len(bad) == len(data.local_server_health) else SymptomSeverity.MEDIUM
     out: list[Symptom] = []
     for entry in bad:
         url = str(entry.get("url") or "")
@@ -160,9 +160,9 @@ def _server_unreachable(data: SourceData) -> list[Symptom]:
                 subject={"url": url},
                 source="local",
                 suggestion=(
-                    "delegate(server_lifecycle) to restart the inference "
-                    "server" if severity is SymptomSeverity.HIGH else
-                    "monitor; alert orchestration if it persists"
+                    "delegate(server_lifecycle) to restart the inference server"
+                    if severity is SymptomSeverity.HIGH
+                    else "monitor; alert orchestration if it persists"
                 ),
             )
         )
@@ -192,9 +192,7 @@ def _log_error_symptoms(data: SourceData) -> list[Symptom]:
 
     out: list[Symptom] = []
     for pattern, hits in by_pattern.items():
-        severity = (
-            SymptomSeverity.HIGH if pattern in _HIGH_SEVERITY_PATTERNS else SymptomSeverity.MEDIUM
-        )
+        severity = SymptomSeverity.HIGH if pattern in _HIGH_SEVERITY_PATTERNS else SymptomSeverity.MEDIUM
         out.append(
             Symptom(
                 name="log_error_pattern",
@@ -270,8 +268,17 @@ def _disk_pressure_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
-    """Emit ``disk_pressure`` for non-SHM mountpoints under capacity stress; SHM is handled
-    separately with stricter thresholds, so it's skipped here to avoid double-firing.
+    """Emit ``disk_pressure`` for non-SHM mountpoints under capacity stress.
+
+    SHM is handled separately with stricter thresholds, so it is skipped
+    here to avoid double-firing.
+
+    Args:
+        data: Collected source data (per-mountpoint disk stats).
+        cfg: Local-health configuration thresholds.
+
+    Returns:
+        Symptoms for stressed mountpoints, possibly empty.
     """
     if not isinstance(data.local_disk, dict) or not data.local_disk:
         return []
@@ -298,10 +305,7 @@ def _disk_pressure_symptoms(
             Symptom(
                 name="disk_pressure",
                 severity=severity,
-                summary=(
-                    f"disk {mountpoint!r} at {used_pct:.0f}% used "
-                    f"({used_gb}/{total_gb} GiB, free={free_gb} GiB)"
-                ),
+                summary=(f"disk {mountpoint!r} at {used_pct:.0f}% used ({used_gb}/{total_gb} GiB, free={free_gb} GiB)"),
                 evidence={
                     "mountpoint": mountpoint,
                     "used_pct": used_pct,
@@ -316,8 +320,8 @@ def _disk_pressure_symptoms(
                 suggestion=(
                     "prune_branch(profile) — profile traces dominate "
                     "$USER_DATA_PATH disk; consider archiving older runs"
-                    if severity is SymptomSeverity.HIGH else
-                    "observe; rotate logs and clean old runs/* if used_pct keeps climbing"
+                    if severity is SymptomSeverity.HIGH
+                    else "observe; rotate logs and clean old runs/* if used_pct keeps climbing"
                 ),
             )
         )
@@ -328,8 +332,18 @@ def _shm_pressure_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
-    """Emit ``shm_pressure`` (stricter thresholds): SGLang/vLLM crash hard when /dev/shm fills,
-    surfaced at runtime before the next server start fails with ``shared memory allocation failed``.
+    """Emit ``shm_pressure`` (stricter thresholds) for SHM mountpoints.
+
+    SGLang/vLLM crash hard when /dev/shm fills; this surfaces the pressure
+    before the next server start fails with ``shared memory allocation
+    failed``.
+
+    Args:
+        data: Collected source data (per-mountpoint disk stats).
+        cfg: Local-health configuration thresholds.
+
+    Returns:
+        Symptoms for stressed SHM mountpoints, possibly empty.
     """
     if not isinstance(data.local_disk, dict) or not data.local_disk:
         return []
@@ -373,8 +387,8 @@ def _shm_pressure_symptoms(
                 suggestion=(
                     "lower TP or restart pod with --shm-size; the next "
                     "validate_stack will likely fail with shared memory error"
-                    if severity is SymptomSeverity.HIGH else
-                    "monitor; restart the affected server if SHM keeps climbing"
+                    if severity is SymptomSeverity.HIGH
+                    else "monitor; restart the affected server if SHM keeps climbing"
                 ),
             )
         )
@@ -382,8 +396,17 @@ def _shm_pressure_symptoms(
 
 
 def _ray_head_dead_symptoms(data: SourceData) -> list[Symptom]:
-    """Emit ``ray_head_dead`` (HIGH) when ``data.local_ray`` reports ``healthy=False``;
-    silent when the probe slot is empty or healthy. Prompts Orchestration to prune kernel_opt.
+    """Emit ``ray_head_dead`` (HIGH) when the Ray head is unhealthy.
+
+    Fires when ``data.local_ray`` reports ``healthy=False``; silent when the
+    probe slot is empty or healthy. Prompts Orchestration to prune
+    kernel_opt.
+
+    Args:
+        data: Collected source data (Ray head probe).
+
+    Returns:
+        A list with one :class:`Symptom` when unhealthy, else empty.
     """
     ray_info = getattr(data, "local_ray", None)
     if not isinstance(ray_info, dict) or not ray_info:
@@ -416,8 +439,17 @@ def _fd_pressure_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
-    """Emit ``fd_pressure`` from ``data.local_fd`` when Coordinator FD usage nears the limit;
-    leaked sockets hitting ``ulimit -n`` surface as agent_stall(kernel) whose real cause is here.
+    """Emit ``fd_pressure`` when Coordinator FD usage nears the limit.
+
+    Leaked sockets hitting ``ulimit -n`` surface as agent_stall(kernel)
+    whose real cause is here.
+
+    Args:
+        data: Collected source data (file-descriptor usage).
+        cfg: Local-health configuration thresholds.
+
+    Returns:
+        A list with one :class:`Symptom` when FD pressure trips, else empty.
     """
     fd_info = getattr(data, "local_fd", None)
     if not isinstance(fd_info, dict) or not fd_info:
@@ -437,9 +469,9 @@ def _fd_pressure_symptoms(
             severity=severity,
             summary=(
                 f"file-descriptor usage {used_pct:.0f}% on pid "
-                f"{fd_info.get('pid','?')} "
-                f"(used={fd_info.get('used','?')}, "
-                f"limit={fd_info.get('limit','?')})"
+                f"{fd_info.get('pid', '?')} "
+                f"(used={fd_info.get('used', '?')}, "
+                f"limit={fd_info.get('limit', '?')})"
             ),
             evidence={
                 "pid": fd_info.get("pid"),
@@ -455,9 +487,8 @@ def _fd_pressure_symptoms(
                 "escalate_strategy_change: long-running session has leaked "
                 "file descriptors; consider restarting Coordinator + "
                 "resume to clear them"
-                if severity is SymptomSeverity.HIGH else
-                "monitor; if used_pct keeps climbing the next agent_stall "
-                "likely traces back here"
+                if severity is SymptomSeverity.HIGH
+                else "monitor; if used_pct keeps climbing the next agent_stall likely traces back here"
             ),
         )
     ]

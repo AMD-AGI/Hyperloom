@@ -47,13 +47,13 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     sd = make_session_dir()
     from .conftest import seed_target_analysis_marker
+
     seed_target_analysis_marker(sd)
     return sd
 
 
 def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE,
-                  payload={"topic": "heartbeat", "body_md": "ok"})
+    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 
 
 def _silent_plan() -> ScriptedPlan:
@@ -71,10 +71,12 @@ def _build_backends(scripts: dict[str, ScriptedPlan]) -> dict[str, Backend]:
 # MockBackend
 @pytest.mark.asyncio
 async def test_mock_backend_plays_scripted_turns():
-    plan = ScriptedPlan(turns=[
-        MockTurn(intents=[_heartbeat()], raw_text="t1"),
-        MockTurn(intents=[Intent(IntentType.ALERT, payload={"severity": "low", "summary": "x"})], raw_text="t2"),
-    ])
+    plan = ScriptedPlan(
+        turns=[
+            MockTurn(intents=[_heartbeat()], raw_text="t1"),
+            MockTurn(intents=[Intent(IntentType.ALERT, payload={"severity": "low", "summary": "x"})], raw_text="t2"),
+        ]
+    )
     backend = MockBackend(plan)
     r1 = await backend.run("p")
     r2 = await backend.run("p")
@@ -147,8 +149,11 @@ async def test_sub_agent_runner_acquires_lane(tmp_path):
 
     sub.register_executor("bench_runner", exe)
     task = await tr.create(
-        kind="bench_runner", params={}, idempotency_key="k-bench-1",
-        requires_lanes=["benchmark_lane"], lease_ttl_sec=30,
+        kind="bench_runner",
+        params={},
+        idempotency_key="k-bench-1",
+        requires_lanes=["benchmark_lane"],
+        lease_ttl_sec=30,
     )
     res = await sub.run_task(task)
     assert res.state == "succeeded"
@@ -188,6 +193,7 @@ class _AlwaysFailingBackend(Backend):
         max_turns: int = 1,
     ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
         from inference_optimizer.orchestrator.backends.base import BackendError
+
         self.calls += 1
         raise BackendError(f"simulated {self.name} subprocess crash #{self.calls}")
 
@@ -213,12 +219,14 @@ class _AlwaysCrashingBackend(Backend):
 
 @pytest.mark.asyncio
 async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """A consecutive BackendError streak promotes per-call ``backend_error``
     events into a single ``backend_unhealthy`` observation, fired once."""
     monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", "3",
+        "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
+        "3",
     )
     backends = _build_backends({})
     backends["robustness"] = _AlwaysFailingBackend("robustness")
@@ -227,14 +235,14 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
         await c.tick(4)
         observations = await c.bus.tail(n=50, topic="observation")
         backend_errors = [
-            o for o in observations
-            if (o.payload or {}).get("kind") == "backend_error"
-            and (o.payload or {}).get("agent") == "robustness"
+            o
+            for o in observations
+            if (o.payload or {}).get("kind") == "backend_error" and (o.payload or {}).get("agent") == "robustness"
         ]
         backend_unhealthy = [
-            o for o in observations
-            if (o.payload or {}).get("kind") == "backend_unhealthy"
-            and (o.payload or {}).get("agent") == "robustness"
+            o
+            for o in observations
+            if (o.payload or {}).get("kind") == "backend_unhealthy" and (o.payload or {}).get("agent") == "robustness"
         ]
         assert len(backend_errors) == 4
         assert len(backend_unhealthy) == 1
@@ -259,10 +267,7 @@ async def test_unexpected_backend_exception_records_last_tick_exception(session_
         assert c.shared_state.last_tick_exception["stage"] == "reactor_pass"
         assert c.shared_state.last_tick_exception["agent"] == "orchestration"
         assert c.shared_state.last_tick_exception["type"] == "RuntimeError"
-        assert (
-            "simulated orchestration unexpected crash"
-            in c.shared_state.last_tick_exception["message"]
-        )
+        assert "simulated orchestration unexpected crash" in c.shared_state.last_tick_exception["message"]
 
         persisted = SharedState.load_or_init(session_dir)
         assert persisted.last_tick_exception == c.shared_state.last_tick_exception
@@ -272,11 +277,13 @@ async def test_unexpected_backend_exception_records_last_tick_exception(session_
 
 @pytest.mark.asyncio
 async def test_backend_error_streak_resets_after_successful_turn(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """A successful turn resets the streak counter and re-arms the alarm."""
     monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", "2",
+        "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
+        "2",
     )
     backends = _build_backends({})
     failing = _AlwaysFailingBackend("robustness")
@@ -298,10 +305,7 @@ async def test_backend_error_streak_resets_after_successful_turn(
         c.backends["robustness"] = failing
         await c.tick(2)
         observations = await c.bus.tail(n=50, topic="observation")
-        backend_unhealthy = [
-            o for o in observations
-            if (o.payload or {}).get("kind") == "backend_unhealthy"
-        ]
+        backend_unhealthy = [o for o in observations if (o.payload or {}).get("kind") == "backend_unhealthy"]
         assert len(backend_unhealthy) == 2
         assert backend_unhealthy[-1].payload["consecutive_errors"] == 2
     finally:
@@ -310,9 +314,13 @@ async def test_backend_error_streak_resets_after_successful_turn(
 
 @pytest.mark.asyncio
 async def test_coordinator_propose_action_creates_pending(session_dir):
-    propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
-        "action_name": "baseline", "predicted_gain_pct": 0.0,
-    })
+    propose = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={
+            "action_name": "baseline",
+            "predicted_gain_pct": 0.0,
+        },
+    )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
@@ -327,9 +335,13 @@ async def test_coordinator_propose_action_creates_pending(session_dir):
 
 @pytest.mark.asyncio
 async def test_coordinator_review_verdict_approve_creates_task(session_dir):
-    propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
-        "action_name": "baseline", "predicted_gain_pct": 0.0,
-    })
+    propose = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={
+            "action_name": "baseline",
+            "predicted_gain_pct": 0.0,
+        },
+    )
     plans = {
         "orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])]),
     }
@@ -338,11 +350,14 @@ async def test_coordinator_review_verdict_approve_creates_task(session_dir):
         await c.tick(1)
         proposal_id = next(iter(c.state.pending_proposals.keys()))
 
-        verdict = Intent(type=IntentType.REVIEW_VERDICT, payload={
-            "target_proposal_msg_id": proposal_id,
-            "verdict": "approve",
-            "reasoning": "matches kb-1",
-        })
+        verdict = Intent(
+            type=IntentType.REVIEW_VERDICT,
+            payload={
+                "target_proposal_msg_id": proposal_id,
+                "verdict": "approve",
+                "reasoning": "matches kb-1",
+            },
+        )
         await c._handle_intent("critic", verdict)
 
         approved = c.state.pending_proposals[proposal_id]
@@ -355,21 +370,30 @@ async def test_coordinator_review_verdict_approve_creates_task(session_dir):
 
 @pytest.mark.asyncio
 async def test_coordinator_review_verdict_reject_no_task(session_dir):
-    propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
-        "action_name": "baseline", "predicted_gain_pct": 0.0,
-    })
+    propose = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={
+            "action_name": "baseline",
+            "predicted_gain_pct": 0.0,
+        },
+    )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
         await c.tick(1)
         proposal_id = next(iter(c.state.pending_proposals.keys()))
-        await c._handle_intent("critic", Intent(
-            type=IntentType.REVIEW_VERDICT, payload={
-                "target_proposal_msg_id": proposal_id,
-                "verdict": "reject", "reasoning": "kb-2 says no",
-                "kb_evidence": "kb-2",
-            },
-        ))
+        await c._handle_intent(
+            "critic",
+            Intent(
+                type=IntentType.REVIEW_VERDICT,
+                payload={
+                    "target_proposal_msg_id": proposal_id,
+                    "verdict": "reject",
+                    "reasoning": "kb-2 says no",
+                    "kb_evidence": "kb-2",
+                },
+            ),
+        )
         decisions = await c.bus.tail(topic="decision")
         assert not any(m.payload.get("kind") == "approved_proposal" for m in decisions)
         verdicts = await c.bus.tail(topic="review_verdict")
@@ -380,10 +404,14 @@ async def test_coordinator_review_verdict_reject_no_task(session_dir):
 
 @pytest.mark.asyncio
 async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
-    delegate = Intent(type=IntentType.DELEGATE, payload={
-        "action_name": "baseline", "params": {"runs": 1},
-        "idempotency_key": "k-deleg-1",
-    })
+    delegate = Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "baseline",
+            "params": {"runs": 1},
+            "idempotency_key": "k-deleg-1",
+        },
+    )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
 
     c = Coordinator(session_dir, backends=_build_backends(plans))
@@ -400,12 +428,15 @@ async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
 async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
     """LLM sometimes puts idempotency_key under params; Coordinator must
     treat it as the delegate key and remove it from executor params."""
-    delegate = Intent(type=IntentType.DELEGATE, payload={
-        "action_name": "explore",
-        "params": {
-            "idempotency_key": "explore-round-2",
+    delegate = Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "explore",
+            "params": {
+                "idempotency_key": "explore-round-2",
+            },
         },
-    })
+    )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
     captured: dict[str, object] = {}
@@ -430,20 +461,21 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
         assert captured["idempotency_key"] == "explore-round-2"
         assert "idempotency_key" not in captured["params"]
         denied = await c.bus.tail(topic="observation")
-        assert not any(
-            m.payload.get("rule") == "duplicate_idempotency_key"
-            for m in denied
-        )
+        assert not any(m.payload.get("rule") == "duplicate_idempotency_key" for m in denied)
     finally:
         await c.stop()
 
 
 @pytest.mark.asyncio
 async def test_coordinator_request_routes_to_kernel(session_dir):
-    req = Intent(type=IntentType.REQUEST, payload={
-        "target_agent": "kernel", "kind": "trace_analyze",
-        "params": {"top_k": 5},
-    })
+    req = Intent(
+        type=IntentType.REQUEST,
+        payload={
+            "target_agent": "kernel",
+            "kind": "trace_analyze",
+            "params": {"top_k": 5},
+        },
+    )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
@@ -459,9 +491,13 @@ async def test_coordinator_request_routes_to_kernel(session_dir):
 
 @pytest.mark.asyncio
 async def test_coordinator_response_routes_back_to_requester(session_dir):
-    req = Intent(type=IntentType.REQUEST, payload={
-        "target_agent": "kernel", "kind": "trace_analyze",
-    })
+    req = Intent(
+        type=IntentType.REQUEST,
+        payload={
+            "target_agent": "kernel",
+            "kind": "trace_analyze",
+        },
+    )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
@@ -473,14 +509,18 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
         assert kernel_inbox, "no request mirrored to kernel"
         request_msg_id = kernel_inbox[0].msg_id
 
-        await c._handle_intent("kernel", Intent(
-            type=IntentType.RESPONSE, payload={
-                "in_reply_to": request_msg_id,
-                "kind": "trace_analyze_done",
-                "status": "ok",
-                "result": {"chosen": ["k1", "k2"]},
-            },
-        ))
+        await c._handle_intent(
+            "kernel",
+            Intent(
+                type=IntentType.RESPONSE,
+                payload={
+                    "in_reply_to": request_msg_id,
+                    "kind": "trace_analyze_done",
+                    "status": "ok",
+                    "result": {"chosen": ["k1", "k2"]},
+                },
+            ),
+        )
         responses = await c.bus.tail(topic="response", to_agent="orchestration")
         assert responses
         assert responses[0].payload["status"] == "ok"
@@ -491,9 +531,13 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
 @pytest.mark.asyncio
 async def test_explore_not_denied_before_profile(session_dir):
     """After baseline, ``explore`` is no longer blocked on empty ``last_profile_trace``."""
-    propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
-        "action_name": "explore", "predicted_gain_pct": 5.0,
-    })
+    propose = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={
+            "action_name": "explore",
+            "predicted_gain_pct": 5.0,
+        },
+    )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
@@ -520,9 +564,13 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
 ):
     """Reverse regression: the action-layer ``trace_analyze`` hard-gate was
     removed; actions must NOT be denied when ``last_trace_analyze`` is stale."""
-    propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
-        "action_name": "params", "predicted_gain_pct": 3.0,
-    })
+    propose = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={
+            "action_name": "params",
+            "predicted_gain_pct": 3.0,
+        },
+    )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
@@ -537,11 +585,8 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
         for m in obs:
             if m.payload.get("kind") != "policy_denied":
                 continue
-            assert "trace_analyze must run first" not in str(
-                m.payload.get("hint") or m.payload.get("reason") or ""
-            ), (
-                "trace_analyze action-layer gate fired for params despite "
-                f"removal: {m.payload!r}"
+            assert "trace_analyze must run first" not in str(m.payload.get("hint") or m.payload.get("reason") or ""), (
+                f"trace_analyze action-layer gate fired for params despite removal: {m.payload!r}"
             )
     finally:
         await c.stop()
@@ -565,10 +610,14 @@ async def test_orchestration_prompt_has_no_execution_checklist(session_dir):
 
 @pytest.mark.asyncio
 async def test_coordinator_kill_task_by_robustness(session_dir):
-    delegate = Intent(type=IntentType.DELEGATE, payload={
-        "action_name": "long_running", "params": {},
-        "idempotency_key": "k-long-1",
-    })
+    delegate = Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "long_running",
+            "params": {},
+            "idempotency_key": "k-long-1",
+        },
+    )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
 
     c = Coordinator(session_dir, backends=_build_backends(plans))
@@ -578,12 +627,17 @@ async def test_coordinator_kill_task_by_robustness(session_dir):
         assert all_tasks  # no runner → failed
 
         new_task = await c.tasks.create(
-            kind="long_running", params={}, idempotency_key="k-long-2",
+            kind="long_running",
+            params={},
+            idempotency_key="k-long-2",
         )
-        await c._handle_intent("robustness", Intent(
-            type=IntentType.KILL_TASK,
-            payload={"task_id": new_task.task_id, "reason": "stalled", "scope": "task"},
-        ))
+        await c._handle_intent(
+            "robustness",
+            Intent(
+                type=IntentType.KILL_TASK,
+                payload={"task_id": new_task.task_id, "reason": "stalled", "scope": "task"},
+            ),
+        )
         after = await c.tasks.get(new_task.task_id)
         assert after.state == "cancelled"
     finally:
@@ -601,10 +655,13 @@ async def test_coordinator_prune_branch_cancels_family_and_records_advisory(sess
         a = await c.tasks.create(kind="baseline", params={}, idempotency_key="ka")
         b = await c.tasks.create(kind="baseline", params={}, idempotency_key="kb")
 
-        await c._handle_intent("robustness", Intent(
-            type=IntentType.PRUNE_BRANCH,
-            payload={"family": "baseline", "reason": "3 fails"},
-        ))
+        await c._handle_intent(
+            "robustness",
+            Intent(
+                type=IntentType.PRUNE_BRANCH,
+                payload={"family": "baseline", "reason": "3 fails"},
+            ),
+        )
         a_after = await c.tasks.get(a.task_id)
         b_after = await c.tasks.get(b.task_id)
         # Active queue still gets cancelled — the prune kills work in flight.
@@ -613,15 +670,16 @@ async def test_coordinator_prune_branch_cancels_family_and_records_advisory(sess
         assert "baseline" in c.shared_state.pruned_families
 
         # Future propose_action carries an advisory observation but is not dropped.
-        await c._handle_intent("orchestration", Intent(
-            type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": "baseline", "predicted_gain_pct": 5.0},
-        ))
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PROPOSE_ACTION,
+                payload={"action_name": "baseline", "predicted_gain_pct": 5.0},
+            ),
+        )
         assert c.state.pending_proposals
         obs = await c.bus.tail(topic="observation")
-        assert any(
-            m.payload.get("kind") == "proposal_pruned_advisory" for m in obs
-        )
+        assert any(m.payload.get("kind") == "proposal_pruned_advisory" for m in obs)
     finally:
         await c.stop()
 
@@ -646,9 +704,9 @@ def _silent_backends() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel":        MockBackend(silent, name="k"),
-        "critic":        MockBackend(silent, name="c"),
-        "robustness":    MockBackend(silent, name="r"),
+        "kernel": MockBackend(silent, name="k"),
+        "critic": MockBackend(silent, name="c"),
+        "robustness": MockBackend(silent, name="r"),
     }
 
 
@@ -722,11 +780,13 @@ async def test_promote_explore_records_success_attempt(session_dir):
         task = _mk_task("explore", "t-ex-1")
         result = {
             "status": "succeeded",
-            "winners": [{
-                "name": "v1",
-                "extra_server_args": "--foo",
-                "extra_envs": {"K": "1"},
-            }],
+            "winners": [
+                {
+                    "name": "v1",
+                    "extra_server_args": "--foo",
+                    "extra_envs": {"K": "1"},
+                }
+            ],
             "best_variant": {
                 "name": "v1",
                 "extra_server_args": "--foo",
@@ -777,11 +837,13 @@ async def test_promote_explore_updates_validated_gain(session_dir):
         task = _mk_task("explore", "t-ex-rebench")
         result = {
             "status": "succeeded",
-            "winners": [{
-                "name": "kv_fp8",
-                "extra_server_args": "--kv-cache-fp8",
-                "extra_envs": {},
-            }],
+            "winners": [
+                {
+                    "name": "kv_fp8",
+                    "extra_server_args": "--kv-cache-fp8",
+                    "extra_envs": {},
+                }
+            ],
             "best_variant": {
                 "name": "kv_fp8",
                 "extra_server_args": "--kv-cache-fp8",
@@ -793,8 +855,7 @@ async def test_promote_explore_updates_validated_gain(session_dir):
         }
         await c._promote_to_shared_state("explore", result, task=task)
         assert c.shared_state.cumulative_gain_validated == pytest.approx(10.0)
-        assert c.shared_state.cumulative_gain_validated_stack_len == \
-            len(c.shared_state.optimization_stack)
+        assert c.shared_state.cumulative_gain_validated_stack_len == len(c.shared_state.optimization_stack)
     finally:
         await c.stop()
 
@@ -838,8 +899,7 @@ async def test_handle_unpromotable_baseline_third_failure_sets_stop_reason(
         for i in range(3):
             await c._handle_unpromotable_result(
                 _mk_task("baseline", f"t-{i}"),
-                {"status": "failed", "error_class": "no_report",
-                 "error": "missing"},
+                {"status": "failed", "error_class": "no_report", "error": "missing"},
             )
         assert c.shared_state.baseline_failure_streak == 3
         assert c.shared_state.stop_reason == "baseline_failed"
@@ -855,8 +915,7 @@ async def test_handle_unpromotable_records_for_non_baseline_kinds(session_dir):
     try:
         await c._handle_unpromotable_result(
             _mk_task("explore", "t-ex-fail"),
-            {"status": "failed", "error_class": "subprocess_nonzero",
-             "error": "rc=1\nstderr blob"},
+            {"status": "failed", "error_class": "subprocess_nonzero", "error": "rc=1\nstderr blob"},
         )
         assert c.shared_state.baseline_failure_streak == 0
         assert c.shared_state.stop_reason in ("", None)
@@ -879,8 +938,7 @@ async def test_handle_unpromotable_kernel_action_records_global_only(
     try:
         await c._handle_unpromotable_result(
             _mk_task("kernel_opt", "t-ko-fail"),
-            {"status": "failed", "error_class": "timeout",
-             "error": "wall-clock exceeded"},
+            {"status": "failed", "error_class": "timeout", "error": "wall-clock exceeded"},
         )
         assert not hasattr(c.shared_state, "kernel_opt_attempts_audit")
         assert len(c.shared_state.last_action_failures) == 1
@@ -904,15 +962,21 @@ async def test_handle_unpromotable_baseline_capture_failure_arms_eager_fallback(
         assert c.shared_state.baseline_eager_fallback is False
         await c._handle_unpromotable_result(
             _mk_task("baseline", "t-cg-1"),
-            {"status": "failed", "error_class": "cuda_graph_capture_failed",
-             "error": "operation not permitted when stream is capturing"},
+            {
+                "status": "failed",
+                "error_class": "cuda_graph_capture_failed",
+                "error": "operation not permitted when stream is capturing",
+            },
         )
         assert c.shared_state.baseline_eager_fallback is True
         # One-shot: a second capture failure must not re-arm (already set).
         await c._handle_unpromotable_result(
             _mk_task("baseline", "t-cg-2"),
-            {"status": "failed", "error_class": "cuda_graph_capture_failed",
-             "error": "operation not permitted when stream is capturing"},
+            {
+                "status": "failed",
+                "error_class": "cuda_graph_capture_failed",
+                "error": "operation not permitted when stream is capturing",
+            },
         )
         assert c.shared_state.baseline_eager_fallback is True
     finally:
@@ -938,8 +1002,11 @@ async def test_baseline_eager_fallback_consume_updates_coordinator_live_state(
     try:
         await c._handle_unpromotable_result(
             _mk_task("baseline", "t-cg-arm"),
-            {"status": "failed", "error_class": "cuda_graph_capture_failed",
-             "error": "operation not permitted when stream is capturing"},
+            {
+                "status": "failed",
+                "error_class": "cuda_graph_capture_failed",
+                "error": "operation not permitted when stream is capturing",
+            },
         )
         assert c.shared_state.baseline_eager_fallback is True
 
@@ -952,10 +1019,7 @@ async def test_baseline_eager_fallback_consume_updates_coordinator_live_state(
 
         # Simulate any later coordinator path flushing the live SharedState.
         c.shared_state.save(session_dir)
-        assert (
-            SharedState.load_or_init(session_dir).baseline_eager_fallback
-            is False
-        )
+        assert SharedState.load_or_init(session_dir).baseline_eager_fallback is False
     finally:
         await c.stop()
 
@@ -972,8 +1036,11 @@ async def test_handle_unpromotable_capture_failure_no_arm_when_baseline_promoted
         c.shared_state.baseline_tput = 1234.0
         await c._handle_unpromotable_result(
             _mk_task("baseline", "t-cg-resume"),
-            {"status": "failed", "error_class": "cuda_graph_capture_failed",
-             "error": "operation not permitted when stream is capturing"},
+            {
+                "status": "failed",
+                "error_class": "cuda_graph_capture_failed",
+                "error": "operation not permitted when stream is capturing",
+            },
         )
         assert c.shared_state.baseline_eager_fallback is False
     finally:
@@ -982,7 +1049,8 @@ async def test_handle_unpromotable_capture_failure_no_arm_when_baseline_promoted
 
 @pytest.mark.asyncio
 async def test_handle_unpromotable_roofline_increments_failure_streak(
-    session_dir, caplog,
+    session_dir,
+    caplog,
 ):
     """Repro (session 20260529T104050Z task 42922ce4): watermark-roofline
     failure must increment roofline_failure_streak, eagerly clear
@@ -1001,10 +1069,11 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
             "sub_result": {"status": "failed", "error_class": "no_trace_files"},
         }
         import logging
-        with caplog.at_level(logging.WARNING,
-                             logger="inference_optimizer.orchestrator.coordinator"):
+
+        with caplog.at_level(logging.WARNING, logger="inference_optimizer.orchestrator.coordinator"):
             await c._handle_unpromotable_result(
-                _mk_task("roofline", task_id), result,
+                _mk_task("roofline", task_id),
+                result,
             )
         # (a) audit entry exists.
         assert len(c.shared_state.roofline_attempts) == 1
@@ -1022,10 +1091,9 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
             "subsequent dispatches stay blocked until denial-time lazy clear."
         )
         # (d) operator-visible warning must be logged.
-        assert any(
-            "Auto-roofline" in r.message and "failed" in r.message
-            for r in caplog.records
-        ), "no 'Auto-roofline ... failed' WARNING was logged"
+        assert any("Auto-roofline" in r.message and "failed" in r.message for r in caplog.records), (
+            "no 'Auto-roofline ... failed' WARNING was logged"
+        )
     finally:
         await c.stop()
 
@@ -1081,8 +1149,13 @@ def _mk_baseline_task(params: dict, *, task_id: str = "t-fp-1") -> Task:
 
 def test_fingerprint_keys_covers_recovery_surface():
     expected = {
-        "benchmark_script", "result_dir", "extra_server_args",
-        "extra_envs", "model_path", "gpu_type", "config_path",
+        "benchmark_script",
+        "result_dir",
+        "extra_server_args",
+        "extra_envs",
+        "model_path",
+        "gpu_type",
+        "config_path",
         "disable_run_eval",
     }
     assert set(_BASELINE_FINGERPRINT_KEYS) == expected
@@ -1102,19 +1175,23 @@ def test_fingerprint_missing_keys_become_none_or_empty():
     assert fp["extra_server_args"] is None
     assert fp["extra_envs"] == []
     assert fp["model_path"] is None
-    fp_with_empty = _baseline_params_fingerprint({
-        "benchmark_script": "sglang_mi300x.sh",
-        "extra_envs": {},
-    })
+    fp_with_empty = _baseline_params_fingerprint(
+        {
+            "benchmark_script": "sglang_mi300x.sh",
+            "extra_envs": {},
+        }
+    )
     assert fp == fp_with_empty
 
 
 def test_fingerprint_stringifies_scalar_values():
-    fp = _baseline_params_fingerprint({
-        "benchmark_script": "sglang_mi300x.sh",
-        "model_path": "/wekafs/models/DeepSeek-R1",
-        "gpu_type": "mi300x",
-    })
+    fp = _baseline_params_fingerprint(
+        {
+            "benchmark_script": "sglang_mi300x.sh",
+            "model_path": "/wekafs/models/DeepSeek-R1",
+            "gpu_type": "mi300x",
+        }
+    )
     assert all(isinstance(v, str) for k, v in fp.items() if v is not None and k != "extra_envs")
 
 
@@ -1132,11 +1209,13 @@ async def test_promote_baseline_records_fingerprint(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        task = _mk_baseline_task({
-            "benchmark_script": "sglang_mi300x.sh",
-            "model_path": "/wekafs/models/DeepSeek-R1",
-            "gpu_type": "mi300x",
-        })
+        task = _mk_baseline_task(
+            {
+                "benchmark_script": "sglang_mi300x.sh",
+                "model_path": "/wekafs/models/DeepSeek-R1",
+                "gpu_type": "mi300x",
+            }
+        )
         result = {
             "output_throughput": 1500.0,
             "materialized_config": "/tmp/baseline.with_envs.yaml",
@@ -1158,9 +1237,11 @@ async def test_handle_unpromotable_baseline_records_fingerprint(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        task = _mk_baseline_task({
-            "benchmark_script": "dsr1_fp8_mi300x.sh",
-        })
+        task = _mk_baseline_task(
+            {
+                "benchmark_script": "dsr1_fp8_mi300x.sh",
+            }
+        )
         result = {
             "status": "failed",
             "error_class": "no_report",
@@ -1291,12 +1372,14 @@ def test_summarize_failed_variants_skips_non_dict_rows():
 def test_summarize_failed_variants_handles_missing_optional_fields():
     rows = [{"name": "v", "status": "failed"}]
     out = coordinator._summarize_failed_variants(rows)
-    assert out == [{
-        "name": "v",
-        "error_class": None,
-        "error_excerpt": None,
-        "extra_server_args": "",
-    }]
+    assert out == [
+        {
+            "name": "v",
+            "error_class": None,
+            "error_excerpt": None,
+            "extra_server_args": "",
+        }
+    ]
 
 
 def test_default_health_timeout_is_900s_not_1800s():
@@ -1309,11 +1392,13 @@ def _write_marker_target_baseline(session_dir: Path) -> None:
     path = target_baseline_json(session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({
-            "status": "no_target",
-            "reason": "no_target_gpu_configured",
-            "row_count": 0,
-        }),
+        json.dumps(
+            {
+                "status": "no_target",
+                "reason": "no_target_gpu_configured",
+                "row_count": 0,
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -1331,10 +1416,7 @@ async def test_idle_run_reaches_max_ticks_without_closing(session_dir):
 
 
 def test_critic_md_carves_out_archival_actions():
-    path = (
-        Path(__file__).resolve().parent.parent
-        / "orchestrator" / "system_prompts" / "critic.md"
-    )
+    path = Path(__file__).resolve().parent.parent / "orchestrator" / "system_prompts" / "critic.md"
     text = path.read_text(encoding="utf-8")
     assert "archival actions" in text.lower()
     assert "`report`" in text
@@ -1378,7 +1460,8 @@ async def test_sub_agent_runner_swallows_tasknotfound_on_final_transition(
 
 @pytest.mark.asyncio
 async def test_sub_agent_runner_swallows_tasknotfound_on_initial_transition(
-    tmp_path, caplog,
+    tmp_path,
+    caplog,
 ):
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
@@ -1393,7 +1476,9 @@ async def test_sub_agent_runner_swallows_tasknotfound_on_initial_transition(
 
     sub.register_executor("baseline", runner)
     task = await tr.create(
-        kind="baseline", params={}, idempotency_key="k-baseline-1",
+        kind="baseline",
+        params={},
+        idempotency_key="k-baseline-1",
     )
     db.raw.execute("DELETE FROM tasks WHERE task_id=?", (task.task_id,))
     db.raw.commit()
@@ -1405,9 +1490,7 @@ async def test_sub_agent_runner_swallows_tasknotfound_on_initial_transition(
     assert res.state == "succeeded"
     assert res.result == {"tput": 1.0}
     assert any(
-        "vanished" in rec.message.lower()
-        and "_transition_resilient" in rec.message
-        for rec in caplog.records
+        "vanished" in rec.message.lower() and "_transition_resilient" in rec.message for rec in caplog.records
     ), "expected the disappearing-row warning to fire"
     db.close()
 

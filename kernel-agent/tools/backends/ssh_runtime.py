@@ -41,14 +41,22 @@ from ray_runtime import SAFE_ENV_KEYS, safe_runtime_env
 DEFAULT_SSH_PORT = 2222
 
 _SSH_OPTS = [
-    "-o", "StrictHostKeyChecking=no",
-    "-o", "UserKnownHostsFile=/dev/null",
-    "-o", "PasswordAuthentication=no",
-    "-o", "BatchMode=yes",
-    "-o", "ConnectTimeout=15",
-    "-o", "ServerAliveInterval=30",
-    "-o", "ServerAliveCountMax=3",
-    "-o", "LogLevel=ERROR",
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "PasswordAuthentication=no",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=15",
+    "-o",
+    "ServerAliveInterval=30",
+    "-o",
+    "ServerAliveCountMax=3",
+    "-o",
+    "LogLevel=ERROR",
 ]
 
 
@@ -56,12 +64,20 @@ def ssh_placement_active() -> bool:
     """True only when the orchestrator opted this run into SSH GPU placement.
 
     The single switch that isolates the Dynamo SSH path from every other run.
+
+    Returns:
+        ``True`` when ``KERNEL_AGENT_GPU_PLACEMENT`` is set to ``ssh``.
     """
     return os.environ.get("KERNEL_AGENT_GPU_PLACEMENT", "").strip().lower() == "ssh"
 
 
 def ssh_target() -> tuple[str, int, str]:
-    """Resolve (host, port, key_path) for the GPU pod from MN_SSH_* env."""
+    """Resolve (host, port, key_path) for the GPU pod from MN_SSH_* env.
+
+    Returns:
+        A ``(host, port, key_path)`` tuple read from ``MN_SSH_HOST`` /
+        ``MN_SSH_PORT`` / ``MN_SSH_KEY``.
+    """
     host = os.environ.get("MN_SSH_HOST", "").strip()
     port = int(os.environ.get("MN_SSH_PORT", str(DEFAULT_SSH_PORT)) or DEFAULT_SSH_PORT)
     key = os.environ.get("MN_SSH_KEY", "").strip()
@@ -73,16 +89,30 @@ def _env_prologue() -> str:
 
     Values are shell-quoted; nothing reaches argv. Mirrors
     ``safe_runtime_env``'s allowlist + credential aliasing.
+
+    Returns:
+        Newline-joined ``export K=V`` lines for the allowlisted GEAK env,
+        including a ``PATH`` export leading with ``/opt/venv/bin``.
     """
     env = safe_runtime_env().get("env_vars", {})
     lines = [
         f"export {k}={shlex.quote(str(v))}"
         for k, v in env.items()
-        if k in SAFE_ENV_KEYS or k in (
-            "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
-            "OOB_API_KEY", "GEAK_API_KEY", "LLM_API_KEY", "AMD_LLM_API_KEY",
-            "LLM_GATEWAY_KEY", "ANTHROPIC_BASE_URL", "OOB_BASE_URL",
-            "GEAK_BASE_URL", "LLM_API_BASE",
+        if k in SAFE_ENV_KEYS
+        or k
+        in (
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "OOB_API_KEY",
+            "GEAK_API_KEY",
+            "LLM_API_KEY",
+            "AMD_LLM_API_KEY",
+            "LLM_GATEWAY_KEY",
+            "ANTHROPIC_BASE_URL",
+            "OOB_BASE_URL",
+            "GEAK_BASE_URL",
+            "LLM_API_BASE",
         )
     ]
     # Ensure /opt/venv/bin (framework venv with geak/torch) leads PATH.
@@ -93,7 +123,7 @@ def _env_prologue() -> str:
 # Self-contained pod-side runner. Mirrors geak_submit.run_via_ray._task: maps
 # GPUs to logical 0..N-1, builds the geak CLI, runs it, prints a JSON result.
 # Stdlib only — the Dynamo pod has no kernel-agent checkout.
-_POD_RUNNER = r'''
+_POD_RUNNER = r"""
 import argparse, json, os, re, shutil, subprocess, sys, time
 from pathlib import Path
 
@@ -157,11 +187,19 @@ except subprocess.TimeoutExpired:
                       "stderr_tail": "TimeoutExpired after %ds" % a.timeout_s,
                       "gpu_ids": ids, "elapsed_s": round(time.time()-started, 2),
                       "cmd": cmd}))
-'''
+"""
 
 
 def _extract_last_json(text: str) -> dict | None:
-    """Parse the last top-level JSON object from the pod's stdout."""
+    """Parse the last top-level JSON object from the pod's stdout.
+
+    Args:
+        text: The pod's stdout to scan.
+
+    Returns:
+        The last top-level JSON object as a dict, or ``None`` when none is
+        found or it fails to parse.
+    """
     if not text:
         return None
     s = text.rstrip()
@@ -176,33 +214,54 @@ def _extract_last_json(text: str) -> dict | None:
             depth -= 1
             if depth == 0:
                 import json
+
                 try:
-                    return json.loads(s[i:end + 1])
+                    return json.loads(s[i : end + 1])
                 except json.JSONDecodeError:
                     return None
     return None
 
 
 def _ssh_unconfigured() -> dict | None:
-    """Return an error dict if MN_SSH_HOST/KEY are missing, else None."""
+    """Return an error dict if MN_SSH_HOST/KEY are missing, else None.
+
+    Returns:
+        A result-shaped error dict when SSH is unconfigured, else ``None``.
+    """
     host, _port, key = ssh_target()
     if not host or not key:
         return {
-            "returncode": 1, "stdout_tail": "",
+            "returncode": 1,
+            "stdout_tail": "",
             "stderr_tail": "KERNEL_AGENT_GPU_PLACEMENT=ssh but MN_SSH_HOST / "
-                           "MN_SSH_KEY are not set; orchestrator must supply them",
-            "gpu_ids": "", "elapsed_s": 0.0, "cmd": [],
+            "MN_SSH_KEY are not set; orchestrator must supply them",
+            "gpu_ids": "",
+            "elapsed_s": 0.0,
+            "cmd": [],
         }
     return None
 
 
 def _run_pod_runner_over_ssh(
-    runner_name: str, runner_py: str, runner_args: list[str], timeout_s: int,
+    runner_name: str,
+    runner_py: str,
+    runner_args: list[str],
+    timeout_s: int,
 ) -> tuple[dict | None, subprocess.CompletedProcess | None, str]:
     """Ship a self-contained pod runner to the GPU pod over SSH and run it.
 
     Env (creds) is piped via SSH stdin (never argv/disk). Returns
     ``(parsed_json_or_None, completed_proc_or_None, host)``.
+
+    Args:
+        runner_name: Short name for the runner (used in temp paths / heredoc).
+        runner_py: The self-contained pod runner Python source.
+        runner_args: CLI args passed to the pod runner.
+        timeout_s: Runner budget in seconds (SSH timeout adds a buffer).
+
+    Returns:
+        A ``(parsed_json_or_None, completed_proc_or_None, host)`` tuple; the
+        proc is ``None`` when the SSH call itself timed out.
     """
     host, port, key = ssh_target()
     quoted_args = " ".join(shlex.quote(x) for x in runner_args)
@@ -218,7 +277,10 @@ def _run_pod_runner_over_ssh(
     argv = ["ssh", *_SSH_OPTS, "-i", key, "-p", str(port), f"root@{host}", "bash", "-s"]
     try:
         proc = subprocess.run(
-            argv, input=script, capture_output=True, text=True,
+            argv,
+            input=script,
+            capture_output=True,
+            text=True,
             timeout=timeout_s + 300,
         )
     except subprocess.TimeoutExpired:
@@ -227,20 +289,45 @@ def _run_pod_runner_over_ssh(
 
 
 def run_geak_over_ssh(
-    prompt_file: Path, output_dir: Path, kernel_path: str,
-    cost_limit: float | None, num_gpus: int, timeout_s: int,
-    kernel_repo: str = "", test_command: str = "",
+    prompt_file: Path,
+    output_dir: Path,
+    kernel_path: str,
+    cost_limit: float | None,
+    num_gpus: int,
+    timeout_s: int,
+    kernel_repo: str = "",
+    test_command: str = "",
 ) -> dict:
     """Run GEAK on a Dynamo GPU pod over SSH (no Ray). Returns the same dict
     shape as ``run_via_cli`` / ``run_via_ray`` so callers are placement-blind.
+
+    Args:
+        prompt_file: Path to the GEAK prompt (on the shared mount).
+        output_dir: Output directory for GEAK artifacts (shared mount).
+        kernel_path: Optional kernel source path passed to GEAK.
+        cost_limit: Optional cost cap forwarded to GEAK.
+        num_gpus: Number of GPUs to expose to the pod runner.
+        timeout_s: GEAK budget in seconds.
+        kernel_repo: Optional kernel repo path passed to GEAK.
+        test_command: Optional test command passed to GEAK.
+
+    Returns:
+        The GEAK result dict (``returncode`` / ``stdout_tail`` /
+        ``stderr_tail`` / ``gpu_ids`` / ``elapsed_s`` / ``cmd``).
     """
     unconfigured = _ssh_unconfigured()
     if unconfigured is not None:
         return unconfigured
     output_dir.mkdir(parents=True, exist_ok=True)
     runner_args = [
-        "--prompt", str(prompt_file), "--output", str(output_dir),
-        "--num-gpus", str(max(1, num_gpus)), "--timeout-s", str(timeout_s),
+        "--prompt",
+        str(prompt_file),
+        "--output",
+        str(output_dir),
+        "--num-gpus",
+        str(max(1, num_gpus)),
+        "--timeout-s",
+        str(timeout_s),
     ]
     if kernel_path:
         runner_args += ["--kernel-path", kernel_path]
@@ -252,26 +339,37 @@ def run_geak_over_ssh(
         runner_args += ["--cost-limit", str(cost_limit)]
 
     parsed, proc, host = _run_pod_runner_over_ssh(
-        "geak", _POD_RUNNER, runner_args, timeout_s,
+        "geak",
+        _POD_RUNNER,
+        runner_args,
+        timeout_s,
     )
     if proc is None:
-        return {"returncode": 124, "stdout_tail": "",
-                "stderr_tail": f"ssh GEAK run timed out (host={host})",
-                "gpu_ids": "", "elapsed_s": 0.0, "cmd": []}
+        return {
+            "returncode": 124,
+            "stdout_tail": "",
+            "stderr_tail": f"ssh GEAK run timed out (host={host})",
+            "gpu_ids": "",
+            "elapsed_s": 0.0,
+            "cmd": [],
+        }
     if parsed is not None:
         return parsed
-    return {"returncode": proc.returncode or 1,
-            "stdout_tail": (proc.stdout or "")[-4000:],
-            "stderr_tail": f"ssh transport/runner error (host={host}): "
-                           f"{(proc.stderr or '')[-2000:]}",
-            "gpu_ids": "", "elapsed_s": 0.0, "cmd": []}
+    return {
+        "returncode": proc.returncode or 1,
+        "stdout_tail": (proc.stdout or "")[-4000:],
+        "stderr_tail": f"ssh transport/runner error (host={host}): {(proc.stderr or '')[-2000:]}",
+        "gpu_ids": "",
+        "elapsed_s": 0.0,
+        "cmd": [],
+    }
 
 
 # OOB pod-side runner. Mirrors oob_submit.run_via_ray._task: maps GPUs, builds
 # the `oob run` cmd, runs it, writes the (potentially large) oob stdout to a
 # shared-FS log under --output so the sandbox reads it back without bloating
 # the JSON, and prints a JSON result with tails + the log path.
-_OOB_RUNNER = r'''
+_OOB_RUNNER = r"""
 import argparse, json, os, shutil, subprocess, sys, time
 from pathlib import Path
 
@@ -332,13 +430,19 @@ print(json.dumps({
     "gpu_ids": ids, "elapsed_s": round(time.time() - started, 2), "cmd": cmd,
     "stdout_log_path": stdout_log,
 }))
-'''
+"""
 
 
 def run_oob_over_ssh(
-    agent: str, prompt_file: Path, output_dir: Path, source_file: str,
-    max_turns: int, num_gpus: int, timeout_s: int,
-    extra_files: list[str] | None = None, kernel_repo: str = "",
+    agent: str,
+    prompt_file: Path,
+    output_dir: Path,
+    source_file: str,
+    max_turns: int,
+    num_gpus: int,
+    timeout_s: int,
+    extra_files: list[str] | None = None,
+    kernel_repo: str = "",
     system_prompt_text: str = "",
 ) -> dict:
     """Run an OOB agent (claude/codex/cursor) on a Dynamo GPU pod over SSH.
@@ -346,6 +450,22 @@ def run_oob_over_ssh(
     Returns the same dict shape as oob_submit.run_via_ray, INCLUDING the full
     ``stdout`` (read back from the shared-FS log the pod runner wrote) so the
     caller's ``_parse_oob_init`` recovers the workspace.
+
+    Args:
+        agent: OOB agent name (e.g. ``claude`` / ``codex`` / ``cursor``).
+        prompt_file: Path to the prompt file (shared mount).
+        output_dir: Output directory for the run (shared mount).
+        source_file: Optional source file passed to the agent.
+        max_turns: Maximum agent turns.
+        num_gpus: Number of GPUs to expose to the pod runner.
+        timeout_s: Agent budget in seconds.
+        extra_files: Optional extra files passed to the agent.
+        kernel_repo: Optional kernel repo path (accepted for parity).
+        system_prompt_text: Optional system prompt written to a shared-FS file.
+
+    Returns:
+        The OOB result dict, including the full ``stdout`` recovered from the
+        shared-FS log.
     """
     unconfigured = _ssh_unconfigured()
     if unconfigured is not None:
@@ -358,9 +478,18 @@ def run_oob_over_ssh(
     except OSError:
         sysprompt_file = Path("")
     runner_args = [
-        "--agent", agent, "--prompt", str(prompt_file), "--output", str(output_dir),
-        "--max-turns", str(max_turns), "--timeout-s", str(timeout_s),
-        "--num-gpus", str(max(1, num_gpus)),
+        "--agent",
+        agent,
+        "--prompt",
+        str(prompt_file),
+        "--output",
+        str(output_dir),
+        "--max-turns",
+        str(max_turns),
+        "--timeout-s",
+        str(timeout_s),
+        "--num-gpus",
+        str(max(1, num_gpus)),
     ]
     if str(sysprompt_file):
         runner_args += ["--system-prompt-file", str(sysprompt_file)]
@@ -371,18 +500,31 @@ def run_oob_over_ssh(
             runner_args += ["--extra-file", ef]
 
     parsed, proc, host = _run_pod_runner_over_ssh(
-        "oob", _OOB_RUNNER, runner_args, timeout_s,
+        "oob",
+        _OOB_RUNNER,
+        runner_args,
+        timeout_s,
     )
     if proc is None:
-        return {"returncode": 124, "stdout_tail": "", "stdout": "",
-                "stderr_tail": f"ssh OOB run timed out (host={host})",
-                "gpu_ids": "", "elapsed_s": 0.0, "cmd": []}
+        return {
+            "returncode": 124,
+            "stdout_tail": "",
+            "stdout": "",
+            "stderr_tail": f"ssh OOB run timed out (host={host})",
+            "gpu_ids": "",
+            "elapsed_s": 0.0,
+            "cmd": [],
+        }
     if parsed is None:
-        return {"returncode": proc.returncode or 1, "stdout": "",
-                "stdout_tail": (proc.stdout or "")[-4000:],
-                "stderr_tail": f"ssh transport/runner error (host={host}): "
-                               f"{(proc.stderr or '')[-2000:]}",
-                "gpu_ids": "", "elapsed_s": 0.0, "cmd": []}
+        return {
+            "returncode": proc.returncode or 1,
+            "stdout": "",
+            "stdout_tail": (proc.stdout or "")[-4000:],
+            "stderr_tail": f"ssh transport/runner error (host={host}): {(proc.stderr or '')[-2000:]}",
+            "gpu_ids": "",
+            "elapsed_s": 0.0,
+            "cmd": [],
+        }
     # Recover the full oob stdout from the shared-FS log so _parse_oob_init
     # sees the init/summary events (the workspace lives under output_dir too).
     full_stdout = parsed.get("stdout_tail", "")

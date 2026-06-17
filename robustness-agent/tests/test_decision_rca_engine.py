@@ -55,6 +55,7 @@ def _engine(handler, *, throttle: RcaThrottle | None = None, **overrides) -> Llm
 # Noop engine
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_noop_engine_returns_empty():
     engine = NoopRcaEngine()
@@ -64,6 +65,7 @@ async def test_noop_engine_returns_empty():
 # ---------------------------------------------------------------------------
 # Happy path
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_llm_engine_calls_chat_server_and_returns_text():
@@ -75,11 +77,7 @@ async def test_llm_engine_calls_chat_server_and_returns_text():
         captured["auth"] = request.headers.get("Authorization")
         return httpx.Response(
             200,
-            json={
-                "choices": [
-                    {"message": {"content": "Likely OOM. Reduce batch_size."}}
-                ]
-            },
+            json={"choices": [{"message": {"content": "Likely OOM. Reduce batch_size."}}]},
         )
 
     engine = _engine(handler)
@@ -210,6 +208,7 @@ async def test_llm_engine_handles_list_content_parts():
 # Throttle
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_throttle_skips_low_severity_symptoms():
     calls = 0
@@ -298,6 +297,7 @@ async def test_throttle_enforces_per_key_cooldown():
 # Error paths
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_llm_engine_returns_empty_on_500():
     def handler(request: httpx.Request) -> httpx.Response:
@@ -345,6 +345,7 @@ async def test_llm_engine_skips_when_credentials_missing():
 # ---------------------------------------------------------------------------
 # extra_evidence_provider
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_extra_evidence_appears_in_prompt():

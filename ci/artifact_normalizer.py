@@ -93,8 +93,18 @@ def _first_of(data: dict[str, Any], *keys: str) -> Any | None:
 
 
 def _first_nested(data: dict[str, Any], *paths: str) -> Any | None:
-    """Return the first non-None value from dotted paths (compat across the
-    several flat and nested ci_metrics schemas agents have emitted)."""
+    """Return the first non-None value found among dotted paths.
+
+    Provides compatibility across the several flat and nested ci_metrics
+    schemas agents have emitted.
+
+    Args:
+        data: The mapping to traverse.
+        *paths: Dotted key paths, probed in order.
+
+    Returns:
+        The first resolved value, or ``None`` when no path resolves.
+    """
     for path in paths:
         cur: Any = data
         ok = True
@@ -340,8 +350,7 @@ def parse_ci_metrics(data: dict[str, Any] | None) -> dict[str, Any]:
     }
     if metrics["gain_pct"] is None and metrics["baseline_throughput"] and metrics["optimized_throughput"]:
         metrics["gain_pct"] = round(
-            (metrics["optimized_throughput"] - metrics["baseline_throughput"])
-            / metrics["baseline_throughput"] * 100,
+            (metrics["optimized_throughput"] - metrics["baseline_throughput"]) / metrics["baseline_throughput"] * 100,
             2,
         )
     return metrics
@@ -392,16 +401,18 @@ def parse_sweep_results(path: Path | None, warnings: list[str]) -> list[dict[str
         with path.open(newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 skipped = any(str(v).strip().upper() == "SKIPPED" for v in row.values())
-                points.append({
-                    "conc": _to_int(row.get("CONC")),
-                    "isl": _to_int(row.get("ISL")),
-                    "osl": _to_int(row.get("OSL")),
-                    "num_prompts": _to_int(row.get("NUM_PROMPTS")),
-                    "output_throughput_tok_s": _to_float(row.get("output_throughput_tok_s")),
-                    "mean_tpot_ms": _to_float(row.get("mean_tpot_ms")),
-                    "mean_ttft_ms": _to_float(row.get("mean_ttft_ms")),
-                    "status": "skipped" if skipped else "ok",
-                })
+                points.append(
+                    {
+                        "conc": _to_int(row.get("CONC")),
+                        "isl": _to_int(row.get("ISL")),
+                        "osl": _to_int(row.get("OSL")),
+                        "num_prompts": _to_int(row.get("NUM_PROMPTS")),
+                        "output_throughput_tok_s": _to_float(row.get("output_throughput_tok_s")),
+                        "mean_tpot_ms": _to_float(row.get("mean_tpot_ms")),
+                        "mean_ttft_ms": _to_float(row.get("mean_ttft_ms")),
+                        "status": "skipped" if skipped else "ok",
+                    }
+                )
     except Exception as e:
         warnings.append(f"failed to parse sweep results: {e}")
     return points
@@ -424,14 +435,16 @@ def parse_kernel_candidates(data: Any) -> list[dict[str, Any]]:
     for item in data:
         if not isinstance(item, dict):
             continue
-        candidates.append({
-            "rank": _to_int(item.get("rank")),
-            "name": item.get("name"),
-            "tier": item.get("tier"),
-            "gpu_pct": _to_float(item.get("gpu_pct")),
-            "count": _to_int(item.get("count")),
-            "time_ms": _to_float(item.get("time_ms")),
-        })
+        candidates.append(
+            {
+                "rank": _to_int(item.get("rank")),
+                "name": item.get("name"),
+                "tier": item.get("tier"),
+                "gpu_pct": _to_float(item.get("gpu_pct")),
+                "count": _to_int(item.get("count")),
+                "time_ms": _to_float(item.get("time_ms")),
+            }
+        )
     return candidates
 
 
@@ -452,14 +465,16 @@ def parse_kernel_results(data: dict[str, Any] | None) -> tuple[list[dict[str, An
     for item in data.get("kernels") or []:
         if not isinstance(item, dict):
             continue
-        kernels.append({
-            "name": item.get("name"),
-            "micro_speedup": _to_float(item.get("micro_speedup")),
-            "correctness": item.get("correctness"),
-            "gpu_pct": _to_float(item.get("gpu_pct")),
-            "status": item.get("status"),
-            "note": item.get("note"),
-        })
+        kernels.append(
+            {
+                "name": item.get("name"),
+                "micro_speedup": _to_float(item.get("micro_speedup")),
+                "correctness": item.get("correctness"),
+                "gpu_pct": _to_float(item.get("gpu_pct")),
+                "status": item.get("status"),
+                "note": item.get("note"),
+            }
+        )
     summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
     return kernels, summary
 
@@ -481,11 +496,13 @@ def build_artifact_index(task_dir: Path) -> list[dict[str, Any]]:
         if not path.is_file():
             continue
         rel = path.relative_to(task_dir).as_posix()
-        artifacts.append({
-            "path": rel,
-            "size_bytes": path.stat().st_size,
-            "kind": classify_artifact(rel),
-        })
+        artifacts.append(
+            {
+                "path": rel,
+                "size_bytes": path.stat().st_size,
+                "kind": classify_artifact(rel),
+            }
+        )
     return artifacts
 
 
@@ -528,8 +545,14 @@ def normalize_task_result(
 ) -> dict[str, Any]:
     """Normalize one task artifact directory.
 
-    ``manifest_record`` is caller-supplied task metadata; metrics are read
-    from files under ``task_dir``.
+    Args:
+        task_dir: Directory containing the task's collected artifacts.
+        manifest_record: Caller-supplied task metadata.
+        run: Optional run-level context merged into the result.
+
+    Returns:
+        The normalized result dict (schema-versioned) with metrics read from
+        files under ``task_dir``.
     """
     warnings: list[str] = []
 
@@ -605,6 +628,15 @@ def collect_normalized_results(
     """Normalize CI-collected artifacts using submission manifests.
 
     GitHub Actions adapter around ``normalize_task_result``.
+
+    Args:
+        artifacts_dir: Root directory of collected task artifacts.
+        manifests_dir: Directory tree holding ``submission_manifest.json``
+            files.
+        run: Optional run-level context merged into each result.
+
+    Returns:
+        One normalized result dict per task record across all manifests.
     """
     results: list[dict[str, Any]] = []
     manifest_files = sorted(manifests_dir.rglob("submission_manifest.json"))
@@ -712,16 +744,21 @@ def main() -> int:
         {"source": args.source},
     )
     write_single_result(result, Path(args.out_dir))
-    print(json.dumps({
-        "out_dir": args.out_dir,
-        "baseline": result["metrics"].get("baseline_throughput"),
-        "optimized": result["metrics"].get("optimized_throughput"),
-        "gain_pct": result["metrics"].get("gain_pct"),
-        "sweep_points": len(result.get("sweep_points") or []),
-        "kernel_candidates": len(result.get("kernel_candidates") or []),
-        "kernel_optimizations": len(result.get("kernel_optimizations") or []),
-        "warnings": result.get("warnings") or [],
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "out_dir": args.out_dir,
+                "baseline": result["metrics"].get("baseline_throughput"),
+                "optimized": result["metrics"].get("optimized_throughput"),
+                "gain_pct": result["metrics"].get("gain_pct"),
+                "sweep_points": len(result.get("sweep_points") or []),
+                "kernel_candidates": len(result.get("kernel_candidates") or []),
+                "kernel_optimizations": len(result.get("kernel_optimizations") or []),
+                "warnings": result.get("warnings") or [],
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

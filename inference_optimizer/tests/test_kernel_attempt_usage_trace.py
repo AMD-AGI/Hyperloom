@@ -35,11 +35,7 @@ def _read_rows(session_dir: Path) -> list[dict]:
     path = llm_calls_path(session_dir)
     if not path.exists():
         return []
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def _attempt(backend: str, log_path: Path, *, write: str | None = None) -> dict:
@@ -57,10 +53,12 @@ def test_geak_attempt_usage_lands_token_row(tmp_path: Path) -> None:
     session_dir = tmp_path / "SESSION"
     session_dir.mkdir()
     log = tmp_path / "geak-1234_stdout.log"
-    stdout = json.dumps({
-        "result": "optimized kernel",
-        "usage": {"prompt_tokens": 1200, "completion_tokens": 340},
-    })
+    stdout = json.dumps(
+        {
+            "result": "optimized kernel",
+            "usage": {"prompt_tokens": 1200, "completion_tokens": 340},
+        }
+    )
     result = {
         "kernel_id": "k007",
         "attempts": [_attempt("geak", log, write=stdout)],
@@ -85,11 +83,15 @@ def test_oob_attempt_usage_lands_token_row(tmp_path: Path) -> None:
     log = tmp_path / "oob-abcd_stdout.log"
     # oob streams JSONL; the usage rides on a late result event.
     stdout = (
-        json.dumps({"type": "init", "session_id": "s"}) + "\n"
-        + json.dumps({
-            "type": "result",
-            "usage": {"input_tokens": 88, "output_tokens": 12},
-        }) + "\n"
+        json.dumps({"type": "init", "session_id": "s"})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "result",
+                "usage": {"input_tokens": 88, "output_tokens": 12},
+            }
+        )
+        + "\n"
     )
     result = {
         "kernel_id": "k002",
@@ -250,12 +252,9 @@ def test_mixed_attempts_only_traces_geak_oob_with_usage(tmp_path: Path) -> None:
     result = {
         "kernel_id": "k010",
         "attempts": [
-            _attempt("claude", claude_log, write=json.dumps(
-                {"usage": {"input_tokens": 1, "output_tokens": 1}})),
-            _attempt("geak", geak_log, write=json.dumps(
-                {"usage": {"prompt_tokens": 10, "completion_tokens": 20}})),
-            _attempt("oob", oob_log, write=json.dumps(
-                {"usage": {"input_tokens": 30, "output_tokens": 40}})),
+            _attempt("claude", claude_log, write=json.dumps({"usage": {"input_tokens": 1, "output_tokens": 1}})),
+            _attempt("geak", geak_log, write=json.dumps({"usage": {"prompt_tokens": 10, "completion_tokens": 20}})),
+            _attempt("oob", oob_log, write=json.dumps({"usage": {"input_tokens": 30, "output_tokens": 40}})),
         ],
     }
     _trace_kernel_attempt_usage(result, session_dir=session_dir)
@@ -269,7 +268,8 @@ def test_result_without_attempts_is_noop(tmp_path: Path) -> None:
     session_dir = tmp_path / "SESSION"
     session_dir.mkdir()
     _trace_kernel_attempt_usage(
-        {"status": "failed", "error": "boom"}, session_dir=session_dir,
+        {"status": "failed", "error": "boom"},
+        session_dir=session_dir,
     )
     _trace_kernel_attempt_usage("not a dict", session_dir=session_dir)
     assert _read_rows(session_dir) == []

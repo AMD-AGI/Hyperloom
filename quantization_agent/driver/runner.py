@@ -57,9 +57,7 @@ def _import_sdk() -> tuple[Any, Any]:
     try:
         import claude_agent_sdk as sdk  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover - exercised via injection seams in tests
-        raise RuntimeError(
-            "claude_agent_sdk not installed; run the quantization-agent installer"
-        ) from exc
+        raise RuntimeError("claude_agent_sdk not installed; run the quantization-agent installer") from exc
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
         raise RuntimeError("claude_agent_sdk missing query / ClaudeAgentOptions")
     return sdk.query, sdk.ClaudeAgentOptions
@@ -94,6 +92,13 @@ def resolve_skill_path(package_root: Path | None = None) -> Path:
     The SKILL is the runtime contract loaded into every attempt; resolution
     is centralized here so callers (including the CLI smoke test) don't
     hardcode the layout.
+
+    Args:
+        package_root: Override for the package root; defaults to the
+            parent of this module's directory.
+
+    Returns:
+        The path to ``SKILL.md`` under the package root.
     """
 
     # __file__ is .../quantization_agent/driver/runner.py — SKILL.md lives one
@@ -122,6 +127,20 @@ def build_attempt_prompt(
     prior outcome ID + the fix-hypothesis file SKILL.md wrote at the end of
     the previous attempt, so the LLM can target the diagnosed cause rather
     than re-running the same plan blindly.
+
+    Args:
+        user_prompt: The verbatim user instruction to embed.
+        skill_path: Path to ``SKILL.md`` (the runtime contract).
+        workspace: Directory where the attempt writes artifacts.
+        quark_root: Read-only Quark project root.
+        attempt_number: 1-based attempt index.
+        acceptable_eval_gap: Caller-supplied eval-gap threshold, if any.
+        interactive: Interactivity mode (``None`` = auto).
+        previous_outcome: Prior attempt's outcome ID, for retry context.
+        fix_hypothesis_path: Path to the prior fix-hypothesis file, if any.
+
+    Returns:
+        The fully-rendered prompt string.
     """
 
     interactive_str = (
@@ -137,9 +156,7 @@ def build_attempt_prompt(
     retry_block = ""
     if attempt_number > 1 and previous_outcome:
         hint = (
-            f"\n- Fix hypothesis from prior attempt: {fix_hypothesis_path}"
-            if fix_hypothesis_path is not None
-            else ""
+            f"\n- Fix hypothesis from prior attempt: {fix_hypothesis_path}" if fix_hypothesis_path is not None else ""
         )
         retry_block = (
             f"\n\n## Retry context\nThis is attempt #{attempt_number}. The previous "
@@ -191,6 +208,25 @@ async def run_one_attempt(
     and returned via ``AttemptResult.sdk_error`` rather than propagated, so
     the retry loop can read the workspace state — which often contains valid
     artifacts even when the SDK aborted late.
+
+    Args:
+        user_prompt: The verbatim user instruction.
+        workspace: Directory for attempt artifacts (created if needed).
+        quark_root: Read-only Quark project root.
+        attempt_number: 1-based attempt index.
+        acceptable_eval_gap: Caller-supplied eval-gap threshold, if any.
+        interactive: Interactivity mode (``None`` = auto).
+        previous_outcome: Prior attempt's outcome ID, for retry context.
+        skill_path: Override for the ``SKILL.md`` path.
+        model: Optional model identifier.
+        max_turns: Maximum SDK turns for the session.
+        allowed_tools: Optional explicit tool allowlist.
+        sdk_query_factory: Override for the SDK query callable (testing).
+        sdk_options_cls: Override for the SDK options class (testing).
+        log: Optional line-logging callback.
+
+    Returns:
+        The :class:`AttemptResult` for the session.
     """
 
     workspace = Path(workspace)
@@ -250,10 +286,7 @@ async def run_one_attempt(
     sdk_error = ""
 
     if log:
-        log(
-            f"quantization-agent SDK runner: workspace={workspace} "
-            f"quark_root={quark_root} attempt={attempt_number}"
-        )
+        log(f"quantization-agent SDK runner: workspace={workspace} quark_root={quark_root} attempt={attempt_number}")
 
     try:
         async for message in sdk_query_factory(prompt=prompt, options=options):

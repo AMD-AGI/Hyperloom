@@ -14,11 +14,15 @@ from pathlib import Path
 
 from inference_optimizer.orchestrator.agent_role import default_role_registry
 from inference_optimizer.orchestrator.backends.mock_backend import (
-    MockBackend, MockTurn, ScriptedPlan,
+    MockBackend,
+    MockTurn,
+    ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.recipe_kb import (
-    LocalRecipeStore, RecipeKB, recipe_canonical_id,
+    LocalRecipeStore,
+    RecipeKB,
+    recipe_canonical_id,
 )
 
 
@@ -35,9 +39,9 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle),
-        "kernel":        MockBackend(idle),
-        "critic":        MockBackend(idle),
-        "robustness":    MockBackend(idle),
+        "kernel": MockBackend(idle),
+        "critic": MockBackend(idle),
+        "robustness": MockBackend(idle),
     }
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"), remote=None)
     coord = Coordinator(
@@ -58,8 +62,11 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
 
 def _expected_cid() -> str:
     return recipe_canonical_id(
-        model=_MODEL, hardware=_HW, framework=_FW,
-        framework_version=_FWV, precision=_PREC,
+        model=_MODEL,
+        hardware=_HW,
+        framework=_FW,
+        framework_version=_FWV,
+        precision=_PREC,
     )
 
 
@@ -94,6 +101,69 @@ def test_kb_amend_recipe_persists_pitfall(tmp_path: Path) -> None:
     assert "ep=8 OOMs on 30B" in descs
 
 
+def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> None:
+    """KEEP with structured variant args must write best_config for warm-replay."""
+    from types import SimpleNamespace
+
+    coord = _make_coordinator(tmp_path)
+    task = SimpleNamespace(
+        kind="explore",
+        task_id="t-keep-bc",
+        params={},
+    )
+    coord._record_fact_per_variant(
+        task=task,
+        source_session_id="sess-1",
+        variant_outcome={
+            "outcome": "KEEP",
+            "variant_name": "disable_radix",
+            "variant": {"extra_sglang_args": "--disable-radix-cache"},
+            "metrics": {"gain_pct": 0.66, "output_throughput": 6700.0},
+        },
+    )
+    row = coord.cortex_kb.get_recipe(canonical_id=_expected_cid())
+    assert row is not None
+    bc = row.get("best_config") or {}
+    assert bc.get("extra_server_args") == "--disable-radix-cache"
+    assert float(row.get("best_throughput") or 0.0) == 6700.0
+    assert any("disable-radix-cache" in str(l.get("statement") or "") for l in (row.get("lessons") or []))
+
+
+def test_record_fact_per_variant_does_not_clobber_better_best_config(
+    tmp_path: Path,
+) -> None:
+    """A weaker KEEP must not overwrite an existing stronger best_config."""
+    from types import SimpleNamespace
+
+    coord = _make_coordinator(tmp_path)
+    cid = _expected_cid()
+    coord.cortex_kb.put_recipe(
+        canonical_id=cid,
+        model=_MODEL,
+        hardware=_HW,
+        framework=_FW,
+        framework_version=_FWV,
+        precision=_PREC,
+        best_config={"extra_sglang_args": "--page-size 32"},
+        best_throughput=7000.0,
+    )
+    task = SimpleNamespace(kind="explore", task_id="t-weaker", params={})
+    coord._record_fact_per_variant(
+        task=task,
+        source_session_id="sess-1",
+        variant_outcome={
+            "outcome": "KEEP",
+            "variant_name": "small_gain",
+            "variant": {"extra_sglang_args": "--disable-radix-cache"},
+            "metrics": {"gain_pct": 0.1, "output_throughput": 6600.0},
+        },
+    )
+    row = coord.cortex_kb.get_recipe(canonical_id=cid)
+    bc = row.get("best_config") or {}
+    assert bc.get("extra_sglang_args") == "--page-size 32"
+    assert float(row.get("best_throughput") or 0.0) == 7000.0
+
+
 def test_kb_amend_recipe_stamps_architecture_tags(tmp_path: Path) -> None:
     """Amend stamps config.json architecture tags (``architectures`` + ``model_type``) into the recipe."""
     coord = _make_coordinator(tmp_path)
@@ -102,7 +172,7 @@ def test_kb_amend_recipe_stamps_architecture_tags(tmp_path: Path) -> None:
     coord._kb_amend_recipe(
         append_lesson={"statement": "raise tp to 8", "measured_impact": "+12%"},
     )
-    row = coord.cortex_kb.get_recipe(canonical_id=_expected_cid())
+    row = coord.cortex_kb.get_recipe(canonical_id=coord._workload_canonical_id())
     assert row is not None
     assert row.get("architectures") == ["LlamaForCausalLM"]
     assert row.get("model_type") == "llama"
@@ -143,8 +213,11 @@ def test_sdk_fallback_t0_anchors_into_self_cortex_kb(tmp_path: Path) -> None:
 def _put(store: LocalRecipeStore, **kw) -> None:
     store.put_recipe(
         canonical_id=_expected_cid(),
-        model=_MODEL, hardware=_HW, framework=_FW,
-        framework_version=_FWV, precision=_PREC,
+        model=_MODEL,
+        hardware=_HW,
+        framework=_FW,
+        framework_version=_FWV,
+        precision=_PREC,
         **kw,
     )
 
@@ -159,10 +232,15 @@ def test_local_store_preserves_pitfall_severity(tmp_path: Path) -> None:
 
 def test_local_store_preserves_lesson_dict_measured_impact(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path / "kb")
-    _put(store, lessons=[{
-        "statement": "raise tp to 8",
-        "measured_impact": {"gain_pct": 12.0, "throughput_after": 1000.0},
-    }])
+    _put(
+        store,
+        lessons=[
+            {
+                "statement": "raise tp to 8",
+                "measured_impact": {"gain_pct": 12.0, "throughput_after": 1000.0},
+            }
+        ],
+    )
     row = store.get_recipe(canonical_id=_expected_cid())
     assert row is not None
     mi = row["lessons"][0]["measured_impact"]
@@ -187,10 +265,15 @@ def test_amend_preserves_t0_extras_and_audit(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
     coord.cortex_kb.put_recipe(
-        canonical_id=cid, model=_MODEL, hardware=_HW, framework=_FW,
-        framework_version=_FWV, precision=_PREC,
+        canonical_id=cid,
+        model=_MODEL,
+        hardware=_HW,
+        framework=_FW,
+        framework_version=_FWV,
+        precision=_PREC,
         extras={"model_class": "moe", "image_digest": "sha256:abc"},
-        authority="AUTHORITATIVE", confidence=0.99,
+        authority="AUTHORITATIVE",
+        confidence=0.99,
     )
     coord._kb_amend_recipe(
         append_lesson={"statement": "x", "measured_impact": "+1%"},
@@ -218,9 +301,14 @@ def test_close_does_not_clobber_better_best_config(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
     coord.cortex_kb.put_recipe(
-        canonical_id=cid, model=_MODEL, hardware=_HW, framework=_FW,
-        framework_version=_FWV, precision=_PREC,
-        best_config={"name": "good", "tput": "1000"}, best_throughput=1000.0,
+        canonical_id=cid,
+        model=_MODEL,
+        hardware=_HW,
+        framework=_FW,
+        framework_version=_FWV,
+        precision=_PREC,
+        best_config={"name": "good", "tput": "1000"},
+        best_throughput=1000.0,
         stack_fingerprint={"vllm_version": "0.6.0"},
     )
     coord.shared_state.current_best = {}
@@ -252,8 +340,7 @@ def _seed_kept_kernel(coord: Coordinator) -> None:
             "best_gain_pct": -0.094,
             "last_decision": "NEEDS_REVIEW",
             "attempts": [
-                {"decision": "NEEDS_REVIEW", "new_tput": 2477.82,
-                 "gain_pct": -0.094},
+                {"decision": "NEEDS_REVIEW", "new_tput": 2477.82, "gain_pct": -0.094},
             ],
         },
     }
@@ -270,9 +357,7 @@ def test_build_recipe_attrs_surfaces_kept_kernel(tmp_path: Path) -> None:
     assert k is not None, f"k006 not in {kopts}"
     assert k["micro_speedup"] == 1.3202
     assert k["decision"] == "KEEP"
-    assert k["source_file"] == (
-        "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu"
-    )
+    assert k["source_file"] == ("/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu")
     assert k["e2e_gain_pct"] == -0.094
     assert k["e2e_tput"] == 2477.82
     assert k["integrated"] is True
@@ -303,8 +388,12 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
     coord.cortex_kb.put_recipe(
-        canonical_id=cid, model=_MODEL, hardware=_HW, framework=_FW,
-        framework_version=_FWV, precision=_PREC,
+        canonical_id=cid,
+        model=_MODEL,
+        hardware=_HW,
+        framework=_FW,
+        framework_version=_FWV,
+        precision=_PREC,
         best_config={
             "name": "warm_replay",
             "extra_sglang_args": "--schedule-policy lpm --page-size 16",
@@ -321,12 +410,10 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
     ss.cumulative_gain = 0.0
     coord.cortex_finalize_recipe_and_journal()
     row = coord.cortex_kb.get_recipe(canonical_id=cid)
-    assert row["best_throughput"] == 2532.0, (
-        "bare-baseline CLOSE clobbered a validated best_throughput"
+    assert row["best_throughput"] == 2532.0, "bare-baseline CLOSE clobbered a validated best_throughput"
+    assert row["best_config"].get("extra_sglang_args") == ("--schedule-policy lpm --page-size 16"), (
+        "warm_replay launch flags were dropped by a flagless baseline overwrite"
     )
-    assert row["best_config"].get("extra_sglang_args") == (
-        "--schedule-policy lpm --page-size 16"
-    ), "warm_replay launch flags were dropped by a flagless baseline overwrite"
 
 
 def test_best_config_reads_stack_args_from_canonical_server_key(
@@ -340,17 +427,17 @@ def test_best_config_reads_stack_args_from_canonical_server_key(
         "extra_server_args": "--page-size 16 --page-size 16",
         "tput": 2200.0,
     }
-    ss.optimization_stack = [{
-        "action": "explore",
-        "variant_name": "page32",
-        "candidate_extra_server_args": "--page-size 32 --schedule-policy lpm",
-        "extra_server_args": "--page-size 32 --schedule-policy lpm",
-    }]
+    ss.optimization_stack = [
+        {
+            "action": "explore",
+            "variant_name": "page32",
+            "candidate_extra_server_args": "--page-size 32 --schedule-policy lpm",
+            "extra_server_args": "--page-size 32 --schedule-policy lpm",
+        }
+    ]
     ss.cumulative_gain_validated = 10.0
     attrs = coord._build_recipe_attrs_from_state()
-    assert attrs["best_config"]["extra_sglang_args"] == (
-        "--page-size 32 --schedule-policy lpm"
-    ), (
+    assert attrs["best_config"]["extra_sglang_args"] == ("--page-size 32 --schedule-policy lpm"), (
         "stack-layer launch args must be read from the canonical "
         "extra_server_args key; got "
         f"{attrs['best_config'].get('extra_sglang_args')!r}"
@@ -362,10 +449,13 @@ def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
     coord.cortex_kb.put_recipe(
-        canonical_id=cid, model=_MODEL, hardware=_HW, framework=_FW,
-        framework_version=_FWV, precision=_PREC,
-        best_config={"name": "old", "extra_sglang_args": "--page-size 16",
-                     "tput": "2000"},
+        canonical_id=cid,
+        model=_MODEL,
+        hardware=_HW,
+        framework=_FW,
+        framework_version=_FWV,
+        precision=_PREC,
+        best_config={"name": "old", "extra_sglang_args": "--page-size 16", "tput": "2000"},
         best_throughput=2000.0,
     )
     ss = coord.shared_state
@@ -374,10 +464,13 @@ def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
         "extra_sglang_args": "--page-size 32 --schedule-policy lpm",
         "tput": 2200.0,
     }
-    ss.optimization_stack = [{
-        "action": "explore", "variant_name": "page32",
-        "extra_sglang_args": "--page-size 32 --schedule-policy lpm",
-    }]
+    ss.optimization_stack = [
+        {
+            "action": "explore",
+            "variant_name": "page32",
+            "extra_sglang_args": "--page-size 32 --schedule-policy lpm",
+        }
+    ]
     ss.cumulative_gain_validated = 10.0
     coord.cortex_finalize_recipe_and_journal()
     row = coord.cortex_kb.get_recipe(canonical_id=cid)
@@ -405,8 +498,7 @@ def test_kernel_e2e_decision_reflects_integrate_revert(tmp_path: Path) -> None:
             "best_gain_pct": -1.0488865062914727,
             "last_decision": "REVERT",
             "attempts": [
-                {"decision": "REVERT", "new_tput": 2784.0072254162687,
-                 "gain_pct": -1.0488865062914727},
+                {"decision": "REVERT", "new_tput": 2784.0072254162687, "gain_pct": -1.0488865062914727},
             ],
         },
     }
@@ -453,7 +545,8 @@ def test_session_entry_carries_throughput_date_and_actions(
     ss = coord.shared_state
     ss.baseline_tput = 2000.0
     ss.current_best = {
-        "name": "tuned", "tput": 2150.0,
+        "name": "tuned",
+        "tput": 2150.0,
         "extra_sglang_args": "--page-size 32",
     }
     ss.optimization_stack = [
@@ -494,7 +587,4 @@ def test_pitfall_description_uses_variant_name_not_bare_kind(
     row = coord.cortex_kb.get_recipe(canonical_id=_expected_cid())
     descs = [p.get("description") for p in (row.get("pitfalls") or [])]
     assert any("page64_no_radix" in (d or "") for d in descs), descs
-    assert not any(
-        (d or "") == f"[{_FW}] explore → regress on {_MODEL}/{_HW}"
-        for d in descs
-    ), descs
+    assert not any((d or "") == f"[{_FW}] explore → regress on {_MODEL}/{_HW}" for d in descs), descs

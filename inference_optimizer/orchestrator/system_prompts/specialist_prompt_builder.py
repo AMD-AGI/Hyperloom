@@ -39,7 +39,14 @@ from inference_optimizer.orchestrator.policy import (
 
 def _is_atom(inp: SpecialistPromptInputs) -> bool:
     """True when ``_focus_*`` blocks should use atom-flavoured hints
-    (empty framework falls back to the canonical sglang/vllm block)."""
+    (empty framework falls back to the canonical sglang/vllm block).
+
+    Args:
+        inp: The specialist prompt inputs.
+
+    Returns:
+        True when the framework is ``atom``.
+    """
     return (inp.framework or "").strip().lower() == "atom"
 
 
@@ -61,13 +68,10 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
             "You target **atom scheduler / cuda_graph / kv_cache** code.",
             "",
             "**What to read first**",
-            "- `atom/entrypoints/openai_server.py` (HTTP request routing, "
-            + "`/start_profile`, `/stop_profile`).",
-            "- `atom/model_engine/engine_core.py` (engine main loop, "
-            + "`start_profiler` call sites).",
+            "- `atom/entrypoints/openai_server.py` (HTTP request routing, " + "`/start_profile`, `/stop_profile`).",
+            "- `atom/model_engine/engine_core.py` (engine main loop, " + "`start_profiler` call sites).",
             "- `atom/model_engine/llm_engine.py` (engine API surface).",
-            "- `atom/model_engine/model_runner.py` (per-rank forward, "
-            + "profiler hooks, cudagraph capture).",
+            "- `atom/model_engine/model_runner.py` (per-rank forward, " + "profiler hooks, cudagraph capture).",
             "- `atom/model_engine/arg_utils.py` (CLI flag inventory; "
             + "ground-truth for `--level`, `--enable_prefix_caching`, "
             + "`--cudagraph-capture-sizes`, `--kv_cache_dtype`, etc.).",
@@ -176,8 +180,7 @@ def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
             "- Searching `sglang/python/sglang/srt/layers/attention/` on "
             + "an atom box: those paths are empty / absent. Use "
             + "`atom/model_ops/` + shared `aiter/` instead.",
-            "- Mixing aiter overrides with `--enforce-eager` invalidates "
-            + "atom's cudagraph captures silently.",
+            "- Mixing aiter overrides with `--enforce-eager` invalidates " + "atom's cudagraph captures silently.",
         ]
     return [
         "You target **aiter / SGLang kernels / triton** code (attention,",
@@ -226,8 +229,7 @@ def _focus_comm_specialist(inp: SpecialistPromptInputs) -> list[str]:
     """
     if _is_atom(inp):
         return [
-            "You target **intra-node RCCL / NCCL / QuickReduce / "
-            + "AllReduce** tuning on atom.",
+            "You target **intra-node RCCL / NCCL / QuickReduce / " + "AllReduce** tuning on atom.",
             "",
             "**Atom is single-node only.** Multi-node tensor / data / "
             + "pipeline parallelism is NOT available on atom. Cross-node "
@@ -242,14 +244,11 @@ def _focus_comm_specialist(inp: SpecialistPromptInputs) -> list[str]:
             + "orchestration layer).",
             "- `aiter/csrc/quick_reduce/` and RCCL plugin paths "
             + "(shared with sglang/vllm; intra-node only on atom).",
-            "- KB anchor `communication.*` (allreduce / QuickReduce / "
-            + "topology).",
+            "- KB anchor `communication.*` (allreduce / QuickReduce / " + "topology).",
             "",
             "**Winning techniques to consider (single-node)**",
-            "- `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4` when "
-            + "intra-node TP allreduce message size > 1MiB.",
-            "- `NCCL_MIN_NCHANNELS` / `NCCL_MAX_NCHANNELS` tuning for "
-            + "the on-box XGMI topology.",
+            "- `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4` when " + "intra-node TP allreduce message size > 1MiB.",
+            "- `NCCL_MIN_NCHANNELS` / `NCCL_MAX_NCHANNELS` tuning for " + "the on-box XGMI topology.",
             "- `--enable-dp-attention` (MLA models) — DP-attention "
             + "shifts work onto a TP-free per-rank path, reducing the "
             + "allreduce footprint.",
@@ -258,8 +257,7 @@ def _focus_comm_specialist(inp: SpecialistPromptInputs) -> list[str]:
             "- Proposing multi-node TP / PP topologies — atom rejects "
             + "them at startup. The Coordinator collapses `--nodes>1` to "
             + "single-node mode on atom (IR-8).",
-            "- INT4 QuickReduce at TP=2 — overhead dominates the "
-            + "bandwidth savings on small message sizes.",
+            "- INT4 QuickReduce at TP=2 — overhead dominates the " + "bandwidth savings on small message sizes.",
         ]
     return [
         "You target **RCCL / NCCL / QuickReduce / AllReduce** code and tuning.",
@@ -396,10 +394,7 @@ def _focus_research_scout_specialist(
     """
     proven_lines: list[str] = []
     if inp.already_proven:
-        proven_lines.append(
-            "**Already proven (warm-start recipe) — do NOT re-mine these; "
-            "focus on net-new priors:**"
-        )
+        proven_lines.append("**Already proven (warm-start recipe) — do NOT re-mine these; focus on net-new priors:**")
         for item in inp.already_proven[:12]:
             name = str(item.get("name") or "").strip()
             if not name:
@@ -453,15 +448,13 @@ def _focus_research_scout_specialist(
     ]
 
 
-_DOMAIN_FOCUS_TEMPLATES: dict[
-    str, "Callable[[SpecialistPromptInputs], list[str]]"
-] = {
+_DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
     "serving_specialist": _focus_serving_specialist,
-    "kernel_switch_specialist":    _focus_kernel_switch_specialist,
-    "comm_specialist":      _focus_comm_specialist,
-    "compiler_specialist":  _focus_compiler_specialist,
-    "system_specialist":    _focus_system_specialist,
-    "pr_intel_specialist":  _focus_pr_intel_specialist,
+    "kernel_switch_specialist": _focus_kernel_switch_specialist,
+    "comm_specialist": _focus_comm_specialist,
+    "compiler_specialist": _focus_compiler_specialist,
+    "system_specialist": _focus_system_specialist,
+    "pr_intel_specialist": _focus_pr_intel_specialist,
     "research_scout_specialist": _focus_research_scout_specialist,
 }
 
@@ -637,7 +630,14 @@ def _auto_retry_note_block(inp: SpecialistPromptInputs) -> list[str]:
     """Heads-up block when this dispatch is a bounded auto-retry of a prior
     transient (timeout / crash / stale-heartbeat) attempt. Advisory only —
     the mandate is unchanged; the note nudges the specialist to scope its work
-    so it finishes within budget this time."""
+    so it finishes within budget this time.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``auto_retry_reason``).
+
+    Returns:
+        The rendered auto-retry notice lines.
+    """
     reason = inp.auto_retry_reason.strip()
     return [
         "",
@@ -657,8 +657,17 @@ def _auto_retry_note_block(inp: SpecialistPromptInputs) -> list[str]:
 def _bench_block(inp: SpecialistPromptInputs) -> list[str]:
     """In-loop micro-bench mandate appended for bench-enabled specialists
     (``mode=patch`` & ``bench=true``). Lists the whitelisted ``bench_id``s and
-    the worktree-scoped contract; the ``run_bench`` tool executes them."""
+    the worktree-scoped contract; the ``run_bench`` tool executes them.
+
+    Args:
+        inp: The specialist prompt inputs.
+
+    Returns:
+        The rendered micro-bench mandate lines, or ``[]`` when no benches are
+        registered.
+    """
     from ..specialist_bench import BENCH_REGISTRY, MAX_BENCH_WALL_CLOCK_SEC
+
     if not BENCH_REGISTRY:
         return []
     lines = [
@@ -676,12 +685,14 @@ def _bench_block(inp: SpecialistPromptInputs) -> list[str]:
     ]
     for spec in BENCH_REGISTRY.values():
         lines.append(f"- ``{spec.bench_id}`` — {spec.description}")
-    lines.extend([
-        "",
-        "run_bench is advisory: the Coordinator still owns the authoritative "
-        + "E2E benchmark and the KEEP/REVERT decision. Never self-report numeric "
-        + "speedups in ``specialist_done`` based on a micro-bench.",
-    ])
+    lines.extend(
+        [
+            "",
+            "run_bench is advisory: the Coordinator still owns the authoritative "
+            + "E2E benchmark and the KEEP/REVERT decision. Never self-report numeric "
+            + "speedups in ``specialist_done`` based on a micro-bench.",
+        ]
+    )
     return lines
 
 
@@ -689,7 +700,14 @@ def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:
     """Free-form mandate appended when ``scope == 'freeform'`` (absorbed from
     the retired dynamic_specialist wave channel). The specialist is NOT bound
     to the domain catalogue — the Orchestration ``task_description`` is the
-    whole mandate. The single deliverable is still ONE ``specialist_done``."""
+    whole mandate. The single deliverable is still ONE ``specialist_done``.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``task_description``).
+
+    Returns:
+        The rendered free-form mandate lines.
+    """
     desc = (inp.task_description or "").strip() or "(no task description provided)"
     return [
         "",
@@ -715,7 +733,15 @@ def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
     """Cross-domain mandate appended when ``scope == 'domains'`` (absorbed
     from the retired dynamic_action channel). The single deliverable is still
     ONE ``specialist_done``; the difference is the patch may span every domain
-    in scope and the Critic will hold it to the cross-domain rules."""
+    in scope and the Critic will hold it to the cross-domain rules.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``extra_focus_tags`` /
+            ``domain``).
+
+    Returns:
+        The rendered cross-domain mandate lines.
+    """
     tags = ", ".join(inp.extra_focus_tags) if inp.extra_focus_tags else inp.domain.key
     return [
         "",
@@ -728,8 +754,7 @@ def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
         + "its own boundary.",
         "",
         "In your ``specialist_done`` you MUST justify the combination:",
-        "- give an independent rationale for the change **within each domain** "
-        + "in scope;",
+        "- give an independent rationale for the change **within each domain** " + "in scope;",
         "- name the **coupling points** (why these changes must land together) "
         + "and at least one **side effect** of the combination;",
         "- show this is genuine cross-domain synthesis, not a concatenation of "
@@ -760,10 +785,7 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
     else:
         rows.append(f"- gpu_type: {_NONE_PLACEHOLDER}")
     if inp.allocated_gpu_ids:
-        rows.append(
-            "- allocated specialist GPU ids: "
-            + ", ".join(str(g) for g in inp.allocated_gpu_ids)
-        )
+        rows.append("- allocated specialist GPU ids: " + ", ".join(str(g) for g in inp.allocated_gpu_ids))
         rows.append(
             "- GPU specialist scope: short experiments / microbenchmarks only; "
             "do not launch a persistent serving server or Magpie benchmark loop."
@@ -835,7 +857,14 @@ def _section_gap(inp: SpecialistPromptInputs) -> list[str]:
 # Section 4 — optional KB context
 def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
     """Issue-J: all prior sources empty, so inject a cold-start directive
-    instead of letting specialists return an empty proposal_set."""
+    instead of letting specialists return an empty proposal_set.
+
+    Args:
+        inp: The specialist prompt inputs.
+
+    Returns:
+        True when every prior KB/PR/research source is empty.
+    """
     return (
         not inp.kb_subgraph
         and not inp.warm_start_recipe
@@ -862,60 +891,65 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
     if not inp.kb_subgraph:
         if inp.research_hints:
             # Research hints stand in as an advisory prior when KB is empty.
-            rows.extend([
-                "Structured KB context is empty for this (model, hardware, domain), but "
-                + "the research scout collected source-backed priors this "
-                + "session. Treat these as your advisory prior (co-equal with "
-                + "RecipeKB priors; the Critic still gates the final answer):",
-                "",
-                inp.research_hints,
-                "",
-                "Anchor proposals on these hints where they fit the gap "
-                + "(Section 3) and hardware (Section 2).",
-            ])
+            rows.extend(
+                [
+                    "Structured KB context is empty for this (model, hardware, domain), but "
+                    + "the research scout collected source-backed priors this "
+                    + "session. Treat these as your advisory prior (co-equal with "
+                    + "RecipeKB priors; the Critic still gates the final answer):",
+                    "",
+                    inp.research_hints,
+                    "",
+                    "Anchor proposals on these hints where they fit the gap " + "(Section 3) and hardware (Section 2).",
+                ]
+            )
             return rows
         if cold:
             # Cold-start directive so the specialist proposes domain-focus
             # defaults rather than an empty proposal_set.
-            rows.extend([
-                "**COLD-START MODE — no priors available.**",
-                "",
-                "All prior sources for this gap are empty:",
-                "",
-                "- KB context: ``(none)`` — no RecipeKB warm-start facts, "
-                + "research hints, or PR feed entries were available for this "
-                + "(model, hardware, domain) tuple.",
-                "- Warm-start recipe: ``(none)`` (Section 5).",
-                "- PR feed: ``(none)`` (Section 6).",
-                "",
-                "**Directive — DO NOT return an empty proposal_set.** "
-                + "Treat the *Winning techniques* + *Pitfalls* in your "
-                + "**domain focus** block (Section 1) as your fallback "
-                + "prior. Pick the **1–2 most conservative, "
-                + "well-attested defaults** from those bullets that are "
-                + "compatible with the hardware (Section 2) and the "
-                + "gap symptom (Section 3); flag each as "
-                + "``confidence: low`` and ``provenance: "
-                + "domain_focus_default`` in the proposal. Use the "
-                + "``residual_questions`` field to record what RecipeKB, "
-                + "research, or PR query a future round should pre-warm.",
-                "",
-                "If the *Winning techniques* block is generic enough "
-                + "that no proposal is safer than a coin-flip, you may "
-                + "still emit ``empty=true`` — but you MUST cite which "
-                + "bullets you considered and why each was rejected "
-                + "(in ``summary``). A bare empty exit with no rationale "
-                + "will be treated as a tool failure by the Coordinator.",
-            ])
+            rows.extend(
+                [
+                    "**COLD-START MODE — no priors available.**",
+                    "",
+                    "All prior sources for this gap are empty:",
+                    "",
+                    "- KB context: ``(none)`` — no RecipeKB warm-start facts, "
+                    + "research hints, or PR feed entries were available for this "
+                    + "(model, hardware, domain) tuple.",
+                    "- Warm-start recipe: ``(none)`` (Section 5).",
+                    "- PR feed: ``(none)`` (Section 6).",
+                    "",
+                    "**Directive — DO NOT return an empty proposal_set.** "
+                    + "Treat the *Winning techniques* + *Pitfalls* in your "
+                    + "**domain focus** block (Section 1) as your fallback "
+                    + "prior. Pick the **1–2 most conservative, "
+                    + "well-attested defaults** from those bullets that are "
+                    + "compatible with the hardware (Section 2) and the "
+                    + "gap symptom (Section 3); flag each as "
+                    + "``confidence: low`` and ``provenance: "
+                    + "domain_focus_default`` in the proposal. Use the "
+                    + "``residual_questions`` field to record what RecipeKB, "
+                    + "research, or PR query a future round should pre-warm.",
+                    "",
+                    "If the *Winning techniques* block is generic enough "
+                    + "that no proposal is safer than a coin-flip, you may "
+                    + "still emit ``empty=true`` — but you MUST cite which "
+                    + "bullets you considered and why each was rejected "
+                    + "(in ``summary``). A bare empty exit with no rationale "
+                    + "will be treated as a tool failure by the Coordinator.",
+                ]
+            )
         else:
-            rows.extend([
-                _NONE_PLACEHOLDER,
-                "",
-                "(No structured KB context supplied. Use Sections 1, 3, 5, "
-                + "and 6 plus source inspection; record missing RecipeKB / "
-                + "research / PR questions in ``residual_questions`` so a "
-                + "future round can warm richer advisory context.)",
-            ])
+            rows.extend(
+                [
+                    _NONE_PLACEHOLDER,
+                    "",
+                    "(No structured KB context supplied. Use Sections 1, 3, 5, "
+                    + "and 6 plus source inspection; record missing RecipeKB / "
+                    + "research / PR questions in ``residual_questions`` so a "
+                    + "future round can warm richer advisory context.)",
+                ]
+            )
         return rows
     rows.append("```json")
     rows.append(json.dumps(inp.kb_subgraph, sort_keys=True, indent=2))
@@ -926,7 +960,14 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
 # Section 4a — Roofline / TraceLens evidence
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
-    empty evidence renders a heading + ``(none)`` placeholder."""
+    empty evidence renders a heading + ``(none)`` placeholder.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``roofline_evidence``).
+
+    Returns:
+        The rendered roofline-evidence section lines.
+    """
     rows = ["## 4a. ROOFLINE EVIDENCE", ""]
     ev = inp.roofline_evidence or {}
     if not isinstance(ev, dict) or not ev:
@@ -947,10 +988,10 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     if isinstance(summary, dict) and summary:
         rows.append("**Executive Summary:**")
         for label, key in (
-            ("Compute %",        "compute_pct"),
-            ("Idle %",           "idle_pct"),
-            ("Exposed Comm %",   "comm_pct"),
-            ("Top bottleneck",   "top_bottleneck"),
+            ("Compute %", "compute_pct"),
+            ("Idle %", "idle_pct"),
+            ("Exposed Comm %", "comm_pct"),
+            ("Top bottleneck", "top_bottleneck"),
         ):
             val = summary.get(key)
             if val is None or val == "":
@@ -969,10 +1010,7 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
             "compute_pct | bandwidth_pct | action):**"
         )
         rows.append("")
-        rows.append(
-            "| kernel_id | name | gpu_pct | bound | AI | eff_pct | "
-            "compute_pct | bandwidth_pct | action |"
-        )
+        rows.append("| kernel_id | name | gpu_pct | bound | AI | eff_pct | compute_pct | bandwidth_pct | action |")
         rows.append("|---|---|---:|---|---:|---:|---:|---:|---|")
         for k in roofline:
             if not isinstance(k, dict):
@@ -980,29 +1018,18 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
             kid = str(k.get("kernel_id") or "")
             name = str(k.get("name") or "")
             gpu_pct = k.get("gpu_pct")
-            gpu_pct_str = (
-                f"{float(gpu_pct):.2f}%" if isinstance(gpu_pct, (int, float))
-                else "—"
-            )
+            gpu_pct_str = f"{float(gpu_pct):.2f}%" if isinstance(gpu_pct, (int, float)) else "—"
             bound = str(k.get("bound_type") or k.get("bottleneck") or "")
             ai = k.get("arithmetic_intensity")
             if ai is None:
                 ai = k.get("flops_per_byte")
-            ai_str = (
-                f"{float(ai):.3g}" if isinstance(ai, (int, float)) else "—"
-            )
+            ai_str = f"{float(ai):.3g}" if isinstance(ai, (int, float)) else "—"
             eff = k.get("efficiency_percent")
-            eff_str = (
-                f"{float(eff):.2f}%" if isinstance(eff, (int, float)) else "—"
-            )
+            eff_str = f"{float(eff):.2f}%" if isinstance(eff, (int, float)) else "—"
             comp = k.get("compute_utilization_pct")
-            comp_str = (
-                f"{float(comp):.2f}%" if isinstance(comp, (int, float)) else "—"
-            )
+            comp_str = f"{float(comp):.2f}%" if isinstance(comp, (int, float)) else "—"
             bw = k.get("bandwidth_utilization_pct")
-            bw_str = (
-                f"{float(bw):.2f}%" if isinstance(bw, (int, float)) else "—"
-            )
+            bw_str = f"{float(bw):.2f}%" if isinstance(bw, (int, float)) else "—"
             actions = k.get("recommended_actions") or []
             action = str(k.get("suggestion") or "")
             if not action and isinstance(actions, list) and actions:
@@ -1025,22 +1052,15 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
             kid = str(k.get("kernel_id") or "")
             name = str(k.get("name") or "")
             gpu_pct = k.get("gpu_pct")
-            gpu_pct_str = (
-                f"{float(gpu_pct):.2f}%" if isinstance(gpu_pct, (int, float))
-                else "—"
-            )
+            gpu_pct_str = f"{float(gpu_pct):.2f}%" if isinstance(gpu_pct, (int, float)) else "—"
             bottleneck = str(k.get("bottleneck") or "")
             src = str(k.get("source_file") or "")
-            rows.append(
-                f"| `{kid}` | {name} | {gpu_pct_str} | {bottleneck} | {src} |"
-            )
+            rows.append(f"| `{kid}` | {name} | {gpu_pct_str} | {bottleneck} | {src} |")
         rows.append("")
 
     analysis_path = str(ev.get("analysis_md_path") or "")
     if analysis_path:
-        rows.append(
-            f"**Full analysis.md path:** `{analysis_path}`"
-        )
+        rows.append(f"**Full analysis.md path:** `{analysis_path}`")
         rows.append("")
         rows.append(
             "Use the `Read` tool on this path for the full TraceLens "
@@ -1080,7 +1100,14 @@ def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
 # Section 5b — Related lessons (positive priors from prior KEEPs)
 def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
     """Render KB ``kind=lesson`` points from prior KEEPs, compactly
-    (statement + measured_impact)."""
+    (statement + measured_impact).
+
+    Args:
+        inp: The specialist prompt inputs (reads ``warm_start_lessons``).
+
+    Returns:
+        The rendered related-lessons section lines.
+    """
     rows = ["## 5b. RELATED LESSONS (prior KEEPs on this model+hw)", ""]
     if not inp.warm_start_lessons:
         rows.append(_NONE_PLACEHOLDER)
@@ -1129,11 +1156,21 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _format_version_note(
-    inp: SpecialistPromptInputs, lesson_attrs: dict[str, Any],
+    inp: SpecialistPromptInputs,
+    lesson_attrs: dict[str, Any],
 ) -> str:
     """GAP 8 — render a ``[from sglang@X.Y, you're on A.B]`` annotation when
     the lesson's framework_version differs; empty when either side is
-    unknown or they match."""
+    unknown or they match.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``framework`` /
+            ``framework_version``).
+        lesson_attrs: The lesson's attrs (reads ``framework_version``).
+
+    Returns:
+        The version-mismatch annotation, or "" when unknown or matching.
+    """
     lesson_fv = str(lesson_attrs.get("framework_version") or "").strip()
     current_fv = (inp.framework_version or "").strip()
     if not lesson_fv or not current_fv:
@@ -1146,7 +1183,14 @@ def _format_version_note(
 
 def _render_measured_impact(raw: Any) -> str:
     """Back-compat renderer for ``attrs.measured_impact`` (dict, legacy
-    string, or other)."""
+    string, or other).
+
+    Args:
+        raw: The ``measured_impact`` value (dict, string, None, or other).
+
+    Returns:
+        A compact human-readable impact string ("" when ``raw`` is None).
+    """
     if isinstance(raw, dict):
         parts: list[str] = []
         gain = raw.get("gain_pct")
@@ -1172,7 +1216,14 @@ def _render_measured_impact(raw: Any) -> str:
 # Section 5c — Known pitfalls (anti-priors from prior REVERTs)
 def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
     """Render KB ``kind=pitfall`` points from prior REVERTs (description +
-    severity); framed as forbidden paths, not suggestions."""
+    severity); framed as forbidden paths, not suggestions.
+
+    Args:
+        inp: The specialist prompt inputs (reads ``warm_start_pitfalls``).
+
+    Returns:
+        The rendered known-pitfalls section lines.
+    """
     rows = ["## 5c. KNOWN PITFALLS (do NOT repeat — prior REVERTs)", ""]
     if not inp.warm_start_pitfalls:
         rows.append(_NONE_PLACEHOLDER)
@@ -1240,10 +1291,7 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
         title = str(pr.get("title") or "").strip()
         url = str(pr.get("url") or "").strip()
         labels = pr.get("labels") or []
-        labels_text = (
-            " " + " ".join(f"[{l}]" for l in labels)
-            if isinstance(labels, list) and labels else ""
-        )
+        labels_text = " " + " ".join(f"[{l}]" for l in labels) if isinstance(labels, list) and labels else ""
         rows.append(f"- {title} — <{url}>{labels_text}")
     return rows
 
@@ -1319,30 +1367,34 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "Payload schema (identical for both channels):",
         "",
         "```json",
-        json.dumps({
-            "intent_type": "specialist_done",
-            "payload": {
-                "gap_canonical_id": inp.gap_canonical_id or "<echo from dispatch>",
-                "domain": inp.domain.key,
-                "proposal_set": [
-                    {
-                        "name": "<unique-in-round>",
-                        "extra_args": "--example-flag value",
-                        "extra_envs": {"EXAMPLE_ENV": "1"},
-                        "reason": "why this might help the gap",
-                        "kb_evidence": [],
-                        "pr_evidence": [],
-                        "source_evidence": []
-                    }
-                ],
-                "patches_written": [],
-                "empty": False,
-                "summary": "≤ 500 char overview of what you tried this round",
-                "confidence": 0.6,
-                "new_findings": [],
-                "residual_questions": []
+        json.dumps(
+            {
+                "intent_type": "specialist_done",
+                "payload": {
+                    "gap_canonical_id": inp.gap_canonical_id or "<echo from dispatch>",
+                    "domain": inp.domain.key,
+                    "proposal_set": [
+                        {
+                            "name": "<unique-in-round>",
+                            "extra_args": "--example-flag value",
+                            "extra_envs": {"EXAMPLE_ENV": "1"},
+                            "reason": "why this might help the gap",
+                            "kb_evidence": [],
+                            "pr_evidence": [],
+                            "source_evidence": [],
+                        }
+                    ],
+                    "patches_written": [],
+                    "empty": False,
+                    "summary": "≤ 500 char overview of what you tried this round",
+                    "confidence": 0.6,
+                    "new_findings": [],
+                    "residual_questions": [],
+                },
             },
-        }, sort_keys=True, indent=2),
+            sort_keys=True,
+            indent=2,
+        ),
         "```",
         "",
         "Field contract:",
@@ -1377,7 +1429,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "**Heartbeat (Channel B only):** When running in subprocess mode,",
         f"write ``{workspace}/heartbeat.json`` periodically (≤5 min apart)",
         "via Bash so the dispatcher knows you are still alive. Format:",
-        "``{\"ts\": \"<iso8601>\", \"status\": \"running\", \"note\": \"<short>\"}``.",
+        '``{"ts": "<iso8601>", "status": "running", "note": "<short>"}``.',
         "Going silent past 5 minutes kills your subprocess.",
         "",
         (
@@ -1483,22 +1535,24 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_iron_rules(inp),
     ]
     user_sections = [
-        _section_hardware(inp),           # 0: § 1
-        _section_gap(inp),                # 1: § 2-3
-        _section_kb_subgraph(inp),        # 2: § 4
+        _section_hardware(inp),  # 0: § 1
+        _section_gap(inp),  # 1: § 2-3
+        _section_kb_subgraph(inp),  # 2: § 4
         _section_roofline_evidence(inp),  # 3: § 4a
-        _section_recipe(inp),             # 4: § 5
-        _section_lessons(inp),            # 5: § 5b
-        _section_pitfalls(inp),           # 6: § 5c
-        _section_pr_feed(inp),            # 7: § 6
-        _section_source_hint(inp),        # 8: § 7
+        _section_recipe(inp),  # 4: § 5
+        _section_lessons(inp),  # 5: § 5b
+        _section_pitfalls(inp),  # 6: § 5c
+        _section_pr_feed(inp),  # 7: § 6
+        _section_source_hint(inp),  # 8: § 7
     ]
     if inp.notes:
-        user_sections.append([
-            "## 10. NOTES FROM ORCHESTRATION",
-            "",
-            inp.notes,
-        ])
+        user_sections.append(
+            [
+                "## 10. NOTES FROM ORCHESTRATION",
+                "",
+                inp.notes,
+            ]
+        )
 
     def _flatten(sections: list[list[str]]) -> str:
         """Join section line-lists into a single newline-separated string.
@@ -1548,9 +1602,7 @@ def build_specialist_prompts_for_domain(
     """
     domain = get_domain(domain_key)
     if domain is None:
-        raise ValueError(
-            f"unknown specialist domain={domain_key!r}; see specialist_domains"
-        )
+        raise ValueError(f"unknown specialist domain={domain_key!r}; see specialist_domains")
     inp = SpecialistPromptInputs(task_id=task_id, domain=domain, **kwargs)
     return build_specialist_prompts(inp)
 

@@ -2,9 +2,9 @@
 
 """Coverage for specialist_subprocess process teardown: the SIGTERM/SIGKILL
 ``_kill`` ladder and the worktree-remove spawn-failure fallback."""
+
 from __future__ import annotations
 
-from pathlib import Path
 
 from inference_optimizer.orchestrator import specialist_subprocess as ss
 from inference_optimizer.orchestrator.specialist_subprocess import (
@@ -87,8 +87,7 @@ def test_kill_terminate_and_kill_raise(monkeypatch):
             raise RuntimeError("kill boom")
 
     proc = _RaisingProc([None])
-    monkeypatch.setattr(ss.os, "getpgid",
-                        lambda pid: (_ for _ in ()).throw(ProcessLookupError("x")))
+    monkeypatch.setattr(ss.os, "getpgid", lambda pid: (_ for _ in ()).throw(ProcessLookupError("x")))
     monkeypatch.setattr(ss.time, "sleep", lambda s: None)
     SpecialistSubprocessDispatcher._kill(proc)  # must not raise
 

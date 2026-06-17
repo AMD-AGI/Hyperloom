@@ -27,8 +27,7 @@ from inference_optimizer.orchestrator.action_executors.report import (
 from inference_optimizer.orchestrator.shared_state import SharedState
 
 _BENIGN_WARN = (
-    "[WARN] Error: [Errno 2] No such file or directory: "
-    "'/app/.../transformers/models/cohere2/modeling_cohere2.py'"
+    "[WARN] Error: [Errno 2] No such file or directory: '/app/.../transformers/models/cohere2/modeling_cohere2.py'"
 )
 
 _SERVER_LOG_OOM = (
@@ -76,7 +75,9 @@ def _failed_state(
         result=result,
     )
     state.record_action_failure(
-        action="baseline", task_id=task_id, result=result,
+        action="baseline",
+        task_id=task_id,
+        result=result,
     )
     return state
 
@@ -93,9 +94,7 @@ def test_highlight_is_benign_uses_summary_only():
     # Benign headline → suppressed.
     assert _highlight_is_benign({"summary": _BENIGN_WARN, "payload": {}})
     # Real fault headline is kept even when payload mentions the benign file.
-    assert not _highlight_is_benign(
-        {"summary": "sev=high EngineCore failed", "payload": {"f": _BENIGN_WARN}}
-    )
+    assert not _highlight_is_benign({"summary": "sev=high EngineCore failed", "payload": {"f": _BENIGN_WARN}})
 
 
 def test_partition_benign_lines_keeps_real_lines():
@@ -144,7 +143,9 @@ def test_failure_summary_pure_benign_falls_back_to_server_log(tmp_path):
     workspace.mkdir(parents=True)
     (workspace.parent / "server.log").write_text(_SERVER_LOG_OOM, encoding="utf-8")
     state = _failed_state(
-        error_class="unknown", error=_BENIGN_WARN, workspace=str(workspace),
+        error_class="unknown",
+        error=_BENIGN_WARN,
+        workspace=str(workspace),
     )
     fs = _build_failure_summary(state, tmp_path)
     assert fs is not None
@@ -158,15 +159,17 @@ def test_failure_summary_pure_benign_falls_back_to_server_log(tmp_path):
 
 def test_failure_summary_picks_latest_failed_attempt():
     state = _failed_state(
-        error_class="timeout", error="baseline benchmark exceeded 600s",
+        error_class="timeout",
+        error="baseline benchmark exceeded 600s",
         task_id="attempt-old",
     )
     # A later, more severe attempt.
     state.record_action_attempt(
-        action="baseline", task_id="attempt-new", status="failed",
+        action="baseline",
+        task_id="attempt-new",
+        status="failed",
         decision="no_promote",
-        result={"status": "failed", "error_class": "server_init_dead",
-                "error": _SERVER_LOG_OOM},
+        result={"status": "failed", "error_class": "server_init_dead", "error": _SERVER_LOG_OOM},
     )
     fs = _build_failure_summary(state)
     assert fs is not None
@@ -179,9 +182,9 @@ def test_failure_summary_falls_back_to_last_action_failures():
     state = SharedState()
     state.set_stop_reason("baseline_failed")
     state.record_action_failure(
-        action="baseline", task_id="b1",
-        result={"status": "failed", "error_class": "server_init_dead",
-                "error": _SERVER_LOG_OOM},
+        action="baseline",
+        task_id="b1",
+        result={"status": "failed", "error_class": "server_init_dead", "error": _SERVER_LOG_OOM},
     )
     assert not state.baseline_attempts
     fs = _build_failure_summary(state)
@@ -192,7 +195,8 @@ def test_failure_summary_falls_back_to_last_action_failures():
 
 def test_failure_summary_absent_when_not_baseline_failed():
     state = _failed_state(
-        error_class="server_init_dead", error=_SERVER_LOG_OOM,
+        error_class="server_init_dead",
+        error=_SERVER_LOG_OOM,
         stop_reason="time_exhausted",
     )
     assert _build_failure_summary(state) is None

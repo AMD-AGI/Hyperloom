@@ -22,6 +22,7 @@ import base64
 import datetime
 import json
 import os
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -43,16 +44,18 @@ _DEFAULT_JIT_POLL_TIMEOUT_S = 1800
 
 
 def _resolve_poll_timeout_s() -> int:
-    """Poll budget (seconds): ``HYPERLOOM_MN_POLL_TIMEOUT_S`` env else ``_DEFAULT_POLL_TIMEOUT_S``."""
+    """Poll budget (seconds): ``HYPERLOOM_MN_POLL_TIMEOUT_S`` env else ``_DEFAULT_POLL_TIMEOUT_S``.
+
+    Returns:
+        int: The poll timeout in seconds (at least 1); falls back to the
+        default when the env var is unset or invalid.
+    """
     raw = (os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S") or "").strip()
     if raw:
         try:
             return max(1, int(raw))
         except ValueError:
-            warn(
-                f"invalid HYPERLOOM_MN_POLL_TIMEOUT_S={raw!r}; "
-                f"using {_DEFAULT_POLL_TIMEOUT_S}"
-            )
+            warn(f"invalid HYPERLOOM_MN_POLL_TIMEOUT_S={raw!r}; using {_DEFAULT_POLL_TIMEOUT_S}")
     return _DEFAULT_POLL_TIMEOUT_S
 
 
@@ -88,15 +91,24 @@ _TERMINAL_OK_STATUSES = {"SUCCEEDED"}
 
 
 def _normalize_extra_args(s: str | None) -> str:
-    """Normalize ``--extra-args`` whitespace for equality (order-preserving; argv order matters)."""
+    """Normalize ``--extra-args`` whitespace for equality (order-preserving; argv order matters).
+
+    Args:
+        s (str | None): The raw extra-args string, or ``None``.
+
+    Returns:
+        str: The string with runs of whitespace collapsed to single spaces
+        (token order preserved). Empty for ``None``.
+    """
     return " ".join((s or "").split())
+
 
 # Exit codes — part of the CLI's contract with the agent; keep stable.
 EXIT_OK = 0
-EXIT_TRANSIENT = 1          # network / SaFE 5xx / timeout — caller may retry
-EXIT_TERMINAL_FAILURE = 2   # workload entered Failed/Stopped/Cancelled — DO NOT retry; fix and recreate
-EXIT_CONFIG_ERROR = 3       # missing env / required arg — fix the call, don't retry blindly
-EXIT_INTERRUPT = 130        # Ctrl-C / SIGINT
+EXIT_TRANSIENT = 1  # network / SaFE 5xx / timeout — caller may retry
+EXIT_TERMINAL_FAILURE = 2  # workload entered Failed/Stopped/Cancelled — DO NOT retry; fix and recreate
+EXIT_CONFIG_ERROR = 3  # missing env / required arg — fix the call, don't retry blindly
+EXIT_INTERRUPT = 130  # Ctrl-C / SIGINT
 
 
 class WorkloadTerminalFailure(RuntimeError):
@@ -155,7 +167,14 @@ def _checkpoint_create_rayjob_state(
     workspace: str,
     args: argparse.Namespace,
 ) -> None:
-    """Persist ``rayjob_id`` as soon as SaFE returns it, so a concurrent ``create-rayjob`` doesn't leak a second RayJob."""
+    """Persist ``rayjob_id`` as soon as SaFE returns it, so a concurrent ``create-rayjob`` doesn't leak a second RayJob.
+
+    Args:
+        wid (str): The SaFE workload id to checkpoint.
+        workspace (str): The SaFE workspace the workload belongs to.
+        args (argparse.Namespace): Parsed ``create-rayjob`` args (supplies
+            ``nodes`` / ``gpus_per_node`` / ``image``).
+    """
     prev = _load_state()
     old = (prev.get("rayjob_id") or "").strip()
     state: dict[str, Any] = dict(prev)
@@ -197,6 +216,16 @@ def _write_rayjob_meta(
 
     Skipped when ``session_id`` is empty (it's the filename). Best-effort:
     filesystem errors are logged at WARN and swallowed.
+
+    Args:
+        wid (str): The SaFE workload (RayJob) id.
+        workspace (str): The SaFE workspace.
+        session_id (str | None): The sandbox session id (used as the filename);
+            the write is skipped when empty.
+        owner_id (str | None): The owning sandbox workload id, if any.
+        display_name (str): Human-readable RayJob name.
+        nodes (int): Node count.
+        gpus_per_node (int): GPUs per pod.
     """
     if not session_id:
         return
@@ -238,8 +267,7 @@ def _require_state(*keys: str) -> dict[str, Any]:
     missing = [k for k in keys if not state.get(k)]
     if missing:
         raise RuntimeError(
-            f"State file {STATE_FILE} missing required keys: {missing}. "
-            f"Have you run 'create-rayjob' first?"
+            f"State file {STATE_FILE} missing required keys: {missing}. Have you run 'create-rayjob' first?"
         )
     return state
 
@@ -273,7 +301,15 @@ def _b64(s: str) -> str:
 
 
 def _wrap_for_dash(body: str) -> str:
-    """Base64-wrap a bash entrypoint so it survives Ray Dashboard exec under /bin/sh (dash rejects ``set -o pipefail``)."""
+    """Base64-wrap a bash entrypoint so it survives Ray Dashboard exec under /bin/sh (dash rejects ``set -o pipefail``).
+
+    Args:
+        body (str): The bash entrypoint body to wrap.
+
+    Returns:
+        str: A ``echo <b64> | base64 -d | bash`` command that decodes and runs
+        ``body`` under bash.
+    """
     enc = _b64(body)
     return f"echo {enc} | base64 -d | bash"
 
@@ -304,7 +340,12 @@ def _parse_kv_list(values: list[str] | None) -> dict[str, str]:
 
 
 def _credential_fanout() -> dict[str, str]:
-    """Return the *_API_KEY / *_BASE_URL env to inject into the RayJob (keys fall back to SAFE_API_KEY per ADDENDUM-13)."""
+    """Return the *_API_KEY / *_BASE_URL env to inject into the RayJob (keys fall back to SAFE_API_KEY per ADDENDUM-13).
+
+    Returns:
+        dict[str, str]: The present credential / base-URL env vars, with API
+        keys defaulting to ``SAFE_API_KEY`` when their own var is unset.
+    """
     safe_key = os.environ.get("SAFE_API_KEY", "").strip()
     out: dict[str, str] = {}
     for name in (
@@ -363,6 +404,29 @@ def _short_poll(
     post-create 404 lag). Terminal failure raises
     :class:`WorkloadTerminalFailure` (exit 2); timeout raises
     :class:`TransientFailure` (exit 1, safe to rerun).
+
+    Args:
+        label (str): Human-readable label used in log lines.
+        fetch (callable): Returns ``(state_obj, summary_str)`` each poll.
+        is_ok (callable): Predicate marking a successful terminal state.
+        is_fail (callable): Predicate marking a terminal failure state.
+        interval_s (int): Seconds to sleep between polls.
+        timeout_s (int): Total poll budget before giving up.
+        failure_diag (callable | None): Optional ``state_obj -> (diag,
+            snapshot)`` used to enrich a terminal failure. Defaults to ``None``.
+        quiet_fetch_error_grace_s (float): Window during which a quiet fetch
+            error is logged at INFO rather than WARN. Defaults to ``0.0``.
+        is_quiet_fetch_error (Callable[[BaseException], bool] | None): Predicate
+            classifying a fetch exception as quiet. Defaults to ``None``.
+
+    Returns:
+        Any: The ``state_obj`` once ``is_ok`` is satisfied.
+
+    Raises:
+        WorkloadTerminalFailure: When ``is_fail`` matches and a
+            ``failure_diag`` is supplied.
+        RuntimeError: When ``is_fail`` matches without a ``failure_diag``.
+        TransientFailure: When the poll budget elapses before a terminal state.
     """
     started = time.monotonic()
     attempt = 0
@@ -416,7 +480,15 @@ def _short_poll(
 
 
 def _summarize_workload_failure(workload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Build a one-line diagnostic + JSON-safe snapshot (phase/message/per-pod status/dispatch) from a SaFE GetWorkloadResponse."""
+    """Build a one-line diagnostic + JSON-safe snapshot (phase/message/per-pod status/dispatch) from a SaFE GetWorkloadResponse.
+
+    Args:
+        workload (dict[str, Any]): A SaFE ``GetWorkloadResponse`` dict.
+
+    Returns:
+        tuple[str, dict[str, Any]]: ``(diag, snapshot)`` — a one-line human
+        diagnostic and a JSON-safe structured failure snapshot.
+    """
     phase = str(workload.get("phase") or "?")
     msg = str(workload.get("message") or "").strip()
     queue = workload.get("queuePosition")
@@ -426,14 +498,16 @@ def _summarize_workload_failure(workload: dict[str, Any]) -> tuple[str, dict[str
     for p in pods:
         if not isinstance(p, dict):
             continue
-        pod_summary.append({
-            "podId": p.get("podId"),
-            "phase": p.get("phase"),
-            "resourceId": p.get("resourceId"),
-            "node": p.get("adminNodeName"),
-            "podIP": p.get("podIP"),
-            "failedMessage": p.get("failedMessage"),
-        })
+        pod_summary.append(
+            {
+                "podId": p.get("podId"),
+                "phase": p.get("phase"),
+                "resourceId": p.get("resourceId"),
+                "node": p.get("adminNodeName"),
+                "podIP": p.get("podIP"),
+                "failedMessage": p.get("failedMessage"),
+            }
+        )
 
     parts = [f"phase={phase}"]
     if msg:
@@ -449,11 +523,10 @@ def _summarize_workload_failure(workload: dict[str, Any]) -> tuple[str, dict[str
         for bp in bad_pods[:3]:
             bp_strs.append(
                 f"{bp.get('podId') or '?'}({bp.get('phase') or '?'}"
-                + (f": {bp['failedMessage']}" if bp.get('failedMessage') else "")
+                + (f": {bp['failedMessage']}" if bp.get("failedMessage") else "")
                 + ")"
             )
-        parts.append("failed_pods=[" + ", ".join(bp_strs)
-                     + (", ..." if len(bad_pods) > 3 else "") + "]")
+        parts.append("failed_pods=[" + ", ".join(bp_strs) + (", ..." if len(bad_pods) > 3 else "") + "]")
     elif pod_summary:
         parts.append(f"pods={len(pod_summary)}")
     diag = " ".join(parts)
@@ -473,6 +546,12 @@ def _find_head_pod_ip(workload: dict) -> str:
 
     Priority: a ``podId`` containing ``-head-``, then ``resourceId == 0``,
     then the first pod with a ``podIP`` (the submitter pod isn't the head).
+
+    Args:
+        workload (dict): A SaFE ``GetWorkloadResponse`` dict.
+
+    Returns:
+        str: The resolved head pod IP, or ``""`` when no pod carries one.
     """
     pods = workload.get("pods") or []
     if not pods:
@@ -518,16 +597,12 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
 
     # ownerId: --owner-id > $WORKLOAD_ID (the sandbox workload, for SaFE GC
     # cascade); omitted when neither is set.
-    owner_id = (
-        args.owner_id
-        or os.environ.get("WORKLOAD_ID", "").strip()
-        or None
-    )
+    owner_id = args.owner_id or os.environ.get("WORKLOAD_ID", "").strip() or None
     if owner_id and not args.owner_id:
         info(f"ownerId derived from $WORKLOAD_ID: {owner_id}")
 
     # workspace: --workspace > $SAFE_WORKSPACE; bail fast with a clear error if neither is set.
-    workspace = (args.workspace or os.environ.get("SAFE_WORKSPACE", "").strip())
+    workspace = args.workspace or os.environ.get("SAFE_WORKSPACE", "").strip()
     if not workspace:
         raise RuntimeError(
             "workspace is required: pass --workspace <safe-workspace> "
@@ -538,11 +613,7 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
         info(f"workspace derived from $SAFE_WORKSPACE: {workspace}")
 
     # display_name: $DISPLAY_NAME > --display-name > fallback.
-    display_name = (
-        os.environ.get("DISPLAY_NAME", "").strip()
-        or args.display_name
-        or f"multi_node_{int(time.time())}"
-    )
+    display_name = os.environ.get("DISPLAY_NAME", "").strip() or args.display_name or f"multi_node_{int(time.time())}"
     info(f"displayName: {display_name}")
 
     # session_id from $CLAW_SESSION_ID; when unset the label is skipped (dev/local runs).
@@ -577,10 +648,7 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
                 prior_wl = safe.get_workload(prior_wid)
             except safe_client.SafeApiError as exc:
                 if exc.status == 404:
-                    info(
-                        f"prior rayjob_id={prior_wid} no longer exists in SaFE; "
-                        f"will create a fresh workload"
-                    )
+                    info(f"prior rayjob_id={prior_wid} no longer exists in SaFE; will create a fresh workload")
                 else:
                     raise
             else:
@@ -618,6 +686,7 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
         if args.no_wait:
             info("--no-wait set; not polling for Running")
         else:
+
             def _fetch():
                 """Fetch the workload and summarize its phase.
 
@@ -656,9 +725,7 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
             "gpus_per_node": args.gpus_per_node,
             "head_pod_ip": head_pod_ip,
             "ray_address": ray_gcs_address(head_pod_ip),
-            "ray_dashboard_url": (
-                ray_dashboard.dashboard_url(head_pod_ip) if head_pod_ip else ""
-            ),
+            "ray_dashboard_url": (ray_dashboard.dashboard_url(head_pod_ip) if head_pod_ip else ""),
             "service_url": f"http://{wid}.{workspace}.svc.cluster.local:8888",
             "last_create_request": {
                 "image": args.image,
@@ -692,24 +759,25 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
     workload body), creates/reuses the workload, waits for Running, then
     discovers the worker pod IPs and the frontend service URL into the state
     file so restart-server can SSH-fan-out the inference server.
+
+    Args:
+        args (argparse.Namespace): Parsed ``create-dynamo`` arguments.
+
+    Returns:
+        int: ``0`` on success.
+
+    Raises:
+        RuntimeError: If no workspace can be resolved.
     """
     extra_env = _parse_kv_list(args.extra_env)
     extra_labels = _parse_kv_list(args.extra_label)
     env = {**_credential_fanout(), **extra_env}
 
-    owner_id = (
-        args.owner_id or os.environ.get("WORKLOAD_ID", "").strip() or None
-    )
-    workspace = (args.workspace or os.environ.get("SAFE_WORKSPACE", "").strip())
+    owner_id = args.owner_id or os.environ.get("WORKLOAD_ID", "").strip() or None
+    workspace = args.workspace or os.environ.get("SAFE_WORKSPACE", "").strip()
     if not workspace:
-        raise RuntimeError(
-            "workspace is required: pass --workspace or export $SAFE_WORKSPACE"
-        )
-    display_name = (
-        os.environ.get("DISPLAY_NAME", "").strip()
-        or args.display_name
-        or f"dynamo_mn_{int(time.time())}"
-    )
+        raise RuntimeError("workspace is required: pass --workspace or export $SAFE_WORKSPACE")
+    display_name = os.environ.get("DISPLAY_NAME", "").strip() or args.display_name or f"dynamo_mn_{int(time.time())}"
     session_id = (os.environ.get("CLAW_SESSION_ID") or "").strip() or None
 
     # Session SSH keypair: public key authorises the controller on every pod.
@@ -769,26 +837,34 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
 
         # Checkpoint id immediately (idempotency: overlapping retries reuse).
         st = dict(_load_state())
-        st.update({
-            "backend": "dynamo",
-            "rayjob_id": wid,
-            "workspace": workspace,
-            "nodes": args.nodes,
-            "gpus_per_node": args.gpus_per_node,
-            "ssh_key_path": str(priv_key),
-            "ssh_port": args.ssh_port,
-            "framework": args.backend_framework,
-            "pd_mode": pd_mode,
-            "kv_transfer_backend": args.kv_transfer_backend,
-            "service_url": dynamo_support.frontend_service_url(wid, workspace),
-        })
+        st.update(
+            {
+                "backend": "dynamo",
+                "rayjob_id": wid,
+                "workspace": workspace,
+                "nodes": args.nodes,
+                "gpus_per_node": args.gpus_per_node,
+                "ssh_key_path": str(priv_key),
+                "ssh_port": args.ssh_port,
+                "framework": args.backend_framework,
+                "pd_mode": pd_mode,
+                "kv_transfer_backend": args.kv_transfer_backend,
+                "service_url": dynamo_support.frontend_service_url(wid, workspace),
+            }
+        )
         _save_state(st)
 
         workload: dict[str, Any] = {}
         if args.no_wait:
             info("--no-wait set; not polling for Running")
         else:
+
             def _fetch():
+                """Fetch the workload and summarize its phase.
+
+                Returns:
+                    tuple: ``(workload_dict, summary_str)`` for the poll loop.
+                """
                 wl = safe.get_workload(wid)
                 return wl, f"phase={wl.get('phase', '?')}"
 
@@ -815,7 +891,8 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
         # Discover worker pod IPs from SaFE GetWorkload .pods (SaFE populates
         # DGD child pods with role-indexed resourceId; see discover_role_pods).
         roles = (
-            dynamo_support.discover_role_pods(workload, pd_mode=pd_mode) if workload
+            dynamo_support.discover_role_pods(workload, pd_mode=pd_mode)
+            if workload
             else {"frontend": [], "prefill": [], "decode": [], "worker": []}
         )
         worker_ips = [p["podIP"] for p in roles["worker"]]
@@ -829,35 +906,36 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
             )
 
     merged = dict(_load_state())
-    merged.update({
-        "backend": "dynamo",
-        "rayjob_id": wid,
-        "workspace": workspace,
-        "nodes": args.nodes,
-        "gpus_per_node": args.gpus_per_node,
-        "ssh_key_path": str(priv_key),
-        "ssh_port": args.ssh_port,
-        "framework": args.backend_framework,
-        "pd_mode": pd_mode,
-        "kv_transfer_backend": args.kv_transfer_backend,
-        "service_url": service_url,
-        "worker_pod_ips": worker_ips,
-        "prefill_pod_ips": prefill_ips,
-        "decode_pod_ips": decode_ips,
-        "last_create_request": {
-            "image": args.image, "nodes": args.nodes,
-            "gpus_per_node": args.gpus_per_node, "kind": "DynamoDeployment",
+    merged.update(
+        {
+            "backend": "dynamo",
+            "rayjob_id": wid,
+            "workspace": workspace,
+            "nodes": args.nodes,
+            "gpus_per_node": args.gpus_per_node,
+            "ssh_key_path": str(priv_key),
+            "ssh_port": args.ssh_port,
+            "framework": args.backend_framework,
             "pd_mode": pd_mode,
-        },
-    })
+            "kv_transfer_backend": args.kv_transfer_backend,
+            "service_url": service_url,
+            "worker_pod_ips": worker_ips,
+            "prefill_pod_ips": prefill_ips,
+            "decode_pod_ips": decode_ips,
+            "last_create_request": {
+                "image": args.image,
+                "nodes": args.nodes,
+                "gpus_per_node": args.gpus_per_node,
+                "kind": "DynamoDeployment",
+                "pd_mode": pd_mode,
+            },
+        }
+    )
     _save_state(merged)
 
     # Best-effort SSH reachability probe (non-fatal: pods may still be booting).
     if gpu_ips:
-        reachable = sum(
-            1 for ip in gpu_ips
-            if ssh_client.probe_ssh(ip, key_path=priv_key, port=args.ssh_port)
-        )
+        reachable = sum(1 for ip in gpu_ips if ssh_client.probe_ssh(ip, key_path=priv_key, port=args.ssh_port))
         info(f"ssh reachable GPU pods: {reachable}/{len(gpu_ips)}")
 
     info(f"state written to {STATE_FILE}")
@@ -866,15 +944,19 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
 
 
 def _dynamo_require_state() -> dict[str, Any]:
-    """Load dynamo state; require an ssh key + at least one GPU pod IP."""
+    """Load dynamo state; require an ssh key + at least one GPU pod IP.
+
+    Returns:
+        dict[str, Any]: The loaded dynamo state.
+
+    Raises:
+        RuntimeError: If the state backend is not ``dynamo``, no GPU pod IPs
+            are recorded, or the ssh key path is missing.
+    """
     state = _load_state()
     if state.get("backend") != "dynamo":
         raise RuntimeError("state backend is not 'dynamo'; run create-dynamo first")
-    has_gpu_pods = bool(
-        state.get("worker_pod_ips")
-        or state.get("prefill_pod_ips")
-        or state.get("decode_pod_ips")
-    )
+    has_gpu_pods = bool(state.get("worker_pod_ips") or state.get("prefill_pod_ips") or state.get("decode_pod_ips"))
     if not has_gpu_pods:
         raise RuntimeError(
             "no GPU pod IPs in state; re-run create-dynamo (LWS pods may "
@@ -895,12 +977,14 @@ _FORWARD_ENV_PREFIXES = ("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_")
 
 
 def _collect_forward_env() -> dict[str, str]:
-    """Read prompt-provided tuning vars from os.environ for SSH forwarding."""
-    fwd = {
-        k: v
-        for k, v in os.environ.items()
-        if any(k.startswith(p) for p in _FORWARD_ENV_PREFIXES)
-    }
+    """Read prompt-provided tuning vars from os.environ for SSH forwarding.
+
+    Returns:
+        dict[str, str]: Prefix-matched tuning vars, the translated torch
+        profiler dir, and any explicit per-variant overrides (which win on
+        key collisions).
+    """
+    fwd = {k: v for k, v in os.environ.items() if any(k.startswith(p) for p in _FORWARD_ENV_PREFIXES)}
     # Multi-node torch profiler: the dynamo SSH path (unlike the RayJob path in
     # launch_multinode.py) never pins SGLANG_TORCH_PROFILER_DIR, so sglang writes
     # traces to pod-local /tmp where the sandbox cannot read them -> roofline's
@@ -925,22 +1009,36 @@ def _collect_forward_env() -> dict[str, str]:
                 for k, v in parsed.items():
                     fwd[str(k)] = str(v)
         except (ValueError, TypeError):
-            warn(
-                "HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; "
-                "skipping per-variant env forwarding"
-            )
+            warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
     return fwd
 
 
 def _dynamo_fanout_launch(
-    state: dict[str, Any], launch_args: str, worker_ips: list[str], *,
-    label: str, poll_timeout: int, print_logs: bool,
+    state: dict[str, Any],
+    launch_args: str,
+    worker_ips: list[str],
+    *,
+    label: str,
+    poll_timeout: int,
+    print_logs: bool,
 ) -> tuple[int, list[dict]]:
     """Ship + run launch_dynamo_node.py on each pod in ``worker_ips`` over SSH.
 
     Returns ``(rc, per_pod_results)``. rc != 0 if any pod's launcher exits
     non-zero. The SAME launch_args go to every pod in the group — each
     self-determines its node-rank from $LWS_WORKER_INDEX pod-side.
+
+    Args:
+        state (dict[str, Any]): The dynamo state (ssh key / port).
+        launch_args (str): The launcher argv string sent to every pod.
+        worker_ips (list[str]): The pod IPs to SSH into.
+        label (str): Human-readable label used in log lines.
+        poll_timeout (int): Per-pod SSH timeout in seconds.
+        print_logs (bool): When ``True``, print each pod's stdout / stderr.
+
+    Returns:
+        tuple[int, list[dict]]: ``(rc, per_pod_results)`` where ``rc`` is
+        non-zero if any pod's launcher failed.
     """
     script = _read_pod_script("launch_dynamo_node.py")
     key_path = state["ssh_key_path"]
@@ -954,8 +1052,13 @@ def _dynamo_fanout_launch(
         info(f"{label}: ssh -> {ip}:{port}")
         try:
             cp = ssh_client.ssh_run_script(
-                ip, script, "python3", launch_args,
-                key_path=key_path, port=port, timeout=poll_timeout,
+                ip,
+                script,
+                "python3",
+                launch_args,
+                key_path=key_path,
+                port=port,
+                timeout=poll_timeout,
                 env=forward_env,
             )
         except subprocess.TimeoutExpired:
@@ -982,6 +1085,16 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
     pod's own $LWS_WORKER_INDEX). The launcher detaches immediately, so this
     returns once every rank has SPAWNED — readiness (MoE cold start) is polled
     sandbox-side against the frontend service_url, never blocked here.
+
+    Args:
+        args (argparse.Namespace): Parsed ``restart-server`` arguments.
+
+    Returns:
+        int: ``0`` when every launcher spawned, ``1`` when at least one failed.
+
+    Raises:
+        RuntimeError: For an unsupported framework, or when PD disaggregation
+            is requested on a non-sglang framework.
     """
     state = _dynamo_require_state()
     framework = (args.framework or state.get("framework") or "sglang").lower()
@@ -992,13 +1105,10 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
     # caller's --pd-mode defaulted to colocated/aggregated.
     pd_mode = (
         "disaggregated"
-        if (getattr(args, "pd_mode", "") or "").lower() == "disaggregated"
-        or state.get("pd_mode") == "disaggregated"
+        if (getattr(args, "pd_mode", "") or "").lower() == "disaggregated" or state.get("pd_mode") == "disaggregated"
         else "aggregated"
     )
-    kv = (
-        getattr(args, "pd_transfer_backend", "") or state.get("kv_transfer_backend") or ""
-    )
+    kv = getattr(args, "pd_transfer_backend", "") or state.get("kv_transfer_backend") or ""
     poll_timeout = _poll_timeout_from_args(args)
     print_logs = getattr(args, "print_logs", False)
     rc_total = 0
@@ -1024,12 +1134,8 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
         shared_extra = getattr(args, "extra_args", "") or ""
         pep = int(getattr(args, "pd_prefill_ep", 0) or 0) or shared_ep
         dep = int(getattr(args, "pd_decode_ep", 0) or 0) or shared_ep
-        prefill_extra = (
-            shared_extra + " " + (getattr(args, "pd_prefill_extra_args", "") or "")
-        ).strip()
-        decode_extra = (
-            shared_extra + " " + (getattr(args, "pd_decode_extra_args", "") or "")
-        ).strip()
+        prefill_extra = (shared_extra + " " + (getattr(args, "pd_prefill_extra_args", "") or "")).strip()
+        decode_extra = (shared_extra + " " + (getattr(args, "pd_decode_extra_args", "") or "")).strip()
         for role, ips, rnnodes, rtp, rep, rextra in (
             ("prefill", state.get("prefill_pod_ips") or [], pn, ptp, pep, prefill_extra),
             ("decode", state.get("decode_pod_ips") or [], dn, dtp, dep, decode_extra),
@@ -1037,16 +1143,27 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
             if not ips:
                 continue
             launch_args = dynamo_support.build_node_launch_args(
-                framework=framework, model=args.model, tp=rtp,
-                nnodes=max(1, rnnodes), ep=rep,
+                framework=framework,
+                model=args.model,
+                tp=rtp,
+                nnodes=max(1, rnnodes),
+                ep=rep,
                 extra_args=rextra,
-                health_wait_sec=0, disagg_mode=role, kv_transfer_backend=kv,
+                health_wait_sec=0,
+                disagg_mode=role,
+                kv_transfer_backend=kv,
             )
-            info(f"dynamo restart-server PD {role}: tp={rtp} ep={rep} "
-                 f"nnodes={rnnodes} pods={len(ips)} kv={kv} extra={rextra!r}")
+            info(
+                f"dynamo restart-server PD {role}: tp={rtp} ep={rep} "
+                f"nnodes={rnnodes} pods={len(ips)} kv={kv} extra={rextra!r}"
+            )
             rc, results = _dynamo_fanout_launch(
-                state, launch_args, list(ips), label=f"restart-{role}",
-                poll_timeout=poll_timeout, print_logs=print_logs,
+                state,
+                launch_args,
+                list(ips),
+                label=f"restart-{role}",
+                poll_timeout=poll_timeout,
+                print_logs=print_logs,
             )
             rc_total = rc_total or rc
             all_results[role] = results
@@ -1054,16 +1171,25 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
         nnodes = int(state.get("nodes") or 1)
         worker_ips = state.get("worker_pod_ips") or []
         launch_args = dynamo_support.build_node_launch_args(
-            framework=framework, model=args.model, tp=args.tp, nnodes=nnodes,
+            framework=framework,
+            model=args.model,
+            tp=args.tp,
+            nnodes=nnodes,
             ep=int(getattr(args, "ep", 1) or 1),
             extra_args=getattr(args, "extra_args", "") or "",
             health_wait_sec=0,
         )
-        info(f"dynamo restart-server: framework={framework} model={args.model} "
-             f"tp={args.tp} nnodes={nnodes} workers={len(worker_ips)}")
+        info(
+            f"dynamo restart-server: framework={framework} model={args.model} "
+            f"tp={args.tp} nnodes={nnodes} workers={len(worker_ips)}"
+        )
         rc_total, results = _dynamo_fanout_launch(
-            state, launch_args, list(worker_ips), label="restart",
-            poll_timeout=poll_timeout, print_logs=print_logs,
+            state,
+            launch_args,
+            list(worker_ips),
+            label="restart",
+            poll_timeout=poll_timeout,
+            print_logs=print_logs,
         )
         all_results["worker"] = results
 
@@ -1072,9 +1198,7 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
     state["last_restart_tp"] = int(args.tp)
     state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
     state["last_restart_pd_mode"] = pd_mode
-    state["last_restart_extra_args"] = _normalize_extra_args(
-        getattr(args, "extra_args", "")
-    )
+    state["last_restart_extra_args"] = _normalize_extra_args(getattr(args, "extra_args", ""))
     if pd_mode == "disaggregated":
         # Persist per-role knobs so a state-only resume (env lost on sandbox
         # recreate) reproduces the same prefill/decode topology.
@@ -1088,10 +1212,12 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
         state["last_restart_pd_decode_extra_args"] = getattr(args, "pd_decode_extra_args", "") or ""
     state["last_restart_results"] = all_results
     _save_state(state)
-    print(json.dumps(
-        {"backend": "dynamo", "pd_mode": pd_mode, "rc": rc_total, "results": all_results},
-        indent=2,
-    ))
+    print(
+        json.dumps(
+            {"backend": "dynamo", "pd_mode": pd_mode, "rc": rc_total, "results": all_results},
+            indent=2,
+        )
+    )
     if rc_total != 0:
         info("dynamo restart: at least one launcher failed; see results")
         return 1
@@ -1100,7 +1226,15 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
 
 
 def _dynamo_all_gpu_ips(state: dict[str, Any]) -> list[str]:
-    """Every GPU pod IP to act on: PD => prefill+decode, else worker."""
+    """Every GPU pod IP to act on: PD => prefill+decode, else worker.
+
+    Args:
+        state (dict[str, Any]): The dynamo state.
+
+    Returns:
+        list[str]: The GPU pod IPs (prefill + decode when disaggregated, else
+        worker).
+    """
     pd = (state.get("pd_mode") or "aggregated").lower()
     if pd == "disaggregated":
         return list(state.get("prefill_pod_ips") or []) + list(state.get("decode_pod_ips") or [])
@@ -1108,50 +1242,84 @@ def _dynamo_all_gpu_ips(state: dict[str, Any]) -> list[str]:
 
 
 def _dynamo_kill_inference(args: argparse.Namespace) -> int:
-    """Dynamo kill: SSH fan-out launch_dynamo_node.py --kill-only to every GPU pod."""
+    """Dynamo kill: SSH fan-out launch_dynamo_node.py --kill-only to every GPU pod.
+
+    Args:
+        args (argparse.Namespace): Parsed ``kill-inference`` arguments.
+
+    Returns:
+        int: ``0`` when every pod's kill succeeded, ``1`` otherwise.
+    """
     state = _dynamo_require_state()
-    framework = (
-        state.get("last_restart_framework") or state.get("framework") or "sglang"
-    ).lower()
+    framework = (state.get("last_restart_framework") or state.get("framework") or "sglang").lower()
     gpu_ips = _dynamo_all_gpu_ips(state)
     launch_args = dynamo_support.build_node_launch_args(
-        framework=framework, model="", tp=0,
-        nnodes=int(state.get("nodes") or 1), kill_only=True,
+        framework=framework,
+        model="",
+        tp=0,
+        nnodes=int(state.get("nodes") or 1),
+        kill_only=True,
     )
     info(f"dynamo kill-inference: framework={framework} pods={len(gpu_ips)}")
     rc, results = _dynamo_fanout_launch(
-        state, launch_args, gpu_ips, label="kill",
+        state,
+        launch_args,
+        gpu_ips,
+        label="kill",
         poll_timeout=_poll_timeout_from_args(args),
         print_logs=getattr(args, "print_logs", False),
     )
     state["last_kill_results"] = results
     _save_state(state)
-    print(json.dumps(
-        {"backend": "dynamo", "action": "kill", "rc": rc, "results": results},
-        indent=2,
-    ))
+    print(
+        json.dumps(
+            {"backend": "dynamo", "action": "kill", "rc": rc, "results": results},
+            indent=2,
+        )
+    )
     return 0 if rc == 0 else 1
 
 
 def _dynamo_ssh_node_op(
-    state: dict[str, Any], ip: str, op_args: str, *, timeout: int,
+    state: dict[str, Any],
+    ip: str,
+    op_args: str,
+    *,
+    timeout: int,
 ) -> tuple[dict | None, dict]:
     """Ship kernel_node_ops.py to one pod over SSH and run one subcommand.
 
     Returns ``(parsed_json_or_None, transport)`` where transport carries the
     ssh rc / stderr for diagnostics.
+
+    Args:
+        state (dict[str, Any]): The dynamo state (ssh key / port).
+        ip (str): The pod IP to SSH into.
+        op_args (str): The ``kernel_node_ops.py`` subcommand argv string.
+        timeout (int): SSH timeout in seconds.
+
+    Returns:
+        tuple[dict | None, dict]: ``(parsed_json_or_None, transport)`` where
+        ``transport`` carries the ssh rc / stderr.
     """
     script = _read_pod_script("kernel_node_ops.py")
     key = state["ssh_key_path"]
     port = int(state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
     try:
         cp = ssh_client.ssh_run_script(
-            ip, script, "python3", op_args, key_path=key, port=port, timeout=timeout,
+            ip,
+            script,
+            "python3",
+            op_args,
+            key_path=key,
+            port=port,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return None, {"rc": 124, "stderr": f"timeout after {timeout}s"}
     return _extract_pod_json(cp.stdout or ""), {
-        "rc": cp.returncode, "stderr": (cp.stderr or "")[-1500:],
+        "rc": cp.returncode,
+        "stderr": (cp.stderr or "")[-1500:],
     }
 
 
@@ -1166,11 +1334,16 @@ def _dynamo_apply_tracelens_patch(args: argparse.Namespace) -> int:
     by TraceLens identically — only the dispatch differs. Idempotent: the
     in-pod script sentinel-greps and returns status=skipped on already-patched
     pods, so it is safe to call on every restart_server_for_round.
+
+    Args:
+        args (argparse.Namespace): Parsed ``apply-tracelens-patch`` arguments.
+
+    Returns:
+        int: ``0`` when every pod applied / skipped, ``1`` on any failure, or
+        ``EXIT_CONFIG_ERROR`` when the tracelens root / GPU pods are missing.
     """
     state = _dynamo_require_state()
-    tracelens_root = (
-        args.tracelens_root or os.environ.get("TRACELENS_ROOT", "").strip()
-    )
+    tracelens_root = args.tracelens_root or os.environ.get("TRACELENS_ROOT", "").strip()
     if not tracelens_root:
         err(
             "apply-tracelens-patch (dynamo) requires --tracelens-root or "
@@ -1200,8 +1373,13 @@ def _dynamo_apply_tracelens_patch(args: argparse.Namespace) -> int:
         info(f"apply-tracelens-patch (dynamo): ssh -> {ip}")
         try:
             cp = ssh_client.ssh_run_script(
-                ip, script, pod_python, op_args,
-                key_path=key_path, port=port, timeout=timeout,
+                ip,
+                script,
+                pod_python,
+                op_args,
+                key_path=key_path,
+                port=port,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired:
             failures.append({"host": ip, "error": f"timeout after {timeout}s"})
@@ -1213,22 +1391,29 @@ def _dynamo_apply_tracelens_patch(args: argparse.Namespace) -> int:
                 r["host"] = ip
                 per_pod.append(r)
         else:
-            failures.append({
-                "host": ip,
-                "error": (parsed or {}).get("error")
-                or (cp.stderr or "")[-800:] or "unknown",
-                "rc": cp.returncode,
-            })
+            failures.append(
+                {
+                    "host": ip,
+                    "error": (parsed or {}).get("error") or (cp.stderr or "")[-800:] or "unknown",
+                    "rc": cp.returncode,
+                }
+            )
     overall = "applied" if not failures else "failed"
-    if overall == "applied" and per_pod and all(
-        r.get("status") == "skipped" for r in per_pod
-    ):
+    if overall == "applied" and per_pod and all(r.get("status") == "skipped" for r in per_pod):
         overall = "skipped"
-    print(json.dumps(
-        {"command": "apply-tracelens-patch", "backend": "dynamo",
-         "status": overall, "per_pod": per_pod, "failures": failures},
-        indent=2, sort_keys=True,
-    ))
+    print(
+        json.dumps(
+            {
+                "command": "apply-tracelens-patch",
+                "backend": "dynamo",
+                "status": overall,
+                "per_pod": per_pod,
+                "failures": failures,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0 if not failures else 1
 
 
@@ -1238,6 +1423,13 @@ def _dynamo_apply_patch(args: argparse.Namespace) -> int:
     Emits the SAME JSON shape as kernel_patch_multinode.py (command/status/
     per_node/failures), with ``per_node[].host`` keyed by the pod IP so the
     sandbox builds an IP->backup_path revert map.
+
+    Args:
+        args (argparse.Namespace): Parsed ``apply-patch`` arguments.
+
+    Returns:
+        int: ``0`` when every pod applied the patch, ``1`` on any failure, or
+        ``EXIT_CONFIG_ERROR`` when the patch file is missing.
     """
     state = _dynamo_require_state()
     patch_path = Path(args.patch_file)
@@ -1260,12 +1452,14 @@ def _dynamo_apply_patch(args: argparse.Namespace) -> int:
             parsed["host"] = ip
             per_node.append(parsed)
         else:
-            failures.append({"host": ip, "error": (parsed or {}).get("error")
-                             or tx.get("stderr") or "unknown", **tx})
+            failures.append({"host": ip, "error": (parsed or {}).get("error") or tx.get("stderr") or "unknown", **tx})
     payload = {
-        "command": "apply", "target_path": args.target_path,
-        "kernel_id": args.kernel_id, "backup_dir": args.backup_dir,
-        "per_node": per_node, "failures": failures,
+        "command": "apply",
+        "target_path": args.target_path,
+        "kernel_id": args.kernel_id,
+        "backup_dir": args.backup_dir,
+        "per_node": per_node,
+        "failures": failures,
         "status": "ok" if not failures else "partial",
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1273,7 +1467,15 @@ def _dynamo_apply_patch(args: argparse.Namespace) -> int:
 
 
 def _dynamo_revert_patch(args: argparse.Namespace) -> int:
-    """Dynamo revert-patch: SSH each pod in the IP->backup_path map + restore."""
+    """Dynamo revert-patch: SSH each pod in the IP->backup_path map + restore.
+
+    Args:
+        args (argparse.Namespace): Parsed ``revert-patch`` arguments.
+
+    Returns:
+        int: ``0`` when every pod reverted, ``1`` on any failure, or
+        ``EXIT_CONFIG_ERROR`` when the backup map is missing / invalid.
+    """
     state = _dynamo_require_state()
     try:
         backup_map = json.loads(args.backup_map_json or "{}")
@@ -1287,18 +1489,17 @@ def _dynamo_revert_patch(args: argparse.Namespace) -> int:
     failures: list[dict] = []
     for ip, backup_path in backup_map.items():
         info(f"revert-patch (dynamo): ssh -> {ip}")
-        op_args = (
-            f"revert --target-path {args.target_path!r} --backup-path {backup_path!r}"
-        )
+        op_args = f"revert --target-path {args.target_path!r} --backup-path {backup_path!r}"
         parsed, tx = _dynamo_ssh_node_op(state, ip, op_args, timeout=args.timeout_sec)
         if parsed and str(parsed.get("status")) in ("restored", "noop_missing_backup"):
             per_node.append({"host": ip, **parsed})
         else:
-            failures.append({"host": ip, "error": (parsed or {}).get("error")
-                             or tx.get("stderr") or "unknown", **tx})
+            failures.append({"host": ip, "error": (parsed or {}).get("error") or tx.get("stderr") or "unknown", **tx})
     payload = {
-        "command": "revert", "target_path": args.target_path,
-        "per_node": per_node, "failures": failures,
+        "command": "revert",
+        "target_path": args.target_path,
+        "per_node": per_node,
+        "failures": failures,
         "status": "ok" if not failures else "partial",
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1306,7 +1507,16 @@ def _dynamo_revert_patch(args: argparse.Namespace) -> int:
 
 
 def _dynamo_kernel_bench(args: argparse.Namespace) -> int:
-    """Dynamo kernel-bench: run the micro-benchmark on ONE GPU pod over SSH."""
+    """Dynamo kernel-bench: run the micro-benchmark on ONE GPU pod over SSH.
+
+    Args:
+        args (argparse.Namespace): Parsed ``kernel-bench`` arguments.
+
+    Returns:
+        int: ``0`` when the bench succeeded, ``1`` when it failed, or
+        ``EXIT_CONFIG_ERROR`` / ``EXIT_TRANSIENT`` on missing GPU pods / no
+        pod JSON.
+    """
     state = _dynamo_require_state()
     gpu_ips = _dynamo_all_gpu_ips(state)
     if not gpu_ips:
@@ -1327,16 +1537,17 @@ def _dynamo_kernel_bench(args: argparse.Namespace) -> int:
     )
     info(f"kernel-bench (dynamo): ssh -> {ip}")
     parsed, tx = _dynamo_ssh_node_op(
-        state, ip, op_args, timeout=args.timeout_sec + 60,
+        state,
+        ip,
+        op_args,
+        timeout=args.timeout_sec + 60,
     )
     if parsed is None:
         err(f"kernel-bench (dynamo): no JSON from pod (ssh rc={tx.get('rc')})")
         if getattr(args, "print_logs", False):
             print(tx.get("stderr", ""))
         return EXIT_TRANSIENT
-    payload = {"command": "bench",
-               "status": "ok" if str(parsed.get("status")) == "ok" else "failed",
-               "result": parsed}
+    payload = {"command": "bench", "status": "ok" if str(parsed.get("status")) == "ok" else "failed", "result": parsed}
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if payload["status"] == "ok" else 1
 
@@ -1347,6 +1558,12 @@ def _resolve_geak_src(explicit: str | None) -> str:
     Resolution: --geak-src > $HYPERLOOM_GEAK_SRC > $HYPERLOOM_ROOT/geak >
     $USER_DATA_PATH/runtime/geak. Must be a path both sandbox and pod see
     (under $USER_DATA_PATH).
+
+    Args:
+        explicit (str | None): The ``--geak-src`` flag value, or ``None``.
+
+    Returns:
+        str: The resolved GEAK source dir, or ``""`` when no source resolves.
     """
     if explicit and explicit.strip():
         return explicit.strip()
@@ -1368,12 +1585,18 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
     pip-installs the shared-FS GEAK checkout into each pod's framework venv so
     the kernel-agent SSH placement (run_geak_over_ssh) finds ``geak`` on PATH.
     Dynamo-only (kernel-agent on RayJob uses the Ray runtime, not this).
+
+    Args:
+        args (argparse.Namespace): Parsed ``install-geak`` arguments.
+
+    Returns:
+        int: ``0`` when every pod installed / skipped, non-zero on any failure
+        (or ``EXIT_CONFIG_ERROR`` when the GEAK source can't be resolved).
     """
     state = _dynamo_require_state()
     geak_src = _resolve_geak_src(getattr(args, "geak_src", None))
     if not geak_src:
-        err("install-geak: cannot resolve GEAK source dir; pass --geak-src or "
-            "set $HYPERLOOM_ROOT / $USER_DATA_PATH")
+        err("install-geak: cannot resolve GEAK source dir; pass --geak-src or set $HYPERLOOM_ROOT / $USER_DATA_PATH")
         return EXIT_CONFIG_ERROR
     script = _read_pod_script("install_geak_node.sh")
     key = state["ssh_key_path"]
@@ -1386,15 +1609,21 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
         info(f"install-geak: ssh -> {ip}")
         try:
             cp = ssh_client.ssh_run_script(
-                ip, script, "bash", f"{geak_src!r}",
-                key_path=key, port=port, timeout=_poll_timeout_from_args(args),
+                ip,
+                script,
+                "bash",
+                f"{geak_src!r}",
+                key_path=key,
+                port=port,
+                timeout=_poll_timeout_from_args(args),
             )
         except subprocess.TimeoutExpired:
             results.append({"host": ip, "status": "failed", "reason": "timeout"})
             rc_total = 1
             continue
         parsed = _extract_pod_json(cp.stdout or "") or {
-            "status": "failed", "reason": (cp.stderr or "")[-500:],
+            "status": "failed",
+            "reason": (cp.stderr or "")[-500:],
         }
         parsed["host"] = ip
         results.append(parsed)
@@ -1402,8 +1631,11 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
             rc_total = 1
         if getattr(args, "print_logs", False):
             print(f"--- {ip} ---\n{cp.stdout}\n{cp.stderr}")
-    print(json.dumps({"command": "install-geak", "results": results,
-                      "status": "ok" if rc_total == 0 else "partial"}, indent=2))
+    print(
+        json.dumps(
+            {"command": "install-geak", "results": results, "status": "ok" if rc_total == 0 else "partial"}, indent=2
+        )
+    )
     return rc_total
 
 
@@ -1415,6 +1647,13 @@ def cmd_install_oob(args: argparse.Namespace) -> int:
     OOB python CLI installs from the shared-NFS ``$OOB_SRC`` checkout; the npm
     CLIs (claude/codex/@cursor-sdk) install per pod. Credentials are forwarded
     over SSH stdin (never argv). Dynamo-only.
+
+    Args:
+        args (argparse.Namespace): Parsed ``install-oob`` arguments.
+
+    Returns:
+        int: ``0`` when every pod installed / skipped, non-zero on any failure
+        (or ``EXIT_CONFIG_ERROR`` when the OOB source is missing).
     """
     state = _dynamo_require_state()
     oob_src = (getattr(args, "oob_src", None) or os.environ.get("OOB_SRC", "")).strip()
@@ -1444,14 +1683,20 @@ def cmd_install_oob(args: argparse.Namespace) -> int:
         info(f"install-oob: ssh -> {ip}")
         try:
             cp = ssh_client.ssh_run_bash_with_env(
-                ip, script, env, key_path=key, port=port, timeout=timeout,
+                ip,
+                script,
+                env,
+                key_path=key,
+                port=port,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired:
             results.append({"host": ip, "status": "failed", "reason": "timeout"})
             rc_total = 1
             continue
         parsed = _extract_pod_json(cp.stdout or "") or {
-            "status": "failed", "reason": (cp.stderr or "")[-500:],
+            "status": "failed",
+            "reason": (cp.stderr or "")[-500:],
         }
         parsed["host"] = ip
         results.append(parsed)
@@ -1459,8 +1704,11 @@ def cmd_install_oob(args: argparse.Namespace) -> int:
             rc_total = 1
         if getattr(args, "print_logs", False):
             print(f"--- {ip} ---\n{cp.stdout}\n{cp.stderr}")
-    print(json.dumps({"command": "install-oob", "results": results,
-                      "status": "ok" if rc_total == 0 else "partial"}, indent=2))
+    print(
+        json.dumps(
+            {"command": "install-oob", "results": results, "status": "ok" if rc_total == 0 else "partial"}, indent=2
+        )
+    )
     return rc_total
 
 
@@ -1470,11 +1718,16 @@ def install_geak_on_pods_best_effort() -> int:
     No-op (returns 0) for non-dynamo state. Failures are logged but do not
     abort provisioning — the kernel phase will surface a clear pod-side
     ``geak CLI not found`` error if install genuinely failed.
+
+    Returns:
+        int: The install return code, or ``0`` for non-dynamo state / on a
+        swallowed error.
     """
     if _load_state().get("backend") != "dynamo":
         return 0
     ns = argparse.Namespace(
-        geak_src=None, print_logs=False,
+        geak_src=None,
+        print_logs=False,
         poll_interval=_DEFAULT_POLL_INTERVAL_S,
         poll_timeout=_resolve_poll_timeout_s(),
     )
@@ -1489,11 +1742,16 @@ def install_oob_on_pods_best_effort() -> int:
     """Best-effort OOB install on the Dynamo GPU pods (provisioner hook).
 
     No-op (0) for non-dynamo. Failures are logged but never abort provisioning.
+
+    Returns:
+        int: The install return code, or ``0`` for non-dynamo state / on a
+        swallowed error.
     """
     if _load_state().get("backend") != "dynamo":
         return 0
     ns = argparse.Namespace(
-        oob_src=None, print_logs=False,
+        oob_src=None,
+        print_logs=False,
         poll_interval=_DEFAULT_POLL_INTERVAL_S,
         poll_timeout=_resolve_poll_timeout_s(),
     )
@@ -1509,6 +1767,10 @@ def install_kernel_tools_on_pods_best_effort() -> int:
 
     No-op for non-dynamo. Returns non-zero only if a sub-install reported a
     hard failure (best-effort; provisioning continues regardless).
+
+    Returns:
+        int: Non-zero if either sub-install reported a hard failure, else
+        ``0``.
     """
     rc_geak = install_geak_on_pods_best_effort()
     rc_oob = install_oob_on_pods_best_effort()
@@ -1522,6 +1784,12 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
     Streams the sandbox-side ``scripts/bootstrap.sh`` into the head pod via a
     heredoc entrypoint (``--script PATH`` overrides with a pod-visible script).
+
+    Args:
+        args (argparse.Namespace): Parsed ``bootstrap`` arguments.
+
+    Returns:
+        int: ``0`` on success.
     """
     state = _require_state("rayjob_id", "head_pod_ip")
     head_ip = state["head_pod_ip"]
@@ -1534,11 +1802,11 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         force_arg = " --force" if args.force else ""
         entrypoint = (
             "set -euo pipefail; "
-            "WORK_DIR=/tmp/multi_node_pod_scripts; mkdir -p \"$WORK_DIR\"; "
+            'WORK_DIR=/tmp/multi_node_pod_scripts; mkdir -p "$WORK_DIR"; '
             "cat > \"$WORK_DIR/bootstrap.sh\" <<'__MN_BOOT_EOF__'\n"
             f"{bootstrap_sh}__MN_BOOT_EOF__\n"
-            f"chmod +x \"$WORK_DIR/bootstrap.sh\"; "
-            f"\"$WORK_DIR/bootstrap.sh\"{force_arg}"
+            f'chmod +x "$WORK_DIR/bootstrap.sh"; '
+            f'"$WORK_DIR/bootstrap.sh"{force_arg}'
         )
 
     with ray_dashboard.RayDashboardClient(head_ip) as ray:
@@ -1593,8 +1861,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
         "if [ -f /etc/profile.d/hyperloom-env.sh ]; "
         "then source /etc/profile.d/hyperloom-env.sh; fi; "
         "for bin in ray; do "
-        "  echo \"-- which $bin --\"; "
-        "  which \"$bin\" || { echo \"MISSING: $bin\" >&2; exit 1; }; "
+        '  echo "-- which $bin --"; '
+        '  which "$bin" || { echo "MISSING: $bin" >&2; exit 1; }; '
         "done; "
         "echo OK"
     )
@@ -1636,13 +1904,20 @@ _SCRIPTS_DIR = Path(__file__).parent / "scripts"
 
 
 def _read_pod_script(name: str) -> str:
-    """Read a pod-side script from ``multi_node/scripts/`` (embedded into the dashboard entrypoint at submit time)."""
+    """Read a pod-side script from ``multi_node/scripts/`` (embedded into the dashboard entrypoint at submit time).
+
+    Args:
+        name (str): The script filename under ``multi_node/scripts/``.
+
+    Returns:
+        str: The script's text contents.
+
+    Raises:
+        RuntimeError: If the named script is missing.
+    """
     p = _SCRIPTS_DIR / name
     if not p.is_file():
-        raise RuntimeError(
-            f"missing pod-side script: {p}. "
-            "Did you trim the multi_node/scripts/ directory?"
-        )
+        raise RuntimeError(f"missing pod-side script: {p}. Did you trim the multi_node/scripts/ directory?")
     return p.read_text(encoding="utf-8")
 
 
@@ -1651,7 +1926,19 @@ def _build_restart_entrypoint(
     pid_file: str,
     log_file: str,
 ) -> str:
-    """Compose the single-node restart entrypoint (heredoc kill_server.sh + launch_server.sh; IR-5 PID-file kill)."""
+    """Compose the single-node restart entrypoint (heredoc kill_server.sh + launch_server.sh; IR-5 PID-file kill).
+
+    Args:
+        args (argparse.Namespace): Parsed ``restart-server`` arguments.
+        pid_file (str): PID-file path the kill / launch scripts use.
+        log_file (str): Server log path on the head pod.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
+
+    Raises:
+        RuntimeError: For an unsupported framework.
+    """
     framework = args.framework.lower()
     if framework not in ("sglang", "vllm"):
         raise RuntimeError(f"unsupported framework: {args.framework!r} (use sglang or vllm)")
@@ -1663,14 +1950,14 @@ def _build_restart_entrypoint(
 
     entrypoint = (
         "set -euo pipefail; "
-        f"WORK_DIR=/tmp/multi_node_pod_scripts; mkdir -p \"$WORK_DIR\"; "
+        f'WORK_DIR=/tmp/multi_node_pod_scripts; mkdir -p "$WORK_DIR"; '
         f"cat > \"$WORK_DIR/kill_server.sh\" <<'__MN_KILL_EOF__'\n"
         f"{kill_sh}__MN_KILL_EOF__\n"
         f"cat > \"$WORK_DIR/launch_server.sh\" <<'__MN_LAUNCH_EOF__'\n"
         f"{launch_sh}__MN_LAUNCH_EOF__\n"
-        "chmod +x \"$WORK_DIR/kill_server.sh\" \"$WORK_DIR/launch_server.sh\"; "
-        f"\"$WORK_DIR/kill_server.sh\" {pid_file!s}; "
-        f"\"$WORK_DIR/launch_server.sh\" {framework!s} {args.model!s} {args.tp!s} "
+        'chmod +x "$WORK_DIR/kill_server.sh" "$WORK_DIR/launch_server.sh"; '
+        f'"$WORK_DIR/kill_server.sh" {pid_file!s}; '
+        f'"$WORK_DIR/launch_server.sh" {framework!s} {args.model!s} {args.tp!s} '
         f"{pid_file!s} {log_file!s} {wait_flag} -- {args.extra_args}"
     )
     return entrypoint
@@ -1683,7 +1970,7 @@ _MN_ENTRYPOINT_PREAMBLE = (
     "if [ -f /etc/profile.d/hyperloom-env.sh ]; then "
     "source /etc/profile.d/hyperloom-env.sh; "
     "fi; "
-    "WORK_DIR=/tmp/multi_node_pod_scripts; mkdir -p \"$WORK_DIR\"; "
+    'WORK_DIR=/tmp/multi_node_pod_scripts; mkdir -p "$WORK_DIR"; '
 )
 
 
@@ -1701,11 +1988,11 @@ def _build_kill_single_entrypoint(pid_file: str) -> str:
     kill_sh = _read_pod_script("kill_server.sh")
     return (
         "set -euo pipefail; "
-        f"WORK_DIR=/tmp/multi_node_pod_scripts; mkdir -p \"$WORK_DIR\"; "
+        f'WORK_DIR=/tmp/multi_node_pod_scripts; mkdir -p "$WORK_DIR"; '
         f"cat > \"$WORK_DIR/kill_server.sh\" <<'__MN_KILL_EOF__'\n"
         f"{kill_sh}__MN_KILL_EOF__\n"
-        "chmod +x \"$WORK_DIR/kill_server.sh\"; "
-        f"\"$WORK_DIR/kill_server.sh\" {pid_file!s}"
+        'chmod +x "$WORK_DIR/kill_server.sh"; '
+        f'"$WORK_DIR/kill_server.sh" {pid_file!s}'
     )
 
 
@@ -1756,19 +2043,34 @@ def _exec_kill_submission(
 
 
 def _build_multinode_kill_entrypoint(pid_dir: str, grace_sec: int = 5) -> str:
-    """Compose the head-pod entrypoint that kills every rank's server via heredoc-embedded kill_multinode.py (fans out via ray actors)."""
+    """Compose the head-pod entrypoint that kills every rank's server via heredoc-embedded kill_multinode.py (fans out via ray actors).
+
+    Args:
+        pid_dir (str): Directory of per-rank PID files.
+        grace_sec (int): Grace period before a hard kill. Defaults to ``5``.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
+    """
     py = _read_pod_script("kill_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
         f"cat > \"$WORK_DIR/kill_multinode.py\" <<'__MN_KILL_PY_EOF__'\n"
         f"{py}__MN_KILL_PY_EOF__\n"
-        f"python3 \"$WORK_DIR/kill_multinode.py\" "
+        f'python3 "$WORK_DIR/kill_multinode.py" '
         f"--pid-dir {pid_dir!s} --grace-sec {grace_sec}"
     )
 
 
 def _extract_launcher_summary(launch_logs: str) -> dict:
-    """Parse the JSON summary launch_multinode.py writes to stdout (the last balanced ``{...}`` in the interleaved logs); ``{}`` on failure."""
+    """Parse the JSON summary launch_multinode.py writes to stdout (the last balanced ``{...}`` in the interleaved logs); ``{}`` on failure.
+
+    Args:
+        launch_logs (str): The interleaved launcher stdout / logs.
+
+    Returns:
+        dict: The parsed summary object, or ``{}`` when none can be parsed.
+    """
     if not launch_logs:
         return {}
     text = launch_logs.rstrip()
@@ -1784,7 +2086,7 @@ def _extract_launcher_summary(launch_logs: str) -> dict:
             depth -= 1
             if depth == 0:
                 try:
-                    candidate = text[i:end_idx + 1]
+                    candidate = text[i : end_idx + 1]
                     parsed = json.loads(candidate)
                     if isinstance(parsed, dict):
                         return parsed
@@ -1805,6 +2107,15 @@ def _build_multinode_launch_entrypoint(
 
     Killed ranks MUST be cleared before this runs (sequenced by
     cmd_restart_server) or rank 0's old process still holds :8888.
+
+    Args:
+        args (argparse.Namespace): Parsed ``restart-server`` arguments.
+        nnodes (int): Number of nodes (ranks) to launch.
+        pid_dir (str): Directory for per-rank PID files.
+        log_dir (str): Directory for per-rank logs.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
     """
     py = _read_pod_script("launch_multinode.py")
     wait_flag = "--no-wait-health" if args.no_wait_health else ""
@@ -1821,10 +2132,7 @@ def _build_multinode_launch_entrypoint(
             try:
                 _profiler_path.mkdir(parents=True, exist_ok=True)
             except OSError as _exc:
-                warn(
-                    f"cannot mkdir profile-traces dir {_profiler_path}: {_exc}; "
-                    f"pod-side launch will retry the mkdir"
-                )
+                warn(f"cannot mkdir profile-traces dir {_profiler_path}: {_exc}; pod-side launch will retry the mkdir")
             profiler_dir = str(_profiler_path)
             info(f"profile-traces dir derived from rayjob_id: {profiler_dir}")
     profiler_arg = f"--torch-profiler-dir {profiler_dir!r} " if profiler_dir else ""
@@ -1865,7 +2173,7 @@ def _build_multinode_launch_entrypoint(
         f"{_MN_ENTRYPOINT_PREAMBLE}"
         f"cat > \"$WORK_DIR/launch_multinode.py\" <<'__MN_LAUNCH_PY_EOF__'\n"
         f"{py}__MN_LAUNCH_PY_EOF__\n"
-        f"python3 \"$WORK_DIR/launch_multinode.py\" "
+        f'python3 "$WORK_DIR/launch_multinode.py" '
         f"--framework {args.framework!s} --model {args.model!s} "
         f"--tp {args.tp!s} --nnodes {nnodes!s} "
         f"--pid-dir {pid_dir!s} --log-dir {log_dir!s} "
@@ -1880,20 +2188,29 @@ def _build_multinode_router_entrypoint(
     pid_dir: str,
     log_dir: str,
 ) -> str:
-    """Compose the head-pod entrypoint that detaches the PD router (rank 0 only, binds 8888) via heredoc-embedded launch_router.py."""
+    """Compose the head-pod entrypoint that detaches the PD router (rank 0 only, binds 8888) via heredoc-embedded launch_router.py.
+
+    Args:
+        args (argparse.Namespace): Parsed ``restart-server`` arguments.
+        prefill_url (str): The prefill group's server URL.
+        decode_url (str): The decode group's server URL.
+        pid_dir (str): Directory for the router PID file.
+        log_dir (str): Directory for the router log.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
+    """
     py = _read_pod_script("launch_router.py")
     public_port = 8888
     pid_file = f"{pid_dir.rstrip('/')}/router.pid"
     log_file = f"{log_dir.rstrip('/')}/router.log"
     vllm_router_cmd = (getattr(args, "pd_vllm_router_cmd", "") or "").strip()
-    vrc_arg = (
-        f"--vllm-router-cmd {vllm_router_cmd!r} " if vllm_router_cmd else ""
-    )
+    vrc_arg = f"--vllm-router-cmd {vllm_router_cmd!r} " if vllm_router_cmd else ""
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
         f"cat > \"$WORK_DIR/launch_router.py\" <<'__MN_ROUTER_PY_EOF__'\n"
         f"{py}__MN_ROUTER_PY_EOF__\n"
-        f"python3 \"$WORK_DIR/launch_router.py\" "
+        f'python3 "$WORK_DIR/launch_router.py" '
         f"--framework {args.framework!s} "
         f"--prefill-url {prefill_url!r} --decode-url {decode_url!r} "
         f"--public-port {public_port} "
@@ -1909,14 +2226,25 @@ def _build_multinode_apply_patch_entrypoint(
     kernel_id: str,
     timeout_sec: int,
 ) -> str:
-    """Compose the head-pod entrypoint that fans out a kernel patch to every pod via heredoc-embedded kernel_patch_multinode.py."""
+    """Compose the head-pod entrypoint that fans out a kernel patch to every pod via heredoc-embedded kernel_patch_multinode.py.
+
+    Args:
+        target_path (str): The pod-side file path to patch.
+        patch_b64 (str): Base64-encoded unified diff to apply.
+        backup_dir (str): Directory where pre-patch backups are written.
+        kernel_id (str): Identifier tying the patch to a kernel.
+        timeout_sec (int): Per-pod apply timeout in seconds.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
+    """
     py = _read_pod_script("kernel_patch_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
-        f"cat > \"$WORK_DIR/kernel_patch_multinode.py\" "
+        f'cat > "$WORK_DIR/kernel_patch_multinode.py" '
         f"<<'__MN_KPATCH_PY_EOF__'\n"
         f"{py}__MN_KPATCH_PY_EOF__\n"
-        f"python3 \"$WORK_DIR/kernel_patch_multinode.py\" apply "
+        f'python3 "$WORK_DIR/kernel_patch_multinode.py" apply '
         f"--target-path {target_path!r} "
         f"--patch-b64 {patch_b64!r} "
         f"--backup-dir {backup_dir!r} "
@@ -1930,14 +2258,24 @@ def _build_multinode_revert_patch_entrypoint(
     backup_map_json: str,
     timeout_sec: int,
 ) -> str:
-    """Compose the head-pod entrypoint that fans out a revert via heredoc-embedded kernel_patch_multinode.py (``backup_map_json`` from the matching apply)."""
+    """Compose the head-pod entrypoint that fans out a revert via heredoc-embedded kernel_patch_multinode.py (``backup_map_json`` from the matching apply).
+
+    Args:
+        target_path (str): The pod-side file path to revert.
+        backup_map_json (str): JSON map of per-pod backups from the matching
+            apply.
+        timeout_sec (int): Per-pod revert timeout in seconds.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
+    """
     py = _read_pod_script("kernel_patch_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
-        f"cat > \"$WORK_DIR/kernel_patch_multinode.py\" "
+        f'cat > "$WORK_DIR/kernel_patch_multinode.py" '
         f"<<'__MN_KPATCH_PY_EOF__'\n"
         f"{py}__MN_KPATCH_PY_EOF__\n"
-        f"python3 \"$WORK_DIR/kernel_patch_multinode.py\" revert "
+        f'python3 "$WORK_DIR/kernel_patch_multinode.py" revert '
         f"--target-path {target_path!r} "
         f"--backup-map-json {backup_map_json!r} "
         f"--timeout-sec {int(timeout_sec)}"
@@ -1952,6 +2290,15 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
 
     Forwards only ``$TRACELENS_ROOT`` (patches are read on the pods'
     wekafs mount); the in-pod script is idempotent.
+
+    Args:
+        tracelens_root (str): Pod-visible TraceLens root forwarded as
+            ``--tracelens-root``.
+        sglang_version_pin (str): Optional SGLang version pin; omitted from the
+            command when empty.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
     """
     py = _read_pod_script("apply_tracelens_patch_multinode.py")
     pin_arg = ""
@@ -1959,10 +2306,10 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
         pin_arg = f" --sglang-version-pin {sglang_version_pin!r}"
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
-        f"cat > \"$WORK_DIR/apply_tracelens_patch_multinode.py\" "
+        f'cat > "$WORK_DIR/apply_tracelens_patch_multinode.py" '
         f"<<'__MN_TLPATCH_PY_EOF__'\n"
         f"{py}__MN_TLPATCH_PY_EOF__\n"
-        f"python3 \"$WORK_DIR/apply_tracelens_patch_multinode.py\" "
+        f'python3 "$WORK_DIR/apply_tracelens_patch_multinode.py" '
         f"--tracelens-root {tracelens_root!r}"
         f"{pin_arg}"
     )
@@ -1975,14 +2322,25 @@ def _build_multinode_kernel_bench_entrypoint(
     result_glob: str,
     timeout_sec: int,
 ) -> str:
-    """Compose the head-pod entrypoint running a kernel micro-benchmark on a single GPU node via heredoc-embedded kernel_bench_multinode.py."""
+    """Compose the head-pod entrypoint running a kernel micro-benchmark on a single GPU node via heredoc-embedded kernel_bench_multinode.py.
+
+    Args:
+        workspace (str): Pod-side workspace dir for the benchmark.
+        bench_command (str): The benchmark command to run.
+        files_b64_json (str): JSON map of base64-encoded files to materialize.
+        result_glob (str): Glob matching the result files to collect.
+        timeout_sec (int): Benchmark timeout in seconds.
+
+    Returns:
+        str: The composed Ray Dashboard entrypoint shell command.
+    """
     py = _read_pod_script("kernel_bench_multinode.py")
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
-        f"cat > \"$WORK_DIR/kernel_bench_multinode.py\" "
+        f'cat > "$WORK_DIR/kernel_bench_multinode.py" '
         f"<<'__MN_KBENCH_PY_EOF__'\n"
         f"{py}__MN_KBENCH_PY_EOF__\n"
-        f"python3 \"$WORK_DIR/kernel_bench_multinode.py\" bench "
+        f'python3 "$WORK_DIR/kernel_bench_multinode.py" bench '
         f"--workspace {workspace!r} "
         f"--bench-command {bench_command!r} "
         f"--files-b64-json {files_b64_json!r} "
@@ -1992,7 +2350,15 @@ def _build_multinode_kernel_bench_entrypoint(
 
 
 def _extract_pod_json(logs: str) -> dict | None:
-    """Parse the last top-level JSON document from an interleaved Ray Dashboard job_logs blob (the in-pod scripts emit one)."""
+    """Parse the last top-level JSON document from an interleaved Ray Dashboard job_logs blob (the in-pod scripts emit one).
+
+    Args:
+        logs (str): The interleaved Ray Dashboard ``job_logs`` text.
+
+    Returns:
+        dict | None: The parsed JSON object, or ``None`` when none can be
+        parsed.
+    """
     if not logs:
         return None
     text = logs.rstrip()
@@ -2022,7 +2388,7 @@ def _extract_pod_json(logs: str) -> dict | None:
             depth -= 1
             if depth == 0:
                 try:
-                    return json.loads(text[i:end + 1])
+                    return json.loads(text[i : end + 1])
                 except json.JSONDecodeError:
                     return None
     return None
@@ -2036,7 +2402,19 @@ def _submit_and_collect_pod_json(
     poll_interval: int,
     poll_timeout: int,
 ) -> tuple[int, dict | None, str]:
-    """Submit ``entrypoint``, poll to terminal, parse the per-pod JSON, and return ``(returncode, parsed_or_None, logs)``."""
+    """Submit ``entrypoint``, poll to terminal, parse the per-pod JSON, and return ``(returncode, parsed_or_None, logs)``.
+
+    Args:
+        head_ip (str): IP of the Ray head pod's dashboard.
+        entrypoint (str): The entrypoint shell command to submit.
+        label (str): Human-readable label used in log lines and polling.
+        poll_interval (int): Seconds between status polls.
+        poll_timeout (int): Overall poll budget in seconds.
+
+    Returns:
+        tuple[int, dict | None, str]: The job return code, the parsed per-pod
+        JSON (or ``None``), and the raw logs.
+    """
     with ray_dashboard.RayDashboardClient(head_ip) as ray:
         sub_id = ray.submit_job(_wrap_for_dash(entrypoint))
         info(f"{label} submission_id={sub_id}")
@@ -2087,6 +2465,16 @@ def cmd_apply_patch(args: argparse.Namespace) -> int:
     Stdout: the same JSON document kernel_patch_multinode.py emits,
     re-printed verbatim so sandbox-side callers (apply_kernel_patch.py
     multi-node dispatch) can parse it deterministically.
+
+    Args:
+        args (argparse.Namespace): Parsed ``apply-patch`` arguments
+            (``patch_file``, ``target_path``, ``kernel_id``, ``backup_dir``,
+            ``timeout_sec``, poll knobs).
+
+    Returns:
+        int: ``EXIT_OK`` on a successful fan-out, ``EXIT_CONFIG_ERROR`` for
+        missing state / unreadable patch, ``EXIT_TRANSIENT`` when the JSON
+        can't be parsed or the fan-out failed.
     """
     if _load_state().get("backend") == "dynamo":
         return _dynamo_apply_patch(args)
@@ -2113,12 +2501,18 @@ def cmd_apply_patch(args: argparse.Namespace) -> int:
     )
 
     entrypoint = _build_multinode_apply_patch_entrypoint(
-        args.target_path, patch_b64, args.backup_dir, args.kernel_id,
+        args.target_path,
+        patch_b64,
+        args.backup_dir,
+        args.kernel_id,
         args.timeout_sec,
     )
     rc, parsed, logs = _submit_and_collect_pod_json(
-        head_ip, entrypoint, label="apply-patch",
-        poll_interval=args.poll_interval, poll_timeout=_poll_timeout_from_args(args),
+        head_ip,
+        entrypoint,
+        label="apply-patch",
+        poll_interval=args.poll_interval,
+        poll_timeout=_poll_timeout_from_args(args),
     )
     if parsed is None:
         err("apply-patch: could not parse per-pod JSON from dashboard logs")
@@ -2134,6 +2528,15 @@ def cmd_revert_patch(args: argparse.Namespace) -> int:
     received it. ``--backup-map-json`` is the per-host map returned by
     the matching ``apply-patch`` call; callers MUST pass it through
     unchanged so the right backups are read on each pod.
+
+    Args:
+        args (argparse.Namespace): Parsed ``revert-patch`` arguments
+            (``target_path``, ``backup_map_json``, ``timeout_sec``, poll
+            knobs).
+
+    Returns:
+        int: ``EXIT_OK`` on success, ``EXIT_CONFIG_ERROR`` for missing state /
+        invalid backup map, ``EXIT_TRANSIENT`` when the JSON can't be parsed.
     """
     if _load_state().get("backend") == "dynamo":
         return _dynamo_revert_patch(args)
@@ -2152,17 +2555,19 @@ def cmd_revert_patch(args: argparse.Namespace) -> int:
         err("--backup-map-json must be a non-empty {host: backup_path} object")
         return EXIT_CONFIG_ERROR
 
-    info(
-        f"revert-patch: target={args.target_path} "
-        f"backup_hosts={list(decoded_map.keys())}"
-    )
+    info(f"revert-patch: target={args.target_path} backup_hosts={list(decoded_map.keys())}")
 
     entrypoint = _build_multinode_revert_patch_entrypoint(
-        args.target_path, args.backup_map_json, args.timeout_sec,
+        args.target_path,
+        args.backup_map_json,
+        args.timeout_sec,
     )
     rc, parsed, logs = _submit_and_collect_pod_json(
-        head_ip, entrypoint, label="revert-patch",
-        poll_interval=args.poll_interval, poll_timeout=_poll_timeout_from_args(args),
+        head_ip,
+        entrypoint,
+        label="revert-patch",
+        poll_interval=args.poll_interval,
+        poll_timeout=_poll_timeout_from_args(args),
     )
     if parsed is None:
         err("revert-patch: could not parse per-pod JSON from dashboard logs")
@@ -2179,22 +2584,25 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
     Needed because the sandbox can't ``import sglang`` to run the local
     patcher. Idempotent (already-patched pods return ``status=skipped``).
     Re-prints the script's JSON (``status`` + ``per_pod``) verbatim.
+
+    Args:
+        args (argparse.Namespace): Parsed ``apply-tracelens-patch`` arguments
+            (``tracelens_root``, ``sglang_version_pin``, poll knobs).
+
+    Returns:
+        int: ``EXIT_OK`` when the patch was applied or skipped,
+        ``EXIT_CONFIG_ERROR`` for missing state / TraceLens root,
+        ``EXIT_TRANSIENT`` otherwise.
     """
     if _load_state().get("backend") == "dynamo":
         return _dynamo_apply_tracelens_patch(args)
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
-        err(
-            "apply-tracelens-patch requires head_pod_ip in state file; "
-            "run create-rayjob first"
-        )
+        err("apply-tracelens-patch requires head_pod_ip in state file; run create-rayjob first")
         return EXIT_CONFIG_ERROR
 
-    tracelens_root = (
-        args.tracelens_root
-        or os.environ.get("TRACELENS_ROOT", "").strip()
-    )
+    tracelens_root = args.tracelens_root or os.environ.get("TRACELENS_ROOT", "").strip()
     if not tracelens_root:
         err(
             "apply-tracelens-patch requires --tracelens-root or "
@@ -2203,17 +2611,18 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
         )
         return EXIT_CONFIG_ERROR
 
-    info(
-        f"apply-tracelens-patch: tracelens_root={tracelens_root!r} "
-        f"version_pin={args.sglang_version_pin!r}"
-    )
+    info(f"apply-tracelens-patch: tracelens_root={tracelens_root!r} version_pin={args.sglang_version_pin!r}")
 
     entrypoint = _build_multinode_apply_tracelens_patch_entrypoint(
-        tracelens_root, args.sglang_version_pin or "",
+        tracelens_root,
+        args.sglang_version_pin or "",
     )
     rc, parsed, logs = _submit_and_collect_pod_json(
-        head_ip, entrypoint, label="apply-tracelens-patch",
-        poll_interval=args.poll_interval, poll_timeout=_poll_timeout_from_args(args),
+        head_ip,
+        entrypoint,
+        label="apply-tracelens-patch",
+        poll_interval=args.poll_interval,
+        poll_timeout=_poll_timeout_from_args(args),
     )
     if parsed is None:
         err("apply-tracelens-patch: could not parse per-pod JSON from dashboard logs")
@@ -2239,6 +2648,16 @@ def cmd_kernel_bench(args: argparse.Namespace) -> int:
     The sandbox calls this when ``is_multi_node()`` is True and the
     kernel-agent micro-benchmark step would otherwise try to compile +
     run on the sandbox (which lacks GPUs in multi-node mode).
+
+    Args:
+        args (argparse.Namespace): Parsed ``kernel-bench`` arguments
+            (``workspace``, ``bench_command``, ``files_b64_json``,
+            ``result_glob``, ``timeout_sec``, poll knobs).
+
+    Returns:
+        int: ``EXIT_OK`` on a successful benchmark, ``EXIT_CONFIG_ERROR`` for
+        missing state / invalid files JSON, ``EXIT_TRANSIENT`` when the JSON
+        can't be parsed.
     """
     if _load_state().get("backend") == "dynamo":
         return _dynamo_kernel_bench(args)
@@ -2256,18 +2675,21 @@ def cmd_kernel_bench(args: argparse.Namespace) -> int:
             err(f"--files-b64-json is not valid JSON: {exc}")
             return EXIT_CONFIG_ERROR
 
-    info(
-        f"kernel-bench: workspace={args.workspace} "
-        f"cmd={args.bench_command!r} result_glob={args.result_glob}"
-    )
+    info(f"kernel-bench: workspace={args.workspace} cmd={args.bench_command!r} result_glob={args.result_glob}")
 
     entrypoint = _build_multinode_kernel_bench_entrypoint(
-        args.workspace, args.bench_command, args.files_b64_json or "{}",
-        args.result_glob, args.timeout_sec,
+        args.workspace,
+        args.bench_command,
+        args.files_b64_json or "{}",
+        args.result_glob,
+        args.timeout_sec,
     )
     rc, parsed, logs = _submit_and_collect_pod_json(
-        head_ip, entrypoint, label="kernel-bench",
-        poll_interval=args.poll_interval, poll_timeout=_poll_timeout_from_args(args),
+        head_ip,
+        entrypoint,
+        label="kernel-bench",
+        poll_interval=args.poll_interval,
+        poll_timeout=_poll_timeout_from_args(args),
     )
     if parsed is None:
         err("kernel-bench: could not parse pod JSON from dashboard logs")
@@ -2296,6 +2718,15 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
     Dynamo backend (state.backend == 'dynamo') routes to the SSH fan-out path
     instead of the Ray Dashboard; the RayJob path below is byte-for-byte
     unchanged for non-dynamo state.
+
+    Args:
+        args (argparse.Namespace): Parsed ``restart-server`` arguments
+            (``framework``, ``model``, ``tp``, ``ep``, PD knobs, ``pid_file``,
+            ``log_file``, poll knobs).
+
+    Returns:
+        int: ``EXIT_OK`` once the server is healthy, ``EXIT_CONFIG_ERROR`` for
+        missing state, or a transient exit code on launch / poll failure.
     """
     if _load_state().get("backend") == "dynamo":
         return _dynamo_restart_server(args)
@@ -2307,8 +2738,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         # Multi-node: dir-based PID/log layout (one file per rank).
         pid_dir = args.pid_file or state.get("last_server_pid_dir") or "/tmp/multi_node_pids"
         log_dir = args.log_file or state.get("last_server_log_dir") or "/tmp/multi_node_logs"
-        info(f"restart-server (multi-node): framework={args.framework} "
-             f"model={args.model} tp={args.tp} nnodes={nnodes}")
+        info(f"restart-server (multi-node): framework={args.framework} model={args.model} tp={args.tp} nnodes={nnodes}")
 
         kill_ep = _build_multinode_kill_entrypoint(pid_dir)
         launch_ep = _build_multinode_launch_entrypoint(args, nnodes, pid_dir, log_dir)
@@ -2318,9 +2748,11 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         # and resume polling (large MoE boots outlast a 110s retry window).
         # Disable with MULTI_NODE_RESTART_RESUME_RUNNING=0.
         launch_sub: str = ""
-        resume_enabled = (
-            os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING", "1").lower()
-            not in ("0", "false", "no", "off")
+        resume_enabled = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
         )
         prev_sub = str(state.get("last_restart_submission_id") or "").strip()
         # ``last_restart_extra_args`` is normalized at write time; do the
@@ -2338,9 +2770,9 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             and int(state.get("last_restart_tp") or 0) == int(args.tp)
             and int(state.get("last_restart_ep") or 1) == int(getattr(args, "ep", 1) or 1)
             and str(state.get("last_restart_pd_mode") or "colocated")
-                == (getattr(args, "pd_mode", "") or "colocated").lower()
+            == (getattr(args, "pd_mode", "") or "colocated").lower()
             and _normalize_extra_args(state.get("last_restart_extra_args"))
-                == _normalize_extra_args(getattr(args, "extra_args", ""))
+            == _normalize_extra_args(getattr(args, "extra_args", ""))
         )
         if resume_enabled and prev_match:
             _prev_status = ""
@@ -2351,20 +2783,26 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             except Exception as _exc:  # noqa: BLE001
                 info(f"resume probe failed: {_exc!r}; falling back to KILL+LAUNCH")
             if _prev_status == "RUNNING":
-                info(f"resume: reusing launch_sub={prev_sub} "
-                     f"(framework={args.framework} model={args.model} "
-                     f"tp={args.tp} ep={getattr(args, 'ep', 1)}) "
-                     f"— skipping KILL+LAUNCH, just polling")
+                info(
+                    f"resume: reusing launch_sub={prev_sub} "
+                    f"(framework={args.framework} model={args.model} "
+                    f"tp={args.tp} ep={getattr(args, 'ep', 1)}) "
+                    f"— skipping KILL+LAUNCH, just polling"
+                )
                 launch_sub = prev_sub
             elif _prev_status in _TERMINAL_OK_STATUSES:
-                info(f"resume: prior launch_sub={prev_sub} already SUCCEEDED; "
-                     f"skipping KILL+LAUNCH, treating as healthy")
+                info(
+                    f"resume: prior launch_sub={prev_sub} already SUCCEEDED; skipping KILL+LAUNCH, treating as healthy"
+                )
                 launch_sub = prev_sub
 
         kill_sub = ""
         if not launch_sub:
             kill_sub = _exec_kill_submission(
-                head_ip, kill_ep, label="restart kill", args=args,
+                head_ip,
+                kill_ep,
+                label="restart kill",
+                args=args,
             )
 
         with ray_dashboard.RayDashboardClient(head_ip) as ray:
@@ -2374,8 +2812,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             # (driver internal, see launch_multinode.py).
             if not launch_sub:
                 launch_sub = ray.submit_job(_wrap_for_dash(launch_ep))
-                info(f"launch submission_id={launch_sub} "
-                     f"(driver waits for actors, then returns; servers detached)")
+                info(f"launch submission_id={launch_sub} (driver waits for actors, then returns; servers detached)")
 
             # EARLY checkpoint: persist the launch identity + config NOW,
             # before the (potentially long) _short_poll. Without this,
@@ -2395,12 +2832,8 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             state["last_restart_model"] = args.model
             state["last_restart_tp"] = int(args.tp)
             state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
-            state["last_restart_pd_mode"] = (
-                getattr(args, "pd_mode", "") or "colocated"
-            ).lower()
-            state["last_restart_extra_args"] = _normalize_extra_args(
-                getattr(args, "extra_args", "")
-            )
+            state["last_restart_pd_mode"] = (getattr(args, "pd_mode", "") or "colocated").lower()
+            state["last_restart_extra_args"] = _normalize_extra_args(getattr(args, "extra_args", ""))
             _save_state(state)
 
             def _fetch_launch():
@@ -2428,9 +2861,11 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             # Fail-fast on a terminal launch status so the caller raises
             # ServerRestartFailed in seconds instead of burning the 1800s health wait.
             if launch_status in _TERMINAL_FAIL_STATUSES:
-                info(f"ERROR launch driver terminal status={launch_status}; "
-                     f"multi-node restart failed (sub_id={launch_sub}). "
-                     f"Check stderr above for MULTI_NODE_FAILURE_SNAPSHOT.")
+                info(
+                    f"ERROR launch driver terminal status={launch_status}; "
+                    f"multi-node restart failed (sub_id={launch_sub}). "
+                    f"Check stderr above for MULTI_NODE_FAILURE_SNAPSHOT."
+                )
                 return 1
 
             # PD disaggregated: read the launcher's prefill/decode URLs and
@@ -2444,18 +2879,25 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                 prefill_url = str(router_state.get("pd_prefill_url") or "").strip()
                 decode_url = str(router_state.get("pd_decode_url") or "").strip()
                 if not prefill_url or not decode_url:
-                    info("ERROR PD launcher summary missing prefill/decode URL; "
-                         "cannot start router. Inspect launch logs above.")
+                    info(
+                        "ERROR PD launcher summary missing prefill/decode URL; "
+                        "cannot start router. Inspect launch logs above."
+                    )
                     return 1
 
-                info(f"PD launcher summary: prefill={prefill_url} "
-                     f"decode={decode_url}; submitting router entrypoint")
+                info(f"PD launcher summary: prefill={prefill_url} decode={decode_url}; submitting router entrypoint")
                 router_ep = _build_multinode_router_entrypoint(
-                    args, prefill_url, decode_url, pid_dir, log_dir,
+                    args,
+                    prefill_url,
+                    decode_url,
+                    pid_dir,
+                    log_dir,
                 )
                 router_sub = ray.submit_job(_wrap_for_dash(router_ep))
-                info(f"router submission_id={router_sub} "
-                     f"(detaches launch_router.py; dashboard exits when router is alive)")
+                info(
+                    f"router submission_id={router_sub} "
+                    f"(detaches launch_router.py; dashboard exits when router is alive)"
+                )
 
                 def _fetch_router():
                     """Fetch the router job status for the poll loop.
@@ -2505,12 +2947,8 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             state["last_restart_pd_decode_tp"] = int(
                 getattr(args, "pd_decode_tp", 0) or 0,
             )
-            state["last_restart_pd_transfer_backend"] = (
-                getattr(args, "pd_transfer_backend", "") or ""
-            )
-            state["last_restart_pd_ib_device"] = (
-                getattr(args, "pd_ib_device", "") or ""
-            )
+            state["last_restart_pd_transfer_backend"] = getattr(args, "pd_transfer_backend", "") or ""
+            state["last_restart_pd_ib_device"] = getattr(args, "pd_ib_device", "") or ""
             state["last_router_submission_id"] = router_sub
             state["pd_prefill_url"] = router_state.get("pd_prefill_url", "")
             state["pd_decode_url"] = router_state.get("pd_decode_url", "")
@@ -2594,7 +3032,10 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
         info(f"kill-inference (multi-node): pid_dir={pid_dir}")
         kill_ep = _build_multinode_kill_entrypoint(pid_dir)
         kill_sub = _exec_kill_submission(
-            head_ip, kill_ep, label="kill-inference", args=args,
+            head_ip,
+            kill_ep,
+            label="kill-inference",
+            args=args,
         )
         state["last_kill_submission_id"] = kill_sub
         _save_state(state)
@@ -2604,7 +3045,10 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
     info(f"kill-inference (single-node): pid_file={pid_file}")
     entrypoint = _build_kill_single_entrypoint(pid_file)
     kill_sub = _exec_kill_submission(
-        head_ip, entrypoint, label="kill-inference", args=args,
+        head_ip,
+        entrypoint,
+        label="kill-inference",
+        args=args,
     )
     state["last_kill_submission_id"] = kill_sub
     _save_state(state)
@@ -2666,8 +3110,12 @@ def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
     Args:
         p (argparse.ArgumentParser): The (sub)parser to add the flags to.
     """
-    p.add_argument("--poll-interval", type=int, default=_DEFAULT_POLL_INTERVAL_S,
-                   help=f"seconds between polls (default {_DEFAULT_POLL_INTERVAL_S})")
+    p.add_argument(
+        "--poll-interval",
+        type=int,
+        default=_DEFAULT_POLL_INTERVAL_S,
+        help=f"seconds between polls (default {_DEFAULT_POLL_INTERVAL_S})",
+    )
     p.add_argument(
         "--poll-timeout",
         type=int,
@@ -2704,50 +3152,65 @@ def build_parser() -> argparse.ArgumentParser:
     # create-rayjob
     sp = sub.add_parser("create-rayjob", help="create the RayJob via SaFE REST")
     sp.add_argument(
-        "--workspace", default=None,
-        help="SaFE workspace id. Resolution: --workspace > $SAFE_WORKSPACE "
-             "env. Bails fast if neither is set.",
+        "--workspace",
+        default=None,
+        help="SaFE workspace id. Resolution: --workspace > $SAFE_WORKSPACE env. Bails fast if neither is set.",
     )
     sp.add_argument("--image", required=True, help="container image for both head and worker pods")
     sp.add_argument("--nodes", type=int, required=True, help="total node count (>=1)")
     sp.add_argument(
-        "--gpus-per-node", type=int, default=8,
+        "--gpus-per-node",
+        type=int,
+        default=8,
         help="GPUs per pod (default 8 — full MI300X / MI355X node). "
-             "Override only if the user prompt explicitly asks for a "
-             "smaller per-pod GPU count.",
+        "Override only if the user prompt explicitly asks for a "
+        "smaller per-pod GPU count.",
     )
-    sp.add_argument("--cpus-per-node", type=int, default=96,
-                    help="default 96 — matches a full MI300X / MI355X pod. "
-                         "Override only if the user prompt asks for less.")
-    sp.add_argument("--mem-per-node", type=int, default=1024,
-                    help="GiB per pod. default 1024 — matches a full MI300X / "
-                         "MI355X pod. Override only if the user prompt asks for less.")
-    sp.add_argument("--ephemeral-per-node", type=int, default=400,
-                    help="GiB per pod. default 400.")
     sp.add_argument(
-        "--display-name", default=None,
+        "--cpus-per-node",
+        type=int,
+        default=96,
+        help="default 96 — matches a full MI300X / MI355X pod. Override only if the user prompt asks for less.",
+    )
+    sp.add_argument(
+        "--mem-per-node",
+        type=int,
+        default=1024,
+        help="GiB per pod. default 1024 — matches a full MI300X / "
+        "MI355X pod. Override only if the user prompt asks for less.",
+    )
+    sp.add_argument("--ephemeral-per-node", type=int, default=400, help="GiB per pod. default 400.")
+    sp.add_argument(
+        "--display-name",
+        default=None,
         help="Optional human-readable RayJob name (shows up in SaFE UI). "
-             "Resolution: $DISPLAY_NAME env > --display-name > "
-             "auto-generated multi_node_<unix-ts>.",
+        "Resolution: $DISPLAY_NAME env > --display-name > "
+        "auto-generated multi_node_<unix-ts>.",
     )
     sp.add_argument("--description", default=None)
     sp.add_argument(
-        "--owner-id", default=None,
+        "--owner-id",
+        default=None,
         help="ownerId for SaFE cascading cleanup. Resolution: --owner-id > "
-             "$WORKLOAD_ID (sandbox workload id). When set, SaFE GCs the "
-             "RayJob when the owner workload stops (safety net for missed "
-             "`stop-rayjob`).",
+        "$WORKLOAD_ID (sandbox workload id). When set, SaFE GCs the "
+        "RayJob when the owner workload stops (safety net for missed "
+        "`stop-rayjob`).",
     )
-    sp.add_argument("--extra-env", action="append", default=[],
-                    help="K=V (repeatable); merged AFTER credential fanout")
-    sp.add_argument("--extra-label", action="append", default=[],
-                    help="K=V (repeatable); reserved primus-safe.* prefixes are stripped")
-    sp.add_argument("--no-wait", action="store_true",
-                    help="don't poll for Running; just create and exit")
-    sp.add_argument("--recreate", action="store_true",
-                    help="force creating a fresh workload even if state.json "
-                         "already has a live rayjob_id. Default behaviour is "
-                         "to REUSE the prior workload (idempotent retries).")
+    sp.add_argument("--extra-env", action="append", default=[], help="K=V (repeatable); merged AFTER credential fanout")
+    sp.add_argument(
+        "--extra-label",
+        action="append",
+        default=[],
+        help="K=V (repeatable); reserved primus-safe.* prefixes are stripped",
+    )
+    sp.add_argument("--no-wait", action="store_true", help="don't poll for Running; just create and exit")
+    sp.add_argument(
+        "--recreate",
+        action="store_true",
+        help="force creating a fresh workload even if state.json "
+        "already has a live rayjob_id. Default behaviour is "
+        "to REUSE the prior workload (idempotent retries).",
+    )
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_create_rayjob)
 
@@ -2755,44 +3218,42 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser(
         "create-dynamo",
         help="create an idle multi-node DynamoDeployment (SSH control plane); "
-             "benchmark entry point is the Dynamo frontend :8000",
+        "benchmark entry point is the Dynamo frontend :8000",
     )
-    sp.add_argument("--workspace", default=None,
-                    help="SaFE workspace id (--workspace > $SAFE_WORKSPACE)")
-    sp.add_argument("--image", required=True,
-                    help="dynamo image WITH the sshd layer (mn-idle.sh present)")
-    sp.add_argument("--nodes", type=int, required=True,
-                    help="worker LWS node count (>=1); worker.replica == nodes")
+    sp.add_argument("--workspace", default=None, help="SaFE workspace id (--workspace > $SAFE_WORKSPACE)")
+    sp.add_argument("--image", required=True, help="dynamo image WITH the sshd layer (mn-idle.sh present)")
+    sp.add_argument("--nodes", type=int, required=True, help="worker LWS node count (>=1); worker.replica == nodes")
     sp.add_argument("--gpus-per-node", type=int, default=8)
     sp.add_argument("--cpus-per-node", type=int, default=96)
     sp.add_argument("--mem-per-node", type=int, default=1024, help="GiB per worker pod")
     sp.add_argument("--ephemeral-per-node", type=int, default=400, help="GiB per worker pod")
-    sp.add_argument("--shared-mem-per-node", type=int, default=200,
-                    help="GiB /dev/shm per worker pod (sharedMemory)")
-    sp.add_argument("--backend-framework", default="sglang",
-                    choices=("sglang", "vllm", "trtllm"))
-    sp.add_argument("--kv-transfer-backend", default="nixl",
-                    choices=("nixl", "mori", "mooncake"))
-    sp.add_argument("--ssh-port", type=int, default=ssh_client.DEFAULT_SSH_PORT,
-                    help=f"pod sshd port (default {ssh_client.DEFAULT_SSH_PORT}; "
-                         f"not 22 to avoid hostNetwork collision)")
-    sp.add_argument("--pd-mode", choices=("aggregated", "disaggregated"),
-                    default="aggregated",
-                    help="aggregated [frontend,worker] (default) or "
-                         "disaggregated [frontend,prefill,decode]")
-    sp.add_argument("--pd-prefill-nodes", type=int, default=0,
-                    help="prefill role replica (disaggregated only)")
-    sp.add_argument("--pd-decode-nodes", type=int, default=0,
-                    help="decode role replica (disaggregated only)")
-    sp.add_argument("--pd-prefill-tp", type=int, default=0,
-                    help="prefill TP; a role spans nodes (LWS) when tp > gpus-per-node")
-    sp.add_argument("--pd-decode-tp", type=int, default=0,
-                    help="decode TP; a role spans nodes (LWS) when tp > gpus-per-node")
+    sp.add_argument("--shared-mem-per-node", type=int, default=200, help="GiB /dev/shm per worker pod (sharedMemory)")
+    sp.add_argument("--backend-framework", default="sglang", choices=("sglang", "vllm", "trtllm"))
+    sp.add_argument("--kv-transfer-backend", default="nixl", choices=("nixl", "mori", "mooncake"))
+    sp.add_argument(
+        "--ssh-port",
+        type=int,
+        default=ssh_client.DEFAULT_SSH_PORT,
+        help=f"pod sshd port (default {ssh_client.DEFAULT_SSH_PORT}; not 22 to avoid hostNetwork collision)",
+    )
+    sp.add_argument(
+        "--pd-mode",
+        choices=("aggregated", "disaggregated"),
+        default="aggregated",
+        help="aggregated [frontend,worker] (default) or disaggregated [frontend,prefill,decode]",
+    )
+    sp.add_argument("--pd-prefill-nodes", type=int, default=0, help="prefill role replica (disaggregated only)")
+    sp.add_argument("--pd-decode-nodes", type=int, default=0, help="decode role replica (disaggregated only)")
+    sp.add_argument(
+        "--pd-prefill-tp", type=int, default=0, help="prefill TP; a role spans nodes (LWS) when tp > gpus-per-node"
+    )
+    sp.add_argument(
+        "--pd-decode-tp", type=int, default=0, help="decode TP; a role spans nodes (LWS) when tp > gpus-per-node"
+    )
     sp.add_argument("--display-name", default=None)
     sp.add_argument("--description", default=None)
     sp.add_argument("--owner-id", default=None)
-    sp.add_argument("--extra-env", action="append", default=[],
-                    help="K=V (repeatable); merged AFTER credential fanout")
+    sp.add_argument("--extra-env", action="append", default=[], help="K=V (repeatable); merged AFTER credential fanout")
     sp.add_argument("--extra-label", action="append", default=[])
     sp.add_argument("--no-wait", action="store_true")
     sp.add_argument("--recreate", action="store_true")
@@ -2800,15 +3261,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_create_dynamo)
 
     # bootstrap
-    sp = sub.add_parser("bootstrap",
+    sp = sub.add_parser(
+        "bootstrap",
         help="install OOB/CLI toolchain inside the RayJob via Ray Dashboard REST. "
-             "Default: uses multi_node/scripts/bootstrap.sh from this checkout.")
-    sp.add_argument("--script", default=None,
-                    help="optional override: absolute path to a bootstrap.sh "
-                         "ALREADY VISIBLE inside the RayJob pod (e.g. baked into "
-                         "the image). When omitted, the bundled script is streamed in.")
-    sp.add_argument("--force", action="store_true",
-                    help="re-run bootstrap even if the marker file says it's done")
+        "Default: uses multi_node/scripts/bootstrap.sh from this checkout.",
+    )
+    sp.add_argument(
+        "--script",
+        default=None,
+        help="optional override: absolute path to a bootstrap.sh "
+        "ALREADY VISIBLE inside the RayJob pod (e.g. baked into "
+        "the image). When omitted, the bundled script is streamed in.",
+    )
+    sp.add_argument("--force", action="store_true", help="re-run bootstrap even if the marker file says it's done")
     sp.add_argument("--print-logs", action="store_true")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_bootstrap)
@@ -2825,12 +3290,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--model", required=True, help="model path or HF id")
     sp.add_argument("--tp", type=int, required=True)
     sp.add_argument(
-        "--ep", type=int, default=1,
+        "--ep",
+        type=int,
+        default=1,
         help="expert-parallel size for MoE inference. 1 (default) keeps "
-             "experts sharded by TP. >=2 enables EP: sglang gets "
-             "`--enable-ep-moe --ep-size N`, vllm gets "
-             "`--enable-expert-parallel`. EP > TP is rejected by the "
-             "orchestrator helper before this CLI is invoked.",
+        "experts sharded by TP. >=2 enables EP: sglang gets "
+        "`--enable-ep-moe --ep-size N`, vllm gets "
+        "`--enable-expert-parallel`. EP > TP is rejected by the "
+        "orchestrator helper before this CLI is invoked.",
     )
     # Prefill-Decode disaggregation. colocated (default) keeps the
     # legacy single-server-group behaviour. disaggregated splits the
@@ -2838,24 +3305,33 @@ def build_parser() -> argparse.ArgumentParser:
     # vllm proxy on the head pod, and binds the public 8888 port at
     # the router (so magpie's BENCHMARK_BASE_URL stays unchanged).
     sp.add_argument(
-        "--pd-mode", choices=("colocated", "disaggregated"),
+        "--pd-mode",
+        choices=("colocated", "disaggregated"),
         default="colocated",
         help="PD disaggregation mode (default colocated).",
     )
     sp.add_argument(
-        "--pd-prefill-nodes", type=int, default=0,
+        "--pd-prefill-nodes",
+        type=int,
+        default=0,
         help="number of prefill nodes (disaggregated only); pn+dn==nnodes",
     )
     sp.add_argument(
-        "--pd-decode-nodes", type=int, default=0,
+        "--pd-decode-nodes",
+        type=int,
+        default=0,
         help="number of decode nodes (disaggregated only)",
     )
     sp.add_argument(
-        "--pd-prefill-tp", type=int, default=0,
+        "--pd-prefill-tp",
+        type=int,
+        default=0,
         help="TP for prefill group (disaggregated only); default = --tp",
     )
     sp.add_argument(
-        "--pd-decode-tp", type=int, default=0,
+        "--pd-decode-tp",
+        type=int,
+        default=0,
         help="TP for decode group (disaggregated only); default = --tp",
     )
     # Per-role EP / extra server args (disaggregated only). The InferenceX
@@ -2865,12 +3341,14 @@ def build_parser() -> argparse.ArgumentParser:
     # to 0 / "" (fall back to the shared --ep / --extra-args, preserving the
     # legacy behaviour) and read $PD_*_EP / $PD_*_EXTRA_ARGS env as defaults.
     sp.add_argument(
-        "--pd-prefill-ep", type=int,
+        "--pd-prefill-ep",
+        type=int,
         default=int(os.environ.get("PD_PREFILL_EP", "0") or 0),
         help="EP for prefill group (disaggregated only); 0 = use --ep",
     )
     sp.add_argument(
-        "--pd-decode-ep", type=int,
+        "--pd-decode-ep",
+        type=int,
         default=int(os.environ.get("PD_DECODE_EP", "0") or 0),
         help="EP for decode group (disaggregated only); 0 = use --ep",
     )
@@ -2878,39 +3356,48 @@ def build_parser() -> argparse.ArgumentParser:
         "--pd-prefill-extra-args",
         default=os.environ.get("PD_PREFILL_EXTRA_ARGS", ""),
         help="extra sglang args appended to the PREFILL group only "
-             "(merged after the shared --extra-args); disaggregated only",
+        "(merged after the shared --extra-args); disaggregated only",
     )
     sp.add_argument(
         "--pd-decode-extra-args",
         default=os.environ.get("PD_DECODE_EXTRA_ARGS", ""),
         help="extra sglang args appended to the DECODE group only "
-             "(merged after the shared --extra-args); disaggregated only",
+        "(merged after the shared --extra-args); disaggregated only",
     )
     sp.add_argument(
-        "--pd-transfer-backend", default="",
+        "--pd-transfer-backend",
+        default="",
         help="sglang: mooncake|nixl ; vllm: NixlConnector|P2pNcclConnector|"
-             "MooncakeConnector|LMCacheConnectorV1; empty = framework default",
+        "MooncakeConnector|LMCacheConnectorV1; empty = framework default",
     )
     sp.add_argument(
-        "--pd-ib-device", default="",
-        help="comma-separated IB/RoCE device list (e.g. mlx5_0,mlx5_1). "
-             "Empty = read $NCCL_IB_HCA from RayJob pod env.",
+        "--pd-ib-device",
+        default="",
+        help="comma-separated IB/RoCE device list (e.g. mlx5_0,mlx5_1). Empty = read $NCCL_IB_HCA from RayJob pod env.",
     )
     sp.add_argument(
-        "--pd-bootstrap-port", type=int, default=8998,
+        "--pd-bootstrap-port",
+        type=int,
+        default=8998,
         help="sglang PD bootstrap rendezvous port (default 8998)",
     )
     sp.add_argument(
-        "--pd-vllm-router-cmd", default="",
+        "--pd-vllm-router-cmd",
+        default="",
         help="vllm-only override for router cmdline; supports {prefill}/{decode}/{port} placeholders",
     )
     sp.add_argument("--extra-args", default="", help="extra CLI args appended verbatim to the framework launch command")
-    sp.add_argument("--pid-file", default=None,
-                    help="PID file path inside the head pod; defaults to /tmp/multi_node_server.pid")
-    sp.add_argument("--log-file", default=None,
-                    help="server log path inside the head pod; defaults to /tmp/multi_node_server.log")
-    sp.add_argument("--no-wait-health", action="store_true",
-                    help="exit the dashboard job immediately after launch instead of waiting for /health")
+    sp.add_argument(
+        "--pid-file", default=None, help="PID file path inside the head pod; defaults to /tmp/multi_node_server.pid"
+    )
+    sp.add_argument(
+        "--log-file", default=None, help="server log path inside the head pod; defaults to /tmp/multi_node_server.log"
+    )
+    sp.add_argument(
+        "--no-wait-health",
+        action="store_true",
+        help="exit the dashboard job immediately after launch instead of waiting for /health",
+    )
     sp.add_argument("--print-logs", action="store_true")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_restart_server)
@@ -2923,7 +3410,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--pid-file",
         default=None,
         help="single-node: head-pod PID file path; multi-node: pid-dir path "
-             "(same override semantics as restart-server --pid-file)",
+        "(same override semantics as restart-server --pid-file)",
     )
     sp.add_argument("--print-logs", action="store_true")
     _add_common_poll_flags(sp)
@@ -2932,10 +3419,8 @@ def build_parser() -> argparse.ArgumentParser:
     # stop-rayjob
     sp = sub.add_parser("stop-rayjob", help="stop the RayJob via SaFE REST")
     sp.add_argument("--workload-id", default=None, help="override the workload id from state file")
-    sp.add_argument("--delete", action="store_true",
-                    help="hard delete instead of soft stop (default: stop)")
-    sp.add_argument("--clear-state", action="store_true",
-                    help="remove /tmp/multi_node_state.json on success")
+    sp.add_argument("--delete", action="store_true", help="hard delete instead of soft stop (default: stop)")
+    sp.add_argument("--clear-state", action="store_true", help="remove /tmp/multi_node_state.json on success")
     sp.set_defaults(func=cmd_stop_rayjob)
 
     # apply-patch (multi-node only)
@@ -2943,18 +3428,24 @@ def build_parser() -> argparse.ArgumentParser:
         "apply-patch",
         help="fan-out a kernel patch to every pod (head + workers); multi-node only",
     )
-    sp.add_argument("--patch-file", required=True,
-                    help="path to the patch source on sandbox filesystem; contents will be base64-encoded into the dashboard entrypoint")
-    sp.add_argument("--target-path", required=True,
-                    help="absolute file path on each pod to overwrite (e.g. /sgl-workspace/aiter/aiter/ops/gemm.py)")
-    sp.add_argument("--backup-dir", required=True,
-                    help="directory on each pod where the pre-patch original is saved (e.g. /var/kernel_patch_backups)")
-    sp.add_argument("--kernel-id", default="",
-                    help="optional id used to construct backup filename")
-    sp.add_argument("--timeout-sec", type=int, default=120,
-                    help="per-actor timeout (default 120s)")
-    sp.add_argument("--print-logs", action="store_true",
-                    help="dump full dashboard job_logs on parse failure")
+    sp.add_argument(
+        "--patch-file",
+        required=True,
+        help="path to the patch source on sandbox filesystem; contents will be base64-encoded into the dashboard entrypoint",
+    )
+    sp.add_argument(
+        "--target-path",
+        required=True,
+        help="absolute file path on each pod to overwrite (e.g. /sgl-workspace/aiter/aiter/ops/gemm.py)",
+    )
+    sp.add_argument(
+        "--backup-dir",
+        required=True,
+        help="directory on each pod where the pre-patch original is saved (e.g. /var/kernel_patch_backups)",
+    )
+    sp.add_argument("--kernel-id", default="", help="optional id used to construct backup filename")
+    sp.add_argument("--timeout-sec", type=int, default=120, help="per-actor timeout (default 120s)")
+    sp.add_argument("--print-logs", action="store_true", help="dump full dashboard job_logs on parse failure")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_apply_patch)
 
@@ -2964,8 +3455,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="fan-out a kernel patch revert; multi-node only",
     )
     sp.add_argument("--target-path", required=True)
-    sp.add_argument("--backup-map-json", required=True,
-                    help='JSON object {hostname: backup_path} from the matching apply-patch result')
+    sp.add_argument(
+        "--backup-map-json",
+        required=True,
+        help="JSON object {hostname: backup_path} from the matching apply-patch result",
+    )
     sp.add_argument("--timeout-sec", type=int, default=60)
     sp.add_argument("--print-logs", action="store_true")
     _add_common_poll_flags(sp)
@@ -2980,7 +3474,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sp.add_argument(
-        "--tracelens-root", default=None,
+        "--tracelens-root",
+        default=None,
         help=(
             "absolute path to public TraceLens checkout (must be visible "
             "from every pod, typically /wekafs/...). Defaults to "
@@ -2988,14 +3483,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sp.add_argument(
-        "--sglang-version-pin", default=None,
-        help=(
-            "advisory pin (e.g. '0.5.11'); logged on mismatch with the "
-            "sglang installed in the pod. Optional."
-        ),
+        "--sglang-version-pin",
+        default=None,
+        help=("advisory pin (e.g. '0.5.11'); logged on mismatch with the sglang installed in the pod. Optional."),
     )
-    sp.add_argument("--print-logs", action="store_true",
-                    help="dump full dashboard job_logs on parse failure")
+    sp.add_argument("--print-logs", action="store_true", help="dump full dashboard job_logs on parse failure")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_apply_tracelens_patch)
 
@@ -3004,16 +3496,19 @@ def build_parser() -> argparse.ArgumentParser:
         "kernel-bench",
         help="run a kernel micro-benchmark on a GPU-bearing pod; multi-node only",
     )
-    sp.add_argument("--workspace", required=True,
-                    help="absolute dir on pod that will be CWD for the bench")
-    sp.add_argument("--bench-command", required=True,
-                    help="shell command to invoke (passed to 'bash -lc')")
-    sp.add_argument("--files-b64-json", default="{}",
-                    help='JSON {rel_path: base64_content} of helper files to stage into workspace before the bench')
-    sp.add_argument("--result-glob", default="*.json",
-                    help="glob (relative to workspace) of result artifacts to read back after the bench")
-    sp.add_argument("--timeout-sec", type=int, default=600,
-                    help="hard timeout for the bench command (default 600s)")
+    sp.add_argument("--workspace", required=True, help="absolute dir on pod that will be CWD for the bench")
+    sp.add_argument("--bench-command", required=True, help="shell command to invoke (passed to 'bash -lc')")
+    sp.add_argument(
+        "--files-b64-json",
+        default="{}",
+        help="JSON {rel_path: base64_content} of helper files to stage into workspace before the bench",
+    )
+    sp.add_argument(
+        "--result-glob",
+        default="*.json",
+        help="glob (relative to workspace) of result artifacts to read back after the bench",
+    )
+    sp.add_argument("--timeout-sec", type=int, default=600, help="hard timeout for the bench command (default 600s)")
     sp.add_argument("--print-logs", action="store_true")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_kernel_bench)
@@ -3022,12 +3517,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser(
         "install-geak",
         help="install the GEAK CLI on every Dynamo GPU pod over SSH "
-             "(idempotent; pip-installs the shared-FS GEAK checkout); dynamo only",
+        "(idempotent; pip-installs the shared-FS GEAK checkout); dynamo only",
     )
-    sp.add_argument("--geak-src", default=None,
-                    help="GEAK source dir on the shared mount (default: "
-                         "$HYPERLOOM_GEAK_SRC > $HYPERLOOM_ROOT/geak > "
-                         "$USER_DATA_PATH/runtime/geak)")
+    sp.add_argument(
+        "--geak-src",
+        default=None,
+        help="GEAK source dir on the shared mount (default: "
+        "$HYPERLOOM_GEAK_SRC > $HYPERLOOM_ROOT/geak > "
+        "$USER_DATA_PATH/runtime/geak)",
+    )
     sp.add_argument("--print-logs", action="store_true")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_install_geak)
@@ -3036,10 +3534,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser(
         "install-oob",
         help="install the OOB backend (oob/claude/codex/@cursor) on every "
-             "Dynamo GPU pod over SSH (idempotent); dynamo only",
+        "Dynamo GPU pod over SSH (idempotent); dynamo only",
     )
-    sp.add_argument("--oob-src", default=None,
-                    help="OOB source dir on the shared mount (default: $OOB_SRC)")
+    sp.add_argument("--oob-src", default=None, help="OOB source dir on the shared mount (default: $OOB_SRC)")
     sp.add_argument("--print-logs", action="store_true")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_install_oob)
@@ -3048,7 +3545,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint with stable exit codes: 0 ok, 1 transient (retryable), 2 terminal workload failure (do not retry), 3 config error, 130 SIGINT."""
+    """CLI entrypoint with stable exit codes: 0 ok, 1 transient (retryable), 2 terminal workload failure (do not retry), 3 config error, 130 SIGINT.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; ``None`` uses
+            ``sys.argv``.
+
+    Returns:
+        int: The process exit code mapped from the subcommand result or the
+        caught exception type.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -3073,12 +3579,15 @@ def main(argv: list[str] | None = None) -> int:
     except (RuntimeError, ValueError) as exc:
         # Caller-fixable input/state errors -> config error; else transient.
         msg = str(exc)
-        if any(s in msg for s in (
-            "is required",
-            "Missing required environment variable",
-            "missing required keys",
-            "unsupported framework",
-        )):
+        if any(
+            s in msg
+            for s in (
+                "is required",
+                "Missing required environment variable",
+                "missing required keys",
+                "unsupported framework",
+            )
+        ):
             err(f"{type(exc).__name__}: {exc}")
             return EXIT_CONFIG_ERROR
         err(f"{type(exc).__name__}: {exc}")

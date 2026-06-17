@@ -36,8 +36,12 @@ def session_dir(tmp_path: Path) -> Path:
 # Journal — construction
 def test_load_or_create_mints_new_when_absent(session_dir: Path):
     j = Journal.load_or_create(
-        session_dir, session_id="sid-1", model="m", hardware="mi300x",
-        framework="sglang", baseline_throughput=600.0,
+        session_dir,
+        session_id="sid-1",
+        model="m",
+        hardware="mi300x",
+        framework="sglang",
+        baseline_throughput=600.0,
     )
     assert j.session_id == "sid-1"
     assert j.model == "m"
@@ -53,17 +57,29 @@ def test_load_or_create_mints_new_when_absent(session_dir: Path):
 
 def test_load_or_create_round_trips_existing_file(session_dir: Path):
     j1 = Journal.load_or_create(
-        session_dir, session_id="sid-1", model="m", hardware="mi300x",
+        session_dir,
+        session_id="sid-1",
+        model="m",
+        hardware="mi300x",
         baseline_throughput=600.0,
     )
-    j1.append_entry(JournalEntry(
-        phase="EXPLORE", iter=1, kind=KIND_BACKEND,
-        change="--attention-backend X", outcome=OUTCOME_KEEP, gain_pct=12.0,
-    ))
+    j1.append_entry(
+        JournalEntry(
+            phase="EXPLORE",
+            iter=1,
+            kind=KIND_BACKEND,
+            change="--attention-backend X",
+            outcome=OUTCOME_KEEP,
+            gain_pct=12.0,
+        )
+    )
     j1.finalize(final_throughput=900.0, total_gain_pct=50.0)
 
     j2 = Journal.load_or_create(
-        session_dir, session_id="sid-1", model="m", hardware="mi300x",
+        session_dir,
+        session_id="sid-1",
+        model="m",
+        hardware="mi300x",
         baseline_throughput=600.0,
     )
     assert j2.final_throughput == 900.0
@@ -78,15 +94,27 @@ def test_load_or_create_keeps_existing_header_when_caller_passes_defaults(
 ):
     """Header fields from disk win over empty-string defaults on resume."""
     j1 = Journal.load_or_create(
-        session_dir, session_id="sid-1", model="m", hardware="mi300x",
+        session_dir,
+        session_id="sid-1",
+        model="m",
+        hardware="mi300x",
         baseline_throughput=700.0,
     )
-    j1.append_entry(JournalEntry(
-        phase="EXPLORE", iter=1, kind=KIND_PARAM,
-        change="--max-num-batched-tokens 16384", outcome=OUTCOME_KEEP,
-    ))
+    j1.append_entry(
+        JournalEntry(
+            phase="EXPLORE",
+            iter=1,
+            kind=KIND_PARAM,
+            change="--max-num-batched-tokens 16384",
+            outcome=OUTCOME_KEEP,
+        )
+    )
     j2 = Journal.load_or_create(
-        session_dir, session_id="", model="", hardware="", baseline_throughput=0.0,
+        session_dir,
+        session_id="",
+        model="",
+        hardware="",
+        baseline_throughput=0.0,
     )
     assert j2.session_id == "sid-1"
     assert j2.model == "m"
@@ -101,7 +129,10 @@ def test_load_or_create_recovers_from_corrupt_file(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{ not json", encoding="utf-8")
     j = Journal.load_or_create(
-        session_dir, session_id="sid-x", model="m", hardware="h",
+        session_dir,
+        session_id="sid-x",
+        model="m",
+        hardware="h",
     )
     assert j.entries == []
     assert j.session_id == "sid-x"
@@ -110,13 +141,22 @@ def test_load_or_create_recovers_from_corrupt_file(
 # Journal — mutation + persistence
 def test_append_entry_flushes_to_disk(session_dir: Path):
     j = Journal.load_or_create(
-        session_dir, session_id="s", model="m", hardware="h",
+        session_dir,
+        session_id="s",
+        model="m",
+        hardware="h",
         baseline_throughput=600.0,
     )
-    j.append_entry(JournalEntry(
-        phase="EXPLORE", iter=1, kind=KIND_BACKEND, change="X",
-        outcome=OUTCOME_KEEP, gain_pct=10.0,
-    ))
+    j.append_entry(
+        JournalEntry(
+            phase="EXPLORE",
+            iter=1,
+            kind=KIND_BACKEND,
+            change="X",
+            outcome=OUTCOME_KEEP,
+            gain_pct=10.0,
+        )
+    )
     blob = json.loads(j.path.read_text(encoding="utf-8"))
     assert blob["entries"][0]["change"] == "X"
     assert blob["entries"][0]["gain_pct"] == 10.0
@@ -125,11 +165,18 @@ def test_append_entry_flushes_to_disk(session_dir: Path):
 
 def test_append_entry_dedupes_on_resume_replay(session_dir: Path):
     j = Journal.load_or_create(
-        session_dir, session_id="s", model="m", hardware="h",
+        session_dir,
+        session_id="s",
+        model="m",
+        hardware="h",
     )
     e = JournalEntry(
-        phase="EXPLORE", iter=1, kind=KIND_BACKEND, change="X",
-        outcome=OUTCOME_KEEP, gain_pct=10.0,
+        phase="EXPLORE",
+        iter=1,
+        kind=KIND_BACKEND,
+        change="X",
+        outcome=OUTCOME_KEEP,
+        gain_pct=10.0,
     )
     assert j.append_entry(e) is True
     assert j.append_entry(e) is False  # dedupe
@@ -139,11 +186,17 @@ def test_append_entry_dedupes_on_resume_replay(session_dir: Path):
 def test_append_entry_dedupe_per_variant(session_dir: Path):
     """variant_name breaks the dedupe tie for two variants of the same round."""
     j = Journal.load_or_create(
-        session_dir, session_id="s", model="m", hardware="h",
+        session_dir,
+        session_id="s",
+        model="m",
+        hardware="h",
     )
     base_kwargs = dict(
-        phase="EXPLORE", iter=2, kind=KIND_PARAM,
-        change="--max-num-batched-tokens", outcome=OUTCOME_REVERT,
+        phase="EXPLORE",
+        iter=2,
+        kind=KIND_PARAM,
+        change="--max-num-batched-tokens",
+        outcome=OUTCOME_REVERT,
     )
     assert j.append_entry(JournalEntry(variant_name="v_8k", **base_kwargs))
     assert j.append_entry(JournalEntry(variant_name="v_16k", **base_kwargs))
@@ -155,12 +208,19 @@ def test_append_entry_dedupe_per_task_id(session_dir: Path):
     from inference_optimizer.orchestrator.optimization_journal import (
         KIND_KERNEL_FILE,
     )
+
     j = Journal.load_or_create(
-        session_dir, session_id="s", model="m", hardware="h",
+        session_dir,
+        session_id="s",
+        model="m",
+        hardware="h",
     )
     base_kwargs = dict(
-        phase="KERNEL", iter=5, kind=KIND_KERNEL_FILE,
-        change="kernel_opt", outcome=OUTCOME_KEEP,
+        phase="KERNEL",
+        iter=5,
+        kind=KIND_KERNEL_FILE,
+        change="kernel_opt",
+        outcome=OUTCOME_KEEP,
     )
     assert j.append_entry(JournalEntry(task_id="task-1", **base_kwargs))
     assert j.append_entry(JournalEntry(task_id="task-2", **base_kwargs))
@@ -172,13 +232,22 @@ def test_append_entry_dedupe_per_task_id(session_dir: Path):
 
 def test_finalize_updates_only_summary_fields(session_dir: Path):
     j = Journal.load_or_create(
-        session_dir, session_id="s", model="m", hardware="h",
+        session_dir,
+        session_id="s",
+        model="m",
+        hardware="h",
         baseline_throughput=600.0,
     )
-    j.append_entry(JournalEntry(
-        phase="EXPLORE", iter=1, kind=KIND_BACKEND, change="X",
-        outcome=OUTCOME_KEEP, gain_pct=10.0,
-    ))
+    j.append_entry(
+        JournalEntry(
+            phase="EXPLORE",
+            iter=1,
+            kind=KIND_BACKEND,
+            change="X",
+            outcome=OUTCOME_KEEP,
+            gain_pct=10.0,
+        )
+    )
     j.finalize(final_throughput=900.0, total_gain_pct=50.0)
     blob = json.loads(j.path.read_text(encoding="utf-8"))
     assert blob["final_throughput"] == 900.0
@@ -189,7 +258,10 @@ def test_finalize_updates_only_summary_fields(session_dir: Path):
 
 def test_finalize_with_partial_args_only_updates_given_fields(session_dir: Path):
     j = Journal.load_or_create(
-        session_dir, session_id="s", model="m", hardware="h",
+        session_dir,
+        session_id="s",
+        model="m",
+        hardware="h",
     )
     j.finalize(total_gain_pct=44.9)
     assert j.total_gain_pct == 44.9
@@ -201,7 +273,10 @@ def test_finalize_with_partial_args_only_updates_given_fields(session_dir: Path)
 
 def test_update_baseline_ignores_non_positive(session_dir: Path):
     j = Journal.load_or_create(
-        session_dir, session_id="s", model="m", hardware="h",
+        session_dir,
+        session_id="s",
+        model="m",
+        hardware="h",
         baseline_throughput=600.0,
     )
     j.update_baseline(0.0)
@@ -214,12 +289,21 @@ def test_update_baseline_ignores_non_positive(session_dir: Path):
 
 def test_to_dict_strips_none_in_entries(session_dir: Path):
     j = Journal.load_or_create(
-        session_dir, session_id="s", model="m", hardware="h",
+        session_dir,
+        session_id="s",
+        model="m",
+        hardware="h",
     )
-    j.append_entry(JournalEntry(
-        phase="EXPLORE", iter=1, kind=KIND_BACKEND, change="X",
-        outcome=OUTCOME_KEEP, gain_pct=10.0,
-    ))
+    j.append_entry(
+        JournalEntry(
+            phase="EXPLORE",
+            iter=1,
+            kind=KIND_BACKEND,
+            change="X",
+            outcome=OUTCOME_KEEP,
+            gain_pct=10.0,
+        )
+    )
     blob = json.loads(j.path.read_text(encoding="utf-8"))
     e = blob["entries"][0]
     # error_class / reason were None → stripped.
@@ -239,14 +323,20 @@ def test_classify_change_kind_recognises_top_level_kinds():
 
 def test_classify_change_kind_explore_variant_dimensions():
     assert classify_change_kind("explore", {"extra_envs": {"X": "1"}}) == KIND_ENV
-    assert classify_change_kind(
-        "explore",
-        {"extra_sglang_args": "--attention-backend FOO"},
-    ) == KIND_BACKEND
-    assert classify_change_kind(
-        "explore",
-        {"extra_sglang_args": "--max-num-batched-tokens 8192"},
-    ) == KIND_PARAM
+    assert (
+        classify_change_kind(
+            "explore",
+            {"extra_sglang_args": "--attention-backend FOO"},
+        )
+        == KIND_BACKEND
+    )
+    assert (
+        classify_change_kind(
+            "explore",
+            {"extra_sglang_args": "--max-num-batched-tokens 8192"},
+        )
+        == KIND_PARAM
+    )
     assert classify_change_kind("explore", {}) == KIND_OTHER
 
 
@@ -271,6 +361,7 @@ def test_operation_kind_for_maps_kind_and_action():
     from inference_optimizer.orchestrator.optimization_journal import (
         operation_kind_for,
     )
+
     # Explore sub-kinds pass through.
     assert operation_kind_for("explore", "backend") == "backend"
     assert operation_kind_for("explore", "param") == "param"
@@ -286,6 +377,7 @@ def test_operation_kind_for_maps_kind_and_action():
 
 def test_proposer_for_resolves_provenance():
     from inference_optimizer.orchestrator.optimization_journal import proposer_for
+
     assert proposer_for("specialist:serving_specialist") == "specialist:serving_specialist"
     assert proposer_for("llm_direct") == "orchestration"
     assert proposer_for("default_grid") == "grid"
@@ -295,10 +387,17 @@ def test_proposer_for_resolves_provenance():
 
 def test_journal_entry_roundtrips_proposer_and_metrics():
     from inference_optimizer.orchestrator.optimization_journal import JournalEntry
+
     e = JournalEntry(
-        phase="EXPLORE", iter=1, kind="backend", change="x", outcome="KEEP",
-        provenance="specialist:serving_specialist", scope="domain",
-        fingerprint="fp123", metrics={"runtime_sec": 42.0},
+        phase="EXPLORE",
+        iter=1,
+        kind="backend",
+        change="x",
+        outcome="KEEP",
+        provenance="specialist:serving_specialist",
+        scope="domain",
+        fingerprint="fp123",
+        metrics={"runtime_sec": 42.0},
     )
     d = e.to_dict()
     assert d["provenance"] == "specialist:serving_specialist"
@@ -309,9 +408,16 @@ def test_journal_entry_roundtrips_proposer_and_metrics():
     assert back.provenance == "specialist:serving_specialist"
     assert back.metrics == {"runtime_sec": 42.0}
     # Empty metrics dict is stripped from the serialized form.
-    assert "metrics" not in JournalEntry(
-        phase="P", iter=0, kind="baseline", change="b", outcome="KEEP",
-    ).to_dict()
+    assert (
+        "metrics"
+        not in JournalEntry(
+            phase="P",
+            iter=0,
+            kind="baseline",
+            change="b",
+            outcome="KEEP",
+        ).to_dict()
+    )
 
 
 def test_journal_entry_roundtrips_predicted_gain():
