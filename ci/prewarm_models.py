@@ -168,7 +168,7 @@ def _dir_stats(p: Path) -> tuple[int, float]:
     return n, total / 1e9
 
 
-def download_one(repo_id: str, target_root: Path, hf_token: str, inner_workers: int = 4) -> dict:
+def download_one(repo_id: str, target_root: Path, hf_token, inner_workers: int = 4) -> dict:
     """Download a single HF repo to <target_root>/<slug>/.
 
     Skips already-complete destinations, downloads into a temporary ``.part``
@@ -190,7 +190,16 @@ def download_one(repo_id: str, target_root: Path, hf_token: str, inner_workers: 
     tmp = tmp_dir(target_root, repo_id)
     hf_api = HfApi()
 
-    if is_complete(dest, repo_id, hf_api, hf_token):
+    # Token pool: accept either a single token (str) or a list. Start on a
+    # token chosen by hashing the repo id so parallel prewarm jobs spread
+    # across the pool, then rotate on 429.
+    tokens = [t for t in (hf_token if isinstance(hf_token, (list, tuple)) else [hf_token]) if t]
+    tok_idx = (hash(repo_id) % len(tokens)) if tokens else 0
+
+    def _cur_token():
+        return tokens[tok_idx % len(tokens)] if tokens else None
+
+    if is_complete(dest, repo_id, hf_api, _cur_token()):
         n, gb = _dir_stats(dest)
         return {"status": "SKIP", "size_gb": gb, "n_files": n, "elapsed_s": 0, "reason": "already complete"}
 
@@ -200,49 +209,70 @@ def download_one(repo_id: str, target_root: Path, hf_token: str, inner_workers: 
         shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True, exist_ok=True)
 
-    try:
-        snapshot_download(
-            repo_id,
-            local_dir=str(tmp),
-            local_dir_use_symlinks=False,
-            token=hf_token or None,
-            max_workers=inner_workers,
-            allow_patterns=None,
-            ignore_patterns=[
-                "*.h5",
-                "*.msgpack",
-                "*.onnx",
-                "*.tflite",
-                "consolidated.*",  # legacy llama-cpp dumps
-            ],
-            tqdm_class=None,
-        )
-    except RepositoryNotFoundError:
+    attempts = max(4, len(tokens) * 2)
+    last_429 = None
+    for attempt in range(attempts):
+        try:
+            snapshot_download(
+                repo_id,
+                local_dir=str(tmp),
+                local_dir_use_symlinks=False,
+                token=_cur_token(),
+                max_workers=inner_workers,
+                allow_patterns=None,
+                ignore_patterns=[
+                    "*.h5",
+                    "*.msgpack",
+                    "*.onnx",
+                    "*.tflite",
+                    "consolidated.*",  # legacy llama-cpp dumps
+                ],
+                tqdm_class=None,
+            )
+            break
+        except RepositoryNotFoundError:
+            shutil.rmtree(tmp, ignore_errors=True)
+            return {
+                "status": "FAIL",
+                "size_gb": 0,
+                "n_files": 0,
+                "elapsed_s": time.time() - start,
+                "reason": "repo not found (gated or deleted)",
+            }
+        except HfHubHTTPError as e:
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            if status_code == 429 or "429" in str(e):
+                last_429 = e
+                if len(tokens) > 1:
+                    tok_idx += 1
+                    log.warning("[%s] HF 429 — rotating token and retrying (attempt %d)", repo_id, attempt + 1)
+                time.sleep(min(2 ** attempt, 30))
+                continue
+            shutil.rmtree(tmp, ignore_errors=True)
+            return {
+                "status": "FAIL",
+                "size_gb": 0,
+                "n_files": 0,
+                "elapsed_s": time.time() - start,
+                "reason": f"HF HTTP error: {e}"[:200],
+            }
+        except Exception as e:
+            shutil.rmtree(tmp, ignore_errors=True)
+            return {
+                "status": "FAIL",
+                "size_gb": 0,
+                "n_files": 0,
+                "elapsed_s": time.time() - start,
+                "reason": f"{type(e).__name__}: {e}"[:200],
+            }
+    else:
         shutil.rmtree(tmp, ignore_errors=True)
         return {
             "status": "FAIL",
             "size_gb": 0,
             "n_files": 0,
             "elapsed_s": time.time() - start,
-            "reason": "repo not found (gated or deleted)",
-        }
-    except HfHubHTTPError as e:
-        shutil.rmtree(tmp, ignore_errors=True)
-        return {
-            "status": "FAIL",
-            "size_gb": 0,
-            "n_files": 0,
-            "elapsed_s": time.time() - start,
-            "reason": f"HF HTTP error: {e}"[:200],
-        }
-    except Exception as e:
-        shutil.rmtree(tmp, ignore_errors=True)
-        return {
-            "status": "FAIL",
-            "size_gb": 0,
-            "n_files": 0,
-            "elapsed_s": time.time() - start,
-            "reason": f"{type(e).__name__}: {e}"[:200],
+            "reason": f"HF 429 rate-limited after {attempts} attempts: {last_429}"[:200],
         }
 
     # Atomic-ish swap; clear any partial dest first.
@@ -420,9 +450,11 @@ def main() -> int:
         force=True,
     )
 
-    hf_token = os.environ.get("HF_TOKEN", "")
-    if not hf_token:
+    hf_tokens = [t for t in (os.environ.get("HF_TOKEN", ""), os.environ.get("HF_TOKEN_2", "")) if t]
+    if not hf_tokens:
         log.warning("HF_TOKEN unset — gated repos will fail with 401/403")
+    elif len(hf_tokens) > 1:
+        log.info("HF token pool: %d tokens (alternate on 429)", len(hf_tokens))
 
     repos = load_repos(args)
     if args.exclude_done and args.already_done.exists():
@@ -455,7 +487,7 @@ def main() -> int:
         max_workers=args.concurrency,
         thread_name_prefix="prewarm",
     ) as ex:
-        future_to_repo = {ex.submit(download_one, r, args.target_root, hf_token, args.inner_workers): r for r in repos}
+        future_to_repo = {ex.submit(download_one, r, args.target_root, hf_tokens, args.inner_workers): r for r in repos}
         for done_count, fut in enumerate(concurrent.futures.as_completed(future_to_repo), 1):
             repo = future_to_repo[fut]
             try:
