@@ -174,10 +174,12 @@ def _copy_loose_tree(
             log.warning("session package: failed to copy loose file %s", rel)
     try:
         (loose_dir / MANIFEST_JSON_NAME).write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8",
+            json.dumps(manifest, indent=2),
+            encoding="utf-8",
         )
         (loose_dir / MANIFEST_TXT_NAME).write_text(
-            _manifest_text(manifest), encoding="utf-8",
+            _manifest_text(manifest),
+            encoding="utf-8",
         )
     except OSError:
         log.warning("session package: failed to write loose manifest")
@@ -395,15 +397,22 @@ def package_session_artifacts(
                 log.warning(
                     "session package: hit size/count cap, TRUNCATING bundle "
                     "(included=%d, bytes=%d, dropped=%d). Manifest flagged "
-                    "truncated=true.", len(included), total, len(dropped),
+                    "truncated=true.",
+                    len(included),
+                    total,
+                    len(dropped),
                 )
                 break
             included.append((p, p.relative_to(sd).as_posix(), sz))
             total += sz
 
         manifest = _build_manifest(
-            sd, sid, [(rel, sz) for _, rel, sz in included], missing_globs,
-            truncated=truncated, dropped_files=dropped,
+            sd,
+            sid,
+            [(rel, sz) for _, rel, sz in included],
+            missing_globs,
+            truncated=truncated,
+            dropped_files=dropped,
         )
 
         root = Path(dest_root).resolve() if dest_root else _dest_root()
@@ -434,7 +443,9 @@ def package_session_artifacts(
 
         log.info(
             "session package: wrote %s (%d files, %d bytes pre-zip)",
-            target, len(included), total,
+            target,
+            len(included),
+            total,
         )
 
         # Also lay the same files down loose (uncompressed, original tree)
@@ -446,7 +457,8 @@ def package_session_artifacts(
                 copied = _copy_loose_tree(included, manifest, root)
                 log.info(
                     "session package: copied %d loose files into %s",
-                    copied, root,
+                    copied,
+                    root,
                 )
             except Exception:  # noqa: BLE001 — loose copy must not mask the zip
                 log.exception("session package: loose copy failed (non-fatal)")

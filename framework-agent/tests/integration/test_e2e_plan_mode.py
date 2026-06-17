@@ -35,9 +35,7 @@ def _write_request(
     return path
 
 
-def test_explore_plan_mode_e2e_against_fake_primus(
-    tmp_path: Path, fake_primus: str
-) -> None:
+def test_explore_plan_mode_e2e_against_fake_primus(tmp_path: Path, fake_primus: str) -> None:
     """``fa explore`` (plan) writes pr.patches + pr_files.json + a sane summary."""
     work_dir = tmp_path / "work"
     req_path = _write_request(tmp_path, primus_base_url=fake_primus, work_dir=work_dir)

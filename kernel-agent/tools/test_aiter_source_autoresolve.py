@@ -26,7 +26,8 @@ def tla() -> types.ModuleType:
     """Load tracelens_analysis.py without running its CLI bootstrap."""
     sys.path.insert(0, str(_TLA_PATH.parent))
     spec = importlib.util.spec_from_file_location(
-        "_tracelens_analysis_autoresolve", _TLA_PATH,
+        "_tracelens_analysis_autoresolve",
+        _TLA_PATH,
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -66,13 +67,15 @@ def test_non_aiter_op_returns_empty(tla) -> None:
 
 def test_finalize_candidates_autoresolves_cktile2stages_from_empty_source(tla) -> None:
     """End-to-end: cktile2stages candidate with no source_file resolves to device .cu as reusable native kernel."""
-    candidates = [{
-        "name": "aiter::moe_cktile2stages_gemm1_ck",
-        "duration_us": 5000.0,
-        "call_count": 72,
-        "source_file": "",  # HIP-graph capture carried no source_file
-        "shapes": [[7211, 3072]],
-    }]
+    candidates = [
+        {
+            "name": "aiter::moe_cktile2stages_gemm1_ck",
+            "duration_us": 5000.0,
+            "call_count": 72,
+            "source_file": "",  # HIP-graph capture carried no source_file
+            "shapes": [[7211, 3072]],
+        }
+    ]
     out = tla._finalize_candidates(candidates, total_dur=10000.0)[0]
     assert out["source_file"].endswith("moe_cktile2stages.cu"), out["source_file"]
     assert out["source_type"] == "hip_cpp"
@@ -83,14 +86,17 @@ def test_finalize_candidates_autoresolves_cktile2stages_from_empty_source(tla) -
 def test_finalize_candidates_promotes_cktile2stages_wrapper(tla) -> None:
     """Trace-named @compile_ops .py wrapper gets promoted to device .cu, wrapper recorded as launcher_source_file."""
     import aiter.ops.moe_op as moe_op
+
     wrapper = moe_op.__file__
-    candidates = [{
-        "name": "aiter::moe_cktile2stages_gemm2_ck",
-        "duration_us": 4000.0,
-        "call_count": 72,
-        "source_file": wrapper,
-        "shapes": [[7211, 3072]],
-    }]
+    candidates = [
+        {
+            "name": "aiter::moe_cktile2stages_gemm2_ck",
+            "duration_us": 4000.0,
+            "call_count": 72,
+            "source_file": wrapper,
+            "shapes": [[7211, 3072]],
+        }
+    ]
     out = tla._finalize_candidates(candidates, total_dur=10000.0)[0]
     assert out["source_file"].endswith("moe_cktile2stages.cu"), out["source_file"]
     assert out["launcher_source_file"] == wrapper

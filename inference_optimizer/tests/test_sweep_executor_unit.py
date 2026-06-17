@@ -16,19 +16,31 @@ from inference_optimizer.orchestrator.action_executors._grid_runner import (
 
 # ---- _coerce_int ----
 
-@pytest.mark.parametrize("value,expected", [
-    (None, 0), ("", 0), ("42", 42), (7, 7), ("bad", 0), ("  9 ", 9),
-])
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, 0),
+        ("", 0),
+        ("42", 42),
+        (7, 7),
+        ("bad", 0),
+        ("  9 ", 9),
+    ],
+)
 def test_coerce_int(value, expected):
     assert sw._coerce_int(value) == expected
 
 
 # ---- _build_grid ----
 
+
 def test_build_grid_basic():
     grid, skipped = sw._build_grid(
-        conc_values=[4], isl_osl_configs=["1024:1024"],
-        num_prompts_factor=5, base_extra_args="--x",
+        conc_values=[4],
+        isl_osl_configs=["1024:1024"],
+        num_prompts_factor=5,
+        base_extra_args="--x",
     )
     assert len(grid) == 1
     assert skipped == []
@@ -39,8 +51,10 @@ def test_build_grid_basic():
 
 def test_build_grid_malformed_io_skipped():
     grid, skipped = sw._build_grid(
-        conc_values=[4], isl_osl_configs=["nonsense"],
-        num_prompts_factor=5, base_extra_args="",
+        conc_values=[4],
+        isl_osl_configs=["nonsense"],
+        num_prompts_factor=5,
+        base_extra_args="",
     )
     assert grid == []
     assert skipped == []
@@ -48,8 +62,11 @@ def test_build_grid_malformed_io_skipped():
 
 def test_build_grid_max_model_len_skip():
     grid, skipped = sw._build_grid(
-        conc_values=[4], isl_osl_configs=["8192:1024"],
-        num_prompts_factor=5, base_extra_args="", max_model_len=4096,
+        conc_values=[4],
+        isl_osl_configs=["8192:1024"],
+        num_prompts_factor=5,
+        base_extra_args="",
+        max_model_len=4096,
     )
     assert grid == []
     assert skipped[0]["status"] == "skipped"
@@ -58,10 +75,15 @@ def test_build_grid_max_model_len_skip():
 
 # ---- _result_dict ----
 
+
 def test_result_dict_surfaces_dims():
     vr = VariantResult(
-        name="v", extra_server_args="", extra_envs={"CONC": "16", "ISL": "1024", "OSL": "512"},
-        status="succeeded", output_throughput=100.0, e2el_mean_ms=50.0,
+        name="v",
+        extra_server_args="",
+        extra_envs={"CONC": "16", "ISL": "1024", "OSL": "512"},
+        status="succeeded",
+        output_throughput=100.0,
+        e2el_mean_ms=50.0,
     )
     d = sw._result_dict(vr)
     assert d["conc"] == 16 and d["isl"] == 1024 and d["osl"] == 512
@@ -69,12 +91,13 @@ def test_result_dict_surfaces_dims():
 
 # ---- _pareto_front ----
 
+
 def test_pareto_front_dominance():
     entries = [
         {"status": "succeeded", "output_throughput": 100, "e2el_mean_ms": 10},
         {"status": "succeeded", "output_throughput": 90, "e2el_mean_ms": 20},  # dominated
-        {"status": "succeeded", "output_throughput": 80, "e2el_mean_ms": 5},   # not dominated
-        {"status": "failed", "output_throughput": 999, "e2el_mean_ms": 1},     # excluded
+        {"status": "succeeded", "output_throughput": 80, "e2el_mean_ms": 5},  # not dominated
+        {"status": "failed", "output_throughput": 999, "e2el_mean_ms": 1},  # excluded
     ]
     front = sw._pareto_front(entries)
     tputs = sorted(e["output_throughput"] for e in front)
@@ -87,6 +110,7 @@ def test_pareto_front_ignores_non_numeric():
 
 
 # ---- SweepExecutor.__call__ ----
+
 
 def _ctx(tmp_path, params):
     return SimpleNamespace(
@@ -122,20 +146,26 @@ async def test_call_success(tmp_path, monkeypatch):
     async def fake_run_grid(**kwargs):
         return [
             VariantResult(
-                name="conc4_isl1024_osl1024", extra_server_args="",
+                name="conc4_isl1024_osl1024",
+                extra_server_args="",
                 extra_envs={"CONC": "4", "ISL": "1024", "OSL": "1024"},
-                status="succeeded", output_throughput=120.0, e2el_mean_ms=40.0,
+                status="succeeded",
+                output_throughput=120.0,
+                e2el_mean_ms=40.0,
             ),
         ]
 
     monkeypatch.setattr(sw, "run_grid", fake_run_grid)
 
     ex = sw.SweepExecutor(session_dir=tmp_path)
-    ctx = _ctx(tmp_path, {
-        "config_path": str(cfg),
-        "conc_values": [4],
-        "isl_osl_configs": ["1024:1024"],
-    })
+    ctx = _ctx(
+        tmp_path,
+        {
+            "config_path": str(cfg),
+            "conc_values": [4],
+            "isl_osl_configs": ["1024:1024"],
+        },
+    )
     out = await ex(ctx)
     assert out["status"] == "succeeded"
     assert out["grid_size"] == 1

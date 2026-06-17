@@ -40,6 +40,7 @@ _CITE_REMINDER = (
 
 # ── Input validation ────────────────────────────────────────────────────
 
+
 @dataclass(frozen=True)
 class WebSearchInput:
     """Normalized, validated input for one ``web_search`` call.
@@ -100,7 +101,11 @@ class WebSearchInput:
 
         freshness = raw.get("freshness")
         if freshness is not None and freshness not in {
-            "day", "week", "month", "year", "any",
+            "day",
+            "week",
+            "month",
+            "year",
+            "any",
         }:
             freshness = None
         elif freshness == "any":
@@ -143,6 +148,7 @@ def _normalize_str_list(value: object) -> tuple[str, ...]:
 
 
 # ── Rate limiter ────────────────────────────────────────────────────────
+
 
 class _LeakyBucket:
     """Per-client leaky bucket.
@@ -191,6 +197,7 @@ class _LeakyBucket:
 
 # ── Client ──────────────────────────────────────────────────────────────
 
+
 @dataclass
 class WebSearchClient:
     """Stateful, per-session web search facade.
@@ -231,7 +238,8 @@ class WebSearchClient:
         self.call_count += 1
         try:
             request = WebSearchInput.from_payload(
-                payload, self.config.search_max_results_cap,
+                payload,
+                self.config.search_max_results_cap,
             )
         except ValueError as exc:
             return f"Error: {exc}"
@@ -250,9 +258,7 @@ class WebSearchClient:
         if request.allowed_domains:
             blocked_merged = ()
         else:
-            blocked_merged = tuple(
-                dict.fromkeys(list(request.blocked_domains) + list(global_deny))
-            )
+            blocked_merged = tuple(dict.fromkeys(list(request.blocked_domains) + list(global_deny)))
         opts = SearchOptions(
             max_results=request.max_results,
             allowed_domains=request.allowed_domains,
@@ -268,16 +274,14 @@ class WebSearchClient:
                 last_error = f"{provider.name}: {exc}"
                 log.info(
                     "web_search provider failed provider=%s err=%s",
-                    provider.name, exc,
+                    provider.name,
+                    exc,
                 )
                 continue
             if global_deny:
                 hits = [h for h in hits if not _host_in(h.url, global_deny)]
             if request.allowed_domains:
-                hits = [
-                    h for h in hits
-                    if _host_in(h.url, request.allowed_domains)
-                ]
+                hits = [h for h in hits if _host_in(h.url, request.allowed_domains)]
             return _format_results(request.query, hits)
 
         if last_error:
@@ -328,10 +332,7 @@ def _format_results(query: str, hits: Sequence[SearchHit]) -> str:
 
     out = "\n".join(parts).rstrip() + _CITE_REMINDER
     if len(out) > _MAX_RESULT_OUTPUT_CHARS:
-        out = (
-            out[: _MAX_RESULT_OUTPUT_CHARS]
-            + "\n[Results truncated due to length...]"
-        )
+        out = out[:_MAX_RESULT_OUTPUT_CHARS] + "\n[Results truncated due to length...]"
     return out
 
 

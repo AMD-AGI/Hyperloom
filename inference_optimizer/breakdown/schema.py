@@ -51,12 +51,13 @@ class SessionMeta(TypedDict, total=False):
         tick_count (int): Number of orchestration ticks executed.
         image (str | None): Fully-qualified container image, or None if unset.
     """
-    session_id: str               # hyperloom internal id (manifest.session_id)
-    claw_session_id: str | None   # SaFE / Claw session id (env CLAW_SESSION_ID)
+
+    session_id: str  # hyperloom internal id (manifest.session_id)
+    claw_session_id: str | None  # SaFE / Claw session id (env CLAW_SESSION_ID)
     sandbox_user_id: str | None
     created_at_utc: str
     ended_at_utc: str
-    stop_reason: str              # target_reached / time_exhausted / global_converged / max_ticks / baseline_failed / ...
+    stop_reason: str  # target_reached / time_exhausted / global_converged / max_ticks / baseline_failed / ...
     max_minutes: int
     elapsed_minutes: float
     host: str
@@ -64,7 +65,7 @@ class SessionMeta(TypedDict, total=False):
     pid: int
     session_dir: str
     tick_count: int
-    image: str | None             # container image fully-qualified (or None if not configured)
+    image: str | None  # container image fully-qualified (or None if not configured)
 
 
 # §2 Workload configuration
@@ -77,8 +78,9 @@ class WorkloadObjective(TypedDict, total=False):
         value (Any): Goal value — a float target, a string (e.g.
             ``target_baseline_dir``), or None when not applicable.
     """
-    kind: str                     # gain_pct / tput / baseline / time_only
-    value: Any                    # float or str (target_baseline_dir) or None
+
+    kind: str  # gain_pct / tput / baseline / time_only
+    value: Any  # float or str (target_baseline_dir) or None
 
 
 class Workload(TypedDict, total=False):
@@ -102,12 +104,13 @@ class Workload(TypedDict, total=False):
         precision (str): Numeric precision of the served model.
         objective (WorkloadObjective): The optimization goal for the run.
     """
-    framework: str                # sglang / vllm / atom
+
+    framework: str  # sglang / vllm / atom
     framework_version: str
     model_name: str
     model_path: str
     model_class: str
-    gpu_type: str                 # mi300x / mi325x / mi355x
+    gpu_type: str  # mi300x / mi325x / mi355x
     tp: int | None
     conc: int | None
     isl: int | None
@@ -130,6 +133,7 @@ class BaselineAttemptSummary(TypedDict, total=False):
         workspace (str | None): Benchmark workspace path, or None.
         error_class (str | None): Error classification on failure, or None.
     """
+
     ts: str
     task_id: str
     status: str
@@ -149,13 +153,14 @@ class BenchmarkInvocation(TypedDict, total=False):
 
     ``extra_envs`` is allowlist-filtered to keep secrets out of the JSON.
     """
-    framework_args: str           # e.g. "python -m sglang.launch_server --model ... --tp 8"
+
+    framework_args: str  # e.g. "python -m sglang.launch_server --model ... --tp 8"
     framework_args_source: str
     # framework_args_source vocab: log_non_default_args / log_args_line /
     # log_python_cmd / yaml_cmd / yaml_benchmark / unknown.
-    extra_envs: dict[str, str]    # allowlisted env vars only (no secrets)
-    config_path: str | None       # baseline_config.with_envs.yaml or variant config
-    server_log_path: str | None   # for debug
+    extra_envs: dict[str, str]  # allowlisted env vars only (no secrets)
+    config_path: str | None  # baseline_config.with_envs.yaml or variant config
+    server_log_path: str | None  # for debug
 
 
 class Baseline(TypedDict, total=False):
@@ -177,11 +182,12 @@ class Baseline(TypedDict, total=False):
         failure_streak (int): Consecutive baseline failures.
         invocation (BenchmarkInvocation): Replayable launch record.
     """
+
     throughput_tok_s_per_gpu: float
     accuracy: float
     ttft_mean_ms: float | None
     e2el_mean_ms: float | None
-    ttft_e2el_source: str         # state_workspace / runs_baseline_disk / unavailable
+    ttft_e2el_source: str  # state_workspace / runs_baseline_disk / unavailable
     config_path: str | None
     benchmark_report_path: str | None
     attempts_history: list[BaselineAttemptSummary]
@@ -215,6 +221,7 @@ class Final(TypedDict, total=False):
         closing_started_unix (float): Unix time the closing phase started.
         closing_report_task_id (str): Task id of the closing report.
     """
+
     throughput_tok_s_per_gpu: float | None
     cumulative_gain_pct_validated: float
     cumulative_gain_pct_per_round_sum: float
@@ -223,10 +230,10 @@ class Final(TypedDict, total=False):
     stack_changed_after_validation: bool
     extra_server_args: str
     extra_envs: dict[str, Any]
-    action_path: list[str]        # ordered list of action:variant labels from optimization_stack
+    action_path: list[str]  # ordered list of action:variant labels from optimization_stack
     ttft_mean_ms: float | None
     e2el_mean_ms: float | None
-    ttft_e2el_source: str         # current_best / validate_stack_disk / stack_top_disk / unavailable
+    ttft_e2el_source: str  # current_best / validate_stack_disk / stack_top_disk / unavailable
     invocation: BenchmarkInvocation
     closing_phase_entered: bool
     closing_started_unix: float
@@ -263,34 +270,37 @@ class PhaseEvent(TypedDict, total=False):
             / ``kernel_opt`` / ``kernel_integrate`` / ``baseline`` / ...), and
             ``metrics`` (per-variant measurement detail).
     """
+
     ts: str
-    action: str                   # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / trace_analyze / integrate
+    action: (
+        str  # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / trace_analyze / integrate
+    )
     task_id: str
-    kernel_id: str | None         # only for kernel-owned actions
-    status: str                   # succeeded / failed
-    decision: str                 # promoted / discarded / salvaged / no_promote / error / KEEP / PARTIAL / REVERT
+    kernel_id: str | None  # only for kernel-owned actions
+    status: str  # succeeded / failed
+    decision: str  # promoted / discarded / salvaged / no_promote / error / KEEP / PARTIAL / REVERT
     key_metric: float | None
     key_metric_kind: str | None
     workspace: str | None
     error_class: str | None
-    phase: str                    # declared phase (journal-sourced events); "" otherwise
-    change: str                   # human-readable change summary (journal) or action key
+    phase: str  # declared phase (journal-sourced events); "" otherwise
+    change: str  # human-readable change summary (journal) or action key
     extras: dict[str, Any]
 
 
 # §6 Capability summary — Capability cards in UI
 class CapabilityEntry(TypedDict, total=False):
-    status: str                   # kept / reverted / tried / attempted / not_attempted / not_configured / failed / completed
+    status: str  # kept / reverted / tried / attempted / not_attempted / not_configured / failed / completed
     attempts: int
-    keeps: int                    # geak/oob: kernels adopted at integrate (NOT micro-only KEEP)
-    reverts: int                  # geak/oob: micro-KEPT kernels reverted at integrate (e2e regressed)
-    e2e_gain_pct: float | None    # geak/oob: best end-to-end integrate gain for this lane's kernel
-    tested: int                   # for backends/params/explore: distinct variants tested
+    keeps: int  # geak/oob: kernels adopted at integrate (NOT micro-only KEEP)
+    reverts: int  # geak/oob: micro-KEPT kernels reverted at integrate (e2e regressed)
+    e2e_gain_pct: float | None  # geak/oob: best end-to-end integrate gain for this lane's kernel
+    tested: int  # for backends/params/explore: distinct variants tested
     best_gain_pct: float | None
-    reason: str                   # human readable, e.g. "kernel-claude only this run"
+    reason: str  # human readable, e.g. "kernel-claude only this run"
     # explore-specific:
-    keep_unstable_count: int      # KEEP'd variants evicted by inlined stack rebench
-    winners_history: int          # cumulative explore_search.winners_history length
+    keep_unstable_count: int  # KEEP'd variants evicted by inlined stack rebench
+    winners_history: int  # cumulative explore_search.winners_history length
     # specialist-row only — per-domain split keyed by SpecialistDomain.key;
     # every catalogue domain is seeded not_attempted for presence-free iteration.
     by_specialist: dict[str, "CapabilityEntry"]
@@ -315,6 +325,7 @@ class CapabilitySummary(TypedDict, total=False):
             total proposals across rounds, ``keeps`` = proposals kept,
             ``attempts`` = number of dispatch rounds.
     """
+
     geak: CapabilityEntry
     oob: CapabilityEntry
     # primary explore row; backends/params/validate_stack are compat aliases.
@@ -338,6 +349,7 @@ class KernelMetadata(TypedDict, total=False):
         gpu_pct (float | None): Share of total GPU time (0..100), or None.
         arithmetic_intensity (float | None): FLOPs per byte, or None.
     """
+
     name: str
     source_file: str
     shapes: list[dict[str, Any]]
@@ -347,18 +359,19 @@ class KernelMetadata(TypedDict, total=False):
 
 class Invocation(TypedDict, total=False):
     """One backend invocation for one kernel (same shape for GEAK/OOB; ``backend`` distinguishes)."""
+
     kernel_id: str
     attempt_id: str
     run_id: str
     ts: str
-    backend: str                  # geak / claude / codex
+    backend: str  # geak / claude / codex
     model: str | None
     kernel_metadata: KernelMetadata
     prompt_path: str | None
     optimized_files: list[str]
     result_path: str | None
     verification_path: str | None
-    decision: str                 # KEEP / PARTIAL / REVERT / FAILED
+    decision: str  # KEEP / PARTIAL / REVERT / FAILED
     micro_speedup: float | None
     compile_passed: bool | None
     correctness_passed: bool | None
@@ -383,22 +396,23 @@ class DetectedKernel(TypedDict, total=False):
         detected_from_task (str): Profile task id that surfaced the kernel.
         benchmark_report_path (str): Path to the benchmark report.
     """
+
     kernel_id: str
     name: str
     gpu_pct: float | None
     time_ms: float | None
-    bottleneck: str               # compute / memory / comm
+    bottleneck: str  # compute / memory / comm
     arithmetic_intensity: float | None
     reusable_native_kernel: bool
     source_file: str | None
-    detected_from_task: str       # which profile task_id surfaced it
+    detected_from_task: str  # which profile task_id surfaced it
     benchmark_report_path: str
     # lifecycle stamps (added by _collect_detected_kernels)
     selected_for_optimization: bool
-    geak: dict[str, Any] | None   # {attempts, best_speedup, decision, last_status}
+    geak: dict[str, Any] | None  # {attempts, best_speedup, decision, last_status}
     oob: dict[str, Any] | None
-    adopted_by: str | None        # geak / oob / kernel_agent / None
-    final_decision: str           # kept / reverted / rejected / attempted / not_optimized
+    adopted_by: str | None  # geak / oob / kernel_agent / None
+    final_decision: str  # kept / reverted / rejected / attempted / not_optimized
     integrate_gain_pct: float | None  # e2e (integrate) gain; negative => regressed -> reverted
 
 
@@ -414,6 +428,7 @@ class RecommendedKernel(TypedDict, total=False):
         bottleneck (str): Bottleneck class (compute / memory / comm).
         reusable_native_kernel (bool): Whether a native kernel can be swapped in.
     """
+
     kernel_id: str
     name: str
     gpu_pct: float | None
@@ -436,8 +451,9 @@ class OptimizedKernel(TypedDict, total=False):
         best_artifact_path (str | None): Path to the best artifact, or None.
         attempts_summary (list[dict[str, Any]]): Per-attempt summary rows.
     """
+
     kernel_id: str
-    backend: str                  # geak / claude / codex (best-of)
+    backend: str  # geak / claude / codex (best-of)
     total_attempts: int
     successful_attempts: int
     best_micro_speedup: float | None
@@ -460,6 +476,7 @@ class AdoptedKernel(TypedDict, total=False):
         adopted_at (str): ISO UTC timestamp of adoption.
         attempt_count (int): Number of attempts before adoption.
     """
+
     kernel_id: str
     patch_path: str
     target_file: str
@@ -483,6 +500,7 @@ class RejectedKernel(TypedDict, total=False):
         best_gain_pct (float | None): Best gain percent observed, or None.
         ts (str): ISO UTC timestamp of rejection.
     """
+
     kernel_id: str
     reason: str
     patch_path: str | None
@@ -505,6 +523,7 @@ class KernelLifecycle(TypedDict, total=False):
         adopted (list[AdoptedKernel]): Optimizations adopted into the stack.
         rejected (list[RejectedKernel]): Optimizations tried but not adopted.
     """
+
     detected: list[DetectedKernel]
     recommended: list[RecommendedKernel]
     optimized: list[OptimizedKernel]
@@ -523,6 +542,7 @@ class KernelToolMetadata(TypedDict, total=False):
         version (str): Tool-reported version string ("" when the tool did not
             surface one).
     """
+
     tool: str
     root_dir: str
     commit: str
@@ -537,6 +557,7 @@ class DiscoveredHotKernel(TypedDict, total=False):
     when discovery surfaced them empty (roofline enrichment runs after the
     discovery record is written).
     """
+
     kernel_id: str
     name: str
     gpu_pct: float | None
@@ -569,6 +590,7 @@ class KernelDiscoveryRun(TypedDict, total=False):
     The discovery tool's authoritative version is not inlined here; it lives in
     the top-level ``versions`` map keyed by ``source``.
     """
+
     source: str
     status: str
     ts: str
@@ -591,6 +613,7 @@ class KernelDispatch(TypedDict, total=False):
         task_group (str | None): Task-group/correlation id, or None.
         ts (str): ISO UTC timestamp of the decision.
     """
+
     kernel_id: str
     dispatched: bool
     backends: list[str]
@@ -626,6 +649,7 @@ class KernelBackendAttempt(TypedDict, total=False):
     The backend tool's authoritative version is not inlined here; it lives in
     the top-level ``versions`` map keyed by ``backend``.
     """
+
     kernel_id: str
     attempt_id: str
     run_id: str
@@ -659,6 +683,7 @@ class KernelE2E(TypedDict, total=False):
         extra_server_args (str): Server-arg fragment introduced by the adoption.
         ts (str): ISO UTC timestamp of the integrate decision.
     """
+
     kernel_id: str
     integrated: bool
     e2e_gain_pct: float | None
@@ -692,6 +717,7 @@ class KernelJourneyEntry(TypedDict, total=False):
         outcome (str): Coarse rollup (``adopted`` / ``reverted`` / ``attempted``
             / ``dispatched`` / ``skipped`` / ``discovered``).
     """
+
     kernel_id: str
     name: str
     gpu_pct: float | None
@@ -721,6 +747,7 @@ class KernelJourney(TypedDict, total=False):
         kernels (list[KernelJourneyEntry]): Per-kernel lifecycle, sorted by
             ``gpu_pct`` descending.
     """
+
     discovery_runs: list[KernelDiscoveryRun]
     kernels: list[KernelJourneyEntry]
 
@@ -749,6 +776,7 @@ class ParamSearchEntry(TypedDict, total=False):
             ``grid`` / ``orchestration``).
         scope (str): Specialist dial (``domain`` / ``domains`` / ``freeform``).
     """
+
     name: str
     fingerprint: str
     extra_server_args: str
@@ -756,8 +784,8 @@ class ParamSearchEntry(TypedDict, total=False):
     output_throughput: float | None
     gain_pct: float | None
     ts: str
-    status: str                   # accepted / rejected / tested
-    operation_kind: str           # backend / param / env
+    status: str  # accepted / rejected / tested
+    operation_kind: str  # backend / param / env
     provenance: str
     proposer: str
     scope: str
@@ -775,6 +803,7 @@ class ParamSearchLedger(TypedDict, total=False):
         winner_history (list[dict[str, Any]]): History of winning variants.
         no_promote_streak (int): Consecutive evaluations without a promotion.
     """
+
     schema_version: int
     tested_count: int
     accepted: list[ParamSearchEntry]
@@ -794,6 +823,7 @@ class ParamSearch(TypedDict, total=False):
         discovered_flags (dict[str, Any]): Flags discovered during search.
         backend_winners_history (list[dict[str, Any]]): History of backend winners.
     """
+
     params: ParamSearchLedger
     backends: ParamSearchLedger
     synergy_attempted: list[str]
@@ -817,6 +847,7 @@ class SweepPoint(TypedDict, total=False):
         status (str): Point status (``ok`` / ``skipped`` / ``failed``).
         benchmark_report_path (str | None): Path to the benchmark report, or None.
     """
+
     variant_name: str
     conc: int | None
     isl: int | None
@@ -825,7 +856,7 @@ class SweepPoint(TypedDict, total=False):
     ttft_mean_ms: float | None
     tpot_mean_ms: float | None
     e2el_mean_ms: float | None
-    status: str                   # ok / skipped / failed
+    status: str  # ok / skipped / failed
     benchmark_report_path: str | None
 
 
@@ -840,6 +871,7 @@ class Sweep(TypedDict, total=False):
         all_variants (list[SweepPoint]): All measured sweep points.
         config_path (str | None): Path to the sweep config, or None.
     """
+
     grid_size: int
     best_overall: dict[str, Any]
     best_for_each_conc: list[dict[str, Any]]
@@ -864,10 +896,11 @@ class CriticIteration(TypedDict, total=False):
         emit_path (str): Path to the emitted review output.
         review_path (str): Path to the review record.
     """
+
     iter: int
     ts: str
-    topic: str                    # what was reviewed (kernel_opt:k001, backends:flag_X, ...)
-    verdict: str                  # approve / reject / redirect / advise / needs_review
+    topic: str  # what was reviewed (kernel_opt:k001, backends:flag_X, ...)
+    verdict: str  # approve / reject / redirect / advise / needs_review
     summary: str
     request_path: str
     judge_bundle_path: str
@@ -885,9 +918,10 @@ class RobustnessSignal(TypedDict, total=False):
         action (str): Recovery action taken in response.
         workdir (str): Working directory associated with the signal.
     """
+
     ts: str
-    signal: str                   # crash / stall / disk_full / cluster_fault / ...
-    action: str                   # what was done
+    signal: str  # crash / stall / disk_full / cluster_fault / ...
+    action: str  # what was done
     workdir: str
 
 
@@ -901,6 +935,7 @@ class CriticRobustness(TypedDict, total=False):
             through the critic's ``commit-review`` protocol (the Coordinator
             performs the writes; the critic only authors them).
     """
+
     critic_iterations: list[CriticIteration]
     robustness_signals: list[RobustnessSignal]
     # KB writes proxied through the critic's ``commit-review`` protocol.
@@ -919,6 +954,7 @@ class GpuMonitorAggregate(TypedDict, total=False):
         max_temp_c (float): Peak temperature (Celsius).
         avg_clock_mhz (float): Average clock frequency (MHz).
     """
+
     samples: int
     avg_power_w: float
     max_power_w: float
@@ -929,6 +965,7 @@ class GpuMonitorAggregate(TypedDict, total=False):
 
 class LaneTimelineEntry(TypedDict, total=False):
     """One row of the legacy M6 lane occupancy summary (resource_lock capacity / holders / expired leases)."""
+
     lane: str
     capacity: int
     live_holders: int
@@ -947,6 +984,7 @@ class Telemetry(TypedDict, total=False):
         gpu_monitor_aggregate (GpuMonitorAggregate): Aggregated GPU telemetry.
         lane_timeline (list[LaneTimelineEntry]): Per-lane capacity/occupancy summary.
     """
+
     baseline_report_path: str | None
     profile_report_paths: list[str]
     torch_trace_paths: list[str]
@@ -977,14 +1015,15 @@ class StackGainEntry(TypedDict, total=False):
             ``validate_stack`` re-baselined.
         extra_server_args (str): Server-arg fragment associated with the change.
     """
+
     ts: str
     stack_len_before: int
     stack_len_after: int
-    action: str                   # backends / params / kernel_opt:<kid> / validate_stack
+    action: str  # backends / params / kernel_opt:<kid> / validate_stack
     variant_name: str | None
     cum_gain_before: float
     cum_gain_after: float
-    delta_pct: float | None       # None when validate_stack re-baselined
+    delta_pct: float | None  # None when validate_stack re-baselined
     extra_server_args: str
 
 
@@ -1007,6 +1046,7 @@ class SourceBreakdown(TypedDict, total=False):
         sweep_pct_of_total (float): Gain share attributed to the sweep.
         validated_total_pct (float): Total validated gain percent.
     """
+
     geak_pct_of_total: float
     oob_pct_of_total: float
     # primary explore family bucket.
@@ -1034,6 +1074,7 @@ class PhaseBreakdownExplore(TypedDict, total=False):
     ``domains`` / ``freeform``); sessions that never recorded a ``scope``
     collapse into ``unspecified``. Omitted on pre-scope breakdowns.
     """
+
     total_gain_pct: float
     by_domain: dict[str, float]
     by_scope: dict[str, float]
@@ -1041,18 +1082,21 @@ class PhaseBreakdownExplore(TypedDict, total=False):
 
 class PhaseBreakdownKernel(TypedDict, total=False):
     """v0.8 M7 — kernel-phase gain split by ``kernel_id`` (KB_design §3.12 §4.6)."""
+
     total_gain_pct: float
     by_kernel_id: dict[str, float]
 
 
 class PhaseBreakdownFrameworkPr(TypedDict, total=False):
     """FRAMEWORK_PR phase gain split by adopted PR; ``by_pr`` keys on ``variant_name`` (``"?"`` when empty)."""
+
     total_gain_pct: float
     by_pr: dict[str, float]
 
 
 class PhaseBreakdownGemmTuning(TypedDict, total=False):
     """KERNEL-entry FP8 GEMM tuning gain split by ``tuned_file`` (falls back to ``variant_name`` then ``"?"``)."""
+
     total_gain_pct: float
     by_tuned_file: dict[str, float]
 
@@ -1074,15 +1118,16 @@ class PhaseBreakdown(TypedDict, total=False):
         close (PhaseBreakdownExplore): CLOSE phase gain (usually 0).
         unattributed (PhaseBreakdownExplore): Gain whose phase could not be inferred.
     """
-    prelude: PhaseBreakdownExplore         # always 0 by definition
+
+    prelude: PhaseBreakdownExplore  # always 0 by definition
     framework_pr: PhaseBreakdownFrameworkPr  # PRELUDE → FRAMEWORK_PR → EXPLORE
     explore: PhaseBreakdownExplore
-    kernel:  PhaseBreakdownKernel
+    kernel: PhaseBreakdownKernel
     # GEMM_TUNING bucketed separately from source-level GEAK/OOB rewrite gain.
     gemm_tuning: PhaseBreakdownGemmTuning
-    sweep:   PhaseBreakdownExplore         # usually 0 (sweep is measurement)
-    close:   PhaseBreakdownExplore         # usually 0
-    unattributed: PhaseBreakdownExplore    # gain whose phase couldn't be inferred
+    sweep: PhaseBreakdownExplore  # usually 0 (sweep is measurement)
+    close: PhaseBreakdownExplore  # usually 0
+    unattributed: PhaseBreakdownExplore  # gain whose phase couldn't be inferred
 
 
 class Attribution(TypedDict, total=False):
@@ -1096,12 +1141,13 @@ class Attribution(TypedDict, total=False):
         phase_breakdown (PhaseBreakdown): Gain split per optimization phase.
         notes (list[str]): Human-readable caveats about the attribution.
     """
+
     gain_per_stack_entry: list[StackGainEntry]
     # validated / single_source / reconstructed / missing
     method: str
     source_breakdown: SourceBreakdown
     phase_breakdown: PhaseBreakdown
-    notes: list[str]              # human-readable caveats
+    notes: list[str]  # human-readable caveats
 
 
 # §16 Phase segments — phase state machine
@@ -1123,14 +1169,15 @@ class PhaseSegment(TypedDict, total=False):
         actions (list[PhaseEvent]): Timeline events with ts in [entered, exit).
         elapsed_seconds (float | None): Segment duration in seconds, or None.
     """
-    phase: str                 # PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE
-    from_phase: str            # previous phase (empty for first segment)
-    entered_ts: str            # iso UTC of entry
+
+    phase: str  # PRELUDE / FRAMEWORK_PR / EXPLORE / KERNEL / SWEEP / CLOSE
+    from_phase: str  # previous phase (empty for first segment)
+    entered_ts: str  # iso UTC of entry
     entered_unix: float | None
-    exit_ts: str               # iso UTC of next transition; "" for current segment
-    exit_unix: float | None    # unix epoch of next transition; None for current segment
-    exit_reason: str           # transition reason vocab entry; "" for current segment
-    evidence: dict[str, Any]   # entry evidence (snapshot at transition time)
+    exit_ts: str  # iso UTC of next transition; "" for current segment
+    exit_unix: float | None  # unix epoch of next transition; None for current segment
+    exit_reason: str  # transition reason vocab entry; "" for current segment
+    evidence: dict[str, Any]  # entry evidence (snapshot at transition time)
     events: list[dict[str, Any]]  # non-transition sub-events folded into this phase
     actions: list[PhaseEvent]  # phase_timeline events attributed to this phase
     elapsed_seconds: float | None
@@ -1145,27 +1192,30 @@ class KBQueueStats(TypedDict, total=False):
         flushed_bookmarks (int): Drain-bookmark rows in ``.kb_flushed.ndjson``.
         dead_letter_lines (int): Rows in ``.kb_dead_letter.ndjson``.
     """
-    pending_lines: int             # current depth of .kb_pending.ndjson
-    flushed_bookmarks: int         # rows in .kb_flushed.ndjson (drain bookmarks)
-    dead_letter_lines: int         # rows in .kb_dead_letter.ndjson
+
+    pending_lines: int  # current depth of .kb_pending.ndjson
+    flushed_bookmarks: int  # rows in .kb_flushed.ndjson (drain bookmarks)
+    dead_letter_lines: int  # rows in .kb_dead_letter.ndjson
 
 
 class KBFlusherStatus(TypedDict, total=False):
     """``kb_provenance.flusher_status`` (v0.8 KB_gaps/Dead-E): boot marker merged with a live pid probe."""
-    enabled: bool                  # cli flag (false when --no-kb-flusher or --degraded-kb)
-    spawned: bool                  # daemon was actually subprocess.Popen'd this boot
-    alive: bool                    # live pid probe at breakdown emit time
+
+    enabled: bool  # cli flag (false when --no-kb-flusher or --degraded-kb)
+    spawned: bool  # daemon was actually subprocess.Popen'd this boot
+    alive: bool  # live pid probe at breakdown emit time
     pid: int | None
     cortex_kb_url: str | None
     interval_sec: float
     batch_size: int
-    reason: str                    # boot-time spawn decision text
-    ts: str                        # iso UTC of the boot marker
-    pid_path: str                  # absolute path to .kb_flusher.pid
+    reason: str  # boot-time spawn decision text
+    ts: str  # iso UTC of the boot marker
+    pid_path: str  # absolute path to .kb_flusher.pid
 
 
 class WarmReplayOutcome(TypedDict, total=False):
     """GAP 1 — warm-recipe replay result. Empty {} when it never fired; else ``status`` + per-status fields."""
+
     status: str
     expected_gain_pct: float
     actual_gain_pct: float
@@ -1207,6 +1257,7 @@ class KBProvenance(TypedDict, total=False):
         pr_degraded_reason (str): PR Monitor soft-degrade reason (None /
             ``explicit_flag`` / ``ir3_auto``).
     """
+
     cortex_session_id: str
     warm_start_ts: str
     warm_start_recipe_seen: bool
@@ -1229,6 +1280,7 @@ class KBProvenance(TypedDict, total=False):
 # specialist_runs section
 class SpecialistDomainBreakdown(TypedDict, total=False):
     """Per-domain attribution for one ``specialist_rounds`` entry."""
+
     dispatched: int
     proposals_total: int
     proposals_kept: int
@@ -1237,14 +1289,16 @@ class SpecialistDomainBreakdown(TypedDict, total=False):
 
 class SpecialistTranscriptRef(TypedDict, total=False):
     """Reference to a specialist transcript on disk (path only by default; ``body`` inlined when the flag is set)."""
+
     task_id: str
     domain: str
     path: str
-    body: str   # only set when CLI flag enabled
+    body: str  # only set when CLI flag enabled
 
 
 class SpecialistRound(TypedDict, total=False):
     """One element of ``specialist_runs``."""
+
     # round_id: numeric counter / "explore-NNN" / task-id hash, coerced numeric when possible.
     round_id: int | str
     dispatched_at: str
@@ -1266,8 +1320,9 @@ class SpecialistRound(TypedDict, total=False):
 # critic_robustness.kb_writes_summary sub-block
 class CriticKBWritesSummary(TypedDict, total=False):
     """Summary of critic-agent ``commit-review`` outputs (Coordinator proxies these into ``kb_provenance``)."""
+
     total: int
-    by_verdict: dict[str, int]   # KEEP / REVERT / NEEDS_INFO / ...
+    by_verdict: dict[str, int]  # KEEP / REVERT / NEEDS_INFO / ...
 
 
 # Top-level shape
@@ -1284,6 +1339,7 @@ class SourceFiles(TypedDict, total=False):
         critic_workdir (str | None): Critic working directory, or None.
         robustness_workdir (str | None): Robustness working directory, or None.
     """
+
     manifest: str
     state: str
     baseline_report: str | None
@@ -1299,28 +1355,30 @@ class SourceFiles(TypedDict, total=False):
 # reference lines, all derived from ``state.json``.
 class RooflineTrajectoryPoint(TypedDict, total=False):
     """One x/y/tooltip on the optimization-progress curve (first point is ``baseline``, rest from the KEEP stack)."""
-    ts: str                          # iso UTC, x value
-    tput: float                      # tok/s, y value
-    label: str                       # "baseline" / variant_name
-    action: str                      # "baseline" / "explore" / "kernel_opt" / ...
-    gain_pct: float                  # cumulative gain vs baseline at this point
-    flags: str                       # candidate_extra_server_args
-    extra_envs: dict[str, str]       # KEY=value pairs the variant set
+
+    ts: str  # iso UTC, x value
+    tput: float  # tok/s, y value
+    label: str  # "baseline" / variant_name
+    action: str  # "baseline" / "explore" / "kernel_opt" / ...
+    gain_pct: float  # cumulative gain vs baseline at this point
+    flags: str  # candidate_extra_server_args
+    extra_envs: dict[str, str]  # KEY=value pairs the variant set
 
 
 class RooflineSnapshot(TypedDict, total=False):
     """One ``state.roofline_snapshots[]`` entry mirrored verbatim (on-disk shape, so new fields flow through)."""
+
     snapshot_id: int
     ts: str
     achieved_tok_per_sec: float
-    theoretical_peak_tok_per_sec: float       # ceiling, vendor peak (unreachable)
-    within_roofline_pct: float                # achieved / peak * 100
+    theoretical_peak_tok_per_sec: float  # ceiling, vendor peak (unreachable)
+    within_roofline_pct: float  # achieved / peak * 100
     gap_to_roofline_pct: float
     compute_pct: float
     idle_pct: float
     comm_pct: float
-    top_bottleneck: str                       # "MoE_unfused" etc
-    top_kernel: dict[str, Any]                # {name, bound_type, efficiency_pct, gpu_pct}
+    top_bottleneck: str  # "MoE_unfused" etc
+    top_kernel: dict[str, Any]  # {name, bound_type, efficiency_pct, gpu_pct}
     analysis_md_path: str
     kernel_roofline_path: str
     trace_input: str
@@ -1335,12 +1393,13 @@ class RooflineProgress(TypedDict, total=False):
     snapshot → ``ceiling_available = False``; no KEEP → trajectory is just
     the baseline point.
     """
+
     # Reference lines (only set when snapshots[] is non-empty)
     ceiling_tok_per_sec: float | None
     target_tok_per_sec: float | None
-    ceiling_ratio_target: float                # default 0.70
+    ceiling_ratio_target: float  # default 0.70
     ceiling_available: bool
-    snapshot_top_bottleneck: str               # tooltip on the ceiling line
+    snapshot_top_bottleneck: str  # tooltip on the ceiling line
     snapshot_within_roofline_pct: float
     snapshot_gap_to_roofline_pct: float
 
@@ -1352,10 +1411,10 @@ class RooflineProgress(TypedDict, total=False):
     current_best_tput: float
     cumulative_gain_pct: float
     current_best_pct_of_ceiling: float | None  # tput/ceiling*100, None when no ceiling
-    current_best_pct_of_target: float | None   # tput/target*100, None when no ceiling
+    current_best_pct_of_target: float | None  # tput/target*100, None when no ceiling
 
     # Audit / staleness
-    roofline_failure_streak: int               # consecutive watermark roofline failures
+    roofline_failure_streak: int  # consecutive watermark roofline failures
     snapshots: list[RooflineSnapshot]
 
 
@@ -1370,6 +1429,7 @@ class OptimizationStackEntry(TypedDict, total=False):
     ``kernel_id`` / ``fingerprint`` / ``provenance`` / ``task_id`` /
     ``validated`` (within the last full-stack rebench).
     """
+
     action: str
     variant_name: str
     candidate_extra_server_args: str
@@ -1398,28 +1458,30 @@ class OptimizationStackEntry(TypedDict, total=False):
 # ``<session_dir>/reports/kernel_roofline.json``.
 class KernelRooflineEntry(TypedDict, total=False):
     """One hot-kernel row (on-disk shape passed through verbatim; fields per spec §1)."""
-    kernel_id: str                 # ``k001``..``k010``
-    name: str                      # ``aiter::ck_moe_stage1`` etc
-    source_file: str               # absolute path; "" when unknown
-    kernel_category: str           # ``MoE`` / ``LayerNorm`` / ``unknown``
-    bound_type: str                # ``memory-bound`` / ``compute-bound``
+
+    kernel_id: str  # ``k001``..``k010``
+    name: str  # ``aiter::ck_moe_stage1`` etc
+    source_file: str  # absolute path; "" when unknown
+    kernel_category: str  # ``MoE`` / ``LayerNorm`` / ``unknown``
+    bound_type: str  # ``memory-bound`` / ``compute-bound``
     arithmetic_intensity: float
     flops_per_byte: float
-    efficiency_percent: float      # kernel-self efficiency 0..100
-    gpu_pct: float                 # share of overall GPU time 0..100
+    efficiency_percent: float  # kernel-self efficiency 0..100
+    gpu_pct: float  # share of overall GPU time 0..100
     call_count: int
     duration_us: float
-    reusable_native_kernel: bool   # True ⇒ GEAK can swap in a custom kernel
+    reusable_native_kernel: bool  # True ⇒ GEAK can swap in a custom kernel
 
 
 class KernelRoofline(TypedDict, total=False):
     """Top-level ``kernel_roofline`` section (loaded from the report; empty ``{}`` on missing/malformed)."""
-    schema_version: int                    # tracelens output schema (currently 1)
-    source: str                            # provenance label, e.g. ``tracelens_analysis``
-    analysis_md_path: str                  # absolute path to the human-readable analysis
-    kernel_candidates_path: str            # absolute path to kernel_candidates.json
-    trace_input: str                       # absolute path to the trace dir
-    trace_input_type: str                  # ``capture_dir`` / ``trace_file`` / ...
+
+    schema_version: int  # tracelens output schema (currently 1)
+    source: str  # provenance label, e.g. ``tracelens_analysis``
+    analysis_md_path: str  # absolute path to the human-readable analysis
+    kernel_candidates_path: str  # absolute path to kernel_candidates.json
+    trace_input: str  # absolute path to the trace dir
+    trace_input_type: str  # ``capture_dir`` / ``trace_file`` / ...
     kernels: list[KernelRooflineEntry]
 
 
@@ -1427,18 +1489,18 @@ class KernelRoofline(TypedDict, total=False):
 # ``reports/kernel_optimization_summary.json``, passed through verbatim so
 # new producer fields ride through; ``by_kernel[]`` rows stay loose (spec §A1.4).
 class KernelOptimizationSummary(TypedDict, total=False):
-    schema_version: int                    # producer schema (currently 1; int, unlike conc_sweep's str)
-    session_id: str                        # global id ``{model}_{ts}_{short_uuid}``
+    schema_version: int  # producer schema (currently 1; int, unlike conc_sweep's str)
+    session_id: str  # global id ``{model}_{ts}_{short_uuid}``
     model_name: str
     cumulative_gain_validated_pct: float
-    totals: dict[str, int]                 # {top_candidates, attempted, integrated, keep_pending, rejected, in_flight, unattempted}
+    totals: dict[str, int]  # {top_candidates, attempted, integrated, keep_pending, rejected, in_flight, unattempted}
     rejection_breakdown: dict[str, int]
     unattempted_reason_breakdown: dict[str, int]
     failure_reason_breakdown: dict[str, int]
-    field_glossary: dict[str, str]         # {field_name: explanation} for tooltips
-    top_takeaways: list[str]               # 2-4 deterministic (non-LLM) sentences
-    by_kernel: list[dict[str, Any]]        # one row per top kernel, sorted gpu_pct desc; shape per §A1.4
-    report_path: str                       # rel-to-session path to the mirrored source report
+    field_glossary: dict[str, str]  # {field_name: explanation} for tooltips
+    top_takeaways: list[str]  # 2-4 deterministic (non-LLM) sentences
+    by_kernel: list[dict[str, Any]]  # one row per top kernel, sorted gpu_pct desc; shape per §A1.4
+    report_path: str  # rel-to-session path to the mirrored source report
 
 
 # Conc Sweep Summary (spec A2; PR #399 lishuoshuo): mirror of
@@ -1446,26 +1508,26 @@ class KernelOptimizationSummary(TypedDict, total=False):
 # across a CONC ladder. When ``status="skipped"`` the baseline/optimized/
 # comparison/summary blocks are omitted — read ``status`` first.
 class ConcSweepSummary(TypedDict, total=False):
-    schema_version: str                    # producer schema (currently "1.0"; str, unlike kernel summary's int)
-    status: str                            # succeeded / failed / skipped
-    skip_reason: str                       # only when status="skipped"
+    schema_version: str  # producer schema (currently "1.0"; str, unlike kernel summary's int)
+    status: str  # succeeded / failed / skipped
+    skip_reason: str  # only when status="skipped"
     session_id: str
     isl: int
     osl: int
     tp: int
     concs_requested: list[int]
-    baseline: dict[str, Any]               # {extra_server_args, extra_envs, points[]}
-    optimized: dict[str, Any]              # {extra_server_args, extra_envs, points[]}
-    comparison: list[dict[str, Any]]       # per-CONC paired rows (feeds the dual curve + speedup bars)
-    summary: dict[str, Any]                # {successful_pairs, failed_pairs, best_conc, best_speedup, median_speedup, mean_speedup}
+    baseline: dict[str, Any]  # {extra_server_args, extra_envs, points[]}
+    optimized: dict[str, Any]  # {extra_server_args, extra_envs, points[]}
+    comparison: list[dict[str, Any]]  # per-CONC paired rows (feeds the dual curve + speedup bars)
+    summary: dict[str, Any]  # {successful_pairs, failed_pairs, best_conc, best_speedup, median_speedup, mean_speedup}
     workspace: str
     elapsed_sec: float
-    total_budget_sec: int                  # None when budget gate disabled
+    total_budget_sec: int  # None when budget gate disabled
     budget_exhausted: bool
     report_json_path: str
-    report_csv_path: str                   # for the "download CSV" button
-    roofline_ceiling: dict[str, Any]       # per-CONC theoretical peak + MBU% (§A2.9); may be absent on old products
-    report_path: str                       # rel-to-session path to the mirrored source report
+    report_csv_path: str  # for the "download CSV" button
+    roofline_ceiling: dict[str, Any]  # per-CONC theoretical peak + MBU% (§A2.9); may be absent on old products
+    report_path: str  # rel-to-session path to the mirrored source report
 
 
 # ---------------------------------------------------------------------------
@@ -1478,6 +1540,7 @@ class TokenBucket(TypedDict, total=False):
     and cache-read tokens; the rollup view keeps them split. ``calls`` is
     the number of LLM calls folded into this bucket.
     """
+
     total_in: int
     total_out: int
     total_cache_creation: int
@@ -1486,17 +1549,17 @@ class TokenBucket(TypedDict, total=False):
 
 
 class DecisionTokens(TypedDict, total=False):
-    by_component: dict[str, TokenBucket]   # component -> its token bucket for this decision
+    by_component: dict[str, TokenBucket]  # component -> its token bucket for this decision
     total_in: int
     total_out: int
-    total_cache: int                       # cache_creation + cache_read
+    total_cache: int  # cache_creation + cache_read
     calls: int
 
 
 class DecisionTraceEntry(TypedDict, total=False):
-    phase: str                             # phase active at the decision (declared or ts-window backfill)
-    tick: int | None                       # orchestrator tick (None when the producer didn't stamp one)
-    ts: str                                # ISO ...Z of the decision
+    phase: str  # phase active at the decision (declared or ts-window backfill)
+    tick: int | None  # orchestrator tick (None when the producer didn't stamp one)
+    ts: str  # ISO ...Z of the decision
     # ``decision`` now carries proposer attribution + a filter label:
     # {component (resolved proposer: specialist:<domain> / grid / orchestration),
     #  operation_kind (backend / param / env / kernel_opt / kernel_integrate / ...),
@@ -1507,9 +1570,9 @@ class DecisionTraceEntry(TypedDict, total=False):
 
 
 class TokenRollup(TypedDict, total=False):
-    by_phase: dict[str, TokenBucket]       # phase -> aggregate token bucket
-    by_component: dict[str, TokenBucket]   # component -> aggregate token bucket
-    session_total: TokenBucket             # whole-session token total
+    by_phase: dict[str, TokenBucket]  # phase -> aggregate token bucket
+    by_component: dict[str, TokenBucket]  # component -> aggregate token bucket
+    session_total: TokenBucket  # whole-session token total
 
 
 class DecisionTrace(TypedDict, total=False):
@@ -1521,6 +1584,7 @@ class DecisionTrace(TypedDict, total=False):
     ``unattributed_tokens`` is the bucket of calls that matched no decision
     (kept so the per-decision sums + this reconcile to ``session_total``).
     """
+
     decision_trace: list[DecisionTraceEntry]
     token_rollup: TokenRollup
     unattributed_tokens: TokenBucket
@@ -1542,6 +1606,7 @@ class TokenUsageBucket(TypedDict, total=False):
         grand_total (int): ``total_in + total_out`` + all cache tokens
             (creation + read) — the all-in figure.
     """
+
     total_in: int
     total_out: int
     total_cache_creation: int
@@ -1564,6 +1629,7 @@ class TokenUsageAttribution(TypedDict, total=False):
             are LLM-internal, not bound to a single tracked change).
         attributed_calls_pct (float): Percentage of calls that were attributed.
     """
+
     attributed_to_decisions: TokenUsageBucket
     unattributed: TokenUsageBucket
     attributed_calls_pct: float
@@ -1585,6 +1651,7 @@ class TokenUsageTimelineEntry(TypedDict, total=False):
         tokens (TokenUsageBucket | None): Tokens attributed to this task_id, or
             None when no LLM call tied to it.
     """
+
     task_id: str | None
     action: str
     phase: str
@@ -1613,6 +1680,7 @@ class TokenUsage(TypedDict, total=False):
         source (str): The ledger files the totals derive from.
         correlation (str): How ``timeline`` joins to ``action_timeline``.
     """
+
     session_total: TokenUsageBucket
     by_component: dict[str, TokenUsageBucket]
     by_phase: dict[str, TokenUsageBucket]
@@ -1638,6 +1706,7 @@ class LangfuseConfig(TypedDict, total=False):
         secret_key_set (bool): Whether ``LANGFUSE_SECRET_KEY`` was present.
         sdk_available (bool): Whether the optional ``langfuse`` SDK importable.
     """
+
     enable_flag: bool
     host: str | None
     public_key_set: bool
@@ -1661,6 +1730,7 @@ class LangfusePushCounts(TypedDict, total=False):
         errors (int): Swallowed send failures (a Langfuse outage never breaks
             the optimization loop).
     """
+
     generations_sent: int
     generations_paired: int
     generations_text_only: int
@@ -1697,6 +1767,7 @@ class LangfusePush(TypedDict, total=False):
         receipt_source (str): Where the collector read this from
             (``receipt_file`` / ``live_emitter`` / ``config_only``).
     """
+
     enabled: bool
     disabled_reason: str | None
     config: LangfuseConfig
@@ -1752,6 +1823,7 @@ class SessionBreakdown(TypedDict, total=False):
         warnings (list[str]): Collector warnings emitted while assembling the file.
         source_files (SourceFiles): Paths to the source artifacts used.
     """
+
     schema_version: str
     exported_at_utc: str
     exporter_version: str
@@ -1777,7 +1849,7 @@ class SessionBreakdown(TypedDict, total=False):
     critic_robustness: CriticRobustness
     telemetry: Telemetry
     attribution: Attribution
-    kb_provenance: KBProvenance      # Cortex KB audit
+    kb_provenance: KBProvenance  # Cortex KB audit
     specialist_runs: list[SpecialistRound]
     # Raw KEEP ledger passthrough mirroring ``state.optimization_stack[]``
     # with full per-entry evidence; the stack-derived sections summarise it.

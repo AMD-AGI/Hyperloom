@@ -28,18 +28,24 @@ from ...protocol.action_surfaces import (
 
 # Phase ordering for the catalogue; unknown phases appended at the end.
 _PHASE_ORDER: tuple[str, ...] = (
-    "prep", "measure", "analysis", "explore", "deep", "validate",
-    "finalize", "support",
+    "prep",
+    "measure",
+    "analysis",
+    "explore",
+    "deep",
+    "validate",
+    "finalize",
+    "support",
 )
 _PHASE_HEADERS: dict[str, str] = {
-    "prep":     "Prep — initialise session metadata. Always finishes first.",
-    "measure":  "Measure — establish baseline_tput. Gate for everything else.",
+    "prep": "Prep — initialise session metadata. Always finishes first.",
+    "measure": "Measure — establish baseline_tput. Gate for everything else.",
     "analysis": "Analysis — read-only; produces traces / candidate kernels.",
-    "explore":  "Explore — propose modifications; one round produces a candidate, not yet validated.",
-    "deep":     "Deep — kernel-owned. Emit via REQUEST(target_agent='kernel', kind=...).",
+    "explore": "Explore — propose modifications; one round produces a candidate, not yet validated.",
+    "deep": "Deep — kernel-owned. Emit via REQUEST(target_agent='kernel', kind=...).",
     "validate": "Validate — apply the accumulated optimization_stack and re-bench to get an honest cumulative gain.",
     "finalize": "Finalize — write the final report.",
-    "support":  "Support — invoke only when triggered (plateau / crash / re-exploration).",
+    "support": "Support — invoke only when triggered (plateau / crash / re-exploration).",
 }
 
 
@@ -58,10 +64,10 @@ def _section_mission() -> list[str]:
         "(percent over baseline_tput) within the wall-clock budget.",
         "",
         "Every tick, ask yourself:",
-        "  \"Given current SharedState, remaining time, and the action catalogue below,",
-        "   which next action gives the highest expected_gain / cost_minutes?\"",
+        '  "Given current SharedState, remaining time, and the action catalogue below,',
+        '   which next action gives the highest expected_gain / cost_minutes?"',
         "",
-        "An optimization is only \"real\" once it has been validated as part of the",
+        'An optimization is only "real" once it has been validated as part of the',
         "full optimization_stack. v0.8 M3 inlines that validation into every",
         "``explore`` KEEP (per-KEEP stack rebench), so the validated cumulative",
         "gain advances automatically — sums of per-round gains still do NOT",
@@ -109,8 +115,7 @@ def _section_session_context(
         f"- framework        : {framework}",
         f"- kernel_enabled   : {'true' if kernel_enabled else 'false'}",
         f"- explore_enabled  : {'true' if explore_enabled else 'false'}",
-        f"- framework_phase_enabled : "
-        f"{'true' if framework_phase_enabled else 'false'}",
+        f"- framework_phase_enabled : {'true' if framework_phase_enabled else 'false'}",
         f"- objective        : {obj}",
         f"- max_minutes      : {max_minutes}",
         f"- framework_source_roots: {roots_line}",
@@ -133,9 +138,7 @@ def _section_session_context(
         "anything outside that set returns `policy_denied` with rule",
         "`phase_incompatible`. The 6-phase chain is:",
         "  PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE",
-        "Disabled phases (see PHASE CONTRACT below) are skipped but keep "
-        "their place in the chain. Transitions are Coordinator-owned "
-        "(you cannot write phase).",
+        "Disabled phases (see PHASE CONTRACT below) are skipped but keep their place in the chain. Transitions are Coordinator-owned (you cannot write phase).",
     ]
 
 
@@ -186,62 +189,60 @@ def _section_phase_semantics(
         "",
     ]
     if disabled_suffix:
-        skipped = ", ".join(
-            f"{ph} ({flag})" for ph, flag in disabled_suffix.items()
-        )
-        lines.append(
-            f"Phases SKIPPED this run (never entered): {skipped}."
-        )
+        skipped = ", ".join(f"{ph} ({flag})" for ph, flag in disabled_suffix.items())
+        lines.append(f"Phases SKIPPED this run (never entered): {skipped}.")
         lines.append("")
     for phase in PHASE_NAMES:
         proposable = sorted(
             llm_proposable_actions_for_with_interleave(
-                phase, interleave=interleave,
+                phase,
+                interleave=interleave,
                 explore_enabled=explore_enabled if interleave else None,
             )
         )
         flag = disabled_suffix.get(phase)
         if flag:
-            lines.append(
-                f"- **{phase}**: {', '.join(proposable)} "
-                f"(DISABLED: {flag} — phase skipped)"
-            )
+            lines.append(f"- **{phase}**: {', '.join(proposable)} (DISABLED: {flag} — phase skipped)")
         else:
             lines.append(f"- **{phase}**: {', '.join(proposable)}")
-    lines.extend([
-        "",
-        "roofline, profile, replay_warm_recipe and framework_pr are never",
-        "in the sets above: the Coordinator auto-manages them and PolicyGate",
-        "denies any attempt to propose them.",
-        "",
-        "Phase transitions are Coordinator-owned. The hard advance gates",
-        "are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit, the per-",
-        "phase budget cap, or a terminal stop_reason exit EXPLORE / KERNEL",
-        "/ SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
-        "You may also emit `escalate_strategy_change{next_action_hint=",
-        "'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}` directly",
-        "(no longer robustness-only) when you judge the current phase",
-        "exhausted; the Coordinator validates the hint vocab and routes",
-        "the transition on the next tick.",
-    ])
-    if interleave:
-        lines.extend([
+    lines.extend(
+        [
             "",
-            "**Phase interleave mode is ON** (on by default; set env "
-            + "`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable):",
-            "- EXPLORE may also REQUEST kernel-owned kinds "
-            + "(kernel_opt / integrate / deep_kernel_analysis / "
-            + "operator_tuning / vendor_kernel_config / gemm_tuning) when "
-            + "a probe of the kernel surface is needed mid-EXPLORE.",
-            "- KERNEL may also propose / delegate explore / specialist /",
-            "  integrate_patch when a config / patch refinement is needed",
-            "  mid-KERNEL.",
-            "- The phase chain stays monotonic for resume / audit / the",
-            "  CLOSE sequencer; only the per-phase action contract is",
-            "  widened. Data-dependency (trace_analyze→run_optimization),",
-            "  the integrate_patch Critic gate, and sweep singletons are",
-            "  unchanged.",
-        ])
+            "roofline, profile, replay_warm_recipe and framework_pr are never",
+            "in the sets above: the Coordinator auto-manages them and PolicyGate",
+            "denies any attempt to propose them.",
+            "",
+            "Phase transitions are Coordinator-owned. The hard advance gates",
+            "are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit, the per-",
+            "phase budget cap, or a terminal stop_reason exit EXPLORE / KERNEL",
+            "/ SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
+            "You may also emit `escalate_strategy_change{next_action_hint=",
+            "'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}` directly",
+            "(no longer robustness-only) when you judge the current phase",
+            "exhausted; the Coordinator validates the hint vocab and routes",
+            "the transition on the next tick.",
+        ]
+    )
+    if interleave:
+        lines.extend(
+            [
+                "",
+                "**Phase interleave mode is ON** (on by default; set env "
+                + "`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable):",
+                "- EXPLORE may also REQUEST kernel-owned kinds "
+                + "(kernel_opt / integrate / deep_kernel_analysis / "
+                + "operator_tuning / vendor_kernel_config / gemm_tuning) when "
+                + "a probe of the kernel surface is needed mid-EXPLORE.",
+                "- KERNEL may also propose / delegate explore / specialist /",
+                "  integrate_patch when a config / patch refinement is needed",
+                "  mid-KERNEL.",
+                "- The phase chain stays monotonic for resume / audit / the",
+                "  CLOSE sequencer; only the per-phase action contract is",
+                "  widened. Data-dependency (trace_analyze→run_optimization),",
+                "  the integrate_patch Critic gate, and sweep singletons are",
+                "  unchanged.",
+            ]
+        )
     return lines
 
 
@@ -330,21 +331,23 @@ def _section_pipeline_and_budget(
         joined = ", ".join(names) or "(none enabled)"
         lines.append(f"- **{phase}** (~{eta:.0f} min) — {header}")
         lines.append(f"    actions: {joined}")
-    lines.extend([
-        "",
-        f"Sum of typical phase ETAs: ~{eta_total:.0f} min vs max_minutes={max_minutes}.",
-        "If sum >> budget, prefer high-gain/low-cost actions and skip optional",
-        "phases (analysis / support). If sum << budget, do an extra explore round",
-        "before report.",
-        "",
-        "``explore`` runs its per-KEEP stack rebench inline — there is no",
-        "standalone validation step. Route every grid attempt through",
-        "``delegate{action_name='explore', params={grid: ...}}``.",
-        "",
-        "At the wall-clock deadline the Coordinator auto-enqueues a deterministic",
-        "`report` (no LLM) during closing phase — do not waste ticks re-proposing",
-        "it unless you want an earlier narrative version before time runs out.",
-    ])
+    lines.extend(
+        [
+            "",
+            f"Sum of typical phase ETAs: ~{eta_total:.0f} min vs max_minutes={max_minutes}.",
+            "If sum >> budget, prefer high-gain/low-cost actions and skip optional",
+            "phases (analysis / support). If sum << budget, do an extra explore round",
+            "before report.",
+            "",
+            "``explore`` runs its per-KEEP stack rebench inline — there is no",
+            "standalone validation step. Route every grid attempt through",
+            "``delegate{action_name='explore', params={grid: ...}}``.",
+            "",
+            "At the wall-clock deadline the Coordinator auto-enqueues a deterministic",
+            "`report` (no LLM) during closing phase — do not waste ticks re-proposing",
+            "it unless you want an earlier narrative version before time runs out.",
+        ]
+    )
     return lines
 
 
@@ -386,9 +389,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             kind_hint = "integrate"
         else:
             kind_hint = meta.name
-        return (
-            f"REQUEST{{target_agent='kernel', kind='{kind_hint}', params={{...}}}}"
-        )
+        return f"REQUEST{{target_agent='kernel', kind='{kind_hint}', params={{...}}}}"
     if meta.name == "report":
         return "propose_action{action_name='report', predicted_gain_pct=0.0}"
     if meta.name == "specialist":
@@ -411,10 +412,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "keep_threshold_pct?=1.0, "
             "accuracy_baseline?={task: {metric: score}}}}"
         )
-    return (
-        f"propose_action{{action_name='{meta.name}', "
-        f"predicted_gain_pct=<your estimate>}}"
-    )
+    return f"propose_action{{action_name='{meta.name}', predicted_gain_pct=<your estimate>}}"
 
 
 def _format_grid_injection_hint(name: str) -> str | None:
@@ -492,9 +490,7 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
             if name in KERNEL_OWNED_ACTIONS:
                 tag_parts.append("KERNEL-OWNED")
             tag = (" (" + ", ".join(tag_parts) + ")") if tag_parts else ""
-            lines.append(
-                f"- **{name}**{tag} — {meta.description}"
-            )
+            lines.append(f"- **{name}**{tag} — {meta.description}")
             lines.append(
                 f"    cost ~{meta.typical_runtime_min:.0f}min  "
                 f"gain {_format_gain_pair(meta)}  "
@@ -549,148 +545,149 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "``explore`` / kernel-owned dispatches are deferred until "
         "``analysis.md`` / ``last_profile_trace`` refreshes.",
     )
-    lines.extend([
-        "5. **Phase-aware action selection**. v0.8",
-        "   retired the legacy ``Action scores`` block. There is no system-side",
-        "   priority list. Pick the next action by reading FACTS in this order:",
-        "",
-        "   a. **Phase + allowed actions** (the `=== Phase ===` /",
-        "      `=== Phase-allowed actions ===` blocks). PolicyGate denies",
-        "      anything outside the allowed set.",
-        "   b. **Current gaps** (the `=== Current gaps ===` block, sourced",
-        "      from `SharedState.gaps[]`). Each row shows canonical_id /",
-        "      layer / severity / symptom / attempts count + last attempt.",
-        "      The LLM picks the next gap to tackle based on layer (which",
-        "      routes the specialist domain), severity (high vs medium),",
-        "      and whether the attempts history shows the gap is still",
-        "      worth pushing on. When the section is missing it means",
-        "      baseline hasn't completed yet — fall back to",
-        "      `last_action_failures` + `explore_search.winners_history`.",
-        "   c. **KB sub-graphs + warm-start recipe** when present —",
-        "      cross-session priors carry "
-        + "*qualitative* hints (what worked / what failed last time).",
-        "   d. **specialist proposal_set** (M5+) — when an explore round just",
-        "      finished, the proposal_set drives the next `explore` grid.",
-        "   e. **Ordering facts**: baseline runs before anything else",
-        "      (invariant). ``analysis.md`` / ``last_profile_trace`` arrive",
-        "      automatically from the Coordinator-owned analysis task at",
-        "      PRELUDE and at every +10% watermark crossing — you do not",
-        "      need a manually-proposed profile before ``kernel_opt``.",
-        "6. **Phase budget awareness**. The `=== Phase ===` block carries",
-        "   ``phase_budget_remaining_pct``. As that number falls below 0.2,",
-        "   prefer lower-cost / known-good actions (explore over kernel_opt).",
-        "   The Plateau advisory block is informational only; it does not",
-        "   advance the phase. When you judge the current phase exhausted,",
-        "   emit ``escalate_strategy_change{next_action_hint=",
-        "   'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}`` (no",
-        "   longer robustness-only). Otherwise the Coordinator advances",
-        "   only on IR-6 force-exit, phase-budget exhaustion, or a",
-        "   terminal stop_reason.",
-        "7. **Sweep / report tail**: once EXPLORE / KERNEL exit, the",
-        "   Coordinator routes the run to SWEEP (or directly to it under",
-        "   --no-kernel). When SWEEP completes, propose `report` for the",
-        "   LLM narrative (Coordinator also auto-enqueues one at the",
-        "   deadline).",
-        "",
-        "If you cannot move forward, emit",
-        "`send_message{topic='heartbeat', body_md='blocked: <reason>'}` and let",
-        "Robustness escalate. NEVER stay silent.",
-        "",
-        "### FAILURE RECOVERY (apply BEFORE re-proposing an action that just failed)",
-        "",
-        "When the inbox carries a fresh `delegated_result{state!='succeeded'}`",
-        "or `last_action_failures[-1].action == <X>`, do NOT re-propose the same",
-        "action with the same params. Coordinator stamps an audit trail on every",
-        "attempt; consult these three SharedState surfaces in order:",
-        "",
-        "1. **`last_<action>`** (snapshot of the latest attempt) and",
-        "   **`<action>_attempts`** (capped per-action history, newest last).",
-        "   Each entry carries `status` / `decision` / `error_class` /",
-        "   `error_excerpt` / `workspace` / `raw_result_path` /",
-        "   `extras.fingerprint`. The fingerprint is the canonical hash of",
-        "   the eight params fields that determine baseline behavior:",
-        "   `benchmark_script` / `result_dir` / `extra_server_args` /",
-        "   `extra_envs` / `model_path` / `gpu_type` / `config_path` /",
-        "   `disable_run_eval`.",
-        "2. **`last_action_failures`** (global rolling log capped at the last",
-        "   10 unpromotable results across ALL kinds, including kernel-owned).",
-        "   Use this when the per-action history doesn't carry the kind you",
-        "   need (e.g. `integrate` failure visible here but `<action>_attempts`",
-        "   only covers the six explore/validate kinds).",
-        "3. **`baseline_failure_streak`** (consecutive failed baselines).",
-        "   Once this hits 3, Coordinator sets `stop_reason='baseline_failed'`",
-        "   and the run terminates; you must recover BEFORE the third failure.",
-        "",
-        "Three decision rules apply in order:",
-        "",
-        "* **RULE F1 — same fingerprint, twice failed → change at least one knob.**",
-        "  This is now YOUR judgement, not a PolicyGate deny. Because you run",
-        "  as a persistent conversation you remember the attempts you already",
-        "  made this session — do not re-propose a baseline whose params",
-        "  fingerprint matches a recent failure; it will fail the same way.",
-        "  Bump at least one of: `params.benchmark_script`",
-        "  (a sanitized `*.sh` file name that MUST match THIS run's framework —",
-        "  e.g. for a vllm run pin `vllm_mi300x.sh`, never `sglang_*`; a",
-        "  cross-framework script boots the wrong engine and is rejected),",
-        "  `params.result_dir`, `params.extra_server_args`, or",
-        "  `params.extra_envs`.",
-        "* **RULE F2 — `error_class='no_report'` + no `rescued_from_leaked_path:*`",
-        "  warning ⇒ leak salvage missed.** The script wrote results outside the",
-        "  workspace and outside the configured leak destinations. Override",
-        "  `params.benchmark_script` to a script that respects `$RESULT_DIR`",
-        "  (Coordinator already exports `RESULT_DIR=<workspace>` by default), or",
-        "  set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` via `update_state` so the next",
-        "  attempt salvages the leak.",
-        "* **RULE F3 — `error_class='subprocess_nonzero'` with same fingerprint",
-        "  ⇒ stop retrying.** Heartbeat with `body_md='blocked: subprocess",
-        "  repeatedly nonzero <action>'` and let Robustness intervene. Do NOT",
-        "  switch action families just to dodge the failure; Robustness'",
-        "  escalation policy needs the heartbeat to fire its RCA.",
-        "* **RULE F4 — `policy_denial_streak` is a pure fact, not a lock.** The",
-        "  `why_denied` context tool (and the `Recent policy denials` block on a",
-        "  seed turn) shows repeated (action, rule) collisions. The system no",
-        "  longer reacts to the streak — there is NO auto-prune at streak≥5 and",
-        "  NO `policy_loop` stop at streak≥10; the run continues until the",
-        "  wall-clock deadline or another stop_reason fires. So the streak is",
-        "  purely a signal for YOU: the same params keep colliding with the same",
-        "  invariant, so change something substantive — a new `params.grid`",
-        "  variant, a different `benchmark_script`, or a sibling action family.",
-        "  Re-emitting the identical denied intent just wastes a tick.",
-        "",
-        "Example (baseline failed twice with `error_class='no_report'`):",
-        "",
-        "    # Prefer RESULT_DIR rescue first; only override benchmark_script",
-        "    # when you have verified a same-framework script-specific bug.",
-        "    propose_action{action_name='baseline',",
-        "        params={result_dir: '<session_dir>/runs/baseline/<task>/leak'},",
-        "        predicted_gain_pct: 0,",
-        "        notes: 'recover from no_report streak by redirecting RESULT_DIR",
-        "                to the observed leak location'}",
-        "",
-        "### IDEA GENERATION (apply after EVERY explore round)",
-        "",
-        "Compose the next `explore` grid from `explore_search` (winners +",
-        "rejected, each with `±x.xx% gain_pct`) and `discovered_flags`:",
-        "",
-        "1. **Sibling values** — if `--max-num-seqs 256` won, try 128 / 512;",
-        "   sweep a winning boolean's related `*_AITER_*` family.",
-        "2. **Synergy** — combine last round's winners via",
-        "   `synergy_mode='auto'` (deduped against `synergy_attempted`).",
-        "3. **Retry rejects** — for each `explore_search.rejected` variant,",
-        "   change the value or pair it with a winner (a `-2%` reject is a",
-        "   dead flag; `-0.3%` just needs a different value).",
-        "4. **Mine flags** — when winners are empty, pull untested boolean",
-        "   toggles from `discovered_flags.<framework>.backend_flags`.",
-        "",
-        "Variant identity is content-based: the executor fingerprints",
-        "`(sorted extra_server_args, sorted extra_envs)`, so renaming a",
-        "tested variant does NOT bypass dedup — change the actual args/envs.",
-        "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
-        "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
-        "",
-        "An explore round that produces zero new ideas is a bug — heartbeat",
-        "with body_md='idea-pipeline-empty' so Robustness can intervene.",
-    ])
+    lines.extend(
+        [
+            "5. **Phase-aware action selection**. v0.8",
+            "   retired the legacy ``Action scores`` block. There is no system-side",
+            "   priority list. Pick the next action by reading FACTS in this order:",
+            "",
+            "   a. **Phase + allowed actions** (the `=== Phase ===` /",
+            "      `=== Phase-allowed actions ===` blocks). PolicyGate denies",
+            "      anything outside the allowed set.",
+            "   b. **Current gaps** (the `=== Current gaps ===` block, sourced",
+            "      from `SharedState.gaps[]`). Each row shows canonical_id /",
+            "      layer / severity / symptom / attempts count + last attempt.",
+            "      The LLM picks the next gap to tackle based on layer (which",
+            "      routes the specialist domain), severity (high vs medium),",
+            "      and whether the attempts history shows the gap is still",
+            "      worth pushing on. When the section is missing it means",
+            "      baseline hasn't completed yet — fall back to",
+            "      `last_action_failures` + `explore_search.winners_history`.",
+            "   c. **KB sub-graphs + warm-start recipe** when present —",
+            "      cross-session priors carry " + "*qualitative* hints (what worked / what failed last time).",
+            "   d. **specialist proposal_set** (M5+) — when an explore round just",
+            "      finished, the proposal_set drives the next `explore` grid.",
+            "   e. **Ordering facts**: baseline runs before anything else",
+            "      (invariant). ``analysis.md`` / ``last_profile_trace`` arrive",
+            "      automatically from the Coordinator-owned analysis task at",
+            "      PRELUDE and at every +10% watermark crossing — you do not",
+            "      need a manually-proposed profile before ``kernel_opt``.",
+            "6. **Phase budget awareness**. The `=== Phase ===` block carries",
+            "   ``phase_budget_remaining_pct``. As that number falls below 0.2,",
+            "   prefer lower-cost / known-good actions (explore over kernel_opt).",
+            "   The Plateau advisory block is informational only; it does not",
+            "   advance the phase. When you judge the current phase exhausted,",
+            "   emit ``escalate_strategy_change{next_action_hint=",
+            "   'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}`` (no",
+            "   longer robustness-only). Otherwise the Coordinator advances",
+            "   only on IR-6 force-exit, phase-budget exhaustion, or a",
+            "   terminal stop_reason.",
+            "7. **Sweep / report tail**: once EXPLORE / KERNEL exit, the",
+            "   Coordinator routes the run to SWEEP (or directly to it under",
+            "   --no-kernel). When SWEEP completes, propose `report` for the",
+            "   LLM narrative (Coordinator also auto-enqueues one at the",
+            "   deadline).",
+            "",
+            "If you cannot move forward, emit",
+            "`send_message{topic='heartbeat', body_md='blocked: <reason>'}` and let",
+            "Robustness escalate. NEVER stay silent.",
+            "",
+            "### FAILURE RECOVERY (apply BEFORE re-proposing an action that just failed)",
+            "",
+            "When the inbox carries a fresh `delegated_result{state!='succeeded'}`",
+            "or `last_action_failures[-1].action == <X>`, do NOT re-propose the same",
+            "action with the same params. Coordinator stamps an audit trail on every",
+            "attempt; consult these three SharedState surfaces in order:",
+            "",
+            "1. **`last_<action>`** (snapshot of the latest attempt) and",
+            "   **`<action>_attempts`** (capped per-action history, newest last).",
+            "   Each entry carries `status` / `decision` / `error_class` /",
+            "   `error_excerpt` / `workspace` / `raw_result_path` /",
+            "   `extras.fingerprint`. The fingerprint is the canonical hash of",
+            "   the eight params fields that determine baseline behavior:",
+            "   `benchmark_script` / `result_dir` / `extra_server_args` /",
+            "   `extra_envs` / `model_path` / `gpu_type` / `config_path` /",
+            "   `disable_run_eval`.",
+            "2. **`last_action_failures`** (global rolling log capped at the last",
+            "   10 unpromotable results across ALL kinds, including kernel-owned).",
+            "   Use this when the per-action history doesn't carry the kind you",
+            "   need (e.g. `integrate` failure visible here but `<action>_attempts`",
+            "   only covers the six explore/validate kinds).",
+            "3. **`baseline_failure_streak`** (consecutive failed baselines).",
+            "   Once this hits 3, Coordinator sets `stop_reason='baseline_failed'`",
+            "   and the run terminates; you must recover BEFORE the third failure.",
+            "",
+            "Three decision rules apply in order:",
+            "",
+            "* **RULE F1 — same fingerprint, twice failed → change at least one knob.**",
+            "  This is now YOUR judgement, not a PolicyGate deny. Because you run",
+            "  as a persistent conversation you remember the attempts you already",
+            "  made this session — do not re-propose a baseline whose params",
+            "  fingerprint matches a recent failure; it will fail the same way.",
+            "  Bump at least one of: `params.benchmark_script`",
+            "  (a sanitized `*.sh` file name that MUST match THIS run's framework —",
+            "  e.g. for a vllm run pin `vllm_mi300x.sh`, never `sglang_*`; a",
+            "  cross-framework script boots the wrong engine and is rejected),",
+            "  `params.result_dir`, `params.extra_server_args`, or",
+            "  `params.extra_envs`.",
+            "* **RULE F2 — `error_class='no_report'` + no `rescued_from_leaked_path:*`",
+            "  warning ⇒ leak salvage missed.** The script wrote results outside the",
+            "  workspace and outside the configured leak destinations. Override",
+            "  `params.benchmark_script` to a script that respects `$RESULT_DIR`",
+            "  (Coordinator already exports `RESULT_DIR=<workspace>` by default), or",
+            "  set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` via `update_state` so the next",
+            "  attempt salvages the leak.",
+            "* **RULE F3 — `error_class='subprocess_nonzero'` with same fingerprint",
+            "  ⇒ stop retrying.** Heartbeat with `body_md='blocked: subprocess",
+            "  repeatedly nonzero <action>'` and let Robustness intervene. Do NOT",
+            "  switch action families just to dodge the failure; Robustness'",
+            "  escalation policy needs the heartbeat to fire its RCA.",
+            "* **RULE F4 — `policy_denial_streak` is a pure fact, not a lock.** The",
+            "  `why_denied` context tool (and the `Recent policy denials` block on a",
+            "  seed turn) shows repeated (action, rule) collisions. The system no",
+            "  longer reacts to the streak — there is NO auto-prune at streak≥5 and",
+            "  NO `policy_loop` stop at streak≥10; the run continues until the",
+            "  wall-clock deadline or another stop_reason fires. So the streak is",
+            "  purely a signal for YOU: the same params keep colliding with the same",
+            "  invariant, so change something substantive — a new `params.grid`",
+            "  variant, a different `benchmark_script`, or a sibling action family.",
+            "  Re-emitting the identical denied intent just wastes a tick.",
+            "",
+            "Example (baseline failed twice with `error_class='no_report'`):",
+            "",
+            "    # Prefer RESULT_DIR rescue first; only override benchmark_script",
+            "    # when you have verified a same-framework script-specific bug.",
+            "    propose_action{action_name='baseline',",
+            "        params={result_dir: '<session_dir>/runs/baseline/<task>/leak'},",
+            "        predicted_gain_pct: 0,",
+            "        notes: 'recover from no_report streak by redirecting RESULT_DIR",
+            "                to the observed leak location'}",
+            "",
+            "### IDEA GENERATION (apply after EVERY explore round)",
+            "",
+            "Compose the next `explore` grid from `explore_search` (winners +",
+            "rejected, each with `±x.xx% gain_pct`) and `discovered_flags`:",
+            "",
+            "1. **Sibling values** — if `--max-num-seqs 256` won, try 128 / 512;",
+            "   sweep a winning boolean's related `*_AITER_*` family.",
+            "2. **Synergy** — combine last round's winners via",
+            "   `synergy_mode='auto'` (deduped against `synergy_attempted`).",
+            "3. **Retry rejects** — for each `explore_search.rejected` variant,",
+            "   change the value or pair it with a winner (a `-2%` reject is a",
+            "   dead flag; `-0.3%` just needs a different value).",
+            "4. **Mine flags** — when winners are empty, pull untested boolean",
+            "   toggles from `discovered_flags.<framework>.backend_flags`.",
+            "",
+            "Variant identity is content-based: the executor fingerprints",
+            "`(sorted extra_server_args, sorted extra_envs)`, so renaming a",
+            "tested variant does NOT bypass dedup — change the actual args/envs.",
+            "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
+            "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
+            "",
+            "An explore round that produces zero new ideas is a bug — heartbeat",
+            "with body_md='idea-pipeline-empty' so Robustness can intervene.",
+        ]
+    )
     return lines
 
 
@@ -809,8 +806,7 @@ def _section_rules(rules_md: str) -> list[str]:
         list[str]: Markdown lines for the RULES & OUTPUT PROTOCOL section.
     """
     body = rules_md.strip() or (
-        "(orchestration.md rules fragment not found — Coordinator will still"
-        " enforce PolicyGate hard rules at runtime.)"
+        "(orchestration.md rules fragment not found — Coordinator will still enforce PolicyGate hard rules at runtime.)"
     )
     return ["## 7. RULES & OUTPUT PROTOCOL", "", body]
 
@@ -858,9 +854,7 @@ def build_orchestration_prompt(
     """
     actions = _filter_actions(action_registry, enabled_actions)
     if kernel_enabled is None:
-        kernel_enabled = any(
-            a.name in KERNEL_OWNED_ACTIONS for a in actions
-        )
+        kernel_enabled = any(a.name in KERNEL_OWNED_ACTIONS for a in actions)
     framework_norm = (framework or "sglang").strip().lower() or "sglang"
 
     rules_md = _read_rules_fragment(rules_fragment_path)
@@ -897,7 +891,9 @@ def build_orchestration_prompt(
 
 
 def default_enabled_actions(
-    *, no_kernel: bool, no_explore: bool = False,
+    *,
+    no_kernel: bool,
+    no_explore: bool = False,
 ) -> tuple[str, ...]:
     """Return the canonical enabled-action set used by the CLI.
 

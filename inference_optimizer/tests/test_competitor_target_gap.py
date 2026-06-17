@@ -12,19 +12,24 @@ from inference_optimizer.orchestrator import research_hints
 
 def _write(session_dir: Path, payload: dict) -> None:
     from inference_optimizer import session_paths
+
     path = session_paths.competitor_target_json(session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def test_load_competitor_target_keeps_only_sourced_rows(tmp_path):
-    _write(tmp_path, {
-        "gpu": "b300", "model": "m",
-        "per_conc": [
-            {"conc": 64, "tput_per_gpu": 100.0, "source": "https://pr/1"},
-            {"conc": 128, "tput_per_gpu": 200.0},
-        ],
-    })
+    _write(
+        tmp_path,
+        {
+            "gpu": "b300",
+            "model": "m",
+            "per_conc": [
+                {"conc": 64, "tput_per_gpu": 100.0, "source": "https://pr/1"},
+                {"conc": 128, "tput_per_gpu": 200.0},
+            ],
+        },
+    )
     target = research_hints.load_competitor_target(tmp_path)
     assert target is not None
     assert len(target["per_conc"]) == 1
@@ -36,22 +41,28 @@ def test_load_competitor_target_missing_returns_none(tmp_path):
 
 
 def test_load_competitor_target_all_sourceless_returns_none(tmp_path):
-    _write(tmp_path, {
-        "gpu": "b300", "model": "m",
-        "per_conc": [{"conc": 64, "tput_per_gpu": 100.0}],
-    })
+    _write(
+        tmp_path,
+        {
+            "gpu": "b300",
+            "model": "m",
+            "per_conc": [{"conc": 64, "tput_per_gpu": 100.0}],
+        },
+    )
     assert research_hints.load_competitor_target(tmp_path) is None
 
 
 def test_gap_analysis_latency_primary():
     target = {
         "per_conc": [
-            {"conc": 64, "tput_per_gpu": 100.0, "tpot_ms": 10.0,
-             "source": "s"},
+            {"conc": 64, "tput_per_gpu": 100.0, "tpot_ms": 10.0, "source": "s"},
         ],
     }
     gap = research_hints.gap_analysis(
-        target, our_tput_per_gpu=95.0, our_tpot_ms=20.0, conc=64,
+        target,
+        our_tput_per_gpu=95.0,
+        our_tpot_ms=20.0,
+        conc=64,
     )
     assert gap is not None
     assert round(gap["throughput_gap_pct"], 1) == 5.0
@@ -63,21 +74,28 @@ def test_gap_analysis_latency_primary():
 def test_gap_analysis_throughput_primary():
     target = {
         "per_conc": [
-            {"conc": 64, "tput_per_gpu": 200.0, "tpot_ms": 10.0,
-             "source": "s"},
+            {"conc": 64, "tput_per_gpu": 200.0, "tpot_ms": 10.0, "source": "s"},
         ],
     }
     gap = research_hints.gap_analysis(
-        target, our_tput_per_gpu=100.0, our_tpot_ms=10.5, conc=64,
+        target,
+        our_tput_per_gpu=100.0,
+        our_tpot_ms=10.5,
+        conc=64,
     )
     assert gap is not None
     assert gap["primary_gap"] == "throughput"
 
 
 def test_gap_analysis_none_when_no_target():
-    assert research_hints.gap_analysis(
-        None, our_tput_per_gpu=1.0, our_tpot_ms=1.0,
-    ) is None
+    assert (
+        research_hints.gap_analysis(
+            None,
+            our_tput_per_gpu=1.0,
+            our_tpot_ms=1.0,
+        )
+        is None
+    )
 
 
 def test_full_gap_summary_emits_latency_hint():
@@ -113,6 +131,7 @@ def test_full_gap_summary_empty_on_none():
 
 def test_derive_tpot_from_e2el_ttft():
     from inference_optimizer.orchestrator.action_executors import benchmark_result
+
     measurement = {"ttft_mean_ms": 100.0, "e2el_mean_ms": 1090.0}
     report = {"config": {"osl": 100}}
     benchmark_result._derive_tpot_if_missing(measurement, report)
@@ -121,14 +140,15 @@ def test_derive_tpot_from_e2el_ttft():
 
 def test_derive_tpot_skipped_when_present():
     from inference_optimizer.orchestrator.action_executors import benchmark_result
-    measurement = {"ttft_mean_ms": 100.0, "e2el_mean_ms": 1090.0,
-                   "tpot_mean_ms": 7.0}
+
+    measurement = {"ttft_mean_ms": 100.0, "e2el_mean_ms": 1090.0, "tpot_mean_ms": 7.0}
     benchmark_result._derive_tpot_if_missing(measurement, {"osl": 100})
     assert measurement["tpot_mean_ms"] == 7.0
 
 
 def test_derive_tpot_skipped_without_osl():
     from inference_optimizer.orchestrator.action_executors import benchmark_result
+
     measurement = {"ttft_mean_ms": 100.0, "e2el_mean_ms": 1090.0}
     benchmark_result._derive_tpot_if_missing(measurement, {})
     assert measurement.get("tpot_mean_ms") is None
@@ -139,11 +159,13 @@ def test_match_variants_to_priors_by_hint_keyword():
         {"name": "mtp_on", "extra_server_args": "--speculative-algorithm EAGLE"},
         {"name": "tp4", "extra_server_args": "--tp 4"},
     ]
-    hints = [{
-        "what": "enable MTP speculative decoding",
-        "source": "https://pr/1",
-        "domain_tags": ["serving_specialist"],
-    }]
+    hints = [
+        {
+            "what": "enable MTP speculative decoding",
+            "source": "https://pr/1",
+            "domain_tags": ["serving_specialist"],
+        }
+    ]
     matches = research_hints.match_variants_to_priors(variants, hints)
     assert "mtp_on" in matches
     assert matches["mtp_on"]["hints"]
@@ -156,7 +178,9 @@ def test_match_variants_latency_alignment():
         {"name": "bs256", "extra_server_args": "--max-batch 256"},
     ]
     matches = research_hints.match_variants_to_priors(
-        variants, [], primary_gap="latency",
+        variants,
+        [],
+        primary_gap="latency",
     )
     assert matches["fuse_rmsnorm"]["latency_aligned"] is True
     assert "bs256" not in matches
@@ -165,7 +189,9 @@ def test_match_variants_latency_alignment():
 def test_match_variants_no_latency_alignment_when_throughput_gap():
     variants = [{"name": "fuse_rmsnorm", "extra_server_args": "--fused"}]
     matches = research_hints.match_variants_to_priors(
-        variants, [], primary_gap="throughput",
+        variants,
+        [],
+        primary_gap="throughput",
     )
     assert matches == {}
 

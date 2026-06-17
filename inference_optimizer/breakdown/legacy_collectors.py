@@ -31,15 +31,15 @@ from .collectors import _iso_z, _parse_iso_unix, _to_float
 
 # Old v0.6 action vocabulary -> canonical v2 phase (``validate_stack`` is phase-neutral; see ``_PHASE_NEUTRAL``).
 _ACTION_PHASE: dict[str, str] = {
-    "baseline":       "PRELUDE",
-    "profile":        "PRELUDE",
-    "explore":        "EXPLORE",
-    "params":         "EXPLORE",
-    "backends":       "EXPLORE",
-    "sweep":          "SWEEP",
+    "baseline": "PRELUDE",
+    "profile": "PRELUDE",
+    "explore": "EXPLORE",
+    "params": "EXPLORE",
+    "backends": "EXPLORE",
+    "sweep": "SWEEP",
     "select_kernels": "KERNEL",
-    "kernel_opt":     "KERNEL",
-    "integrate":      "KERNEL",
+    "kernel_opt": "KERNEL",
+    "integrate": "KERNEL",
 }
 
 # Actions that inherit the active phase rather than open a new segment.
@@ -159,10 +159,7 @@ def collect_phase_segments(
                 else None
             )
             if g_pct is None:
-                g_pct = (
-                    _to_float(ex.get("gain_pct"))
-                    or _to_float(ex.get("best_gain_pct_vs_base"))
-                )
+                g_pct = _to_float(ex.get("gain_pct")) or _to_float(ex.get("best_gain_pct_vs_base"))
             if g_pct is not None and (best_gain is None or g_pct > best_gain):
                 best_gain = g_pct
         adopted_here = [
@@ -171,16 +168,12 @@ def collect_phase_segments(
                 "variant_name": a.get("variant_name"),
                 # Canonical field; v0.6 raw state only has the pre-rename
                 # ``candidate_extra_sglang_args``, so fall back to it.
-                "extra_server_args": (
-                    a.get("candidate_extra_server_args")
-                    or a.get("candidate_extra_sglang_args")
-                ),
+                "extra_server_args": (a.get("candidate_extra_server_args") or a.get("candidate_extra_sglang_args")),
                 "tput": _to_float(a.get("tput")),
                 "ts": _iso_z(a.get("ts")),
             }
             for a in adoptions
-            if (not exit_ts or _iso_z(a.get("ts")) < exit_ts)
-            and _iso_z(a.get("ts")) >= entered_ts
+            if (not exit_ts or _iso_z(a.get("ts")) < exit_ts) and _iso_z(a.get("ts")) >= entered_ts
         ]
         evidence: dict[str, Any] = {"reconstructed_from": "legacy_audit_lists"}
         if best_gain is not None:
@@ -188,18 +181,20 @@ def collect_phase_segments(
         if adopted_here:
             evidence["adopted"] = adopted_here
 
-        segments.append({
-            "phase":           g["phase"],
-            "from_phase":      segments[-1]["phase"] if segments else "",
-            "entered_ts":      entered_ts,
-            "entered_unix":    entered_unix,
-            "exit_ts":         exit_ts,
-            "exit_unix":       exit_unix,
-            "exit_reason":     "",
-            "evidence":        evidence,
-            "events":          [],
-            "actions":         acts,
-            "elapsed_seconds": elapsed,
-        })
+        segments.append(
+            {
+                "phase": g["phase"],
+                "from_phase": segments[-1]["phase"] if segments else "",
+                "entered_ts": entered_ts,
+                "entered_unix": entered_unix,
+                "exit_ts": exit_ts,
+                "exit_unix": exit_unix,
+                "exit_reason": "",
+                "evidence": evidence,
+                "events": [],
+                "actions": acts,
+                "elapsed_seconds": elapsed,
+            }
+        )
 
     return segments

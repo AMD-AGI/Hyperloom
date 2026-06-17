@@ -48,7 +48,8 @@ def coord(tmp_path: Path) -> Coordinator:
     ["explore", "sweep", "report", "integrate"],
 )
 def test_sequence_denial_action_no_longer_blocks_on_profile(
-    coord: Coordinator, action: str,
+    coord: Coordinator,
+    action: str,
 ):
     """With baseline done and empty ``last_profile_trace``, explore-family actions are no longer sequence-denied."""
     coord.shared_state.last_profile_trace = ""
@@ -57,10 +58,12 @@ def test_sequence_denial_action_no_longer_blocks_on_profile(
 
 
 @pytest.mark.parametrize(
-    "req_kind", ["run_optimization"],
+    "req_kind",
+    ["run_optimization"],
 )
 def test_sequence_denial_request_no_longer_blocks_on_profile(
-    coord: Coordinator, req_kind: str,
+    coord: Coordinator,
+    req_kind: str,
 ):
     """The request-layer profile-prereq deny was demoted into ``run_optimization_handler``, so kernel requests aren't pre-denied on an empty ``last_profile_trace``."""
     coord.shared_state.last_profile_trace = ""

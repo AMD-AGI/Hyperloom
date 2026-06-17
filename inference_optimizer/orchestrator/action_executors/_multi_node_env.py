@@ -116,10 +116,7 @@ def dynamo_ssh_env_from_state() -> dict[str, str]:
     if state.get("backend") != "dynamo":
         return {}
     if (state.get("pd_mode") or "").lower() == "disaggregated":
-        gpu_ips = (
-            list(state.get("prefill_pod_ips") or [])
-            + list(state.get("decode_pod_ips") or [])
-        )
+        gpu_ips = list(state.get("prefill_pod_ips") or []) + list(state.get("decode_pod_ips") or [])
     else:
         gpu_ips = list(state.get("worker_pod_ips") or [])
     key = str(state.get("ssh_key_path") or "").strip()
@@ -177,6 +174,7 @@ def magpie_remote_env() -> dict[str, str]:
     head_ip = str(state.get("head_pod_ip") or "").strip()
     if head_ip and ".svc.cluster.local" in service_url:
         import re
+
         port = re.search(r":(\d+)$", service_url)
         port = port.group(1) if port else "8888"
         service_url = f"http://{head_ip}:{port}"

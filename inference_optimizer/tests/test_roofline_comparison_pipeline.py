@@ -98,6 +98,7 @@ def _mock_state(
 @pytest.fixture
 def analysis_md(tmp_path):
     """Materialise a minimal TraceLens-shaped analysis.md on disk."""
+
     def _make(name: str, marker_text: str = "from snapshot") -> str:
         path = tmp_path / name
         path.write_text(
@@ -109,6 +110,7 @@ def analysis_md(tmp_path):
             encoding="utf-8",
         )
         return str(path)
+
     return _make
 
 
@@ -124,7 +126,9 @@ def test_build_summary_single_snapshot_emits_single_snapshot_mode(analysis_md):
     """One snapshot → mode='single_snapshot', baseline == latest from `roofline_snapshots[0]`."""
     path = analysis_md("analysis_1.md")
     snap1 = _snapshot(
-        snapshot_id=1, analysis_md_path=path, ts="2026-05-24T13:00:02+00:00",
+        snapshot_id=1,
+        analysis_md_path=path,
+        ts="2026-05-24T13:00:02+00:00",
     )
     state = _mock_state(
         roofline_snapshots=[snap1],
@@ -153,14 +157,22 @@ def test_build_summary_two_snapshots_emits_before_after_with_delta(analysis_md):
     p1 = analysis_md("analysis_1.md", "baseline snapshot")
     p2 = analysis_md("analysis_2.md", "post-optimization snapshot")
     snap1 = _snapshot(
-        snapshot_id=1, analysis_md_path=p1, ts="2026-05-24T13:00:00+00:00",
-        compute_pct=67.26, idle_pct=32.72,
-        top_kernel_name="aten::mm", top_kernel_efficiency_pct=65.16,
+        snapshot_id=1,
+        analysis_md_path=p1,
+        ts="2026-05-24T13:00:00+00:00",
+        compute_pct=67.26,
+        idle_pct=32.72,
+        top_kernel_name="aten::mm",
+        top_kernel_efficiency_pct=65.16,
     )
     snap2 = _snapshot(
-        snapshot_id=2, analysis_md_path=p2, ts="2026-05-24T13:45:00+00:00",
-        compute_pct=75.10, idle_pct=24.90,
-        top_kernel_name="aten::addmm", top_kernel_efficiency_pct=72.40,
+        snapshot_id=2,
+        analysis_md_path=p2,
+        ts="2026-05-24T13:45:00+00:00",
+        compute_pct=75.10,
+        idle_pct=24.90,
+        top_kernel_name="aten::addmm",
+        top_kernel_efficiency_pct=72.40,
     )
     state = _mock_state(
         roofline_snapshots=[snap1, snap2],
@@ -200,7 +212,8 @@ def test_format_section_single_snapshot_no_n31_wording(tmp_path):
         encoding="utf-8",
     )
     snap = _snapshot(
-        snapshot_id=1, analysis_md_path=str(p),
+        snapshot_id=1,
+        analysis_md_path=str(p),
         ts="2026-05-24T13:00:00+00:00",
     )
     cmp = {"mode": "single_snapshot", "baseline": snap, "latest": snap}
@@ -219,11 +232,13 @@ def test_format_section_before_after_renders_both_blocks(tmp_path):
     p2 = tmp_path / "a2.md"
     p2.write_text("# TL\n\n## Executive Summary\n\nbody2\n", encoding="utf-8")
     snap1 = _snapshot(
-        snapshot_id=1, analysis_md_path=str(p1),
+        snapshot_id=1,
+        analysis_md_path=str(p1),
         ts="2026-05-24T13:00:00+00:00",
     )
     snap2 = _snapshot(
-        snapshot_id=2, analysis_md_path=str(p2),
+        snapshot_id=2,
+        analysis_md_path=str(p2),
         ts="2026-05-24T13:45:00+00:00",
         compute_pct=75.10,
     )
@@ -254,14 +269,8 @@ def test_build_summary_propagates_kernel_roofline_path(analysis_md):
     summary = _build_summary_dict(state, ev_counts={}, highlights=[])
     cmp = summary.get("roofline_comparison")
     assert cmp is not None
-    assert (
-        cmp["baseline"].get("kernel_roofline_path")
-        == "/tmp/session/reports/kernel_roofline.json"
-    )
-    assert (
-        cmp["latest"].get("kernel_roofline_path")
-        == "/tmp/session/reports/kernel_roofline.json"
-    )
+    assert cmp["baseline"].get("kernel_roofline_path") == "/tmp/session/reports/kernel_roofline.json"
+    assert cmp["latest"].get("kernel_roofline_path") == "/tmp/session/reports/kernel_roofline.json"
 
 
 def test_build_roofline_snapshot_default_carries_empty_kernel_roofline_path(
@@ -271,9 +280,11 @@ def test_build_roofline_snapshot_default_carries_empty_kernel_roofline_path(
     from inference_optimizer.orchestrator.roofline_snapshot import (
         build_roofline_snapshot,
     )
+
     p = tmp_path / "analysis.md"
     p.write_text(
-        "# TraceLens\n\n## Executive Summary\n\nbody\n", encoding="utf-8",
+        "# TraceLens\n\n## Executive Summary\n\nbody\n",
+        encoding="utf-8",
     )
     snap = build_roofline_snapshot(
         snapshot_id=1,
@@ -317,10 +328,12 @@ class TestBuildSnapshotCeilingFields:
         from inference_optimizer.orchestrator.roofline_snapshot import (
             build_roofline_snapshot,
         )
+
         p = tmp_path / "analysis.md"
         p.write_text("# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8")
         snap = build_roofline_snapshot(
-            snapshot_id=1, ts="2026-05-24T13:00:00+00:00",
+            snapshot_id=1,
+            ts="2026-05-24T13:00:00+00:00",
             analysis_md_path=str(p),
         )
         assert snap["theoretical_peak_tok_per_sec"] is None
@@ -332,10 +345,12 @@ class TestBuildSnapshotCeilingFields:
         from inference_optimizer.orchestrator.roofline_snapshot import (
             build_roofline_snapshot,
         )
+
         p = tmp_path / "analysis.md"
         p.write_text("# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8")
         snap = build_roofline_snapshot(
-            snapshot_id=1, ts="ts",
+            snapshot_id=1,
+            ts="ts",
             analysis_md_path=str(p),
             theoretical_peak_tok_per_sec=1000.0,
             achieved_tok_per_sec=527.5,
@@ -349,10 +364,12 @@ class TestBuildSnapshotCeilingFields:
         from inference_optimizer.orchestrator.roofline_snapshot import (
             build_roofline_snapshot,
         )
+
         p = tmp_path / "analysis.md"
         p.write_text("# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8")
         snap = build_roofline_snapshot(
-            snapshot_id=1, ts="ts",
+            snapshot_id=1,
+            ts="ts",
             analysis_md_path=str(p),
             theoretical_peak_tok_per_sec=0.0,
             achieved_tok_per_sec=527.5,
@@ -369,6 +386,7 @@ class TestComparisonDeltaIncludesWithinRoofline:
         from inference_optimizer.orchestrator.roofline_snapshot import (
             build_roofline_comparison_from_history,
         )
+
         snap_base = _snapshot_with_ceiling(
             snapshot_id=1,
             analysis_md_path="/tmp/base.md",
@@ -395,6 +413,7 @@ class TestComparisonDeltaIncludesWithinRoofline:
         from inference_optimizer.orchestrator.roofline_snapshot import (
             format_roofline_metrics_table,
         )
+
         base = _snapshot_with_ceiling(
             snapshot_id=1,
             analysis_md_path="/tmp/base.md",
@@ -430,15 +449,20 @@ class TestComparisonDeltaIncludesWithinRoofline:
         from inference_optimizer.orchestrator.roofline_snapshot import (
             build_roofline_comparison_from_history,
         )
+
         snap_base = _snapshot_with_ceiling(
-            snapshot_id=1, analysis_md_path="/p1", ts="t1",
+            snapshot_id=1,
+            analysis_md_path="/p1",
+            ts="t1",
             theoretical_peak_tok_per_sec=1000.0,
             achieved_tok_per_sec=527.5,
             within_roofline_pct=52.75,
             gap_to_roofline_pct=47.25,
         )
         snap_latest = _snapshot_with_ceiling(
-            snapshot_id=2, analysis_md_path="/p2", ts="t2",
+            snapshot_id=2,
+            analysis_md_path="/p2",
+            ts="t2",
             theoretical_peak_tok_per_sec=1000.0,
             achieved_tok_per_sec=690.89,
             within_roofline_pct=69.09,
@@ -457,7 +481,8 @@ class TestSummaryDictCarriesCeilingThroughHistory:
     def test_single_snapshot_propagates_ceiling_to_summary(self, analysis_md):
         path = analysis_md("a.md")
         snap = _snapshot_with_ceiling(
-            snapshot_id=1, analysis_md_path=path,
+            snapshot_id=1,
+            analysis_md_path=path,
             ts="2026-05-24T13:00:00+00:00",
             theoretical_peak_tok_per_sec=1000.0,
             achieved_tok_per_sec=527.5,
@@ -481,18 +506,23 @@ class TestFormatTableRendersCeiling:
         from inference_optimizer.orchestrator.roofline_snapshot import (
             format_roofline_metrics_table,
         )
+
         snap = _snapshot_with_ceiling(
-            snapshot_id=1, analysis_md_path="/p", ts="t",
+            snapshot_id=1,
+            analysis_md_path="/p",
+            ts="t",
             theoretical_peak_tok_per_sec=1000.0,
             achieved_tok_per_sec=527.5,
             within_roofline_pct=52.75,
             gap_to_roofline_pct=47.25,
         )
-        lines = format_roofline_metrics_table({
-            "mode": "single_snapshot",
-            "baseline": snap,
-            "latest": snap,
-        })
+        lines = format_roofline_metrics_table(
+            {
+                "mode": "single_snapshot",
+                "baseline": snap,
+                "latest": snap,
+            }
+        )
         text = "\n".join(lines)
         assert "Theoretical peak" in text
         assert "1000.0 tok/s" in text
@@ -506,15 +536,20 @@ class TestFormatTableRendersCeiling:
         from inference_optimizer.orchestrator.roofline_snapshot import (
             format_roofline_metrics_table,
         )
+
         base = _snapshot_with_ceiling(
-            snapshot_id=1, analysis_md_path="/p1", ts="t1",
+            snapshot_id=1,
+            analysis_md_path="/p1",
+            ts="t1",
             theoretical_peak_tok_per_sec=1000.0,
             achieved_tok_per_sec=527.5,
             within_roofline_pct=52.75,
             gap_to_roofline_pct=47.25,
         )
         latest = _snapshot_with_ceiling(
-            snapshot_id=2, analysis_md_path="/p2", ts="t2",
+            snapshot_id=2,
+            analysis_md_path="/p2",
+            ts="t2",
             theoretical_peak_tok_per_sec=1000.0,
             achieved_tok_per_sec=690.89,
             within_roofline_pct=69.09,
@@ -539,18 +574,23 @@ class TestFormatTableRendersCeiling:
         from inference_optimizer.orchestrator.roofline_snapshot import (
             format_roofline_metrics_table,
         )
+
         snap = _snapshot(
-            snapshot_id=1, analysis_md_path="/p", ts="t",
+            snapshot_id=1,
+            analysis_md_path="/p",
+            ts="t",
         )
         snap["theoretical_peak_tok_per_sec"] = None
         snap["achieved_tok_per_sec"] = None
         snap["within_roofline_pct"] = None
         snap["gap_to_roofline_pct"] = None
-        lines = format_roofline_metrics_table({
-            "mode": "single_snapshot",
-            "baseline": snap,
-            "latest": snap,
-        })
+        lines = format_roofline_metrics_table(
+            {
+                "mode": "single_snapshot",
+                "baseline": snap,
+                "latest": snap,
+            }
+        )
         text = "\n".join(lines)
         assert "Theoretical peak" not in text
 
@@ -565,6 +605,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
         from inference_optimizer.orchestrator.roofline_ceiling import (
             RooflineBreakdown,
         )
+
         br = RooflineBreakdown(mem, cmp, peak, kind)
         monkeypatch.setattr(
             roofline_ceiling,
@@ -572,17 +613,18 @@ class TestRecordTraceAnalyzeStampsCeiling:
             lambda _state, **_kw: br,
         )
 
-    def test_stamps_ceiling_and_achieved_into_history(
-        self, tmp_path, monkeypatch
-    ):
+    def test_stamps_ceiling_and_achieved_into_history(self, tmp_path, monkeypatch):
         from inference_optimizer.orchestrator.shared_state import SharedState
+
         self._mock_breakdown(
-            monkeypatch, mem=1000.0, cmp=5000.0, peak=1000.0, kind="memory",
+            monkeypatch,
+            mem=1000.0,
+            cmp=5000.0,
+            peak=1000.0,
+            kind="memory",
         )
         md = tmp_path / "analysis.md"
-        md.write_text(
-            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
-        )
+        md.write_text("# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8")
         state = SharedState()
         state.baseline_tput = 527.5
         state.current_best = {"action": "params", "tput": 690.89}
@@ -601,9 +643,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
         assert snap["within_roofline_pct"] == 69.09
         assert snap["gap_to_roofline_pct"] == pytest.approx(30.91, abs=0.01)
 
-    def test_forced_baseline_arm_overrides_promoted_current_best(
-        self, tmp_path, monkeypatch
-    ):
+    def test_forced_baseline_arm_overrides_promoted_current_best(self, tmp_path, monkeypatch):
         """A delayed PRELUDE roofline (payload roofline_arm=baseline) records as
         baseline even after warm-replay promoted a fp8 current_best — the ceiling
         is computed for the baseline arm and achieved uses baseline_tput."""
@@ -611,6 +651,7 @@ class TestRecordTraceAnalyzeStampsCeiling:
         from inference_optimizer.orchestrator.roofline_ceiling import (
             RooflineBreakdown,
         )
+
         seen_arm: dict[str, object] = {}
 
         def _capture(_state, **kw):
@@ -623,10 +664,9 @@ class TestRecordTraceAnalyzeStampsCeiling:
             _capture,
         )
         from inference_optimizer.orchestrator.shared_state import SharedState
+
         md = tmp_path / "analysis.md"
-        md.write_text(
-            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
-        )
+        md.write_text("# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8")
         state = SharedState()
         state.baseline_tput = 527.5
         # warm-replay already promoted an optimized fp8 arm.
@@ -648,17 +688,18 @@ class TestRecordTraceAnalyzeStampsCeiling:
         snap = state.roofline_snapshots[0]
         assert snap["achieved_tok_per_sec"] == 527.5
 
-    def test_falls_back_to_baseline_tput_when_no_current_best(
-        self, tmp_path, monkeypatch
-    ):
+    def test_falls_back_to_baseline_tput_when_no_current_best(self, tmp_path, monkeypatch):
         from inference_optimizer.orchestrator.shared_state import SharedState
+
         self._mock_breakdown(
-            monkeypatch, mem=1000.0, cmp=5000.0, peak=1000.0, kind="memory",
+            monkeypatch,
+            mem=1000.0,
+            cmp=5000.0,
+            peak=1000.0,
+            kind="memory",
         )
         md = tmp_path / "analysis.md"
-        md.write_text(
-            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
-        )
+        md.write_text("# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8")
         state = SharedState()
         state.baseline_tput = 527.5
         state.current_best = {}
@@ -674,19 +715,20 @@ class TestRecordTraceAnalyzeStampsCeiling:
         assert snap["achieved_tok_per_sec"] == 527.5
         assert snap["within_roofline_pct"] == 52.75
 
-    def test_baseline_arm_falls_back_to_last_baseline_tput(
-        self, tmp_path, monkeypatch
-    ):
+    def test_baseline_arm_falls_back_to_last_baseline_tput(self, tmp_path, monkeypatch):
         """When baseline_tput is lost, a baseline-arm snapshot still stamps
         achieved from last_baseline so within/gap pct are not empty."""
         from inference_optimizer.orchestrator.shared_state import SharedState
+
         self._mock_breakdown(
-            monkeypatch, mem=1000.0, cmp=5000.0, peak=1000.0, kind="memory",
+            monkeypatch,
+            mem=1000.0,
+            cmp=5000.0,
+            peak=1000.0,
+            kind="memory",
         )
         md = tmp_path / "analysis.md"
-        md.write_text(
-            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
-        )
+        md.write_text("# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8")
         state = SharedState()
         state.baseline_tput = 0.0
         state.last_baseline = {"output_throughput": 480.0}
@@ -703,19 +745,20 @@ class TestRecordTraceAnalyzeStampsCeiling:
         assert snap["achieved_tok_per_sec"] == 480.0
         assert snap["within_roofline_pct"] == 48.0
 
-    def test_unknown_roofline_arm_falls_back_to_inference(
-        self, tmp_path, monkeypatch
-    ):
+    def test_unknown_roofline_arm_falls_back_to_inference(self, tmp_path, monkeypatch):
         """An invalid roofline_arm is ignored and the recorder infers from
         current_best.tput (here a promoted optimized arm)."""
         from inference_optimizer.orchestrator.shared_state import SharedState
+
         self._mock_breakdown(
-            monkeypatch, mem=1000.0, cmp=5000.0, peak=1000.0, kind="memory",
+            monkeypatch,
+            mem=1000.0,
+            cmp=5000.0,
+            peak=1000.0,
+            kind="memory",
         )
         md = tmp_path / "analysis.md"
-        md.write_text(
-            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
-        )
+        md.write_text("# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8")
         state = SharedState()
         state.baseline_tput = 527.5
         state.current_best = {"tput": 900.0}
@@ -730,15 +773,14 @@ class TestRecordTraceAnalyzeStampsCeiling:
         snap = state.roofline_snapshots[0]
         assert snap["achieved_tok_per_sec"] == 900.0
 
-    def test_current_best_arm_keeps_arm_when_tput_missing(
-        self, tmp_path, monkeypatch
-    ):
+    def test_current_best_arm_keeps_arm_when_tput_missing(self, tmp_path, monkeypatch):
         """A current_best-tagged snapshot keeps its arm even when current_best
         carries no live tput; the ceiling must not downgrade to baseline."""
         from inference_optimizer.orchestrator import roofline_ceiling
         from inference_optimizer.orchestrator.roofline_ceiling import (
             RooflineBreakdown,
         )
+
         seen_arm: dict[str, object] = {}
 
         def _capture(_state, **kw):
@@ -751,15 +793,15 @@ class TestRecordTraceAnalyzeStampsCeiling:
             _capture,
         )
         from inference_optimizer.orchestrator.shared_state import SharedState
+
         md = tmp_path / "analysis.md"
-        md.write_text(
-            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
-        )
+        md.write_text("# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8")
         state = SharedState()
         state.baseline_tput = 527.5
         # No live tput, but a recorded output_throughput from the run.
         state.current_best = {
-            "action": "params", "output_throughput": 690.0,
+            "action": "params",
+            "output_throughput": 690.0,
         }
         state.record_trace_analyze(
             {"trace_input": "/tmp/trace.json", "roofline_arm": "current_best"},
@@ -776,11 +818,10 @@ class TestRecordTraceAnalyzeStampsCeiling:
 
     def test_zero_peak_keeps_within_gap_none(self, tmp_path, monkeypatch):
         from inference_optimizer.orchestrator.shared_state import SharedState
+
         self._mock_breakdown(monkeypatch)
         md = tmp_path / "analysis.md"
-        md.write_text(
-            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
-        )
+        md.write_text("# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8")
         state = SharedState()
         state.baseline_tput = 527.5
         state.record_trace_analyze(
@@ -804,8 +845,10 @@ class TestBuildSnapshotTwoSidedRoofline:
         from inference_optimizer.orchestrator.roofline_snapshot import (
             build_roofline_snapshot,
         )
+
         snap = build_roofline_snapshot(
-            snapshot_id=1, ts="2026-05-30T07:00:00Z",
+            snapshot_id=1,
+            ts="2026-05-30T07:00:00Z",
             analysis_md_path="",
             theoretical_peak_tok_per_sec=1000.0,
             achieved_tok_per_sec=500.0,
@@ -819,8 +862,10 @@ class TestBuildSnapshotTwoSidedRoofline:
         from inference_optimizer.orchestrator.roofline_snapshot import (
             build_roofline_snapshot,
         )
+
         snap = build_roofline_snapshot(
-            snapshot_id=1, ts="2026-05-30T07:00:00Z",
+            snapshot_id=1,
+            ts="2026-05-30T07:00:00Z",
             analysis_md_path="",
             theoretical_peak_tok_per_sec=8000.0,
             achieved_tok_per_sec=6244.0,
@@ -838,10 +883,15 @@ class TestBuildSnapshotTwoSidedRoofline:
         from inference_optimizer.orchestrator.roofline_snapshot import (
             build_roofline_snapshot,
         )
+
         snap = build_roofline_snapshot(
-            snapshot_id=1, ts="t", analysis_md_path="",
-            theoretical_peak_tok_per_sec=0.0, achieved_tok_per_sec=0.0,
-            mem_ceiling_tok_per_sec=0.0, cmp_ceiling_tok_per_sec=0.0,
+            snapshot_id=1,
+            ts="t",
+            analysis_md_path="",
+            theoretical_peak_tok_per_sec=0.0,
+            achieved_tok_per_sec=0.0,
+            mem_ceiling_tok_per_sec=0.0,
+            cmp_ceiling_tok_per_sec=0.0,
             bound_kind="unknown",
         )
         assert snap["roofline_mem_ceiling_tok_per_sec"] is None
@@ -858,6 +908,7 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         from inference_optimizer.orchestrator.roofline_ceiling import (
             RooflineBreakdown,
         )
+
         br = RooflineBreakdown(mem, cmp, peak, kind)
         monkeypatch.setattr(
             roofline_ceiling,
@@ -867,9 +918,7 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
 
     def _record(self, tmp_path, state):
         md = tmp_path / "analysis.md"
-        md.write_text(
-            "# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8"
-        )
+        md.write_text("# TL\n\n## Executive Summary\n\nbody\n", encoding="utf-8")
         state.record_trace_analyze(
             {"trace_input": "/tmp/trace.json"},
             {
@@ -881,11 +930,17 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         return state.roofline_snapshots[0]
 
     def test_memory_bound_breakdown_propagates_to_snapshot(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         from inference_optimizer.orchestrator.shared_state import SharedState
+
         self._mock_breakdown(
-            monkeypatch, mem=8065.0, cmp=375_612.0, peak=8065.0,
+            monkeypatch,
+            mem=8065.0,
+            cmp=375_612.0,
+            peak=8065.0,
             kind="memory",
         )
         state = SharedState()
@@ -899,11 +954,17 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         assert snap["within_roofline_pct"] == pytest.approx(77.43, abs=0.05)
 
     def test_compute_bound_breakdown_propagates_to_snapshot(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         from inference_optimizer.orchestrator.shared_state import SharedState
+
         self._mock_breakdown(
-            monkeypatch, mem=8000.0, cmp=2000.0, peak=2000.0,
+            monkeypatch,
+            mem=8000.0,
+            cmp=2000.0,
+            peak=2000.0,
             kind="compute",
         )
         state = SharedState()
@@ -914,11 +975,18 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         assert snap["roofline_bound_kind"] == "compute"
 
     def test_unknown_breakdown_keeps_all_ceiling_fields_none(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         from inference_optimizer.orchestrator.shared_state import SharedState
+
         self._mock_breakdown(
-            monkeypatch, mem=0.0, cmp=0.0, peak=0.0, kind="unknown",
+            monkeypatch,
+            mem=0.0,
+            cmp=0.0,
+            peak=0.0,
+            kind="unknown",
         )
         state = SharedState()
         state.baseline_tput = 1000.0
@@ -931,13 +999,18 @@ class TestRecordTraceAnalyzeStampsTwoSidedRoofline:
         assert snap["within_roofline_pct"] is None
 
     def test_perfmodel_breakdown_persists_decode_sides_and_bound(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         from inference_optimizer.orchestrator import roofline_ceiling
         from inference_optimizer.orchestrator.shared_state import SharedState
 
         self._mock_breakdown(
-            monkeypatch, mem=8000.0, cmp=40_000.0, peak=7900.0,
+            monkeypatch,
+            mem=8000.0,
+            cmp=40_000.0,
+            peak=7900.0,
             kind="memory",
         )
         monkeypatch.setattr(roofline_ceiling, "load_model_meta", lambda *a, **kw: object())

@@ -66,8 +66,22 @@ def _log(msg: str) -> None:
 # the same rendezvous / discovery / tuning config the container was started
 # with. An sshd session would otherwise launch with a bare login env.
 _ENV_RECOVER_PREFIXES = (
-    "LWS_", "POD_", "NCCL_", "GLOO_", "RCCL_", "DYN_", "SGLANG_", "VLLM_",
-    "HSA_", "HIP_", "ROCR_", "HF_", "NATS_", "UCX_", "NIXL_", "MC_",
+    "LWS_",
+    "POD_",
+    "NCCL_",
+    "GLOO_",
+    "RCCL_",
+    "DYN_",
+    "SGLANG_",
+    "VLLM_",
+    "HSA_",
+    "HIP_",
+    "ROCR_",
+    "HF_",
+    "NATS_",
+    "UCX_",
+    "NIXL_",
+    "MC_",
     # Hyperloom patch (operator-local): KUBERNETES_* must propagate too,
     # otherwise dynamo's kubernetes discovery backend fails with
     #   "Failed to create Kubernetes client: failed to infer config:
@@ -106,9 +120,7 @@ def _recover_container_env() -> dict[str, str]:
         k, _, v = chunk.partition(b"=")
         key = k.decode("utf-8", "ignore")
         val = v.decode("utf-8", "ignore")
-        if key in _ENV_RECOVER_NAMES or any(
-            key.startswith(p) for p in _ENV_RECOVER_PREFIXES
-        ):
+        if key in _ENV_RECOVER_NAMES or any(key.startswith(p) for p in _ENV_RECOVER_PREFIXES):
             # pid1 wins for rendezvous/discovery; but keep sshd's PATH augmented
             # with /opt/venv/bin so python3 resolves to the framework venv.
             env[key] = val
@@ -224,22 +236,32 @@ def _build_sglang_cmd(a: argparse.Namespace, node_rank: int, leader: str) -> lis
         The ``dynamo.sglang`` command argv for this pod's rank.
     """
     cmd = [
-        "python3", "-m", "dynamo.sglang",
-        "--model-path", a.model,
-        "--tp-size", str(a.tp),
+        "python3",
+        "-m",
+        "dynamo.sglang",
+        "--model-path",
+        a.model,
+        "--tp-size",
+        str(a.tp),
         "--trust-remote-code",
-        "--host", "0.0.0.0",
+        "--host",
+        "0.0.0.0",
     ]
     # Single-node roles: omit --nnodes/--node-rank/--dist-init-addr to mirror the
     # SaFE native dynamo.sglang launch. Passing them for an nnodes=1 disaggregated
     # PD role made decode emit 0 output tokens (finish_reason=stop), while the
     # SaFE deploy (which omits them for single node) generates normally.
     if int(a.nnodes) > 1:
-        cmd.extend([
-            "--nnodes", str(a.nnodes),
-            "--node-rank", str(node_rank),
-            "--dist-init-addr", f"{leader}:{a.dist_init_port}",
-        ])
+        cmd.extend(
+            [
+                "--nnodes",
+                str(a.nnodes),
+                "--node-rank",
+                str(node_rank),
+                "--dist-init-addr",
+                f"{leader}:{a.dist_init_port}",
+            ]
+        )
     if a.ep and int(a.ep) > 1:
         cmd.extend(["--ep-size", str(a.ep)])
     if a.extra_args:
@@ -257,9 +279,13 @@ def _build_vllm_cmd(a: argparse.Namespace) -> list[str]:
         The ``dynamo.vllm`` command argv for rank 0.
     """
     cmd = [
-        "python3", "-m", "dynamo.vllm",
-        "--model", a.model,
-        "--tensor-parallel-size", str(a.tp),
+        "python3",
+        "-m",
+        "dynamo.vllm",
+        "--model",
+        a.model,
+        "--tensor-parallel-size",
+        str(a.tp),
     ]
     if a.ep and int(a.ep) > 1:
         cmd.append("--enable-expert-parallel")
@@ -268,8 +294,7 @@ def _build_vllm_cmd(a: argparse.Namespace) -> list[str]:
     return cmd
 
 
-def _detach_launch(cmd: list[str], log_file: Path, pid_file: Path,
-                   env: dict[str, str]) -> int:
+def _detach_launch(cmd: list[str], log_file: Path, pid_file: Path, env: dict[str, str]) -> int:
     """Start ``cmd`` detached (nohup+setsid) and record its PID.
 
     Reparents the server under init so it survives the SSH session closing,
@@ -304,13 +329,13 @@ def _detach_launch(cmd: list[str], log_file: Path, pid_file: Path,
     )
     proc = subprocess.run(
         ["/bin/bash", "-lc", f"set -euo pipefail; {launch}"],
-        env=env, capture_output=True, text=True, timeout=120,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"detach spawn failed rc={proc.returncode} "
-            f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-        )
+        raise RuntimeError(f"detach spawn failed rc={proc.returncode} stdout={proc.stdout!r} stderr={proc.stderr!r}")
     pid = int(pid_file.read_text(encoding="utf-8").strip())
     time.sleep(0.5)
     try:
@@ -322,9 +347,7 @@ def _detach_launch(cmd: list[str], log_file: Path, pid_file: Path,
                 tail = log_file.read_text(errors="replace")[-4000:]
         except OSError:
             pass
-        raise RuntimeError(
-            f"server pid={pid} exited within 0.5s: {exc}; log tail:\n{tail}"
-        ) from exc
+        raise RuntimeError(f"server pid={pid} exited within 0.5s: {exc}; log tail:\n{tail}") from exc
     return pid
 
 
@@ -345,8 +368,11 @@ def _ray_start(role: str, leader: str, env: dict[str, str]) -> None:
     else:
         ray_cmd = f"ray start --address={shlex.quote(leader)}:{_RAY_GCS_PORT} --disable-usage-stats"
     cp = subprocess.run(
-        ["/bin/bash", "-lc", ray_cmd], env=env,
-        capture_output=True, text=True, timeout=180,
+        ["/bin/bash", "-lc", ray_cmd],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
     )
     _log(f"ray start ({role}) rc={cp.returncode} {(cp.stderr or cp.stdout).strip()[:300]}")
 
@@ -365,11 +391,13 @@ def _wait_health(port: int, timeout_s: int, pid: int | None) -> bool:
     """
     import urllib.error
     import urllib.request
+
     started = time.monotonic()
     while time.monotonic() - started < timeout_s:
         try:
             with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/health", timeout=3,
+                f"http://127.0.0.1:{port}/health",
+                timeout=3,
             ) as resp:
                 if 200 <= resp.status < 300:
                     return True
@@ -409,12 +437,11 @@ def main() -> int:
     p.add_argument("--pid-file", default="/tmp/mn_dynamo_server.pid")
     p.add_argument("--log-file", default="/tmp/mn_dynamo_server.log")
     p.add_argument("--extra-args", default="")
-    p.add_argument("--health-port", type=int, default=8000,
-                   help="leader local readiness probe port (frontend/http)")
-    p.add_argument("--health-wait-sec", type=int, default=0,
-                   help="leader-only: seconds to wait for local /health (0=skip)")
-    p.add_argument("--kill-only", action="store_true",
-                   help="kill the prior server via PID file and exit (frees GPU)")
+    p.add_argument("--health-port", type=int, default=8000, help="leader local readiness probe port (frontend/http)")
+    p.add_argument(
+        "--health-wait-sec", type=int, default=0, help="leader-only: seconds to wait for local /health (0=skip)"
+    )
+    p.add_argument("--kill-only", action="store_true", help="kill the prior server via PID file and exit (frees GPU)")
     args = p.parse_args()
 
     env = _recover_container_env()
@@ -448,8 +475,9 @@ def main() -> int:
     if args.kill_only:
         # vllm: also tear down the local ray node so GPUs are freed.
         if args.framework == "vllm":
-            subprocess.run(["/bin/bash", "-lc", "ray stop --force || true"],
-                           env=env, capture_output=True, text=True, timeout=60)
+            subprocess.run(
+                ["/bin/bash", "-lc", "ray stop --force || true"], env=env, capture_output=True, text=True, timeout=60
+            )
         print(json.dumps({"status": "ok", "action": "kill", "node_rank": node_rank}))
         return 0
 
@@ -457,8 +485,10 @@ def main() -> int:
         _log("ERROR --model and --tp are required unless --kill-only")
         return 2
 
-    _log(f"framework={args.framework} model={args.model} tp={args.tp} "
-         f"nnodes={args.nnodes} node_rank={node_rank} leader={leader}")
+    _log(
+        f"framework={args.framework} model={args.model} tp={args.tp} "
+        f"nnodes={args.nnodes} node_rank={node_rank} leader={leader}"
+    )
 
     if args.framework == "sglang":
         cmd = _build_sglang_cmd(args, node_rank, leader)
@@ -468,8 +498,7 @@ def main() -> int:
         _ray_start("head" if node_rank == 0 else "worker", leader, env)
         if node_rank != 0:
             pid_file.write_text("0")  # sentinel; nothing to kill but the ray node
-            print(json.dumps({"status": "ok", "node_rank": node_rank,
-                              "role": "vllm_ray_worker", "pid": 0}))
+            print(json.dumps({"status": "ok", "node_rank": node_rank, "role": "vllm_ray_worker", "pid": 0}))
             return 0
         cmd = _build_vllm_cmd(args)
         pid = _detach_launch(cmd, log_file, pid_file, env)

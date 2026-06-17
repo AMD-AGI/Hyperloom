@@ -53,10 +53,7 @@ BENCH_REGISTRY: dict[str, BenchSpec] = {
     for spec in (
         BenchSpec(
             bench_id="kernel_attention_timing",
-            description=(
-                "Micro-time the attention kernel path in the worktree "
-                "(prefill + decode shapes)."
-            ),
+            description=("Micro-time the attention kernel path in the worktree (prefill + decode shapes)."),
             wall_clock_sec=45.0,
             script_path="kernel_attention_timing.sh",
         ),
@@ -68,18 +65,13 @@ BENCH_REGISTRY: dict[str, BenchSpec] = {
         ),
         BenchSpec(
             bench_id="kernel_kvcache_layout",
-            description=(
-                "Probe KV-cache layout / paging cost for the worktree build."
-            ),
+            description=("Probe KV-cache layout / paging cost for the worktree build."),
             wall_clock_sec=45.0,
             script_path="kernel_kvcache_layout.sh",
         ),
         BenchSpec(
             bench_id="inference_short_prompt",
-            description=(
-                "Short-prompt single-process inference micro-bench (no served "
-                "endpoint)."
-            ),
+            description=("Short-prompt single-process inference micro-bench (no served endpoint)."),
             wall_clock_sec=60.0,
             script_path="inference_short_prompt.sh",
         ),
@@ -147,10 +139,7 @@ async def run_bench(
         return _error(
             "bench_tool_disabled",
             bench_id=bench_id,
-            note=(
-                "run_bench is disabled; use read-only investigation tools "
-                "for exploration."
-            ),
+            note=("run_bench is disabled; use read-only investigation tools for exploration."),
         )
     bench = BENCH_REGISTRY.get(bench_id)
     if bench is None:
@@ -169,9 +158,7 @@ async def run_bench(
             bench_id=bench_id,
             script_path=str(script),
         )
-    scratch = (
-        Path(worktree) / "scratch" / "bench" / bench_id / str(call_id)
-    )
+    scratch = Path(worktree) / "scratch" / "bench" / bench_id / str(call_id)
     scratch.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env.setdefault("SPECIALIST_BENCH_OUTPUT_DIR", str(scratch))
@@ -179,7 +166,8 @@ async def run_bench(
     env.setdefault("SPECIALIST_BENCH_PARAMS_JSON", json.dumps(params or {}))
     try:
         proc = await asyncio.create_subprocess_exec(
-            "bash", str(script),
+            "bash",
+            str(script),
             cwd=str(worktree),
             env=env,
             stdout=asyncio.subprocess.PIPE,
@@ -189,7 +177,8 @@ async def run_bench(
         return _error("spawn_failed", bench_id=bench_id, detail=repr(exc))
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout,
+            proc.communicate(),
+            timeout=timeout,
         )
     except asyncio.TimeoutError:
         proc.kill()
@@ -198,24 +187,29 @@ async def run_bench(
         except ProcessLookupError:
             pass
         return _error(
-            "timed_out", bench_id=bench_id, wall_clock_sec=timeout,
+            "timed_out",
+            bench_id=bench_id,
+            wall_clock_sec=timeout,
         )
     stdout = stdout_bytes.decode("utf-8", errors="replace")[-2000:]
     stderr = stderr_bytes.decode("utf-8", errors="replace")[-2000:]
-    return _ok({
-        "bench_id": bench_id,
-        "exit_code": proc.returncode,
-        "stdout_tail": stdout,
-        "stderr_tail": stderr,
-        "output_dir": str(scratch),
-    })
+    return _ok(
+        {
+            "bench_id": bench_id,
+            "exit_code": proc.returncode,
+            "stdout_tail": stdout,
+            "stderr_tail": stderr,
+            "output_dir": str(scratch),
+        }
+    )
 
 
 _PATCH_PATH_RE = re.compile(r"^(?:---|\+\+\+) (?:a|b)/(?P<path>.+)$", re.M)
 
 
 def apply_patch_in_worktree(
-    worktree: Path, patch_text: str,
+    worktree: Path,
+    patch_text: str,
 ) -> dict[str, Any]:
     """Try ``git apply`` inside the worktree (self-check); not committed.
 
@@ -294,7 +288,10 @@ def capture_worktree_cumulative_diff(worktree: Path) -> str | None:
     try:
         proc = subprocess.run(
             ["git", "-C", str(worktree), "diff", "HEAD"],
-            capture_output=True, text=True, timeout=20.0, check=False,
+            capture_output=True,
+            text=True,
+            timeout=20.0,
+            check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
@@ -315,13 +312,17 @@ def reset_worktree(worktree: Path) -> None:
     try:
         subprocess.run(
             ["git", "reset", "--hard"],
-            cwd=str(worktree), capture_output=True,
-            timeout=20.0, check=False,
+            cwd=str(worktree),
+            capture_output=True,
+            timeout=20.0,
+            check=False,
         )
         subprocess.run(
             ["git", "clean", "-fd"],
-            cwd=str(worktree), capture_output=True,
-            timeout=20.0, check=False,
+            cwd=str(worktree),
+            capture_output=True,
+            timeout=20.0,
+            check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass

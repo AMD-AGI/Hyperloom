@@ -26,8 +26,7 @@ def _no_sleep(monkeypatch):
 
 @pytest.fixture
 def _client(monkeypatch):
-    for key in ("CORTEX_KB_URL", "CORTEX_KB_HTTP_TIMEOUT_SEC",
-                "CORTEX_KB_RETRY_ATTEMPTS", "KB_SERVICE_TOKEN"):
+    for key in ("CORTEX_KB_URL", "CORTEX_KB_HTTP_TIMEOUT_SEC", "CORTEX_KB_RETRY_ATTEMPTS", "KB_SERVICE_TOKEN"):
         monkeypatch.delenv(key, raising=False)
     return RemoteRecipeClient(kb_url=KB_URL, foreground=False, retry_attempts=2)
 
@@ -41,8 +40,9 @@ def test_parse_error_envelope_non_json():
 
 
 def test_parse_error_envelope_business():
-    resp = httpx.Response(409, json={"detail": {"error": {
-        "code": "CONFLICT", "message": "exists", "details": {"x": 1}}}})
+    resp = httpx.Response(
+        409, json={"detail": {"error": {"code": "CONFLICT", "message": "exists", "details": {"x": 1}}}}
+    )
     cat, code, msg, details = rc._parse_error_envelope(resp)
     assert cat == "business"
     assert code == "CONFLICT"
@@ -50,10 +50,15 @@ def test_parse_error_envelope_business():
 
 
 def test_parse_error_envelope_validation_list():
-    resp = httpx.Response(422, json={"detail": [
-        {"loc": ["body", "limit"], "msg": "must be int"},
-        "not-a-mapping",
-    ]})
+    resp = httpx.Response(
+        422,
+        json={
+            "detail": [
+                {"loc": ["body", "limit"], "msg": "must be int"},
+                "not-a-mapping",
+            ]
+        },
+    )
     cat, code, msg, details = rc._parse_error_envelope(resp)
     assert cat == "validation"
     assert "body.limit" in msg
@@ -68,10 +73,12 @@ def test_parse_error_envelope_unknown_dict():
 # ---- transport retry behaviour ----
 def test_transport_retries_then_succeeds(_client):
     with respx.mock(base_url=KB_URL) as mock:
-        mock.get(PATH_HEALTH).mock(side_effect=[
-            httpx.Response(503, json={"detail": "warming"}),
-            httpx.Response(200, json={"status": "ok"}),
-        ])
+        mock.get(PATH_HEALTH).mock(
+            side_effect=[
+                httpx.Response(503, json={"detail": "warming"}),
+                httpx.Response(200, json={"status": "ok"}),
+            ]
+        )
         assert _client.health() is True
 
 
@@ -115,8 +122,9 @@ def test_request_bare_list_wrapped(_client):
 
 def test_request_business_400_raises(_client):
     with respx.mock(base_url=KB_URL) as mock:
-        mock.get("/x").mock(return_value=httpx.Response(
-            400, json={"detail": {"error": {"code": "BAD", "message": "no"}}}))
+        mock.get("/x").mock(
+            return_value=httpx.Response(400, json={"detail": {"error": {"code": "BAD", "message": "no"}}})
+        )
         with pytest.raises(RemoteRecipeClientError) as ei:
             _client._ensure_transport().request("GET", "/x")
     assert ei.value.category == "business"

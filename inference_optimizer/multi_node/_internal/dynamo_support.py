@@ -47,12 +47,15 @@ def _parse_role_index(pod_id: str) -> int | None:
         The parsed role slot index, or ``None`` when the pattern is absent.
     """
     import re
+
     m = re.search(r"-role(\d+)-", pod_id)
     return int(m.group(1)) if m else None
 
 
 def _classify_pod_role(
-    pod_id: str, resource_id: Any, service_roles: list[str],
+    pod_id: str,
+    resource_id: Any,
+    service_roles: list[str],
 ) -> str | None:
     """Classify a DGD pod into frontend / prefill / decode / worker.
 
@@ -96,7 +99,9 @@ def _classify_pod_role(
 
 
 def discover_role_pods(
-    workload: dict[str, Any], *, pd_mode: str = "aggregated",
+    workload: dict[str, Any],
+    *,
+    pd_mode: str = "aggregated",
 ) -> dict[str, list[dict[str, Any]]]:
     """Group a SaFE GetWorkloadResponse's pods by role.
 
@@ -116,7 +121,10 @@ def discover_role_pods(
     """
     service_roles = _service_roles_for(pd_mode)
     groups: dict[str, list[dict[str, Any]]] = {
-        "frontend": [], "prefill": [], "decode": [], "worker": [],
+        "frontend": [],
+        "prefill": [],
+        "decode": [],
+        "worker": [],
     }
     for p in workload.get("pods") or []:
         if not isinstance(p, dict):
@@ -136,16 +144,20 @@ def discover_role_pods(
         role = _classify_pod_role(pod_id, p.get("resourceId"), service_roles)
         if role is None:
             continue
-        groups[role].append({
-            "podId": pod_id,
-            "podIP": pod_ip,
-            "lwsIndex": _parse_lws_ordinal(pod_id),
-        })
+        groups[role].append(
+            {
+                "podId": pod_id,
+                "podIP": pod_ip,
+                "lwsIndex": _parse_lws_ordinal(pod_id),
+            }
+        )
     for role in groups:
-        groups[role].sort(key=lambda d: (
-            d["lwsIndex"] if isinstance(d["lwsIndex"], int) else 1 << 30,
-            d["podId"],
-        ))
+        groups[role].sort(
+            key=lambda d: (
+                d["lwsIndex"] if isinstance(d["lwsIndex"], int) else 1 << 30,
+                d["podId"],
+            )
+        )
     return groups
 
 
@@ -226,8 +238,7 @@ def frontend_service_url(
 DYNAMO_BOOTSTRAP_PORT = 30001
 
 
-def disagg_flags(mode: str, kv_transfer_backend: str, *,
-                 bootstrap_port: int = DYNAMO_BOOTSTRAP_PORT) -> str:
+def disagg_flags(mode: str, kv_transfer_backend: str, *, bootstrap_port: int = DYNAMO_BOOTSTRAP_PORT) -> str:
     """sglang PD disaggregation flags for a prefill/decode group.
 
     Mirrors the SaFE dispatcher's ``sglangDisaggFlags`` so the SSH-launched
@@ -306,16 +317,26 @@ def build_node_launch_args(
         # the pid-file path so it kills the right server.
         parts.extend(["--pid-file", pid_file])
         return " ".join(shlex.quote(x) for x in parts)
-    parts.extend([
-        "--model", model,
-        "--tp", str(tp),
-        "--nnodes", str(nnodes),
-        "--dist-init-port", str(dist_init_port),
-        "--pid-file", pid_file,
-        "--log-file", log_file,
-        "--health-port", str(health_port),
-        "--health-wait-sec", str(health_wait_sec),
-    ])
+    parts.extend(
+        [
+            "--model",
+            model,
+            "--tp",
+            str(tp),
+            "--nnodes",
+            str(nnodes),
+            "--dist-init-port",
+            str(dist_init_port),
+            "--pid-file",
+            pid_file,
+            "--log-file",
+            log_file,
+            "--health-port",
+            str(health_port),
+            "--health-wait-sec",
+            str(health_wait_sec),
+        ]
+    )
     if ep and int(ep) > 1:
         parts.extend(["--ep", str(ep)])
     quoted = " ".join(shlex.quote(x) for x in parts)

@@ -117,7 +117,7 @@ async def _async_main(argv: list[str] | None = None) -> None:
         argv (list[str] | None): Argument vector forwarded to
             :func:`_parse_args`. Defaults to ``None``.
     """
-    args = _parse_args(argv)
+    _parse_args(argv)
     config = await Config.discover()
     await _run_reactor_mode(config)
 

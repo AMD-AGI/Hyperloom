@@ -125,7 +125,8 @@ def cid_to_path_components(
     model, hardware, framework, model_type, architectures, framework_version, precision = parts[1:]
     if any(not seg for seg in parts[1:]):
         raise InvalidCanonicalIdError(
-            raw, "empty segment(s) detected — every dimension must be non-empty",
+            raw,
+            "empty segment(s) detected — every dimension must be non-empty",
         )
     return (model, hardware, framework, model_type, architectures, framework_version, precision)
 
@@ -192,8 +193,7 @@ def canonical_id_for_path(*, root: Path, recipe_dir: Path) -> str:
     if len(parts) != CANONICAL_ID_DIMENSIONS:
         raise InvalidCanonicalIdError(
             str(recipe_dir),
-            f"expected {CANONICAL_ID_DIMENSIONS} levels under root, "
-            f"got {len(parts)}: {parts!r}",
+            f"expected {CANONICAL_ID_DIMENSIONS} levels under root, got {len(parts)}: {parts!r}",
         )
     # Directory order matches canonical_id: model/hw/fw/model_type/arch/fwv/precision
     model, hardware, framework, model_type, architectures, framework_version, precision = parts

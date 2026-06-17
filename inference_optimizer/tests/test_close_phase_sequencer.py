@@ -12,7 +12,9 @@ import pytest
 
 from inference_optimizer.orchestrator.agent_role import default_role_registry
 from inference_optimizer.orchestrator.backends.mock_backend import (
-    MockBackend, MockTurn, ScriptedPlan,
+    MockBackend,
+    MockTurn,
+    ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.policy import CORE_STATE_FIELDS
@@ -72,6 +74,7 @@ class _StubTaskRegistry:
         if existing is not None:
             return existing, True
         import uuid as _uuid
+
         tid = task_id or _uuid.uuid4().hex
         row = _StubTaskRow(
             task_id=tid,
@@ -178,7 +181,9 @@ async def test_record_close_step_appends_to_evidence_close_steps(coord):
 async def test_record_close_step_optional_detail(coord):
     coord.shared_state.phase_history = [_close_phase_history_row()]
     await coord._record_close_step(
-        "cortex_commit", status="failed", detail="cortex unreachable",
+        "cortex_commit",
+        status="failed",
+        detail="cortex unreachable",
     )
     row = coord.shared_state.phase_history[-1]["evidence"]["close_steps"][0]
     assert row["detail"] == "cortex unreachable"
@@ -198,13 +203,14 @@ async def test_record_close_step_creates_missing_evidence_dict(coord):
 @pytest.mark.asyncio
 async def test_record_close_step_replaces_non_list_close_steps(coord):
     """Defensive: malformed pre-existing close_steps (not a list) gets replaced."""
-    coord.shared_state.phase_history = [{
-        "to_phase": "CLOSE", "evidence": {"close_steps": "broken"},
-    }]
+    coord.shared_state.phase_history = [
+        {
+            "to_phase": "CLOSE",
+            "evidence": {"close_steps": "broken"},
+        }
+    ]
     await coord._record_close_step("report", status="done")
-    assert isinstance(
-        coord.shared_state.phase_history[-1]["evidence"]["close_steps"], list
-    )
+    assert isinstance(coord.shared_state.phase_history[-1]["evidence"]["close_steps"], list)
 
 
 @pytest.mark.asyncio
@@ -219,7 +225,10 @@ async def test_wait_for_task_terminal_returns_immediately_when_succeeded(
     coord,
 ):
     await coord.tasks.create_or_return_existing(
-        kind="report", params={}, idempotency_key="k1", task_id="t-x",
+        kind="report",
+        params={},
+        idempotency_key="k1",
+        task_id="t-x",
     )
     state = await coord._wait_for_task_terminal("t-x", timeout_sec=1.0)
     assert state == "succeeded"
@@ -234,12 +243,17 @@ async def test_wait_for_task_terminal_returns_none_for_unknown(coord):
 @pytest.mark.asyncio
 async def test_wait_for_task_terminal_timeout(coord):
     """Task never reaches terminal → returns None after timeout."""
+
     class _StuckRegistry:
         async def get(self, task_id):
             return _StubTaskRow(
-                task_id=task_id, kind="report", state="running",
-                params={}, idempotency_key="",
+                task_id=task_id,
+                kind="report",
+                state="running",
+                params={},
+                idempotency_key="",
             )
+
     coord.tasks = _StuckRegistry()
     state = await coord._wait_for_task_terminal("t-stuck", timeout_sec=0.05)
     assert state is None
@@ -262,8 +276,11 @@ async def test_enqueue_internal_report_task_fresh(coord):
 async def test_enqueue_internal_report_task_reuses_existing(coord):
     """When the wall-clock deadline already enqueued a report task, reuse it."""
     existing = _StubTaskRow(
-        task_id="wallclock-report", kind="report", state="succeeded",
-        params={}, idempotency_key="closing-report-1234",
+        task_id="wallclock-report",
+        kind="report",
+        state="succeeded",
+        params={},
+        idempotency_key="closing-report-1234",
     )
     coord.tasks._by_id["wallclock-report"] = existing
     coord.shared_state.closing_report_task_id = "wallclock-report"
@@ -302,8 +319,13 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     # fact_finalize.
     steps = [r["step"] for r in rows]
     assert steps == [
-        "sequencer_started", "report", "session_breakdown",
-        "artifact_package", "fact_finalize", "ndjson_drain", "done",
+        "sequencer_started",
+        "report",
+        "session_breakdown",
+        "artifact_package",
+        "fact_finalize",
+        "ndjson_drain",
+        "done",
     ]
     # All effective steps succeeded. Index by step name so the assertions
     # don't drift if the sequence grows again.
@@ -411,11 +433,14 @@ def test_policy_blocks_llm_close_sequence_done_write():
         default_role_registry,
     )
     from inference_optimizer.protocol.intent import (
-        Intent, IntentType,
+        Intent,
+        IntentType,
     )
     from inference_optimizer.orchestrator.policy import (
-        PolicyDenied, PolicyGate,
+        PolicyDenied,
+        PolicyGate,
     )
+
     gate = PolicyGate(role_registry=default_role_registry())
     intent = Intent(
         type=IntentType.UPDATE_STATE,
@@ -434,9 +459,9 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle_plan),
-        "kernel":        MockBackend(idle_plan),
-        "critic":        MockBackend(idle_plan),
-        "robustness":    MockBackend(idle_plan),
+        "kernel": MockBackend(idle_plan),
+        "critic": MockBackend(idle_plan),
+        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=session_dir,
@@ -453,10 +478,11 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
     coord.shared_state.phase = "SWEEP"
     coord.shared_state.phase_history = [
         {"to_phase": "EXPLORE", "evidence": {}, "reason": "prelude_done"},
-        {"to_phase": "SWEEP",   "evidence": {}, "reason": "plateau_kernel"},
+        {"to_phase": "SWEEP", "evidence": {}, "reason": "plateau_kernel"},
     ]
     coord.shared_state.record_phase_transition(
-        to_phase="CLOSE", reason="sweep_done",
+        to_phase="CLOSE",
+        reason="sweep_done",
         evidence={"trigger": "test_e2e"},
     )
     await coord._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
@@ -488,9 +514,9 @@ async def test_cortex_t4_hook_short_circuits_when_sequencer_done(tmp_path: Path)
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle_plan),
-        "kernel":        MockBackend(idle_plan),
-        "critic":        MockBackend(idle_plan),
-        "robustness":    MockBackend(idle_plan),
+        "kernel": MockBackend(idle_plan),
+        "critic": MockBackend(idle_plan),
+        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=session_dir,
@@ -514,9 +540,9 @@ async def test_cortex_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Path)
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle_plan),
-        "kernel":        MockBackend(idle_plan),
-        "critic":        MockBackend(idle_plan),
-        "robustness":    MockBackend(idle_plan),
+        "kernel": MockBackend(idle_plan),
+        "critic": MockBackend(idle_plan),
+        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=session_dir,

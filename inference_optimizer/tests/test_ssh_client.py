@@ -36,7 +36,11 @@ def test_ssh_run_builds_expected_argv(monkeypatch):
 
     monkeypatch.setattr(ssh_client.subprocess, "run", _run)
     cp = ssh_client.ssh_run(
-        "10.0.0.1", "echo hi", key_path="/k/id", port=2345, timeout=42,
+        "10.0.0.1",
+        "echo hi",
+        key_path="/k/id",
+        port=2345,
+        timeout=42,
     )
     assert cp.returncode == 0
     argv = captured["argv"]
@@ -63,8 +67,12 @@ def test_ssh_run_script_base64_wraps_and_prepends_env(monkeypatch):
     monkeypatch.setattr(ssh_client.subprocess, "run", _run)
     script = "print('multi\nnode')"
     ssh_client.ssh_run_script(
-        "h", script, "python3", "--flag v",
-        key_path="/k", env={"MORI_DISPATCH": "1", "X Y": "a b"},
+        "h",
+        script,
+        "python3",
+        "--flag v",
+        key_path="/k",
+        env={"MORI_DISPATCH": "1", "X Y": "a b"},
         remote_path="/tmp/run.py",
     )
     # The remote command is the last argv element (bash -lc <quoted cmd>).
@@ -83,7 +91,8 @@ def test_ssh_run_script_base64_wraps_and_prepends_env(monkeypatch):
 def test_ssh_run_script_no_env_has_no_prefix(monkeypatch):
     captured = {}
     monkeypatch.setattr(
-        ssh_client.subprocess, "run",
+        ssh_client.subprocess,
+        "run",
         lambda argv, **kw: captured.setdefault("argv", argv) or _FakeCompleted(0),
     )
     ssh_client.ssh_run_script("h", "x=1", "python3", "", key_path="/k")
@@ -103,7 +112,10 @@ def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch):
 
     monkeypatch.setattr(ssh_client.subprocess, "run", _run)
     ssh_client.ssh_run_bash_with_env(
-        "h", "echo body", {"OOB_API_KEY": "secret-123"}, key_path="/k",
+        "h",
+        "echo body",
+        {"OOB_API_KEY": "secret-123"},
+        key_path="/k",
     )
     # bash -s reads the script from stdin; the secret is in the piped input,
     # never on argv (so it cannot leak via ps/argv or the pod's disk).
@@ -116,7 +128,8 @@ def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch):
 
 def test_probe_ssh_true_on_marker(monkeypatch):
     monkeypatch.setattr(
-        ssh_client, "ssh_run",
+        ssh_client,
+        "ssh_run",
         lambda *a, **kw: _FakeCompleted(0, "mn_ssh_ok\n", ""),
     )
     assert ssh_client.probe_ssh("h", key_path="/k") is True
@@ -124,7 +137,8 @@ def test_probe_ssh_true_on_marker(monkeypatch):
 
 def test_probe_ssh_false_on_bad_rc(monkeypatch):
     monkeypatch.setattr(
-        ssh_client, "ssh_run",
+        ssh_client,
+        "ssh_run",
         lambda *a, **kw: _FakeCompleted(255, "", "conn refused"),
     )
     assert ssh_client.probe_ssh("h", key_path="/k") is False
@@ -158,7 +172,8 @@ def test_generate_session_keypair_idempotent_reuse(tmp_path, monkeypatch):
 
 def test_generate_session_keypair_raises_on_keygen_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        ssh_client.subprocess, "run",
+        ssh_client.subprocess,
+        "run",
         lambda *a, **kw: _FakeCompleted(1, "", "boom"),
     )
     with pytest.raises(RuntimeError, match="ssh-keygen failed"):

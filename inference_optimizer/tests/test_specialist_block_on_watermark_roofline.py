@@ -148,7 +148,9 @@ class TestWatermarkRatioEnvOverride:
     """``HYPERLOOM_ROOFLINE_WATERMARK_RATIO`` tunes the threshold (default 1.10); invalid values fall back."""
 
     def test_env_var_lowers_threshold_to_5pct(
-        self, coord: Coordinator, monkeypatch: pytest.MonkeyPatch,
+        self,
+        coord: Coordinator,
+        monkeypatch: pytest.MonkeyPatch,
     ):
         monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "1.05")
         coord.shared_state.baseline_tput = 100.0
@@ -157,7 +159,9 @@ class TestWatermarkRatioEnvOverride:
         assert coord._needs_roofline_for_watermark() is True
 
     def test_env_var_raises_threshold_to_20pct(
-        self, coord: Coordinator, monkeypatch: pytest.MonkeyPatch,
+        self,
+        coord: Coordinator,
+        monkeypatch: pytest.MonkeyPatch,
     ):
         monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "1.20")
         coord.shared_state.baseline_tput = 100.0
@@ -166,7 +170,9 @@ class TestWatermarkRatioEnvOverride:
         assert coord._needs_roofline_for_watermark() is False
 
     def test_unset_env_var_defaults_to_1_10(
-        self, coord: Coordinator, monkeypatch: pytest.MonkeyPatch,
+        self,
+        coord: Coordinator,
+        monkeypatch: pytest.MonkeyPatch,
     ):
         monkeypatch.delenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", raising=False)
         coord.shared_state.baseline_tput = 100.0
@@ -189,12 +195,14 @@ class TestWatermarkRatioEnvOverride:
         assert coord._needs_roofline_for_watermark() is False
 
     def test_resolver_returns_default_when_unset(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ):
         """The module-level resolver returns 1.10 when the env var is unset."""
         from inference_optimizer.orchestrator.coordinator import (
             _resolve_roofline_watermark_ratio,
         )
+
         monkeypatch.delenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", raising=False)
         assert _resolve_roofline_watermark_ratio() == 1.10
 

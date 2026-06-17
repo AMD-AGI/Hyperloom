@@ -91,10 +91,14 @@ def test_main_skips_skipped_candidates_without_backend_dispatch(
         "argv",
         [
             "kernel_optimization.py",
-            "--kernel-id", requested,
-            "--session-id", "s1",
-            "--workspace-path", str(tmp_path),
-            "--candidates-path", str(candidates_path),
+            "--kernel-id",
+            requested,
+            "--session-id",
+            "s1",
+            "--workspace-path",
+            str(tmp_path),
+            "--candidates-path",
+            str(candidates_path),
         ],
     )
 

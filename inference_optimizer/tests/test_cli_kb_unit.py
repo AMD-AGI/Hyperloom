@@ -3,20 +3,23 @@
 """Coverage for ``cli_kb``: local KB root resolution, the RecipeKB dispatcher
 across remote-mode branches (degraded / gbrain / cortex), the cortex T0
 bootstrap (success + mid-flight failure), and the KnowledgePlane facade."""
+
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
-import pytest
 
 from inference_optimizer import cli_kb
 
 
 def _args(**over):
     base = dict(
-        local_kb_root=None, degraded_kb=False, cortex_kb_url=None,
-        pr_monitor_enabled=True, pr_monitor_url=None, pr_monitor_mcp_url=None,
+        local_kb_root=None,
+        degraded_kb=False,
+        cortex_kb_url=None,
+        pr_monitor_enabled=True,
+        pr_monitor_url=None,
+        pr_monitor_mcp_url=None,
         pr_feed_window_days=None,
     )
     base.update(over)
@@ -72,6 +75,7 @@ def test_dispatcher_gbrain_enabled(tmp_path, monkeypatch) -> None:
         enabled = True
 
     from inference_optimizer.recipe_kb import gbrain_remote_client as grc
+
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _Remote())
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
     assert isinstance(kb.remote, _Remote)
@@ -87,6 +91,7 @@ def test_dispatcher_gbrain_inline_mirror(tmp_path, monkeypatch) -> None:
 
     from inference_optimizer.recipe_kb import gbrain_remote_client as grc
     from inference_optimizer.recipe_kb import gbrain_ingest as gi
+
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _Remote())
     monkeypatch.setattr(gi, "build_mirror_mcp_from_env", lambda: object())
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
@@ -98,6 +103,7 @@ def test_dispatcher_gbrain_not_configured(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
     monkeypatch.setenv("RECIPE_KB_REMOTE", "gbrain")
     from inference_optimizer.recipe_kb import gbrain_remote_client as grc
+
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: None)
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
     assert kb.remote is None
@@ -108,6 +114,7 @@ def test_dispatcher_both_no_sources(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("RECIPE_KB_REMOTE", "both")
     monkeypatch.delenv("CORTEX_KB_URL", raising=False)
     from inference_optimizer.recipe_kb import gbrain_remote_client as grc
+
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: None)
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
     assert kb.remote is None
@@ -141,6 +148,7 @@ def test_attach_recipe_audit_hook_unwraps_mirror(tmp_path, monkeypatch) -> None:
 
     from inference_optimizer.recipe_kb import gbrain_ingest as gi
     from inference_optimizer.recipe_kb import gbrain_remote_client as grc
+
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _Remote())
     monkeypatch.setattr(gi, "build_mirror_mcp_from_env", lambda: object())
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
@@ -165,7 +173,10 @@ def test_bootstrap_cortex_kb_success(tmp_path, monkeypatch) -> None:
     calls = []
     monkeypatch.setattr(cli_kb, "run_t0_anchor", lambda *a, **k: calls.append(k))
     kb = cli_kb._bootstrap_cortex_kb(
-        _args(), session_dir=tmp_path, manifest={"model_name": "m"}, resume=False,
+        _args(),
+        session_dir=tmp_path,
+        manifest={"model_name": "m"},
+        resume=False,
     )
     assert kb is not None
     assert calls  # t0 anchor invoked
@@ -181,9 +192,9 @@ def test_bootstrap_cortex_kb_t0_failure_continues(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(cli_kb, "run_t0_anchor", _boom)
     args = _args()
     kb = cli_kb._bootstrap_cortex_kb(
-        args, session_dir=tmp_path,
-        manifest={"model_path": "/models/Qwen", "stack_fingerprint": {"rocm": "6.2"},
-                  "image": "img@sha"},
+        args,
+        session_dir=tmp_path,
+        manifest={"model_path": "/models/Qwen", "stack_fingerprint": {"rocm": "6.2"}, "image": "img@sha"},
         resume=False,
     )
     assert kb is not None
@@ -193,7 +204,8 @@ def test_bootstrap_cortex_kb_t0_failure_continues(tmp_path, monkeypatch) -> None
 # -- _bootstrap_knowledge_plane --------------------------------------------
 def test_bootstrap_knowledge_plane_enabled(tmp_path) -> None:
     plane = cli_kb._bootstrap_knowledge_plane(
-        _args(pr_monitor_enabled=True), session_dir=tmp_path,
+        _args(pr_monitor_enabled=True),
+        session_dir=tmp_path,
     )
     assert plane is not None
 

@@ -52,7 +52,8 @@ def _min_nofile_target() -> int:
 
 
 def ensure_fd_limit(
-    min_soft: Optional[int] = None, log_path: Optional[Path] = None,
+    min_soft: Optional[int] = None,
+    log_path: Optional[Path] = None,
 ) -> Tuple[int, int]:
     """Raise this process's RLIMIT_NOFILE soft limit before Ray starts.
 
@@ -104,8 +105,7 @@ def ensure_fd_limit(
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("a", encoding="utf-8") as log:
                 log.write(
-                    f"[fd_limit] RLIMIT_NOFILE soft raised to {soft} "
-                    f"(hard={hard}) for raylet stability (issue #433)\n"
+                    f"[fd_limit] RLIMIT_NOFILE soft raised to {soft} (hard={hard}) for raylet stability (issue #433)\n"
                 )
         except OSError:  # pragma: no cover - logging must never break startup
             pass
@@ -247,7 +247,8 @@ def _is_ray_version_mismatch(text: str) -> bool:
 
 
 def force_restart_local_cluster(
-    num_gpus: Optional[int] = None, log_path: Optional[Path] = None,
+    num_gpus: Optional[int] = None,
+    log_path: Optional[Path] = None,
 ) -> None:
     """Tear down any reachable Ray cluster and start a fresh local head.
 
@@ -282,31 +283,54 @@ def force_restart_local_cluster(
         subprocess.run(stop_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
         proc = subprocess.run(start_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"failed to restart local Ray after version mismatch; see {log_path}"
-        )
+        raise RuntimeError(f"failed to restart local Ray after version mismatch; see {log_path}")
 
 
 # Env vars safe to forward to Ray workers; excludes *_VISIBLE_DEVICES (Ray-owned; forcing them triggers set_visible_accelerator_ids IndexError on ROCm).
 SAFE_ENV_KEYS = (
-    "PATH", "HOME", "LD_LIBRARY_PATH",
-    "HYPERLOOM_KERNEL_AGENT_ROOT", "KERNEL_AGENT_ROOT",
+    "PATH",
+    "HOME",
+    "LD_LIBRARY_PATH",
+    "HYPERLOOM_KERNEL_AGENT_ROOT",
+    "KERNEL_AGENT_ROOT",
     # USER_DATA_PATH is the single artefact root others default under.
-    "USER_DATA_PATH", "HYPERLOOM_RUNTIME_DIR", "KERNEL_AGENT_ENV",
-    "MAGPIE_DIR", "INFERENCEX_PATH",
+    "USER_DATA_PATH",
+    "HYPERLOOM_RUNTIME_DIR",
+    "KERNEL_AGENT_ENV",
+    "MAGPIE_DIR",
+    "INFERENCEX_PATH",
     "SAFE_API_KEY",
-    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-    "OPENAI_API_KEY", "OPENAI_BASE_URL",
-    "OOB_API_KEY", "OOB_BASE_URL", "OOB_LOCAL", "OOB_HOME",
-    "CURSOR_API_KEY", "CURSOR_DEFAULT_MODEL",
-    "AMD_API_KEY", "AMD_LLM_API_KEY", "LLM_GATEWAY_KEY",
-    "LLM_API_KEY", "LLM_API_BASE", "LLM_PROXY_API_KEY", "LLM_PROXY_BASE_URL",
-    "GEAK_CONFIG", "GEAK_MODEL_NAME", "GEAK_API_KEY", "GEAK_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OOB_API_KEY",
+    "OOB_BASE_URL",
+    "OOB_LOCAL",
+    "OOB_HOME",
+    "CURSOR_API_KEY",
+    "CURSOR_DEFAULT_MODEL",
+    "AMD_API_KEY",
+    "AMD_LLM_API_KEY",
+    "LLM_GATEWAY_KEY",
+    "LLM_API_KEY",
+    "LLM_API_BASE",
+    "LLM_PROXY_API_KEY",
+    "LLM_PROXY_BASE_URL",
+    "GEAK_CONFIG",
+    "GEAK_MODEL_NAME",
+    "GEAK_API_KEY",
+    "GEAK_BASE_URL",
     "GEAK_WORK_DIR",
-    "GEAK_MEMORY_STORE_PATH", "GEAK_SAVE_TO_KNOWLEDGE_BASE",
-    "GEAK_MEMORY_MIN_SPEEDUP", "GEAK_CROSS_SESSION_MEMORY_URL",
-    "GEAK_MEMORY_API_KEY", "GEAK_USE_KNOWLEDGE_BASE",
-    "GEAK_MEMORY_DISABLE", "GEAK_MEMORY_NO_CROSS_SESSION",
+    "GEAK_MEMORY_STORE_PATH",
+    "GEAK_SAVE_TO_KNOWLEDGE_BASE",
+    "GEAK_MEMORY_MIN_SPEEDUP",
+    "GEAK_CROSS_SESSION_MEMORY_URL",
+    "GEAK_MEMORY_API_KEY",
+    "GEAK_USE_KNOWLEDGE_BASE",
+    "GEAK_MEMORY_DISABLE",
+    "GEAK_MEMORY_NO_CROSS_SESSION",
     "MSWEA_MODEL_NAME",
     # e2e optimizer (GEAK@GEAK_v4, formerly PerfSkills): the runner path + repo
     # root so a Ray worker can locate interface/run_e2e.py and the e2e_workflow/
@@ -369,6 +393,7 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
     import contextlib
     import io
     import ray
+
     runtime_env = safe_runtime_env()
 
     def _init() -> None:

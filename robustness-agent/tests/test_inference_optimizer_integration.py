@@ -216,7 +216,9 @@ async def test_gpu_memory_leaked_round_trips_through_upstream_policy_gate(tmp_pa
         assert any(s.name == "gpu_memory_leaked" for s in second)
 
         decision = await ladder.decide(
-            second, tick_index=1, now_unix=2.0,
+            second,
+            tick_index=1,
+            now_unix=2.0,
         )
         types_emitted = {i.type.value for i in decision.intents}
         assert {"alert", "delegate"} <= types_emitted
@@ -226,9 +228,7 @@ async def test_gpu_memory_leaked_round_trips_through_upstream_policy_gate(tmp_pa
         for intent in decision.intents:
             gate.validate_intent("robustness", _to_upstream(intent))
 
-        delegate = next(
-            i for i in decision.intents if i.type.value == "delegate"
-        )
+        delegate = next(i for i in decision.intents if i.type.value == "delegate")
         assert delegate.payload["action_name"] == "recover"
         assert delegate.payload["params"]["force_gpu_cleanup"] is True
         assert delegate.payload["params"]["reason"] == "gpu_memory_leaked"
@@ -263,11 +263,13 @@ async def test_gpu_memory_leaked_silent_when_live_owner_present(tmp_path):
                     for i in range(2)
                 ],
             },
-            local_processes=[{
-                "pid": 4242,
-                "rss_mb": 8_000.0,
-                "cmd": "python -m vllm.entrypoints.openai.api_server",
-            }],
+            local_processes=[
+                {
+                    "pid": 4242,
+                    "rss_mb": 8_000.0,
+                    "cmd": "python -m vllm.entrypoints.openai.api_server",
+                }
+            ],
         )
         for tick in range(4):
             ctx = ReactorContext(
@@ -302,8 +304,7 @@ async def test_repeated_failure_emits_prune_branch_passing_gate(tmp_path):
     )
     for tid in ("t1", "t2"):
         conn.execute(
-            "INSERT INTO events (msg_id, from_agent, to_agent, topic, payload, ts)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events (msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 tid,
                 "coordinator",

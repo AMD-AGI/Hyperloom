@@ -32,17 +32,16 @@ from inference_optimizer.paths import make_session_dir
 
 # ---------------------------------------------------------------------------
 def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE,
-                  payload={"topic": "heartbeat", "body_md": "ok"})
+    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 
 
 def _silent_backends() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel":        MockBackend(silent, name="k"),
-        "critic":        MockBackend(silent, name="c"),
-        "robustness":    MockBackend(silent, name="r"),
+        "kernel": MockBackend(silent, name="k"),
+        "critic": MockBackend(silent, name="c"),
+        "robustness": MockBackend(silent, name="r"),
     }
 
 
@@ -58,11 +57,11 @@ async def test_report_resolves_session_dir_from_env(tmp_path, monkeypatch):
     """ReportExecutor resolves session_dir from $USER_DATA_PATH."""
     sd = tmp_path / "real-session"
     sd.mkdir()
-    state = SharedState(session_id=sd.name, model_name="qwen3-8b",
-                        baseline_tput=800.0, cumulative_gain=2.5)
+    state = SharedState(session_id=sd.name, model_name="qwen3-8b", baseline_tput=800.0, cumulative_gain=2.5)
     state.save(sd)
     # Initialise the coordinator.db schema.
     from inference_optimizer.storage.connection import SqliteConnection
+
     storage_dir = sd / "storage"
     storage_dir.mkdir()
     SqliteConnection(storage_dir / "coordinator.db").close()
@@ -70,9 +69,9 @@ async def test_report_resolves_session_dir_from_env(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(sd))
 
     class _Ctx:
-        task = Task(task_id="t-1", kind="report", params={},
-                    requires_lanes=(), state="running",
-                    idempotency_key="report-test-1")
+        task = Task(
+            task_id="t-1", kind="report", params={}, requires_lanes=(), state="running", idempotency_key="report-test-1"
+        )
         lease = None
         extra: dict = {}
 
@@ -89,15 +88,16 @@ async def test_report_prefers_ctx_extra_over_env(tmp_path, monkeypatch):
     sd.mkdir()
     SharedState(session_id=sd.name, baseline_tput=600.0).save(sd)
     from inference_optimizer.storage.connection import SqliteConnection
+
     (sd / "storage").mkdir()
     SqliteConnection(sd / "storage" / "coordinator.db").close()
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "wrong"))
 
     class _Ctx:
-        task = Task(task_id="t-2", kind="report", params={},
-                    requires_lanes=(), state="running",
-                    idempotency_key="report-test-2")
+        task = Task(
+            task_id="t-2", kind="report", params={}, requires_lanes=(), state="running", idempotency_key="report-test-2"
+        )
         lease = None
         extra = {"session_dir": str(sd)}
 
@@ -115,11 +115,14 @@ async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypa
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from inference_optimizer.orchestrator import kernel_request_handlers
+
         async def fake_handler(payload, *, session_dir):
             return {"status": "ok", "selected_kernels": [{"rank": 1, "name": "x"}]}
+
         monkeypatch.setitem(
             kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "trace_analyze", fake_handler,
+            "trace_analyze",
+            fake_handler,
         )
 
         cur_before = await c.cursors.load("kernel")
@@ -127,8 +130,7 @@ async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypa
 
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "trace_analyze",
-                     "params": {"trace_input": "/tmp/trace.json"}},
+            payload={"target_agent": "kernel", "kind": "trace_analyze", "params": {"trace_input": "/tmp/trace.json"}},
         )
         await c._handle_intent("orchestration", intent)
 
@@ -144,10 +146,10 @@ async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypa
             f"request seq {request_msg.seq} to suppress duplicate response"
         )
         leftover = await c.bus.replay_for(
-            "kernel", after_seq=cur_after.last_processed_seq,
+            "kernel",
+            after_seq=cur_after.last_processed_seq,
         )
-        assert not any(m.topic == "request" and m.msg_id == request_msg.msg_id
-                       for m in leftover)
+        assert not any(m.topic == "request" and m.msg_id == request_msg.msg_id for m in leftover)
     finally:
         await c.stop()
 
@@ -158,6 +160,7 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from inference_optimizer.orchestrator import kernel_request_handlers
+
         candidates_path = tmp_path / "kernel_candidates.json"
         candidates_path.write_text("{}", encoding="utf-8")
         call_count = {"n": 0}
@@ -168,20 +171,29 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
                 "status": "ok",
                 "candidates_path": str(candidates_path),
                 "hot_kernels": [
-                    {"kernel_id": "k001", "name": "kA", "gpu_pct": 30.0,
-                     "source_file": "/sgl-workspace/aiter/csrc/x.cu",
-                     "reusable_native_kernel": True},
+                    {
+                        "kernel_id": "k001",
+                        "name": "kA",
+                        "gpu_pct": 30.0,
+                        "source_file": "/sgl-workspace/aiter/csrc/x.cu",
+                        "reusable_native_kernel": True,
+                    },
                 ],
             }
+
         monkeypatch.setitem(
             kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "trace_analyze", fake_handler,
+            "trace_analyze",
+            fake_handler,
         )
 
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "trace_analyze",
-                     "params": {"trace_input": "/tmp/trace-A.json.gz"}},
+            payload={
+                "target_agent": "kernel",
+                "kind": "trace_analyze",
+                "params": {"trace_input": "/tmp/trace-A.json.gz"},
+            },
         )
         await c._handle_intent("orchestration", intent)
         await c._handle_intent("orchestration", intent)
@@ -194,11 +206,17 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
         assert "k001" in cached["reusable_native_kernel_ids"]
 
         # Different trace_input must NOT hit the cache.
-        await c._handle_intent("orchestration", Intent(
-            type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "trace_analyze",
-                     "params": {"trace_input": "/tmp/trace-B.json.gz"}},
-        ))
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={
+                    "target_agent": "kernel",
+                    "kind": "trace_analyze",
+                    "params": {"trace_input": "/tmp/trace-B.json.gz"},
+                },
+            ),
+        )
         assert call_count["n"] == 2
 
         assert "last_trace_analyze=" in c.shared_state.to_prompt_summary()
@@ -213,6 +231,7 @@ async def test_profile_promotion_records_args_and_clears_select_cache(session_di
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from inference_optimizer.orchestrator.task_registry import Task
+
         c.shared_state.last_trace_analyze = {
             "trace_input": "/old/trace.json.gz",
             "candidates_path": "/old/k.json",
@@ -260,13 +279,11 @@ async def test_profile_promotion_writes_last_profile_trace(session_dir):
         }
         await c._promote_to_shared_state("profile", result)
 
-        assert c.shared_state.last_profile_trace == \
-            "/tmp/ws/torch_trace/main.trace.json.gz"
+        assert c.shared_state.last_profile_trace == "/tmp/ws/torch_trace/main.trace.json.gz"
         assert (c.shared_state.current_best or {}).get("action") != "profile"
 
         reloaded = SharedState.load_or_init(session_dir)
-        assert reloaded.last_profile_trace == \
-            "/tmp/ws/torch_trace/main.trace.json.gz"
+        assert reloaded.last_profile_trace == "/tmp/ws/torch_trace/main.trace.json.gz"
     finally:
         await c.stop()
 

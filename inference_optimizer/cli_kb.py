@@ -40,10 +40,7 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
     Returns:
         Path: The resolved local KB root directory.
     """
-    explicit = (
-        getattr(args, "local_kb_root", None)
-        or os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", "")
-    )
+    explicit = getattr(args, "local_kb_root", None) or os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", "")
     if explicit:
         return Path(str(explicit).strip())
     return _workspace_root_resolve() / "kb"
@@ -135,9 +132,7 @@ def _build_recipe_kb_dispatcher(
         if not cortex_url:
             cortex_url = (os.environ.get("CORTEX_KB_URL", "") or "").strip()
         if cortex_url:
-            sources.append(
-                RemoteRecipeClient(kb_url=cortex_url, foreground=True, enabled=True)
-            )
+            sources.append(RemoteRecipeClient(kb_url=cortex_url, foreground=True, enabled=True))
             names.append("cortex")
         if sources:
             return RecipeKB(
@@ -158,20 +153,15 @@ def _build_recipe_kb_dispatcher(
             # out-of-band CronJob ingests the local store into gbrain (gbrain
             # off the write path); ``inline`` => best-effort mirror each local
             # write into gbrain in-process (local write stays authoritative).
-            mirror_mode = (
-                os.environ.get("RECIPE_KB_MIRROR_MODE", "external").strip().lower()
-            )
+            mirror_mode = os.environ.get("RECIPE_KB_MIRROR_MODE", "external").strip().lower()
             if mirror_mode == "inline":
                 from .recipe_kb.gbrain_ingest import (
                     GbrainMirroringRecipeKB,
                     build_mirror_mcp_from_env,
                 )
+
                 mirror_mcp = build_mirror_mcp_from_env()
-                return (
-                    GbrainMirroringRecipeKB(kb, mirror_mcp)
-                    if mirror_mcp is not None
-                    else kb
-                )
+                return GbrainMirroringRecipeKB(kb, mirror_mcp) if mirror_mcp is not None else kb
             return kb  # external (default): no in-process mirror
         # Selected but not configured: stay local-only.
         return RecipeKB(local=local_store, remote=None)
@@ -236,11 +226,11 @@ def _bootstrap_cortex_kb(
         if merged_meta:
             state.stack_fingerprint_meta = merged_meta
     extra_attrs = {
-        "framework":            state.framework or manifest.get("framework", ""),
-        "model_class":          state.model_class or "",
+        "framework": state.framework or manifest.get("framework", ""),
+        "model_class": state.model_class or "",
         # Operator traceability: which Claw job / sandbox produced best_config.
-        "claw_session_id":      manifest.get("claw_session_id") or "",
-        "sandbox_user_id":      manifest.get("sandbox_user_id") or "",
+        "claw_session_id": manifest.get("claw_session_id") or "",
+        "sandbox_user_id": manifest.get("sandbox_user_id") or "",
     }
     try:
         run_t0_anchor(
@@ -266,9 +256,7 @@ def _bootstrap_cortex_kb(
             f"will be created on first KEEP/REVERT).",
             file=sys.stderr,
         )
-        args.kb_degraded_reason = (
-            getattr(args, "kb_degraded_reason", None) or "t0_runtime_fail"
-        )
+        args.kb_degraded_reason = getattr(args, "kb_degraded_reason", None) or "t0_runtime_fail"
     return kb
 
 
@@ -303,14 +291,8 @@ def _bootstrap_knowledge_plane(
 
     pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
     pr_url = (getattr(args, "pr_monitor_url", None) or "").strip() or None
-    pr_mcp_url = (
-        (getattr(args, "pr_monitor_mcp_url", None) or "").strip()
-        or DEFAULT_PR_MONITOR_MCP_URL
-    )
-    window_days = int(
-        getattr(args, "pr_feed_window_days", DEFAULT_PR_FEED_WINDOW_DAYS)
-        or DEFAULT_PR_FEED_WINDOW_DAYS
-    )
+    pr_mcp_url = (getattr(args, "pr_monitor_mcp_url", None) or "").strip() or DEFAULT_PR_MONITOR_MCP_URL
+    window_days = int(getattr(args, "pr_feed_window_days", DEFAULT_PR_FEED_WINDOW_DAYS) or DEFAULT_PR_FEED_WINDOW_DAYS)
 
     pr_client = PRMonitorClient.from_args(url=pr_url, enabled=pr_enabled)
     if not pr_enabled:
@@ -320,10 +302,7 @@ def _bootstrap_knowledge_plane(
         pr_reachable = False
     else:
         status_text = f"REST {pr_client.base_url} (window={window_days}d)"
-        print(
-            f"PR Monitor       : REST {pr_client.base_url} (window="
-            f"{window_days}d, mcp={pr_mcp_url})"
-        )
+        print(f"PR Monitor       : REST {pr_client.base_url} (window={window_days}d, mcp={pr_mcp_url})")
         pr_reachable = True
 
     # One-shot status marker so breakdown.warnings can surface pr_monitor:*
@@ -332,20 +311,27 @@ def _bootstrap_knowledge_plane(
         try:
             from .session_paths import pr_monitor_status_json
             from .paths import asset_actions_dir  # noqa: F401 (unused import warning suppress)
+
             marker = pr_monitor_status_json(session_dir)
             marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text(json.dumps({
-                "enabled":      bool(pr_enabled),
-                "url":          (pr_client.base_url if pr_enabled else ""),
-                "reachable":    bool(pr_reachable),
-                "mcp_url":      pr_mcp_url if pr_enabled else "",
-                "window_days":  int(window_days),
-                "status_text":  status_text,
-            }, sort_keys=True, indent=2))
+            marker.write_text(
+                json.dumps(
+                    {
+                        "enabled": bool(pr_enabled),
+                        "url": (pr_client.base_url if pr_enabled else ""),
+                        "reachable": bool(pr_reachable),
+                        "mcp_url": pr_mcp_url if pr_enabled else "",
+                        "window_days": int(window_days),
+                        "status_text": status_text,
+                    },
+                    sort_keys=True,
+                    indent=2,
+                )
+            )
         except OSError as exc:  # noqa: BLE001 — defensive
             log.warning(
-                "pr_monitor_status marker write failed: %r "
-                "(breakdown.warnings will miss pr_monitor row)", exc,
+                "pr_monitor_status marker write failed: %r (breakdown.warnings will miss pr_monitor row)",
+                exc,
             )
 
     # cortex_kb=None per the local-kb design (KB reads go via RecipeKB).

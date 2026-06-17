@@ -18,6 +18,7 @@ import progress  # noqa: E402
 
 # ── _load_json ──
 
+
 def test_load_json_missing_returns_empty(tmp_path: Path):
     assert progress._load_json(tmp_path / "nope.json") == {}
 
@@ -36,6 +37,7 @@ def test_load_json_invalid_returns_empty(tmp_path: Path, capsys):
 
 
 # ── _summary_rows ──
+
 
 def test_summary_rows_bare_list(tmp_path: Path):
     p = tmp_path / "s.json"
@@ -56,6 +58,7 @@ def test_summary_rows_models_key(tmp_path: Path):
 
 
 # ── _classify_status ──
+
 
 def test_classify_completed():
     row = {"baseline_tok_per_gpu": 1, "optimized_tok_per_gpu": 2, "gain_pct": 10}
@@ -86,11 +89,19 @@ def test_classify_failed_no_data():
 
 # ── _row_to_entry ──
 
+
 def test_row_to_entry_full():
     row = {
-        "model": "org/m", "framework": "sglang", "precision": "fp8", "tp": 8,
-        "params_b": 7, "gain_pct": 12.345, "vs_inferenceX_pct": 3.21,
-        "task_id": "t1", "baseline_tok_per_gpu": 1, "optimized_tok_per_gpu": 2,
+        "model": "org/m",
+        "framework": "sglang",
+        "precision": "fp8",
+        "tp": 8,
+        "params_b": 7,
+        "gain_pct": 12.345,
+        "vs_inferenceX_pct": 3.21,
+        "task_id": "t1",
+        "baseline_tok_per_gpu": 1,
+        "optimized_tok_per_gpu": 2,
     }
     e = progress._row_to_entry(row)
     assert e["repo_id"] == "org/m"
@@ -108,6 +119,7 @@ def test_row_to_entry_failed_has_reason():
 
 # ── cmd_promote ──
 
+
 def _ns(**kw) -> argparse.Namespace:
     return argparse.Namespace(**kw)
 
@@ -115,16 +127,20 @@ def _ns(**kw) -> argparse.Namespace:
 def test_promote_empty_summary(tmp_path: Path):
     s = tmp_path / "sum.json"
     s.write_text(json.dumps([]), encoding="utf-8")
-    rc = progress.cmd_promote(
-        _ns(summary=str(s), already_done=str(tmp_path / "ad.json"), write=False))
+    rc = progress.cmd_promote(_ns(summary=str(s), already_done=str(tmp_path / "ad.json"), write=False))
     assert rc == 1
 
 
 def test_promote_dry_run(tmp_path: Path, capsys):
     s = tmp_path / "sum.json"
-    s.write_text(json.dumps([
-        {"model": "org/m1", "baseline_tok_per_gpu": 1, "optimized_tok_per_gpu": 2, "gain_pct": 5},
-    ]), encoding="utf-8")
+    s.write_text(
+        json.dumps(
+            [
+                {"model": "org/m1", "baseline_tok_per_gpu": 1, "optimized_tok_per_gpu": 2, "gain_pct": 5},
+            ]
+        ),
+        encoding="utf-8",
+    )
     ad = tmp_path / "ad.json"
     rc = progress.cmd_promote(_ns(summary=str(s), already_done=str(ad), write=False))
     assert rc == 0
@@ -134,10 +150,15 @@ def test_promote_dry_run(tmp_path: Path, capsys):
 
 def test_promote_write_creates_file(tmp_path: Path):
     s = tmp_path / "sum.json"
-    s.write_text(json.dumps([
-        {"model": "org/m1", "baseline_tok_per_gpu": 1, "optimized_tok_per_gpu": 2, "gain_pct": 5},
-        {"model": "org/m2"},
-    ]), encoding="utf-8")
+    s.write_text(
+        json.dumps(
+            [
+                {"model": "org/m1", "baseline_tok_per_gpu": 1, "optimized_tok_per_gpu": 2, "gain_pct": 5},
+                {"model": "org/m2"},
+            ]
+        ),
+        encoding="utf-8",
+    )
     ad = tmp_path / "sub" / "ad.json"
     rc = progress.cmd_promote(_ns(summary=str(s), already_done=str(ad), write=True))
     assert rc == 0
@@ -149,12 +170,16 @@ def test_promote_write_creates_file(tmp_path: Path):
 
 def test_promote_upgrades_not_downgrades(tmp_path: Path):
     ad = tmp_path / "ad.json"
-    ad.write_text(json.dumps({"models": [{"repo_id": "org/m", "status": "failed"}]}),
-                  encoding="utf-8")
+    ad.write_text(json.dumps({"models": [{"repo_id": "org/m", "status": "failed"}]}), encoding="utf-8")
     s = tmp_path / "sum.json"
-    s.write_text(json.dumps([
-        {"model": "org/m", "baseline_tok_per_gpu": 1, "optimized_tok_per_gpu": 2, "gain_pct": 5},
-    ]), encoding="utf-8")
+    s.write_text(
+        json.dumps(
+            [
+                {"model": "org/m", "baseline_tok_per_gpu": 1, "optimized_tok_per_gpu": 2, "gain_pct": 5},
+            ]
+        ),
+        encoding="utf-8",
+    )
     rc = progress.cmd_promote(_ns(summary=str(s), already_done=str(ad), write=True))
     assert rc == 0
     data = json.loads(ad.read_text(encoding="utf-8"))
@@ -163,30 +188,35 @@ def test_promote_upgrades_not_downgrades(tmp_path: Path):
 
 def test_promote_nothing_to_do(tmp_path: Path, capsys):
     ad = tmp_path / "ad.json"
-    ad.write_text(json.dumps({"models": [{"repo_id": "org/m", "status": "completed"}]}),
-                  encoding="utf-8")
+    ad.write_text(json.dumps({"models": [{"repo_id": "org/m", "status": "completed"}]}), encoding="utf-8")
     s = tmp_path / "sum.json"
     # Same completed status -> no upgrade, no new entry.
-    s.write_text(json.dumps([
-        {"model": "org/m", "baseline_tok_per_gpu": 1, "optimized_tok_per_gpu": 2, "gain_pct": 5},
-    ]), encoding="utf-8")
+    s.write_text(
+        json.dumps(
+            [
+                {"model": "org/m", "baseline_tok_per_gpu": 1, "optimized_tok_per_gpu": 2, "gain_pct": 5},
+            ]
+        ),
+        encoding="utf-8",
+    )
     rc = progress.cmd_promote(_ns(summary=str(s), already_done=str(ad), write=True))
     assert rc == 0
     assert "nothing to promote" in capsys.readouterr().out
 
 
 def test_promote_many_new_entries_truncated(tmp_path: Path, capsys):
-    rows = [{"model": f"org/m{i}", "baseline_tok_per_gpu": 1,
-             "optimized_tok_per_gpu": 2, "gain_pct": 5} for i in range(20)]
+    rows = [
+        {"model": f"org/m{i}", "baseline_tok_per_gpu": 1, "optimized_tok_per_gpu": 2, "gain_pct": 5} for i in range(20)
+    ]
     s = tmp_path / "sum.json"
     s.write_text(json.dumps(rows), encoding="utf-8")
-    rc = progress.cmd_promote(
-        _ns(summary=str(s), already_done=str(tmp_path / "ad.json"), write=False))
+    rc = progress.cmd_promote(_ns(summary=str(s), already_done=str(tmp_path / "ad.json"), write=False))
     assert rc == 0
     assert "and 5 more" in capsys.readouterr().out
 
 
 # ── cmd_list_remaining ──
+
 
 def test_list_remaining_empty_candidates(tmp_path: Path):
     c = tmp_path / "c.json"
@@ -209,13 +239,20 @@ def test_list_remaining_prints_unrun(tmp_path: Path, capsys):
 
 # ── cmd_stats ──
 
+
 def test_stats_basic(tmp_path: Path, capsys):
     ad = tmp_path / "ad.json"
-    ad.write_text(json.dumps({"models": [
-        {"repo_id": "a", "status": "completed", "framework": "sglang",
-         "precision": "fp8", "gain_pct": 10},
-        {"repo_id": "b", "status": "failed"},
-    ]}), encoding="utf-8")
+    ad.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {"repo_id": "a", "status": "completed", "framework": "sglang", "precision": "fp8", "gain_pct": 10},
+                    {"repo_id": "b", "status": "failed"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     rc = progress.cmd_stats(_ns(already_done=str(ad), candidates=None))
     assert rc == 0
     out = capsys.readouterr().out
@@ -225,8 +262,7 @@ def test_stats_basic(tmp_path: Path, capsys):
 
 def test_stats_with_candidates(tmp_path: Path, capsys):
     ad = tmp_path / "ad.json"
-    ad.write_text(json.dumps({"models": [{"repo_id": "a", "status": "completed"}]}),
-                  encoding="utf-8")
+    ad.write_text(json.dumps({"models": [{"repo_id": "a", "status": "completed"}]}), encoding="utf-8")
     c = tmp_path / "c.json"
     c.write_text(json.dumps({"candidates": [{"repo_id": "a"}, {"repo_id": "b"}]}), encoding="utf-8")
     rc = progress.cmd_stats(_ns(already_done=str(ad), candidates=str(c)))
@@ -238,11 +274,11 @@ def test_stats_with_candidates(tmp_path: Path, capsys):
 
 # ── main dispatch ──
 
+
 def test_main_promote(tmp_path: Path, monkeypatch):
     s = tmp_path / "sum.json"
     s.write_text(json.dumps([{"model": "org/m"}]), encoding="utf-8")
-    monkeypatch.setattr(sys, "argv", ["progress.py", "promote", str(s),
-                                      "--already-done", str(tmp_path / "ad.json")])
+    monkeypatch.setattr(sys, "argv", ["progress.py", "promote", str(s), "--already-done", str(tmp_path / "ad.json")])
     assert progress.main() == 0
 
 
@@ -256,6 +292,7 @@ def test_main_stats(tmp_path: Path, monkeypatch):
 def test_main_list_remaining(tmp_path: Path, monkeypatch):
     c = tmp_path / "c.json"
     c.write_text(json.dumps({"candidates": [{"repo_id": "a"}]}), encoding="utf-8")
-    monkeypatch.setattr(sys, "argv", ["progress.py", "list-remaining", str(c),
-                                      "--already-done", str(tmp_path / "ad.json")])
+    monkeypatch.setattr(
+        sys, "argv", ["progress.py", "list-remaining", str(c), "--already-done", str(tmp_path / "ad.json")]
+    )
     assert progress.main() == 0

@@ -38,6 +38,7 @@ def _stub_dns(monkeypatch):
 
 # ── URL validation ──────────────────────────────────────────────────────
 
+
 class TestUrlValidation:
     def _run(self, url: str) -> str:
         return WebFetchClient(
@@ -53,8 +54,7 @@ class TestUrlValidation:
 
         def handler(request: httpx.Request) -> httpx.Response:
             captured["url"] = str(request.url)
-            return httpx.Response(200, text="ok",
-                                  headers={"content-type": "text/plain"})
+            return httpx.Response(200, text="ok", headers={"content-type": "text/plain"})
 
         client = WebFetchClient(config=_cfg(), http_client=_client(handler))
         client.execute({"url": "http://example.com/a"})
@@ -75,6 +75,7 @@ class TestUrlValidation:
 
 # ── SSRF guard ──────────────────────────────────────────────────────────
 
+
 class TestSSRF:
     def test_dns_resolution_failure(self, monkeypatch):
         def bad_resolve(host):
@@ -82,20 +83,21 @@ class TestSSRF:
 
         monkeypatch.setattr(fc, "_resolve_or_raise", bad_resolve)
         client = WebFetchClient(
-            config=_cfg(), http_client=_client(lambda r: httpx.Response(200)),
+            config=_cfg(),
+            http_client=_client(lambda r: httpx.Response(200)),
         )
         out = client.execute({"url": "https://example.com/a"})
         assert out.startswith("Error: DNS resolution failed")
 
     def test_ipv4_blocked(self, monkeypatch):
         def fake_resolve(host):
-            raise FetchError(
-                f"SSRF: resolved IPv4 127.0.0.1 for {host} is in a blocked range"
-            )
+            raise FetchError(f"SSRF: resolved IPv4 127.0.0.1 for {host} is in a blocked range")
+
         monkeypatch.setattr(fc, "_resolve_or_raise", fake_resolve)
 
         client = WebFetchClient(
-            config=_cfg(), http_client=_client(lambda r: httpx.Response(200)),
+            config=_cfg(),
+            http_client=_client(lambda r: httpx.Response(200)),
         )
         assert "SSRF" in client.execute({"url": "https://example.com/"})
 
@@ -103,9 +105,16 @@ class TestSSRF:
 class TestIPBlocking:
     def test_ipv4_private_ranges(self):
         for ip in [
-            "0.0.0.1", "10.1.2.3", "127.0.0.1", "169.254.1.1",
-            "172.16.0.1", "172.31.255.255", "192.168.1.1",
-            "100.64.0.1", "198.18.0.1", "224.0.0.1",
+            "0.0.0.1",
+            "10.1.2.3",
+            "127.0.0.1",
+            "169.254.1.1",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "100.64.0.1",
+            "198.18.0.1",
+            "224.0.0.1",
         ]:
             assert fc._ipv4_blocked(ip), ip
 
@@ -126,13 +135,16 @@ class TestIPBlocking:
 
 # ── Content-type handling ───────────────────────────────────────────────
 
+
 class TestContentTypes:
     def test_text_plain_returned_verbatim(self):
         def handler(request):
             return httpx.Response(
-                200, content=b"hello world",
+                200,
+                content=b"hello world",
                 headers={"content-type": "text/plain; charset=utf-8"},
             )
+
         client = WebFetchClient(config=_cfg(), http_client=_client(handler))
         out = client.execute({"url": "https://example.com/a"})
         assert "hello world" in out
@@ -143,9 +155,11 @@ class TestContentTypes:
 
         def handler(request):
             return httpx.Response(
-                200, content=html,
+                200,
+                content=html,
                 headers={"content-type": "text/html"},
             )
+
         client = WebFetchClient(config=_cfg(), http_client=_client(handler))
         out = client.execute({"url": "https://example.com/a"})
         assert "Title" in out and "Para" in out
@@ -157,9 +171,11 @@ class TestContentTypes:
 
         def handler(request):
             return httpx.Response(
-                200, content=html,
+                200,
+                content=html,
                 headers={"content-type": "text/html"},
             )
+
         client = WebFetchClient(config=_cfg(), http_client=_client(handler))
         out = client.execute({"url": "https://example.com/a", "raw": True})
         assert "<h1>T</h1>" in out
@@ -167,15 +183,18 @@ class TestContentTypes:
     def test_binary_unsupported(self):
         def handler(request):
             return httpx.Response(
-                200, content=b"\x00\x01",
+                200,
+                content=b"\x00\x01",
                 headers={"content-type": "application/pdf"},
             )
+
         client = WebFetchClient(config=_cfg(), http_client=_client(handler))
         out = client.execute({"url": "https://example.com/x.pdf"})
         assert "unsupported binary content-type" in out
 
 
 # ── Redirect handling ──────────────────────────────────────────────────
+
 
 class TestRedirect:
     def test_same_host_redirect_followed(self):
@@ -185,10 +204,12 @@ class TestRedirect:
             calls.append(str(request.url))
             if str(request.url) == "https://example.com/a":
                 return httpx.Response(
-                    302, headers={"location": "https://example.com/b"},
+                    302,
+                    headers={"location": "https://example.com/b"},
                 )
             return httpx.Response(
-                200, content=b"final",
+                200,
+                content=b"final",
                 headers={"content-type": "text/plain"},
             )
 
@@ -200,7 +221,8 @@ class TestRedirect:
     def test_cross_host_redirect_refused(self):
         def handler(request):
             return httpx.Response(
-                301, headers={"location": "https://evil.com/p"},
+                301,
+                headers={"location": "https://evil.com/p"},
             )
 
         client = WebFetchClient(config=_cfg(), http_client=_client(handler))
@@ -211,8 +233,10 @@ class TestRedirect:
     def test_redirect_loop_detected(self):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
-                302, headers={"location": str(request.url) + "x"},
+                302,
+                headers={"location": str(request.url) + "x"},
             )
+
         client = WebFetchClient(config=_cfg(), http_client=_client(handler))
         out = client.execute({"url": "https://example.com/a"})
         assert "too many redirects" in out
@@ -221,17 +245,22 @@ class TestRedirect:
         def handler(request):
             if str(request.url) == "https://example.com/a":
                 return httpx.Response(
-                    301, headers={"location": "https://www.example.com/a"},
+                    301,
+                    headers={"location": "https://www.example.com/a"},
                 )
             return httpx.Response(
-                200, content=b"final", headers={"content-type": "text/plain"},
+                200,
+                content=b"final",
+                headers={"content-type": "text/plain"},
             )
+
         client = WebFetchClient(config=_cfg(), http_client=_client(handler))
         out = client.execute({"url": "https://example.com/a"})
         assert "final" in out
 
 
 # ── Cache + denylist ────────────────────────────────────────────────────
+
 
 class TestCacheAndDenylist:
     def test_cache_hit_skips_network(self):
@@ -240,7 +269,8 @@ class TestCacheAndDenylist:
         def handler(request):
             hits.append(1)
             return httpx.Response(
-                200, content=b"first",
+                200,
+                content=b"first",
                 headers={"content-type": "text/plain"},
             )
 
@@ -256,7 +286,8 @@ class TestCacheAndDenylist:
         def handler(request):
             hits.append(1)
             return httpx.Response(
-                200, content=b"<p>x</p>",
+                200,
+                content=b"<p>x</p>",
                 headers={"content-type": "text/html"},
             )
 
@@ -268,7 +299,8 @@ class TestCacheAndDenylist:
     def test_fetch_denylist(self):
         cfg = _cfg(fetch_domain_denylist=("internal.local",))
         client = WebFetchClient(
-            config=cfg, http_client=_client(lambda r: httpx.Response(200)),
+            config=cfg,
+            http_client=_client(lambda r: httpx.Response(200)),
         )
         out = client.execute({"url": "https://api.internal.local/x"})
         assert "blocked" in out
@@ -276,15 +308,18 @@ class TestCacheAndDenylist:
 
 # ── Output truncation + JS shell ───────────────────────────────────────
 
+
 class TestOutputBudget:
     def test_truncation_marker_added(self):
         body = b"a" * 60_000
 
         def handler(request):
             return httpx.Response(
-                200, content=body,
+                200,
+                content=body,
                 headers={"content-type": "text/plain"},
             )
+
         client = WebFetchClient(
             config=_cfg(fetch_max_output_chars=1024),
             http_client=_client(handler),
@@ -297,9 +332,11 @@ class TestOutputBudget:
 
         def handler(request):
             return httpx.Response(
-                200, content=body,
+                200,
+                content=body,
                 headers={"content-type": "text/html"},
             )
+
         client = WebFetchClient(config=_cfg(), http_client=_client(handler))
         out = client.execute({"url": "https://example.com/spa"})
         assert "JS_RENDER_REQUIRED" in out
@@ -307,13 +344,13 @@ class TestOutputBudget:
 
 # ── max_bytes clamp ────────────────────────────────────────────────────
 
+
 def test_max_bytes_clamped_to_config():
     sizes = []
 
     def handler(request):
         sizes.append(request.url)
-        return httpx.Response(200, content=b"x" * 200,
-                              headers={"content-type": "text/plain"})
+        return httpx.Response(200, content=b"x" * 200, headers={"content-type": "text/plain"})
 
     cfg = _cfg(fetch_max_bytes=512)
     client = WebFetchClient(config=cfg, http_client=_client(handler))
@@ -339,6 +376,7 @@ def test_max_bytes_stops_reading_early():
 
 
 # ── small URL helpers ──────────────────────────────────────────────────
+
 
 class TestSameHost:
     def test_same_host_with_www(self):
