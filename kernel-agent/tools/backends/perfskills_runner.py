@@ -60,8 +60,15 @@ def build_handoff(
     gpu_ids: str = "",
     bench_client: str = "auto",
     inferencex_path: str = "",
+    bench_protocol: dict | None = None,
 ) -> dict:
-    """Assemble the stable handoff.json payload (Hyperloom -> PerfSkills)."""
+    """Assemble the stable handoff.json payload (Hyperloom -> PerfSkills).
+
+    ``bench_protocol`` (optional) forwards Hyperloom's measurement 口径
+    (``random_range_ratio`` / ``num_prompts`` / ``num_warmups`` / ``seed``) so
+    PerfSkills' internal e2e bench measures identically. Omit it (or omit any
+    key) to leave PerfSkills on its own standalone defaults.
+    """
     h = {
         "schema_version": HANDOFF_SCHEMA_VERSION,
         "model_path": model_path,
@@ -87,6 +94,10 @@ def build_handoff(
         h["launch_recipe"] = launch_recipe
     if gpu_ids:
         h["gpu_ids"] = gpu_ids
+    if bench_protocol:
+        # Drop empty/None values so only resolved knobs are forwarded.
+        h["bench_protocol"] = {k: v for k, v in dict(bench_protocol).items()
+                               if v is not None and str(v).strip() != ""}
     return h
 
 

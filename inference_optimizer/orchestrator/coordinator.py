@@ -2028,6 +2028,52 @@ class Coordinator:
         if self._should_continue_kernel_after_gemm():
             await self._run_kernel_opt_after_gemm()
 
+    @staticmethod
+    def _resolve_bench_protocol(recipe_path: str) -> dict[str, Any]:
+        """Extract Hyperloom's bench 口径 for the PerfSkills handoff.
+
+        Reads the materialized baseline recipe's ``benchmark.envs`` (the exact
+        knobs Magpie benched with) and falls back to the process env. Returns
+        only the keys that resolve so absent values leave PerfSkills on its own
+        standalone defaults. Never raises — 口径 propagation must not block the
+        KERNEL phase.
+        """
+        envs: dict[str, Any] = {}
+        try:
+            import yaml  # local import: yaml is not a coordinator top-level dep
+
+            if recipe_path and Path(recipe_path).is_file():
+                cfg = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8")) or {}
+                envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
+        except Exception:  # noqa: BLE001
+            log.warning("bench_protocol: could not read recipe %r", recipe_path,
+                        exc_info=True)
+            envs = {}
+
+        def _pick(key: str, cast: Callable[[str], Any]) -> Any:
+            raw = envs.get(key)
+            if raw is None or str(raw).strip() == "":
+                raw = os.environ.get(key, "")
+            raw = str(raw).strip()
+            if not raw:
+                return None
+            try:
+                return cast(raw)
+            except (TypeError, ValueError):
+                return None
+
+        protocol: dict[str, Any] = {}
+        for proto_key, env_key, cast in (
+            ("random_range_ratio", "RANDOM_RANGE_RATIO", float),
+            ("num_prompts", "NUM_PROMPTS", int),
+            ("num_warmups", "NUM_WARMUPS", int),
+            ("seed", "SEED", int),
+        ):
+            val = _pick(env_key, cast)
+            if val is not None:
+                protocol[proto_key] = val
+        return protocol
+
     async def _run_perfskills_kernel_phase(self, *, from_phase: str) -> None:
         """Delegate the KERNEL phase to PerfSkills (one whole-pipeline e2e run).
 
@@ -2046,6 +2092,17 @@ class Coordinator:
             "osl": int(getattr(state, "osl", 0) or int(os.environ.get("OSL", "1024"))),
             "conc": int(getattr(state, "conc", 0) or int(os.environ.get("CONC", "64"))),
         }
+        # Bench 口径 (measurement protocol): forward the SAME knobs Hyperloom
+        # actually benched with so PerfSkills' internal e2e measures identically.
+        # Without this PerfSkills falls back to its own standalone defaults
+        # (e.g. RANDOM_RANGE_RATIO=1 fixed-length vs Hyperloom's 0 variable-length)
+        # and the cross-harness numbers diverge. Source of truth = the materialized
+        # baseline recipe's benchmark.envs (the exact values Magpie ran), with a
+        # process-env fallback. Only keys that resolve are sent; absent keys leave
+        # PerfSkills on its own defaults so it still runs standalone.
+        bench_protocol = self._resolve_bench_protocol(
+            str(getattr(state, "baseline_config_path", "") or "")
+        )
         handoff = {
             "schema_version": 1,
             "model_path": str(getattr(state, "model_path", "") or os.environ.get("MODEL_PATH", "")),
@@ -2063,6 +2120,8 @@ class Coordinator:
             "bench_client": "auto",
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
         }
+        if bench_protocol:
+            handoff["bench_protocol"] = bench_protocol
 
         out_dir = self.session_dir / "perfskills"
         out_dir.mkdir(parents=True, exist_ok=True)
