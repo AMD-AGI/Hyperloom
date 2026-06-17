@@ -92,10 +92,6 @@ from .trace.llm_trace import LLMCallRecord, append_llm_call
 from .action_executors.benchmark_result import is_valid_measurement
 from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
     _BASELINE_FINGERPRINT_KEYS,
-    _BASELINE_SELF_LOOP_THRESHOLD,
-    _DEFAULT_ROOFLINE_WATERMARK_RATIO,
-    _MULTI_VALUE_SGLANG_FLAGS,
-    _ROOFLINE_WATERMARK_RATIO_ENV,
     _baseline_params_fingerprint,
     _dedupe_extra_server_args,
     _infer_model_class_from_config,

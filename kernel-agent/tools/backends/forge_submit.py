@@ -352,7 +352,9 @@ def _acquire_repo_lock(repo: str) -> int | None:
             held or cannot be opened.
     """
     try:
-        fd = os.open(os.path.join(repo, ".git", "forge_inplace.lock"), os.O_CREAT | os.O_RDWR, 0o644)
+        # Lock file is owner-only (0o600); no reason for group/other read
+        # (CodeQL py/overly-permissive-file).
+        fd = os.open(os.path.join(repo, ".git", "forge_inplace.lock"), os.O_CREAT | os.O_RDWR, 0o600)
     except OSError:
         return None
     try:
