@@ -21,7 +21,15 @@ _MAX_NAME_LEN = 70
 
 
 def _short_name(name: str) -> str:
-    """Shorten a kernel name keeping head + tail (CK/ROCBLAS variants differ at the tail)."""
+    """Shorten a kernel name keeping head + tail (CK/ROCBLAS variants differ at the tail).
+
+    Args:
+        name: Full kernel name to shorten.
+
+    Returns:
+        The name unchanged when short enough, otherwise a head + tail
+        elision joined by ``"..."``.
+    """
     if not name:
         return ""
     if len(name) <= _MAX_NAME_LEN:
@@ -32,6 +40,15 @@ def _short_name(name: str) -> str:
 
 
 def _fmt_speedup(v: Any) -> str:
+    """Format a speedup multiplier for a table cell.
+
+    Args:
+        v (Any): The speedup value; non-numeric or ``None`` yields an em dash.
+
+    Returns:
+        str: A string like ``"1.25x"``, or ``"—"`` when the value is missing
+            or non-numeric.
+    """
     if v is None:
         return "—"
     try:
@@ -42,7 +59,16 @@ def _fmt_speedup(v: Any) -> str:
 
 
 def _lane_summary(lane: dict[str, Any] | None) -> str:
-    """Format a per-lane summary cell: best-speedup + attempts + last decision."""
+    """Format a per-lane summary cell: best-speedup + attempts + last decision.
+
+    Args:
+        lane (dict[str, Any] | None): A GEAK or OOB lane record with optional
+            ``best_speedup``, ``attempts`` and ``decision`` keys.
+
+    Returns:
+        str: A compact cell like ``"1.25x (3 att) [KEEP]"``, or ``"—"`` when
+            the lane never touched the kernel.
+    """
     if not lane:
         return "—"
     spd = _fmt_speedup(lane.get("best_speedup"))
@@ -58,6 +84,20 @@ def _lane_summary(lane: dict[str, Any] | None) -> str:
 
 @register_renderer("kernel_lifecycle")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the kernel-lifecycle section as a single per-kernel table.
+
+    Emits one row per detected kernel with its full optimization
+    lifecycle (selection, GEAK/OOB attempts, adoption, final decision),
+    splitting long-tail unselected kernels into a collapsible block. The
+    section is marked skipped when no kernels were detected.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered section with key facts, decisions and
+            the markdown table.
+    """
     kl = breakdown.get("kernel_lifecycle") or {}
     raw_detected = kl.get("detected") or []
     detected: list[dict[str, Any]] = []
@@ -76,11 +116,13 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             title="Kernel Lifecycle",
             key_facts=["No kernels detected this session."],
             markdown_block="",
-            decisions=[Decision(
-                kind="not_attempted",
-                subject="kernel_lifecycle",
-                rationale="no detected kernels",
-            )],
+            decisions=[
+                Decision(
+                    kind="not_attempted",
+                    subject="kernel_lifecycle",
+                    rationale="no detected kernels",
+                )
+            ],
             warnings=[],
             skipped=True,
         )
@@ -107,37 +149,42 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "stalled before launch."
         )
     if adopted:
-        names = ", ".join(
-            f"`{d.get('kernel_id')}`→{d.get('adopted_by') or '?'}"
-            for d in adopted[:5]
-        )
+        names = ", ".join(f"`{d.get('kernel_id')}`→{d.get('adopted_by') or '?'}" for d in adopted[:5])
         facts.append(f"Adopted kernels: {names}.")
 
     decisions: list[Decision] = []
     if adopted:
-        decisions.append(Decision(
-            kind="kept", subject="kernel_lifecycle:adopted",
-            rationale=f"{len(adopted)} kernel patches adopted",
-        ))
+        decisions.append(
+            Decision(
+                kind="kept",
+                subject="kernel_lifecycle:adopted",
+                rationale=f"{len(adopted)} kernel patches adopted",
+            )
+        )
     if reverted:
-        decisions.append(Decision(
-            kind="reverted", subject="kernel_lifecycle:reverted",
-            rationale=f"{len(reverted)} kernel patches reverted after integrate",
-        ))
+        decisions.append(
+            Decision(
+                kind="reverted",
+                subject="kernel_lifecycle:reverted",
+                rationale=f"{len(reverted)} kernel patches reverted after integrate",
+            )
+        )
     if rejected:
-        decisions.append(Decision(
-            kind="rejected", subject="kernel_lifecycle:rejected",
-            rationale=f"{len(rejected)} kernel patches rejected outright",
-        ))
+        decisions.append(
+            Decision(
+                kind="rejected",
+                subject="kernel_lifecycle:rejected",
+                rationale=f"{len(rejected)} kernel patches rejected outright",
+            )
+        )
     if not adopted and not reverted and not rejected and not attempted:
-        decisions.append(Decision(
-            kind="not_attempted",
-            subject="kernel_lifecycle",
-            rationale=(
-                f"all {len(detected)} detected kernels left un-optimized "
-                "(neither GEAK nor OOB attempted)"
-            ),
-        ))
+        decisions.append(
+            Decision(
+                kind="not_attempted",
+                subject="kernel_lifecycle",
+                rationale=(f"all {len(detected)} detected kernels left un-optimized (neither GEAK nor OOB attempted)"),
+            )
+        )
 
     # Drop bw% / compute% columns when every entry is None/0 (no roofline data).
     show_bw = any(d.get("bandwidth_util_pct") for d in detected)
@@ -151,6 +198,14 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     headers += ["selected", "GEAK", "OOB", "adopted_by", "final"]
 
     def _row_for(d: dict[str, Any]) -> list[Any]:
+        """Build one table row for a detected kernel record.
+
+        Args:
+            d (dict[str, Any]): A single detected-kernel record.
+
+        Returns:
+            list[Any]: The cell values matching the active ``headers`` order.
+        """
         row: list[Any] = [
             d.get("kernel_id") or "—",
             _short_name(d.get("name") or ""),

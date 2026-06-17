@@ -61,6 +61,13 @@ class Reactor:
     """
 
     def __init__(self, components: ReactorComponents) -> None:
+        """Initialise the reactor from its component bundle.
+
+        Args:
+            components (ReactorComponents): Bundle of the router,
+                classifier, ladder, policy and optional sink / RCA engine /
+                finalizer / state store the pipeline drives each tick.
+        """
         self._router = components.router
         self._classifier = components.classifier
         self._ladder = components.ladder
@@ -78,13 +85,37 @@ class Reactor:
 
     @property
     def tick_index(self) -> int:
+        """Current in-process tick index.
+
+        Returns:
+            int: Number of ``tick`` calls served by this instance.
+        """
         return self._tick_index
 
     @property
     def last_symptoms(self) -> list[Symptom]:
+        """Symptoms classified on the most recent tick.
+
+        Returns:
+            list[Symptom]: A copy of the last tick's symptom list.
+        """
         return list(self._last_symptoms)
 
     async def tick(self, ctx: ReactorContext) -> list[Intent]:
+        """Run one pipeline tick and return the validated intents.
+
+        Advances the tick index, collects a source snapshot, classifies
+        symptoms, runs the action ladder, filters intents through the
+        policy gate, persists findings, fires the finalizer once on
+        stop, and flushes cross-tick state.
+
+        Args:
+            ctx (ReactorContext): Per-tick input parsed from the
+                Coordinator prompt or inbox.
+
+        Returns:
+            list[Intent]: Intents that passed policy validation this tick.
+        """
         self._tick_index += 1
         now_unix = ctx.now_unix or time.time()
 
@@ -136,9 +167,17 @@ class Reactor:
         return validated_intents
 
     def _resolve_authoritative_tick(self, ctx: ReactorContext) -> int:
-        """Pick the most reliable tick index: prefer the Coordinator's
-        session-wide ``ctx.shared_state.tick``, else the in-memory counter
-        (tests / first tick before the prompt is written).
+        """Pick the most reliable tick index for this reactor pass.
+
+        Prefers the Coordinator's session-wide ``ctx.shared_state.tick``,
+        else the in-memory counter (tests / first tick before the prompt is
+        written).
+
+        Args:
+            ctx: Reactor context for the current tick.
+
+        Returns:
+            The resolved authoritative tick index.
         """
         shared_tick = getattr(ctx.shared_state, "tick", 0) or 0
         if shared_tick > 0:
@@ -146,16 +185,31 @@ class Reactor:
         return self._tick_index
 
     async def _flush_state_store(self) -> None:
+        """Flush cross-tick detector state to disk off the event loop.
+
+        No-op when no state store is configured. Failures are logged and
+        swallowed so a flush error never crashes the tick.
+        """
         if self._state_store is None:
             return
         try:
             await asyncio.to_thread(self._state_store.flush_atomic)
         except Exception:  # noqa: BLE001 — best-effort, never crash tick
             log.exception(
-                "reactor tick=%d state_store flush failed", self._tick_index,
+                "reactor tick=%d state_store flush failed",
+                self._tick_index,
             )
 
     async def _maybe_finalize(self, ctx: ReactorContext) -> None:
+        """Fire the postmortem finalizer once on the first stop_reason.
+
+        No-op when no finalizer is configured, the latch has already
+        fired, or ``stop_reason`` is still empty. An in-memory latch plus
+        the finalizer's disk marker guarantee at-most-once semantics.
+
+        Args:
+            ctx (ReactorContext): Per-tick context carrying ``stop_reason``.
+        """
         if self._finalizer is None or self._finalize_fired:
             return
         stop_reason = str(ctx.shared_state.stop_reason or "").strip()
@@ -166,11 +220,13 @@ class Reactor:
         self._finalize_fired = True
         try:
             await asyncio.to_thread(
-                self._finalizer.finalize, stop_reason=stop_reason,
+                self._finalizer.finalize,
+                stop_reason=stop_reason,
             )
         except Exception:  # noqa: BLE001 — finalize is best-effort
             log.exception(
-                "reactor tick=%d postmortem finalizer raised", self._tick_index,
+                "reactor tick=%d postmortem finalizer raised",
+                self._tick_index,
             )
 
 
@@ -179,6 +235,17 @@ def _summarise(
     symptoms: list[Symptom],
     findings: list[Finding],
 ) -> dict[str, Any]:
+    """Build a compact debug summary of a tick's pipeline outputs.
+
+    Args:
+        data (Any): The source snapshot produced by the router.
+        symptoms (list[Symptom]): Symptoms classified this tick.
+        findings (list[Finding]): Findings produced by the action ladder.
+
+    Returns:
+        dict[str, Any]: Summary with sources used, degraded reason, and
+        symptom / finding counts.
+    """
     return {
         "sources_used": list(getattr(data, "sources_used", []) or []),
         "degraded_reason": getattr(data, "degraded_reason", None),

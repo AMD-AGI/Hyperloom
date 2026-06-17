@@ -19,8 +19,6 @@ from inference_optimizer.cli import (
 )
 from inference_optimizer.recipe_kb import (
     LocalRecipeStore,
-    RecipeKB,
-    RemoteRecipeClient,
     cid_to_path_components,
     recipe_canonical_id,
 )
@@ -47,7 +45,7 @@ def _ns(**overrides: Any) -> argparse.Namespace:
     fields: dict[str, Any] = {
         "local_kb_root": None,
         "cortex_kb_url": None,
-        "degraded_kb":   False,
+        "degraded_kb": False,
     }
     fields.update(overrides)
     return argparse.Namespace(**fields)
@@ -62,8 +60,8 @@ def test_item1_canonical_id_is_5tuple_with_inference_prefix() -> None:
         framework_version="0.4.5",
         precision="fp8",
     )
-    assert cid == "inference:deepseek-r1:mi300x:sglang:0.4.5:fp8"
-    assert len(cid.split(":")) == 6  # prefix + 5 dimensions
+    assert cid == "inference:deepseek-r1:mi300x:sglang:unknown_model_type:unknown_arch:0.4.5:fp8"
+    assert len(cid.split(":")) == 8  # prefix + 7 dimensions
 
 
 def test_item1_canonical_id_keyword_only_no_positional_drift() -> None:
@@ -108,13 +106,19 @@ def test_item3_no_central_url_reads_and_writes_go_local(
     assert kb.remote is None
 
     cid = recipe_canonical_id(
-        model="m", hardware="mi300x", framework="sglang",
-        framework_version="0.4.5", precision="fp8",
+        model="m",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
     )
     out = kb.put_recipe(
         canonical_id=cid,
-        model="m", hardware="mi300x",
-        framework="sglang", framework_version="0.4.5", precision="fp8",
+        model="m",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
         best_throughput=12345.0,
     )
     assert out["created"] is True
@@ -139,17 +143,20 @@ def test_item4_central_kb_reads_central_writes_local(
     assert kb.remote.kb_url == central_url
 
     cid = recipe_canonical_id(
-        model="m", hardware="mi300x", framework="sglang",
-        framework_version="0.4.5", precision="fp8",
+        model="m",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
     )
 
     # Central has a stale row for this cid.
     central_payload = {
         "canonical_id": cid,
-        "version":      9,
-        "labels":       {"model": "m", "hardware": "mi300x"},
-        "body":         {"best_config": {"tp": "16"}},
-        "metrics":      {"throughput": 99999.0},
+        "version": 9,
+        "labels": {"model": "m", "hardware": "mi300x"},
+        "body": {"best_config": {"tp": "16"}},
+        "metrics": {"throughput": 99999.0},
     }
 
     # WRITE must NOT touch central — only the /recipes/search read route is mocked,
@@ -160,8 +167,11 @@ def test_item4_central_kb_reads_central_writes_local(
         )
         kb.put_recipe(
             canonical_id=cid,
-            model="m", hardware="mi300x",
-            framework="sglang", framework_version="0.4.5", precision="fp8",
+            model="m",
+            hardware="mi300x",
+            framework="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
             best_throughput=11111.0,
         )
         local_row = kb.local.get_recipe(canonical_id=cid)
@@ -190,15 +200,21 @@ def test_item5_unreachable_central_falls_back_to_local(
     kb.remote.retry_attempts = 1  # type: ignore[union-attr]
 
     cid = recipe_canonical_id(
-        model="m", hardware="mi300x", framework="sglang",
-        framework_version="0.4.5", precision="fp8",
+        model="m",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
     )
 
     # Seed the local store so the fallback has something to return.
     kb.local.put_recipe(
         canonical_id=cid,
-        model="m", hardware="mi300x",
-        framework="sglang", framework_version="0.4.5", precision="fp8",
+        model="m",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
         best_throughput=22222.0,
     )
 
@@ -210,8 +226,11 @@ def test_item5_unreachable_central_falls_back_to_local(
         # WRITE still goes local (central is read-only by design).
         kb.put_recipe(
             canonical_id=cid,
-            model="m", hardware="mi300x",
-            framework="sglang", framework_version="0.4.5", precision="fp8",
+            model="m",
+            hardware="mi300x",
+            framework="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
             best_throughput=33333.0,
         )
         # READ: central 503 → fall through to local (RemoteRecipeClientError absorbed).
@@ -225,23 +244,35 @@ def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
     """Two recipes differing in any single dimension land in distinct on-disk locations."""
     store = LocalRecipeStore(root=tmp_path)
     cid_v1 = recipe_canonical_id(
-        model="m", hardware="mi300x", framework="sglang",
-        framework_version="0.4.5", precision="fp8",
+        model="m",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
     )
     cid_v2 = recipe_canonical_id(
-        model="m", hardware="mi300x", framework="sglang",
-        framework_version="0.5.0", precision="fp8",
+        model="m",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.5.0",
+        precision="fp8",
     )
     store.put_recipe(
         canonical_id=cid_v1,
-        model="m", hardware="mi300x",
-        framework="sglang", framework_version="0.4.5", precision="fp8",
+        model="m",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
         best_throughput=1.0,
     )
     store.put_recipe(
         canonical_id=cid_v2,
-        model="m", hardware="mi300x",
-        framework="sglang", framework_version="0.5.0", precision="fp8",
+        model="m",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.5.0",
+        precision="fp8",
         best_throughput=2.0,
     )
     parts_v1 = cid_to_path_components(cid_v1)
@@ -258,18 +289,24 @@ def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
 
 
 def test_item6_path_levels_match_5_dimensions(tmp_path: Path) -> None:
-    """The on-disk path is exactly 5 levels below the store root, one per identity dimension."""
+    """The on-disk path is exactly 7 levels below the store root, one per identity dimension."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
-        model="m", hardware="hw", framework="fw",
-        framework_version="ver", precision="prec",
+        model="m",
+        hardware="hw",
+        framework="fw",
+        framework_version="ver",
+        precision="prec",
     )
     store.put_recipe(
         canonical_id=cid,
-        model="m", hardware="hw", framework="fw",
-        framework_version="ver", precision="prec",
+        model="m",
+        hardware="hw",
+        framework="fw",
+        framework_version="ver",
+        precision="prec",
     )
-    expected = tmp_path / "m" / "hw" / "fw" / "ver" / "prec" / "recipe.json"
+    expected = tmp_path / "m" / "hw" / "fw" / "unknown_model_type" / "unknown_arch" / "ver" / "prec" / "recipe.json"
     assert expected.is_file()
 
 
@@ -285,9 +322,7 @@ def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
         precision="bf16",
     )
     # Slug rule: basename + lowercase + space → underscore.
-    assert cid == (
-        "inference:qwen-qwen3-30b-a3b-base:mi355x:sglang:0.4.5:bf16"
-    )
+    assert cid == ("inference:qwen-qwen3-30b-a3b-base:mi355x:sglang:unknown_model_type:unknown_arch:0.4.5:bf16")
     store.put_recipe(
         canonical_id=cid,
         model="/hyperloom/models/Qwen-Qwen3-30B-A3B-Base",
@@ -297,10 +332,16 @@ def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
         precision="bf16",
         best_throughput=42.0,
     )
-    # Recipe lives at exactly 5 levels below root; model component is the basename only.
+    # Recipe lives at exactly 7 levels below root; model component is the basename only.
     expected = (
-        tmp_path / "qwen-qwen3-30b-a3b-base"
-        / "mi355x" / "sglang" / "0.4.5" / "bf16"
+        tmp_path
+        / "qwen-qwen3-30b-a3b-base"
+        / "mi355x"
+        / "sglang"
+        / "unknown_model_type"
+        / "unknown_arch"
+        / "0.4.5"
+        / "bf16"
         / "recipe.json"
     )
     assert expected.is_file()
@@ -311,17 +352,21 @@ def test_item7_model_with_double_slash_normalises(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
         model="/some/path/MyModel/",
-        hardware="hw", framework="fw",
-        framework_version="v", precision="p",
+        hardware="hw",
+        framework="fw",
+        framework_version="v",
+        precision="p",
     )
     assert ":mymodel:" in cid
     store.put_recipe(
         canonical_id=cid,
         model="/some/path/MyModel/",
-        hardware="hw", framework="fw",
-        framework_version="v", precision="p",
+        hardware="hw",
+        framework="fw",
+        framework_version="v",
+        precision="p",
     )
-    expected = tmp_path / "mymodel" / "hw" / "fw" / "v" / "p" / "recipe.json"
+    expected = tmp_path / "mymodel" / "hw" / "fw" / "unknown_model_type" / "unknown_arch" / "v" / "p" / "recipe.json"
     assert expected.is_file()
 
 
@@ -332,13 +377,19 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
     """A second put_recipe without ``what_worked`` must preserve the previously written value."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
-        model="m", hardware="hw", framework="fw",
-        framework_version="v", precision="p",
+        model="m",
+        hardware="hw",
+        framework="fw",
+        framework_version="v",
+        precision="p",
     )
     store.put_recipe(
         canonical_id=cid,
-        model="m", hardware="hw", framework="fw",
-        framework_version="v", precision="p",
+        model="m",
+        hardware="hw",
+        framework="fw",
+        framework_version="v",
+        precision="p",
         what_worked=[
             {"description": "X helped", "measured_impact": "+10%"},
         ],
@@ -347,9 +398,7 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
         ],
         pitfalls=[{"description": "watch for Z"}],
         sessions=[
-            {"date": "2026-05-28",
-             "throughput_before": 1.0, "throughput_after": 1.1,
-             "actions_taken": ["a"]},
+            {"date": "2026-05-28", "throughput_before": 1.0, "throughput_after": 1.1, "actions_taken": ["a"]},
         ],
     )
 
@@ -358,8 +407,11 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
     assert live is not None
     store.put_recipe(
         canonical_id=cid,
-        model="m", hardware="hw", framework="fw",
-        framework_version="v", precision="p",
+        model="m",
+        hardware="hw",
+        framework="fw",
+        framework_version="v",
+        precision="p",
         what_worked=list(live.get("what_worked") or []),
         what_failed=list(live.get("what_failed") or []),
         pitfalls=list(live.get("pitfalls") or []),
@@ -385,19 +437,28 @@ def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
     """Every put_recipe bumps version and snapshots the prior row to ``history/v{N}.json`` for rollback."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
-        model="m", hardware="hw", framework="fw",
-        framework_version="v", precision="p",
+        model="m",
+        hardware="hw",
+        framework="fw",
+        framework_version="v",
+        precision="p",
     )
     store.put_recipe(
         canonical_id=cid,
-        model="m", hardware="hw", framework="fw",
-        framework_version="v", precision="p",
+        model="m",
+        hardware="hw",
+        framework="fw",
+        framework_version="v",
+        precision="p",
         best_throughput=1.0,
     )
     store.put_recipe(
         canonical_id=cid,
-        model="m", hardware="hw", framework="fw",
-        framework_version="v", precision="p",
+        model="m",
+        hardware="hw",
+        framework="fw",
+        framework_version="v",
+        precision="p",
         best_throughput=2.0,
     )
     history = store.get_history(canonical_id=cid)
@@ -411,13 +472,19 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
     """The persisted ``recipe.json`` uses arbor field names, NOT the v2 wire spec's findings/failures/gaps/body/metrics."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
-        model="m", hardware="hw", framework="fw",
-        framework_version="v", precision="p",
+        model="m",
+        hardware="hw",
+        framework="fw",
+        framework_version="v",
+        precision="p",
     )
     store.put_recipe(
         canonical_id=cid,
-        model="m", hardware="hw", framework="fw",
-        framework_version="v", precision="p",
+        model="m",
+        hardware="hw",
+        framework="fw",
+        framework_version="v",
+        precision="p",
         best_config={"tp": "8"},
         best_throughput=42.0,
         what_worked=[{"description": "x", "measured_impact": "+5%"}],
@@ -431,40 +498,44 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
             "rocm_version": "7.2",
         },
         sessions=[
-            {"date": "2026-05-28",
-             "throughput_before": 1.0, "throughput_after": 42.0,
-             "actions_taken": ["tp+ep"]},
+            {"date": "2026-05-28", "throughput_before": 1.0, "throughput_after": 42.0, "actions_taken": ["tp+ep"]},
         ],
     )
     on_disk = json.loads(
-        (tmp_path / "m" / "hw" / "fw" / "v" / "p" / "recipe.json")
-        .read_text(encoding="utf-8")
+        (tmp_path / "m" / "hw" / "fw" / "unknown_model_type" / "unknown_arch" / "v" / "p" / "recipe.json").read_text(
+            encoding="utf-8"
+        )
     )
 
     # Arbor field names present at the top level.
-    assert "best_config"        in on_disk
-    assert "best_throughput"    in on_disk
-    assert "what_worked"        in on_disk
-    assert "what_failed"        in on_disk
-    assert "remaining_gaps"     in on_disk
-    assert "pitfalls"           in on_disk
-    assert "last_profiled"      in on_disk
-    assert "stack_fingerprint"  in on_disk
-    assert "sessions"           in on_disk
-    assert "model"              in on_disk
-    assert "hardware"           in on_disk
+    assert "best_config" in on_disk
+    assert "best_throughput" in on_disk
+    assert "what_worked" in on_disk
+    assert "what_failed" in on_disk
+    assert "remaining_gaps" in on_disk
+    assert "pitfalls" in on_disk
+    assert "last_profiled" in on_disk
+    assert "stack_fingerprint" in on_disk
+    assert "sessions" in on_disk
+    assert "model" in on_disk
+    assert "hardware" in on_disk
 
     # Stack fingerprint sub-shape matches arbor's StackFingerprint.
     assert set(on_disk["stack_fingerprint"]) >= {
-        "vllm_version", "aiter_commit", "rocm_version",
+        "vllm_version",
+        "aiter_commit",
+        "rocm_version",
     }
     # Sessions row sub-shape matches arbor's SessionSummary.
     assert set(on_disk["sessions"][0]) >= {
-        "date", "throughput_before", "throughput_after", "actions_taken",
+        "date",
+        "throughput_before",
+        "throughput_after",
+        "actions_taken",
     }
     # Finding / Failure / Gap sub-shapes (pure arbor).
-    assert set(on_disk["what_worked"][0])    == {"description", "measured_impact"}
-    assert set(on_disk["what_failed"][0])    == {"description", "reason"}
+    assert set(on_disk["what_worked"][0]) == {"description", "measured_impact"}
+    assert set(on_disk["what_failed"][0]) == {"description", "reason"}
     assert set(on_disk["remaining_gaps"][0]) == {"description", "metrics"}
     # Pitfall is arbor's ``description`` plus hyperloom's optional ``severity`` superset.
     assert set(on_disk["pitfalls"][0]) >= {"description"}
@@ -472,7 +543,4 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
 
     # The v2 wire-spec key names MUST NOT appear on disk (arbor-pure).
     for v2_only_key in ("findings", "failures", "gaps", "body", "metrics"):
-        assert v2_only_key not in on_disk, (
-            f"unexpected v2 wire-spec key {v2_only_key!r} in arbor "
-            f"on-disk recipe.json"
-        )
+        assert v2_only_key not in on_disk, f"unexpected v2 wire-spec key {v2_only_key!r} in arbor on-disk recipe.json"

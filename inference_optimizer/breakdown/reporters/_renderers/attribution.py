@@ -11,6 +11,19 @@ from ..base import Decision, RenderedSection, fmt_pct, md_table, register_render
 
 @register_renderer("attribution")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the source-attribution section: gain split across sources.
+
+    Surfaces the per-source breakdown table, the collector's authoritative
+    attribution method label, and any assumption notes. Skipped when no
+    per-source split is available (single-source or unmined attribution).
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered section, marked skipped when there is no
+            per-source split to show.
+    """
     a = breakdown.get("attribution") or {}
     sb = a.get("source_breakdown") or {}
     notes = a.get("notes") or []
@@ -26,12 +39,12 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     total_v = sb.get("validated_total_pct")
     rows = [
         # explore subsumes the old backends+params split; legacy rows kept for archived reports.
-        ["explore",  sb.get("explore_pct_of_total"),  sb.get("explore_share_pct")],
+        ["explore", sb.get("explore_pct_of_total"), sb.get("explore_share_pct")],
         ["backends", sb.get("backends_pct_of_total"), sb.get("backends_share_pct")],
-        ["params",   sb.get("params_pct_of_total"),   sb.get("params_share_pct")],
-        ["sweep",    sb.get("sweep_pct_of_total"),    sb.get("sweep_share_pct")],
-        ["geak",     sb.get("geak_pct_of_total"),     sb.get("geak_share_pct")],
-        ["oob",      sb.get("oob_pct_of_total"),      sb.get("oob_share_pct")],
+        ["params", sb.get("params_pct_of_total"), sb.get("params_share_pct")],
+        ["sweep", sb.get("sweep_pct_of_total"), sb.get("sweep_share_pct")],
+        ["geak", sb.get("geak_pct_of_total"), sb.get("geak_share_pct")],
+        ["oob", sb.get("oob_pct_of_total"), sb.get("oob_share_pct")],
     ]
 
     facts: list[str] = []
@@ -48,22 +61,21 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     for src, pct, share in rows:
         if pct in (None, 0, 0.0):
             continue
-        facts.append(
-            f"{src}: {fmt_pct(pct)} of total"
-            + (f" ({fmt_pct(share)} share)" if share is not None else "")
-        )
+        facts.append(f"{src}: {fmt_pct(pct)} of total" + (f" ({fmt_pct(share)} share)" if share is not None else ""))
     for n in notes:
         facts.append(f"Note: {n}")
 
     decisions: list[Decision] = []
     for src, pct, _share in rows:
         if pct and pct > 0:
-            decisions.append(Decision(
-                kind="kept",
-                subject=f"attribution:{src}",
-                metric_pct=float(pct),
-                rationale="contributed positive validated gain",
-            ))
+            decisions.append(
+                Decision(
+                    kind="kept",
+                    subject=f"attribution:{src}",
+                    metric_pct=float(pct),
+                    rationale="contributed positive validated gain",
+                )
+            )
 
     # Only emit the table when some source is non-zero; all-zero rows can't
     # distinguish "not mined yet" from "every source contributed zero".

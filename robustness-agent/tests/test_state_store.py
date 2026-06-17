@@ -49,7 +49,8 @@ def test_malformed_json_recovers_to_empty(tmp_path: Path) -> None:
     target_dir = tmp_path / "agents" / "robustness"
     target_dir.mkdir(parents=True)
     (target_dir / "detector_state.json").write_text(
-        "{not valid json", encoding="utf-8",
+        "{not valid json",
+        encoding="utf-8",
     )
     store = DetectorStateStore(session_dir=tmp_path)
     assert store.snapshot() == {}
@@ -64,7 +65,8 @@ def test_non_dict_top_level_is_dropped(tmp_path: Path) -> None:
     target_dir = tmp_path / "agents" / "robustness"
     target_dir.mkdir(parents=True)
     (target_dir / "detector_state.json").write_text(
-        json.dumps(["not", "a", "dict"]), encoding="utf-8",
+        json.dumps(["not", "a", "dict"]),
+        encoding="utf-8",
     )
     store = DetectorStateStore(session_dir=tmp_path)
     assert store.snapshot() == {}
@@ -74,11 +76,13 @@ def test_non_dict_slot_values_are_dropped(tmp_path: Path) -> None:
     target_dir = tmp_path / "agents" / "robustness"
     target_dir.mkdir(parents=True)
     (target_dir / "detector_state.json").write_text(
-        json.dumps({
-            "gpu_leak": {"consecutive_hits": 1},
-            "ray_pending": ["bad"],  # not a dict
-            "progress": "also bad",
-        }),
+        json.dumps(
+            {
+                "gpu_leak": {"consecutive_hits": 1},
+                "ray_pending": ["bad"],  # not a dict
+                "progress": "also bad",
+            }
+        ),
         encoding="utf-8",
     )
     store = DetectorStateStore(session_dir=tmp_path)

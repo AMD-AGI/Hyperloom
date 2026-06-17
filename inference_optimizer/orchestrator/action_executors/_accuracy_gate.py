@@ -31,25 +31,37 @@ _HIGH_RISK_CLI_PATTERNS: tuple[str, ...] = (
     "--decode-attention-backend",
 )
 
-_HIGH_RISK_ENV_KEYS: frozenset[str] = frozenset({
-    "VLLM_ROCM_USE_AITER",
-    "VLLM_ROCM_USE_AITER_LINEAR",
-    "VLLM_ROCM_USE_AITER_RMSNORM",
-    "VLLM_ROCM_USE_AITER_FP8BMM",
-    "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
-    "VLLM_ROCM_USE_AITER_TRITON_ROPE",
-    "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
-    "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT",
-    "AMDGCN_USE_BUFFER_OPS",
-    "SGLANG_USE_AITER",
-})
+_HIGH_RISK_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "VLLM_ROCM_USE_AITER",
+        "VLLM_ROCM_USE_AITER_LINEAR",
+        "VLLM_ROCM_USE_AITER_RMSNORM",
+        "VLLM_ROCM_USE_AITER_FP8BMM",
+        "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
+        "VLLM_ROCM_USE_AITER_TRITON_ROPE",
+        "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
+        "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT",
+        "AMDGCN_USE_BUFFER_OPS",
+        "SGLANG_USE_AITER",
+    }
+)
 
 
 def is_high_accuracy_risk(
     extra_args: str = "",
     extra_envs: dict[str, str] | None = None,
 ) -> bool:
-    """Return True if the variant changes precision or compute paths."""
+    """Return True if the variant changes precision or compute paths.
+
+    Args:
+        extra_args (str): The variant's server args to scan for high-risk
+            CLI flags.
+        extra_envs (dict[str, str] | None): The variant's env overrides to scan
+            for high-risk keys.
+
+    Returns:
+        bool: True when the variant matches any high-risk flag / env key.
+    """
     args_lower = extra_args.lower()
     for pattern in _HIGH_RISK_CLI_PATTERNS:
         if pattern in args_lower:
@@ -66,9 +78,14 @@ def parse_eval_results(workspace: Path | str) -> dict[str, Any]:
     Searches ``results*.json`` recursively for the GSM8K-primary
     ``exact_match,strict-match`` metric.
 
+    Args:
+        workspace (Path | str): The benchmark workspace to search recursively
+            for ``results*.json``.
+
     Returns:
-        {"accuracy": float, "task": str, "source_file": str}
-        or {"accuracy": None, "error": str} if not found.
+        dict[str, Any]: ``{"accuracy": float, "task": str, "metric": str,
+            "source_file": str}`` on success, or ``{"accuracy": None,
+            "error": str}`` when no result / metric is found.
     """
     workspace = Path(workspace)
     search_paths = [
@@ -77,9 +94,7 @@ def parse_eval_results(workspace: Path | str) -> dict[str, Any]:
     ]
     result_files: list[Path] = []
     for pattern in search_paths:
-        result_files.extend(
-            Path(f) for f in glob.glob(str(pattern), recursive=True)
-        )
+        result_files.extend(Path(f) for f in glob.glob(str(pattern), recursive=True))
     if not result_files:
         return {"accuracy": None, "error": f"no results*.json in {workspace}"}
 
@@ -91,13 +106,11 @@ def parse_eval_results(workspace: Path | str) -> dict[str, Any]:
 
     results = data.get("results", {})
     for task_name, metrics in results.items():
-        for key in ("exact_match,strict-match", "exact_match,flexible-extract",
-                    "exact_match,none", "acc,none"):
+        for key in ("exact_match,strict-match", "exact_match,flexible-extract", "exact_match,none", "acc,none"):
             if key in metrics:
                 score = metrics[key]
                 if isinstance(score, (int, float)):
-                    log.info("accuracy_gate: task=%s metric=%s score=%.4f "
-                             "source=%s", task_name, key, score, latest)
+                    log.info("accuracy_gate: task=%s metric=%s score=%.4f source=%s", task_name, key, score, latest)
                     return {
                         "accuracy": float(score),
                         "task": task_name,
@@ -116,6 +129,15 @@ def accuracy_passed(
     """Return True if accuracy drop is within tolerance.
 
     threshold=0.05 means: if baseline_accuracy=0.80, new must be >= 0.75.
+
+    Args:
+        baseline_accuracy (float): The baseline accuracy score. ``<= 0`` skips
+            the gate (returns True).
+        new_accuracy (float): The candidate variant's accuracy score.
+        threshold (float): The maximum allowed accuracy drop.
+
+    Returns:
+        bool: True when the drop is within ``threshold`` (or no baseline).
     """
     if baseline_accuracy <= 0:
         # No baseline accuracy recorded; skip gate (can't compare).

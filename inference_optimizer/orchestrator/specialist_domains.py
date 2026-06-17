@@ -21,6 +21,29 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SpecialistDomain:
+    """A single specialist domain entry in the canonical catalogue.
+
+    Describes one specialist (serving, kernel, comm, compiler, system, etc.)
+    that the Orchestrator can dispatch, including which source layer it reads,
+    which KB anchor it maps to, and which upstream repos it scouts for PRs.
+
+    Attributes:
+        key (str): Stable identifier for the domain (e.g. ``serving_specialist``).
+        layer (str): Human-readable description of the source/runtime layer it
+            focuses on.
+        kb_anchor (str): Knowledge-base anchor the domain is associated with.
+        pr_repos (tuple[str, ...]): Upstream repositories scanned for relevant
+            PRs. Defaults to an empty tuple.
+        available_in (str): Milestone in which the domain becomes available
+            (e.g. ``M5`` or ``M6``). Defaults to ``"M6"``.
+        description (str): Free-form description of the domain's responsibilities.
+            Defaults to an empty string.
+        sub_kinds (tuple[str, ...]): Optional per-domain sub_kind catalogue. When
+            empty, only ``params.sub_kind`` in {None, ""} is accepted; non-empty
+            values are denied with a structured PolicyGate error. Defaults to an
+            empty tuple.
+    """
+
     key: str
     layer: str
     kb_anchor: str
@@ -52,8 +75,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         pr_repos=("ROCm/aiter", "triton-lang/triton"),
         available_in="M6",
         description=(
-            "Reads aiter / sglang kernels / triton source; focuses on "
-            "attention, MoE, GEMM, fused attention paths."
+            "Reads aiter / sglang kernels / triton source; focuses on attention, MoE, GEMM, fused attention paths."
         ),
     ),
     SpecialistDomain(
@@ -62,10 +84,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         kb_anchor="communication",
         pr_repos=("ROCm/rccl", "nvidia/nccl"),
         available_in="M6",
-        description=(
-            "Focuses on collective communication, allreduce algorithms, "
-            "QuickReduce, topology."
-        ),
+        description=("Focuses on collective communication, allreduce algorithms, QuickReduce, topology."),
     ),
     SpecialistDomain(
         key="compiler_specialist",
@@ -73,10 +92,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         kb_anchor="compiler",
         pr_repos=("triton-lang/triton", "pytorch/pytorch"),
         available_in="M6",
-        description=(
-            "Focuses on torch.compile, inductor, triton codegen, AMDGCN, "
-            "register pressure."
-        ),
+        description=("Focuses on torch.compile, inductor, triton codegen, AMDGCN, register pressure."),
     ),
     SpecialistDomain(
         key="system_specialist",
@@ -94,8 +110,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="pr_intel_specialist",
         layer="cross-repo PR research",
         kb_anchor="pr_intelligence",
-        pr_repos=("ROCm/aiter", "sgl-project/sglang", "ROCm/vllm",
-                  "triton-lang/triton", "ROCm/rccl"),
+        pr_repos=("ROCm/aiter", "sgl-project/sglang", "ROCm/vllm", "triton-lang/triton", "ROCm/rccl"),
         available_in="M6",
         description=(
             "EXPLORE-phase per-gap PR top-up. Surveys PRs across known "
@@ -109,8 +124,14 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="research_scout_specialist",
         layer="proven-prior research / reference scripts / arch features",
         kb_anchor="research_scout",
-        pr_repos=("ROCm/aiter", "sgl-project/sglang", "ROCm/vllm",
-                  "triton-lang/triton", "ROCm/rccl", "NVIDIA/TensorRT-LLM"),
+        pr_repos=(
+            "ROCm/aiter",
+            "sgl-project/sglang",
+            "ROCm/vllm",
+            "triton-lang/triton",
+            "ROCm/rccl",
+            "NVIDIA/TensorRT-LLM",
+        ),
         available_in="M5",
         description=(
             "Read-only research collector dispatched at PRELUDE (and "
@@ -125,9 +146,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
 )
 
 
-SPECIALIST_DOMAIN_KEYS: frozenset[str] = frozenset(
-    d.key for d in SPECIALIST_DOMAINS
-)
+SPECIALIST_DOMAIN_KEYS: frozenset[str] = frozenset(d.key for d in SPECIALIST_DOMAINS)
 
 
 # Controlled knowledge-domain tag vocabulary derived from distinct
@@ -137,6 +156,14 @@ EXTRA_KNOWLEDGE_DOMAIN_TAGS: tuple[str, ...] = ()
 
 
 def _derive_knowledge_domain_tags() -> tuple[str, ...]:
+    """Collect the distinct knowledge-domain tags from the catalogue.
+
+    Combines the ``kb_anchor`` of each specialist domain with any extra
+    standalone tags, preserving first-seen order and dropping blanks.
+
+    Returns:
+        Ordered tuple of unique knowledge-domain tags.
+    """
     seen: dict[str, None] = {}
     for d in SPECIALIST_DOMAINS:
         anchor = (d.kb_anchor or "").strip()
@@ -156,6 +183,13 @@ KNOWLEDGE_DOMAIN_TAG_SET: frozenset[str] = frozenset(KNOWLEDGE_DOMAIN_TAGS)
 # Map each knowledge-domain tag back to a representative catalogue entry.
 # The first catalogue entry that owns the anchor wins.
 def _anchor_to_domain_map() -> dict[str, "SpecialistDomain"]:
+    """Build a map from KB anchor to its representative domain entry.
+
+    The first catalogue entry that owns a given anchor wins.
+
+    Returns:
+        Mapping of ``kb_anchor`` to the owning :class:`SpecialistDomain`.
+    """
     out: dict[str, SpecialistDomain] = {}
     for d in SPECIALIST_DOMAINS:
         anchor = (d.kb_anchor or "").strip()
@@ -169,7 +203,15 @@ _ANCHOR_TO_DOMAIN: dict[str, "SpecialistDomain"] = _anchor_to_domain_map()
 
 def domain_for_tag(tag: str) -> "SpecialistDomain | None":
     """Return a representative catalogue entry for a knowledge-domain
-    tag (matched first by ``kb_anchor``, then by ``key``)."""
+    tag (matched first by ``kb_anchor``, then by ``key``).
+
+    Args:
+        tag: The knowledge-domain tag to look up.
+
+    Returns:
+        The matching catalogue entry, or ``None`` when the tag is empty or
+        unknown.
+    """
     t = (tag or "").strip()
     if not t:
         return None
@@ -185,6 +227,12 @@ def normalize_dispatch_tags(params: dict) -> list[str]:
     Reads ``params.tags``; falls back to the ``params.domain`` alias (mapped
     to its ``kb_anchor`` when it names a catalogue entry, else verbatim) when
     absent. Order-preserving dedup; empty entries dropped.
+
+    Args:
+        params: The dispatch payload (reads ``tags`` then ``domain``).
+
+    Returns:
+        The resolved, order-preserving deduped tag list.
     """
     raw = params.get("tags")
     tags: list[str] = []
@@ -200,15 +248,22 @@ def normalize_dispatch_tags(params: dict) -> list[str]:
             tags.append((dom.kb_anchor or domain) if dom else domain)
     return list(dict.fromkeys(tags))
 
+
 # Active set — domains with fully-wired prompt templates. Matches the
 # full catalogue, so Orchestration never falls through to the generic template.
-SPECIALIST_DOMAINS_M5: frozenset[str] = frozenset(
-    d.key for d in SPECIALIST_DOMAINS
-)
+SPECIALIST_DOMAINS_M5: frozenset[str] = frozenset(d.key for d in SPECIALIST_DOMAINS)
 
 
 def get_domain(key: str) -> SpecialistDomain | None:
-    """Return the catalogue entry for ``key`` or None when unknown."""
+    """Return the catalogue entry for ``key`` or None when unknown.
+
+    Args:
+        key (str): The domain key to look up (e.g. ``serving_specialist``).
+
+    Returns:
+        SpecialistDomain | None: The matching catalogue entry, or None if no
+        domain with that key exists.
+    """
     for d in SPECIALIST_DOMAINS:
         if d.key == key:
             return d

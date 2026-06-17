@@ -24,7 +24,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .trace.parse_usage import parse_claude_stream_json_usage
+from .trace.parse_usage import (
+    parse_claude_stream_json_response,
+    parse_claude_stream_json_usage,
+)
 
 
 log = logging.getLogger(__name__)
@@ -119,6 +122,14 @@ class SpecialistSubprocessResult:
     This is how the *production-default* specialist path's token spend —
     otherwise invisible to the parent — re-enters the unified ledger."""
 
+    response: str | None = None
+    """Assistant reply text recovered from the same Claude CLI
+    ``stream-json`` log (full-trace B1 conversation). The prompt is held by
+    the parent (the CLI takes it via a prompt file, so it never appears in
+    the stream); pairing the parent-side prompt with this response lands the
+    production specialist turn in ``conversations.jsonl``. ``None`` when no
+    response text could be recovered (crash before any reply)."""
+
     error: str = ""
 
 
@@ -128,6 +139,12 @@ def _pick_worktree_base(roots: tuple[str, ...]) -> Path | None:
 
     Falls back to None when none exist — the runner then runs the
     specialist without an isolated worktree.
+
+    Args:
+        roots: Candidate root paths to probe for a ``.git`` marker.
+
+    Returns:
+        The first git-checkout root, or ``None`` when none qualify.
     """
     for r in roots:
         p = Path(r)
@@ -141,13 +158,24 @@ def _pick_worktree_base(roots: tuple[str, ...]) -> Path | None:
 
 
 def _setup_worktree(
-    base: Path, worktree_path: Path, branch: str,
+    base: Path,
+    worktree_path: Path,
+    branch: str,
 ) -> tuple[Path | None, str]:
     """Create a fresh git worktree at ``worktree_path`` branched off
-    ``base``'s HEAD. Returns (worktree_dir, error_message).
+    ``base``'s HEAD.
 
     Best-effort: on git error returns ``(None, err)`` so the caller can
     proceed without isolation (PR-A2 default) or hard-fail.
+
+    Args:
+        base: Git checkout the worktree is branched off of.
+        worktree_path: Destination path for the new worktree.
+        branch: Branch name to create for the worktree.
+
+    Returns:
+        A ``(worktree_path, "")`` tuple on success, or ``(None, error)`` on
+        git failure.
     """
     if worktree_path.exists():
         # Resume / retry: reuse an existing worktree (stale ones are rare).
@@ -158,20 +186,27 @@ def _setup_worktree(
         return worktree_path, ""
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "git", "-C", str(base), "worktree", "add",
-        "-b", branch, str(worktree_path),
+        "git",
+        "-C",
+        str(base),
+        "worktree",
+        "add",
+        "-b",
+        branch,
+        str(worktree_path),
     ]
     try:
         cp = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=60.0, check=False,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+            check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return None, f"git worktree add failed to spawn: {exc!r}"
     if cp.returncode != 0:
-        return None, (
-            f"git worktree add rc={cp.returncode}: "
-            f"stderr={cp.stderr.strip()[:400]!r}"
-        )
+        return None, (f"git worktree add rc={cp.returncode}: stderr={cp.stderr.strip()[:400]!r}")
     return worktree_path, ""
 
 
@@ -180,15 +215,21 @@ def _teardown_worktree(base: Path | None, worktree_path: Path) -> None:
 
     Called only on the REVERT / synth-empty path; the KEEP path leaves the
     worktree in place so ``integrate_patch`` can pull patches out of it.
+
+    Args:
+        base: Git checkout the worktree was created from, or ``None``.
+        worktree_path: Path of the worktree to remove.
     """
     if not worktree_path.exists():
         return
     if base is not None and (base / ".git").exists():
         try:
             subprocess.run(
-                ["git", "-C", str(base), "worktree", "remove", "--force",
-                 str(worktree_path)],
-                capture_output=True, text=True, timeout=30.0, check=False,
+                ["git", "-C", str(base), "worktree", "remove", "--force", str(worktree_path)],
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+                check=False,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
@@ -205,6 +246,12 @@ class SpecialistSubprocessDispatcher:
     """
 
     def __init__(self, config: SpecialistSubprocessConfig):
+        """Store the static spawn config for reuse across dispatches.
+
+        Args:
+            config (SpecialistSubprocessConfig): Session-wide config
+                captured at CLI boot; reused for every :meth:`run` call.
+        """
         self.config = config
 
     # Public entry point
@@ -223,18 +270,30 @@ class SpecialistSubprocessDispatcher:
     ) -> SpecialistSubprocessResult:
         """Spawn a claude subprocess, reap it, return the parsed result.
 
-        Parameters
-        ----------
-        workspace: ``runs/specialist/<task_id>/`` — where prompt.md,
-            process.log, heartbeat.json, specialist_done.json live.
-        worktree: per-task git worktree (None when worktree setup
-            failed; the dispatcher still spawns claude but the agent
-            has no write-isolated tree, only ``--add-dir <workspace>``).
-        system_prompt / user_prompt: assembled by
-            :func:`specialist_prompt_builder.build_specialist_prompts`.
-        allowed_tools: per-task tool whitelist (post-:meth:`SpecialistRunner._resolve_tools`).
-        max_turns: hard cap on LLM turns; multiplied by config's
-            ``per_turn_max_seconds`` for the wall-clock ceiling.
+        Args:
+            task_id (str): Task identifier used for logging / workspace
+                layout.
+            workspace (Path): ``runs/specialist/<task_id>/`` — where
+                prompt.md, process.log, heartbeat.json, and
+                specialist_done.json live.
+            worktree (Path | None): Per-task git worktree (None when
+                worktree setup failed; the dispatcher still spawns claude
+                but the agent has no write-isolated tree, only
+                ``--add-dir <workspace>``).
+            worktree_base (Path | None): The base checkout the worktree was
+                branched off (used by callers for teardown).
+            system_prompt (str): System prompt assembled by
+                :func:`specialist_prompt_builder.build_specialist_prompts`.
+            user_prompt (str): User prompt from the same builder.
+            allowed_tools (tuple[str, ...]): Per-task tool whitelist
+                (post-:meth:`SpecialistRunner._resolve_tools`).
+            max_turns (int): Hard cap on LLM turns; multiplied by the
+                config's ``per_turn_max_seconds`` for the wall-clock ceiling.
+
+        Returns:
+            SpecialistSubprocessResult: Parsed outcome — done payload (if
+                any), exit code, timing, timeout / stale-heartbeat flags,
+                process log path, and discovered patches.
         """
         workspace.mkdir(parents=True, exist_ok=True)
         prompt_file = workspace / "prompt.md"
@@ -250,12 +309,7 @@ class SpecialistSubprocessDispatcher:
 
         # Write the prompt file (system + user collapsed into one
         # --system-prompt-file; -p carries the kickoff).
-        combined = (
-            "<!-- system_prompt -->\n"
-            + system_prompt
-            + "\n<!-- user_prompt -->\n"
-            + user_prompt
-        )
+        combined = "<!-- system_prompt -->\n" + system_prompt + "\n<!-- user_prompt -->\n" + user_prompt
         prompt_file.write_text(combined, encoding="utf-8")
 
         cmd = self._build_claude_cmd(
@@ -275,8 +329,7 @@ class SpecialistSubprocessDispatcher:
             env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = visible
         else:
             # CPU specialists must not inherit serving GPU visibility.
-            for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES",
-                        "ROCR_VISIBLE_DEVICES"):
+            for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
                 env.pop(var, None)
 
         proc_started = time.monotonic()
@@ -332,6 +385,12 @@ class SpecialistSubprocessDispatcher:
         #    memory — re-enters the unified ledger. Best-effort: a missing
         #    / truncated log yields ``None`` (parser swallows its own I/O).
         usage = parse_claude_stream_json_usage(process_log)
+        # Conversation sibling of the usage recovery above: the same
+        # stream-json log carries the assistant's reply. Recover it so the
+        # production specialist turn lands in conversations.jsonl (the prompt
+        # is paired in by the parent runner). Best-effort: returns None on a
+        # missing / truncated log.
+        response = parse_claude_stream_json_response(process_log)
 
         return SpecialistSubprocessResult(
             done_payload=done_payload,
@@ -342,25 +401,48 @@ class SpecialistSubprocessDispatcher:
             process_log_path=str(process_log),
             patches=patches,
             usage=usage,
+            response=response,
             error=outcome["error"],
         )
 
     # Internals
     def _build_claude_cmd(
-        self, *,
+        self,
+        *,
         prompt_file: Path,
         workspace: Path,
         worktree: Path | None,
         allowed_tools: tuple[str, ...],
     ) -> list[str]:
+        """Assemble the ``claude`` CLI argv for a specialist subprocess.
+
+        Builds the flag list (output format, permission mode, system
+        prompt file, tool whitelist, mcp config, ``--add-dir`` entries,
+        operator escape-hatch args). ``emit_intent`` is dropped from the
+        tool whitelist since the subprocess has no in-process MCP server.
+
+        Args:
+            prompt_file (Path): Combined system+user prompt file passed via
+                ``--system-prompt-file``.
+            workspace (Path): Task workspace surfaced as an ``--add-dir``.
+            worktree (Path | None): Write-isolated worktree surfaced as the
+                first ``--add-dir`` when present.
+            allowed_tools (tuple[str, ...]): Per-task tool whitelist.
+
+        Returns:
+            list[str]: The full command argv to spawn.
+        """
         cfg = self.config
         cmd: list[str] = [
             cfg.claude_executable,
             "--print",
-            "--output-format", cfg.output_format,
+            "--output-format",
+            cfg.output_format,
             "--verbose",
-            "--permission-mode", cfg.permission_mode,
-            "--system-prompt-file", str(prompt_file),
+            "--permission-mode",
+            cfg.permission_mode,
+            "--system-prompt-file",
+            str(prompt_file),
             "-p",
             "Execute the task in your system prompt. Work autonomously. "
             + "Write specialist_done.json as your absolute last action.",
@@ -399,6 +481,25 @@ class SpecialistSubprocessDispatcher:
         max_seconds: float,
         started: float,
     ) -> dict[str, Any]:
+        """Poll the subprocess until it finishes, stalls, or times out.
+
+        Each tick checks (in order): a done-file at any candidate path
+        (graceful exit with a short grace window), natural process exit,
+        heartbeat staleness, and the hard wall-clock cap. Stale / timed-out
+        runs are killed via :meth:`_kill`.
+
+        Args:
+            proc (subprocess.Popen): The running claude subprocess.
+            workspace (Path): Task workspace (reserved for context).
+            done_files (tuple[Path, ...]): Candidate done-file paths to poll.
+            heartbeat_file (Path): Heartbeat file whose mtime gauges liveness.
+            max_seconds (float): Hard wall-clock ceiling for the run.
+            started (float): ``time.monotonic()`` value at spawn time.
+
+        Returns:
+            dict[str, Any]: Outcome with ``exit_code``, ``elapsed``,
+                ``timed_out``, ``stale_heartbeat``, and ``error`` keys.
+        """
         cfg = self.config
         outcome: dict[str, Any] = {
             "exit_code": None,
@@ -425,6 +526,11 @@ class SpecialistSubprocessDispatcher:
                 grace_until = now + 30.0
                 while time.monotonic() < grace_until and proc.poll() is None:
                     await asyncio.sleep(2.0)
+                # done.json written but the process (or its process-group
+                # children: SDK / curl) is still alive after grace — reap it so
+                # a multi-day run never leaks orphaned specialist subprocesses.
+                if proc.poll() is None:
+                    self._kill(proc)
                 outcome["exit_code"] = proc.poll()
                 outcome["elapsed"] = time.monotonic() - started
                 break
@@ -468,10 +574,7 @@ class SpecialistSubprocessDispatcher:
             # Hard wall-clock cap.
             if elapsed > max_seconds:
                 outcome["timed_out"] = True
-                outcome["error"] = (
-                    f"specialist subprocess exceeded "
-                    f"{max_seconds:.0f}s wall-clock cap"
-                )
+                outcome["error"] = f"specialist subprocess exceeded {max_seconds:.0f}s wall-clock cap"
                 self._kill(proc)
                 outcome["exit_code"] = proc.poll()
                 outcome["elapsed"] = time.monotonic() - started
@@ -481,8 +584,15 @@ class SpecialistSubprocessDispatcher:
 
     @staticmethod
     def _kill(proc: subprocess.Popen) -> None:
-        """Tear down a claude subprocess. Kills the whole process group
-        so child SDK / curl invocations die with it."""
+        """Tear down a claude subprocess.
+
+        Kills the whole process group (SIGTERM, then SIGKILL after a 5s
+        grace) so child SDK / curl invocations die with it. No-op if the
+        process already exited.
+
+        Args:
+            proc (subprocess.Popen): The subprocess to terminate.
+        """
         if proc.poll() is not None:
             return
         try:
@@ -509,11 +619,22 @@ class SpecialistSubprocessDispatcher:
 
     @staticmethod
     def _collect_patches(
-        worktree: Path | None, workspace: Path,
+        worktree: Path | None,
+        workspace: Path,
     ) -> list[str]:
-        """Return sorted patch paths discovered under worktree/patches/
-        and workspace/patches/ (defense in depth — the agent may write
-        to either)."""
+        """Discover patch files written by the specialist.
+
+        Scans both ``worktree/patches/`` and ``workspace/patches/``
+        (defense in depth — the agent may write to either) for ``*.patch``
+        and ``*.diff`` files.
+
+        Args:
+            worktree (Path | None): Per-task worktree, or None.
+            workspace (Path): Task workspace.
+
+        Returns:
+            list[str]: Discovered patch file paths.
+        """
         out: list[str] = []
         for base in (worktree, workspace):
             if base is None:
@@ -528,25 +649,39 @@ class SpecialistSubprocessDispatcher:
 
     @staticmethod
     def _read_done(done_file: Path) -> dict[str, Any] | None:
+        """Parse a ``specialist_done.json`` file, unwrapping intent envelopes.
+
+        Tolerates missing files and parse errors (logged, returns None).
+        When the file holds a ``specialist_done`` intent envelope, the
+        inner ``payload`` is merged with the outer keys so callers always
+        see a flat dict.
+
+        Args:
+            done_file (Path): Path to the candidate done-file.
+
+        Returns:
+            dict[str, Any] | None: The parsed (and possibly unwrapped)
+                payload, or None when missing / unparseable / not a dict.
+        """
         if not done_file.exists():
             return None
         try:
             data = json.loads(done_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             log.warning(
-                "specialist_done.json parse failed at %s: %r", done_file, exc,
+                "specialist_done.json parse failed at %s: %r",
+                done_file,
+                exc,
             )
             return None
         if not isinstance(data, dict):
             log.warning(
                 "specialist_done.json at %s is not a dict (%r); ignoring",
-                done_file, type(data).__name__,
+                done_file,
+                type(data).__name__,
             )
             return None
-        if (
-            str(data.get("intent_type") or "") == "specialist_done"
-            and isinstance(data.get("payload"), dict)
-        ):
+        if str(data.get("intent_type") or "") == "specialist_done" and isinstance(data.get("payload"), dict):
             inner = data["payload"]
             merged: dict[str, Any] = {}
             for k, v in data.items():
@@ -556,11 +691,9 @@ class SpecialistSubprocessDispatcher:
             for k, v in inner.items():
                 merged[k] = v
             log.info(
-                "_read_done: unwrapped specialist_done intent envelope at %s "
-                "(proposal_set_len=%d, empty=%s)",
+                "_read_done: unwrapped specialist_done intent envelope at %s (proposal_set_len=%d, empty=%s)",
                 done_file,
-                len(inner.get("proposal_set") or [])
-                if isinstance(inner.get("proposal_set"), list) else 0,
+                len(inner.get("proposal_set") or []) if isinstance(inner.get("proposal_set"), list) else 0,
                 inner.get("empty"),
             )
             return merged

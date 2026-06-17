@@ -25,11 +25,11 @@ SCHEMA_VERSION = 3
 # Default lane capacities; ``--research-lane-capacity`` overrides research_lane
 # at boot. A fresh DB runs with research_lane=1 (single specialist).
 DEFAULT_LANE_CAPACITIES: dict[str, int] = {
-    "server_lifecycle":   1,
+    "server_lifecycle": 1,
     "workspace_mutation": 1,
-    "benchmark_lane":     1,
-    "profile_lane":       1,
-    "research_lane":      1,
+    "benchmark_lane": 1,
+    "profile_lane": 1,
+    "research_lane": 1,
 }
 
 
@@ -129,8 +129,13 @@ _DDL = [
 
 
 _MANAGED_TABLES = (
-    "leases", "lane_capacity", "gpu_leases", "events", "cursors",
-    "tasks", "schema_version",
+    "leases",
+    "lane_capacity",
+    "gpu_leases",
+    "events",
+    "cursors",
+    "tasks",
+    "schema_version",
 )
 
 
@@ -139,6 +144,13 @@ def _migrate_leases_v1_to_v2(cur: sqlite3.Cursor) -> bool:
     ``(lane, holder_id)``). Returns True when a migration ran, False when
     already migrated / unknown shape. Snapshots rows, recreates the table,
     re-inserts; runs inside the caller's BEGIN IMMEDIATE.
+
+    Args:
+        cur: Open SQLite cursor within the caller's transaction.
+
+    Returns:
+        ``True`` when a migration ran, ``False`` when already migrated or the
+        table has an unknown shape.
     """
     try:
         cur.execute("PRAGMA table_info(leases)")
@@ -147,17 +159,12 @@ def _migrate_leases_v1_to_v2(cur: sqlite3.Cursor) -> bool:
     info = cur.fetchall()
     if not info:
         return False
-    pk_cols = sorted(
-        (row[1] for row in info if int(row[5] or 0) > 0)
-    )
+    pk_cols = sorted((row[1] for row in info if int(row[5] or 0) > 0))
     if pk_cols == ["holder_id", "lane"]:
         return False  # already migrated
     if pk_cols != ["lane"]:
         return False  # unknown shape — leave it alone
-    cur.execute(
-        "SELECT lane, holder_id, task_id, action, pid, "
-        "acquired_at, expires_at, heartbeat_at FROM leases"
-    )
+    cur.execute("SELECT lane, holder_id, task_id, action, pid, acquired_at, expires_at, heartbeat_at FROM leases")
     rows = cur.fetchall()
     cur.execute("DROP TABLE leases")
     cur.execute(
@@ -175,12 +182,8 @@ def _migrate_leases_v1_to_v2(cur: sqlite3.Cursor) -> bool:
         )
         """
     )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_leases_expires ON leases(expires_at)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_leases_lane ON leases(lane)"
-    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_leases_expires ON leases(expires_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_leases_lane ON leases(lane)")
     for r in rows:
         cur.execute(
             "INSERT OR REPLACE INTO leases(lane, holder_id, task_id, "
@@ -193,20 +196,34 @@ def _migrate_leases_v1_to_v2(cur: sqlite3.Cursor) -> bool:
 
 def _seed_default_lane_capacity(cur: sqlite3.Cursor) -> None:
     """Idempotently insert default capacity rows; existing rows are left
-    alone so a resume preserves the operator's choice."""
+    alone so a resume preserves the operator's choice.
+
+    Args:
+        cur: Open SQLite cursor within the caller's transaction.
+    """
     for lane, capacity in DEFAULT_LANE_CAPACITIES.items():
         cur.execute(
-            "INSERT OR IGNORE INTO lane_capacity(lane, capacity) "
-            "VALUES (?, ?)",
+            "INSERT OR IGNORE INTO lane_capacity(lane, capacity) VALUES (?, ?)",
             (lane, int(capacity)),
         )
 
 
 def set_lane_capacity(
-    conn: sqlite3.Connection, lane: str, capacity: int,
+    conn: sqlite3.Connection,
+    lane: str,
+    capacity: int,
 ) -> None:
-    """Upsert one ``lane_capacity`` row. Called by the CLI / Coordinator
-    boot path once :data:`SharedState.research_lane_capacity` is known."""
+    """Upsert one ``lane_capacity`` row.
+
+    Called by the CLI / Coordinator boot path once
+    :data:`SharedState.research_lane_capacity` is known. Runs in its
+    own ``BEGIN IMMEDIATE`` transaction.
+
+    Args:
+        conn (sqlite3.Connection): Open database connection.
+        lane (str): Lane name to set capacity for.
+        capacity (int): New capacity value.
+    """
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")
@@ -224,14 +241,24 @@ def set_lane_capacity(
 
 
 def get_lane_capacity(conn: sqlite3.Connection, lane: str) -> int:
-    """Return capacity for ``lane``, falling back to
-    :data:`DEFAULT_LANE_CAPACITIES`. Returns ``1`` for unknown lanes
-    (defensive; ``ensure_schema`` already seeds every KNOWN_LANES
-    member)."""
+    """Return capacity for ``lane``, falling back to defaults.
+
+    Falls back to :data:`DEFAULT_LANE_CAPACITIES` (and finally ``1``
+    for unknown lanes — defensive, since ``ensure_schema`` already
+    seeds every known lane).
+
+    Args:
+        conn (sqlite3.Connection): Open database connection.
+        lane (str): Lane name to look up.
+
+    Returns:
+        int: Configured capacity, or the default for the lane.
+    """
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT capacity FROM lane_capacity WHERE lane = ?", (str(lane),),
+            "SELECT capacity FROM lane_capacity WHERE lane = ?",
+            (str(lane),),
         )
         row = cur.fetchone()
         if row is not None:
@@ -247,6 +274,12 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
     """Idempotently create all tables, run the leases PK migration, seed
     lane_capacity defaults, and record the schema version. Single
     transaction so readers never see an intermediate schema.
+
+    Args:
+        conn: Open database connection.
+
+    Returns:
+        The current (max) recorded schema version.
     """
     cur = conn.cursor()
     try:
@@ -267,8 +300,7 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
             cur.execute(stmt)
         _seed_default_lane_capacity(cur)
         cur.execute(
-            "INSERT OR IGNORE INTO schema_version(version, applied_at) "
-            "VALUES (?, datetime('now'))",
+            "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, datetime('now'))",
             (SCHEMA_VERSION,),
         )
         cur.execute("SELECT MAX(version) FROM schema_version")
@@ -283,7 +315,14 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
 
 
 def reset_schema(conn: sqlite3.Connection) -> None:
-    """Drop and recreate every managed table. Test-only convenience."""
+    """Drop and recreate every managed table. Test-only convenience.
+
+    Drops all tables in :data:`_MANAGED_TABLES` in one transaction,
+    then re-runs :func:`ensure_schema` to rebuild them.
+
+    Args:
+        conn (sqlite3.Connection): Open database connection.
+    """
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")

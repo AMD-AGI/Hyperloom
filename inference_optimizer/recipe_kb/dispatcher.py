@@ -5,7 +5,8 @@
 Routes calls between the local store and the central kb-service
 according to the design fixed in 2026-05-28:
 
-Writes — local-only:
+Writes — local-only::
+
     :meth:`put_recipe`, :meth:`append_attempt`,
     :meth:`delete_recipe` are forwarded verbatim to
     :class:`LocalRecipeStore`. The remote client never sees a
@@ -14,7 +15,8 @@ Writes — local-only:
     new rows land.
 
 Reads — remote-first via the SINGLE ``/recipes/search`` route, fall
-through to local on absence / failure:
+through to local on absence / failure::
+
     The remote half is reached ONLY through ``/recipes/search``.
     ``get_recipe`` decodes the 5-tuple from the canonical_id into
     ``label_match`` and issues ONE search — the server decides
@@ -43,7 +45,8 @@ through to local on absence / failure:
        local store. Callers therefore never have to unwrap remote
        errors.
 
-Reads — local-only mode:
+Reads — local-only mode::
+
     A dispatcher constructed with ``remote=None`` (e.g.
     ``--degraded-kb`` or no ``--cortex-kb-url``) skips step 1
     entirely; reads go directly to the local store. A
@@ -74,23 +77,45 @@ from .remote_client import RemoteRecipeClient, RemoteRecipeClientError
 
 log = logging.getLogger(__name__)
 
+# Short, stable labels for the configured remote backend keyed by client class
+# name (used by :meth:`RecipeKB._remote_label` for logs/audit trace). Unknown
+# backends fall back to their class name.
+_REMOTE_LABELS: dict[str, str] = {
+    "RemoteRecipeClient": "cortex",
+    "GbrainRemoteRecipeClient": "gbrain",
+    "CompositeRemoteRecipeClient": "composite",
+}
+
 
 def _labels_from_canonical_id(canonical_id: str) -> dict[str, str]:
-    """Decode a canonical_id into the 5-key ``label_match`` dict the
-    central ``/recipes/search`` route expects.
+    """Decode a canonical_id into the 7-key ``label_match`` dict the
+    ``/recipes/search`` route expects.
 
-    The five cid segments are already slug-clean (produced by
+    The seven cid segments are already slug-clean (produced by
     ``recipe_canonical_id``), so they map 1:1 to the label values the
-    server matches on. Raises :class:`InvalidCanonicalIdError` for a
-    malformed id — the caller falls back to a local read.
+    server matches on.
+
+    Args:
+        canonical_id (str): Canonical recipe identity to decode.
+
+    Returns:
+        dict[str, str]: The 7-key ``label_match`` dict (``model`` /
+            ``hardware`` / ``framework`` / ``framework_version`` /
+            ``precision`` / ``model_type`` / ``architectures``).
+
+    Raises:
+        InvalidCanonicalIdError: If ``canonical_id`` is malformed; the
+            caller falls back to a local read.
     """
-    model, hardware, framework, framework_version, precision = (
-        cid_to_path_components(canonical_id)
+    model, hardware, framework, model_type, architectures, framework_version, precision = cid_to_path_components(
+        canonical_id
     )
     return {
         "model": model,
         "hardware": hardware,
         "framework": framework,
+        "model_type": model_type,
+        "architectures": architectures,
         "framework_version": framework_version,
         "precision": precision,
     }
@@ -132,6 +157,14 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
     Tolerant of missing keys — the central server always returns the
     full v2 envelope, but a partially-populated row (e.g. an old
     archive that pre-dates the field) shouldn't crash the read.
+
+    Args:
+        v2_payload (dict[str, Any]): A v2-spec recipe dict from the
+            central kb-service.
+
+    Returns:
+        dict[str, Any]: The same row in arbor on-disk shape; an empty
+            dict if ``v2_payload`` is not a dict.
     """
     if not isinstance(v2_payload, dict):
         return {}
@@ -147,14 +180,11 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
     # as exact). A real v2 row always carries ``labels`` + ``body``; the
     # absence of EVERY v2 envelope marker means the row is already arbor,
     # so we pass it through untouched.
-    if not any(
-        marker in v2_payload
-        for marker in ("body", "labels", "findings", "failures", "gaps", "metrics")
-    ):
+    if not any(marker in v2_payload for marker in ("body", "labels", "findings", "failures", "gaps", "metrics")):
         return dict(v2_payload)
-    body    = v2_payload.get("body")    or {}
+    body = v2_payload.get("body") or {}
     metrics = v2_payload.get("metrics") or {}
-    labels  = v2_payload.get("labels")  or {}
+    labels = v2_payload.get("labels") or {}
     if not isinstance(body, dict):
         body = {}
     if not isinstance(metrics, dict):
@@ -164,38 +194,41 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
 
     arbor: dict[str, Any] = {
         # store-managed metadata
-        "canonical_id":      v2_payload.get("canonical_id", ""),
-        "version":           v2_payload.get("version", 1),
-        "created_at":        v2_payload.get("created_at", ""),
-        "updated_at":        v2_payload.get("updated_at", ""),
+        "canonical_id": v2_payload.get("canonical_id", ""),
+        "version": v2_payload.get("version", 1),
+        "created_at": v2_payload.get("created_at", ""),
+        "updated_at": v2_payload.get("updated_at", ""),
         # 5-tuple identity from labels (with empty fallback when the
         # central row pre-dates the labels stamp)
-        "model":             str(labels.get("model") or ""),
-        "hardware":          str(labels.get("hardware") or ""),
-        "framework":         str(labels.get("framework") or ""),
+        "model": str(labels.get("model") or ""),
+        "hardware": str(labels.get("hardware") or ""),
+        "framework": str(labels.get("framework") or ""),
         "framework_version": str(labels.get("framework_version") or ""),
-        "precision":         str(labels.get("precision") or ""),
-        # arbor payload pulled out of body / metrics
-        "best_config":       dict(body.get("best_config") or {}),
-        "best_throughput":   float(
-            body.get("best_throughput")
-            or metrics.get("throughput")
-            or 0.0
+        "precision": str(labels.get("precision") or ""),
+        # arbor payload pulled out of body / metrics.
+        # kb-extract recipes store optimized args directly in body.extra_sglang_args
+        # rather than body.best_config; synthesize best_config when absent.
+        "best_config": dict(body.get("best_config") or {})
+        or (
+            {"extra_server_args": str(body.get("extra_sglang_args") or body.get("extra_server_args") or "").strip()}
+            if (body.get("extra_sglang_args") or body.get("extra_server_args"))
+            else {}
         ),
-        "what_worked":       list(v2_payload.get("findings") or []),
-        "what_failed":       list(v2_payload.get("failures") or []),
-        "remaining_gaps":    list(v2_payload.get("gaps") or []),
-        "prs_tested":        list(body.get("prs_tested") or []),
-        "pitfalls":          list(v2_payload.get("pitfalls") or []),
-        "lessons":           list(v2_payload.get("lessons") or []),
-        "last_profiled":     str(body.get("last_profiled") or ""),
+        "best_throughput": float(body.get("best_throughput") or metrics.get("throughput") or 0.0),
+        "what_worked": list(v2_payload.get("findings") or []),
+        "what_failed": list(v2_payload.get("failures") or []),
+        "remaining_gaps": list(v2_payload.get("gaps") or []),
+        "prs_tested": list(body.get("prs_tested") or []),
+        "pitfalls": list(v2_payload.get("pitfalls") or []),
+        "lessons": list(v2_payload.get("lessons") or []),
+        "last_profiled": str(body.get("last_profiled") or ""),
         "stack_fingerprint": dict(body.get("stack_fingerprint") or {}),
-        "sessions":          list(body.get("sessions") or []),
+        "sessions": list(body.get("sessions") or []),
         # v2-only audit fields pass through
-        "authority":     v2_payload.get("authority", "EXPERIENTIAL"),
-        "confidence":    v2_payload.get("confidence", 0.85),
+        "authority": v2_payload.get("authority", "EXPERIENTIAL"),
+        "confidence": v2_payload.get("confidence", 0.85),
         "evidence_refs": list(v2_payload.get("evidence_refs") or []),
-        "provenance":    dict(v2_payload.get("provenance") or {}),
+        "provenance": dict(v2_payload.get("provenance") or {}),
     }
     # Carry through any extra top-level keys the envelope shipped that
     # aren't part of the v2 wire structure (``body`` / ``labels`` /
@@ -217,7 +250,7 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Client-side rerank by ``prefer`` similarity
 # ---------------------------------------------------------------------------
-# The ``required`` filter (5-tuple ``label_match``) decides reusability;
+# The ``required`` filter (7-tuple ``label_match``) decides reusability;
 # ``prefer`` decides similarity. Neither the cortex kb-service nor the
 # gbrain page store rank by ``prefer`` server-side, so the dispatcher does
 # a stable client-side rerank over the already-arbor rows: higher
@@ -231,15 +264,31 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
 #   / ``osl`` / ``max_model_len``) — exact int/float equality.
 # A field absent on the row contributes 0 (no penalty, no credit).
 _PREFER_NUMERIC_KEYS: tuple[str, ...] = (
-    "tp", "ep", "pp", "conc", "isl", "osl", "max_model_len",
+    "tp",
+    "ep",
+    "pp",
+    "conc",
+    "isl",
+    "osl",
+    "max_model_len",
 )
 _PREFER_STRING_KEYS: tuple[str, ...] = (
-    "framework_version", "quant_scheme", "workload_mode",
+    "framework_version",
+    "quant_scheme",
+    "workload_mode",
 )
 
 
 def _prefer_score(row: dict[str, Any], prefer: dict[str, Any]) -> int:
-    """Count how many ``prefer`` fields the (flat arbor) row matches."""
+    """Count how many ``prefer`` fields the (flat arbor) row matches.
+
+    Args:
+        row: A flat arbor recipe row.
+        prefer: Workload-similarity hints to compare against the row.
+
+    Returns:
+        The count of matching numeric and string preference fields.
+    """
     if not isinstance(row, dict):
         return 0
     score = 0
@@ -266,12 +315,21 @@ def _prefer_score(row: dict[str, Any], prefer: dict[str, Any]) -> int:
 
 
 def _rerank_by_prefer(
-    rows: list[dict[str, Any]], prefer: dict[str, Any] | None,
+    rows: list[dict[str, Any]],
+    prefer: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     """Stable rerank of flat arbor rows by ``prefer`` similarity.
 
     No-op when ``prefer`` is empty. Never drops rows; only reorders so a
     closer-workload recipe surfaces first.
+
+    Args:
+        rows: The flat arbor rows to reorder.
+        prefer: Workload-similarity hints, or ``None`` to leave order intact.
+
+    Returns:
+        The rows reordered by descending preference score (or unchanged when
+        ``prefer`` is empty).
     """
     if not prefer:
         return rows
@@ -295,11 +353,18 @@ class RecipeKB:
             Defaults to ``log.warning`` so audit-collector hooks
             can wire a structured event in without a
             dispatcher-internal change.
+        audit_hook: Optional callback invoked (best-effort, never
+            raising into the caller) after every read/write with a
+            structured event dict describing whether the remote was
+            used, the request, and the resolution. Defaults to
+            ``None`` (no audit). Wired by the CLI to append a
+            ``recipe_snapshot/.audit.jsonl`` trace.
     """
 
     local: LocalRecipeStore
     remote: RemoteRecipeClient | None = None
     on_remote_failure: Any = None
+    audit_hook: Any = None
 
     # ------------------------------------------------------------------
     # Capability flags
@@ -314,6 +379,9 @@ class RecipeKB:
         v1 ``CortexKBClient`` keep working against the v2 dispatcher
         (e.g. ``coordinator._ensure_cortex_t0_anchored``); a missing
         attribute there would silently skip the SDK-fallback T0 anchor.
+
+        Returns:
+            bool: Always ``True``.
         """
         return True
 
@@ -328,6 +396,9 @@ class RecipeKB:
         retries background) to detect "service unhealthy" within an
         SLO that matches what callers already expect from the prior
         client. Adding a separate ping doubles RTT for every read.
+
+        Returns:
+            bool: ``True`` iff a remote client exists and is enabled.
         """
         return self.remote is not None and bool(self.remote.enabled)
 
@@ -345,23 +416,123 @@ class RecipeKB:
         :func:`_v2_to_arbor` keeps an idempotency guard so a row that is
         already in flat arbor shape (e.g. a mis-built adapter) passes
         through untouched rather than being silently emptied.
+
+        Args:
+            row: The remote row in the unified nested KB-interface envelope.
+
+        Returns:
+            The row projected into the flat arbor shape callers expect.
         """
         return _v2_to_arbor(row)
 
+    def _remote_label(self) -> str:
+        """A short, stable label for the configured remote backend.
+
+        Returns:
+            str: ``"none"`` when no remote, else ``"cortex"`` /
+                ``"gbrain"`` / ``"composite"`` (falling back to the
+                client class name for any future backend).
+        """
+        if self.remote is None:
+            return "none"
+        return _REMOTE_LABELS.get(
+            type(self.remote).__name__,
+            type(self.remote).__name__,
+        )
+
+    def _emit_audit(self, event: dict[str, Any]) -> None:
+        """Best-effort emit one audit event to ``audit_hook`` (never raises).
+
+        Args:
+            event (dict[str, Any]): The structured audit record.
+        """
+        hook = self.audit_hook
+        if not callable(hook):
+            return
+        try:
+            hook(event)
+        except Exception:  # noqa: BLE001 - audit must never break a KB op
+            log.debug("recipe_kb: audit_hook raised", exc_info=True)
+
+    def _read_audit_event(
+        self,
+        *,
+        method: str,
+        resolution: str,
+        row: dict[str, Any] | None,
+        canonical_id: str = "",
+        prefer: dict[str, Any] | None = None,
+        label_match: dict[str, Any] | None = None,
+        candidates: int = 0,
+    ) -> dict[str, Any]:
+        """Build a structured audit record for one recipe-snapshot read.
+
+        Captures whether the remote was consulted and which backend served
+        the row (``remote``), the request (``canonical_id`` / ``prefer`` /
+        ``label_match``), how it resolved (``remote`` / ``remote_miss`` /
+        ``remote_error`` / ``local``), and a compact view of the returned row
+        so the trace answers "was the recipe-snapshot used, what did we ask,
+        and what came back" without storing the full payload.
+
+        Args:
+            method (str): The read method (``get_recipe`` / ``search``).
+            resolution (str): How the read resolved.
+            row (dict[str, Any] | None): The resolved row (or first row).
+            canonical_id (str): Requested canonical id (``get_recipe``).
+            prefer (dict[str, Any] | None): Rerank hints, if any.
+            label_match (dict[str, Any] | None): Search filter, if any.
+            candidates (int): Number of remote candidate rows considered.
+
+        Returns:
+            dict[str, Any]: The audit event (no timestamp; the hook stamps it).
+        """
+        result: dict[str, Any] | None = None
+        if isinstance(row, dict):
+            result = {
+                "canonical_id": str(row.get("canonical_id") or ""),
+                "exact": bool(canonical_id and str(row.get("canonical_id") or "") == canonical_id),
+                "best_throughput": float(row.get("best_throughput") or 0.0),
+                "best_config_nonempty": bool(row.get("best_config")),
+            }
+        return {
+            "method": method,
+            "remote": self._remote_label(),
+            "resolution": resolution,
+            "hit": row is not None,
+            "candidates": int(candidates),
+            "request": {
+                "canonical_id": canonical_id or None,
+                "prefer_keys": sorted((prefer or {}).keys()),
+                "label_match": label_match or None,
+            },
+            "result": result,
+        }
+
     def _note_failure(self, method: str, exc: Exception) -> None:
+        """Report a remote read failure before local fall-through.
+
+        Invokes the ``on_remote_failure`` callback when one is
+        configured (logging if the callback itself raises); otherwise
+        logs a warning. Never raises.
+
+        Args:
+            method (str): Name of the dispatcher method that failed
+                against the remote.
+            exc (Exception): The remote failure being reported.
+        """
         if callable(self.on_remote_failure):
             try:
                 self.on_remote_failure(method, exc)
             except Exception:  # noqa: BLE001
                 log.exception(
-                    "on_remote_failure callback raised — continuing "
-                    "with local fallback for %s", method,
+                    "on_remote_failure callback raised — continuing with local fallback for %s",
+                    method,
                 )
         else:
             log.warning(
-                "recipe_kb: remote %s failed (%s); falling back to "
-                "local store",
-                method, exc,
+                "recipe_kb: remote %s failed (%s); falling back to local store",
+                method,
+                exc,
             )
 
     # ==================================================================
@@ -395,9 +566,39 @@ class RecipeKB:
     ) -> dict[str, Any]:
         """Write a recipe row LOCALLY ONLY in the arbor schema.
 
-        Returns ``{"canonical_id", "version", "created"}``. Never
-        touches the central kb-service. Field shape mirrors arbor's
-        ``Recipe`` (see :mod:`recipe_kb.schema`).
+        Never touches the central kb-service. Field shape mirrors
+        arbor's ``Recipe`` (see :mod:`recipe_kb.schema`); all
+        arguments are forwarded verbatim to
+        :meth:`LocalRecipeStore.put_recipe`.
+
+        Args:
+            canonical_id (str): Canonical recipe identity; must be
+                non-empty.
+            model (str): Model identity slot.
+            hardware (str): Hardware identity slot.
+            framework (str): Framework identity slot.
+            framework_version (str): Framework version identity slot.
+            precision (str): Precision identity slot.
+            best_config (dict[str, str] | None): Best-known config.
+            best_throughput (float): Best measured throughput.
+            what_worked (list[Any] | None): Findings that helped.
+            what_failed (list[Any] | None): Findings that failed.
+            remaining_gaps (list[Any] | None): Known remaining gaps.
+            prs_tested (list[Any] | None): PRs tested.
+            pitfalls (list[Any] | None): Known pitfalls.
+            lessons (list[Any] | None): Lessons learned.
+            last_profiled (str): Timestamp of last profiling run.
+            stack_fingerprint (dict[str, str] | None): Stack
+                fingerprint mapping.
+            sessions (list[Any] | None): Per-session records.
+            authority (str): Authority tier.
+            confidence (float): Confidence score in ``[0, 1]``.
+            evidence_refs (list[Any] | None): Supporting evidence refs.
+            provenance (dict[str, Any] | None): Audit provenance.
+            extras (dict[str, Any] | None): Free-form arbor keys.
+
+        Returns:
+            dict[str, Any]: ``{"canonical_id", "version", "created"}``.
         """
         return self.local.put_recipe(
             canonical_id=canonical_id,
@@ -437,7 +638,28 @@ class RecipeKB:
         rationale: str = "",
         attempt_at: str | None = None,
     ) -> dict[str, Any]:
-        """Append one attempt row LOCALLY ONLY."""
+        """Append one attempt row LOCALLY ONLY.
+
+        Forwards verbatim to :meth:`LocalRecipeStore.append_attempt`.
+
+        Args:
+            canonical_id (str): Parent recipe identity; must be
+                non-empty.
+            session_id (str): Owning session; must be non-empty.
+            diff (dict[str, Any] | None): Config diff applied.
+            predicted_delta (dict[str, Any] | None): Predicted metric
+                deltas.
+            measured_metrics (dict[str, Any] | None): Measured metrics.
+            fitness (float | None): Scalar fitness score, or ``None``.
+            outcome (str): Outcome label.
+            rationale (str): Free-form rationale.
+            attempt_at (str | None): Explicit ISO-8601 timestamp; auto
+                stamped when ``None``.
+
+        Returns:
+            dict[str, Any]: A dict with keys ``id``,
+                ``recipe_canonical_id`` and ``attempt_at``.
+        """
         return self.local.append_attempt(
             canonical_id=canonical_id,
             session_id=session_id,
@@ -451,7 +673,15 @@ class RecipeKB:
         )
 
     def delete_recipe(self, *, canonical_id: str) -> bool:
-        """Delete the live recipe row LOCALLY ONLY (history preserved)."""
+        """Delete the live recipe row LOCALLY ONLY (history preserved).
+
+        Args:
+            canonical_id (str): Canonical recipe identity; must be
+                non-empty.
+
+        Returns:
+            bool: ``True`` iff a live row was removed.
+        """
         return self.local.delete_recipe(canonical_id=canonical_id)
 
     # ==================================================================
@@ -466,7 +696,7 @@ class RecipeKB:
     ) -> dict[str, Any] | None:
         """Read a recipe row.
 
-        Remote uses the SINGLE ``/recipes/search`` route: the 5-tuple
+        Remote uses the SINGLE ``/recipes/search`` route: the 7-tuple
         decoded from ``canonical_id`` is passed as ``label_match`` and
         the central kb-service decides exact-vs-relative match +
         ranking. We deliberately do NOT hit ``GET /recipes/{cid}``;
@@ -475,7 +705,7 @@ class RecipeKB:
         ``prefer`` (workload-similarity hints — ``tp`` / ``ep`` / ``pp``
         / ``conc`` / ``isl`` / ``osl`` / ``max_model_len`` /
         ``framework_version`` / ``quant_scheme`` / ``workload_mode``)
-        does NOT change the ``required`` (5-tuple) filter; it only
+        does NOT change the ``required`` (7-tuple) filter; it only
         reranks the candidate rows so the closest-workload recipe is
         returned first. When ``prefer`` is set we ask the remote for a
         small candidate window instead of a single row, rerank
@@ -488,32 +718,86 @@ class RecipeKB:
           returns live rows), and
         * the fall-through when remote is absent / empty / errors.
 
-        Returns ``None`` only when neither store has the row.
+        Args:
+            canonical_id (str): Canonical recipe identity.
+            version (int | None): Specific archived version (served
+                locally), or ``None`` for the live row.
+
+        Returns:
+            dict[str, Any] | None: The recipe row in arbor shape, or
+                ``None`` when neither store has the row.
         """
+        resolution = "local"
         if version is None and self._remote_active():
             try:
+                # Fast path: delegate to the remote's get_recipe (slug-based
+                # O(1) on gbrain/composite) rather than the expensive search
+                # scan that chokes on large legacy page corpora.
+                try:
+                    direct = self.remote.get_recipe(  # type: ignore[union-attr]
+                        canonical_id=canonical_id,
+                        version=version,
+                    )
+                except (RemoteRecipeClientError, Exception):  # noqa: BLE001
+                    direct = None
+                if direct is not None and isinstance(direct, dict) and direct:
+                    normalized = self._normalize_remote_row(direct)
+                    if normalized and normalized.get("canonical_id"):
+                        self._emit_audit(
+                            self._read_audit_event(
+                                method="get_recipe",
+                                resolution="remote",
+                                row=normalized,
+                                canonical_id=canonical_id,
+                                prefer=prefer,
+                                candidates=1,
+                            )
+                        )
+                        return normalized
+                # Fast path miss — try label-match search with prefer rerank.
                 labels = _labels_from_canonical_id(canonical_id)
-                # With prefer hints we pull a candidate window so the
-                # client-side rerank has rows to reorder; otherwise the
-                # single top (server-ranked) row is enough.
                 candidate_limit = 25 if prefer else 1
                 rows = self.remote.search(  # type: ignore[union-attr]
-                    label_match=labels, limit=candidate_limit, prefer=prefer,
+                    label_match=labels,
+                    limit=candidate_limit,
+                    prefer=prefer,
                 )
                 if rows:
-                    normalized = [self._normalize_remote_row(r) for r in rows]
-                    ranked = _rerank_by_prefer(normalized, prefer)
+                    normalized_rows = [self._normalize_remote_row(r) for r in rows]
+                    ranked = _rerank_by_prefer(normalized_rows, prefer)
+                    self._emit_audit(
+                        self._read_audit_event(
+                            method="get_recipe",
+                            resolution="remote",
+                            row=ranked[0],
+                            canonical_id=canonical_id,
+                            prefer=prefer,
+                            candidates=len(rows),
+                        )
+                    )
                     return ranked[0]
                 # remote miss — fall through to local.
+                resolution = "remote_miss"
             except RemoteRecipeClientError as exc:
                 self._note_failure("get_recipe", exc)
+                resolution = "remote_error"
             except InvalidCanonicalIdError as exc:
-                # Can't build label_match from a malformed cid; the
-                # local store applies the same parse, so just degrade.
                 log.warning("get_recipe: %s; local-only read", exc)
-        return self.local.get_recipe(
-            canonical_id=canonical_id, version=version,
+                resolution = "remote_error"
+        local_row = self.local.get_recipe(
+            canonical_id=canonical_id,
+            version=version,
         )
+        self._emit_audit(
+            self._read_audit_event(
+                method="get_recipe",
+                resolution=resolution,
+                row=local_row,
+                canonical_id=canonical_id,
+                prefer=prefer,
+            )
+        )
+        return local_row
 
     def get_history(
         self,
@@ -528,14 +812,31 @@ class RecipeKB:
         ``/history`` is not used. The local archive is authoritative
         for writes anyway, so the on-disk ``history/v{N}.json`` files
         are the source of truth here.
+
+        Args:
+            canonical_id (str): Canonical recipe identity.
+            limit (int): Maximum number of archived rows to return.
+
+        Returns:
+            list[dict[str, Any]]: Archived prior versions ascending by
+                version.
         """
         return self.local.get_history(
-            canonical_id=canonical_id, limit=limit,
+            canonical_id=canonical_id,
+            limit=limit,
         )
 
     def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
         """Recent recipes — LOCAL only (remote = ``/recipes/search``
-        route only; bare ``GET /recipes`` is not used)."""
+        route only; bare ``GET /recipes`` is not used).
+
+        Args:
+            limit (int): Maximum number of recipes to return.
+
+        Returns:
+            list[dict[str, Any]]: Recent live recipes, ordered
+                ``updated_at DESC``.
+        """
         return self.local.list_recent(limit=limit)
 
     def search(
@@ -566,7 +867,20 @@ class RecipeKB:
 
         ``prefer`` only reorders; the ``required`` filter
         (``label_match`` / ``metric_filters``) decides membership.
+
+        Args:
+            label_match: Identity labels deciding membership.
+            metric_filters: ``{metric: {min, max}}`` bounds deciding membership.
+            updated_since: Lower bound on ``updated_at``.
+            order_by: Ordering directive forwarded to the store.
+            limit: Maximum number of rows to return.
+            prefer: Workload-similarity hints used only to rerank results.
+
+        Returns:
+            The matching recipe rows (remote-first, local fall-through),
+            reranked by ``prefer``.
         """
+        resolution = "local"
         if self._remote_active():
             try:
                 rows = self.remote.search(  # type: ignore[union-attr]
@@ -584,9 +898,22 @@ class RecipeKB:
                 # hasn't received our local writes yet.
                 if rows:
                     normalized = [self._normalize_remote_row(r) for r in rows]
-                    return _rerank_by_prefer(normalized, prefer)
+                    ranked = _rerank_by_prefer(normalized, prefer)
+                    self._emit_audit(
+                        self._read_audit_event(
+                            method="search",
+                            resolution="remote",
+                            row=ranked[0] if ranked else None,
+                            label_match=label_match,
+                            prefer=prefer,
+                            candidates=len(rows),
+                        )
+                    )
+                    return ranked
+                resolution = "remote_miss"
             except RemoteRecipeClientError as exc:
                 self._note_failure("search", exc)
+                resolution = "remote_error"
         local_rows = self.local.search(
             label_match=label_match,
             metric_filters=metric_filters,
@@ -594,7 +921,17 @@ class RecipeKB:
             order_by=order_by,
             limit=limit,
         )
-        return _rerank_by_prefer(local_rows, prefer)
+        ranked_local = _rerank_by_prefer(local_rows, prefer)
+        self._emit_audit(
+            self._read_audit_event(
+                method="search",
+                resolution=resolution,
+                row=ranked_local[0] if ranked_local else None,
+                label_match=label_match,
+                prefer=prefer,
+            )
+        )
+        return ranked_local
 
     def list_attempts(
         self,
@@ -603,9 +940,18 @@ class RecipeKB:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Attempts for one recipe — LOCAL only (remote =
-        ``/recipes/search`` route only)."""
+        ``/recipes/search`` route only).
+
+        Args:
+            canonical_id (str): Parent recipe identity.
+            limit (int): Maximum number of attempts to return.
+
+        Returns:
+            list[dict[str, Any]]: Attempt rows newest-first.
+        """
         return self.local.list_attempts(
-            canonical_id=canonical_id, limit=limit,
+            canonical_id=canonical_id,
+            limit=limit,
         )
 
     def list_session_attempts(
@@ -615,9 +961,18 @@ class RecipeKB:
         limit: int = 500,
     ) -> list[dict[str, Any]]:
         """Session attempts — LOCAL only (remote = ``/recipes/search``
-        route only)."""
+        route only).
+
+        Args:
+            session_id (str): Session whose attempts to collect.
+            limit (int): Maximum number of attempts to return.
+
+        Returns:
+            list[dict[str, Any]]: Attempts for the session oldest-first.
+        """
         return self.local.list_session_attempts(
-            session_id=session_id, limit=limit,
+            session_id=session_id,
+            limit=limit,
         )
 
     # ==================================================================

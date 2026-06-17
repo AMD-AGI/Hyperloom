@@ -22,15 +22,11 @@ from runtime.intent_envelope import (
 
 
 def test_allowed_verdicts_match_design_v06():
-    assert ALLOWED_VERDICTS == frozenset(
-        {"approve", "reject", "redirect", "advise", "needs_review"}
-    )
+    assert ALLOWED_VERDICTS == frozenset({"approve", "reject", "redirect", "advise", "needs_review"})
 
 
 def test_allowed_verdict_sources_match_schema():
-    assert ALLOWED_VERDICT_SOURCES == frozenset(
-        {"critic", "mock", "timeout", "critic_unavailable"}
-    )
+    assert ALLOWED_VERDICT_SOURCES == frozenset({"critic", "mock", "timeout", "critic_unavailable"})
 
 
 def test_build_review_verdict_intent_minimal():
@@ -67,23 +63,17 @@ def test_build_review_verdict_intent_full():
 
 def test_build_review_verdict_rejects_bad_verdict():
     with pytest.raises(IntentEnvelopeValidationError, match="verdict"):
-        build_review_verdict_intent(
-            target_proposal_msg_id="abc1", verdict="lgtm"
-        )
+        build_review_verdict_intent(target_proposal_msg_id="abc1", verdict="lgtm")
 
 
 def test_build_review_verdict_rejects_bad_source():
     with pytest.raises(IntentEnvelopeValidationError, match="source"):
-        build_review_verdict_intent(
-            target_proposal_msg_id="abc1", verdict="approve", source="someone"
-        )
+        build_review_verdict_intent(target_proposal_msg_id="abc1", verdict="approve", source="someone")
 
 
 def test_build_review_verdict_rejects_empty_target():
     with pytest.raises(IntentEnvelopeValidationError, match="target"):
-        build_review_verdict_intent(
-            target_proposal_msg_id="", verdict="approve"
-        )
+        build_review_verdict_intent(target_proposal_msg_id="", verdict="approve")
 
 
 def test_build_heartbeat_intent_default():
@@ -93,10 +83,12 @@ def test_build_heartbeat_intent_default():
 
 
 def test_build_envelope_with_intents_validates():
-    env = build_envelope([
-        build_review_verdict_intent(target_proposal_msg_id="m1", verdict="approve"),
-        build_review_verdict_intent(target_proposal_msg_id="m2", verdict="reject"),
-    ])
+    env = build_envelope(
+        [
+            build_review_verdict_intent(target_proposal_msg_id="m1", verdict="approve"),
+            build_review_verdict_intent(target_proposal_msg_id="m2", verdict="reject"),
+        ]
+    )
     d = env.to_dict()
     assert len(d["intents"]) == 2
     assert d["intents"][0]["payload"]["target_proposal_msg_id"] == "m1"
@@ -111,42 +103,42 @@ def test_build_envelope_empty_falls_back_to_heartbeat():
 
 
 def test_validate_envelope_accepts_well_formed_dict():
-    env = validate_envelope({
-        "intents": [
-            {
-                "intent_type": "review_verdict",
-                "payload": {
-                    "target_proposal_msg_id": "abc",
-                    "verdict": "approve",
-                    "source": "critic",
-                    "reasoning": "ok",
-                },
-            }
-        ]
-    })
+    env = validate_envelope(
+        {
+            "intents": [
+                {
+                    "intent_type": "review_verdict",
+                    "payload": {
+                        "target_proposal_msg_id": "abc",
+                        "verdict": "approve",
+                        "source": "critic",
+                        "reasoning": "ok",
+                    },
+                }
+            ]
+        }
+    )
     assert isinstance(env, IntentEnvelope)
     assert env.intents[0].payload["verdict"] == "approve"
 
 
 def test_validate_envelope_rejects_disallowed_intent():
     with pytest.raises(IntentEnvelopeValidationError, match="not.*Critic"):
-        validate_envelope({
-            "intents": [
-                {
-                    "intent_type": "delegate",
-                    "payload": {"action_name": "baseline"},
-                }
-            ]
-        })
+        validate_envelope(
+            {
+                "intents": [
+                    {
+                        "intent_type": "delegate",
+                        "payload": {"action_name": "baseline"},
+                    }
+                ]
+            }
+        )
 
 
 def test_validate_envelope_rejects_missing_payload_key():
     with pytest.raises(IntentEnvelopeValidationError, match="target"):
-        validate_envelope({
-            "intents": [
-                {"intent_type": "review_verdict", "payload": {"verdict": "approve"}}
-            ]
-        })
+        validate_envelope({"intents": [{"intent_type": "review_verdict", "payload": {"verdict": "approve"}}]})
 
 
 def test_validate_envelope_rejects_empty_list():
@@ -156,17 +148,19 @@ def test_validate_envelope_rejects_empty_list():
 
 def test_validate_envelope_rejects_unknown_verdict():
     with pytest.raises(IntentEnvelopeValidationError, match="verdict"):
-        validate_envelope({
-            "intents": [
-                {
-                    "intent_type": "review_verdict",
-                    "payload": {
-                        "target_proposal_msg_id": "x",
-                        "verdict": "yes",
-                    },
-                }
-            ]
-        })
+        validate_envelope(
+            {
+                "intents": [
+                    {
+                        "intent_type": "review_verdict",
+                        "payload": {
+                            "target_proposal_msg_id": "x",
+                            "verdict": "yes",
+                        },
+                    }
+                ]
+            }
+        )
 
 
 def test_advice_intent_carries_optional_target():

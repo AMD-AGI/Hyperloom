@@ -59,21 +59,20 @@ _SESSION_SKELETON: tuple[str, ...] = (
     "runs/integrate",
     "runs/kernel_opt",
     "kernel-agent-workspace",
-    "kernel-agent",            # tools/<name>.py output root (runs/<session_id>/...)
+    "kernel-agent",  # tools/<name>.py output root (runs/<session_id>/...)
     "patches",
-    "optimizer_runs",          # launcher stdout / pid / robustness monitor logs
+    "optimizer_runs",  # launcher stdout / pid / robustness monitor logs
 )
 
 # Workspace-shared layout (one copy per $USER_DATA_PATH). mkdir-ed by
 # install.sh + reused for every session_dir launched from this workspace.
 _WORKSPACE_SKELETON: tuple[str, ...] = (
-    "runtime",                 # pod-local env files (kernel-agent.env.sh, etc.)
-    "runtime/source-mirrors",  # writable mirrors of GEAK / OOB / TraceLens sources
-    "runtime/geak-config",     # generated litellm config consumed by GEAK CLI
+    "runtime",  # pod-local env files (kernel-agent.env.sh, etc.)
+    "runtime/geak-config",  # generated litellm config consumed by GEAK CLI
     # Cortex KB per-session bookkeeping (.kb_sid / .kb_warm.json / ...);
     # created up-front so the KB client never mkdir's on the hot path.
     "runtime/cortex",
-    "logs",                    # launcher stdout (workspace-shared)
+    "logs",  # launcher stdout (workspace-shared)
 )
 
 # Filename-safety regex for model_basename (ROCm/Magpie/Claude CLI choke
@@ -90,6 +89,9 @@ def workspace_root() -> Path:
     ``DEFAULT_SESSION_DIR``), regardless of layout mode. Workspace-shared
     artefacts (runtime/, logs/) live here. Falling back to the default emits
     one loud warning so a misconfigured launcher is visible.
+
+    Returns:
+        The workspace root path.
     """
     global _WARNED_NO_USER_DATA
     user_data = os.environ.get(ENV_USER_DATA_PATH)
@@ -111,7 +113,11 @@ def workspace_root() -> Path:
 
 def _layout_mode() -> str:
     """Effective layout mode: ``flat`` or ``per_model_ts`` (default), pinnable
-    via the env override."""
+    via the env override.
+
+    Returns:
+        Either ``"flat"`` or ``"per_model_ts"``.
+    """
     raw = (os.environ.get(ENV_SESSION_LAYOUT) or "").strip().lower()
     if raw in ("flat", "per_model_ts"):
         return raw
@@ -120,7 +126,14 @@ def _layout_mode() -> str:
 
 def _sanitize_model_basename(model_name: str | os.PathLike[str]) -> str:
     """Reduce ``model_name`` (path, HF id, or Path) to a filename-safe
-    basename (trailing path component). Empty/all-invalid -> ``"session"``."""
+    basename (trailing path component). Empty/all-invalid -> ``"session"``.
+
+    Args:
+        model_name: Model path, HF id, or Path to reduce to a basename.
+
+    Returns:
+        A filename-safe basename, or ``"session"`` when empty/all-invalid.
+    """
     stem = ("" if model_name is None else str(model_name)).strip()
     if not stem:
         return "session"
@@ -136,6 +149,9 @@ def session_dir() -> Path:
     ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` (pin from make_session_dir,
     inherited by subprocesses) -> ``$USER_DATA_PATH`` (flat layout) ->
     ``DEFAULT_SESSION_DIR``.
+
+    Returns:
+        The absolute session directory for the current run.
     """
     pinned = os.environ.get(ENV_CURRENT_SESSION_DIR)
     if pinned:
@@ -150,6 +166,13 @@ def find_latest_per_session_dir(
     ``--resume`` without ``--resume-from``). Selects by the
     ``%Y%m%dT%H%M%SZ`` timestamp in the directory name (lex sort), not mtime.
     Returns None when no matching subdir exists.
+
+    Args:
+        model_name: Restrict the scan to one model's subtree, or ``None`` to
+            scan every model basename.
+
+    Returns:
+        The latest per-session directory, or ``None`` when none match.
     """
     ws = workspace_root()
     if not ws.is_dir():
@@ -159,10 +182,7 @@ def find_latest_per_session_dir(
         model_root = ws / basename
         if not model_root.is_dir():
             return None
-        candidates = [
-            p for p in model_root.iterdir()
-            if p.is_dir() and len(p.name) == 16 and p.name.endswith("Z")
-        ]
+        candidates = [p for p in model_root.iterdir() if p.is_dir() and len(p.name) == 16 and p.name.endswith("Z")]
     else:
         # Scan every model_basename subdir; the timestamp-shaped name check
         # skips workspace-shared subdirs (runtime/, logs/).
@@ -185,6 +205,13 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
     is ``<workspace_root>/<model>/<UTC_ts>/`` and is pinned via
     ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR``; otherwise it is
     workspace_root (flat layout). Idempotent.
+
+    Args:
+        model_name: Model name selecting the per-model subtree, or ``None``
+            for the flat layout.
+
+    Returns:
+        The created (and pinned) session directory.
     """
     ws = workspace_root()
     ws.mkdir(parents=True, exist_ok=True)
@@ -193,9 +220,7 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
 
     if _layout_mode() == "per_model_ts" and model_name:
         basename = _sanitize_model_basename(model_name)
-        ts = datetime.datetime.now(datetime.timezone.utc).strftime(
-            "%Y%m%dT%H%M%SZ"
-        )
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         sd = ws / basename / ts
     else:
         sd = ws
@@ -210,42 +235,86 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
 
 
 def db_path_for(session_dir: Path) -> Path:
-    """Canonical SQLite location for a session: ``<sd>/storage/coordinator.db``."""
+    """Return the canonical SQLite database path for a session.
+
+    Args:
+        session_dir (Path): The session directory root.
+
+    Returns:
+        Path: ``<session_dir>/storage/coordinator.db``.
+    """
     return Path(session_dir) / "storage" / "coordinator.db"
 
 
 def asset_root() -> Path:
-    """Return the package runtime-asset root (shipped read-only files)."""
+    """Return the package runtime-asset root (shipped read-only files).
+
+    Honours the ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` override (with ``~``
+    expansion) when set; otherwise returns the installed package root.
+
+    Returns:
+        Path: The asset root directory.
+
+    Raises:
+        AssetRootNotFound: If the override env var is set but points at a
+            path that does not exist.
+    """
     override = os.environ.get(ENV_OVERRIDE_ASSET_ROOT)
     if override:
         root = Path(override).expanduser()
         if not root.exists():
-            raise AssetRootNotFound(
-                f"{ENV_OVERRIDE_ASSET_ROOT} points at missing dir: {root}"
-            )
+            raise AssetRootNotFound(f"{ENV_OVERRIDE_ASSET_ROOT} points at missing dir: {root}")
         return root
     return PACKAGE_ROOT
 
 
 def asset_scripts_dir() -> Path:
+    """Return the directory of shipped shell scripts.
+
+    Returns:
+        Path: ``<asset_root>/scripts``.
+    """
     return asset_root() / "scripts"
 
 
 def asset_actions_dir() -> Path:
+    """Return the directory of shipped action-metadata files.
+
+    Returns:
+        Path: ``<asset_root>/actions``.
+    """
     return asset_root() / "actions"
 
 
 def asset_system_prompts_dir() -> Path:
+    """Return the directory of shipped agent system prompts.
+
+    Returns:
+        Path: ``<asset_root>/orchestrator/system_prompts``.
+    """
     return asset_root() / "orchestrator" / "system_prompts"
 
 
 def asset_kernel_opt_dir() -> Path:
+    """Return the directory of shipped kernel-optimization prompt templates.
+
+    Returns:
+        Path: ``<asset_root>/kernel_opt``.
+    """
     return asset_root() / "kernel_opt"
 
 
 def agent_session_dir(session_dir: Path, agent_name: str) -> Path:
     """Per-agent inbox/outbox dir under the session (created by
-    make_session_dir; this only computes the path)."""
+    make_session_dir; this only computes the path).
+
+    Args:
+        session_dir: The session directory root.
+        agent_name: The agent name subdirectory.
+
+    Returns:
+        ``<session_dir>/agents/<agent_name>``.
+    """
     return Path(session_dir) / "agents" / agent_name
 
 
@@ -254,38 +323,76 @@ def agent_session_dir(session_dir: Path, agent_name: str) -> Path:
 # paths by hand.
 def runtime_dir(session_dir: Path | None = None) -> Path:
     """``<workspace_root>/runtime/`` — workspace-shared writable runtime
-    (kernel-agent env file, GEAK litellm config, source mirrors). Survives
-    across sessions; the ``session_dir`` param is ignored (back-compat).
+    (kernel-agent env file, GEAK litellm config). Survives across sessions;
+    the ``session_dir`` param is ignored (back-compat).
+
+    Args:
+        session_dir: Ignored; accepted for back-compat.
+
+    Returns:
+        ``<workspace_root>/runtime``.
     """
     return workspace_root() / "runtime"
 
 
-def source_mirrors_dir(session_dir: Path | None = None) -> Path:
-    """``<workspace_root>/runtime/source-mirrors/`` — writable GEAK / OOB /
-    TraceLens mirrors so ``pip install -e`` works even when the source mount
-    is read-only. ``session_dir`` param ignored (back-compat).
+def open_source_root() -> Path:
+    """Pod-local base for auto-cloned open-source deps, mirroring the install
+    scripts: ``$HYPERLOOM_OPEN_SOURCE_ROOT`` else
+    ``${TMPDIR:-/tmp}/hyperloom/open-source-repos``. Decoupled from
+    ``$USER_DATA_PATH`` so a shared workspace root never collocates concurrent
+    pods' checkouts.
+
+    Returns:
+        The pod-local open-source repos root path.
     """
-    return runtime_dir() / "source-mirrors"
+    override = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT")
+    if override:
+        return Path(override)
+    tmp = os.environ.get("TMPDIR") or "/tmp"
+    return Path(tmp) / "hyperloom" / "open-source-repos"
 
 
 def magpie_dir(session_dir: Path | None = None) -> Path:
-    """``<workspace_root>/runtime/Magpie/`` — Magpie clone (workspace-shared;
-    ``$MAGPIE_DIR`` overrides). ``session_dir`` param ignored (back-compat).
+    """``<open_source_root>/Magpie/`` — Magpie clone (pod-local; ``$MAGPIE_DIR``
+    overrides). Aligned with install.sh so script and runtime resolve the same
+    checkout. ``session_dir`` param ignored (back-compat).
+
+    Args:
+        session_dir: Ignored; accepted for back-compat.
+
+    Returns:
+        The Magpie checkout path.
     """
-    return runtime_dir() / "Magpie"
+    override = os.environ.get("MAGPIE_DIR")
+    if override:
+        return Path(override)
+    return open_source_root() / "Magpie"
 
 
 def kernel_agent_runs_root(session_dir: Path) -> Path:
     """``<sd>/kernel-agent/`` — kernel-agent CLI tool output root (one
     ``runs/<session_id>/`` per invocation). Distinct from the kernel_id-keyed
     ``<sd>/kernel-agent-workspace/``.
+
+    Args:
+        session_dir: The session directory root.
+
+    Returns:
+        ``<session_dir>/kernel-agent``.
     """
     return Path(session_dir) / "kernel-agent"
 
 
 def optimizer_runs_dir(session_dir: Path) -> Path:
     """``<sd>/optimizer_runs/`` — launcher stdout / PID / robustness monitor
-    logs."""
+    logs.
+
+    Args:
+        session_dir: The session directory root.
+
+    Returns:
+        ``<session_dir>/optimizer_runs``.
+    """
     return Path(session_dir) / "optimizer_runs"
 
 
@@ -294,6 +401,9 @@ def mn_profile_trace_root() -> Path:
     root (``<rayjob_id>/torch_trace/`` per provision). Multi-node operators
     MUST set ``$USER_DATA_PATH`` to a cluster-shared path or the sandbox never
     sees pod-side trace files. Single-node never reads this.
+
+    Returns:
+        ``<workspace_root>/profile-traces``.
     """
     return workspace_root() / "profile-traces"
 
@@ -317,10 +427,10 @@ __all__ = [
     "magpie_dir",
     "make_session_dir",
     "mn_profile_trace_root",
+    "open_source_root",
     "optimizer_runs_dir",
     "runtime_dir",
     "session_dir",
-    "source_mirrors_dir",
     "find_latest_per_session_dir",
     "workspace_root",
 ]

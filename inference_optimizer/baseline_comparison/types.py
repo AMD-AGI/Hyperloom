@@ -45,13 +45,19 @@ class BaselineQuery:
     osl: int = 0
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the query into a plain JSON-safe dict.
+
+        Returns:
+            dict[str, Any]: The query fields (model, gpu, framework,
+                precision, isl, osl) as a flat dictionary.
+        """
         return {
-            "model":     self.model,
-            "gpu":       self.gpu,
+            "model": self.model,
+            "gpu": self.gpu,
             "framework": self.framework,
             "precision": self.precision,
-            "isl":       self.isl,
-            "osl":       self.osl,
+            "isl": self.isl,
+            "osl": self.osl,
         }
 
 
@@ -64,25 +70,31 @@ class BaselinePoint:
     SharedState / scoring (which the design explicitly forbids).
     """
 
-    tput_per_gpu:        float
+    tput_per_gpu: float
     output_tput_per_gpu: float
-    conc:                int
-    decode_tp:            int
-    mean_ttft_ms:         float
-    mean_tpot_ms:         float
-    mean_e2el_ms:         float
-    date:                 str = ""
+    conc: int
+    decode_tp: int
+    mean_ttft_ms: float
+    mean_tpot_ms: float
+    mean_e2el_ms: float
+    date: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the data point into a plain JSON-safe dict.
+
+        Returns:
+            dict[str, Any]: The point's throughput, concurrency, latency,
+                and date fields as a flat dictionary.
+        """
         return {
-            "tput_per_gpu":        self.tput_per_gpu,
+            "tput_per_gpu": self.tput_per_gpu,
             "output_tput_per_gpu": self.output_tput_per_gpu,
-            "conc":                self.conc,
-            "decode_tp":            self.decode_tp,
-            "mean_ttft_ms":         self.mean_ttft_ms,
-            "mean_tpot_ms":         self.mean_tpot_ms,
-            "mean_e2el_ms":         self.mean_e2el_ms,
-            "date":                 self.date,
+            "conc": self.conc,
+            "decode_tp": self.decode_tp,
+            "mean_ttft_ms": self.mean_ttft_ms,
+            "mean_tpot_ms": self.mean_tpot_ms,
+            "mean_e2el_ms": self.mean_e2el_ms,
+            "date": self.date,
         }
 
 
@@ -90,9 +102,9 @@ class BaselinePoint:
 class BaselineSummary:
     """The full target-analysis artefact persisted under the session dir.
 
-    Shape:
+    Shape (schematic, not literal JSON):
 
-    .. code-block:: json
+    .. code-block:: text
 
         {
           "query":         {model, gpu, framework, precision, isl, osl},
@@ -118,31 +130,49 @@ class BaselineSummary:
     existing log/UI consumers that only know ``warning`` still work.
     """
 
-    query:      BaselineQuery
+    query: BaselineQuery
     fetched_at: str
-    row_count:  int
-    best:       BaselinePoint | None
+    row_count: int
+    best: BaselinePoint | None
     all_concurrencies: list[BaselinePoint] = field(default_factory=list)
-    status:     str = "ok"
-    warning:    str = ""
-    source:     str = ""
-    reason:     str = ""
+    status: str = "ok"
+    warning: str = ""
+    source: str = ""
+    reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the summary (and its nested points) to a JSON-safe dict.
+
+        Returns:
+            dict[str, Any]: The full on-disk artefact shape, with the
+                nested query and baseline points recursively serialised.
+        """
         return {
-            "query":             self.query.to_dict(),
-            "fetched_at":        self.fetched_at,
-            "row_count":         self.row_count,
-            "best":              self.best.to_dict() if self.best else None,
+            "query": self.query.to_dict(),
+            "fetched_at": self.fetched_at,
+            "row_count": self.row_count,
+            "best": self.best.to_dict() if self.best else None,
             "all_concurrencies": [p.to_dict() for p in self.all_concurrencies],
-            "status":            self.status,
-            "reason":            self.reason,
-            "warning":           self.warning,
-            "source":            self.source,
+            "status": self.status,
+            "reason": self.reason,
+            "warning": self.warning,
+            "source": self.source,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "BaselineSummary":
+        """Reconstruct a summary from its persisted dict representation.
+
+        Missing or malformed fields are tolerated and coerced to sensible
+        defaults so that loading a partial / older artefact never raises.
+
+        Args:
+            d (dict[str, Any]): A dictionary previously produced by
+                :meth:`to_dict` (or a compatible subset).
+
+        Returns:
+            BaselineSummary: The reconstructed summary instance.
+        """
         q = d.get("query") or {}
         best_raw = d.get("best")
         return cls(
@@ -157,10 +187,7 @@ class BaselineSummary:
             fetched_at=str(d.get("fetched_at", "")),
             row_count=int(d.get("row_count", 0) or 0),
             best=BaselinePoint(**best_raw) if isinstance(best_raw, dict) else None,
-            all_concurrencies=[
-                BaselinePoint(**p) for p in (d.get("all_concurrencies") or [])
-                if isinstance(p, dict)
-            ],
+            all_concurrencies=[BaselinePoint(**p) for p in (d.get("all_concurrencies") or []) if isinstance(p, dict)],
             status=str(d.get("status", "ok")),
             warning=str(d.get("warning", "")),
             source=str(d.get("source", "")),

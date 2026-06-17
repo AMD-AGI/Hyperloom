@@ -27,6 +27,15 @@ log = logging.getLogger(__name__)
 
 
 def _env_int(name: str, default: int = 0) -> int:
+    """Read an integer environment variable with a fallback default.
+
+    Args:
+        name (str): The environment variable name.
+        default (int): Value returned when the var is unset or non-integer.
+
+    Returns:
+        int: The parsed integer, or ``default`` when unset / unparseable.
+    """
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
@@ -34,13 +43,23 @@ def _env_int(name: str, default: int = 0) -> int:
         return int(raw)
     except ValueError:
         log.warning(
-            "target_analysis_executor: env %s=%r is not an integer; "
-            "falling back to %d", name, raw, default,
+            "target_analysis_executor: env %s=%r is not an integer; falling back to %d",
+            name,
+            raw,
+            default,
         )
         return default
 
 
 def _env_str(name: str) -> str:
+    """Read a stripped string environment variable.
+
+    Args:
+        name (str): The environment variable name.
+
+    Returns:
+        str: The stripped value, or ``""`` when unset.
+    """
     return os.environ.get(name, "").strip()
 
 
@@ -59,6 +78,14 @@ class TargetAnalysisExecutor:
         compare_against_gpu: str,
         session_dir: Path | str | None = None,
     ):
+        """Initialize the executor with the pinned comparison reference.
+
+        Args:
+            compare_against_gpu (str): The GPU reference identifier the session
+                compares against (immutable for the session).
+            session_dir (Path | str | None): Fallback session root used when
+                the context does not supply one.
+        """
         self.compare_against_gpu = (compare_against_gpu or "").strip()
         if session_dir is not None:
             self.session_dir: Path | None = Path(session_dir)
@@ -68,7 +95,14 @@ class TargetAnalysisExecutor:
     def _resolve_session_dir(self, ctx: RunnerContext) -> Path | None:
         """Resolve session_dir: ``ctx.extra["session_dir"]`` >
         ``task.params["session_dir"]`` > constructor arg >
-        ``paths.session_dir()``; ``None`` when nothing resolves."""
+        ``paths.session_dir()``; ``None`` when nothing resolves.
+
+        Args:
+            ctx: The runner context carrying ``task.params`` and ``extra``.
+
+        Returns:
+            The resolved session directory, or ``None`` when nothing resolves.
+        """
         extra = getattr(ctx, "extra", None) or {}
         cand = extra.get("session_dir")
         if cand:
@@ -81,34 +115,47 @@ class TargetAnalysisExecutor:
             return self.session_dir
         try:
             from ...paths import session_dir as _sd
+
             sd = _sd()
             return sd if sd.exists() else None
         except Exception:  # noqa: BLE001
             return None
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Run the external-baseline comparison and persist report artefacts.
+
+        Resolves the session dir and comparison reference, invokes
+        :func:`analyze` (folding matching InferenceX rows into a
+        ``BaselineSummary`` and writing JSON / MD artefacts), and returns a
+        report-only result. Never fails the task: upstream / mapping errors are
+        recorded in the summary status and ``status="succeeded"`` is returned.
+
+        Args:
+            ctx (RunnerContext): The runner context carrying ``task.params``
+                overrides and ``extra`` (session dir).
+
+        Returns:
+            dict[str, Any]: A ``status="succeeded"`` result dict pointing at
+                the persisted artefacts plus the comparison status / reason.
+        """
         params = dict(ctx.task.params or {})
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
             log.warning(
-                "target_analysis_executor: could not resolve session_dir; "
-                "skipping (no artefacts will be written)",
+                "target_analysis_executor: could not resolve session_dir; skipping (no artefacts will be written)",
             )
             return {
                 "status": "succeeded",
-                "kind":   ctx.task.kind,
-                "note":   "skipped: no session_dir",
+                "kind": ctx.task.kind,
+                "note": "skipped: no session_dir",
                 "baseline_status": "skipped",
                 "reason": "no_session_dir",
             }
 
-        compare_against_gpu = str(
-            params.get("compare_against_gpu") or self.compare_against_gpu or ""
-        ).strip()
+        compare_against_gpu = str(params.get("compare_against_gpu") or self.compare_against_gpu or "").strip()
         if not compare_against_gpu:
             log.info(
-                "target_analysis_executor: no compare_against_gpu set; "
-                "writing skipped summary and returning",
+                "target_analysis_executor: no compare_against_gpu set; writing skipped summary and returning",
             )
             try:
                 summary = analyze(
@@ -120,8 +167,8 @@ class TargetAnalysisExecutor:
                 log.exception("target_analysis_executor: analyze() raised: %s", exc)
                 return {
                     "status": "succeeded",
-                    "kind":   ctx.task.kind,
-                    "note":   f"analyzer crashed: {exc}",
+                    "kind": ctx.task.kind,
+                    "note": f"analyzer crashed: {exc}",
                     "baseline_status": "fetch_error",
                     "reason": "analyzer_crash",
                 }
@@ -147,8 +194,8 @@ class TargetAnalysisExecutor:
             log.exception("target_analysis_executor: analyze() raised: %s", exc)
             return {
                 "status": "succeeded",
-                "kind":   ctx.task.kind,
-                "note":   f"analyzer crashed: {exc}",
+                "kind": ctx.task.kind,
+                "note": f"analyzer crashed: {exc}",
                 "baseline_status": "fetch_error",
                 "reason": "analyzer_crash",
             }
@@ -161,19 +208,30 @@ class TargetAnalysisExecutor:
         session_dir: Path,
     ) -> dict[str, Any]:
         """Build the small bus-friendly result payload (pointer + status;
-        the heavy JSON stays on disk)."""
+        the heavy JSON stays on disk).
+
+        Args:
+            ctx: The runner context (supplies ``task.kind``).
+            summary: The baseline comparison summary object.
+            session_dir: Session directory the report artefacts live under.
+
+        Returns:
+            The bus-friendly result dict with status, pointers, and best-point
+            metrics when available.
+        """
         from ...session_paths import target_analysis_report_md, target_baseline_json
+
         json_path = target_baseline_json(session_dir)
         md_path = target_analysis_report_md(session_dir)
         out = {
-            "status":          "succeeded",
-            "kind":            ctx.task.kind,
+            "status": "succeeded",
+            "kind": ctx.task.kind,
             "baseline_status": getattr(summary, "status", "unknown"),
-            "reason":          getattr(summary, "reason", ""),
-            "warning":         getattr(summary, "warning", ""),
-            "row_count":       getattr(summary, "row_count", 0),
-            "json_path":       str(json_path),
-            "md_path":         str(md_path),
+            "reason": getattr(summary, "reason", ""),
+            "warning": getattr(summary, "warning", ""),
+            "row_count": getattr(summary, "row_count", 0),
+            "json_path": str(json_path),
+            "md_path": str(md_path),
         }
         best = getattr(summary, "best", None)
         if best is not None:
@@ -182,8 +240,10 @@ class TargetAnalysisExecutor:
             out["best_decode_tp"] = best.decode_tp
         log.info(
             "target_analysis_executor: status=%s reason=%s rows=%d (%s)",
-            out["baseline_status"], out["reason"] or "-",
-            out["row_count"], out["warning"] or "ok",
+            out["baseline_status"],
+            out["reason"] or "-",
+            out["row_count"],
+            out["warning"] or "ok",
         )
         return out
 

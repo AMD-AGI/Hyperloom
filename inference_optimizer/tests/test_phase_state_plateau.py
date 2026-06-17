@@ -35,10 +35,15 @@ from inference_optimizer.orchestrator.shared_state import SharedState
 
 # 1. ESCALATE_HINT vocab
 def test_escalate_hint_vocab_closed():
-    assert ESCALATE_HINT_VOCAB == frozenset({
-        "skip_to_kernel", "skip_to_sweep", "skip_to_close",
-        "extend_explore_budget", "extend_kernel_budget",
-    })
+    assert ESCALATE_HINT_VOCAB == frozenset(
+        {
+            "skip_to_kernel",
+            "skip_to_sweep",
+            "skip_to_close",
+            "extend_explore_budget",
+            "extend_kernel_budget",
+        }
+    )
 
 
 def test_is_valid_escalate_hint_accepts_vocab_and_pause_specialist():
@@ -68,10 +73,12 @@ def test_plateau_explore_empty_state_returns_false():
 
 def test_plateau_explore_AND_low_gain_AND_streak_triggers():
     state = SimpleNamespace(
-        explore_search={"winners_history": [
-            {"gain_pct": 0.1},
-            {"gain_pct": 0.05},
-        ]},
+        explore_search={
+            "winners_history": [
+                {"gain_pct": 0.1},
+                {"gain_pct": 0.05},
+            ]
+        },
         specialist_rounds=[
             {"proposals_total": 1, "proposals_kept": 1},
             {"proposals_total": 0, "proposals_kept": 0},
@@ -88,10 +95,12 @@ def test_plateau_explore_AND_low_gain_AND_streak_triggers():
 def test_plateau_explore_high_gain_blocks_trigger():
     """Even with empty streak, large recent KEEP gain blocks plateau."""
     state = SimpleNamespace(
-        explore_search={"winners_history": [
-            {"gain_pct": 3.0},
-            {"gain_pct": 2.0},
-        ]},
+        explore_search={
+            "winners_history": [
+                {"gain_pct": 3.0},
+                {"gain_pct": 2.0},
+            ]
+        },
         specialist_rounds=[
             {"proposals_total": 0, "proposals_kept": 0},
             {"proposals_total": 0, "proposals_kept": 0},
@@ -141,15 +150,21 @@ def test_plateau_kernel_revert_streak_triggers():
     """3 consecutive REVERTs → triggered."""
     state = SimpleNamespace(
         kernel_integrate_attempts={
-            "k1": {"attempts": [
-                {"decision": "REVERT", "ts": "2026-05-19T18:00:00"},
-            ]},
-            "k2": {"attempts": [
-                {"decision": "REVERT", "ts": "2026-05-19T18:01:00"},
-            ]},
-            "k3": {"attempts": [
-                {"decision": "REVERT", "ts": "2026-05-19T18:02:00"},
-            ]},
+            "k1": {
+                "attempts": [
+                    {"decision": "REVERT", "ts": "2026-05-19T18:00:00"},
+                ]
+            },
+            "k2": {
+                "attempts": [
+                    {"decision": "REVERT", "ts": "2026-05-19T18:01:00"},
+                ]
+            },
+            "k3": {
+                "attempts": [
+                    {"decision": "REVERT", "ts": "2026-05-19T18:02:00"},
+                ]
+            },
         },
     )
     triggered, ev = compute_plateau_kernel(state)
@@ -161,9 +176,11 @@ def test_plateau_kernel_low_gain_triggers():
     """Low cumulative KEEP gain alone triggers (OR semantics)."""
     state = SimpleNamespace(
         kernel_integrate_attempts={
-            "k1": {"attempts": [
-                {"decision": "KEEP", "ts": "2026-05-19T18:00:00", "gain_pct": 0.1},
-            ]},
+            "k1": {
+                "attempts": [
+                    {"decision": "KEEP", "ts": "2026-05-19T18:00:00", "gain_pct": 0.1},
+                ]
+            },
         },
     )
     triggered, ev = compute_plateau_kernel(state)
@@ -175,12 +192,16 @@ def test_plateau_kernel_high_gain_blocks_revert_streak():
     """When the REVERT streak is below threshold and gain is large, plateau doesn't fire."""
     state = SimpleNamespace(
         kernel_integrate_attempts={
-            "k1": {"attempts": [
-                {"decision": "KEEP", "ts": "2026-05-19T18:00:00", "gain_pct": 5.0},
-            ]},
-            "k2": {"attempts": [
-                {"decision": "REVERT", "ts": "2026-05-19T18:01:00"},
-            ]},
+            "k1": {
+                "attempts": [
+                    {"decision": "KEEP", "ts": "2026-05-19T18:00:00", "gain_pct": 5.0},
+                ]
+            },
+            "k2": {
+                "attempts": [
+                    {"decision": "REVERT", "ts": "2026-05-19T18:01:00"},
+                ]
+            },
         },
     )
     triggered, _ev = compute_plateau_kernel(state)
@@ -217,8 +238,9 @@ def test_plateau_kernel_empty_attempts_dict_with_no_entries_does_not_trigger():
 
 
 # 4. exit_normal_explore / exit_normal_kernel — wired to real plateau
-def test_exit_normal_explore_does_not_exit_on_plateau():
-    """P3_17: plateau is advisory only; a bare plateau signal must NOT exit EXPLORE."""
+def test_exit_normal_explore_does_not_exit_on_plateau(monkeypatch):
+    """With cyclic off, plateau is advisory only; a bare plateau signal must NOT exit EXPLORE."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "0")
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=0.0,
@@ -255,15 +277,14 @@ def test_exit_normal_explore_skip_to_kernel_hint_short_circuits():
 
 
 def test_exit_normal_kernel_does_not_exit_on_plateau():
-    """P3_17: KERNEL plateau is advisory only; only the skip_to_sweep hint or budget exhaustion may exit KERNEL."""
+    """KERNEL plateau is advisory only; only the skip_to_sweep hint or budget exhaustion may exit KERNEL."""
     state = SimpleNamespace(
         phase="KERNEL",
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
         kernel_integrate_attempts={
-            f"k{i}": {"attempts": [{"decision": "REVERT", "ts": f"2026-05-19T18:0{i}:00"}]}
-            for i in range(3)
+            f"k{i}": {"attempts": [{"decision": "REVERT", "ts": f"2026-05-19T18:0{i}:00"}]} for i in range(3)
         },
         rejected_kernel_ids=[],
         pending_escalate_hint="",
@@ -273,7 +294,7 @@ def test_exit_normal_kernel_does_not_exit_on_plateau():
 
 
 def test_exit_normal_kernel_after_gemm_does_not_exit():
-    """P3_17: the GEMM-completed shortcut is removed; GEMM completion alone never advances KERNEL → SWEEP."""
+    """The GEMM-completed shortcut is removed; GEMM completion alone never advances KERNEL → SWEEP."""
     state = SimpleNamespace(
         phase="KERNEL",
         phase_started_unix=0.0,
@@ -337,21 +358,21 @@ def _skip_to_sweep_state(phase: str) -> SimpleNamespace:
 
 
 def test_exit_normal_explore_skip_to_sweep_is_non_terminal():
-    # skip_to_sweep is the non-terminal "no more leverage" signal.
+    # skip_to_sweep exhausts the explore lever (non-terminal).
     out = exit_normal_explore(_skip_to_sweep_state("EXPLORE"))
     assert out is not None
     reason, evidence = out
-    assert reason == "no_more_leverage"
+    assert reason == "explore_no_more_leverage"
     assert evidence.get("hint") == ESCALATE_HINT_SKIP_TO_SWEEP
 
 
-def test_compute_next_phase_skip_to_sweep_from_explore_skips_kernel():
-    # no_more_leverage routes EXPLORE -> SWEEP (no KERNEL hop), non-terminal.
+def test_compute_next_phase_skip_to_sweep_from_explore_routes_to_kernel():
+    # Exhausted explore leverage switches lever (EXPLORE -> KERNEL), non-terminal.
     out = compute_next_phase(_skip_to_sweep_state("EXPLORE"), kernel_enabled=True)
     assert out is not None
     target, reason, evidence = out
-    assert target == PHASE_SWEEP
-    assert reason == "no_more_leverage"
+    assert target == PHASE_KERNEL
+    assert reason == "explore_no_more_leverage"
     assert evidence.get("terminal") is not True
 
 
@@ -360,13 +381,14 @@ def test_compute_next_phase_skip_to_sweep_from_kernel_routes_to_sweep():
     assert out is not None
     target, reason, _ = out
     assert target == PHASE_SWEEP
-    assert reason == "no_more_leverage"
+    assert reason == "kernel_no_more_leverage"
 
 
 # 5. apply_escalate_budget_bump
 def test_apply_escalate_budget_bump_lifts_phase_within_cap():
     out = apply_escalate_budget_bump(
-        {"EXPLORE": 0.60}, phase="EXPLORE",
+        {"EXPLORE": 0.60},
+        phase="EXPLORE",
     )
     assert out["EXPLORE"] == pytest.approx(
         0.60 + ESCALATE_HINT_BUDGET_BUMP_DELTA,
@@ -375,7 +397,8 @@ def test_apply_escalate_budget_bump_lifts_phase_within_cap():
 
 def test_apply_escalate_budget_bump_clamps_to_cap():
     out = apply_escalate_budget_bump(
-        {"EXPLORE": 0.95}, phase="EXPLORE",
+        {"EXPLORE": 0.95},
+        phase="EXPLORE",
     )
     assert out["EXPLORE"] == ESCALATE_HINT_BUDGET_BUMP_CAP
 
@@ -446,19 +469,28 @@ def test_set_stop_reason_empty_string_clears():
 
 def test_stop_reason_vocab_has_v08_additions():
     for new in (
-        "plateau_explore", "plateau_kernel", "no_kernel_skipped",
-        "sweep_done", "robustness_escalated", "user_stop_requested",
-        "cortex_drain_failed", "cortex_t0_failed", "cortex_commit_failed",
-        "prelude_baseline_failed", "prelude_policy_loop",
-        "time_exhausted_during_prelude", "crash_threshold_exceeded",
+        "plateau_explore",
+        "plateau_kernel",
+        "no_kernel_skipped",
+        "sweep_done",
+        "robustness_escalated",
+        "user_stop_requested",
+        "cortex_drain_failed",
+        "cortex_t0_failed",
+        "cortex_commit_failed",
+        "prelude_baseline_failed",
+        "prelude_policy_loop",
+        "time_exhausted_during_prelude",
+        "crash_threshold_exceeded",
     ):
         assert new in STOP_REASON_VOCAB
         assert is_valid_stop_reason(new)
 
 
 # 7. plateau is advisory only — pure compute_plateau_* still works
-def test_compute_next_phase_does_not_advance_on_plateau():
-    """P3_17: even when the EXPLORE plateau judge fires, compute_next_phase returns None without an explicit hint or budget gate."""
+def test_compute_next_phase_does_not_advance_on_plateau(monkeypatch):
+    """With cyclic off, even when the EXPLORE plateau judge fires, compute_next_phase returns None without an explicit hint or budget gate."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "0")
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=0.0,
@@ -510,8 +542,8 @@ def test_collect_phase_breakdown_buckets_by_phase():
         "phase_history": [
             {"to_phase": "PRELUDE", "ts_unix": 0.0, "reason": "phase_entered"},
             {"to_phase": "EXPLORE", "ts_unix": 50.0, "reason": "prelude_done"},
-            {"to_phase": "KERNEL",  "ts_unix": 200.0, "reason": "plateau_explore"},
-            {"to_phase": "SWEEP",   "ts_unix": 400.0, "reason": "plateau_kernel"},
+            {"to_phase": "KERNEL", "ts_unix": 200.0, "reason": "plateau_explore"},
+            {"to_phase": "SWEEP", "ts_unix": 400.0, "reason": "plateau_kernel"},
         ],
         "explore_search": {
             "winners_history": [

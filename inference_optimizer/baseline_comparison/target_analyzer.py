@@ -44,6 +44,11 @@ LLM_AUTHORED_SOURCE = "llm_authored"
 
 
 def _iso_utc_now() -> str:
+    """Return the current UTC time as a second-precision ISO string.
+
+    Returns:
+        str: Timestamp formatted as ``YYYY-MM-DDTHH:MM:SSZ``.
+    """
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -53,6 +58,14 @@ def _dedup_by_conc(points: list[BaselinePoint]) -> list[BaselinePoint]:
     Upstream sometimes contains multiple rows for the same (conc, tp)
     (different dates or sweep methods). The report only needs the best
     one per slot — keeping all of them just clutters the markdown.
+
+    Args:
+        points (list[BaselinePoint]): Candidate points, possibly with
+            duplicate ``(conc, decode_tp)`` combos.
+
+    Returns:
+        list[BaselinePoint]: Best point per ``(conc, decode_tp)``,
+            sorted by those two keys.
     """
     best: dict[tuple[int, int], BaselinePoint] = {}
     for p in points:
@@ -70,6 +83,12 @@ def _format_report_md(summary: BaselineSummary) -> str:
     contract is "facts only, no derived KPI" so this section never
     accidentally becomes an optimisation target (see S2 in the design
     chat).
+
+    Args:
+        summary (BaselineSummary): The summary to render.
+
+    Returns:
+        str: The markdown report text (newline-terminated).
     """
     q = summary.query
     lines: list[str] = []
@@ -121,10 +140,7 @@ def _format_report_md(summary: BaselineSummary) -> str:
         lines.append("| conc | decode_tp | tput/GPU | mean_tpot (ms) |")
         lines.append("| ---: | ---: | ---: | ---: |")
         for p in summary.all_concurrencies:
-            lines.append(
-                f"| {p.conc} | {p.decode_tp} "
-                f"| {p.tput_per_gpu:.1f} | {p.mean_tpot_ms:.3f} |"
-            )
+            lines.append(f"| {p.conc} | {p.decode_tp} | {p.tput_per_gpu:.1f} | {p.mean_tpot_ms:.3f} |")
         lines.append("")
 
     lines.append(
@@ -144,12 +160,22 @@ def _persist(
     Uses :mod:`session_paths` for path computation. Returns the
     ``(json_path, md_path)`` tuple so the executor can surface them
     on the bus event.
+
+    Args:
+        summary (BaselineSummary): The analysis artefact to serialise.
+        session_dir (Path): Session root under which the
+            ``target_analysis/`` output directory is created.
+
+    Returns:
+        tuple[Path, Path]: The ``(json_path, md_path)`` of the written
+            JSON and Markdown report files.
     """
     from ..session_paths import (
         target_analysis_dir,
         target_analysis_report_md,
         target_baseline_json,
     )
+
     out_dir = target_analysis_dir(session_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     json_path = target_baseline_json(session_dir)
@@ -168,8 +194,24 @@ def _target_row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
     Returns ``None`` when ``tput_per_gpu`` is missing or non-positive.
     ``tpot_ms`` is the per-output-token latency; ``interactivity`` (when
     present) is informational only and not folded into the point shape.
+
+    Args:
+        row: A single ``per_conc`` mapping from the competitor target data.
+
+    Returns:
+        A ``BaselinePoint`` built from the row, or ``None`` when the row has
+        no usable positive ``tput_per_gpu``.
     """
+
     def _fnum(key: str) -> float:
+        """Read a float field from the enclosing ``row``.
+
+        Args:
+            key: Field name to look up.
+
+        Returns:
+            The value as a float, or ``0.0`` if missing or unparseable.
+        """
         try:
             return float(row.get(key))
         except (TypeError, ValueError):
@@ -217,6 +259,20 @@ def analyze(
     ``reason`` mirrors ``status`` with finer granularity:
     ``ok`` / ``model_mapping_miss`` / ``no_target_gpu_configured`` /
     ``no_competitor_target``.
+
+    Args:
+        session_dir: Session directory used to load competitor data and
+            persist the resulting summary.
+        model_path: Model path or name to map to a canonical display name.
+        compare_against_gpu: Target GPU to compare against; when empty the
+            analysis is skipped.
+        framework: Optional framework name recorded on the query.
+        precision: Optional precision label recorded on the query.
+        isl: Optional input sequence length recorded on the query.
+        osl: Optional output sequence length recorded on the query.
+
+    Returns:
+        The persisted ``BaselineSummary`` describing the comparison outcome.
     """
     from ..orchestrator import research_hints
 
@@ -239,10 +295,7 @@ def analyze(
             best=None,
             status="skipped",
             reason="model_mapping_miss",
-            warning=(
-                f"model name mapping miss for {model_path!r}; "
-                "no display name found"
-            ),
+            warning=(f"model name mapping miss for {model_path!r}; no display name found"),
             source=LLM_AUTHORED_SOURCE,
         )
         _persist(summary, session_dir=session_dir)
@@ -274,10 +327,7 @@ def analyze(
             best=None,
             status="no_match",
             reason="no_competitor_target",
-            warning=(
-                "no sourced competitor_target.json available "
-                "(research scout disabled or produced no targets)"
-            ),
+            warning=("no sourced competitor_target.json available (research scout disabled or produced no targets)"),
             source=LLM_AUTHORED_SOURCE,
         )
         _persist(summary, session_dir=session_dir)
@@ -285,9 +335,7 @@ def analyze(
 
     all_points = _dedup_by_conc(points)
     best = max(points, key=lambda p: p.tput_per_gpu)
-    target_sources = sorted({
-        str(r.get("source")).strip() for r in rows if str(r.get("source") or "").strip()
-    })
+    target_sources = sorted({str(r.get("source")).strip() for r in rows if str(r.get("source") or "").strip()})
     summary = BaselineSummary(
         query=query,
         fetched_at=now,
@@ -296,9 +344,7 @@ def analyze(
         all_concurrencies=all_points,
         status="ok",
         reason="ok",
-        warning=(
-            "sources: " + "; ".join(target_sources) if target_sources else ""
-        ),
+        warning=("sources: " + "; ".join(target_sources) if target_sources else ""),
         source=LLM_AUTHORED_SOURCE,
     )
     _persist(summary, session_dir=session_dir)

@@ -15,12 +15,14 @@ from .errors import RuntimeAdapterError
 
 
 # KB-side ``kind`` enum (kb-critic-integration-contract §2.1).
-KB_KINDS: frozenset[str] = frozenset({
-    "pitfall",
-    "technique",
-    "params_catalog",
-    "model_profile",
-})
+KB_KINDS: frozenset[str] = frozenset(
+    {
+        "pitfall",
+        "technique",
+        "params_catalog",
+        "model_profile",
+    }
+)
 
 
 # Critic categories → KB kinds. Categories without an entry are treated as
@@ -44,18 +46,22 @@ CATEGORY_TO_KIND: dict[str, str] = {
 def map_category_to_kind(category: str) -> str:
     """Return the KB ``kind`` for a Critic ``category``.
 
+    Args:
+        category (str): The Critic category to translate.
+
+    Returns:
+        str: The mapped KB ``kind``.
+
     Raises:
-        RuntimeAdapterError: If ``category`` is not in the catalogue.
+        RuntimeAdapterError: If ``category`` is not a string or is not in the
+            catalogue.
     """
     if not isinstance(category, str):
-        raise RuntimeAdapterError(
-            f"category must be str, got {type(category).__name__}"
-        )
+        raise RuntimeAdapterError(f"category must be str, got {type(category).__name__}")
     kind = CATEGORY_TO_KIND.get(category)
     if not kind:
         raise RuntimeAdapterError(
-            f"unsupported Critic category {category!r}; mapping table only "
-            f"covers {sorted(CATEGORY_TO_KIND.keys())!r}"
+            f"unsupported Critic category {category!r}; mapping table only covers {sorted(CATEGORY_TO_KIND.keys())!r}"
         )
     return kind
 
@@ -63,7 +69,15 @@ def map_category_to_kind(category: str) -> str:
 def filter_supported_categories(
     categories: Iterable[str],
 ) -> tuple[list[str], list[str]]:
-    """Split an iterable into ``(supported, rejected)`` category lists."""
+    """Split an iterable into ``(supported, rejected)`` category lists.
+
+    Args:
+        categories (Iterable[str]): Critic categories to partition.
+
+    Returns:
+        tuple[list[str], list[str]]: ``(supported, rejected)`` where supported
+        categories appear in the mapping table and rejected ones do not.
+    """
     supported: list[str] = []
     rejected: list[str] = []
     for c in categories:

@@ -23,6 +23,12 @@ def build_tool_schemas(config: WebToolsConfig) -> list[dict[str, Any]]:
     would actually be constructible (e.g. search requires a provider with
     an API key). The caller is expected to skip the ``tools=`` argument
     entirely when this list is empty.
+
+    Args:
+        config (WebToolsConfig): Resolved web-tools configuration.
+
+    Returns:
+        list[dict[str, Any]]: Enabled OpenAI tool schemas (possibly empty).
     """
     if not config.critic_web_tools_enabled:
         return []
@@ -36,7 +42,14 @@ def build_tool_schemas(config: WebToolsConfig) -> list[dict[str, Any]]:
 
 
 def _search_usable(config: WebToolsConfig) -> bool:
-    """True when at least one implemented search provider has an API key."""
+    """True when at least one implemented search provider has an API key.
+
+    Args:
+        config (WebToolsConfig): Resolved web-tools configuration.
+
+    Returns:
+        bool: Whether the ``web_search`` tool should be exposed.
+    """
     return any(
         name in IMPLEMENTED_SEARCH_PROVIDERS and config.has_search_api_key(name)
         for name in config.search_provider_chain()
@@ -44,6 +57,11 @@ def _search_usable(config: WebToolsConfig) -> bool:
 
 
 def _search_schema() -> dict[str, Any]:
+    """Return the OpenAI function schema for the ``web_search`` tool.
+
+    Returns:
+        dict[str, Any]: The ``web_search`` tool schema.
+    """
     return {
         "type": "function",
         "function": {
@@ -76,10 +94,7 @@ def _search_schema() -> dict[str, Any]:
                     "blocked_domains": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": (
-                            "Exclude results from these domains. Mutually "
-                            "exclusive with allowed_domains."
-                        ),
+                        "description": ("Exclude results from these domains. Mutually exclusive with allowed_domains."),
                     },
                     "max_results": {
                         "type": "integer",
@@ -90,16 +105,14 @@ def _search_schema() -> dict[str, Any]:
                     "site": {
                         "type": "string",
                         "description": (
-                            "Shorthand for allowed_domains=[site]. Ignored "
-                            "if allowed_domains is non-empty."
+                            "Shorthand for allowed_domains=[site]. Ignored if allowed_domains is non-empty."
                         ),
                     },
                     "freshness": {
                         "type": "string",
                         "enum": ["day", "week", "month", "year", "any"],
                         "description": (
-                            "Bias toward recency. Honored by 3rd-party "
-                            "providers; may be ignored by others."
+                            "Bias toward recency. Honored by 3rd-party providers; may be ignored by others."
                         ),
                     },
                 },
@@ -110,6 +123,11 @@ def _search_schema() -> dict[str, Any]:
 
 
 def _fetch_schema() -> dict[str, Any]:
+    """Return the OpenAI function schema for the ``web_fetch`` tool.
+
+    Returns:
+        dict[str, Any]: The ``web_fetch`` tool schema.
+    """
     return {
         "type": "function",
         "function": {
@@ -137,10 +155,7 @@ def _fetch_schema() -> dict[str, Any]:
                     },
                     "raw": {
                         "type": "boolean",
-                        "description": (
-                            "true -> bypass HTML->Markdown conversion "
-                            "(default false)."
-                        ),
+                        "description": ("true -> bypass HTML->Markdown conversion (default false)."),
                     },
                 },
                 "required": ["url"],

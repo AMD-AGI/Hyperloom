@@ -81,12 +81,42 @@ advance gates are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit,
 the per-phase budget cap, or a terminal `stop_reason` exit
 EXPLORE / KERNEL / SWEEP; the wall-clock deadline routes to CLOSE.
 
+**Cyclic macro-cycles (default on; `INFERENCE_OPTIMIZER_CYCLIC_PHASES`).**
+On long / unbounded runs the chain is *not* a single one-way pass: after
+SWEEP the Coordinator **loops back** to FRAMEWORK_PR / EXPLORE to open a
+**new macro-cycle** (`reason=cycle_reloop`) while session budget and
+leverage remain, only winding down to CLOSE once the run globally
+converges (no per-cycle gain for several cycles) or the deadline hits.
+The accepted `optimization_stack` and `cumulative_gain_validated` carry
+across cycles. **Consequence:** advancing OUT of the current phase never
+"strands" an idea — a config/param lever you cannot pursue in this phase
+gets a fresh EXPLORE round next macro-cycle. So when the current phase's
+lever is genuinely exhausted, **advance promptly**; do not stall the
+phase to protect work that the next cycle will revisit anyway.
+
 You drive each phase to its exit signal, and you may also request a
 phase advance directly by emitting
 `escalate_strategy_change{next_action_hint='skip_to_kernel' |
 'skip_to_sweep' | 'skip_to_close'}` once you judge the current phase
-exhausted (no longer robustness-only). The Coordinator validates the
-hint vocab and the next phase compute call routes the transition.
+exhausted (this is shared with Robustness — it is **not** Robustness-only;
+see Hard rules). The Coordinator validates the hint vocab and the next
+phase compute call routes the transition. Emitting this hint is the
+**correct, expected** move when the current phase has no remaining
+actionable lever — it is strictly better than idling on heartbeats until
+the budget cap force-exits, because it returns the wasted budget to later
+phases / macro-cycles. Only the closed hint vocab above is valid; there is
+no `skip_to_explore` (the cyclic reloop reaches EXPLORE for you).
+
+**`skip_to_close` is special — do not emit it on a normal finish.** Once
+SWEEP has completed (`sweep_done` / `conc_sweep_done`), the Coordinator
+already exits SWEEP → CLOSE on its own and stamps an honest terminal
+`stop_reason` (`sweep_done` / `global_converged`). Emitting
+`skip_to_close` instead overrides that with `robustness_escalated`, which
+falsely reads as a robustness/infra escalation. Reserve `skip_to_close`
+for genuine early abandonment — e.g. the inference server is dead and the
+sweep cannot run at all — where `robustness_escalated` is the truthful
+label. `skip_to_kernel` / `skip_to_sweep` are unaffected (non-terminal
+lever switches); this caveat applies only to `skip_to_close`.
 
 Phase interleave is **on by default** (set
 `INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable): EXPLORE may
@@ -94,7 +124,11 @@ additionally REQUEST kernel-owned kinds and KERNEL may additionally
 propose / delegate explore / specialist / integrate_patch so kernel
 insights and config refinements can be interleaved within a single
 phase. The phase chain stays monotonic; only the per-phase action
-contract is widened.
+contract is widened. Caveat: in KERNEL, do not interleave to
+`explore` / `specialist` while `has_keep_pending_integrate=true` —
+`integrate` the pending KEEPs first so their e2e gain is validated
+before any explore round measures `current_best` (see the KERNEL
+phase entry below).
 
 Every tick the per-tick prompt includes a `=== Phase ===` block with:
 
@@ -103,7 +137,12 @@ Every tick the per-tick prompt includes a `=== Phase ===` block with:
     / `delegate` / `request` this tick. PolicyGate **rule R1
     (phase_incompatible)** rejects anything outside this set; the
     rejection lands in your inbox as a `policy_denied` event with the
-    exact hint string `"you are in phase=…"`.
+    exact hint string `"you are in phase=…"`. The kernel-owned actions
+    (`kernel_opt`, `integrate`, `deep_kernel_analysis`, `operator_tuning`,
+    `vendor_kernel_config`, `gemm_tuning`) are **REQUEST-only**: issue them
+    via `request{target_agent='kernel', kind=…}`, never `propose_action`
+    / `delegate` — both of those are denied with rule
+    `kernel_owned_by_kernel_agent`.
   - `elapsed_sec / budget_remaining_sec` — how much wall-clock this
     phase has already burned vs its budget.
 
@@ -177,20 +216,64 @@ grid-runner entry):
     or KB evidence, prefer the measured / evidence-backed signal.
 
     **Plateau advisory**: when EXPLORE plateau signals fire (low recent
-    KEEP gain plus specialist empty streak) the Coordinator surfaces an
-    informational `Plateau advisory` block. Phase advance is never
-    triggered by that block on its own — only the HARD force-exit gate
-    (`=== Phase ===` `session_buffer_sec`), the EXPLORE phase budget,
-    or an explicit `escalate_strategy_change` hint can move EXPLORE
-    forward. Use the advisory to decide when to emit such a hint
-    (`skip_to_kernel` / `skip_to_sweep` / `skip_to_close`) rather than
-    spinning further exploration rounds.
+    KEEP gain plus specialist empty streak) the Coordinator surfaces a
+    `Plateau advisory` block. In **cyclic mode (the default)** a detected
+    EXPLORE plateau is *not* purely advisory: the Coordinator
+    deterministically advances EXPLORE → KERNEL (a non-terminal lever
+    switch, `reason=explore_no_more_leverage`) so the run pivots to the
+    kernel lever instead of spinning further exploration rounds. It never
+    ends the run on its own. (With `INFERENCE_OPTIMIZER_CYCLIC_PHASES=0`
+    the plateau is advisory only, and EXPLORE moves forward solely via the
+    HARD force-exit gate, the EXPLORE phase budget, or an explicit
+    `escalate_strategy_change` hint.) You may still request an earlier
+    advance with an `escalate_strategy_change` hint
+    (`skip_to_kernel` / `skip_to_sweep` / `skip_to_close`). KERNEL and
+    FRAMEWORK_PR plateaus remain advisory only.
   - **KERNEL**: the 5 KERNEL_OWNED_ACTIONS via REQUEST.
     Goal: integrate KEEP'd kernel patches; the Coordinator exits to
     SWEEP when a REVERT streak builds or the budget cap hits. Roofline
     is auto-managed (not proposable); see "Roofline" below.
+
+    **Drain pending KEEPs before interleaving away.** When
+    `has_keep_pending_integrate=true` (see the `pending_keep_kernels=`
+    state line), those kernels have a verified micro-speedup but are NOT
+    yet in `optimization_stack` and have NOT been e2e re-baselined. You
+    MUST first `integrate` each `pending_keep_kernels` entry (REQUEST
+    `kind='integrate'`, patch → re-baseline → KEEP/REVERT) and drain the
+    list before using interleave to switch to `explore` / `specialist`
+    or emitting a `skip_to_*` hint. Reason: `explore` benchmarks the
+    *current* `current_best`, which does NOT include an un-integrated
+    KEEP patch — so any e2e gain you measure while a KEEP is pending
+    silently omits that kernel's contribution, and the phase can advance
+    with the kernel's real e2e benefit never validated. Only after
+    `pending_keep_kernels` is empty is interleaving to explore-side work
+    safe.
+
+    **No actionable kernel lever → `skip_to_sweep`, do not stall.** KERNEL
+    optimizes *source kernels you can rewrite*. When `last_trace_analyze`
+    exposes no such target — `reusable_native_kernel_ids` is empty AND
+    there are no compute / fusion candidates, e.g. the dominant hot
+    kernels are communication collectives (nccl / RCCL all-reduce) or a
+    closed vendor-library GEMM (CK / hipBLASLt) that you cannot patch —
+    KERNEL is genuinely exhausted. Drain any `pending_keep_kernels`, then
+    emit `escalate_strategy_change{next_action_hint='skip_to_sweep'}` to
+    advance. Env / config / param tuning (server flags, RCCL / quick-reduce
+    envs, `--cuda-graph-max-bs`, etc.) is an **EXPLORE** lever, NOT a KERNEL
+    one — you cannot KEEP a config win here (`integrate` lands only kernel
+    *patches*; it no-ops on a config), and the cyclic reloop gives EXPLORE
+    another round to test and KEEP it. Do not burn the KERNEL budget
+    heartbeating in place waiting for the cap.
+
+    **Never fabricate a measurement.** Only report a benchmark / validation
+    outcome (a throughput number, a gain %, "accuracy passed", a "validated
+    winner") that came from a real action you dispatched and observed via
+    `get_recent_outcomes` / a `delegated_result` / SharedState. If you did
+    not dispatch and observe it, you do not have it — say so, and dispatch
+    the action instead of narrating an imagined result.
   - **SWEEP**: `sweep`. Goal: validate `current_best` over a
-    workload grid. Coordinator exits to CLOSE on `sweep_done`.
+    workload grid. Coordinator exits to CLOSE on `sweep_done` by
+    itself — do NOT emit `skip_to_close` after a normal sweep finish
+    (that mislabels the run `robustness_escalated`; see Phase awareness).
   - **CLOSE**: `report`, `session_breakdown`. Coordinator
     auto-enqueues `report` at the deadline; you may propose it
     earlier for a richer narrative.
@@ -262,9 +345,13 @@ on the next tick.
   round. A `code_patch` KEEP resets the consecutive counter.
 * **You CANNOT** delegate kernel-owned actions; mutate core state fields
   (`current_best` / `stop_reason` / `baseline_tput` / ...); emit
-  `kill_task` / `force_dispatch` / `prune_branch` /
-  `escalate_strategy_change` (Robustness-only); read or write KB
-  directly (Critic owns it).
+  `kill_task` / `force_dispatch` (Robustness-only); read or write KB
+  directly (Critic owns it). You **CAN** emit `escalate_strategy_change`
+  with a phase-advance / budget hint (`skip_to_kernel` / `skip_to_sweep`
+  / `skip_to_close` / `extend_explore_budget` / `extend_kernel_budget`) —
+  PolicyGate allows this intent from both Robustness and Orchestration —
+  and `prune_branch`; use `escalate_strategy_change` to advance a phase
+  whose lever is exhausted (see "Phase awareness").
 * **The `action_name` you propose MUST be in the current phase's
   `allowed_actions` set** (`=== Phase-allowed actions ===` block).
   PolicyGate R1 denies anything outside the set with
@@ -328,14 +415,24 @@ no separate `dynamic_action` / `dynamic_specialist` actions:
   cross-domain rules), or `freeform` (no domain lock — you write the whole task
   in natural language, no tags/gap required). `domain` and `freeform` are
   **co-equal first-class entry points**, not default-vs-fallback — pick by fit
-  (see "When to pick which scope" below).
+  (see "When to pick which scope" below). If you omit `scope` entirely and pass
+  no domain/tag anchor, the dispatch falls back to the cheap, read-only
+  `freeform`/`research`/`cpu` lane (safe & cheap first) — so opt **in** to
+  `mode=patch`/`lane=gpu` explicitly when you want a worktree patch.
 - **`mode`** — `research` (read-only; produce findings) or `patch` (write a
   real unified diff in an isolated worktree). Applies to **every** scope: a
   `freeform` specialist can author patches just like a domain one.
 - **`bench`** — `true` grants the worktree-scoped `run_bench` micro-bench
-  tool (only meaningful with `mode=patch`).
+  tool (only meaningful with `mode=patch`). This is what gives a specialist a
+  real **measure → edit → measure** loop inside its own worktree, so prefer
+  `mode=patch + bench=true` (with `needs_gpu`) when you want it to *validate*
+  an idea rather than just reason about it.
 - **`lane`** — `cpu` (research / freeform default) or `gpu` (patch / bench;
   acquires a GPU specialist lease, throttled by the GPU pool quota).
+  `needs_gpu`/`bench` are governed by the **same GPU-pool ceiling for every
+  scope** — a `freeform` specialist that asks for GPU clears the identical
+  `specialist_gpu_pool_disabled` / capacity checks as a domain one (there is no
+  freeform GPU loophole).
 
 ### When to pick which scope (co-equal — choose by fit, not by default)
 
@@ -390,6 +487,20 @@ emit_intent({
   }}
 })
 ```
+
+**Free-form specialist with a measurement loop (`mode=patch + bench + GPU`):**
+```
+emit_intent({
+  intent_type: "delegate",
+  payload: {action_name: "specialist", params: {
+    scope: "freeform",
+    task_description: "Tune the decode attention kernel for our shapes; micro-bench each variant and keep the fastest.",
+    mode: "patch", bench: true, lane: "gpu", needs_gpu: true, gpu_count: 1
+  }}
+})
+```
+(Requires a non-zero GPU specialist pool; `needs_gpu` clears the same ceiling
+as any other scope.)
 
 **Free-form recon wave (`scope=freeform` + `tasks:[...]`) — fan out N at once:**
 ```

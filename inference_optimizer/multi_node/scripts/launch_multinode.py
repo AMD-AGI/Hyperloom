@@ -42,45 +42,74 @@ _DEFAULT_DIST_INIT_PORT = 29500
 
 
 def _pd_decode_dist_init_port(prefill_dist_init_port: int) -> int:
-    """Derive the decode rendezvous port as ``prefill + 1`` so an override shifts both endpoints in lock-step."""
+    """Derive the decode rendezvous port as ``prefill + 1`` so an override shifts both endpoints in lock-step.
+
+    Args:
+        prefill_dist_init_port: The prefill group's rendezvous port.
+
+    Returns:
+        int: The decode group's rendezvous port.
+    """
     return prefill_dist_init_port + 1
+
+
 # sglang PD bootstrap (KV transfer rendezvous) port; override via --pd-bootstrap-port.
 _PD_DEFAULT_BOOTSTRAP_PORT = 8998
 # Max seconds to wait for ray.nodes() to surface every expected pod.
 _NODES_DISCOVERY_TIMEOUT_SEC = 120
 # rank-0 /health probe budget (cold MoE can exceed it; --no-wait-health to bypass).
-_HEALTH_PROBE_TIMEOUT_SEC = int(os.environ.get('SGLANG_HEALTH_PROBE_TIMEOUT_SEC', '1800'))
+_HEALTH_PROBE_TIMEOUT_SEC = int(os.environ.get("SGLANG_HEALTH_PROBE_TIMEOUT_SEC", "1800"))
 
 
 def _log(msg: str) -> None:
-    """Stderr line with timestamp (no logging module to avoid handler surprises as a dashboard entry-point)."""
+    """Stderr line with timestamp (no logging module to avoid handler surprises as a dashboard entry-point).
+
+    Args:
+        msg: The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[launch_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _wait_for_nodes(target_n: int, timeout_s: int) -> list[dict]:
-    """Poll ray.nodes() until ``target_n`` alive GPU nodes are visible."""
+    """Poll ray.nodes() until ``target_n`` alive GPU nodes are visible.
+
+    Args:
+        target_n (int): Number of alive GPU nodes required.
+        timeout_s (int): Maximum seconds to wait before giving up.
+
+    Returns:
+        list[dict]: The alive GPU node rows from ``ray.nodes()``.
+
+    Raises:
+        RuntimeError: If fewer than ``target_n`` nodes are visible before
+            the timeout elapses.
+    """
     started = time.monotonic()
     while True:
-        nodes = [
-            n for n in ray.nodes()
-            if n.get("Alive") and float(n.get("Resources", {}).get("GPU", 0)) > 0
-        ]
+        nodes = [n for n in ray.nodes() if n.get("Alive") and float(n.get("Resources", {}).get("GPU", 0)) > 0]
         if len(nodes) >= target_n:
             return nodes
         elapsed = time.monotonic() - started
         if elapsed >= timeout_s:
             raise RuntimeError(
-                f"only {len(nodes)}/{target_n} alive GPU nodes after {elapsed:.0f}s; "
-                f"check KubeRay scheduler logs"
+                f"only {len(nodes)}/{target_n} alive GPU nodes after {elapsed:.0f}s; check KubeRay scheduler logs"
             )
         _log(f"waiting for nodes: have={len(nodes)} need={target_n} t={elapsed:.0f}s")
         time.sleep(3)
 
 
 def _pick_head_first(nodes: list[dict]) -> list[dict]:
-    """Reorder so the local (driver) node is rank 0 and the rest follow in NodeManagerAddress order."""
+    """Reorder so the local (driver) node is rank 0 and the rest follow in NodeManagerAddress order.
+
+    Args:
+        nodes: The alive GPU node rows from ``ray.nodes()``.
+
+    Returns:
+        list[dict]: The nodes reordered with the local node first, or all
+        nodes sorted by address when the driver is not on a GPU node.
+    """
     local_addr = ray.util.get_node_ip_address()
     local = [n for n in nodes if n.get("NodeManagerAddress") == local_addr]
     others = sorted(
@@ -113,17 +142,41 @@ def _build_sglang_cmd(
 
     Only rank 0 gets ``--host``/``--port`` (workers serve no HTTP).
     ``--trust-remote-code`` is default-on (custom modeling.py models need
-    it). ``ep > 1`` emits ``--expert-parallel-size N`` for true expert
+    it).     ``ep > 1`` emits ``--expert-parallel-size N`` for true expert
     parallelism (the older ``--enable-ep-moe`` pair was removed upstream).
+
+    Args:
+        model: Model path passed to the launcher.
+        tp: Tensor-parallel size.
+        nnodes: Total node count for this server group.
+        node_rank: This node's rank within the group.
+        dist_init_addr: Collective rendezvous ``host:port``.
+        extra_args: Extra args appended verbatim to the launcher.
+        ep: Expert-parallel size; ``> 1`` enables expert parallelism.
+        pd_role: PD disaggregation role (``prefill``/``decode``) or empty.
+        pd_port: HTTP port bound by rank 0.
+        pd_transfer_backend: KV-transfer backend for PD mode.
+        pd_ib_device: IB/RoCE device list for PD KV transfer.
+        pd_bootstrap_port: sglang PD bootstrap rendezvous port.
+
+    Returns:
+        list[str]: The sglang launch argv.
     """
     cmd = [
-        "python3", "-m", "sglang.launch_server",
-        "--model-path", model,
+        "python3",
+        "-m",
+        "sglang.launch_server",
+        "--model-path",
+        model,
         "--trust-remote-code",
-        "--tp", str(tp),
-        "--nnodes", str(nnodes),
-        "--node-rank", str(node_rank),
-        "--dist-init-addr", dist_init_addr,
+        "--tp",
+        str(tp),
+        "--nnodes",
+        str(nnodes),
+        "--node-rank",
+        str(node_rank),
+        "--dist-init-addr",
+        dist_init_addr,
     ]
     if node_rank == 0:
         # rank-0 HTTP port = internal prefill/decode port in PD mode, public port in colocated.
@@ -160,13 +213,33 @@ def _build_vllm_cmd(
 
     ``--tensor-parallel-size`` = total cluster GPUs; ``ep > 1`` adds
     ``--enable-expert-parallel`` (vllm infers ep_size = tp_size).
+
+    Args:
+        model: Model path passed to ``vllm serve``.
+        tp: Tensor-parallel size (total cluster GPUs).
+        extra_args: Extra args appended verbatim to the launcher.
+        ep: Expert-parallel size; ``> 1`` enables expert parallelism.
+        pd_role: PD disaggregation role (``prefill``/``decode``) or empty.
+        pd_port: HTTP port bound by the server.
+        pd_transfer_backend: KV connector name for PD mode.
+        pd_kv_rank: This group's KV rank in PD mode.
+        pd_kv_parallel_size: Total KV parallel size in PD mode.
+
+    Returns:
+        list[str]: The vLLM launch argv.
     """
     cmd = [
-        "vllm", "serve", model,
-        "--tensor-parallel-size", str(tp),
-        "--host", "0.0.0.0",
-        "--port", str(pd_port),
-        "--distributed-executor-backend", "ray",
+        "vllm",
+        "serve",
+        model,
+        "--tensor-parallel-size",
+        str(tp),
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(pd_port),
+        "--distributed-executor-backend",
+        "ray",
     ]
     if ep > 1:
         cmd.append("--enable-expert-parallel")
@@ -191,11 +264,18 @@ def _build_vllm_cmd(
 
 
 def _probe_mec_firmware_lt_177() -> bool:
-    """Return True iff rocm-smi reports MEC firmware < 177 (gate for the HSA_NO_SCRATCH_RECLAIM workaround); False on any failure."""
+    """Return True iff rocm-smi reports MEC firmware < 177 (gate for the HSA_NO_SCRATCH_RECLAIM workaround); False on any failure.
+
+    Returns:
+        bool: ``True`` if MEC firmware is below 177; ``False`` on any probe
+        failure or higher firmware.
+    """
     try:
         proc = subprocess.run(
             ["rocm-smi", "--showfw"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except (FileNotFoundError, subprocess.SubprocessError, OSError):
         return False
@@ -220,12 +300,14 @@ def _subprocess_env() -> dict[str, str]:
     Sets the MI300X tuning trio (SGLANG_USE_AITER / SGLANG_AITER_MLA_PERSIST,
     and HSA_NO_SCRATCH_RECLAIM when MEC firmware < 177) without clobbering
     caller-set values.
+
+    Returns:
+        dict[str, str]: The environment mapping for the launcher subprocess.
     """
     env = dict(os.environ)
     # Strip Ray's empty *_VISIBLE_DEVICES mask (num_gpus=0 actors) so the
     # detached framework child re-discovers all GPUs; honour non-empty overrides.
-    for _vis in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES",
-                 "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"):
+    for _vis in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"):
         if _vis in env and env[_vis].strip() == "":
             env.pop(_vis, None)
     # Prevent the MI300X fused-decode-MLA crash (aiter ForwardMetadata mismatch).
@@ -249,7 +331,22 @@ def _detach_framework_launch(
     sub_env: dict[str, str],
     node_rank: int,
 ) -> int:
-    """Start ``cmd`` detached from the Ray worker via bash+nohup+setsid (reparents under init, PYTHONUNBUFFERED logs, fails fast with log tail)."""
+    """Start ``cmd`` detached from the Ray worker via bash+nohup+setsid (reparents under init, PYTHONUNBUFFERED logs, fails fast with log tail).
+
+    Args:
+        cmd: The framework launcher argv.
+        log_file: Path the launcher's stdout/stderr is appended to.
+        pid_file: Path the spawned launcher PID is written to.
+        sub_env: Environment passed to the spawn shell.
+        node_rank: This node's rank, used in log/error messages.
+
+    Returns:
+        int: The PID of the detached framework process.
+
+    Raises:
+        RuntimeError: If the spawn shell fails, the PID file is missing or
+            invalid, or the process exits within 0.5s of launch.
+    """
     sub_env = dict(sub_env)
     sub_env.setdefault("PYTHONUNBUFFERED", "1")
     log_q = shlex.quote(str(log_file))
@@ -280,9 +377,7 @@ def _detach_framework_launch(
     try:
         pid = int(pid_file.read_text(encoding="utf-8").strip())
     except (ValueError, OSError) as exc:
-        raise RuntimeError(
-            f"[rank {node_rank}] missing or invalid pid file {pid_file}: {exc}"
-        ) from exc
+        raise RuntimeError(f"[rank {node_rank}] missing or invalid pid file {pid_file}: {exc}") from exc
 
     time.sleep(0.5)
     try:
@@ -295,12 +390,10 @@ def _detach_framework_launch(
         except OSError:
             tail = "<could not read log>"
         sys.stderr.write(
-            f"[rank {node_rank}] child pid={pid} not alive after 0.5s: {exc}\n"
-            f"[rank {node_rank}] log tail:\n{tail}\n",
+            f"[rank {node_rank}] child pid={pid} not alive after 0.5s: {exc}\n[rank {node_rank}] log tail:\n{tail}\n",
         )
         raise RuntimeError(
-            f"[rank {node_rank}] framework exited immediately (pid={pid}); "
-            f"see log tail on stderr and {log_file}"
+            f"[rank {node_rank}] framework exited immediately (pid={pid}); see log tail on stderr and {log_file}"
         ) from exc
     return pid
 
@@ -332,25 +425,50 @@ def _spawn_remote(
 
     ``torch_profiler_dir`` (if set) is exported as
     ``SGLANG_TORCH_PROFILER_DIR`` for shared-path traces.
+
+    Args:
+        framework: ``sglang`` or ``vllm``.
+        model: Model path passed to the launcher.
+        tp: Tensor-parallel size.
+        nnodes: Total node count for this server group.
+        node_rank: This node's rank within the group.
+        head_ip: Rendezvous head IP.
+        dist_init_port: Collective rendezvous port.
+        pid_dir: Directory the PID file is written to.
+        log_dir: Directory the log file is written to.
+        extra_args: Extra args appended verbatim to the launcher.
+        torch_profiler_dir: Optional shared dir exported as
+            ``SGLANG_TORCH_PROFILER_DIR``.
+        ep: Expert-parallel size.
+        pd_role: PD disaggregation role (``prefill``/``decode``) or empty.
+        pd_port: HTTP port bound in PD mode.
+        pd_transfer_backend: KV-transfer backend for PD mode.
+        pd_ib_device: IB/RoCE device list for PD KV transfer.
+        pd_bootstrap_port: sglang PD bootstrap rendezvous port.
+        pd_kv_rank: vLLM KV rank for PD mode.
+        pd_kv_parallel_size: vLLM total KV parallel size for PD mode.
+        pid_file_name: Optional role-tagged PID file name.
+
+    Returns:
+        int: The spawned framework PID, or ``0`` for a no-op vLLM worker rank.
+
+    Raises:
+        RuntimeError: If ``framework`` is unsupported, or the detached launch
+            fails.
     """
     Path(pid_dir).mkdir(parents=True, exist_ok=True)
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     # PD mode runs two groups with overlapping rank numbers; caller passes
     # a role-tagged pid_file_name so they don't collide on disk.
     fname = pid_file_name or f"rank_{node_rank}.pid"
-    log_fname = (
-        f"{Path(fname).stem}.log" if pid_file_name else f"rank_{node_rank}.log"
-    )
+    log_fname = f"{Path(fname).stem}.log" if pid_file_name else f"rank_{node_rank}.log"
     pid_file = Path(pid_dir) / fname
     log_file = Path(log_dir) / log_fname
 
     sub_env = _subprocess_env()
     # Resume-aware fallback to $HYPERLOOM_MN_PROFILE_TRACE_DIR so traces still
     # reach a shared dir when a reused server skips this launch.
-    tpd = (
-        (torch_profiler_dir or "").strip()
-        or os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
-    )
+    tpd = (torch_profiler_dir or "").strip() or os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if tpd:
         # Pin profiler output to a shared dir; mkdir failure is non-fatal.
         try:
@@ -367,9 +485,15 @@ def _spawn_remote(
     fw = framework.lower()
     if fw == "sglang":
         cmd = _build_sglang_cmd(
-            model=model, tp=tp, nnodes=nnodes, node_rank=node_rank,
-            dist_init_addr=dist_init_addr, extra_args=extra_args, ep=ep,
-            pd_role=pd_role, pd_port=pd_port,
+            model=model,
+            tp=tp,
+            nnodes=nnodes,
+            node_rank=node_rank,
+            dist_init_addr=dist_init_addr,
+            extra_args=extra_args,
+            ep=ep,
+            pd_role=pd_role,
+            pd_port=pd_port,
             pd_transfer_backend=pd_transfer_backend,
             pd_ib_device=pd_ib_device,
             pd_bootstrap_port=pd_bootstrap_port,
@@ -387,8 +511,12 @@ def _spawn_remote(
             pid_file.write_text("0")
             return 0
         cmd = _build_vllm_cmd(
-            model=model, tp=tp, extra_args=extra_args, ep=ep,
-            pd_role=pd_role, pd_port=pd_port,
+            model=model,
+            tp=tp,
+            extra_args=extra_args,
+            ep=ep,
+            pd_role=pd_role,
+            pd_port=pd_port,
             pd_transfer_backend=pd_transfer_backend,
             pd_kv_rank=pd_kv_rank,
             pd_kv_parallel_size=pd_kv_parallel_size,
@@ -402,7 +530,16 @@ def _spawn_remote(
 
 
 def _rank0_pid_from_log(log_dir: str) -> int | None:
-    """Read rank 0 PID from /tmp/multi_node_pids/rank_0.pid (best-effort)."""
+    """Read rank 0 PID from /tmp/multi_node_pids/rank_0.pid (best-effort).
+
+    Args:
+        log_dir (str): The log directory; its parent is probed for the
+            ``multi_node_pids/rank_0.pid`` file before falling back to the
+            default ``/tmp`` location.
+
+    Returns:
+        int | None: The rank-0 PID, or ``None`` if it cannot be read.
+    """
     try:
         pid_path = pathlib.Path(log_dir).parent / "multi_node_pids" / "rank_0.pid"
         if not pid_path.is_file():
@@ -441,7 +578,15 @@ _FATAL_SCAN_TAIL_BYTES = 256 * 1024
 
 
 def _scan_rank0_log_for_fatal(log_dir: str) -> str | None:
-    """Scan rank_0.log tail for a fatal traceback / framework error; returns the matched line or ``None``."""
+    """Scan rank_0.log tail for a fatal traceback / framework error; returns the matched line or ``None``.
+
+    Args:
+        log_dir: Directory containing ``rank_0.log``.
+
+    Returns:
+        str | None: The first matched fatal line, or ``None`` if none found
+        or the log cannot be read.
+    """
     try:
         lf = Path(log_dir) / "rank_0.log"
         if not lf.is_file():
@@ -471,14 +616,27 @@ def _wait_health(
     rank0_pid: int | None = None,
     log_dir: str | None = None,
 ) -> bool:
-    """Poll rank-0 ``/health``; True on first 200, False on timeout / rank-0 death / fatal ``rank_0.log`` error."""
+    """Poll rank-0 ``/health``; True on first 200, False on timeout / rank-0 death / fatal ``rank_0.log`` error.
+
+    Args:
+        timeout_s: Maximum seconds to poll before giving up.
+        rank0_pid: Optional rank-0 PID; the wait aborts early if it dies.
+        log_dir: Optional directory whose ``rank_0.log`` is scanned for fatal
+            errors to abort early.
+
+    Returns:
+        bool: ``True`` on a first healthy response; ``False`` on timeout,
+        confirmed rank-0 death, or a fatal log error.
+    """
     import urllib.request
     import urllib.error
+
     started = time.monotonic()
     while time.monotonic() - started < timeout_s:
         try:
             with urllib.request.urlopen(
-                f"http://127.0.0.1:{_INFERENCE_PORT}/health", timeout=3,
+                f"http://127.0.0.1:{_INFERENCE_PORT}/health",
+                timeout=3,
             ) as resp:
                 if 200 <= resp.status < 300:
                     return True
@@ -489,8 +647,7 @@ def _wait_health(
             try:
                 os.kill(rank0_pid, 0)
             except ProcessLookupError:
-                _log(f"ERROR rank 0 pid={rank0_pid} died while waiting for /health; "
-                     f"aborting health wait")
+                _log(f"ERROR rank 0 pid={rank0_pid} died while waiting for /health; aborting health wait")
                 return False
             except OSError:
                 pass  # permission etc; don't kill the wait
@@ -498,30 +655,38 @@ def _wait_health(
         if log_dir:
             fatal_line = _scan_rank0_log_for_fatal(log_dir)
             if fatal_line:
-                _log(f"ERROR rank 0 fatal in rank_0.log: {fatal_line[:300]}; "
-                     f"aborting health wait (was: silent 1800s stall)")
+                _log(
+                    f"ERROR rank 0 fatal in rank_0.log: {fatal_line[:300]}; "
+                    f"aborting health wait (was: silent 1800s stall)"
+                )
                 return False
         time.sleep(5)
     return False
 
 
 def _emit_rank0_log_tail(log_dir: Path) -> None:
-    """Append the tail of ``rank_0.log`` to stderr if the file exists."""
+    """Append the tail of ``rank_0.log`` to stderr if the file exists.
+
+    Args:
+        log_dir (Path): Directory containing ``rank_0.log``.
+    """
     lf = log_dir / "rank_0.log"
     try:
         sz = lf.stat().st_size if lf.is_file() else 0
         _log(f"(tail probe) rank_0.log bytes={sz} path={lf}")
         if sz > 0:
-            _log(
-                "rank_0.log tail (last 8kiB):\n"
-                + lf.read_text(encoding="utf-8", errors="replace")[-8192:]
-            )
+            _log("rank_0.log tail (last 8kiB):\n" + lf.read_text(encoding="utf-8", errors="replace")[-8192:])
     except OSError as exc:
         _log(f"(tail probe) cannot read rank_0.log: {exc}")
 
 
 def _log_rank0_post_spawn(log_dir: Path, rank0_pid: int | None) -> None:
-    """Emit rank-0 diagnostics after a short settle (a ``rank_0.log`` tail for early weight-load exits)."""
+    """Emit rank-0 diagnostics after a short settle (a ``rank_0.log`` tail for early weight-load exits).
+
+    Args:
+        log_dir: Directory containing ``rank_0.log``.
+        rank0_pid: The rank-0 PID to probe, or ``None`` to skip.
+    """
     if rank0_pid is None or rank0_pid <= 0:
         return
     time.sleep(3)
@@ -534,6 +699,18 @@ def _log_rank0_post_spawn(log_dir: Path, rank0_pid: int | None) -> None:
 
 
 def main() -> int:
+    """Parse CLI arguments and launch the multi-node server group(s).
+
+    Connects to the in-pod Ray cluster, discovers and rank-orders nodes,
+    spawns one launcher actor per rank (colocated or PD-disaggregated),
+    emits a JSON summary to stdout, and optionally waits for rank-0
+    ``/health``.
+
+    Returns:
+        int: Process exit code; ``0`` on success (or slow-but-alive boot),
+        ``1`` on a spawn failure, ``2`` on invalid args or a confirmed
+        framework early-exit / fatal log error.
+    """
     p = argparse.ArgumentParser(
         prog="launch_multinode.py",
         description="Spawn one sglang/vllm rank per RayJob node via ray actors.",
@@ -545,59 +722,83 @@ def main() -> int:
     p.add_argument("--pid-dir", required=True)
     p.add_argument("--log-dir", required=True)
     p.add_argument(
-        "--dist-init-port", type=int,
+        "--dist-init-port",
+        type=int,
         default=int(os.environ.get("RAYJOB_DIST_INIT_PORT") or _DEFAULT_DIST_INIT_PORT),
         help=f"sglang collective rendezvous port (default {_DEFAULT_DIST_INIT_PORT}, "
-             f"resolution: --dist-init-port > $RAYJOB_DIST_INIT_PORT > {_DEFAULT_DIST_INIT_PORT})",
+        f"resolution: --dist-init-port > $RAYJOB_DIST_INIT_PORT > {_DEFAULT_DIST_INIT_PORT})",
     )
-    p.add_argument("--no-wait-health", action="store_true",
-                   help="don't poll /health on rank 0 before returning")
-    p.add_argument("--extra-args", default="",
-                   help="extra args appended verbatim to the framework launcher")
-    p.add_argument("--torch-profiler-dir", default="",
-                   help="when set, exported as SGLANG_TORCH_PROFILER_DIR on every "
-                        "rank's framework subprocess; intended for a wekafs path "
-                        "shared with the sandbox (see HYPERLOOM_MN_PROFILE_TRACE_DIR)")
-    p.add_argument("--ep", type=int, default=1,
-                   help="expert-parallel size; 1 (default) keeps experts "
-                        "TP-sharded (legacy). >=2 emits sglang "
-                        "`--enable-ep-moe --ep-size N` or vllm "
-                        "`--enable-expert-parallel`. Caller (orchestrator "
-                        "helper) is responsible for ensuring ep <= tp.")
+    p.add_argument("--no-wait-health", action="store_true", help="don't poll /health on rank 0 before returning")
+    p.add_argument("--extra-args", default="", help="extra args appended verbatim to the framework launcher")
+    p.add_argument(
+        "--torch-profiler-dir",
+        default="",
+        help="when set, exported as SGLANG_TORCH_PROFILER_DIR on every "
+        "rank's framework subprocess; intended for a wekafs path "
+        "shared with the sandbox (see HYPERLOOM_MN_PROFILE_TRACE_DIR)",
+    )
+    p.add_argument(
+        "--ep",
+        type=int,
+        default=1,
+        help="expert-parallel size; 1 (default) keeps experts "
+        "TP-sharded (legacy). >=2 emits sglang "
+        "`--enable-ep-moe --ep-size N` or vllm "
+        "`--enable-expert-parallel`. Caller (orchestrator "
+        "helper) is responsible for ensuring ep <= tp.",
+    )
     # PD disaggregation args: `colocated` (default) is one TP group;
     # `disaggregated` splits into prefill/decode groups fronted by the router.
-    p.add_argument("--pd-mode", choices=("colocated", "disaggregated"),
-                   default="colocated",
-                   help="PD disaggregation mode (default colocated)")
-    p.add_argument("--pd-prefill-nodes", type=int, default=0,
-                   help="number of prefill nodes (disaggregated only); "
-                        "must satisfy pd_prefill_nodes + pd_decode_nodes == nnodes")
-    p.add_argument("--pd-decode-nodes", type=int, default=0,
-                   help="number of decode nodes (disaggregated only)")
-    p.add_argument("--pd-prefill-tp", type=int, default=0,
-                   help="TP size for the prefill group (disaggregated only); "
-                        "default = --tp")
-    p.add_argument("--pd-decode-tp", type=int, default=0,
-                   help="TP size for the decode group (disaggregated only); "
-                        "default = --tp")
-    p.add_argument("--pd-transfer-backend", default="",
-                   help="sglang: mooncake|nixl ; vllm: NixlConnector|"
-                        "P2pNcclConnector|MooncakeConnector|LMCacheConnectorV1; "
-                        "empty = framework default (sglang mooncake / vllm NixlConnector)")
-    p.add_argument("--pd-ib-device", default="",
-                   help="comma-separated IB/RoCE device list for KV transfer "
-                        "(e.g. mlx5_0,mlx5_1). Empty = read $NCCL_IB_HCA "
-                        "from this pod's env (RayJob image typically injects "
-                        "it); if that's also empty, mooncake auto-detects.")
-    p.add_argument("--pd-bootstrap-port", type=int,
-                   default=_PD_DEFAULT_BOOTSTRAP_PORT,
-                   help=f"sglang PD bootstrap rendezvous port "
-                        f"(default {_PD_DEFAULT_BOOTSTRAP_PORT})")
+    p.add_argument(
+        "--pd-mode",
+        choices=("colocated", "disaggregated"),
+        default="colocated",
+        help="PD disaggregation mode (default colocated)",
+    )
+    p.add_argument(
+        "--pd-prefill-nodes",
+        type=int,
+        default=0,
+        help="number of prefill nodes (disaggregated only); must satisfy pd_prefill_nodes + pd_decode_nodes == nnodes",
+    )
+    p.add_argument("--pd-decode-nodes", type=int, default=0, help="number of decode nodes (disaggregated only)")
+    p.add_argument(
+        "--pd-prefill-tp",
+        type=int,
+        default=0,
+        help="TP size for the prefill group (disaggregated only); default = --tp",
+    )
+    p.add_argument(
+        "--pd-decode-tp", type=int, default=0, help="TP size for the decode group (disaggregated only); default = --tp"
+    )
+    p.add_argument(
+        "--pd-transfer-backend",
+        default="",
+        help="sglang: mooncake|nixl ; vllm: NixlConnector|"
+        "P2pNcclConnector|MooncakeConnector|LMCacheConnectorV1; "
+        "empty = framework default (sglang mooncake / vllm NixlConnector)",
+    )
+    p.add_argument(
+        "--pd-ib-device",
+        default="",
+        help="comma-separated IB/RoCE device list for KV transfer "
+        "(e.g. mlx5_0,mlx5_1). Empty = read $NCCL_IB_HCA "
+        "from this pod's env (RayJob image typically injects "
+        "it); if that's also empty, mooncake auto-detects.",
+    )
+    p.add_argument(
+        "--pd-bootstrap-port",
+        type=int,
+        default=_PD_DEFAULT_BOOTSTRAP_PORT,
+        help=f"sglang PD bootstrap rendezvous port (default {_PD_DEFAULT_BOOTSTRAP_PORT})",
+    )
     args = p.parse_args()
 
     if args.nnodes < 2:
-        _log(f"nnodes={args.nnodes} < 2; this script is for multi-node only. "
-             f"Use launch_server.sh for single-pod restarts.")
+        _log(
+            f"nnodes={args.nnodes} < 2; this script is for multi-node only. "
+            f"Use launch_server.sh for single-pod restarts."
+        )
         return 2
 
     # Validate PD args; populate defaults.
@@ -606,8 +807,10 @@ def main() -> int:
         pn = int(args.pd_prefill_nodes or 0)
         dn = int(args.pd_decode_nodes or 0)
         if pn <= 0 or dn <= 0 or pn + dn != args.nnodes:
-            _log(f"PD invalid split: pd_prefill_nodes={pn} pd_decode_nodes={dn} "
-                 f"nnodes={args.nnodes}; require pn+dn==nnodes and both >0")
+            _log(
+                f"PD invalid split: pd_prefill_nodes={pn} pd_decode_nodes={dn} "
+                f"nnodes={args.nnodes}; require pn+dn==nnodes and both >0"
+            )
             return 2
         ptp = int(args.pd_prefill_tp or args.tp)
         dtp = int(args.pd_decode_tp or args.tp)
@@ -631,17 +834,19 @@ def main() -> int:
     ray.init(ignore_reinit_error=True, log_to_driver=True)
     nodes = _wait_for_nodes(args.nnodes, _NODES_DISCOVERY_TIMEOUT_SEC)
     nodes = _pick_head_first(nodes)
-    nodes = nodes[:args.nnodes]
+    nodes = nodes[: args.nnodes]
     head_ip = ray.util.get_node_ip_address()
     _log(f"discovered {len(nodes)} GPU nodes; head_ip={head_ip}; rank order:")
     for k, n in enumerate(nodes):
-        _log(f"  rank {k}: node_id={n.get('NodeID', '?')[:16]}... "
-             f"addr={n.get('NodeManagerAddress', '?')} "
-             f"gpu={n.get('Resources', {}).get('GPU', 0)}")
+        _log(
+            f"  rank {k}: node_id={n.get('NodeID', '?')[:16]}... "
+            f"addr={n.get('NodeManagerAddress', '?')} "
+            f"gpu={n.get('Resources', {}).get('GPU', 0)}"
+        )
 
     # Spawn one actor per rank (num_gpus=0; the framework reserves GPUs itself).
     SpawnActor = ray.remote(num_cpus=1, num_gpus=0)(_spawn_remote)
-    pids: dict[str, int] = {}     # pid_file_name -> real PID
+    pids: dict[str, int] = {}  # pid_file_name -> real PID
     refs: list[tuple[str, Any]] = []  # noqa: F821  Any imported below
 
     if pd_mode == "disaggregated":
@@ -651,14 +856,19 @@ def main() -> int:
             node = nodes[grp_rank]
             actor_ref = SpawnActor.options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
-                    node_id=node["NodeID"], soft=False,
+                    node_id=node["NodeID"],
+                    soft=False,
                 ),
             ).remote(
-                framework=args.framework, model=args.model,
-                tp=ptp, nnodes=pn, node_rank=grp_rank,
+                framework=args.framework,
+                model=args.model,
+                tp=ptp,
+                nnodes=pn,
+                node_rank=grp_rank,
                 head_ip=prefill_head_ip,
                 dist_init_port=args.dist_init_port,
-                pid_dir=args.pid_dir, log_dir=args.log_dir,
+                pid_dir=args.pid_dir,
+                log_dir=args.log_dir,
                 extra_args=extra_args,
                 torch_profiler_dir=args.torch_profiler_dir,
                 ep=int(args.ep or 1),
@@ -667,7 +877,7 @@ def main() -> int:
                 pd_transfer_backend=args.pd_transfer_backend,
                 pd_ib_device=ib_dev,
                 pd_bootstrap_port=args.pd_bootstrap_port,
-                pd_kv_rank=0,        # vllm-only; sglang ignores
+                pd_kv_rank=0,  # vllm-only; sglang ignores
                 pd_kv_parallel_size=2,
                 pid_file_name=f"prefill_{grp_rank}.pid",
             )
@@ -679,14 +889,19 @@ def main() -> int:
             node = nodes[pn + grp_rank]
             actor_ref = SpawnActor.options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
-                    node_id=node["NodeID"], soft=False,
+                    node_id=node["NodeID"],
+                    soft=False,
                 ),
             ).remote(
-                framework=args.framework, model=args.model,
-                tp=dtp, nnodes=dn, node_rank=grp_rank,
+                framework=args.framework,
+                model=args.model,
+                tp=dtp,
+                nnodes=dn,
+                node_rank=grp_rank,
                 head_ip=decode_head_ip,
                 dist_init_port=_pd_decode_dist_init_port(args.dist_init_port),
-                pid_dir=args.pid_dir, log_dir=args.log_dir,
+                pid_dir=args.pid_dir,
+                log_dir=args.log_dir,
                 extra_args=extra_args,
                 torch_profiler_dir=args.torch_profiler_dir,
                 ep=int(args.ep or 1),
@@ -705,14 +920,19 @@ def main() -> int:
         for rank, node in enumerate(nodes):
             actor_ref = SpawnActor.options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
-                    node_id=node["NodeID"], soft=False,
+                    node_id=node["NodeID"],
+                    soft=False,
                 ),
             ).remote(
-                framework=args.framework, model=args.model,
-                tp=args.tp, nnodes=args.nnodes, node_rank=rank,
+                framework=args.framework,
+                model=args.model,
+                tp=args.tp,
+                nnodes=args.nnodes,
+                node_rank=rank,
                 head_ip=head_ip,
                 dist_init_port=args.dist_init_port,
-                pid_dir=args.pid_dir, log_dir=args.log_dir,
+                pid_dir=args.pid_dir,
+                log_dir=args.log_dir,
                 extra_args=extra_args,
                 torch_profiler_dir=args.torch_profiler_dir,
                 ep=int(args.ep or 1),
@@ -760,18 +980,13 @@ def main() -> int:
         summary["pd_decode_nodes"] = dn
         summary["pd_prefill_tp"] = ptp
         summary["pd_decode_tp"] = dtp
-        summary["pd_transfer_backend"] = (
-            args.pd_transfer_backend
-            or ("NixlConnector" if args.framework.lower() == "vllm" else "mooncake")
+        summary["pd_transfer_backend"] = args.pd_transfer_backend or (
+            "NixlConnector" if args.framework.lower() == "vllm" else "mooncake"
         )
         summary["pd_ib_device"] = ib_dev
         summary["pd_bootstrap_port"] = args.pd_bootstrap_port
-        summary["pd_prefill_url"] = (
-            f"http://{prefill_head_ip}:{_PD_PREFILL_PORT}"
-        )
-        summary["pd_decode_url"] = (
-            f"http://{decode_head_ip}:{_PD_DECODE_PORT}"
-        )
+        summary["pd_prefill_url"] = f"http://{prefill_head_ip}:{_PD_PREFILL_PORT}"
+        summary["pd_decode_url"] = f"http://{decode_head_ip}:{_PD_DECODE_PORT}"
     sys.stdout.write(json.dumps(summary, indent=2) + "\n")
     sys.stdout.flush()
 
@@ -787,7 +1002,9 @@ def main() -> int:
     _log(f"polling rank 0 /health for up to {_HEALTH_PROBE_TIMEOUT_SEC}s")
     _r0_pid = _rank0_pid_from_log(args.log_dir)
     if _wait_health(
-        _HEALTH_PROBE_TIMEOUT_SEC, rank0_pid=_r0_pid, log_dir=args.log_dir,
+        _HEALTH_PROBE_TIMEOUT_SEC,
+        rank0_pid=_r0_pid,
+        log_dir=args.log_dir,
     ):
         _log("rank 0 /health OK")
         return 0
@@ -813,19 +1030,19 @@ def main() -> int:
             "kind": "framework_early_exit",
             "rank0_pid": _r0_pid,
             "hint": "framework process exited before /health flipped; "
-                    "common causes: unrecognized launcher flag, kernel "
-                    "ABI assert (e.g. aiter MLA num_qo_heads%16), OOM "
-                    "during cuda graph capture, RCCL init failure. See "
-                    "rank_0.log tail above.",
+            "common causes: unrecognized launcher flag, kernel "
+            "ABI assert (e.g. aiter MLA num_qo_heads%16), OOM "
+            "during cuda graph capture, RCCL init failure. See "
+            "rank_0.log tail above.",
         }
-        sys.stderr.write(
-            f"MULTI_NODE_FAILURE_SNAPSHOT={json.dumps(snap)}\n"
-        )
+        sys.stderr.write(f"MULTI_NODE_FAILURE_SNAPSHOT={json.dumps(snap)}\n")
         sys.stderr.flush()
-        _log(f"ERROR rank 0 pid={_r0_pid} dead before /health; returning 2 "
-             f"so the Ray Dashboard job reports FAILED and hyperloom "
-             f"surfaces ServerRestartFailed immediately (was: silent "
-             f"1800s /health stall).")
+        _log(
+            f"ERROR rank 0 pid={_r0_pid} dead before /health; returning 2 "
+            f"so the Ray Dashboard job reports FAILED and hyperloom "
+            f"surfaces ServerRestartFailed immediately (was: silent "
+            f"1800s /health stall)."
+        )
         return 2
     # A fatal traceback in rank_0.log proves a crash even when the nohup
     # wrapper PID lingers (else the 1800s wait silently reports SUCCEEDED).
@@ -837,18 +1054,20 @@ def main() -> int:
             "rank0_alive": _r0_alive,
             "hint": f"rank_0.log contains fatal: {_fatal_line[:500]}",
         }
-        sys.stderr.write(
-            f"MULTI_NODE_FAILURE_SNAPSHOT={json.dumps(snap)}\n"
-        )
+        sys.stderr.write(f"MULTI_NODE_FAILURE_SNAPSHOT={json.dumps(snap)}\n")
         sys.stderr.flush()
-        _log(f"ERROR rank 0 framework error in rank_0.log (pid={_r0_pid} "
-             f"alive={_r0_alive}); returning 2 so Ray Dashboard job reports "
-             f"FAILED in seconds instead of 1800s silent stall.")
+        _log(
+            f"ERROR rank 0 framework error in rank_0.log (pid={_r0_pid} "
+            f"alive={_r0_alive}); returning 2 so Ray Dashboard job reports "
+            f"FAILED in seconds instead of 1800s silent stall."
+        )
         return 2
-    _log(f"WARN rank 0 /health did not pass within {_HEALTH_PROBE_TIMEOUT_SEC}s; "
-         f"rank-0 pid={_r0_pid} alive={_r0_alive} (None=pid unknown) — "
-         f"server likely still loading weights; the caller's external poll "
-         f"will catch up.")
+    _log(
+        f"WARN rank 0 /health did not pass within {_HEALTH_PROBE_TIMEOUT_SEC}s; "
+        f"rank-0 pid={_r0_pid} alive={_r0_alive} (None=pid unknown) — "
+        f"server likely still loading weights; the caller's external poll "
+        f"will catch up."
+    )
     return 0  # Don't fail; caller polls health from sandbox
 
 

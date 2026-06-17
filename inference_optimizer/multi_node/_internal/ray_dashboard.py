@@ -26,17 +26,38 @@ RAY_DASHBOARD_PORT = 8265
 _HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)
 
 
-
 def _wrap_for_dash(body: str) -> str:
-    """Base64-wrap a bash body so it survives /bin/sh (dash), which Ray Dashboard uses to run entrypoints."""
+    """Base64-wrap a bash body so it survives /bin/sh (dash), which Ray Dashboard uses to run entrypoints.
+
+    Args:
+        body: The bash script body to wrap.
+
+    Returns:
+        str: A shell command that decodes and runs ``body`` under bash.
+    """
     import base64 as _b64
+
     encoded = _b64.b64encode(body.encode()).decode()
-    return f'echo {encoded} | base64 -d | bash'
+    return f"echo {encoded} | base64 -d | bash"
+
 
 class RayDashboardError(RuntimeError):
-    """Raised when the Ray dashboard returns an unexpected status."""
+    """Raised when the Ray dashboard returns an unexpected status.
+
+    Attributes:
+        status (int | None): The HTTP status code returned, if any.
+        body (str): The raw response body.
+        endpoint (str): The dashboard endpoint that produced the error.
+    """
 
     def __init__(self, status: int | None, body: str, *, endpoint: str) -> None:
+        """Initialize the error with response context.
+
+        Args:
+            status (int | None): The HTTP status code returned, if any.
+            body (str): The raw response body (truncated in the message).
+            endpoint (str): The dashboard endpoint that produced the error.
+        """
         snippet = body[:500] + ("..." if len(body) > 500 else "")
         super().__init__(f"Ray dashboard {endpoint} -> status={status} body={snippet}")
         self.status = status
@@ -45,7 +66,17 @@ class RayDashboardError(RuntimeError):
 
 
 def dashboard_url(head_pod_ip: str) -> str:
-    """Build the Ray Dashboard base URL for a given head pod IP."""
+    """Build the Ray Dashboard base URL for a given head pod IP.
+
+    Args:
+        head_pod_ip (str): The head pod's IP address.
+
+    Returns:
+        str: The dashboard base URL ``http://<head_pod_ip>:8265``.
+
+    Raises:
+        ValueError: If ``head_pod_ip`` is empty.
+    """
     if not head_pod_ip:
         raise ValueError("head_pod_ip is empty; cannot build Ray Dashboard URL")
     return f"http://{head_pod_ip}:{RAY_DASHBOARD_PORT}"
@@ -55,6 +86,11 @@ class RayDashboardClient:
     """Stateless HTTP wrapper for ``/api/jobs/`` on a single head pod IP."""
 
     def __init__(self, head_pod_ip: str) -> None:
+        """Create a client bound to one head pod's dashboard.
+
+        Args:
+            head_pod_ip (str): The head pod IP whose dashboard to target.
+        """
         self._base = dashboard_url(head_pod_ip)
         self._client = httpx.Client(
             timeout=_HTTPX_TIMEOUT,
@@ -62,25 +98,60 @@ class RayDashboardClient:
         )
 
     def close(self) -> None:
+        """Close the underlying HTTP client, ignoring any errors."""
         try:
             self._client.close()
         except Exception:
             pass
 
     def __enter__(self) -> "RayDashboardClient":
+        """Enter the context manager.
+
+        Returns:
+            RayDashboardClient: This client instance.
+        """
         return self
 
     def __exit__(self, *exc) -> None:
+        """Close the HTTP client on context-manager exit.
+
+        Args:
+            *exc: Standard exception triple (type, value, traceback); unused.
+        """
         self.close()
 
     def _decode(self, resp: httpx.Response, endpoint: str) -> Any:
+        """Decode a JSON response, wrapping decode errors.
+
+        Args:
+            resp (httpx.Response): The HTTP response to decode.
+            endpoint (str): Endpoint label used in error messages.
+
+        Returns:
+            Any: The parsed JSON payload.
+
+        Raises:
+            RayDashboardError: If the response body is not valid JSON.
+        """
         try:
             return resp.json()
         except json.JSONDecodeError as e:
             raise RayDashboardError(resp.status_code, resp.text, endpoint=endpoint) from e
 
     def submit_job(self, entrypoint: str, *, runtime_env: dict | None = None) -> str:
-        """POST /api/jobs/; returns the ``submission_id`` immediately (entrypoint runs async, poll :meth:`get_job`)."""
+        """POST /api/jobs/; returns the ``submission_id`` immediately (entrypoint runs async, poll :meth:`get_job`).
+
+        Args:
+            entrypoint: The shell entrypoint to run on the cluster.
+            runtime_env: Optional Ray runtime environment payload.
+
+        Returns:
+            str: The dashboard ``submission_id`` (or ``job_id``) for polling.
+
+        Raises:
+            ValueError: If ``entrypoint`` is empty.
+            RayDashboardError: On a non-200 status or a response missing an id.
+        """
         if not entrypoint:
             raise ValueError("entrypoint is empty")
         # Wrap for dash compatibility (Ray Dashboard uses /bin/sh).
@@ -99,7 +170,18 @@ class RayDashboardClient:
         return sub
 
     def get_job(self, submission_id: str) -> dict:
-        """GET /api/jobs/{submission_id}; response carries ``status`` (PENDING/RUNNING/SUCCEEDED/FAILED/STOPPED) + ``message``."""
+        """GET /api/jobs/{submission_id}; response carries ``status`` (PENDING/RUNNING/SUCCEEDED/FAILED/STOPPED) + ``message``.
+
+        Args:
+            submission_id: The dashboard submission id to query.
+
+        Returns:
+            dict: The decoded job status payload.
+
+        Raises:
+            ValueError: If ``submission_id`` is empty.
+            RayDashboardError: On any non-200 status.
+        """
         if not submission_id:
             raise ValueError("submission_id is empty")
         endpoint = f"GET /api/jobs/{submission_id}"
@@ -109,7 +191,19 @@ class RayDashboardClient:
         return self._decode(resp, endpoint)
 
     def get_job_logs(self, submission_id: str) -> str:
-        """GET /api/jobs/{submission_id}/logs. Returns plain text logs."""
+        """GET /api/jobs/{submission_id}/logs.
+
+        Args:
+            submission_id (str): The dashboard submission id to fetch logs
+                for.
+
+        Returns:
+            str: The job's plain-text logs, or an empty string if the log
+            fetch returns a non-200 status.
+
+        Raises:
+            ValueError: If ``submission_id`` is empty.
+        """
         if not submission_id:
             raise ValueError("submission_id is empty")
         endpoint = f"GET /api/jobs/{submission_id}/logs"

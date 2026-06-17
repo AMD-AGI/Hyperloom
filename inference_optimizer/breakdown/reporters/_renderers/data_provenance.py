@@ -14,7 +14,14 @@ from ..base import RenderedSection, md_table, register_renderer
 
 
 def _sources_summary(sources: list[dict[str, Any]]) -> str:
-    """Render a ``<found>/<total> probed`` summary, distinguishing required hits from optional."""
+    """Render a ``<found>/<total> probed`` summary, distinguishing required hits from optional.
+
+    Args:
+        sources: Probe records, each with ``found`` and ``required`` flags.
+
+    Returns:
+        A summary string of found/total counts, or ``"—"`` when empty.
+    """
     if not sources:
         return "—"
     total = len(sources)
@@ -26,10 +33,21 @@ def _sources_summary(sources: list[dict[str, Any]]) -> str:
 
 @register_renderer("data_provenance")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the data-provenance section as a per-section probe table.
+
+    Shows, for each tracked section, whether it was populated and which
+    required source artifacts were missing, so empty/partial sections are
+    explainable. Skipped on breakdowns built before provenance shipped.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered section, or a skipped placeholder when
+            no provenance entries exist.
+    """
     entries_raw = breakdown.get("data_provenance")
-    entries: list[dict[str, Any]] = (
-        entries_raw if isinstance(entries_raw, list) else []
-    )
+    entries: list[dict[str, Any]] = entries_raw if isinstance(entries_raw, list) else []
     if not entries:
         return RenderedSection(
             section_id="data_provenance",
@@ -48,13 +66,15 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         populated = entry.get("populated")
         sources = entry.get("sources") or []
         missing = entry.get("missing_required") or []
-        rows.append([
-            section,
-            status,
-            "yes" if populated else "no",
-            ", ".join(str(m) for m in missing) if missing else "—",
-            _sources_summary(sources),
-        ])
+        rows.append(
+            [
+                section,
+                status,
+                "yes" if populated else "no",
+                ", ".join(str(m) for m in missing) if missing else "—",
+                _sources_summary(sources),
+            ]
+        )
         if status == "empty":
             empty_sections.append(section)
         elif status == "partial":
@@ -69,14 +89,10 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         f"Data provenance tracked across {len(entries)} section(s).",
     ]
     if empty_sections:
-        facts.append(
-            "Sections empty due to missing required sources: "
-            + ", ".join(f"`{s}`" for s in empty_sections)
-        )
+        facts.append("Sections empty due to missing required sources: " + ", ".join(f"`{s}`" for s in empty_sections))
     if partial_sections:
         facts.append(
-            "Sections partial (some required sources missing): "
-            + ", ".join(f"`{s}`" for s in partial_sections)
+            "Sections partial (some required sources missing): " + ", ".join(f"`{s}`" for s in partial_sections)
         )
 
     return RenderedSection(

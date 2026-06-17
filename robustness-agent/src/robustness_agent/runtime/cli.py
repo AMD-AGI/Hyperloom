@@ -79,11 +79,30 @@ class RuntimeAdapterError(RuntimeError):
 
 
 def _read_json(path: str | Path) -> Any:
+    """Read and parse a JSON file.
+
+    Args:
+        path (str | Path): Path to the JSON file to read.
+
+    Returns:
+        Any: The parsed JSON value, or ``None`` if the file is empty or
+        contains only whitespace.
+    """
     text = Path(path).read_text(encoding="utf-8")
     return json.loads(text) if text.strip() else None
 
 
 def _emit_json(obj: Any, out: str | None) -> None:
+    """Serialise an object to JSON and emit it.
+
+    The serialised JSON is always written to stdout; when ``out`` is a
+    real path it is additionally written to that file.
+
+    Args:
+        obj (Any): JSON-serialisable object to emit.
+        out (str | None): Destination path, or ``"-"``/``None`` to write
+            only to stdout.
+    """
     serialised = json.dumps(obj, ensure_ascii=False, indent=2)
     if out and out != "-":
         Path(out).write_text(serialised + "\n", encoding="utf-8")
@@ -92,40 +111,61 @@ def _emit_json(obj: Any, out: str | None) -> None:
 
 
 def _coerce_request(raw: Any) -> dict[str, Any]:
+    """Validate and normalise a raw request payload.
+
+    Enforces the ``coordinator_inbox`` contract: the payload must be an
+    object with a recognised ``kind``, a non-empty ``session_id`` and
+    ``raw_prompt``, and optional object-typed ``context`` / ``options``.
+
+    Args:
+        raw (Any): The parsed request payload to validate.
+
+    Returns:
+        dict[str, Any]: The validated request dictionary (returned
+        unchanged).
+
+    Raises:
+        RuntimeAdapterError: If any required field is missing or has the
+            wrong type.
+    """
     if not isinstance(raw, dict):
-        raise RuntimeAdapterError(
-            f"request top-level must be an object, got {type(raw).__name__}"
-        )
+        raise RuntimeAdapterError(f"request top-level must be an object, got {type(raw).__name__}")
     kind = raw.get("kind")
     if not isinstance(kind, str) or not kind.strip():
         raise RuntimeAdapterError("request.kind missing or empty")
     if kind not in REQUEST_KINDS:
-        raise RuntimeAdapterError(
-            f"request.kind={kind!r} not in {sorted(REQUEST_KINDS)!r}"
-        )
+        raise RuntimeAdapterError(f"request.kind={kind!r} not in {sorted(REQUEST_KINDS)!r}")
     session_id = raw.get("session_id")
     if not isinstance(session_id, str) or not session_id.strip():
         raise RuntimeAdapterError("request.session_id must be non-empty string")
     raw_prompt = raw.get("raw_prompt")
     if not isinstance(raw_prompt, str) or not raw_prompt.strip():
-        raise RuntimeAdapterError(
-            "coordinator_inbox: raw_prompt must be a non-empty string"
-        )
+        raise RuntimeAdapterError("coordinator_inbox: raw_prompt must be a non-empty string")
     context = raw.get("context")
     if context is not None and not isinstance(context, dict):
-        raise RuntimeAdapterError(
-            f"request.context must be an object when present, got {type(context).__name__}"
-        )
+        raise RuntimeAdapterError(f"request.context must be an object when present, got {type(context).__name__}")
     options = raw.get("options")
     if options is not None and not isinstance(options, dict):
-        raise RuntimeAdapterError(
-            f"request.options must be an object when present, got {type(options).__name__}"
-        )
+        raise RuntimeAdapterError(f"request.options must be an object when present, got {type(options).__name__}")
     return raw
 
 
 async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
-    """Drive a single reactor tick from a normalised ``request`` dict."""
+    """Drive a single reactor tick from a normalised ``request`` dict.
+
+    Discovers configuration, applies any host-supplied ``options``
+    overrides, builds the reactor components, runs one tick, and returns
+    the resulting emit payload.
+
+    Args:
+        request (dict[str, Any]): Validated request dict carrying
+            ``session_id``, ``raw_prompt``, and optional ``context`` /
+            ``options``.
+
+    Returns:
+        dict[str, Any]: Emit payload with ``intent_envelope``,
+        ``session_id``, ``tick_index``, and ``parse_warnings``.
+    """
     session_id = str(request["session_id"]).strip()
     raw_prompt = str(request["raw_prompt"])
     context = dict(request.get("context") or {})
@@ -147,9 +187,7 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
     if "pod_metrics_categories" in options:
         raw_cats = options["pod_metrics_categories"]
         if isinstance(raw_cats, str):
-            cats = tuple(
-                part.strip() for part in raw_cats.split(",") if part.strip()
-            )
+            cats = tuple(part.strip() for part in raw_cats.split(",") if part.strip())
         elif isinstance(raw_cats, (list, tuple)):
             cats = tuple(str(c).strip() for c in raw_cats if str(c).strip())
         else:
@@ -166,9 +204,7 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
     # Opt out of the default inference-server health probe (heartbeat tests /
     # sandboxes auditing health out-of-band) without reconfiguring targets.
     if "auto_probe_inference_server" in options:
-        config.auto_probe_inference_server = bool(
-            options["auto_probe_inference_server"]
-        )
+        config.auto_probe_inference_server = bool(options["auto_probe_inference_server"])
     # Disable the per-tick ``ray status`` probe on hosts without a Ray head to
     # avoid false-positive ``ray_head_dead`` alerts.
     if "ray_probe_enabled" in options:
@@ -181,31 +217,26 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
     # multi-node setups inject 60.0 (single-node stays 45.0) since cold start +
     # baseline + profile consume 35-50 min before any explore family runs.
     if "progress_no_levers_min_minutes" in options:
-        config.progress_no_levers_min_minutes = float(
-            options["progress_no_levers_min_minutes"]
-        )
+        config.progress_no_levers_min_minutes = float(options["progress_no_levers_min_minutes"])
     if "progress_no_levers_min_ticks" in options:
-        config.progress_no_levers_min_ticks = int(
-            options["progress_no_levers_min_ticks"]
-        )
+        config.progress_no_levers_min_ticks = int(options["progress_no_levers_min_ticks"])
 
     # L4 — advertise session_dir so co-deployed Critic ``prepare-review`` finds
     # the findings jsonl; setdefault keeps an operator override intact.
     os.environ.setdefault(
-        "ROBUSTNESS_AGENT_SESSION_DIR", str(config.session_dir),
+        "ROBUSTNESS_AGENT_SESSION_DIR",
+        str(config.session_dir),
     )
 
     tick_index_raw = context.get("tick_index", 0)
     tick_index = int(tick_index_raw) if isinstance(tick_index_raw, (int, float)) else 0
     now_unix_raw = context.get("now_unix")
-    now_unix = (
-        float(now_unix_raw)
-        if isinstance(now_unix_raw, (int, float))
-        else time.time()
-    )
+    now_unix = float(now_unix_raw) if isinstance(now_unix_raw, (int, float)) else time.time()
 
     reactor_ctx = from_coordinator_prompt(
-        raw_prompt, tick_index=tick_index, now_unix=now_unix,
+        raw_prompt,
+        tick_index=tick_index,
+        now_unix=now_unix,
     )
     if not reactor_ctx.shared_state.session_id:
         reactor_ctx = ReactorContext(
@@ -239,6 +270,15 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cmd_tick(args: argparse.Namespace) -> None:
+    """Handle the ``tick`` subcommand.
+
+    Reads and validates the request file, runs a single reactor tick,
+    and emits the resulting envelope JSON.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments with ``request``
+            and ``out`` attributes.
+    """
     request = _coerce_request(_read_json(args.request))
     emit = asyncio.run(_run_tick(request))
     _emit_json(emit, args.out)
@@ -252,12 +292,19 @@ def _cmd_finalize(args: argparse.Namespace) -> None:
     intent landed). Idempotent — re-running has no effect once the
     ``.robustness_finalized`` marker exists, matching the in-reactor
     behaviour.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments with
+            ``session_dir``, ``session_id``, ``stop_reason``, and ``out``
+            attributes.
+
+    Raises:
+        RuntimeAdapterError: If ``--session-dir`` does not point to an
+            existing directory.
     """
     session_dir = Path(str(args.session_dir)).expanduser()
     if not session_dir.is_dir():
-        raise RuntimeAdapterError(
-            f"--session-dir does not point to a directory: {session_dir}"
-        )
+        raise RuntimeAdapterError(f"--session-dir does not point to a directory: {session_dir}")
     session_id = (args.session_id or session_dir.name or "default").strip()
     stop_reason = (args.stop_reason or "manual_finalize").strip()
     wrote = finalize_session(
@@ -276,6 +323,14 @@ def _cmd_finalize(args: argparse.Namespace) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the runtime CLI argument parser.
+
+    Registers the ``tick`` and ``finalize`` subcommands with their
+    respective options and handler functions.
+
+    Returns:
+        argparse.ArgumentParser: The configured parser.
+    """
     parser = argparse.ArgumentParser(
         prog="robustness-agent-runtime",
         description="Robustness reactor runtime CLI (subprocess transport).",
@@ -331,6 +386,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Runtime CLI process entry point.
+
+    Configures logging, parses arguments, dispatches to the selected
+    subcommand handler, and maps failures to the contract exit codes.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse. Defaults to
+            ``None``, which uses ``sys.argv``.
+
+    Returns:
+        int: ``0`` on logical success, ``2`` on adapter/configuration
+        errors.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

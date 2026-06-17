@@ -33,22 +33,22 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     sd = make_session_dir()
     from .conftest import seed_target_analysis_marker
+
     seed_target_analysis_marker(sd)
     return sd
 
 
 def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE,
-                  payload={"topic": "heartbeat", "body_md": "ok"})
+    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 
 
 def _backends_full() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel":        MockKernelBackend(),
-        "critic":        MockCriticBackend(),
-        "robustness":    MockRobustnessBackend(),
+        "kernel": MockKernelBackend(),
+        "critic": MockCriticBackend(),
+        "robustness": MockRobustnessBackend(),
     }
 
 
@@ -96,17 +96,21 @@ async def test_existing_events_triggers_resume(session_dir):
 @pytest.mark.asyncio
 async def test_replay_rebuilds_undecided_proposals(session_dir):
     """One propose, no verdict → resume restores it as pending."""
-    propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
-        "action_name": "baseline", "predicted_gain_pct": 0.0,
-    })
+    propose = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={
+            "action_name": "baseline",
+            "predicted_gain_pct": 0.0,
+        },
+    )
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     backends_no_critic = {
-        "orchestration": MockBackend(ScriptedPlan(turns=[MockTurn(intents=[propose])],
-                                                    default_intent=_heartbeat()),
-                                       name="o"),
-        "kernel":        MockBackend(silent, name="k"),
-        "critic":        MockBackend(silent, name="c"),
-        "robustness":    MockBackend(silent, name="r"),
+        "orchestration": MockBackend(
+            ScriptedPlan(turns=[MockTurn(intents=[propose])], default_intent=_heartbeat()), name="o"
+        ),
+        "kernel": MockBackend(silent, name="k"),
+        "critic": MockBackend(silent, name="c"),
+        "robustness": MockBackend(silent, name="r"),
     }
     c1 = Coordinator(session_dir, backends=backends_no_critic)
     try:
@@ -131,13 +135,16 @@ async def test_replay_rebuilds_undecided_proposals(session_dir):
 @pytest.mark.asyncio
 async def test_replay_skips_approved_proposals(session_dir):
     """Approved proposal must not appear as pending after resume."""
-    propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
-        "action_name": "baseline", "predicted_gain_pct": 0.0,
-    })
+    propose = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={
+            "action_name": "baseline",
+            "predicted_gain_pct": 0.0,
+        },
+    )
     backends = _backends_full()
     backends["orchestration"] = MockBackend(
-        ScriptedPlan(turns=[MockTurn(intents=[propose])],
-                     default_intent=_heartbeat()),
+        ScriptedPlan(turns=[MockTurn(intents=[propose])], default_intent=_heartbeat()),
         name="orch",
     )
     c1 = Coordinator(session_dir, backends=backends)
@@ -159,29 +166,39 @@ async def test_replay_skips_approved_proposals(session_dir):
 @pytest.mark.asyncio
 async def test_replay_skips_rejected_proposals(session_dir):
     """Rejected proposal also counted as decided → not pending after resume."""
-    propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
-        "action_name": "baseline", "predicted_gain_pct": 0.0,
-    })
+    propose = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={
+            "action_name": "baseline",
+            "predicted_gain_pct": 0.0,
+        },
+    )
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     backends = {
         "orchestration": MockBackend(
-            ScriptedPlan(turns=[MockTurn(intents=[propose])],
-                         default_intent=_heartbeat()),
+            ScriptedPlan(turns=[MockTurn(intents=[propose])], default_intent=_heartbeat()),
             name="o",
         ),
-        "kernel":     MockBackend(silent, name="k"),
-        "critic":     MockBackend(silent, name="c"),
+        "kernel": MockBackend(silent, name="k"),
+        "critic": MockBackend(silent, name="c"),
         "robustness": MockBackend(silent, name="r"),
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
         await c1.tick(1)
         proposal_id = next(iter(c1.state.pending_proposals.keys()))
-        await c1._handle_intent("critic", Intent(
-            type=IntentType.REVIEW_VERDICT,
-            payload={"target_proposal_msg_id": proposal_id, "verdict": "reject",
-                     "reasoning": "violates kb-7", "kb_evidence": "kb-7"},
-        ))
+        await c1._handle_intent(
+            "critic",
+            Intent(
+                type=IntentType.REVIEW_VERDICT,
+                payload={
+                    "target_proposal_msg_id": proposal_id,
+                    "verdict": "reject",
+                    "reasoning": "violates kb-7",
+                    "kb_evidence": "kb-7",
+                },
+            ),
+        )
     finally:
         await c1.stop()
 
@@ -200,9 +217,9 @@ async def test_replay_mixed_pending_and_decided(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     backends = {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel":        MockBackend(silent, name="k"),
-        "critic":        MockBackend(silent, name="c"),
-        "robustness":    MockBackend(silent, name="r"),
+        "kernel": MockBackend(silent, name="k"),
+        "critic": MockBackend(silent, name="c"),
+        "robustness": MockBackend(silent, name="r"),
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
@@ -216,23 +233,35 @@ async def test_replay_mixed_pending_and_decided(session_dir):
         c1.shared_state.save(session_dir)
         proposal_ids = []
         for action in ("baseline", "profile", "explore"):
-            await c1._handle_intent("orchestration", Intent(
-                type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": action, "predicted_gain_pct": 0.0},
-            ))
+            await c1._handle_intent(
+                "orchestration",
+                Intent(
+                    type=IntentType.PROPOSE_ACTION,
+                    payload={"action_name": action, "predicted_gain_pct": 0.0},
+                ),
+            )
             tail = await c1.bus.tail(topic="proposal", n=1)
             proposal_ids.append(tail[0].msg_id)
 
-        await c1._handle_intent("critic", Intent(
-            type=IntentType.REVIEW_VERDICT,
-            payload={"target_proposal_msg_id": proposal_ids[0],
-                     "verdict": "approve", "reasoning": "ok"},
-        ))
-        await c1._handle_intent("critic", Intent(
-            type=IntentType.REVIEW_VERDICT,
-            payload={"target_proposal_msg_id": proposal_ids[1],
-                     "verdict": "reject", "reasoning": "no", "kb_evidence": "kb-x"},
-        ))
+        await c1._handle_intent(
+            "critic",
+            Intent(
+                type=IntentType.REVIEW_VERDICT,
+                payload={"target_proposal_msg_id": proposal_ids[0], "verdict": "approve", "reasoning": "ok"},
+            ),
+        )
+        await c1._handle_intent(
+            "critic",
+            Intent(
+                type=IntentType.REVIEW_VERDICT,
+                payload={
+                    "target_proposal_msg_id": proposal_ids[1],
+                    "verdict": "reject",
+                    "reasoning": "no",
+                    "kb_evidence": "kb-x",
+                },
+            ),
+        )
     finally:
         await c1.stop()
 
@@ -252,20 +281,26 @@ async def test_resume_preserves_pruned_and_restores_pending(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     backends = {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel":        MockBackend(silent, name="k"),
-        "critic":        MockBackend(silent, name="c"),
-        "robustness":    MockBackend(silent, name="r"),
+        "kernel": MockBackend(silent, name="k"),
+        "critic": MockBackend(silent, name="c"),
+        "robustness": MockBackend(silent, name="r"),
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
-        await c1._handle_intent("robustness", Intent(
-            type=IntentType.PRUNE_BRANCH,
-            payload={"family": "deep_kernel", "reason": "x"},
-        ))
-        await c1._handle_intent("orchestration", Intent(
-            type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
-        ))
+        await c1._handle_intent(
+            "robustness",
+            Intent(
+                type=IntentType.PRUNE_BRANCH,
+                payload={"family": "deep_kernel", "reason": "x"},
+            ),
+        )
+        await c1._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PROPOSE_ACTION,
+                payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
+            ),
+        )
     finally:
         await c1.stop()
 
@@ -284,16 +319,19 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     backends = {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel":        MockBackend(silent, name="k"),
-        "critic":        MockBackend(silent, name="c"),
-        "robustness":    MockBackend(silent, name="r"),
+        "kernel": MockBackend(silent, name="k"),
+        "critic": MockBackend(silent, name="c"),
+        "robustness": MockBackend(silent, name="r"),
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
-        await c1._handle_intent("orchestration", Intent(
-            type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
-        ))
+        await c1._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PROPOSE_ACTION,
+                payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
+            ),
+        )
     finally:
         await c1.stop()
 
@@ -316,12 +354,14 @@ class TestN23ResumePerSession:
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch, tmp_path):
         from inference_optimizer import paths as _paths
+
         monkeypatch.setenv(_paths.ENV_USER_DATA_PATH, str(tmp_path))
         monkeypatch.delenv(_paths.ENV_CURRENT_SESSION_DIR, raising=False)
         monkeypatch.delenv(_paths.ENV_SESSION_LAYOUT, raising=False)
 
     def test_resume_picks_latest_subdir_after_two_launches(self, tmp_path):
         from inference_optimizer import paths as _paths
+
         sd1 = _paths.make_session_dir(model_name="DeepSeek-R1-0528")
         assert _paths.find_latest_per_session_dir() == sd1
         assert _paths.find_latest_per_session_dir(model_name="DeepSeek-R1-0528") == sd1
@@ -335,8 +375,10 @@ class TestN23ResumePerSession:
 
     def test_resume_does_not_mutate_user_data_path(self, tmp_path):
         from inference_optimizer import paths as _paths
+
         sd = _paths.make_session_dir(model_name="Qwen3-32B")
         import os as _os
+
         assert _os.environ[_paths.ENV_USER_DATA_PATH] == str(tmp_path)
         assert _os.environ[_paths.ENV_CURRENT_SESSION_DIR] == str(sd)
         assert _paths.workspace_root() == tmp_path
@@ -344,12 +386,16 @@ class TestN23ResumePerSession:
 
     def test_resume_falls_back_to_flat_when_no_per_session_subdir(self, tmp_path):
         from inference_optimizer import paths as _paths
+
         assert _paths.find_latest_per_session_dir() is None
 
     def test_resume_from_explicit_path_must_be_under_workspace_root(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         from inference_optimizer import paths as _paths
+
         sd = _paths.make_session_dir(model_name="Qwen3-32B")
         assert tmp_path.resolve() in sd.resolve().parents
 
@@ -363,6 +409,7 @@ class TestN23ResumePerSession:
 
     def test_latest_picks_across_models_when_model_name_omitted(self, tmp_path):
         from inference_optimizer import paths as _paths
+
         (tmp_path / "ModelA").mkdir()
         (tmp_path / "ModelA" / "20260101T000000Z").mkdir()
         (tmp_path / "ModelB").mkdir()
@@ -377,6 +424,7 @@ class TestN23ResumePerSession:
 
     def test_workspace_shared_dirs_never_picked_as_session(self, tmp_path):
         from inference_optimizer import paths as _paths
+
         (tmp_path / "runtime").mkdir()
         (tmp_path / "runtime" / "20990101T000000Z").mkdir()
         (tmp_path / "logs").mkdir()
@@ -409,6 +457,7 @@ class TestN24KernelAgentEnvHardFail:
 
     def test_noop_when_root_already_set(self, monkeypatch, capsys):
         from inference_optimizer import cli
+
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
         cli._load_kernel_agent_env_fallback()
         out = capsys.readouterr()
@@ -417,6 +466,7 @@ class TestN24KernelAgentEnvHardFail:
 
     def test_aborts_when_no_user_data_path(self, monkeypatch, capsys):
         from inference_optimizer import cli
+
         with pytest.raises(SystemExit) as excinfo:
             cli._load_kernel_agent_env_fallback()
         assert excinfo.value.code == 2
@@ -426,6 +476,7 @@ class TestN24KernelAgentEnvHardFail:
 
     def test_aborts_when_env_file_missing(self, tmp_path, monkeypatch, capsys):
         from inference_optimizer import cli
+
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         with pytest.raises(SystemExit) as excinfo:
             cli._load_kernel_agent_env_fallback()
@@ -436,13 +487,18 @@ class TestN24KernelAgentEnvHardFail:
         assert str(tmp_path) in err
 
     def test_aborts_when_env_file_does_not_define_root(
-        self, tmp_path, monkeypatch, capsys,
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
     ):
         from inference_optimizer import cli
+
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         (runtime / "kernel-agent.env.sh").write_text(
-            "# stale file\nexport SOMETHING_ELSE=1\n", encoding="utf-8",
+            "# stale file\nexport SOMETHING_ELSE=1\n",
+            encoding="utf-8",
         )
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         with pytest.raises(SystemExit) as excinfo:
@@ -454,6 +510,7 @@ class TestN24KernelAgentEnvHardFail:
 
     def test_sources_vars_on_success(self, tmp_path, monkeypatch, capsys):
         from inference_optimizer import cli
+
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         (runtime / "kernel-agent.env.sh").write_text(
@@ -465,6 +522,7 @@ class TestN24KernelAgentEnvHardFail:
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         cli._load_kernel_agent_env_fallback()
         import os as _os
+
         assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/opt/kernel-agent"
         assert _os.environ["KERNEL_AGENT_LOG_LEVEL"] == "INFO"
         out = capsys.readouterr().out
@@ -473,24 +531,28 @@ class TestN24KernelAgentEnvHardFail:
 
     def test_env_wins_over_file(self, tmp_path, monkeypatch, capsys):
         from inference_optimizer import cli
+
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         (runtime / "kernel-agent.env.sh").write_text(
-            "export HYPERLOOM_KERNEL_AGENT_ROOT=/from/file\n"
-            "export KERNEL_AGENT_LOG_LEVEL=INFO\n",
+            "export HYPERLOOM_KERNEL_AGENT_ROOT=/from/file\nexport KERNEL_AGENT_LOG_LEVEL=INFO\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("KERNEL_AGENT_LOG_LEVEL", "DEBUG")
         cli._load_kernel_agent_env_fallback()
         import os as _os
+
         assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/file"
         assert _os.environ["KERNEL_AGENT_LOG_LEVEL"] == "DEBUG"
 
     def test_explicit_kernel_agent_env_overrides_user_data_path(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         from inference_optimizer import cli
+
         custom = tmp_path / "custom-loc.sh"
         custom.write_text(
             "export HYPERLOOM_KERNEL_AGENT_ROOT=/from/custom\n",
@@ -500,4 +562,5 @@ class TestN24KernelAgentEnvHardFail:
         monkeypatch.setenv("USER_DATA_PATH", "/nonexistent/should-not-be-used")
         cli._load_kernel_agent_env_fallback()
         import os as _os
+
         assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/custom"

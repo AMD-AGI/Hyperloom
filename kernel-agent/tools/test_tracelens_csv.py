@@ -9,6 +9,7 @@ TraceLens now consumes only ``analysis.md``; legacy CSV fallbacks are gone.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -22,6 +23,207 @@ if str(_TOOL_DIR) not in sys.path:
 
 import tracelens_analysis as tla  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
+
+
+def test_deterministic_category_analysis_command_maps_manifest_names(tmp_path):
+    """Deterministic route must invoke the real TraceLens script for manifest category names."""
+    cases = {
+        "sdpa_fwd": (
+            "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis",
+            ["--category", "sdpa_fwd"],
+        ),
+        "sdpa_bwd": (
+            "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis",
+            ["--category", "sdpa_bwd"],
+        ),
+        "inferenceattention": (
+            "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis",
+            ["--category", "inferenceattention"],
+        ),
+        "norm_bwd": (
+            "TraceLens.Agent.Analysis.category_analyses.norm_analysis",
+            ["--category", "norm_bwd"],
+        ),
+        "rmsnorm": (
+            "TraceLens.Agent.Analysis.category_analyses.norm_analysis",
+            ["--category", "rmsnorm"],
+        ),
+        "moe_unfused": (
+            "TraceLens.Agent.Analysis.category_analyses.moe_analysis",
+            ["--category", "moe_unfused"],
+        ),
+        "customcollective": (
+            "TraceLens.Agent.Analysis.category_analyses.other_analysis",
+            ["--category", "customcollective"],
+        ),
+        "triton": (
+            "TraceLens.Agent.Analysis.category_analyses.triton_analysis",
+            [],
+        ),
+    }
+    for category, (module_name, extra_args) in cases.items():
+        cmd = tla._category_analysis_command(category, "compute_kernel", tmp_path)
+        assert cmd is not None
+        assert module_name in cmd
+        for arg in extra_args:
+            assert arg in cmd
+
+
+def test_deterministic_category_analysis_command_handles_grouped_gemm(tmp_path):
+    cmd = tla._category_analysis_command(
+        "groupedgemm_fwd",
+        "compute_kernel",
+        tmp_path,
+    )
+
+    assert cmd is not None
+    assert cmd[:2] == [sys.executable, "-c"]
+    snippet = cmd[2]
+    assert "gemm_analysis" in snippet
+    assert "category='groupedgemm_fwd'" in snippet
+    assert "--category" not in cmd
+
+
+def test_deterministic_category_analysis_command_skips_non_compute(tmp_path):
+    assert tla._category_analysis_command("sdpa_fwd", "system", tmp_path) is None
+    assert tla._category_analysis_command("cpu_idle", "compute_kernel", tmp_path) is None
+    assert tla._category_analysis_command("unknown_new_category", "compute_kernel", tmp_path) is None
+
+
+def test_deterministic_pipeline_failure_cannot_return_partial_hot_kernels():
+    with pytest.raises(RuntimeError, match="refusing to return partial hot_kernels"):
+        tla._raise_on_failed_deterministic_pipeline(2)
+
+    tla._raise_on_failed_deterministic_pipeline(0)
+
+
+def test_deterministic_steps_return_category_script_failure(monkeypatch, tmp_path):
+    output_dir = tmp_path / "out"
+    category_dir = output_dir / "category_data"
+    category_dir.mkdir(parents=True)
+    (category_dir / "category_manifest.json").write_text(
+        """
+        {
+          "categories": [
+            {"name": "sdpa_fwd", "tier": "compute_kernel"}
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    (tmp_path / "trace.json").write_text("{}", encoding="utf-8")
+    log_path = tmp_path / "tl.log"
+    calls: list[list[str]] = []
+
+    def fake_run_command(cmd, *, cwd, log_path, timeout_s, env=None):
+        calls.append(cmd)
+        if "TraceLens.Agent.Analysis.category_analyses.sdpa_analysis" in cmd:
+            return 7
+        return 0
+
+    monkeypatch.setattr(tla, "run_command", fake_run_command)
+
+    rc = tla._run_deterministic_tracelens_steps(
+        trace_path=tmp_path / "trace.json",
+        output_dir=output_dir,
+        tl_root=tmp_path,
+        platform="MI300X",
+        analysis_mode="standalone",
+        framework="sglang",
+        capture_folder=None,
+        log_path=log_path,
+        budget_minutes=1,
+    )
+
+    assert rc == 7
+    assert any("TraceLens.Agent.Analysis.category_analyses.sdpa_analysis" in cmd for cmd in calls)
+    assert any("generate_priority_data" in " ".join(cmd) for cmd in calls)
+
+
+def test_deterministic_steps_quote_priority_output_dir(monkeypatch, tmp_path):
+    output_dir = tmp_path / "out'quoted"
+    category_dir = output_dir / "category_data"
+    category_dir.mkdir(parents=True)
+    (category_dir / "category_manifest.json").write_text(
+        '{"categories": []}',
+        encoding="utf-8",
+    )
+    (tmp_path / "trace.json").write_text("{}", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_run_command(cmd, *, cwd, log_path, timeout_s, env=None):
+        calls.append(cmd)
+        return 0
+
+    monkeypatch.setattr(tla, "run_command", fake_run_command)
+
+    rc = tla._run_deterministic_tracelens_steps(
+        trace_path=tmp_path / "trace.json",
+        output_dir=output_dir,
+        tl_root=tmp_path,
+        platform="MI300X",
+        analysis_mode="standalone",
+        framework="sglang",
+        capture_folder=None,
+        log_path=tmp_path / "tl.log",
+        budget_minutes=1,
+    )
+
+    assert rc == 0
+    priority_cmd = next(cmd for cmd in calls if "generate_priority_data" in " ".join(cmd))
+    assert str(output_dir) in priority_cmd[2]
+    assert f"generate_priority_data({str(output_dir)!r})" in priority_cmd[2]
+
+
+def test_deterministic_main_fails_before_high_idle_gate(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    import json as _json
+
+    trace = tmp_path / "trace.json"
+    trace.write_text('{"traceEvents": []}', encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    tl_root = tmp_path / "TraceLens"
+    skill = tl_root / "TraceLens" / "Agent" / "Analysis" / ".cursor" / "skills" / "analysis-orchestrator.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# skill\n", encoding="utf-8")
+
+    monkeypatch.setattr(tla, "count_gpu_kernel_events", lambda _path: 1)
+    monkeypatch.setattr(tla, "populate_gpu_arch_json", lambda **_kwargs: None)
+    monkeypatch.setattr(tla, "run_command", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(
+        tla,
+        "_run_deterministic_tracelens_steps",
+        lambda **_kwargs: 9,
+    )
+
+    def _unexpected_idle_read(_output_dir):
+        raise AssertionError("idle gate must not run after deterministic failure")
+
+    monkeypatch.setattr(tla, "_extract_idle_pct_from_gpu_timeline", _unexpected_idle_read)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "tracelens_analysis.py",
+            "--trace-input",
+            str(trace),
+            "--workspace-path",
+            str(workspace),
+            "--tracelens-root",
+            str(tl_root),
+            "--analysis-route",
+            "deterministic",
+            "--skip-split",
+        ],
+    )
+
+    assert tla.main() == 1
+    result = _json.loads(capsys.readouterr().out)
+    assert result["status"] == "failed"
+    assert "Deterministic TraceLens pipeline failed" in result["error"]
 
 
 # A path — is_kernel_event strict cat == 'kernel'
@@ -52,8 +254,7 @@ def test_a_filters_cpu_op():
 
 def test_a_accepts_real_kernel_event():
     real = {
-        "name": ("_ZN5aiter24add_rmsnorm_quant_kernel"
-                 "IDF16bDF16bLi256ELi16ELb1ELb0ELb1ELi1EEEvPT0_"),
+        "name": ("_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0ELb1ELi1EEEvPT0_"),
         "cat": "kernel",
         "dur": 6.48,
     }
@@ -78,21 +279,15 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
     the buggy events drop out of top-K."""
     events = [
         # 5 host-side sync events, big durations (the buggy ones)
-        {"name": "torch/cuda/streams.py(222): synchronize",
-         "cat": "python_function", "dur": 88673.0},
-        {"name": "torch/cuda/__init__.py(1073): synchronize",
-         "cat": "python_function", "dur": 10414.0},
-        {"name": "<built-in function _cuda_synchronize>",
-         "cat": "python_function", "dur": 10368.0},
+        {"name": "torch/cuda/streams.py(222): synchronize", "cat": "python_function", "dur": 88673.0},
+        {"name": "torch/cuda/__init__.py(1073): synchronize", "cat": "python_function", "dur": 10414.0},
+        {"name": "<built-in function _cuda_synchronize>", "cat": "python_function", "dur": 10368.0},
         {"name": "hipDeviceSynchronize", "cat": "cuda_runtime", "dur": 10364.0},
-        {"name": "<built-in method synchronize of Event object at 0x123>",
-         "cat": "python_function", "dur": 88671.0},
+        {"name": "<built-in method synchronize of Event object at 0x123>", "cat": "python_function", "dur": 88671.0},
         # 3 real kernels, smaller duration
         {"name": "aiter::add_rmsnorm_quant_kernel<...>", "cat": "kernel", "dur": 466.0},
-        {"name": "sgl_hip::activation::act_and_mul_kernel<...>",
-         "cat": "kernel", "dur": 380.0},
-        {"name": "void paged_attention_ll4mi_QKV_mfma16_kernel<...>",
-         "cat": "kernel", "dur": 889.0},
+        {"name": "sgl_hip::activation::act_and_mul_kernel<...>", "cat": "kernel", "dur": 380.0},
+        {"name": "void paged_attention_ll4mi_QKV_mfma16_kernel<...>", "cat": "kernel", "dur": 889.0},
     ]
     # Direct call paths used by analyze_trace_files
     kept = [e for e in events if tla.is_kernel_event(e)]
@@ -117,9 +312,13 @@ def test_compile_generated_kernel_is_not_reusable_native():
         ),
     }
     assert candidate["source_type"] == "runtime_generated"
-    assert tla.is_runtime_generated_kernel(
-        candidate["name"], candidate["source_file"],
-    ) is True
+    assert (
+        tla.is_runtime_generated_kernel(
+            candidate["name"],
+            candidate["source_file"],
+        )
+        is True
+    )
     assert tla.is_reusable_native_kernel(candidate) is False
     assert tla.recommend_backends(candidate) == []
     assert "not reusable" in tla.build_notes(candidate)
@@ -135,9 +334,13 @@ def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
         ),
     }
     assert candidate["source_type"] == "triton"
-    assert tla.is_runtime_generated_kernel(
-        candidate["name"], candidate["source_file"],
-    ) is False
+    assert (
+        tla.is_runtime_generated_kernel(
+            candidate["name"],
+            candidate["source_file"],
+        )
+        is False
+    )
     assert tla.is_reusable_native_kernel(candidate) is True
     # Without CURSOR_API_KEY: recommendation excludes cursor (auto-skip).
     monkeypatch.delenv("CURSOR_API_KEY", raising=False)
@@ -178,9 +381,7 @@ def test_recommend_backends_geak_is_first_in_ladder():
         "reusable_native_kernel": True,
     }
     ladder = tla.recommend_backends(candidate)
-    assert ladder and ladder[0] == "geak", (
-        f"GEAK must be first in the ladder, got {ladder}"
-    )
+    assert ladder and ladder[0] == "geak", f"GEAK must be first in the ladder, got {ladder}"
 
 
 def test_unknown_source_root_is_not_reusable_native():
@@ -188,7 +389,8 @@ def test_unknown_source_root_is_not_reusable_native():
         "name": "my_custom_kernel",
         "source_file": "/tmp/random/my_custom_kernel.cu",
         "source_type": tla.source_type_for(
-            "my_custom_kernel", "/tmp/random/my_custom_kernel.cu",
+            "my_custom_kernel",
+            "/tmp/random/my_custom_kernel.cu",
         ),
     }
     assert candidate["source_type"] == "hip_cpp"
@@ -240,14 +442,16 @@ def test_125_derive_category_normalizations():
 
 def test_125_finalize_outputs_source_path_field():
     """_finalize_candidates exposes source_path mirror of source_file (#125)."""
-    candidates = [{
-        "name": "rmsnorm_kernel",
-        "duration_us": 100.0,
-        "call_count": 10,
-        "source_file": "/path/to/rmsnorm.cu",
-        "source_type": "hip_cpp",
-        "shapes": [[16, 1024]],
-    }]
+    candidates = [
+        {
+            "name": "rmsnorm_kernel",
+            "duration_us": 100.0,
+            "call_count": 10,
+            "source_file": "/path/to/rmsnorm.cu",
+            "source_type": "hip_cpp",
+            "shapes": [[16, 1024]],
+        }
+    ]
     out = tla._finalize_candidates(candidates, total_dur=100.0)
     assert out[0]["source_path"] == "/path/to/rmsnorm.cu"
     assert out[0]["kernel_category"] == "LayerNorm"
@@ -258,20 +462,22 @@ def test_finalize_uses_csv_op_category_for_aten_mm(tmp_path):
     csv_dir = tmp_path / "perf_report_csvs"
     csv_dir.mkdir()
     (csv_dir / "unified_perf_summary.csv").write_text(
-        "name,op category,extra\n"
-        "aten::mm,GEMM,ignored\n",
+        "name,op category,extra\naten::mm,GEMM,ignored\n",
         encoding="utf-8",
     )
-    candidates = [{
-        "name": "aten::mm",
-        "duration_us": 100.0,
-        "call_count": 1,
-        "source_file": "",
-        "source_type": "unknown",
-        "shapes": [[15360, 2048]],
-    }]
+    candidates = [
+        {
+            "name": "aten::mm",
+            "duration_us": 100.0,
+            "call_count": 1,
+            "source_file": "",
+            "source_type": "unknown",
+            "shapes": [[15360, 2048]],
+        }
+    ]
     out = tla._finalize_candidates(
-        candidates, total_dur=100.0,
+        candidates,
+        total_dur=100.0,
         perf_report_csv_dir=csv_dir,
     )
     assert out[0]["tracelens_category"] == "GEMM"
@@ -306,18 +512,132 @@ def test_load_op_category_map_missing_returns_empty(tmp_path):
     assert tla.load_op_category_map(tmp_path / "perf_report_csvs") == {}
 
 
+# ── #727 companion: fused-MoE trace-anchored shape capture ────────────────────
+
+# The two operand-tuple rows TraceLens writes for the fused-MoE expert kernel in
+# ``ops_unique_args.csv`` (gate/up GEMM then down GEMM), as captured for the
+# Qwen3-30B-A3B MoE decode workload (conc 64, ISL/OSL 1024).
+_FUSED_MOE_OPS_UNIQUE_ARGS = (
+    "name,op category,Input Dims,Input type\n"
+    "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427,MoE_fused,"
+    '"((15360, 2048), (128, 1536, 2048), (), (122880, 1536), (), (), (), '
+    '(15360, 8), (15360, 8), (131007,), (2047,), (1,), ())",'
+    "\"('c10::BFloat16', 'c10::BFloat16', '', 'c10::BFloat16', '', '', '', "
+    "'float', 'int', 'int', 'int', 'int', '')\"\n"
+    "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427,MoE_fused,"
+    '"((122880, 768), (128, 2048, 768), (), (15360, 8, 2048), (), (), (), '
+    '(15360, 8), (15360, 8), (131007,), (2047,), (1,), ())",'
+    "\"('c10::BFloat16', 'c10::BFloat16', '', 'c10::BFloat16', '', '', '', "
+    "'float', 'int', 'int', 'int', 'int', '')\"\n"
+)
+
+
+def _write_fused_moe_ops_unique_args(tmp_path):
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "ops_unique_args.csv").write_text(_FUSED_MOE_OPS_UNIQUE_ARGS, encoding="utf-8")
+    return csv_dir
+
+
+def test_resolve_fused_moe_shapes_matches_manual_harness(tmp_path):
+    """Operand dims recovered from ops_unique_args.csv match the manual GEAK harness shapes."""
+    csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
+    shapes = tla.resolve_fused_moe_shapes_from_csv(csv_dir)
+    # gate/up GEMM: A(num_tokens,H) x w1(E,2I,H) -> C(T,2I)
+    assert "(15360,2048) bf16" in shapes  # A
+    assert "(128,1536,2048) bf16" in shapes  # w1 (2*I=1536)
+    assert "(122880,1536) bf16" in shapes  # C (T=num_tokens*topk)
+    # down GEMM: A(T,I) x w2(E,H,I) -> C(num_tokens,topk,H)
+    assert "(122880,768) bf16" in shapes  # A (I=768)
+    assert "(128,2048,768) bf16" in shapes  # w2
+    assert "(15360,8,2048) bf16" in shapes  # C
+    # 1-tuples keep the trailing comma; ints map to i32, floats to f32.
+    assert "(131007,) i32" in shapes
+    assert "(15360,8) f32" in shapes
+    # No empty/scalar operand leaks through.
+    assert all(s and s != "()" for s in shapes)
+
+
+def test_resolve_fused_moe_shapes_missing_csv_returns_empty(tmp_path):
+    """Absent sidecar / no fused-MoE rows => [] so the candidate's empty shapes stay untouched."""
+    assert tla.resolve_fused_moe_shapes_from_csv(tmp_path / "nope") == []
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "ops_unique_args.csv").write_text(
+        'name,op category,Input Dims,Input type\naten::mm,GEMM,"((15360, 2048),)","(\'c10::BFloat16\',)"\n',
+        encoding="utf-8",
+    )
+    assert tla.resolve_fused_moe_shapes_from_csv(csv_dir) == []
+
+
+def test_finalize_grafts_fused_moe_shapes_onto_empty_candidate(tmp_path):
+    """The empty-shaped fused-MoE candidate is back-filled with trace-anchored shapes + provenance."""
+    csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
+    candidates = [
+        {
+            "name": "invoke_fused_moe_kernel",
+            "duration_us": 302429.0,
+            "call_count": 96,
+            "source_file": ("/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py"),
+            "source_type": "python",
+            "shapes": [],
+            "tracelens_category": "moe_fused",
+        }
+    ]
+    out = tla._finalize_candidates(
+        candidates,
+        total_dur=302429.0,
+        perf_report_csv_dir=csv_dir,
+    )
+    assert out[0]["shapes"], "fused-MoE candidate must carry non-empty shapes"
+    assert "(15360,2048) bf16" in out[0]["shapes"]
+    assert out[0]["shape_provenance"] == "torch_trace"
+
+
+def test_finalize_does_not_touch_non_moe_or_already_shaped(tmp_path):
+    """Resolver is scoped: non-MoE ops and MoE candidates that already have shapes are left as-is."""
+    csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
+    candidates = [
+        {  # non-MoE op: must NOT be back-filled from the fused-MoE sidecar
+            "name": "aten::mm",
+            "duration_us": 100.0,
+            "shapes": [],
+            "source_file": "",
+            "source_type": "unknown",
+        },
+        {  # MoE op that already carries shapes: keep them verbatim
+            "name": "invoke_fused_moe_kernel",
+            "duration_us": 200.0,
+            "shapes": ["(99,99) bf16"],
+            "source_file": "",
+            "source_type": "python",
+            "tracelens_category": "moe_fused",
+        },
+    ]
+    out = tla._finalize_candidates(
+        candidates,
+        total_dur=300.0,
+        perf_report_csv_dir=csv_dir,
+    )
+    assert out[0]["shapes"] == []
+    assert out[1]["shapes"] == ["(99,99) bf16"]
+
+
 def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
     """Backward compatibility: no csv => the name heuristic still tags aiter::ck_moe_* as MoE (csv path is additive)."""
-    candidates = [{
-        "name": "aiter::ck_moe_stage1",
-        "duration_us": 100.0,
-        "call_count": 1,
-        "source_file": "",
-        "source_type": "unknown",
-        "shapes": [[1, 1]],
-    }]
+    candidates = [
+        {
+            "name": "aiter::ck_moe_stage1",
+            "duration_us": 100.0,
+            "call_count": 1,
+            "source_file": "",
+            "source_type": "unknown",
+            "shapes": [[1, 1]],
+        }
+    ]
     out = tla._finalize_candidates(
-        candidates, total_dur=100.0,
+        candidates,
+        total_dur=100.0,
         perf_report_csv_dir=tmp_path / "does_not_exist",
     )
     assert out[0].get("tracelens_category", "") == ""
@@ -326,7 +646,8 @@ def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
 
 def test_normalize_upstream_category_handles_moe_aux_and_collective():
     """New mappings: MoE_aux -> MoE and CustomCollective -> Communication normalize cleanly."""
-    from tracelens_skill_runner import normalize_upstream_category
+    normalize_upstream_category = tlr.normalize_upstream_category
+
     assert normalize_upstream_category("MoE_aux") == "MoE"
     assert normalize_upstream_category("moe_aux") == "MoE"
     assert normalize_upstream_category("CustomCollective") == "Communication"
@@ -450,12 +771,14 @@ def test_load_model_kernel_params_reads_head_dim(tmp_path):
     model_dir = tmp_path / "Qwen-Qwen3-8B"
     model_dir.mkdir()
     (model_dir / "config.json").write_text(
-        _json.dumps({
-            "head_dim": 128,
-            "hidden_size": 4096,
-            "num_attention_heads": 32,
-            "num_key_value_heads": 8,
-        }),
+        _json.dumps(
+            {
+                "head_dim": 128,
+                "hidden_size": 4096,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -473,10 +796,12 @@ def test_load_model_kernel_params_derives_head_size_from_hidden_size(tmp_path):
     model_dir = tmp_path / "meta-llama-Llama-3.1-8B"
     model_dir.mkdir()
     (model_dir / "config.json").write_text(
-        _json.dumps({
-            "hidden_size": 4096,
-            "num_attention_heads": 32,
-        }),
+        _json.dumps(
+            {
+                "hidden_size": 4096,
+                "num_attention_heads": 32,
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -493,14 +818,16 @@ def test_load_model_kernel_params_preserves_mla_head_dims(tmp_path):
     model_dir = tmp_path / "DeepSeek-R1-0528"
     model_dir.mkdir()
     (model_dir / "config.json").write_text(
-        _json.dumps({
-            "hidden_size": 7168,
-            "num_attention_heads": 128,
-            "qk_nope_head_dim": 128,
-            "qk_rope_head_dim": 64,
-            "v_head_dim": 128,
-            "kv_lora_rank": 512,
-        }),
+        _json.dumps(
+            {
+                "hidden_size": 7168,
+                "num_attention_heads": 128,
+                "qk_nope_head_dim": 128,
+                "qk_rope_head_dim": 64,
+                "v_head_dim": 128,
+                "kv_lora_rank": 512,
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -696,24 +1023,36 @@ def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
 
 
 def test_count_gpu_kernel_events_distinguishes_cpu_only_and_real_traces(tmp_path):
-    import gzip, json as _json
+    import gzip
+    import json as _json
+
     cpu_only = tmp_path / "cpu_only.json.gz"
     with gzip.open(cpu_only, "wt") as f:
-        _json.dump({"traceEvents": [
-            {"cat": "cpu_op", "name": "aten::add", "dur": 1.0},
-            {"cat": "python_function", "name": "wrapper", "dur": 2.0},
-            {"cat": "cuda_runtime", "name": "hipDeviceSynchronize", "dur": 3.0},
-        ]}, f)
+        _json.dump(
+            {
+                "traceEvents": [
+                    {"cat": "cpu_op", "name": "aten::add", "dur": 1.0},
+                    {"cat": "python_function", "name": "wrapper", "dur": 2.0},
+                    {"cat": "cuda_runtime", "name": "hipDeviceSynchronize", "dur": 3.0},
+                ]
+            },
+            f,
+        )
     assert tla.count_gpu_kernel_events(cpu_only) == 0
 
     real = tmp_path / "real.json.gz"
     with gzip.open(real, "wt") as f:
-        _json.dump({"traceEvents": [
-            {"cat": "cpu_op", "name": "aten::add", "dur": 1.0},
-            {"cat": "kernel", "name": "void some_gemm_kernel<...>", "dur": 7.0},
-            {"cat": "kernel", "name": "void some_attn_kernel<...>", "dur": 11.0},
-            {"cat": "cuda_runtime", "name": "hipLaunchKernel", "dur": 0.5},
-        ]}, f)
+        _json.dump(
+            {
+                "traceEvents": [
+                    {"cat": "cpu_op", "name": "aten::add", "dur": 1.0},
+                    {"cat": "kernel", "name": "void some_gemm_kernel<...>", "dur": 7.0},
+                    {"cat": "kernel", "name": "void some_attn_kernel<...>", "dur": 11.0},
+                    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "dur": 0.5},
+                ]
+            },
+            f,
+        )
     assert tla.count_gpu_kernel_events(real) == 2
 
 
@@ -732,10 +1071,15 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
 
     trace = tmp_path / "cpu_only_trace.json.gz"
     with gzip.open(trace, "wt") as f:
-        _json.dump({"traceEvents": [
-            {"cat": "cpu_op", "name": "aten::add", "dur": 1.0},
-            {"cat": "python_function", "name": "wrapper", "dur": 2.0},
-        ]}, f)
+        _json.dump(
+            {
+                "traceEvents": [
+                    {"cat": "cpu_op", "name": "aten::add", "dur": 1.0},
+                    {"cat": "python_function", "name": "wrapper", "dur": 2.0},
+                ]
+            },
+            f,
+        )
 
     captured: list[list[str]] = []
 
@@ -750,19 +1094,25 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
 
     argv = [
         "tracelens_analysis.py",
-        "--trace-input", str(trace),
-        "--workspace-path", str(workspace),
-        "--tracelens-root", str(tl_root),
-        "--target-platform", "MI300X",
-        "--top-k", "5",
-        "--budget-minutes", "1",
+        "--trace-input",
+        str(trace),
+        "--workspace-path",
+        str(workspace),
+        "--tracelens-root",
+        str(tl_root),
+        "--target-platform",
+        "MI300X",
+        "--top-k",
+        "5",
+        "--budget-minutes",
+        "1",
         "--no-llm-orchestrator",
     ]
     import os as _os
+
     env_backup = dict(_os.environ)
     try:
-        with patch.object(tla.subprocess, "run", side_effect=fake_run), \
-             patch.object(tla.sys, "argv", argv):
+        with patch.object(tla.subprocess, "run", side_effect=fake_run), patch.object(tla.sys, "argv", argv):
             try:
                 rc = tla.main()
             except SystemExit as exc:
@@ -773,13 +1123,10 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
 
     assert rc != 0, "fail-fast on CPU-only trace must return non-zero"
     assert all(
-        "TraceLens.TraceUtils.split_inference_trace_annotation" not in str(p)
-        for cmd in captured for p in cmd
+        "TraceLens.TraceUtils.split_inference_trace_annotation" not in str(p) for cmd in captured for p in cmd
     ), f"splitter must not run on CPU-only trace; captured={captured}"
     assert all(
-        "TraceLens_generate_perf_report_pytorch_inference" not in str(c[0])
-        or "--help" in c
-        for c in captured if c
+        "TraceLens_generate_perf_report_pytorch_inference" not in str(c[0]) or "--help" in c for c in captured if c
     ), f"perf-report CLI must not be invoked for CPU-only trace; captured={captured}"
 
 
@@ -812,20 +1159,22 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
         (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
         yield _Message(content=[_TextBlock("done")])
 
-    res = asyncio.run(tlr.run_tracelens_skill(
-        skill_path=tmp_path / "skill.md",
-        trace_path=tmp_path / "trace.json.gz",
-        output_dir=output_dir,
-        tracelens_root=tmp_path,
-        tracelens_internal_root=tmp_path / "TraceLens-internal",
-        platform="MI300X",
-        framework="sglang",
-        analysis_mode="default",
-        capture_folder=None,
-        budget_minutes=1,
-        sdk_query_factory=_fake_query,
-        sdk_options_cls=_FakeOptions,
-    ))
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI300X",
+            framework="sglang",
+            analysis_mode="default",
+            capture_folder=None,
+            budget_minutes=1,
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        )
+    )
 
     assert res.report_path.exists()
     assert res.artifact_paths["tracelens_agent_report"] == str(res.report_path)
@@ -834,6 +1183,177 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert "Task" in captured["options"]["allowed_tools"]
 
 
+def test_266_run_tracelens_skill_writes_agent_transcript(tmp_path):
+    """#266: the SDK runner must persist a full stream-JSON transcript
+    (text + tool_use/tool_result blocks) next to ``analysis.md`` so an
+    operator can inspect the agent's lifecycle and the artifacts it
+    produced *during* execution. The transcript path is surfaced via
+    ``artifact_paths`` so it flows into the kernel-agent status sidecar.
+
+    Granularity is top-level orchestrator only: ``Task``-tool subagent
+    turns are collapsed by the SDK into a single tool_use/tool_result
+    pair at this level, which is sufficient for lifecycle visibility.
+    """
+    import asyncio
+    import json as _json
+    from dataclasses import dataclass, field
+    from typing import Any
+
+    # Fakes named to match the real claude-agent-sdk class names so the
+    # serializer's class-name-based ``block`` tag mirrors production.
+    @dataclass
+    class TextBlock:
+        text: str
+
+    @dataclass
+    class ToolUseBlock:
+        name: str
+        input: dict
+        id: str = "tu_1"
+
+    @dataclass
+    class AssistantMessage:
+        content: list[Any]
+
+    @dataclass
+    class ResultMessage:
+        content: list[Any] = field(default_factory=list)
+        result: str = ""
+        usage: dict = field(default_factory=dict)
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+
+    async def _fake_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield AssistantMessage(content=[TextBlock("starting analysis")])
+        yield AssistantMessage(
+            content=[
+                ToolUseBlock(name="Bash", input={"command": "ls"}, id="tu_42"),
+            ]
+        )
+        yield ResultMessage(result="done", usage={"input_tokens": 10})
+
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI300X",
+            framework="sglang",
+            analysis_mode="default",
+            capture_folder=None,
+            budget_minutes=1,
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        )
+    )
+
+    transcript_path = output_dir / "agent_transcript.jsonl"
+    assert transcript_path.exists(), "stream-JSON transcript must be written"
+    assert res.artifact_paths.get("tracelens_agent_transcript") == str(transcript_path)
+
+    lines = [_json.loads(line) for line in transcript_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 3, f"one JSON object per SDK message, got {len(lines)}"
+
+    # The tool_use block must be captured with its name + input so an
+    # operator can see which command the agent ran (lifecycle visibility).
+    tool_blocks = [
+        b for rec in lines for b in rec.get("content", []) if b.get("block") in ("ToolUseBlock", "ServerToolUseBlock")
+    ]
+    assert any(b.get("name") == "Bash" and b.get("input", {}).get("command") == "ls" for b in tool_blocks), (
+        f"tool_use block not captured: {tool_blocks}"
+    )
+
+    # Terminal ResultMessage usage is captured for token accounting.
+    assert any(rec.get("usage", {}).get("input_tokens") == 10 for rec in lines)
+
+
+def test_266_transcript_failure_never_aborts_run(tmp_path):
+    """#266: transcript capture is best-effort — a serialization or IO
+    error on the logging side must never abort an otherwise-successful
+    TraceLens run. ``analysis.md`` is still the contracted exit point."""
+    import asyncio
+
+    class _Unserializable:
+        """A content block whose attributes raise on access."""
+
+        @property
+        def text(self):  # noqa: D401
+            raise RuntimeError("boom")
+
+    class _Message:
+        def __init__(self, content):
+            self.content = content
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    output_dir = tmp_path / "out"
+
+    async def _fake_query(*, prompt, options):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield _Message(content=[_Unserializable()])
+
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI300X",
+            framework="sglang",
+            analysis_mode="default",
+            capture_folder=None,
+            budget_minutes=1,
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        )
+    )
+
+    # Run still succeeds: report resolved, no crash from transcript path.
+    assert res.report_path.exists()
+
+
+def test_266_transcript_caps_oversized_fields():
+    """#266: a megabyte tool_result / text block must be truncated so the
+    diagnostic transcript cannot grow unbounded. The cap applies to direct
+    string fields and to strings nested inside tool inputs/results."""
+    cap = tlr._TRANSCRIPT_FIELD_MAX_CHARS
+
+    # _cap_str leaves short strings alone, clips long ones with a marker.
+    assert tlr._cap_str("short") == "short"
+    big = "x" * (cap + 5000)
+    capped = tlr._cap_str(big)
+    assert len(capped) < len(big)
+    assert capped.startswith("x" * cap)
+    assert "truncated" in capped
+
+    # _json_safe caps strings at any nesting depth (tool_result content).
+    nested = tlr._json_safe({"out": ["y" * (cap + 100)]})
+    assert len(nested["out"][0]) <= cap + 64
+
+    class _ToolResultBlock:
+        def __init__(self, content):
+            self.content = content
+            self.tool_use_id = "tu_1"
+            self.is_error = False
+
+    rec = tlr._serialize_sdk_block(_ToolResultBlock("z" * (cap + 9000)))
+    assert "truncated" in rec["content"]
+    assert len(rec["content"]) < cap + 9000
+
+
+# ===========================================================================
 # T2 — analysis.md is the only contracted TraceLens output.
 def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
     """SDK orchestrator sidecars must not be surfaced as Hyperloom inputs."""
@@ -860,28 +1380,32 @@ def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
         (output_dir / "priority_data.json").write_text(
-            _json.dumps({"findings": []}), encoding="utf-8",
+            _json.dumps({"findings": []}),
+            encoding="utf-8",
         )
         (output_dir / "category_data").mkdir(parents=True, exist_ok=True)
         (output_dir / "category_data" / "category_manifest.json").write_text(
-            _json.dumps({"categories": []}), encoding="utf-8",
+            _json.dumps({"categories": []}),
+            encoding="utf-8",
         )
         yield _Message(content=[_TextBlock("done — sidecars ignored")])
 
-    res = asyncio.run(tlr.run_tracelens_skill(
-        skill_path=tmp_path / "skill.md",
-        trace_path=tmp_path / "trace.json.gz",
-        output_dir=output_dir,
-        tracelens_root=tmp_path,
-        tracelens_internal_root=tmp_path / "TraceLens-internal",
-        platform="MI300X",
-        framework="sglang",
-        analysis_mode="default",
-        capture_folder=None,
-        budget_minutes=1,
-        sdk_query_factory=_fake_query,
-        sdk_options_cls=_FakeOptions,
-    ))
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI300X",
+            framework="sglang",
+            analysis_mode="default",
+            capture_folder=None,
+            budget_minutes=1,
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        )
+    )
 
     assert res.report_path.exists(), "analysis.md is the single source of truth and must exist"
     assert "tracelens_agent_report" in res.artifact_paths
@@ -916,20 +1440,22 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
         yield _Message(content=[_TextBlock("done")])
 
     with pytest.raises(RuntimeError, match="analysis.md"):
-        asyncio.run(tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI300X",
-            framework="sglang",
-            analysis_mode="default",
-            capture_folder=None,
-            budget_minutes=1,
-            sdk_query_factory=_fake_query,
-            sdk_options_cls=_FakeOptions,
-        ))
+        asyncio.run(
+            tlr.run_tracelens_skill(
+                skill_path=tmp_path / "skill.md",
+                trace_path=tmp_path / "trace.json.gz",
+                output_dir=output_dir,
+                tracelens_root=tmp_path,
+                tracelens_internal_root=tmp_path / "TraceLens-internal",
+                platform="MI300X",
+                framework="sglang",
+                analysis_mode="default",
+                capture_folder=None,
+                budget_minutes=1,
+                sdk_query_factory=_fake_query,
+                sdk_options_cls=_FakeOptions,
+            )
+        )
 
 
 # #127 — splitter CLI must match the real split_inference_trace_annotation interface
@@ -951,7 +1477,8 @@ def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
 
 
 def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
-    tmp_path, capsys,
+    tmp_path,
+    capsys,
 ):
     """The end-to-end split path must call the real splitter interface, not the broken --input/--platform form."""
     import gzip
@@ -969,11 +1496,16 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     capture.mkdir()
     trace = tmp_path / "trace.json.gz"
     with gzip.open(trace, "wt") as f:
-        _json.dump({"traceEvents": [
-            # At least one real GPU kernel event so the new fail-fast
-            # validation lets the run continue into the splitter step.
-            {"cat": "kernel", "name": "void some_real_kernel<...>", "dur": 5.0},
-        ]}, f)
+        _json.dump(
+            {
+                "traceEvents": [
+                    # At least one real GPU kernel event so the new fail-fast
+                    # validation lets the run continue into the splitter step.
+                    {"cat": "kernel", "name": "void some_real_kernel<...>", "dur": 5.0},
+                ]
+            },
+            f,
+        )
 
     captured: list[list[str]] = []
 
@@ -989,22 +1521,31 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
 
     argv = [
         "tracelens_analysis.py",
-        "--trace-input", str(trace),
-        "--workspace-path", str(workspace),
-        "--tracelens-root", str(tl_root),
-        "--target-platform", "MI300X",
-        "--top-k", "5",
-        "--budget-minutes", "1",
+        "--trace-input",
+        str(trace),
+        "--workspace-path",
+        str(workspace),
+        "--tracelens-root",
+        str(tl_root),
+        "--target-platform",
+        "MI300X",
+        "--top-k",
+        "5",
+        "--budget-minutes",
+        "1",
         "--no-llm-orchestrator",
-        "--capture-folder", str(capture),
-        "--split-conc", "8",
-        "--split-osl", "1024",
+        "--capture-folder",
+        str(capture),
+        "--split-conc",
+        "8",
+        "--split-osl",
+        "1024",
     ]
     import os as _os
+
     env_backup = dict(_os.environ)
     try:
-        with patch.object(tla.subprocess, "run", side_effect=fake_run), \
-             patch.object(tla.sys, "argv", argv):
+        with patch.object(tla.subprocess, "run", side_effect=fake_run), patch.object(tla.sys, "argv", argv):
             try:
                 tla.main()
             except SystemExit as exc:
@@ -1017,38 +1558,24 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
         _os.environ.update(env_backup)
 
     splitter_cmd = next(
-        (c for c in captured
-         if any("split_inference_trace_annotation" in str(p) for p in c)),
+        (c for c in captured if any("split_inference_trace_annotation" in str(p) for p in c)),
         None,
     )
     assert splitter_cmd is not None, f"splitter never invoked; cmds={captured}"
     # Real CLI: positional trace_path, -o output, --find-steady-state.
-    assert "--input" not in splitter_cmd, (
-        f"--input must be removed: {splitter_cmd}"
-    )
-    assert "--platform" not in splitter_cmd, (
-        f"--platform is not a valid splitter flag: {splitter_cmd}"
-    )
+    assert "--input" not in splitter_cmd, f"--input must be removed: {splitter_cmd}"
+    assert "--platform" not in splitter_cmd, f"--platform is not a valid splitter flag: {splitter_cmd}"
     assert "--find-steady-state" in splitter_cmd, splitter_cmd
     assert "-o" in splitter_cmd, splitter_cmd
-    assert str(trace) in splitter_cmd, (
-        f"trace_path must be passed positionally: {splitter_cmd}"
-    )
+    assert str(trace) in splitter_cmd, f"trace_path must be passed positionally: {splitter_cmd}"
     # CONC / OSL passthroughs.
     assert "--CONC" in splitter_cmd and "8" in splitter_cmd, splitter_cmd
     assert "--OSL" in splitter_cmd and "1024" in splitter_cmd, splitter_cmd
 
     assert all(
-        not (
-            c
-            and "TraceLens_generate_perf_report_pytorch_inference" in str(c[0])
-            and "--profile_json_path" in c
-        )
+        not (c and "TraceLens_generate_perf_report_pytorch_inference" in str(c[0]) and "--profile_json_path" in c)
         for c in captured
-    ), (
-        "perf-report CSV fallback must not run; analysis.md is the single "
-        f"source of truth. cmds={captured}"
-    )
+    ), f"perf-report CSV fallback must not run; analysis.md is the single source of truth. cmds={captured}"
     out = capsys.readouterr().out
     result = _json.loads(out)
     assert result["status"] == "failed"
@@ -1065,9 +1592,7 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
     from unittest.mock import patch
 
     tl_root = tmp_path / "TraceLens-internal"
-    skill_dir = (
-        tl_root / "TraceLens" / "Agent" / "Analysis" / ".cursor" / "skills"
-    )
+    skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / ".cursor" / "skills"
     skill_dir.mkdir(parents=True)
     (skill_dir / "analysis-orchestrator.md").write_text("stub")
     workspace = tmp_path / "ws"
@@ -1076,9 +1601,14 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
     capture.mkdir()
     trace = tmp_path / "trace.json.gz"
     with gzip.open(trace, "wt") as f:
-        _json.dump({"traceEvents": [
-            {"cat": "kernel", "name": "void some_real_kernel<...>", "dur": 5.0},
-        ]}, f)
+        _json.dump(
+            {
+                "traceEvents": [
+                    {"cat": "kernel", "name": "void some_real_kernel<...>", "dur": 5.0},
+                ]
+            },
+            f,
+        )
 
     captured: list[list[str]] = []
 
@@ -1093,14 +1623,21 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
 
     argv = [
         "tracelens_analysis.py",
-        "--trace-input", str(trace),
-        "--workspace-path", str(workspace),
-        "--tracelens-root", str(tl_root),
-        "--target-platform", "MI300X",
-        "--top-k", "5",
-        "--budget-minutes", "1",
+        "--trace-input",
+        str(trace),
+        "--workspace-path",
+        str(workspace),
+        "--tracelens-root",
+        str(tl_root),
+        "--target-platform",
+        "MI300X",
+        "--top-k",
+        "5",
+        "--budget-minutes",
+        "1",
         "--no-llm-orchestrator",
-        "--capture-folder", str(capture),
+        "--capture-folder",
+        str(capture),
         *extra_argv,
     ]
 
@@ -1111,8 +1648,7 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
                 _os.environ.pop(k, None)
             else:
                 _os.environ[k] = v
-        with patch.object(tla.subprocess, "run", side_effect=fake_run), \
-             patch.object(tla.sys, "argv", argv):
+        with patch.object(tla.subprocess, "run", side_effect=fake_run), patch.object(tla.sys, "argv", argv):
             try:
                 tla.main()
             except SystemExit:
@@ -1126,8 +1662,7 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
 
 def _find_splitter_cmd(captured):
     return next(
-        (c for c in captured
-         if any("split_inference_trace_annotation" in str(p) for p in c)),
+        (c for c in captured if any("split_inference_trace_annotation" in str(p) for p in c)),
         None,
     )
 
@@ -1137,9 +1672,12 @@ def test_194_3_splitter_receives_R_from_cli_arg(tmp_path):
     captured, _ = _drive_main_capturing_subprocess(
         tmp_path,
         extra_argv=[
-            "--split-conc", "32",
-            "--split-osl", "1024",
-            "--split-r", "0.5",
+            "--split-conc",
+            "32",
+            "--split-osl",
+            "1024",
+            "--split-r",
+            "0.5",
         ],
         env_overrides={"RANDOM_RANGE_RATIO": None},
     )
@@ -1194,8 +1732,7 @@ def test_194_3_splitter_ignores_non_numeric_R(tmp_path):
 
 # parse_analysis_md — TraceLens final-report contract (#155 review)
 _FIXTURE_LLAMA70B_ANALYSIS_MD = (
-    Path(__file__).resolve().parents[1]
-    / "tests" / "fixtures" / "tracelens_v03_llama70b_analysis.md"
+    Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "tracelens_v03_llama70b_analysis.md"
 )
 
 
@@ -1203,8 +1740,7 @@ def test_parse_analysis_md_llama70b_fixture_yields_21_compute_candidates():
     """Round-trip the official Llama-3 70B golden analysis.md fixture into 21 compute candidates."""
     cands = tlr.parse_analysis_md(_FIXTURE_LLAMA70B_ANALYSIS_MD, top_k=50)
     assert len(cands) == 21, (
-        f"expected 21 candidates (18 GEMM + 2 SDPA_fwd + 1 SDPA_bwd) from "
-        f"the fixture; got {len(cands)}"
+        f"expected 21 candidates (18 GEMM + 2 SDPA_fwd + 1 SDPA_bwd) from the fixture; got {len(cands)}"
     )
 
     by_cat = {}
@@ -1354,31 +1890,34 @@ def test_parse_analysis_md_efficiency_sort_respects_top_k_budget(tmp_path):
 
 
 # normalize_upstream_category — TraceLens orchestrator_prepare.py enum (#155 #4)
-@pytest.mark.parametrize("raw,expected", [
-    ("gemm", "GEMM"),
-    ("groupedgemm_fwd", "GEMM"),
-    ("groupedgemm_bwd", "GEMM"),
-    ("moe_fused", "MoE"),
-    ("moe_unfused", "MoE"),
-    ("sdpa_fwd", "SDPA"),
-    ("sdpa_bwd", "SDPA"),
-    ("inferenceattention", "SDPA"),
-    ("rmsnorm", "LayerNorm"),
-    ("norm_fwd", "LayerNorm"),
-    ("norm_bwd", "LayerNorm"),
-    ("convolution", "Convolution"),
-    ("conv_fwd", "Convolution"),
-    ("conv_bwd", "Convolution"),
-    ("triton", "Triton"),
-    ("elementwise", "Elementwise"),
-    ("reduce", "Reduction"),
-    ("cpu_idle", "Other"),
-    ("other", "Other"),
-    # Mixed case + whitespace + alt separators must normalise the same way.
-    ("  GEMM  ", "GEMM"),
-    ("Sdpa-Fwd", "SDPA"),
-    ("MoE/Fused", "MoE"),
-])
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("gemm", "GEMM"),
+        ("groupedgemm_fwd", "GEMM"),
+        ("groupedgemm_bwd", "GEMM"),
+        ("moe_fused", "MoE"),
+        ("moe_unfused", "MoE"),
+        ("sdpa_fwd", "SDPA"),
+        ("sdpa_bwd", "SDPA"),
+        ("inferenceattention", "SDPA"),
+        ("rmsnorm", "LayerNorm"),
+        ("norm_fwd", "LayerNorm"),
+        ("norm_bwd", "LayerNorm"),
+        ("convolution", "Convolution"),
+        ("conv_fwd", "Convolution"),
+        ("conv_bwd", "Convolution"),
+        ("triton", "Triton"),
+        ("elementwise", "Elementwise"),
+        ("reduce", "Reduction"),
+        ("cpu_idle", "Other"),
+        ("other", "Other"),
+        # Mixed case + whitespace + alt separators must normalise the same way.
+        ("  GEMM  ", "GEMM"),
+        ("Sdpa-Fwd", "SDPA"),
+        ("MoE/Fused", "MoE"),
+    ],
+)
 def test_normalize_upstream_category_matches_orchestrator_prepare_enum(raw, expected):
     """Mirror TraceLens-internal CATEGORY_SKILL_MAP keys exactly."""
     assert tlr.normalize_upstream_category(raw) == expected
@@ -1412,6 +1951,7 @@ def test_derive_kernel_category_falls_back_to_name_heuristic():
     assert tla.derive_kernel_category({"name": "fmha_fwd_kernel"}) == "SDPA"
     assert tla.derive_kernel_category({"name": "rmsnorm_fused"}) == "LayerNorm"
     assert tla.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
+
 
 # PR-A §1: _extract_pitem_prose extracts Reasoning / Resolution / Impact
 _SYNTHETIC_PITEM_BODY = """\
@@ -1515,37 +2055,28 @@ def test_parse_analysis_md_attaches_prose_from_fixture():
         assert "impact_high_ms" in c
         # The fixture's P-items all have non-empty prose; require it.
         assert c["reasoning_for_slowdown"], (
-            f"empty reasoning_for_slowdown on candidate {c.get('name')!r} "
-            f"(rank P{c.get('tracelens_pitem_rank')})"
+            f"empty reasoning_for_slowdown on candidate {c.get('name')!r} (rank P{c.get('tracelens_pitem_rank')})"
         )
-        assert c["resolution"], (
-            f"empty resolution on candidate {c.get('name')!r}"
-        )
+        assert c["resolution"], f"empty resolution on candidate {c.get('name')!r}"
 
     # P1 prose mentions "Tile / wave-occupancy tuning" per the fixture.
     p1_rows = [c for c in cands if c["tracelens_pitem_rank"] == 1]
-    assert any(
-        "wave-occupancy" in c["resolution"] for c in p1_rows
-    ), "P1 resolution should mention wave-occupancy tuning (from fixture)"
+    assert any("wave-occupancy" in c["resolution"] for c in p1_rows), (
+        "P1 resolution should mention wave-occupancy tuning (from fixture)"
+    )
 
 
 # parse_analysis_md — spec allows trailing category-specific extra columns after the 9 canonical
 # ones (attention appends 3, generic-op appends Sub-Category); the parser must accept them, not skip.
 _FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD = (
-    Path(__file__).resolve().parents[1]
-    / "tests"
-    / "fixtures"
-    / "tracelens_v03_qwen3_moe_attention_analysis.md"
+    Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "tracelens_v03_qwen3_moe_attention_analysis.md"
 )
 
 
 def test_parse_analysis_md_tolerates_attention_12_column_table_per_spec():
     """A 12-column attention ``**Data:**`` table (9 canonical + 3 spec-allowed extras) must parse using the first 9 cells."""
     cands = tlr.parse_analysis_md(_FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD, top_k=10)
-    assert len(cands) == 1, (
-        f"expected 1 attention candidate from the 12-column fixture; got "
-        f"{len(cands)}"
-    )
+    assert len(cands) == 1, f"expected 1 attention candidate from the 12-column fixture; got {len(cands)}"
     c = cands[0]
     assert c["name"] == "vllm::unified_attention_with_output"
     assert c["tracelens_category"] == "inferenceattention"
@@ -1571,8 +2102,15 @@ def test_parse_analysis_md_tolerates_attention_12_column_table_per_spec():
     assert extras.get("attention pattern") == "GQA (8:1)"
     # Canonical fields must NOT leak into extras.
     for canonical_key in (
-        "operation", "args", "kernel path", "time (ms)", "%e2e",
-        "count", "flops/byte", "efficiency", "bound",
+        "operation",
+        "args",
+        "kernel path",
+        "time (ms)",
+        "%e2e",
+        "count",
+        "flops/byte",
+        "efficiency",
+        "bound",
     ):
         assert canonical_key not in extras
 
@@ -1696,55 +2234,65 @@ def test_classify_patchability_rejects_vendor_blas_name_markers():
         "nccl_kernel",
         "aten::copy_",
     ):
-        reusable, reason = tla.classify_patchability({
-            "name": marker_name,
-            "source_file": "/sgl-workspace/aiter/foo.py",
-            "source_type": "python",
-        })
+        reusable, reason = tla.classify_patchability(
+            {
+                "name": marker_name,
+                "source_file": "/sgl-workspace/aiter/foo.py",
+                "source_type": "python",
+            }
+        )
         assert reusable is False, marker_name
         assert "non-patchable" in reason or "PyTorch native" in reason, marker_name
 
 
 def test_classify_patchability_rejects_aten_without_library():
     """aten::* without a library hint is treated as Tensile / native backend."""
-    reusable, reason = tla.classify_patchability({
-        "name": "aten::mm",
-        "source_file": "/sgl-workspace/aiter/foo.py",
-        "source_type": "python",
-        "library": "",
-    })
+    reusable, reason = tla.classify_patchability(
+        {
+            "name": "aten::mm",
+            "source_file": "/sgl-workspace/aiter/foo.py",
+            "source_type": "python",
+            "library": "",
+        }
+    )
     assert reusable is False
     assert "Tensile" in reason or "vendor" in reason
 
 
 def test_classify_patchability_rejects_aten_tensile_library():
     """Explicit library == 'Tensile' is the most common reject path."""
-    reusable, reason = tla.classify_patchability({
-        "name": "aten::mm",
-        "source_file": "/sgl-workspace/aiter/foo.py",
-        "source_type": "python",
-        "library": "Tensile",
-    })
+    reusable, reason = tla.classify_patchability(
+        {
+            "name": "aten::mm",
+            "source_file": "/sgl-workspace/aiter/foo.py",
+            "source_type": "python",
+            "library": "Tensile",
+        }
+    )
     assert reusable is False
     assert "Tensile" in reason
 
 
 def test_classify_patchability_rejects_runtime_generated_kernel():
-    reusable, reason = tla.classify_patchability({
-        "name": "triton_poi_fused_add_0",
-        "source_file": "/tmp/torchinductor_root/ab/cdef.py",
-        "source_type": "runtime_generated",
-    })
+    reusable, reason = tla.classify_patchability(
+        {
+            "name": "triton_poi_fused_add_0",
+            "source_file": "/tmp/torchinductor_root/ab/cdef.py",
+            "source_type": "runtime_generated",
+        }
+    )
     assert reusable is False
     assert "runtime-generated" in reason
 
 
 def test_classify_patchability_rejects_unreusable_source_root():
-    reusable, reason = tla.classify_patchability({
-        "name": "my_custom_kernel",
-        "source_file": "/tmp/random/my_custom_kernel.cu",
-        "source_type": "hip_cpp",
-    })
+    reusable, reason = tla.classify_patchability(
+        {
+            "name": "my_custom_kernel",
+            "source_file": "/tmp/random/my_custom_kernel.cu",
+            "source_type": "hip_cpp",
+        }
+    )
     assert reusable is False
     assert "reusable framework root" in reason
 
@@ -1883,7 +2431,10 @@ def _seed_pkg(tmp_path, pkg: str, relpath: str, funcs: tuple[str, ...] = ()) -> 
 def test_resolve_launcher_via_env_override(tmp_path, monkeypatch):
     """``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` is the highest-priority resolver source (no import needed)."""
     target = _seed_pkg(
-        tmp_path, "aiter", "ops/rmsnorm.py", funcs=("rmsnorm2d_fwd",),
+        tmp_path,
+        "aiter",
+        "ops/rmsnorm.py",
+        funcs=("rmsnorm2d_fwd",),
     )
     monkeypatch.setenv(
         tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
@@ -1971,7 +2522,8 @@ def test_resolve_launcher_rejects_when_function_not_in_file(tmp_path, monkeypatc
     target = tmp_path / "aiter_shadowed_xyz" / "ops" / "rmsnorm.py"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
-        "def some_other_function():\n    pass\n", encoding="utf-8",
+        "def some_other_function():\n    pass\n",
+        encoding="utf-8",
     )
     monkeypatch.setenv(
         tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
@@ -2003,7 +2555,8 @@ def test_resolve_launcher_ast_check_falls_through_to_next_root(tmp_path, monkeyp
     good_target = good_root / "aiter_pinned_qrs" / "ops" / "rmsnorm.py"
     good_target.parent.mkdir(parents=True, exist_ok=True)
     good_target.write_text(
-        "def rmsnorm2d_fwd(x):\n    return x\n", encoding="utf-8",
+        "def rmsnorm2d_fwd(x):\n    return x\n",
+        encoding="utf-8",
     )
 
     monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
@@ -2069,8 +2622,7 @@ def test_resolve_launcher_skips_unparseable_env_entries(tmp_path, monkeypatch):
 def test_function_line_from_ast_finds_def_lineno(tmp_path):
     src = tmp_path / "kernel.py"
     src.write_text(
-        "import torch\n\n\ndef other():\n    pass\n\n\ndef rms_norm(x):\n"
-        "    return x\n",
+        "import torch\n\n\ndef other():\n    pass\n\n\ndef rms_norm(x):\n    return x\n",
         encoding="utf-8",
     )
     # The ``def rms_norm`` line is at line 8 (1-indexed).
@@ -2084,6 +2636,7 @@ def test_function_line_from_ast_returns_none_on_invalid_source(tmp_path):
     src.write_text("this is not valid python ::: !!!", encoding="utf-8")
     assert tlr._function_line_from_ast(src, "anything") is None
     assert tlr._function_line_from_ast(tmp_path / "does_not_exist.py", "x") is None
+
 
 def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
     """Candidates sharing Operation name + source function group together; a different function stays separate."""
@@ -2241,9 +2794,7 @@ def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_
     assert len(groups) == 1
     g = groups[0]
     prose = g["all_pitem_prose"]
-    assert len(prose) == 2, (
-        f"expected 2 distinct (rank,title) prose entries; got {len(prose)}"
-    )
+    assert len(prose) == 2, f"expected 2 distinct (rank,title) prose entries; got {len(prose)}"
     # Sorted by rank ascending → P2 first, P5 second.
     assert prose[0]["rank"] == 2
     assert "decode" in prose[0]["title"].lower()
@@ -2304,9 +2855,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
-    assert len(groups) == 1, (
-        f"expected 1 task_group (same op + same source); got {len(groups)}"
-    )
+    assert len(groups) == 1, f"expected 1 task_group (same op + same source); got {len(groups)}"
     g = groups[0]
     assert g["operation"] == "vllm::rocm_unquantized_gemm"
     assert set(g["kernel_ids"]) == {"k001", "k002", "k003", "k004"}
@@ -2327,6 +2876,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
     # carrying the task_group — this is what the kernel_optimization
     # subprocess sees in build_prompt.
     import importlib
+
     ko = importlib.import_module("kernel_optimization")
     primary = dict(g["rows"][0])
     primary["task_group"] = g
@@ -2345,8 +2895,7 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
     assert block.count("(640,2880) bf16") == 1
     case2_segment = block.split("Case 2:")[1].split("Case 3:")[0]
     assert "(640,2880) bf16" in case2_segment, (
-        "k002's unique shape must land in Case 2 — confirms shape "
-        "preservation per-row, not cross-row merging"
+        "k002's unique shape must land in Case 2 — confirms shape preservation per-row, not cross-row merging"
     )
     # Same for k003's unique ``(2880,512)`` shape → Case 3.
     case3_segment = block.split("Case 3:")[1].split("Case 4:")[0]
@@ -2425,10 +2974,7 @@ def test_normalize_operation_key_strips_templates():
     # Distinct base names must remain distinct after normalization.
     assert tlr._normalize_operation_key("a<x>") != tlr._normalize_operation_key("b<x>")
     # No templates: returned verbatim (Q1 base names never change).
-    assert (
-        tlr._normalize_operation_key("vllm::rocm_unquantized_gemm")
-        == "vllm::rocm_unquantized_gemm"
-    )
+    assert tlr._normalize_operation_key("vllm::rocm_unquantized_gemm") == "vllm::rocm_unquantized_gemm"
     # Degenerate all-template name: keep original rather than an empty key.
     assert tlr._normalize_operation_key("<all>") == "<all>"
 
@@ -2472,10 +3018,7 @@ def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
         },
     ]
     groups = tlr.aggregate_by_source_function(cands)
-    assert len(groups) == 1, (
-        f"native kernel split across {len(groups)} groups by call-site line "
-        "— #420 regression"
-    )
+    assert len(groups) == 1, f"native kernel split across {len(groups)} groups by call-site line — #420 regression"
     g = groups[0]
     assert set(g["kernel_ids"]) == {"k001", "k002"}
     assert g["aggregate_duration_us"] == 150.0
@@ -2509,19 +3052,22 @@ def test_aggregate_merges_native_template_instances_by_source(tmp_path):
         {  # rmsnorm (mode 1), shape A
             "kernel_id": "k005",
             "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb0ELb0EEEvPKT_",
-            "duration_us": 300.0, "call_count": 30,
+            "duration_us": 300.0,
+            "call_count": 30,
             "tracelens_launcher_path": bare,
         },
         {  # rmsnorm (mode 1), shape B -> different BlockSize template arg
             "kernel_id": "k006",
             "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi512ELi16ELb0ELb0EEEvPKT_",
-            "duration_us": 200.0, "call_count": 20,
+            "duration_us": 200.0,
+            "call_count": 20,
             "tracelens_launcher_path": bare,
         },
         {  # add_rmsnorm (mode 2) -> ADD_RESIDUAL=true template arg
             "kernel_id": "k007",
             "name": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0EEEvPKT_",
-            "duration_us": 100.0, "call_count": 10,
+            "duration_us": 100.0,
+            "call_count": 10,
             "tracelens_launcher_path": bare,
         },
     ]
@@ -2599,14 +3145,18 @@ def test_build_task_groups_filters_non_reusable():
     group's kernel_ids."""
     cands = [
         {
-            "kernel_id": "k001", "name": "rms_norm",
-            "duration_us": 50.0, "call_count": 4,
+            "kernel_id": "k001",
+            "name": "rms_norm",
+            "duration_us": 50.0,
+            "call_count": 4,
             "tracelens_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
             "reusable_native_kernel": True,
         },
         {
-            "kernel_id": "k002", "name": "rocblas_sgemm",
-            "duration_us": 80.0, "call_count": 2,
+            "kernel_id": "k002",
+            "name": "rocblas_sgemm",
+            "duration_us": 80.0,
+            "call_count": 2,
             "tracelens_launcher_path": "aiter/rmsnorm.py(1): rms_norm",
             "reusable_native_kernel": False,  # filtered out
         },
@@ -2769,7 +3319,9 @@ def test_build_high_idle_warning_shape(tmp_path):
     report = tmp_path / "analysis.md"
     report.write_text("# noop\n", encoding="utf-8")
     w = tla._build_high_idle_warning(
-        idle_pct=42.567, threshold_pct=20.0, report_path=report,
+        idle_pct=42.567,
+        threshold_pct=20.0,
+        report_path=report,
     )
     assert w["code"] == "high_gpu_idle_pct"
     assert w["severity"] == "warning"
@@ -2850,9 +3402,7 @@ def test_infer_analysis_mode_unknown_framework_stays_default():
 def test_framework_pkg_fallback_roots_has_atom_entry():
     """The atom fallback roots must include ``/app/ATOM`` plus a site-packages variant."""
     table = tlr._FRAMEWORK_PKG_FALLBACK_ROOTS
-    assert "atom" in table, (
-        "atom missing from _FRAMEWORK_PKG_FALLBACK_ROOTS"
-    )
+    assert "atom" in table, "atom missing from _FRAMEWORK_PKG_FALLBACK_ROOTS"
     roots = table["atom"]
     assert "/app/ATOM" in roots
     assert any("site-packages" in r or "dist-packages" in r for r in roots), (
@@ -2882,8 +3432,521 @@ def test_resolve_launcher_via_atom_fallback_root(tmp_path, monkeypatch):
     )
     assert resolved is not None
     abs_path, line, func = resolved
-    assert abs_path == str(
-        tmp_path / "atom" / "model_engine" / "model_runner.py"
-    )
+    assert abs_path == str(tmp_path / "atom" / "model_engine" / "model_runner.py")
     assert line == 125
     assert func == "forward"
+
+
+# ---------------------------------------------------------------------------
+# deterministic_extract_hot_kernels
+# ---------------------------------------------------------------------------
+
+
+def _write_priority_json(output_dir, findings):
+    p = output_dir / "priority_data.json"
+    p.write_text(json.dumps({"findings": findings}), encoding="utf-8")
+
+
+def _write_metrics_json(output_dir, category, operations, status="OK"):
+    cat_dir = output_dir / "category_data"
+    cat_dir.mkdir(parents=True, exist_ok=True)
+    (cat_dir / f"{category}_metrics.json").write_text(
+        json.dumps(
+            {
+                "category": category,
+                "status": status,
+                "operations": operations,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_deterministic_extract_hot_kernels_basic(tmp_path):
+    ops = [
+        {"name": "aten::mm", "time_ms": 10.0, "count": 5, "args": "(1024,1024) bf16", "launcher_path": ""},
+    ]
+    _write_metrics_json(tmp_path, "gemm", ops)
+    _write_priority_json(
+        tmp_path,
+        [
+            {
+                "global_rank": 1,
+                "category": "gemm",
+                "impact_score": 0.8,
+                "members": [
+                    {"operation": "aten::mm", "time_ms": 10.0, "efficiency_pct": 45.0, "bound_type": "compute"},
+                ],
+            },
+        ],
+    )
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+    assert len(result) == 1
+    c = result[0]
+    assert c["name"] == "aten::mm"
+    assert c["duration_us"] == 10000.0
+    assert c["call_count"] == 5
+    assert c["efficiency_percent"] == 45.0
+    assert c["shapes"] == ["(1024,1024) bf16"]
+    assert c["input_shapes"] == [{"call_num": 5, "shape": "(1024,1024) bf16"}]
+
+
+def test_deterministic_extract_hot_kernels_empty_priority(tmp_path):
+    _write_priority_json(tmp_path, [])
+    assert tla.deterministic_extract_hot_kernels(tmp_path, top_k=5) == []
+
+
+def test_deterministic_extract_hot_kernels_missing_priority(tmp_path):
+    assert tla.deterministic_extract_hot_kernels(tmp_path, top_k=5) == []
+
+
+def test_deterministic_extract_hot_kernels_bad_priority_json(tmp_path):
+    priority_path = tmp_path / "priority_data.json"
+    priority_path.write_text("{not json", encoding="utf-8")
+    log_path = tmp_path / "deterministic.log"
+
+    result = tla.deterministic_extract_hot_kernels(
+        tmp_path,
+        top_k=5,
+        log_path=log_path,
+    )
+
+    assert result == []
+    assert "failed to parse" in log_path.read_text(encoding="utf-8")
+
+
+def test_deterministic_extract_hot_kernels_bad_priority_json_fail_loud(tmp_path):
+    priority_path = tmp_path / "priority_data.json"
+    priority_path.write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="failed to parse"):
+        tla.deterministic_extract_hot_kernels(
+            tmp_path,
+            top_k=5,
+            fail_on_corrupt_priority=True,
+        )
+
+
+def test_deterministic_extract_hot_kernels_top_k_limit(tmp_path):
+    ops = [{"name": f"op{i}", "time_ms": float(i), "count": 1, "args": ""} for i in range(10)]
+    _write_metrics_json(tmp_path, "gemm", ops)
+    members = [{"operation": f"op{i}", "time_ms": float(i), "efficiency_pct": 50.0} for i in range(10)]
+    _write_priority_json(
+        tmp_path,
+        [
+            {"global_rank": 1, "category": "gemm", "impact_score": 1.0, "members": members},
+        ],
+    )
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=3)
+    assert len(result) == 3
+
+
+def test_deterministic_extract_sets_non_synthetic_input_shapes(tmp_path):
+    """Input shapes from deterministic extraction must NOT be synthetic."""
+    ops = [
+        {
+            "name": "aiter::mm",
+            "time_ms": 5.0,
+            "count": 3,
+            "args": "(512,256) fp16<br>(256,128) fp16",
+            "launcher_path": "",
+        },
+    ]
+    _write_metrics_json(tmp_path, "gemm", ops)
+    _write_priority_json(
+        tmp_path,
+        [
+            {
+                "global_rank": 1,
+                "category": "gemm",
+                "impact_score": 0.5,
+                "members": [
+                    {"operation": "aiter::mm", "time_ms": 5.0, "efficiency_pct": 60.0},
+                ],
+            },
+        ],
+    )
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+    c = result[0]
+    assert c["input_shapes"] == [
+        {"call_num": 3, "shape": "(512,256) fp16<br>(256,128) fp16"},
+    ]
+    assert "_input_shapes_synthetic" not in c
+
+
+def test_deterministic_extract_skips_metric_mismatch(tmp_path):
+    ops = [
+        {"name": "aten::mm", "time_ms": 100.0, "count": 5, "args": "(1024,1024) bf16", "launcher_path": ""},
+    ]
+    _write_metrics_json(tmp_path, "gemm", ops)
+    _write_priority_json(
+        tmp_path,
+        [
+            {
+                "global_rank": 1,
+                "category": "gemm",
+                "impact_score": 0.8,
+                "members": [
+                    {"operation": "aten::mm", "time_ms": 10.0, "efficiency_pct": 45.0, "bound_type": "compute"},
+                ],
+            },
+        ],
+    )
+
+    log_path = tmp_path / "deterministic.log"
+    result = tla.deterministic_extract_hot_kernels(
+        tmp_path,
+        top_k=5,
+        log_path=log_path,
+    )
+
+    assert result == []
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "skipping priority member with no matching metrics row" in log_text
+    assert "operation='aten::mm'" in log_text
+
+
+# ---------------------------------------------------------------------------
+# deterministic_extract_hot_kernels — "other" bucket inclusion + sorting
+# ---------------------------------------------------------------------------
+
+_OTHER_MOE_NAME = "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427"
+_MOE_KERNEL_DEF = (
+    "/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py"
+)
+# The wrapper that merely *launches* the kernel — must never be the source.
+_MOE_LAUNCHER_PATH = "sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(391): _fused_moe_kernel_sequence"
+
+
+def test_deterministic_extract_includes_other_bucket_kernel(tmp_path, monkeypatch):
+    """A high-GPU-time "other"-bucket Triton kernel (fused_moe) that never
+    appears in priority_data findings must still be surfaced, resolved to its
+    *definition* file (not the launcher wrapper)."""
+    _write_metrics_json(
+        tmp_path,
+        "other",
+        [
+            {
+                "name": _OTHER_MOE_NAME,
+                "time_ms": 354.0,
+                "count": 96,
+                "args": "(16384,2048) bf16",
+                "launcher_path": _MOE_LAUNCHER_PATH,
+                "library": "Triton",
+            },
+        ],
+    )
+    # priority_data has only a small gemm finding — no fused_moe.
+    _write_metrics_json(
+        tmp_path,
+        "gemm",
+        [
+            {"name": "aten::mm", "time_ms": 10.0, "count": 5, "args": "(1024,1024) bf16", "launcher_path": ""},
+        ],
+    )
+    _write_priority_json(
+        tmp_path,
+        [
+            {
+                "global_rank": 1,
+                "category": "gemm",
+                "impact_score": 0.8,
+                "members": [
+                    {"operation": "aten::mm", "time_ms": 10.0, "efficiency_pct": 45.0, "bound_type": "compute"}
+                ],
+            },
+        ],
+    )
+    # Hermetic: pin symbol resolution to the kernel definition file.
+    monkeypatch.setattr(tla, "locate_source_via_grep", lambda name: _MOE_KERNEL_DEF if name == _OTHER_MOE_NAME else "")
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+    by_name = {c["name"]: c for c in result}
+    assert _OTHER_MOE_NAME in by_name, "fused_moe other-bucket op must be surfaced"
+    moe = by_name[_OTHER_MOE_NAME]
+    assert moe["source_file"] == _MOE_KERNEL_DEF, "must resolve to definition, not launcher"
+    assert "fused_moe.py" not in moe["source_file"], "must NOT point at the launcher wrapper"
+    assert moe["candidate_source"] == "other_bucket_fallback"
+
+
+def test_deterministic_extract_sorts_all_candidates_by_duration(tmp_path, monkeypatch):
+    """The dominant "other"-bucket kernel (354ms) must outrank a small
+    priority-data kernel (10ms) — all candidates sorted by GPU time."""
+    _write_metrics_json(
+        tmp_path,
+        "other",
+        [
+            {
+                "name": _OTHER_MOE_NAME,
+                "time_ms": 354.0,
+                "count": 96,
+                "args": "(16384,2048) bf16",
+                "launcher_path": _MOE_LAUNCHER_PATH,
+                "library": "Triton",
+            },
+        ],
+    )
+    _write_metrics_json(
+        tmp_path,
+        "elementwise",
+        [
+            {
+                "name": "sgl_kernel::silu_and_mul",
+                "time_ms": 10.0,
+                "count": 5,
+                "args": "(1024,1024) bf16",
+                "launcher_path": "",
+            },
+        ],
+    )
+    _write_priority_json(
+        tmp_path,
+        [
+            {
+                "global_rank": 1,
+                "category": "elementwise",
+                "impact_score": 1.9,
+                "members": [
+                    {
+                        "operation": "sgl_kernel::silu_and_mul",
+                        "time_ms": 10.0,
+                        "efficiency_pct": 17.0,
+                        "bound_type": "memory",
+                    }
+                ],
+            },
+        ],
+    )
+    monkeypatch.setattr(tla, "locate_source_via_grep", lambda name: _MOE_KERNEL_DEF if name == _OTHER_MOE_NAME else "")
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+    assert result[0]["name"] == _OTHER_MOE_NAME, "biggest kernel must rank first"
+    durations = [c["duration_us"] for c in result]
+    assert durations == sorted(durations, reverse=True), "candidates sorted desc by duration"
+
+
+def test_deterministic_extract_skips_other_op_with_unresolvable_source(tmp_path, monkeypatch):
+    """An "other"-bucket op whose symbol cannot be resolved to a definition
+    file is skipped (never falls back to the launcher wrapper as source)."""
+    _write_metrics_json(
+        tmp_path,
+        "other",
+        [
+            {
+                "name": "sglang_profiler::mystery_op_999",
+                "time_ms": 50.0,
+                "count": 1,
+                "args": "",
+                "launcher_path": _MOE_LAUNCHER_PATH,
+                "library": "Triton",
+            },
+        ],
+    )
+    _write_priority_json(tmp_path, [])
+    monkeypatch.setattr(tla, "locate_source_via_grep", lambda name: "")
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+    assert result == [], "unresolvable other-bucket op must be skipped"
+
+
+# ---------------------------------------------------------------------------
+# _match_op_by_time
+# ---------------------------------------------------------------------------
+
+
+def test_match_op_by_time_exact_match():
+    ops = [
+        {"name": "a", "time_ms": 10.0, "args": "shape1"},
+        {"name": "a", "time_ms": 20.0, "args": "shape2"},
+    ]
+    result = tla._match_op_by_time(ops, "a", 20.0)
+    assert result["args"] == "shape2"
+
+
+def test_match_op_by_time_close_match():
+    ops = [{"name": "a", "time_ms": 10.005, "args": "ok"}]
+    result = tla._match_op_by_time(ops, "a", 10.0)
+    assert result["args"] == "ok"
+
+
+def test_match_op_by_time_rejects_distant_match():
+    ops = [{"name": "a", "time_ms": 100.0, "args": "wrong"}]
+    result = tla._match_op_by_time(ops, "a", 10.0)
+    assert result == {}
+
+
+def test_match_op_by_time_no_name_match():
+    ops = [{"name": "b", "time_ms": 10.0}]
+    result = tla._match_op_by_time(ops, "a", 10.0)
+    assert result == {}
+
+
+def test_match_op_by_time_empty_ops():
+    assert tla._match_op_by_time([], "a", 10.0) == {}
+
+
+# ---------------------------------------------------------------------------
+# _extract_total_time_us_from_gpu_timeline
+# ---------------------------------------------------------------------------
+
+
+def test_extract_total_time_us_from_gpu_timeline(tmp_path):
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "gpu_timeline.csv").write_text(
+        "type,time ms,percent\ncompute_time,100.5,80.0\ntotal_time,125.0,100.0\nidle_time,24.5,20.0\n",
+        encoding="utf-8",
+    )
+    result = tla._extract_total_time_us_from_gpu_timeline(tmp_path)
+    assert result == 125000.0
+
+
+def test_extract_total_time_us_returns_none_when_missing(tmp_path):
+    assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# _normalize_profiler_op_name / graph-captured keyword recovery
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_profiler_op_name_strips_graph_wrappers():
+    n = tla._normalize_profiler_op_name
+    # Launch wrapper + return type + template are peeled to the bare symbol.
+    assert n("hipGraphLaunch->void ck::foo_kernel<int>") == "ck::foo_kernel<int>"
+    # Plain symbol with no namespace keeps the identifier after stripping void.
+    assert (
+        n("hipGraphLaunch->void paged_attention_ll4mi_QKV_mfma16_kernel<x>")
+        == "paged_attention_ll4mi_QKV_mfma16_kernel<x>"
+    )
+    # Embedded Itanium-mangled symbol is surfaced for the _Z demangle path.
+    assert (
+        n("hipGraphLaunch->_ZN5aiter37dynamic_per_group_scaled_quant_fp8E")
+        == "_ZN5aiter37dynamic_per_group_scaled_quant_fp8E"
+    )
+    # .kd suffix and "(Synthetic Op)" annotation are removed.
+    assert n("hipGraphLaunch->triton_poi_fused_2.kd (Synthetic Op)") == "triton_poi_fused_2"
+    # Already-clean names pass through unchanged (regression guard).
+    assert n("aten::mm") == "aten::mm"
+    assert (
+        n("sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427")
+        == "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427"
+    )
+
+
+def test_candidate_keywords_recovers_graph_captured_symbols():
+    # Before normalization these kept the "hipGraphLaunch->void " prefix and
+    # greped to nothing; now they yield the real kernel identifier.
+    kws = tla._candidate_keywords("hipGraphLaunch->void paged_attention_ll4mi_QKV_mfma16_kernel<x>")
+    assert "paged_attention_ll4mi_QKV_mfma16_kernel" in kws
+
+    kws = tla._candidate_keywords("hipGraphLaunch->_ZN5aiter37dynamic_per_group_scaled_quant_fp8E")
+    assert "dynamic_per_group_scaled_quant_fp8E" in kws
+
+    # Clean profiler symbol still resolves to the same keyword as before.
+    kws = tla._candidate_keywords("sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427")
+    assert kws == ["fused_moe_triton_kernels_invoke_fused_moe_kernel_427"]
+
+
+def test_deterministic_other_bucket_logs_unresolved_high_time_op(
+    tmp_path,
+    monkeypatch,
+):
+    """A high-GPU-time other-bucket op with no resolvable source must be logged,
+    not silently dropped (root-cause-B observability guard)."""
+    _write_priority_json(tmp_path, [])
+    _write_metrics_json(
+        tmp_path,
+        "other",
+        [
+            {
+                "name": "hipGraphLaunch->void ck::kernel_moe_gemm_2lds<...>",
+                "time_ms": 217.0,
+                "count": 4,
+                "args": "(1,2) bf16",
+                "launcher_path": "",
+            },
+        ],
+    )
+    # Simulate a vendor template kernel that exists only as a compiled .so:
+    # no editable source can be grepped.
+    monkeypatch.setattr(tla, "locate_source_via_grep", lambda name: "")
+
+    log_path = tmp_path / "deterministic.log"
+    result = tla.deterministic_extract_hot_kernels(
+        tmp_path,
+        top_k=5,
+        log_path=log_path,
+    )
+
+    assert result == []
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "no editable source resolved" in log_text
+    assert "time_ms=217.000" in log_text
+
+
+def test_minimal_analysis_md_includes_system_level_signals(tmp_path):
+    """System-Level Signals section is rendered from gpu_timeline.csv (no LLM)."""
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "gpu_timeline.csv").write_text(
+        "type,time ms,percent\n"
+        "computation_time,800.0,80.0\n"
+        "exposed_comm_time,40.0,4.0\n"
+        "exposed_memcpy_time,10.0,1.0\n"
+        "idle_time,200.0,20.0\n"
+        "total_time,1000.0,100.0\n",
+        encoding="utf-8",
+    )
+
+    report = tla.generate_minimal_analysis_md(tmp_path, [], idle_pct=20.0)
+    text = report.read_text(encoding="utf-8")
+
+    assert "## System-Level Signals" in text
+    assert "GPU idle | 20.00%" in text
+    # 20% idle is above the default 80%? No — default gate is high; ensure the
+    # note reflects the threshold comparison deterministically.
+    assert "idle gate" in text
+    assert "Exposed communication | 4.00%" in text
+    assert "Exposed memcpy (device copy) | 1.00%" in text
+
+
+def test_minimal_analysis_md_omits_system_signals_without_timeline(tmp_path):
+    """No gpu_timeline.csv -> no System-Level Signals section (no fabrication)."""
+    report = tla.generate_minimal_analysis_md(tmp_path, [], idle_pct=None)
+    text = report.read_text(encoding="utf-8")
+    assert "## System-Level Signals" not in text
+
+
+def test_deterministic_other_bucket_keeps_resolvable_graph_op(
+    tmp_path,
+    monkeypatch,
+):
+    """A graph-captured op whose symbol resolves to source is kept as a candidate."""
+    _write_priority_json(tmp_path, [])
+    _write_metrics_json(
+        tmp_path,
+        "other",
+        [
+            {
+                "name": "hipGraphLaunch->void aiter::my_triton_kernel<x> (Synthetic Op)",
+                "time_ms": 50.0,
+                "count": 2,
+                "args": "(8,16) fp16",
+                "launcher_path": "",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        tla,
+        "locate_source_via_grep",
+        lambda name: "/sgl-workspace/aiter/my_triton_kernel.py",
+    )
+
+    result = tla.deterministic_extract_hot_kernels(tmp_path, top_k=5)
+
+    assert len(result) == 1
+    assert result[0]["source_file"] == "/sgl-workspace/aiter/my_triton_kernel.py"
+    assert result[0]["duration_us"] == 50000.0

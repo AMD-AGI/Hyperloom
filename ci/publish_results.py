@@ -18,6 +18,22 @@ DEFAULT_SERVICE_URL = "http://core42.primus-safe.amd.com/hyperloom-results"
 
 
 def load_results(path: Path) -> list[dict[str, Any]]:
+    """Load result records from a JSON or NDJSON file.
+
+    Handles three on-disk shapes: a ``.ndjson`` file with one JSON object per
+    line, a JSON object wrapping a ``results`` list (or a single schema-versioned
+    result), and a top-level JSON list of result objects.
+
+    Args:
+        path (Path): Path to the results file to read.
+
+    Returns:
+        list[dict[str, Any]]: The parsed result records, or an empty list if
+        the payload does not match any recognized shape.
+
+    Raises:
+        FileNotFoundError: If ``path`` does not exist.
+    """
     if not path.exists():
         raise FileNotFoundError(f"input file not found: {path}")
 
@@ -41,11 +57,18 @@ def load_results(path: Path) -> list[dict[str, Any]]:
 
 
 def _normalize_submitted_at(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Move ``run.submitted_at`` ISO strings to ``run.submitted_at_iso`` (set original to None).
+    """Move ``run.submitted_at`` ISO strings to ``run.submitted_at_iso``.
 
-    Required because the ingest path binds ``submitted_at`` (timestamptz) as a str and asyncpg
-    rejects it with HTTP 500. The sibling key preserves the value in the raw_result JSONB blob.
-    Drop once the ingest path accepts ISO strings directly.
+    Required because the ingest path binds ``submitted_at`` (timestamptz) as a
+    str and asyncpg rejects it with HTTP 500. The sibling key preserves the
+    value in the raw_result JSONB blob. Drop once the ingest path accepts ISO
+    strings directly.
+
+    Args:
+        results: Normalized result dicts to clean.
+
+    Returns:
+        New result dicts with ``submitted_at`` moved to ``submitted_at_iso``.
     """
     cleaned: list[dict[str, Any]] = []
     for r in results:
@@ -71,10 +94,22 @@ def publish(
     max_retries: int = 5,
     initial_backoff_s: float = 5.0,
 ) -> dict:
-    """POST results to /api/import with exponential-backoff retry.
+    """POST results to ``/api/import`` with exponential-backoff retry.
 
-    Retries cover intermittent service-side failures: PG pool drops after a pod crashloop
-    (HTTP 500, succeeds on retry once asyncpg reconnects) and liveness-probe restarts (5xx / refused).
+    Retries cover intermittent service-side failures: PG pool drops after a pod
+    crashloop (HTTP 500, succeeds on retry once asyncpg reconnects) and
+    liveness-probe restarts (5xx / refused).
+
+    Args:
+        results: Normalized result dicts to publish.
+        url: Base service URL (``/api/import`` is appended).
+        token: Optional bearer token.
+        timeout: Per-request timeout in seconds.
+        max_retries: Maximum retry attempts.
+        initial_backoff_s: Initial backoff delay in seconds.
+
+    Returns:
+        The decoded JSON response from the import endpoint.
     """
     import time
     import requests
@@ -90,18 +125,18 @@ def publish(
     for attempt in range(1, max_retries + 1):
         try:
             resp = requests.post(
-                endpoint, headers=headers, json=body, timeout=timeout,
+                endpoint,
+                headers=headers,
+                json=body,
+                timeout=timeout,
             )
             # Only retry 5xx; 4xx means our payload is wrong and retrying won't help.
             if 500 <= resp.status_code < 600:
                 snippet = (resp.text or "")[:200].replace("\n", " ")
-                err = RuntimeError(
-                    f"HTTP {resp.status_code} from {endpoint}: {snippet}"
-                )
+                err = RuntimeError(f"HTTP {resp.status_code} from {endpoint}: {snippet}")
                 last_err = err
                 print(
-                    f"publish attempt {attempt}/{max_retries} failed: {err} "
-                    f"(retrying after {backoff:.0f}s)",
+                    f"publish attempt {attempt}/{max_retries} failed: {err} (retrying after {backoff:.0f}s)",
                     flush=True,
                 )
             else:
@@ -110,8 +145,7 @@ def publish(
         except requests.RequestException as e:
             last_err = e
             print(
-                f"publish attempt {attempt}/{max_retries} network error: "
-                f"{e!r} (retrying after {backoff:.0f}s)",
+                f"publish attempt {attempt}/{max_retries} network error: {e!r} (retrying after {backoff:.0f}s)",
                 flush=True,
             )
 
@@ -119,12 +153,18 @@ def publish(
             time.sleep(backoff)
             backoff = min(backoff * 2, 60.0)
 
-    raise RuntimeError(
-        f"publish failed after {max_retries} retries: {last_err!r}"
-    )
+    raise RuntimeError(f"publish failed after {max_retries} retries: {last_err!r}")
 
 
 def main() -> int:
+    """Parse CLI arguments, load results, and publish them.
+
+    Skips publishing (returning success) when no service URL is configured or
+    when the input file contains no results.
+
+    Returns:
+        int: Process exit code (``0`` on success or skip).
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, help="normalized_results.json or .ndjson")
     parser.add_argument(

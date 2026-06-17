@@ -45,11 +45,34 @@ TERMINAL_STATES = frozenset({"succeeded", "cancelled", "needs_manual_review"})
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond-precision ISO 8601 string.
+
+    Returns:
+        str: The current UTC timestamp.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 @dataclass
 class Task:
+    """A delegated task row persisted in the ``tasks`` table.
+
+    Attributes:
+        task_id (str): Unique task identifier.
+        kind (str): The task kind/action name.
+        state (str): Current lifecycle state (one of :data:`TASK_STATES`).
+        params (dict): Action parameters.
+        idempotency_key (str): UNIQUE key used to de-duplicate re-creations.
+        requires_lanes (list[str]): Resource lanes the task needs.
+        allowed_tools (list[str]): Tool whitelist for the task.
+        side_effects (list[str]): Declared side effects.
+        lease_ttl_sec (int): Lease TTL in seconds.
+        attempts (int): Number of run attempts so far.
+        history (list[dict]): Recorded state-transition history.
+        created_at (str): ISO creation timestamp.
+        updated_at (str): ISO last-update timestamp.
+    """
+
     task_id: str
     kind: str
     state: str
@@ -66,6 +89,15 @@ class Task:
 
     @classmethod
     def from_row(cls, row) -> "Task":
+        """Build a :class:`Task` from a ``tasks`` table row.
+
+        Args:
+            row: A mapping-like DB row with the ``tasks`` columns; JSON columns
+                are decoded.
+
+        Returns:
+            Task: The reconstructed task instance.
+        """
         return cls(
             task_id=row["task_id"],
             kind=row["kind"],
@@ -84,16 +116,34 @@ class Task:
 
 
 class IllegalTransition(RuntimeError):
+    """Raised when a requested task state transition is not allowed."""
+
     pass
 
 
 class TaskNotFound(RuntimeError):
+    """Raised when a task lookup by ``task_id`` finds no row."""
+
     pass
 
 
 # ---------------------------------------------------------------------------
 class TaskRegistry:
+    """State machine + persistence layer for delegated tasks.
+
+    Wraps the ``tasks`` SQLite table and enforces the allowed lifecycle
+    transitions documented at module level.
+
+    Attributes:
+        db (SqliteConnection): The backing SQLite connection.
+    """
+
     def __init__(self, db: SqliteConnection):
+        """Initialise the registry.
+
+        Args:
+            db (SqliteConnection): The backing SQLite connection.
+        """
         self.db = db
 
     async def create_or_return_existing(
@@ -108,10 +158,23 @@ class TaskRegistry:
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
     ) -> tuple[Task, bool]:
-        """Insert a new task row OR return the existing one keyed by idempotency_key. Returns ``(task, was_existing)``."""
-        existing = await self.db.fetchone(
-            "SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,)
-        )
+        """Insert a new task row OR return the existing one keyed by idempotency_key. Returns ``(task, was_existing)``.
+
+        Args:
+            kind: Task kind tag.
+            params: Task parameters serialised into the row.
+            idempotency_key: Key used to detect and return an existing task.
+            requires_lanes: Lanes the task must hold while running.
+            allowed_tools: Tools the task is permitted to use.
+            side_effects: Declared side effects of the task.
+            lease_ttl_sec: Lease time-to-live in seconds.
+            task_id: Optional explicit task id; generated when omitted.
+
+        Returns:
+            A tuple ``(task, was_existing)`` where ``was_existing`` is ``True``
+            when a task with the same idempotency key already existed.
+        """
+        existing = await self.db.fetchone("SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,))
         if existing is not None:
             return Task.from_row(existing), True
 
@@ -170,7 +233,21 @@ class TaskRegistry:
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
     ) -> Task:
-        """Thin wrapper around :meth:`create_or_return_existing` for callers that don't need ``was_existing``."""
+        """Thin wrapper around :meth:`create_or_return_existing` for callers that don't need ``was_existing``.
+
+        Args:
+            kind: Task kind tag.
+            params: Task parameters serialised into the row.
+            idempotency_key: Key used to detect and return an existing task.
+            requires_lanes: Lanes the task must hold while running.
+            allowed_tools: Tools the task is permitted to use.
+            side_effects: Declared side effects of the task.
+            lease_ttl_sec: Lease time-to-live in seconds.
+            task_id: Optional explicit task id; generated when omitted.
+
+        Returns:
+            The created or pre-existing ``Task``.
+        """
         task, _was_existing = await self.create_or_return_existing(
             kind=kind,
             params=params,
@@ -184,9 +261,18 @@ class TaskRegistry:
         return task
 
     async def get(self, task_id: str) -> Task:
-        row = await self.db.fetchone(
-            "SELECT * FROM tasks WHERE task_id=?", (task_id,)
-        )
+        """Fetch a single task by id.
+
+        Args:
+            task_id (str): The task identifier.
+
+        Returns:
+            Task: The matching task.
+
+        Raises:
+            TaskNotFound: If no row matches ``task_id``.
+        """
+        row = await self.db.fetchone("SELECT * FROM tasks WHERE task_id=?", (task_id,))
         if row is None:
             raise TaskNotFound(task_id)
         return Task.from_row(row)
@@ -197,6 +283,25 @@ class TaskRegistry:
         new_state: str,
         evidence: dict[str, Any] | None = None,
     ) -> Task:
+        """Transition a task to a new state, recording history.
+
+        Increments ``attempts`` when entering ``running`` from ``queued`` or
+        ``failed``.
+
+        Args:
+            task_id (str): The task identifier.
+            new_state (str): The target state (must be in :data:`TASK_STATES`).
+            evidence (dict[str, Any] | None): Optional evidence recorded in the
+                transition history entry.
+
+        Returns:
+            Task: The task after the transition.
+
+        Raises:
+            ValueError: If ``new_state`` is not a known state.
+            TaskNotFound: If no row matches ``task_id``.
+            IllegalTransition: If the transition is not permitted.
+        """
         if new_state not in TASK_STATES:
             raise ValueError(f"unknown state: {new_state!r}")
         async with self.db.transaction() as cur:
@@ -207,73 +312,164 @@ class TaskRegistry:
             current_state = row["state"]
             allowed = _TRANSITIONS.get(current_state, frozenset())
             if new_state not in allowed:
-                raise IllegalTransition(
-                    f"cannot transition {task_id!r} from "
-                    f"{current_state!r} to {new_state!r}"
-                )
+                raise IllegalTransition(f"cannot transition {task_id!r} from {current_state!r} to {new_state!r}")
             now = _now_iso()
             history = json.loads(row["history"])
-            history.append({
-                "from": current_state,
-                "to": new_state,
-                "ts": now,
-                "evidence": evidence or {},
-            })
+            history.append(
+                {
+                    "from": current_state,
+                    "to": new_state,
+                    "ts": now,
+                    "evidence": evidence or {},
+                }
+            )
             attempts = row["attempts"]
             if new_state == "running" and current_state in ("queued", "failed"):
                 attempts += 1
             cur.execute(
-                "UPDATE tasks SET state=?, history=?, attempts=?, updated_at=? "
-                "WHERE task_id=?",
+                "UPDATE tasks SET state=?, history=?, attempts=?, updated_at=? WHERE task_id=?",
                 (new_state, json.dumps(history), attempts, now, task_id),
             )
         return await self.get(task_id)
 
     async def queued(self) -> list[Task]:
-        rows = await self.db.fetchall(
-            "SELECT * FROM tasks WHERE state='queued' ORDER BY created_at ASC"
-        )
+        """Return all queued tasks ordered oldest-first.
+
+        Returns:
+            list[Task]: Queued tasks sorted by creation time.
+        """
+        rows = await self.db.fetchall("SELECT * FROM tasks WHERE state='queued' ORDER BY created_at ASC")
         return [Task.from_row(r) for r in rows]
 
     async def running(self) -> list[Task]:
-        rows = await self.db.fetchall(
-            "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC"
-        )
+        """Return all running tasks ordered least-recently-updated-first.
+
+        Returns:
+            list[Task]: Running tasks sorted by update time.
+        """
+        rows = await self.db.fetchall("SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC")
         return [Task.from_row(r) for r in rows]
 
     async def by_state(self, state: str) -> list[Task]:
+        """Return all tasks in the given state.
+
+        Args:
+            state (str): The state to filter on (must be in
+                :data:`TASK_STATES`).
+
+        Returns:
+            list[Task]: Matching tasks ordered by update time.
+
+        Raises:
+            ValueError: If ``state`` is not a known state.
+        """
         if state not in TASK_STATES:
             raise ValueError(f"unknown state: {state!r}")
-        rows = await self.db.fetchall(
-            "SELECT * FROM tasks WHERE state=? ORDER BY updated_at ASC", (state,)
-        )
+        rows = await self.db.fetchall("SELECT * FROM tasks WHERE state=? ORDER BY updated_at ASC", (state,))
         return [Task.from_row(r) for r in rows]
 
+    async def reclaim_expired_running(
+        self,
+        *,
+        now_unix: float | None = None,
+        reason: str = "lease_expired",
+    ) -> list[str]:
+        """Fail running tasks whose execution lease (``lease_ttl_sec`` since
+        ``updated_at``) has expired (R6 watchdog / cycle soft-restart cleanup).
+
+        A ``running`` row that has not advanced for longer than its own
+        ``lease_ttl_sec`` is orphaned — the worker died or was reaped — so we
+        transition it ``running -> failed`` (retry-eligible, lanes freed). Tasks
+        with ``lease_ttl_sec <= 0`` are left untouched (no lease to expire).
+
+        Idempotent: a second call finds the rows already ``failed`` and is a
+        no-op. Returns the reclaimed task_ids.
+
+        Args:
+            now_unix: Reference unix time for lease-age comparison; defaults to
+                the current time.
+            reason: Reason label recorded in the transition history evidence.
+
+        Returns:
+            The task ids whose expired running lease was reclaimed to
+            ``failed`` (empty when none expired).
+        """
+        import time as _time
+
+        now = float(now_unix if now_unix is not None else _time.time())
+        reclaimed: list[str] = []
+        async with self.db.transaction() as cur:
+            cur.execute("SELECT task_id, lease_ttl_sec, updated_at, history FROM tasks WHERE state='running'")
+            rows = [(r["task_id"], r["lease_ttl_sec"], r["updated_at"], r["history"]) for r in cur.fetchall()]
+            now_iso = _now_iso()
+            for task_id, ttl, updated_at, history_json in rows:
+                try:
+                    ttl_sec = float(ttl or 0)
+                except (TypeError, ValueError):
+                    ttl_sec = 0.0
+                if ttl_sec <= 0:
+                    continue
+                try:
+                    updated = datetime.fromisoformat(str(updated_at))
+                    if updated.tzinfo is None:
+                        updated = updated.replace(tzinfo=timezone.utc)
+                    age = now - updated.timestamp()
+                except (TypeError, ValueError):
+                    continue
+                if age < ttl_sec:
+                    continue
+                history = json.loads(history_json)
+                history.append(
+                    {
+                        "from": "running",
+                        "to": "failed",
+                        "ts": now_iso,
+                        "evidence": {
+                            "reason": reason,
+                            "age_sec": round(age, 1),
+                            "lease_ttl_sec": ttl_sec,
+                        },
+                    }
+                )
+                cur.execute(
+                    "UPDATE tasks SET state='failed', history=?, updated_at=? WHERE task_id=?",
+                    (json.dumps(history), now_iso, task_id),
+                )
+                reclaimed.append(task_id)
+        return reclaimed
+
     async def cancel_family(self, family_kinds: list[str]) -> list[str]:
-        """Bulk-cancel queued tasks of the given kinds (Robustness prune_branch); returns cancelled task_ids."""
+        """Bulk-cancel queued tasks of the given kinds (Robustness prune_branch); returns cancelled task_ids.
+
+        Args:
+            family_kinds: Task kinds whose queued tasks should be cancelled.
+
+        Returns:
+            The task ids that were cancelled (empty when none matched).
+        """
         if not family_kinds:
             return []
         cancelled: list[str] = []
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(family_kinds))
             cur.execute(
-                f"SELECT task_id, history FROM tasks WHERE state='queued' "
-                f"AND kind IN ({placeholders})",
+                f"SELECT task_id, history FROM tasks WHERE state='queued' AND kind IN ({placeholders})",
                 family_kinds,
             )
             rows = [(r["task_id"], r["history"]) for r in cur.fetchall()]
             now = _now_iso()
             for task_id, history_json in rows:
                 history = json.loads(history_json)
-                history.append({
-                    "from": "queued",
-                    "to": "cancelled",
-                    "ts": now,
-                    "evidence": {"reason": "prune_branch"},
-                })
+                history.append(
+                    {
+                        "from": "queued",
+                        "to": "cancelled",
+                        "ts": now,
+                        "evidence": {"reason": "prune_branch"},
+                    }
+                )
                 cur.execute(
-                    "UPDATE tasks SET state='cancelled', history=?, updated_at=? "
-                    "WHERE task_id=?",
+                    "UPDATE tasks SET state='cancelled', history=?, updated_at=? WHERE task_id=?",
                     (json.dumps(history), now, task_id),
                 )
                 cancelled.append(task_id)

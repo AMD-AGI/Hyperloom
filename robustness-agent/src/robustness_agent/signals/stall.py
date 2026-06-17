@@ -19,11 +19,13 @@ from .symptom import Symptom, SymptomSeverity
 
 
 # Agents tracked for stall detection; robustness excludes itself.
-_TRACKED_AGENTS: frozenset[str] = frozenset({
-    "orchestration",
-    "kernel",
-    "critic",
-})
+_TRACKED_AGENTS: frozenset[str] = frozenset(
+    {
+        "orchestration",
+        "kernel",
+        "critic",
+    }
+)
 
 
 @dataclass
@@ -40,6 +42,22 @@ def evaluate_stall_signals(
     *,
     config: StallConfig | None = None,
 ) -> list[Symptom]:
+    """Emit ``agent_stall`` symptoms for tracked agents that have gone silent.
+
+    Computes per-agent idle time from the most recent activity timestamp and
+    fires MEDIUM (or HIGH past ``severity_high_after_s``) once idle time exceeds
+    the stall timeout.
+
+    Args:
+        ctx (ReactorContext): Reactor context (provides inbox and current time).
+        data (SourceData): Collected source data including coordinator events.
+        config (StallConfig | None): Tunables; defaults to :class:`StallConfig`
+            when ``None``.
+
+    Returns:
+        list[Symptom]: One ``agent_stall`` symptom per stalled agent, possibly
+            empty.
+    """
     cfg = config or StallConfig()
     last_seen = _collect_last_seen(ctx.inbox, data.coordinator_events)
     out: list[Symptom] = []
@@ -51,19 +69,12 @@ def evaluate_stall_signals(
         idle_s = max(0.0, ctx.now_unix - ts)
         if idle_s < cfg.stall_timeout_s:
             continue
-        severity = (
-            SymptomSeverity.HIGH
-            if idle_s >= cfg.severity_high_after_s
-            else SymptomSeverity.MEDIUM
-        )
+        severity = SymptomSeverity.HIGH if idle_s >= cfg.severity_high_after_s else SymptomSeverity.MEDIUM
         out.append(
             Symptom(
                 name="agent_stall",
                 severity=severity,
-                summary=(
-                    f"agent {agent} silent for {int(idle_s)}s "
-                    f"(threshold={int(cfg.stall_timeout_s)}s)"
-                ),
+                summary=(f"agent {agent} silent for {int(idle_s)}s (threshold={int(cfg.stall_timeout_s)}s)"),
                 evidence={
                     "agent": agent,
                     "idle_seconds": int(idle_s),
@@ -72,10 +83,7 @@ def evaluate_stall_signals(
                 },
                 subject={"agent": agent},
                 source="local" if data.coordinator_events else "inbox",
-                suggestion=(
-                    "force_dispatch the head queued task or escalate"
-                    " strategy if agent remains silent"
-                ),
+                suggestion=("force_dispatch the head queued task or escalate strategy if agent remains silent"),
             )
         )
     return out
@@ -85,6 +93,19 @@ def _collect_last_seen(
     inbox: list[InboxItem],
     coordinator_events: list[dict[str, Any]],
 ) -> dict[str, float]:
+    """Compute the latest activity timestamp per tracked agent.
+
+    Folds together inbox items and coordinator events, keeping the most recent
+    timestamp seen for each tracked agent.
+
+    Args:
+        inbox (list[InboxItem]): Inbox items from the reactor context.
+        coordinator_events (list[dict[str, Any]]): Raw coordinator events.
+
+    Returns:
+        dict[str, float]: Mapping of agent name to its latest activity unix
+            timestamp.
+    """
     last: dict[str, float] = {}
 
     for item in inbox:
@@ -112,6 +133,18 @@ def _collect_last_seen(
 
 
 def _coerce_unix(value: Any) -> float | None:
+    """Coerce a timestamp value to unix seconds.
+
+    Accepts numeric epoch seconds or an ISO-8601 string (``Z`` suffix
+    tolerated), falling back to parsing the string as a float.
+
+    Args:
+        value (Any): The raw timestamp value.
+
+    Returns:
+        float | None: Unix seconds, or ``None`` when the value cannot be
+            interpreted as a timestamp.
+    """
     if value is None:
         return None
     if isinstance(value, (int, float)):

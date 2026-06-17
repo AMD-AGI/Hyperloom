@@ -33,7 +33,8 @@ from inference_optimizer.orchestrator.action_executors.explore import (
 )
 from inference_optimizer.orchestrator.shared_state import SharedState
 from inference_optimizer.orchestrator.resource_lock import (
-    ResourceLockManager, SqliteLeaseBackend,
+    ResourceLockManager,
+    SqliteLeaseBackend,
 )
 from inference_optimizer.orchestrator.sub_agent_runner import SubAgentRunner
 from inference_optimizer.orchestrator.task_registry import TaskRegistry
@@ -74,22 +75,26 @@ def _write_baseline_yaml(path: Path) -> None:
 def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
     workspace = slot / "benchmark_sglang_20260519_001122"
     workspace.mkdir(parents=True)
-    (workspace / "benchmark_report.json").write_text(json.dumps({
-        "success": True,
-        "framework": "sglang",
-        "model": "/wekafs/models/Qwen-Qwen3-8B",
-        "throughput": {
-            "request_throughput": tput / 256,
-            "output_throughput": tput,
-            "total_token_throughput": tput * 2,
-            "completed_requests": 80,
-            "duration_seconds": 25.0,
-        },
-        "latency": {
-            "ttft": {"mean_ms": 140.0, "p99_ms": 160.0},
-            "e2el": {"mean_ms": 2500.0, "p99_ms": 2560.0},
-        },
-    }))
+    (workspace / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "framework": "sglang",
+                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "throughput": {
+                    "request_throughput": tput / 256,
+                    "output_throughput": tput,
+                    "total_token_throughput": tput * 2,
+                    "completed_requests": 80,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {
+                    "ttft": {"mean_ms": 140.0, "p99_ms": 160.0},
+                    "e2el": {"mean_ms": 2500.0, "p99_ms": 2560.0},
+                },
+            }
+        )
+    )
     return workspace
 
 
@@ -119,7 +124,8 @@ def test_canonical_fingerprint_collapses_renames():
 def test_canonical_fingerprint_distinguishes_envs():
     fp_args = canonical_fingerprint("--max-num-seqs 256", {})
     fp_args_envs = canonical_fingerprint(
-        "--max-num-seqs 256", {"VLLM_ROCM_USE_AITER": "1"},
+        "--max-num-seqs 256",
+        {"VLLM_ROCM_USE_AITER": "1"},
     )
     assert fp_args != fp_args_envs
 
@@ -151,28 +157,39 @@ def test_record_explore_accepted_dedup_by_fingerprint():
 
 def test_apply_explore_search_update_preserves_accepted():
     state = SharedState()
-    state.record_explore_accepted({
-        "name": "a",
-        "extra_server_args": "--flag-a",
-        "fingerprint": "aa" * 8,
-        "gain_pct": 3.0,
-    })
+    state.record_explore_accepted(
+        {
+            "name": "a",
+            "extra_server_args": "--flag-a",
+            "fingerprint": "aa" * 8,
+            "gain_pct": 3.0,
+        }
+    )
     # Executor update arrives with tested/rejected but NOT accepted —
     # the bucket should survive the merge.
-    state.apply_explore_search_update({
-        "schema_version": 1,
-        "tested": {"bb" * 8: {
-            "name": "b", "extra_server_args": "--flag-b",
-            "extra_envs": {}, "outcome": "REVERT",
-        }},
-        "rejected": [{
-            "fingerprint": "bb" * 8,
-            "name": "b", "reason": "not_keep",
-        }],
-        "name_index": {"b": "bb" * 8},
-        "cursor": 1,
-        "last_round": {"round_id": "explore-001"},
-    })
+    state.apply_explore_search_update(
+        {
+            "schema_version": 1,
+            "tested": {
+                "bb" * 8: {
+                    "name": "b",
+                    "extra_server_args": "--flag-b",
+                    "extra_envs": {},
+                    "outcome": "REVERT",
+                }
+            },
+            "rejected": [
+                {
+                    "fingerprint": "bb" * 8,
+                    "name": "b",
+                    "reason": "not_keep",
+                }
+            ],
+            "name_index": {"b": "bb" * 8},
+            "cursor": 1,
+            "last_round": {"round_id": "explore-001"},
+        }
+    )
     assert len(state.explore_search["accepted"]) == 1
     assert state.explore_search["accepted"][0]["name"] == "a"
     assert "bb" * 8 in state.explore_search["tested"]
@@ -183,9 +200,7 @@ def test_compute_explore_variant_timeout_floor_when_no_baseline():
     """No baseline yet (cold start / failed baseline) → floor."""
     assert _compute_explore_variant_timeout(0.0, 1.10) == DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC
     assert _compute_explore_variant_timeout(-1.0, 1.10) == DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC
-    assert (
-        _compute_explore_variant_timeout(0.0, 1.10, floor_sec=1800) == 1800
-    )
+    assert _compute_explore_variant_timeout(0.0, 1.10, floor_sec=1800) == 1800
 
 
 def test_compute_explore_variant_timeout_scales_with_baseline():
@@ -231,7 +246,8 @@ def test_compute_explore_variant_timeout_safety_margin_override():
 # ExploreExecutor wires the auto-derived timeout through run_grid
 @pytest.mark.asyncio
 async def test_explore_executor_auto_derives_variant_timeout(
-    sub_agent_runner, tmp_path,
+    sub_agent_runner,
+    tmp_path,
 ):
     """No ``variant_timeout_sec`` + injected baseline/kill_ratio → executor auto-derives the cap."""
     sub, tr, _ = sub_agent_runner
@@ -247,31 +263,36 @@ async def test_explore_executor_auto_derives_variant_timeout(
         from inference_optimizer.orchestrator.action_executors._grid_runner import (
             VariantResult,
         )
+
         slot = Path(kwargs["output_root"])
         slot.mkdir(parents=True, exist_ok=True)
         ws = _fake_workspace(slot, tput=805.0)
-        return [VariantResult(
-            name="v_smoke",
-            extra_server_args="--smoke",
-            extra_envs={},
-            status="succeeded",
-            output_throughput=805.0,
-            workspace=str(ws),
-        )]
+        return [
+            VariantResult(
+                name="v_smoke",
+                extra_server_args="--smoke",
+                extra_envs={},
+                status="succeeded",
+                output_throughput=805.0,
+                workspace=str(ws),
+            )
+        ]
 
-    grid = [{
-        "name": "v_smoke",
-        "extra_args": "--smoke",
-        "extra_envs": {},
-        "provenance": "default_grid",
-    }]
+    grid = [
+        {
+            "name": "v_smoke",
+            "extra_args": "--smoke",
+            "extra_envs": {},
+            "provenance": "default_grid",
+        }
+    ]
     task = await tr.create(
         kind="explore",
         params={
             "config_path": str(base),
-            "output_dir":  str(output_dir),
-            "base_tput":   800.0,
-            "grid":        grid,
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": grid,
             # NO variant_timeout_sec → auto-derive should fire.
             "baseline_runtime_sec": 4140.0,
             "explore_overtime_kill_ratio": 1.10,
@@ -293,7 +314,8 @@ async def test_explore_executor_auto_derives_variant_timeout(
 
 @pytest.mark.asyncio
 async def test_explore_executor_safety_margin_param_overrides_default(
-    sub_agent_runner, tmp_path,
+    sub_agent_runner,
+    tmp_path,
 ):
     """``params['variant_timeout_safety_margin']`` adjusts auto-derived headroom absent an explicit timeout."""
     sub, tr, _ = sub_agent_runner
@@ -308,31 +330,36 @@ async def test_explore_executor_safety_margin_param_overrides_default(
         from inference_optimizer.orchestrator.action_executors._grid_runner import (
             VariantResult,
         )
+
         slot = Path(kwargs["output_root"])
         slot.mkdir(parents=True, exist_ok=True)
         ws = _fake_workspace(slot, tput=805.0)
-        return [VariantResult(
-            name="v_smoke",
-            extra_server_args="--smoke",
-            extra_envs={},
-            status="succeeded",
-            output_throughput=805.0,
-            workspace=str(ws),
-        )]
+        return [
+            VariantResult(
+                name="v_smoke",
+                extra_server_args="--smoke",
+                extra_envs={},
+                status="succeeded",
+                output_throughput=805.0,
+                workspace=str(ws),
+            )
+        ]
 
-    grid = [{
-        "name": "v_smoke",
-        "extra_args": "--smoke",
-        "extra_envs": {},
-        "provenance": "default_grid",
-    }]
+    grid = [
+        {
+            "name": "v_smoke",
+            "extra_args": "--smoke",
+            "extra_envs": {},
+            "provenance": "default_grid",
+        }
+    ]
     task = await tr.create(
         kind="explore",
         params={
             "config_path": str(base),
-            "output_dir":  str(output_dir),
-            "base_tput":   800.0,
-            "grid":        grid,
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": grid,
             "baseline_runtime_sec": 4140.0,
             "explore_overtime_kill_ratio": 1.10,
             # Generous headroom (1.0) → 4140 * 2.10 = 8694 s.
@@ -353,9 +380,10 @@ async def test_explore_executor_safety_margin_param_overrides_default(
 
 @pytest.mark.asyncio
 async def test_explore_executor_roofline_advisory_annotates_without_dropping(
-    sub_agent_runner, tmp_path,
+    sub_agent_runner,
+    tmp_path,
 ):
-    """P2_15: a saturation snapshot produces a per-variant ``roofline_advisory`` but every variant still benches."""
+    """A saturation snapshot produces a per-variant ``roofline_advisory`` but every variant still benches."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -367,6 +395,7 @@ async def test_explore_executor_roofline_advisory_annotates_without_dropping(
         from inference_optimizer.orchestrator.action_executors._grid_runner import (
             VariantResult,
         )
+
         grid = list(kwargs.get("grid") or [])
         assert len(grid) == 1
         gv = grid[0]
@@ -374,14 +403,16 @@ async def test_explore_executor_roofline_advisory_annotates_without_dropping(
         slot = Path(kwargs["output_root"])
         slot.mkdir(parents=True, exist_ok=True)
         ws = _fake_workspace(slot, tput=805.0)
-        return [VariantResult(
-            name=gv.name,
-            extra_server_args=gv.extra_server_args,
-            extra_envs=dict(gv.extra_envs),
-            status="succeeded",
-            output_throughput=805.0,
-            workspace=str(ws),
-        )]
+        return [
+            VariantResult(
+                name=gv.name,
+                extra_server_args=gv.extra_server_args,
+                extra_envs=dict(gv.extra_envs),
+                status="succeeded",
+                output_throughput=805.0,
+                workspace=str(ws),
+            )
+        ]
 
     grid = [
         {
@@ -407,12 +438,14 @@ async def test_explore_executor_roofline_advisory_annotates_without_dropping(
         kind="explore",
         params={
             "config_path": str(base),
-            "output_dir":  str(output_dir),
-            "base_tput":   800.0,
-            "grid":        grid,
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": grid,
             "roofline_saturation_snapshot": {
-                "compute": 25.0, "memory": 92.0,
-                "host_overhead": 18.0, "comm": 0.0,
+                "compute": 25.0,
+                "memory": 92.0,
+                "host_overhead": 18.0,
+                "comm": 0.0,
             },
         },
         idempotency_key="ex-roofline-advisory",
@@ -434,15 +467,14 @@ async def test_explore_executor_roofline_advisory_annotates_without_dropping(
     assert advisory[0]["reason"] == "likely_saturated"
     assert advisory[0]["saturated_directions"] == ["memory"]
     # The advisory path never lands variants in skipped_dup.
-    skip_reasons = {
-        s.get("name"): s.get("reason") for s in out.get("skipped_dup", [])
-    }
+    skip_reasons = {s.get("name"): s.get("reason") for s in out.get("skipped_dup", [])}
     assert "memory_only" not in skip_reasons
 
 
 @pytest.mark.asyncio
 async def test_explore_executor_roofline_advisory_empty_when_below_threshold(
-    sub_agent_runner, tmp_path,
+    sub_agent_runner,
+    tmp_path,
 ):
     """When no axis crosses the saturation threshold, the advisory list is empty and every variant runs."""
     sub, tr, _ = sub_agent_runner
@@ -456,36 +488,43 @@ async def test_explore_executor_roofline_advisory_empty_when_below_threshold(
         from inference_optimizer.orchestrator.action_executors._grid_runner import (
             VariantResult,
         )
+
         gv = list(kwargs.get("grid") or [])[0]
         benched_variants.append(gv.name)
         slot = Path(kwargs["output_root"])
         slot.mkdir(parents=True, exist_ok=True)
         ws = _fake_workspace(slot, tput=805.0)
-        return [VariantResult(
-            name=gv.name,
-            extra_server_args=gv.extra_server_args,
-            extra_envs=dict(gv.extra_envs),
-            status="succeeded",
-            output_throughput=805.0,
-            workspace=str(ws),
-        )]
+        return [
+            VariantResult(
+                name=gv.name,
+                extra_server_args=gv.extra_server_args,
+                extra_envs=dict(gv.extra_envs),
+                status="succeeded",
+                output_throughput=805.0,
+                workspace=str(ws),
+            )
+        ]
 
-    grid = [{
-        "name": "memory_only",
-        "extra_args": "--max-running-requests 256",
-        "extra_envs": {},
-        "provenance": "default_grid",
-    }]
+    grid = [
+        {
+            "name": "memory_only",
+            "extra_args": "--max-running-requests 256",
+            "extra_envs": {},
+            "provenance": "default_grid",
+        }
+    ]
     task = await tr.create(
         kind="explore",
         params={
             "config_path": str(base),
-            "output_dir":  str(output_dir),
-            "base_tput":   800.0,
-            "grid":        grid,
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": grid,
             "roofline_saturation_snapshot": {
-                "compute": 5.0, "memory": 10.0,
-                "host_overhead": 5.0, "comm": 0.0,
+                "compute": 5.0,
+                "memory": 10.0,
+                "host_overhead": 5.0,
+                "comm": 0.0,
             },
         },
         idempotency_key="ex-roofline-empty",
@@ -505,7 +544,8 @@ async def test_explore_executor_roofline_advisory_empty_when_below_threshold(
 
 @pytest.mark.asyncio
 async def test_explore_executor_explicit_variant_timeout_wins(
-    sub_agent_runner, tmp_path,
+    sub_agent_runner,
+    tmp_path,
 ):
     """Operator-pinned ``variant_timeout_sec`` takes precedence over auto-derive."""
     sub, tr, _ = sub_agent_runner
@@ -520,32 +560,37 @@ async def test_explore_executor_explicit_variant_timeout_wins(
         from inference_optimizer.orchestrator.action_executors._grid_runner import (
             VariantResult,
         )
+
         slot = Path(kwargs["output_root"])
         slot.mkdir(parents=True, exist_ok=True)
         ws = _fake_workspace(slot, tput=805.0)
-        return [VariantResult(
-            name="v_smoke",
-            extra_server_args="--smoke",
-            extra_envs={},
-            status="succeeded",
-            output_throughput=805.0,
-            workspace=str(ws),
-        )]
+        return [
+            VariantResult(
+                name="v_smoke",
+                extra_server_args="--smoke",
+                extra_envs={},
+                status="succeeded",
+                output_throughput=805.0,
+                workspace=str(ws),
+            )
+        ]
 
-    grid = [{
-        "name": "v_smoke",
-        "extra_args": "--smoke",
-        "extra_envs": {},
-        "provenance": "default_grid",
-    }]
+    grid = [
+        {
+            "name": "v_smoke",
+            "extra_args": "--smoke",
+            "extra_envs": {},
+            "provenance": "default_grid",
+        }
+    ]
     task = await tr.create(
         kind="explore",
         params={
             "config_path": str(base),
-            "output_dir":  str(output_dir),
-            "base_tput":   800.0,
-            "grid":        grid,
-            "variant_timeout_sec": 9000,    # explicit pin
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": grid,
+            "variant_timeout_sec": 9000,  # explicit pin
             "baseline_runtime_sec": 4140.0,
             "explore_overtime_kill_ratio": 1.10,
         },
@@ -580,17 +625,20 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
         # Slot's parent dir name carries the variant slug so we can branch.
         slug = slot.parent.name + "/" + slot.name
         if "v00_v_keep" in slug:
-            tput = 840.0   # +5% vs base 800
+            tput = 840.0  # +5% vs base 800
         elif "v01_v_revert" in slug:
-            tput = 800.4   # +0.05% — below 1.0% threshold
+            tput = 800.4  # +0.05% — below 1.0% threshold
         elif "stack_rebench" in slug:
-            tput = 845.0   # stable for the KEEP'd variant
+            tput = 845.0  # stable for the KEEP'd variant
         else:
             tput = 800.0
         _fake_workspace(slot, tput=tput)
         call_counter["i"] += 1
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
     grid = [
@@ -611,9 +659,9 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
         kind="explore",
         params={
             "config_path": str(base),
-            "output_dir":  str(output_dir),
-            "base_tput":   800.0,
-            "grid":        grid,
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": grid,
             "variant_timeout_sec": 10,
         },
         idempotency_key="ex-1",
@@ -650,7 +698,8 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
 
 @pytest.mark.asyncio
 async def test_explore_executor_recovers_base_tput_from_shared_state(
-    sub_agent_runner, tmp_path,
+    sub_agent_runner,
+    tmp_path,
 ):
     """Regression: when params omits ``base_tput``, the executor recovers it from SharedState (else real wins are discarded)."""
     sub, tr, _ = sub_agent_runner
@@ -668,22 +717,27 @@ async def test_explore_executor_recovers_base_tput_from_shared_state(
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=840.0)  # +5% vs recovered baseline 800
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
-    grid = [{
-        "name": "v_keep",
-        "extra_args": "--keep-flag",
-        "extra_envs": {},
-        "provenance": "default_grid",
-    }]
+    grid = [
+        {
+            "name": "v_keep",
+            "extra_args": "--keep-flag",
+            "extra_envs": {},
+            "provenance": "default_grid",
+        }
+    ]
     task = await tr.create(
         kind="explore",
         params={
             "config_path": str(base),
-            "output_dir":  str(output_dir),
+            "output_dir": str(output_dir),
             # ``base_tput`` intentionally OMITTED to exercise SharedState recovery.
-            "grid":        grid,
+            "grid": grid,
             "variant_timeout_sec": 10,
         },
         idempotency_key="ex-base-tput-recovery",
@@ -707,7 +761,8 @@ async def test_explore_executor_recovers_base_tput_from_shared_state(
 
 @pytest.mark.asyncio
 async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
-    sub_agent_runner, tmp_path,
+    sub_agent_runner,
+    tmp_path,
 ):
     """SharedState recovery prefers ``current_best.tput`` over ``baseline_tput``, so a +5%-vs-baseline variant REVERTs against the best."""
     sub, tr, _ = sub_agent_runner
@@ -725,21 +780,26 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=840.0)  # +5% vs baseline, -6.7% vs best
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
-    grid = [{
-        "name": "v_below_best",
-        "extra_args": "--below-best-flag",
-        "extra_envs": {},
-        "provenance": "default_grid",
-    }]
+    grid = [
+        {
+            "name": "v_below_best",
+            "extra_args": "--below-best-flag",
+            "extra_envs": {},
+            "provenance": "default_grid",
+        }
+    ]
     task = await tr.create(
         kind="explore",
         params={
             "config_path": str(base),
-            "output_dir":  str(output_dir),
-            "grid":        grid,
+            "output_dir": str(output_dir),
+            "grid": grid,
             "variant_timeout_sec": 10,
         },
         idempotency_key="ex-cb-recovery",
@@ -777,7 +837,10 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
         bench_calls.append(slot.name)
         _fake_workspace(slot, tput=900.0)
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
     fp_dup = canonical_fingerprint("--dup-flag", {})
@@ -791,17 +854,19 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
         kind="explore",
         params={
             "config_path": str(base),
-            "output_dir":  str(output_dir),
-            "base_tput":   800.0,
-            "grid":        grid,
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": grid,
             "explore_search": {
-                "tested": {fp_dup: {
-                    "fingerprint": fp_dup,
-                    "name": "previous_run_name",
-                    "extra_server_args": "--dup-flag",
-                    "extra_envs": {},
-                    "outcome": "REVERT",
-                }},
+                "tested": {
+                    fp_dup: {
+                        "fingerprint": fp_dup,
+                        "name": "previous_run_name",
+                        "extra_server_args": "--dup-flag",
+                        "extra_envs": {},
+                        "outcome": "REVERT",
+                    }
+                },
                 "rejected": [],
                 "accepted": [],
                 "name_index": {},
@@ -829,7 +894,8 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
 
 @pytest.mark.asyncio
 async def test_explore_executor_stack_rebench_evicts_unstable_keep(
-    sub_agent_runner, tmp_path,
+    sub_agent_runner,
+    tmp_path,
 ):
     """KB_design §3.4 §4.4: an unstable stack rebench evicts the KEEP'd variant (KEEP_UNSTABLE → REVERT)."""
     sub, tr, _ = sub_agent_runner
@@ -843,28 +909,33 @@ async def test_explore_executor_stack_rebench_evicts_unstable_keep(
         slug = slot.parent.name + "/" + slot.name
         # Single-variant run looks great:
         if "v00_unstable" in slug and "stack_rebench" not in slug:
-            tput = 850.0    # +6.25%
+            tput = 850.0  # +6.25%
         elif "stack_rebench" in slug:
-            tput = 802.0    # +0.25% — below the 0.5% stable floor
+            tput = 802.0  # +0.25% — below the 0.5% stable floor
         else:
             tput = 800.0
         _fake_workspace(slot, tput=tput)
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
     task = await tr.create(
         kind="explore",
         params={
             "config_path": str(base),
-            "output_dir":  str(output_dir),
-            "base_tput":   800.0,
-            "grid": [{
-                "name": "unstable",
-                "extra_args": "--unstable-flag",
-                "extra_envs": {},
-                "provenance": "llm_direct",
-            }],
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "unstable",
+                    "extra_args": "--unstable-flag",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
             "variant_timeout_sec": 10,
             "stack_stable_threshold_pct": 0.5,
         },
@@ -894,6 +965,7 @@ def test_default_keep_and_stack_stable_thresholds():
         DEFAULT_KEEP_THRESHOLD_PCT,
         DEFAULT_STACK_STABLE_PCT,
     )
+
     assert DEFAULT_KEEP_THRESHOLD_PCT == 1.0
     assert DEFAULT_STACK_STABLE_PCT == 0.5
     # The rebench floor must not exceed the single-variant KEEP gate.
@@ -905,21 +977,21 @@ def test_stack_stable_floor_arithmetic_at_new_default():
     from inference_optimizer.orchestrator.action_executors.explore import (
         DEFAULT_STACK_STABLE_PCT,
     )
+
     base = 4438.83
     stable_floor = base * (1.0 + DEFAULT_STACK_STABLE_PCT / 100.0)
     assert base * 1.006 > stable_floor, (
-        f"DEFAULT_STACK_STABLE_PCT={DEFAULT_STACK_STABLE_PCT}: +0.6% "
-        f"rebench should clear floor={stable_floor:.2f}"
+        f"DEFAULT_STACK_STABLE_PCT={DEFAULT_STACK_STABLE_PCT}: +0.6% rebench should clear floor={stable_floor:.2f}"
     )
     assert base * 1.003 < stable_floor, (
-        f"DEFAULT_STACK_STABLE_PCT={DEFAULT_STACK_STABLE_PCT}: +0.3% "
-        f"rebench should fall below floor={stable_floor:.2f}"
+        f"DEFAULT_STACK_STABLE_PCT={DEFAULT_STACK_STABLE_PCT}: +0.3% rebench should fall below floor={stable_floor:.2f}"
     )
 
 
 @pytest.mark.asyncio
 async def test_explore_executor_killed_overtime_no_tput_no_keep(
-    sub_agent_runner, tmp_path,
+    sub_agent_runner,
+    tmp_path,
 ):
     """Fix E (Q3c): a fired soft deadline records KILLED_OVERTIME (no tput, no KEEP/REVERT, stack unchanged)."""
     sub, tr, _ = sub_agent_runner
@@ -941,19 +1013,21 @@ async def test_explore_executor_killed_overtime_no_tput_no_keep(
             stderr="",
         )
 
-    grid = [{
-        "name": "slow_variant",
-        "extra_args": "--slow-flag",
-        "extra_envs": {},
-        "provenance": "default_grid",
-    }]
+    grid = [
+        {
+            "name": "slow_variant",
+            "extra_args": "--slow-flag",
+            "extra_envs": {},
+            "provenance": "default_grid",
+        }
+    ]
     task = await tr.create(
         kind="explore",
         params={
             "config_path": str(base),
-            "output_dir":  str(output_dir),
-            "base_tput":   800.0,
-            "grid":        grid,
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": grid,
             "variant_timeout_sec": 60,
             "baseline_runtime_sec": 10.0,
             "explore_overtime_kill_ratio": 1.10,
@@ -994,15 +1068,15 @@ async def test_explore_executor_killed_overtime_no_tput_no_keep(
     # Rejected ledger picks the variant up so re-proposals hit ledger.dedup.
     rejected_reasons = {r["reason"] for r in ledger["rejected"]}
     assert "killed_overtime" in rejected_reasons
-    outcomes = {row["variant_name"]: row["outcome"]
-                for row in out["per_variant_outcomes"]}
+    outcomes = {row["variant_name"]: row["outcome"] for row in out["per_variant_outcomes"]}
     assert outcomes["slow_variant"] == "KILLED_OVERTIME"
     assert fp in out["explore_search_update"]["last_round"]["killed_overtime"]
 
 
 @pytest.mark.asyncio
 async def test_explore_executor_overtime_disabled_when_ratio_zero(
-    sub_agent_runner, tmp_path,
+    sub_agent_runner,
+    tmp_path,
 ):
     """Fix E (Q5): ratio<=0 disables the gate; executor must NOT pass ``soft_deadline_sec``."""
     sub, tr, _ = sub_agent_runner
@@ -1016,26 +1090,31 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
         received_deadlines.append(kwargs.get("soft_deadline_sec"))
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
-        _fake_workspace(slot, tput=820.0)   # +2.5% KEEP
+        _fake_workspace(slot, tput=820.0)  # +2.5% KEEP
         return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="ok", stderr="",
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
         )
 
     task = await tr.create(
         kind="explore",
         params={
             "config_path": str(base),
-            "output_dir":  str(output_dir),
-            "base_tput":   800.0,
-            "grid": [{
-                "name": "fast_variant",
-                "extra_args": "--fast-flag",
-                "extra_envs": {},
-                "provenance": "default_grid",
-            }],
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "fast_variant",
+                    "extra_args": "--fast-flag",
+                    "extra_envs": {},
+                    "provenance": "default_grid",
+                }
+            ],
             "variant_timeout_sec": 60,
             "baseline_runtime_sec": 10.0,
-            "explore_overtime_kill_ratio": 0.0,   # disabled
+            "explore_overtime_kill_ratio": 0.0,  # disabled
         },
         idempotency_key="ex-overtime-off",
     )
@@ -1062,8 +1141,8 @@ async def test_explore_executor_empty_grid_returns_failed(sub_agent_runner, tmp_
         kind="explore",
         params={
             "config_path": str(base),
-            "base_tput":   800.0,
-            "grid":        [],
+            "base_tput": 800.0,
+            "grid": [],
         },
         idempotency_key="ex-empty",
     )
@@ -1079,10 +1158,8 @@ def test_capability_summary_has_explore_row_with_legacy_aliases():
     state = {
         "explore_search": {
             "tested": {"aabbccdd11223344": {"name": "v1", "outcome": "KEEP"}},
-            "accepted": [{"name": "v1", "gain_pct": 4.2,
-                           "fingerprint": "aabbccdd11223344"}],
-            "rejected": [{"name": "v2", "reason": "stack_unstable",
-                           "fingerprint": "deadbeefdeadbeef"}],
+            "accepted": [{"name": "v1", "gain_pct": 4.2, "fingerprint": "aabbccdd11223344"}],
+            "rejected": [{"name": "v2", "reason": "stack_unstable", "fingerprint": "deadbeefdeadbeef"}],
             "winners_history": [{"round_id": "explore-001"}],
         },
         "optimization_stack": [
@@ -1111,7 +1188,10 @@ def _names(variants):
 def test_atom_default_grid_mla_moe_model_emits_all_gated_variants():
     """MoE + MLA + MTP-capable model class (``moe_mla``) unlocks the full atom seed grid (>= 5 variants)."""
     grid = _atom_default_grid(
-        model_class="moe_mla", conc=64, isl=1024, osl=1024,
+        model_class="moe_mla",
+        conc=64,
+        isl=1024,
+        osl=1024,
     )
     names = _names(grid)
     assert len(grid) >= 5, f"too few variants: {names}"
@@ -1129,7 +1209,10 @@ def test_atom_default_grid_mla_moe_model_emits_all_gated_variants():
 def test_atom_default_grid_dense_model_omits_moe_mla_mtp():
     """Dense model class must NOT emit MoE / MLA / MTP variants (would fail flag-compat or crash atom)."""
     grid = _atom_default_grid(
-        model_class="dense", conc=8, isl=512, osl=512,
+        model_class="dense",
+        conc=8,
+        isl=512,
+        osl=512,
     )
     names = _names(grid)
     assert "atom_ep" not in names
@@ -1143,7 +1226,10 @@ def test_atom_default_grid_dense_model_omits_moe_mla_mtp():
 
 def test_atom_default_grid_fp8_model_emits_kv_fp8():
     grid = _atom_default_grid(
-        model_class="moe_fp8", conc=16, isl=512, osl=512,
+        model_class="moe_fp8",
+        conc=16,
+        isl=512,
+        osl=512,
     )
     names = _names(grid)
     assert "atom_kv_fp8" in names
@@ -1161,17 +1247,13 @@ def test_atom_default_grid_variants_have_unique_names():
     for mc in ("dense", "moe", "moe_mla", "moe_mla_nsa", "moe_fp8", ""):
         grid = _atom_default_grid(model_class=mc, conc=32)
         names = _names(grid)
-        assert len(names) == len(set(names)), (
-            f"duplicate names in atom grid for model_class={mc!r}: {names}"
-        )
+        assert len(names) == len(set(names)), f"duplicate names in atom grid for model_class={mc!r}: {names}"
 
 
 def test_atom_default_grid_names_use_atom_prefix():
     grid = _atom_default_grid(model_class="moe_mla", conc=64)
     for v in grid:
-        assert v.name.startswith("atom_"), (
-            f"variant name does not start with 'atom_': {v.name!r}"
-        )
+        assert v.name.startswith("atom_"), f"variant name does not start with 'atom_': {v.name!r}"
 
 
 def test_atom_default_grid_variants_carry_default_grid_provenance():
@@ -1190,7 +1272,11 @@ def test_atom_default_grid_conc_zero_omits_cudagraph_bracket():
 
 def test_default_grid_for_framework_atom_returns_seeded_grid():
     grid = _default_grid_for_framework(
-        "atom", model_class="moe_mla", conc=64, isl=1024, osl=1024,
+        "atom",
+        model_class="moe_mla",
+        conc=64,
+        isl=1024,
+        osl=1024,
     )
     assert grid, "atom framework should produce a non-empty default grid"
     assert any(v.name == "atom_level_2" for v in grid)
@@ -1200,7 +1286,9 @@ def test_default_grid_for_framework_atom_returns_seeded_grid():
 def test_default_grid_for_framework_non_atom_returns_empty(framework):
     """Sglang/vllm rely on LLM-emitted variants; unknown frameworks also return ``[]`` (no crash)."""
     grid = _default_grid_for_framework(
-        framework, model_class="moe_mla", conc=64,
+        framework,
+        model_class="moe_mla",
+        conc=64,
     )
     assert grid == []
 
@@ -1230,7 +1318,9 @@ def _write_atom_baseline_yaml(path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_explore_executor_atom_empty_grid_seeds_default_grid(
-    sub_agent_runner, tmp_path, monkeypatch,
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
 ):
     """An empty grid on an atom session falls through to ``_default_grid_for_framework('atom', ...)`` rather than failing."""
     sub, tr, _ = sub_agent_runner
@@ -1258,8 +1348,8 @@ async def test_explore_executor_atom_empty_grid_seeds_default_grid(
         kind="explore",
         params={
             "config_path": str(base),
-            "base_tput":   800.0,
-            "grid":        [],
+            "base_tput": 800.0,
+            "grid": [],
             "model_class": "moe_mla",
         },
         idempotency_key="ex-atom-empty-seeded",
@@ -1281,7 +1371,8 @@ async def test_explore_executor_atom_empty_grid_seeds_default_grid(
 
 @pytest.mark.asyncio
 async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
-    sub_agent_runner, tmp_path,
+    sub_agent_runner,
+    tmp_path,
 ):
     """Inverse of the atom test: an empty grid on sglang/vllm still returns ``error_class='empty_grid'``."""
     sub, tr, _ = sub_agent_runner
@@ -1291,8 +1382,8 @@ async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
         kind="explore",
         params={
             "config_path": str(base),
-            "base_tput":   800.0,
-            "grid":        [],
+            "base_tput": 800.0,
+            "grid": [],
         },
         idempotency_key="ex-sglang-empty-still-fails",
     )
@@ -1312,16 +1403,16 @@ def test_atom_default_grid_survives_compatibility_filter_without_help_probe(
     from inference_optimizer.orchestrator.action_executors import (
         _grid_runner,
     )
+
     monkeypatch.setattr(
-        _grid_runner, "_probe_server_help_text", lambda fw: "",
+        _grid_runner,
+        "_probe_server_help_text",
+        lambda fw: "",
     )
 
     grid = _atom_default_grid(model_class="moe_mla", conc=64)
     kept, dropped = apply_compatibility_filter(grid)
-    assert kept == grid, (
-        f"compatibility filter dropped seed variants when help-text "
-        f"probe is empty; dropped={dropped}"
-    )
+    assert kept == grid, f"compatibility filter dropped seed variants when help-text probe is empty; dropped={dropped}"
 
 
 def test_grid_variants_from_payload_coerces_list_extra_args():
@@ -1336,15 +1427,11 @@ def test_grid_variants_from_payload_coerces_list_extra_args():
     payload = [
         {"name": "list_args", "extra_args": ["--max-num-batched-tokens", "32768"]},
         {"name": "str_args", "extra_args": "--block-size 64"},
-        {"name": "tuple_server_args",
-         "extra_server_args": ("--distributed-executor-backend", "mp")},
+        {"name": "tuple_server_args", "extra_server_args": ("--distributed-executor-backend", "mp")},
     ]
     by_name = {v.name: v for v in _grid_variants_from_payload(payload)}
 
     assert by_name["list_args"].extra_server_args == "--max-num-batched-tokens 32768"
     assert "[" not in by_name["list_args"].extra_server_args
     assert by_name["str_args"].extra_server_args == "--block-size 64"
-    assert (
-        by_name["tuple_server_args"].extra_server_args
-        == "--distributed-executor-backend mp"
-    )
+    assert by_name["tuple_server_args"].extra_server_args == "--distributed-executor-backend mp"

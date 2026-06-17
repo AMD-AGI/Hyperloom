@@ -12,6 +12,7 @@ By default reads the last 500 events to mirror the legacy behaviour; pass
 500-event default rotates older rounds out and silently undercounts on
 long runs — use ``--all`` when comparing totals against the run report.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -23,13 +24,21 @@ from collections import Counter
 
 
 def main() -> int:
+    """Count and print coordinator event topics for a session.
+
+    Resolves the session directory, opens its ``coordinator.db``, tallies
+    proposal/delegated/kernel-request/kernel-response events over the selected
+    window, and prints the counts as JSON.
+
+    Returns:
+        int: ``0`` on success, or ``2`` when ``coordinator.db`` is not found.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "session_dir",
         nargs="?",
         default=None,
-        help="Session directory (default: $USER_DATA_PATH or "
-             "/workspace/hyperloom)",
+        help="Session directory (default: $USER_DATA_PATH or /workspace/hyperloom)",
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
@@ -51,6 +60,7 @@ def main() -> int:
         # Defer to inference_optimizer.paths so resolution rules
         # (env > default) stay in one place.
         from inference_optimizer.paths import session_dir as _resolve_sd
+
         session_dir = _resolve_sd()
     db = pathlib.Path(session_dir) / "storage" / "coordinator.db"
     if not db.exists():
@@ -58,16 +68,10 @@ def main() -> int:
         return 2
 
     if args.all:
-        query = (
-            "SELECT from_agent, to_agent, topic, payload FROM events "
-            "ORDER BY seq DESC"
-        )
+        query = "SELECT from_agent, to_agent, topic, payload FROM events ORDER BY seq DESC"
         params: tuple = ()
     else:
-        query = (
-            "SELECT from_agent, to_agent, topic, payload FROM events "
-            "ORDER BY seq DESC LIMIT ?"
-        )
+        query = "SELECT from_agent, to_agent, topic, payload FROM events ORDER BY seq DESC LIMIT ?"
         params = (int(args.limit),)
 
     counts: Counter[str] = Counter()

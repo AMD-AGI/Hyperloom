@@ -56,8 +56,9 @@ try:
     from huggingface_hub import HfApi, snapshot_download
     from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError
 except ImportError as e:
-    print(f"ERROR: huggingface_hub not installed: {e}\n"
-          "Run: pip install --quiet 'huggingface_hub>=0.24'", file=sys.stderr)
+    print(
+        f"ERROR: huggingface_hub not installed: {e}\nRun: pip install --quiet 'huggingface_hub>=0.24'", file=sys.stderr
+    )
     sys.exit(2)
 
 
@@ -78,15 +79,39 @@ def slug(repo_id: str) -> str:
       meta-llama/Llama-3.1-8B            → meta-llama-Llama-3.1-8B
       deepseek-ai/DeepSeek-R1            → deepseek-ai-DeepSeek-R1
       dphn/dolphin-2.9.1-yi-1.5-34b      → dphn-dolphin-2.9.1-yi-1.5-34b
+
+    Args:
+        repo_id (str): The HuggingFace repo id (``owner/repo``).
+
+    Returns:
+        str: The slug with ``/`` replaced by ``-``.
     """
     return repo_id.replace("/", "-")
 
 
 def dest_dir(target_root: Path, repo_id: str) -> Path:
+    """Compute the final destination directory for a repo.
+
+    Args:
+        target_root (Path): Root directory holding per-model folders.
+        repo_id (str): The HuggingFace repo id.
+
+    Returns:
+        Path: ``target_root/<slug>`` for the repo.
+    """
     return target_root / slug(repo_id)
 
 
 def tmp_dir(target_root: Path, repo_id: str) -> Path:
+    """Compute the in-flight temporary directory for a repo download.
+
+    Args:
+        target_root (Path): Root directory holding per-model folders.
+        repo_id (str): The HuggingFace repo id.
+
+    Returns:
+        Path: ``target_root/.tmp/<slug>.part`` used before the atomic rename.
+    """
     return target_root / ".tmp" / f"{slug(repo_id)}.part"
 
 
@@ -94,18 +119,26 @@ def tmp_dir(target_root: Path, repo_id: str) -> Path:
 
 
 def is_complete(dest: Path, repo_id: str, hf_api: HfApi, token: str) -> bool:
-    """True iff dest/ has every file the HF repo claims, with non-zero size.
+    """Report whether a local copy fully mirrors the HF repo.
 
     One ``list_repo_files`` call; partial prior runs fail this because they
     miss a file or have a zero-sized one.
+
+    Args:
+        dest: Local destination directory.
+        repo_id: HF repo id to compare against.
+        hf_api: An :class:`HfApi` client.
+        token: HF token for gated repos.
+
+    Returns:
+        ``True`` iff ``dest`` has every claimed file with non-zero size.
     """
     if not dest.is_dir():
         return False
     try:
         files = hf_api.list_repo_files(repo_id, token=token)
     except Exception as e:
-        log.warning("[%s] HF list_repo_files failed (%s) — re-downloading",
-                    repo_id, e)
+        log.warning("[%s] HF list_repo_files failed (%s) — re-downloading", repo_id, e)
         return False
     for f in files:
         p = dest / f
@@ -118,7 +151,14 @@ def is_complete(dest: Path, repo_id: str, hf_api: HfApi, token: str) -> bool:
 
 
 def _dir_stats(p: Path) -> tuple[int, float]:
-    """Return (n_files, total_GB) under p, ignoring .part suffixes."""
+    """Return (n_files, total_GB) under p, ignoring .part suffixes.
+
+    Args:
+        p (Path): Directory to walk recursively.
+
+    Returns:
+        tuple[int, float]: The file count and total size in gigabytes.
+    """
     n = 0
     total = 0
     for f in p.rglob("*"):
@@ -128,11 +168,22 @@ def _dir_stats(p: Path) -> tuple[int, float]:
     return n, total / 1e9
 
 
-def download_one(repo_id: str, target_root: Path, hf_token: str,
-                 inner_workers: int = 4) -> dict:
+def download_one(repo_id: str, target_root: Path, hf_token: str, inner_workers: int = 4) -> dict:
     """Download a single HF repo to <target_root>/<slug>/.
 
-    Returns a dict: status (OK/SKIP/FAIL), size_gb, n_files, elapsed_s, reason.
+    Skips already-complete destinations, downloads into a temporary ``.part``
+    directory, then atomically swaps it into place. Failures are reported in
+    the return dict rather than raised.
+
+    Args:
+        repo_id (str): The HuggingFace repo id to download.
+        target_root (Path): Root directory for per-model folders.
+        hf_token (str): HF token for authenticated/gated repos.
+        inner_workers (int): Parallel file workers for ``snapshot_download``.
+
+    Returns:
+        dict: A result dict with ``status`` (OK/SKIP/FAIL), ``size_gb``,
+        ``n_files``, ``elapsed_s``, and an optional ``reason``.
     """
     start = time.time()
     dest = dest_dir(target_root, repo_id)
@@ -141,8 +192,7 @@ def download_one(repo_id: str, target_root: Path, hf_token: str,
 
     if is_complete(dest, repo_id, hf_api, hf_token):
         n, gb = _dir_stats(dest)
-        return {"status": "SKIP", "size_gb": gb, "n_files": n,
-                "elapsed_s": 0, "reason": "already complete"}
+        return {"status": "SKIP", "size_gb": gb, "n_files": n, "elapsed_s": 0, "reason": "already complete"}
 
     # Clean stale .part if previous run aborted mid-flight
     if tmp.exists():
@@ -159,26 +209,41 @@ def download_one(repo_id: str, target_root: Path, hf_token: str,
             max_workers=inner_workers,
             allow_patterns=None,
             ignore_patterns=[
-                "*.h5", "*.msgpack", "*.onnx", "*.tflite",
+                "*.h5",
+                "*.msgpack",
+                "*.onnx",
+                "*.tflite",
                 "consolidated.*",  # legacy llama-cpp dumps
             ],
             tqdm_class=None,
         )
     except RepositoryNotFoundError:
         shutil.rmtree(tmp, ignore_errors=True)
-        return {"status": "FAIL", "size_gb": 0, "n_files": 0,
-                "elapsed_s": time.time() - start,
-                "reason": "repo not found (gated or deleted)"}
+        return {
+            "status": "FAIL",
+            "size_gb": 0,
+            "n_files": 0,
+            "elapsed_s": time.time() - start,
+            "reason": "repo not found (gated or deleted)",
+        }
     except HfHubHTTPError as e:
         shutil.rmtree(tmp, ignore_errors=True)
-        return {"status": "FAIL", "size_gb": 0, "n_files": 0,
-                "elapsed_s": time.time() - start,
-                "reason": f"HF HTTP error: {e}"[:200]}
+        return {
+            "status": "FAIL",
+            "size_gb": 0,
+            "n_files": 0,
+            "elapsed_s": time.time() - start,
+            "reason": f"HF HTTP error: {e}"[:200],
+        }
     except Exception as e:
         shutil.rmtree(tmp, ignore_errors=True)
-        return {"status": "FAIL", "size_gb": 0, "n_files": 0,
-                "elapsed_s": time.time() - start,
-                "reason": f"{type(e).__name__}: {e}"[:200]}
+        return {
+            "status": "FAIL",
+            "size_gb": 0,
+            "n_files": 0,
+            "elapsed_s": time.time() - start,
+            "reason": f"{type(e).__name__}: {e}"[:200],
+        }
 
     # Atomic-ish swap; clear any partial dest first.
     if dest.exists():
@@ -192,23 +257,40 @@ def download_one(repo_id: str, target_root: Path, hf_token: str,
         shutil.rmtree(tmp, ignore_errors=True)
 
     n, gb = _dir_stats(dest)
-    return {"status": "OK", "size_gb": gb, "n_files": n,
-            "elapsed_s": time.time() - start}
+    return {"status": "OK", "size_gb": gb, "n_files": n, "elapsed_s": time.time() - start}
 
 
 # ── Input loading ───────────────────────────────────────────────────────────
 
 
 def _load_candidates(path: Path) -> list[str]:
+    """Load repo ids from a candidates JSON file.
+
+    Args:
+        path (Path): Path to the candidates JSON produced by build_candidates.
+
+    Returns:
+        list[str]: The ``repo_id`` of each candidate entry.
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
     cands = data.get("candidates", [])
     return [c["repo_id"] for c in cands if c.get("repo_id")]
 
 
-def _slice_repos(repos: list[str], batch_index: int | None,
-                 batch_size: int | None) -> list[str]:
-    """Apply optional --batch-index / --batch-size slice (same semantics as
-    generate_hf_matrix.py, so prewarm + optimize target the same repos)."""
+def _slice_repos(repos: list[str], batch_index: int | None, batch_size: int | None) -> list[str]:
+    """Apply an optional ``--batch-index`` / ``--batch-size`` slice.
+
+    Uses the same semantics as ``generate_hf_matrix.py`` so prewarm and
+    optimize target the same repos.
+
+    Args:
+        repos: The full repo list.
+        batch_index: 0-based batch index (defaults to 0).
+        batch_size: Entries per batch; falsy returns all repos.
+
+    Returns:
+        The selected repo slice.
+    """
     if not batch_size:
         return repos
     bi = batch_index or 0
@@ -218,6 +300,20 @@ def _slice_repos(repos: list[str], batch_index: int | None,
 
 
 def load_repos(args: argparse.Namespace) -> list[str]:
+    """Resolve the list of repos to prewarm from CLI args or stdin.
+
+    Precedence: explicit ``--repos``, then ``--candidates`` (with optional
+    batch slicing), then newline-delimited repo ids piped on stdin.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments.
+
+    Returns:
+        list[str]: The repo ids to download.
+
+    Raises:
+        SystemExit: If no input source provides any repos.
+    """
     if args.repos:
         return list(args.repos)
     if args.candidates:
@@ -225,19 +321,25 @@ def load_repos(args: argparse.Namespace) -> list[str]:
         return _slice_repos(repos, args.batch_index, args.batch_size)
     # stdin (one repo per line)
     if not sys.stdin.isatty():
-        repos = [ln.strip() for ln in sys.stdin if ln.strip()
-                 and not ln.startswith("#")]
+        repos = [ln.strip() for ln in sys.stdin if ln.strip() and not ln.startswith("#")]
         if repos:
             return repos
-    raise SystemExit(
-        "provide --candidates FILE or --repos REPO [REPO ...] "
-        "or pipe a list to stdin")
+    raise SystemExit("provide --candidates FILE or --repos REPO [REPO ...] or pipe a list to stdin")
 
 
 # ── Main loop ───────────────────────────────────────────────────────────────
 
 
 def _format_extras(result: dict) -> str:
+    """Build a compact one-line summary of a download result for logging.
+
+    Args:
+        result (dict): A result dict from :func:`download_one`.
+
+    Returns:
+        str: A space-joined summary of size, file count, elapsed time, and
+        any reason.
+    """
     parts = [f"{result.get('size_gb', 0):.1f}GB"]
     if result.get("n_files", 0) > 0:
         parts.append(f"{result['n_files']}f")
@@ -253,35 +355,56 @@ def _format_extras(result: dict) -> str:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--candidates", type=Path,
-                   help="candidates JSON from build_candidates.py "
-                        "(preferred, drives the same pool as the batch matrix)")
-    p.add_argument("--repos", nargs="+",
-                   help="explicit HF repo IDs (alt to --candidates / stdin)")
-    p.add_argument("--batch-index", type=int, default=None,
-                   help="optional slice start (0-based, same semantics as "
-                        "generate_hf_matrix.py)")
-    p.add_argument("--batch-size", type=int, default=None,
-                   help="optional slice length (when set, takes "
-                        "candidates[batch_index*batch_size : +batch_size])")
-    p.add_argument("--target-root", type=Path, default=Path("/wekafs/models"),
-                   help="root dir for <slug>/ subdirs "
-                        "(default /wekafs/models; on c04u01 the real "
-                        "underlying path is /mnt/weka/models via a symlink)")
-    p.add_argument("--concurrency", type=int, default=16,
-                   help="parallel repo downloads (default 16, HF token "
-                        "usually tolerates this)")
-    p.add_argument("--inner-workers", type=int, default=4,
-                   help="parallel file workers inside a single snapshot_download "
-                        "(default 4, multiplies with --concurrency)")
-    p.add_argument("--exclude-done", action="store_true",
-                   help="also skip repos listed in already_done.json")
-    p.add_argument("--already-done", type=Path,
-                   default=Path(__file__).parent / "candidates" / "already_done.json")
-    p.add_argument("--log", type=Path,
-                   help="also append progress to this file (in addition to stdout)")
+    """Parse CLI arguments and prewarm the requested repos concurrently.
+
+    Resolves the repo list, optionally excludes already-done models, downloads
+    each repo across a thread pool, and logs a final ok/skip/fail summary.
+
+    Returns:
+        int: ``0`` if no downloads failed, otherwise ``1``.
+    """
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument(
+        "--candidates",
+        type=Path,
+        help="candidates JSON from build_candidates.py (preferred, drives the same pool as the batch matrix)",
+    )
+    p.add_argument("--repos", nargs="+", help="explicit HF repo IDs (alt to --candidates / stdin)")
+    p.add_argument(
+        "--batch-index",
+        type=int,
+        default=None,
+        help="optional slice start (0-based, same semantics as generate_hf_matrix.py)",
+    )
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="optional slice length (when set, takes candidates[batch_index*batch_size : +batch_size])",
+    )
+    p.add_argument(
+        "--target-root",
+        type=Path,
+        default=Path("/wekafs/models"),
+        help="root dir for <slug>/ subdirs "
+        "(default /wekafs/models; on c04u01 the real "
+        "underlying path is /mnt/weka/models via a symlink)",
+    )
+    p.add_argument(
+        "--concurrency",
+        type=int,
+        default=16,
+        help="parallel repo downloads (default 16, HF token usually tolerates this)",
+    )
+    p.add_argument(
+        "--inner-workers",
+        type=int,
+        default=4,
+        help="parallel file workers inside a single snapshot_download (default 4, multiplies with --concurrency)",
+    )
+    p.add_argument("--exclude-done", action="store_true", help="also skip repos listed in already_done.json")
+    p.add_argument("--already-done", type=Path, default=Path(__file__).parent / "candidates" / "already_done.json")
+    p.add_argument("--log", type=Path, help="also append progress to this file (in addition to stdout)")
     p.add_argument("--verbose", action="store_true")
     args = p.parse_args()
 
@@ -303,8 +426,7 @@ def main() -> int:
 
     repos = load_repos(args)
     if args.exclude_done and args.already_done.exists():
-        done = {m["repo_id"] for m in
-                json.loads(args.already_done.read_text()).get("models", [])}
+        done = {m["repo_id"] for m in json.loads(args.already_done.read_text()).get("models", [])}
         before = len(repos)
         repos = [r for r in repos if r not in done]
         log.info("--exclude-done: %d → %d repos", before, len(repos))
@@ -316,8 +438,13 @@ def main() -> int:
     args.target_root.mkdir(parents=True, exist_ok=True)
     (args.target_root / ".tmp").mkdir(parents=True, exist_ok=True)
 
-    log.info("PREWARM start: %d repos → %s (concurrency=%d, inner=%d)",
-             len(repos), args.target_root, args.concurrency, args.inner_workers)
+    log.info(
+        "PREWARM start: %d repos → %s (concurrency=%d, inner=%d)",
+        len(repos),
+        args.target_root,
+        args.concurrency,
+        args.inner_workers,
+    )
 
     ok = skip = fail = 0
     total_gb = 0.0
@@ -328,36 +455,36 @@ def main() -> int:
         max_workers=args.concurrency,
         thread_name_prefix="prewarm",
     ) as ex:
-        future_to_repo = {
-            ex.submit(download_one, r, args.target_root, hf_token,
-                      args.inner_workers): r
-            for r in repos
-        }
-        for done_count, fut in enumerate(
-                concurrent.futures.as_completed(future_to_repo), 1):
+        future_to_repo = {ex.submit(download_one, r, args.target_root, hf_token, args.inner_workers): r for r in repos}
+        for done_count, fut in enumerate(concurrent.futures.as_completed(future_to_repo), 1):
             repo = future_to_repo[fut]
             try:
                 result = fut.result()
             except Exception as e:
-                result = {"status": "FAIL", "reason": f"executor: {e}",
-                          "size_gb": 0, "n_files": 0, "elapsed_s": 0}
+                result = {"status": "FAIL", "reason": f"executor: {e}", "size_gb": 0, "n_files": 0, "elapsed_s": 0}
 
             status = result["status"]
-            if status == "OK":   ok += 1
-            elif status == "SKIP": skip += 1
+            if status == "OK":
+                ok += 1
+            elif status == "SKIP":
+                skip += 1
             else:
                 fail += 1
                 fail_repos.append((repo, result.get("reason", "?")))
 
             total_gb += result.get("size_gb", 0)
-            log.info("[%d/%d] %s %s  %s",
-                     done_count, len(repos), status, repo,
-                     _format_extras(result))
+            log.info("[%d/%d] %s %s  %s", done_count, len(repos), status, repo, _format_extras(result))
 
     elapsed = time.time() - started
-    log.info("PREWARM done: ok=%d skip=%d fail=%d  total=%.1fGB  elapsed=%dm%ds",
-             ok, skip, fail, total_gb,
-             int(elapsed // 60), int(elapsed % 60))
+    log.info(
+        "PREWARM done: ok=%d skip=%d fail=%d  total=%.1fGB  elapsed=%dm%ds",
+        ok,
+        skip,
+        fail,
+        total_gb,
+        int(elapsed // 60),
+        int(elapsed % 60),
+    )
 
     if fail_repos:
         log.warning("Failures:")

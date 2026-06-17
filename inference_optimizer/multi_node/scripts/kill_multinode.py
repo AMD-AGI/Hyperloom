@@ -24,6 +24,11 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
 def _log(msg: str) -> None:
+    """Write a timestamped progress line to stderr and flush it.
+
+    Args:
+        msg (str): The message text to emit.
+    """
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[kill_multinode {ts}] {msg}\n")
     sys.stderr.flush()
@@ -34,6 +39,14 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
 
     One sweep covers both colocated and PD-disaggregated modes (unused
     patterns are no-ops).
+
+    Args:
+        pid_dir: Directory containing the PID files to sweep.
+        grace_sec: Seconds to wait between SIGTERM and SIGKILL.
+
+    Returns:
+        dict: Summary with ``killed``, ``stale``, and ``missing`` lists keyed
+        by PID-file name.
     """
     summary: dict[str, list] = {"killed": [], "stale": [], "missing": []}
     p = Path(pid_dir)
@@ -131,14 +144,24 @@ def _kill_remote(pid_dir: str, grace_sec: int) -> dict:
 
 
 def main() -> int:
+    """Parse CLI arguments and fan out kill actors across all alive nodes.
+
+    Connects to the in-pod Ray cluster, schedules one pinned kill actor per
+    alive node, collects each node's kill summary, and prints the aggregate
+    as JSON to stdout.
+
+    Returns:
+        int: Process exit code; ``0`` on success even when some nodes had
+        nothing to kill.
+    """
     p = argparse.ArgumentParser(
         prog="kill_multinode.py",
         description="Kill every multi-node server process spawned by launch_multinode.py.",
     )
-    p.add_argument("--pid-dir", required=True,
-                   help="dir containing rank_*.pid files (same value passed to launch_multinode)")
-    p.add_argument("--grace-sec", type=int, default=5,
-                   help="seconds between SIGTERM and SIGKILL (default 5)")
+    p.add_argument(
+        "--pid-dir", required=True, help="dir containing rank_*.pid files (same value passed to launch_multinode)"
+    )
+    p.add_argument("--grace-sec", type=int, default=5, help="seconds between SIGTERM and SIGKILL (default 5)")
     args = p.parse_args()
 
     _log(f"pid_dir={args.pid_dir} grace={args.grace_sec}s")
@@ -153,7 +176,8 @@ def main() -> int:
         node_id = node["NodeID"]
         ref = KillActor.options(
             scheduling_strategy=NodeAffinitySchedulingStrategy(
-                node_id=node_id, soft=False,
+                node_id=node_id,
+                soft=False,
             ),
         ).remote(args.pid_dir, args.grace_sec)
         refs.append((node_id[:16], ref))

@@ -33,14 +33,64 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
     """Resolve the local recipe-snapshot KB root: ``--local-kb-root`` ->
     ``$HYPERLOOM_LOCAL_KB_ROOT`` -> ``workspace_root()/kb``. Not created here
     (LocalRecipeStore creates it lazily on first write).
+
+    Args:
+        args: Parsed CLI arguments; ``local_kb_root`` is consulted first.
+
+    Returns:
+        Path: The resolved local KB root directory.
     """
-    explicit = (
-        getattr(args, "local_kb_root", None)
-        or os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", "")
-    )
+    explicit = getattr(args, "local_kb_root", None) or os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", "")
     if explicit:
         return Path(str(explicit).strip())
     return _workspace_root_resolve() / "kb"
+
+
+def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
+    """Wire ``RecipeKB.audit_hook`` to append remote-read trace events.
+
+    Each recipe-snapshot remote read (``get_recipe`` / ``search``) is appended
+    to ``recipe_snapshot/.audit.jsonl`` so the trace records whether the
+    snapshot KB (gbrain / cortex) was consulted, the request, and how it
+    resolved. Best-effort and never raises into the KB op. No-op without a
+    session dir or when the dispatcher predates ``audit_hook``.
+
+    Args:
+        kb (Any): The RecipeKB dispatcher (or a mirroring wrapper around it).
+        session_dir (Path | None): Session dir hosting the audit log.
+    """
+    if session_dir is None:
+        return
+    # Unwrap the inline gbrain-mirroring wrapper so the hook lands on the
+    # actual RecipeKB whose reads emit the audit events.
+    target = getattr(kb, "_inner", kb)
+    if not hasattr(target, "audit_hook"):
+        return
+
+    from datetime import datetime, timezone
+
+    from .session_paths import recipe_snapshot_audit_jsonl
+
+    audit_path = recipe_snapshot_audit_jsonl(Path(session_dir))
+
+    def _hook(event: dict[str, Any]) -> None:
+        """Append a timestamped recipe-snapshot read event to the audit log.
+
+        Args:
+            event (dict[str, Any]): The remote-read trace event to record.
+        """
+        try:
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            row = {
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                **event,
+            }
+            with audit_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, sort_keys=True) + "\n")
+        except Exception:  # noqa: BLE001 — audit must never break a KB op
+            log.debug("recipe_snapshot audit append failed", exc_info=True)
+
+    target.audit_hook = _hook
 
 
 def _build_recipe_kb_dispatcher(
@@ -49,6 +99,12 @@ def _build_recipe_kb_dispatcher(
     """Build the local-write / remote-read RecipeKB dispatcher. Local store
     always wired; remote half enabled only when not --degraded-kb and a URL
     resolves (foreground 2s + 1-retry; no hard-coded default endpoint).
+
+    Args:
+        args: Parsed CLI arguments (``degraded_kb``, ``cortex_kb_url``, etc.).
+
+    Returns:
+        Any: A configured ``RecipeKB`` dispatcher (optionally gbrain-mirroring).
     """
     from .recipe_kb import LocalRecipeStore, RecipeKB, RemoteRecipeClient
 
@@ -57,6 +113,33 @@ def _build_recipe_kb_dispatcher(
 
     if bool(getattr(args, "degraded_kb", False)):
         return RecipeKB(local=local_store, remote=None)  # opt-out: no network
+
+    # Aggregated read remote (opt-in: RECIPE_KB_REMOTE=both). Fans reads across
+    # gbrain (GBRAIN_*) and the cortex kb-service (--cortex-kb-url /
+    # $CORTEX_KB_URL), then dedups/field-merges same-cid rows. Writes remain
+    # local-only; mirroring policy is handled only by the gbrain-only path.
+    if os.environ.get("RECIPE_KB_REMOTE", "").strip().lower() == "both":
+        from .recipe_kb.composite_remote import CompositeRemoteRecipeClient
+        from .recipe_kb.gbrain_remote_client import build_gbrain_remote_from_env
+
+        sources: list[Any] = []
+        names: list[str] = []
+        gbrain_remote = build_gbrain_remote_from_env()
+        if gbrain_remote is not None and gbrain_remote.enabled:
+            sources.append(gbrain_remote)
+            names.append("gbrain")
+        cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
+        if not cortex_url:
+            cortex_url = (os.environ.get("CORTEX_KB_URL", "") or "").strip()
+        if cortex_url:
+            sources.append(RemoteRecipeClient(kb_url=cortex_url, foreground=True, enabled=True))
+            names.append("cortex")
+        if sources:
+            return RecipeKB(
+                local=local_store,
+                remote=CompositeRemoteRecipeClient(sources, names=names),
+            )
+        return RecipeKB(local=local_store, remote=None)
 
     # gbrain read-side remote (opt-in: RECIPE_KB_REMOTE=gbrain + GBRAIN_*).
     # Writes stay local-only; gbrain serves the read side only.
@@ -70,20 +153,15 @@ def _build_recipe_kb_dispatcher(
             # out-of-band CronJob ingests the local store into gbrain (gbrain
             # off the write path); ``inline`` => best-effort mirror each local
             # write into gbrain in-process (local write stays authoritative).
-            mirror_mode = (
-                os.environ.get("RECIPE_KB_MIRROR_MODE", "external").strip().lower()
-            )
+            mirror_mode = os.environ.get("RECIPE_KB_MIRROR_MODE", "external").strip().lower()
             if mirror_mode == "inline":
                 from .recipe_kb.gbrain_ingest import (
                     GbrainMirroringRecipeKB,
                     build_mirror_mcp_from_env,
                 )
+
                 mirror_mcp = build_mirror_mcp_from_env()
-                return (
-                    GbrainMirroringRecipeKB(kb, mirror_mcp)
-                    if mirror_mcp is not None
-                    else kb
-                )
+                return GbrainMirroringRecipeKB(kb, mirror_mcp) if mirror_mcp is not None else kb
             return kb  # external (default): no in-process mirror
         # Selected but not configured: stay local-only.
         return RecipeKB(local=local_store, remote=None)
@@ -112,8 +190,19 @@ def _bootstrap_cortex_kb(
     """Boot the recipe-snapshot KB integration, run the T0 anchor, and return
     the dispatcher. KB unavailability never aborts the launch
     (fail_fast=False); a hard T0 failure warns and continues warm-start-empty.
+
+    Args:
+        args: Parsed CLI arguments.
+        session_dir: The current session directory.
+        manifest: The session manifest dict (model, framework, fingerprint).
+        resume: Whether this launch is resuming an existing session.
+
+    Returns:
+        Any: The configured ``RecipeKB`` dispatcher.
     """
     kb = _build_recipe_kb_dispatcher(args)
+    # Trace every recipe-snapshot remote read into the session audit log.
+    _attach_recipe_audit_hook(kb, session_dir)
 
     state = SharedState.load_or_init(session_dir)
     workload = (
@@ -137,11 +226,11 @@ def _bootstrap_cortex_kb(
         if merged_meta:
             state.stack_fingerprint_meta = merged_meta
     extra_attrs = {
-        "framework":            state.framework or manifest.get("framework", ""),
-        "model_class":          state.model_class or "",
+        "framework": state.framework or manifest.get("framework", ""),
+        "model_class": state.model_class or "",
         # Operator traceability: which Claw job / sandbox produced best_config.
-        "claw_session_id":      manifest.get("claw_session_id") or "",
-        "sandbox_user_id":      manifest.get("sandbox_user_id") or "",
+        "claw_session_id": manifest.get("claw_session_id") or "",
+        "sandbox_user_id": manifest.get("sandbox_user_id") or "",
     }
     try:
         run_t0_anchor(
@@ -167,9 +256,7 @@ def _bootstrap_cortex_kb(
             f"will be created on first KEEP/REVERT).",
             file=sys.stderr,
         )
-        args.kb_degraded_reason = (
-            getattr(args, "kb_degraded_reason", None) or "t0_runtime_fail"
-        )
+        args.kb_degraded_reason = getattr(args, "kb_degraded_reason", None) or "t0_runtime_fail"
     return kb
 
 
@@ -182,6 +269,15 @@ def _bootstrap_knowledge_plane(
     """Construct the :class:`KnowledgePlane` facade. Wires the optional PR
     Monitor REST client (KB reads go through RecipeKB, so cortex_kb=None here).
     Both backends fail-soft; --degraded-pr yields a disabled PRMonitorClient.
+
+    Args:
+        args: Parsed CLI arguments (PR Monitor enablement, URLs, window).
+        cortex_client: Optional cortex client; unused (KB reads go via RecipeKB).
+        session_dir: Optional session directory; when set a status marker is
+            written for breakdown warnings.
+
+    Returns:
+        KnowledgePlane: The wired KnowledgePlane facade.
     """
     from .orchestrator.knowledge_plane import (
         KnowledgePlane,
@@ -195,14 +291,8 @@ def _bootstrap_knowledge_plane(
 
     pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
     pr_url = (getattr(args, "pr_monitor_url", None) or "").strip() or None
-    pr_mcp_url = (
-        (getattr(args, "pr_monitor_mcp_url", None) or "").strip()
-        or DEFAULT_PR_MONITOR_MCP_URL
-    )
-    window_days = int(
-        getattr(args, "pr_feed_window_days", DEFAULT_PR_FEED_WINDOW_DAYS)
-        or DEFAULT_PR_FEED_WINDOW_DAYS
-    )
+    pr_mcp_url = (getattr(args, "pr_monitor_mcp_url", None) or "").strip() or DEFAULT_PR_MONITOR_MCP_URL
+    window_days = int(getattr(args, "pr_feed_window_days", DEFAULT_PR_FEED_WINDOW_DAYS) or DEFAULT_PR_FEED_WINDOW_DAYS)
 
     pr_client = PRMonitorClient.from_args(url=pr_url, enabled=pr_enabled)
     if not pr_enabled:
@@ -212,10 +302,7 @@ def _bootstrap_knowledge_plane(
         pr_reachable = False
     else:
         status_text = f"REST {pr_client.base_url} (window={window_days}d)"
-        print(
-            f"PR Monitor       : REST {pr_client.base_url} (window="
-            f"{window_days}d, mcp={pr_mcp_url})"
-        )
+        print(f"PR Monitor       : REST {pr_client.base_url} (window={window_days}d, mcp={pr_mcp_url})")
         pr_reachable = True
 
     # One-shot status marker so breakdown.warnings can surface pr_monitor:*
@@ -224,20 +311,27 @@ def _bootstrap_knowledge_plane(
         try:
             from .session_paths import pr_monitor_status_json
             from .paths import asset_actions_dir  # noqa: F401 (unused import warning suppress)
+
             marker = pr_monitor_status_json(session_dir)
             marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text(json.dumps({
-                "enabled":      bool(pr_enabled),
-                "url":          (pr_client.base_url if pr_enabled else ""),
-                "reachable":    bool(pr_reachable),
-                "mcp_url":      pr_mcp_url if pr_enabled else "",
-                "window_days":  int(window_days),
-                "status_text":  status_text,
-            }, sort_keys=True, indent=2))
+            marker.write_text(
+                json.dumps(
+                    {
+                        "enabled": bool(pr_enabled),
+                        "url": (pr_client.base_url if pr_enabled else ""),
+                        "reachable": bool(pr_reachable),
+                        "mcp_url": pr_mcp_url if pr_enabled else "",
+                        "window_days": int(window_days),
+                        "status_text": status_text,
+                    },
+                    sort_keys=True,
+                    indent=2,
+                )
+            )
         except OSError as exc:  # noqa: BLE001 — defensive
             log.warning(
-                "pr_monitor_status marker write failed: %r "
-                "(breakdown.warnings will miss pr_monitor row)", exc,
+                "pr_monitor_status marker write failed: %r (breakdown.warnings will miss pr_monitor row)",
+                exc,
             )
 
     # cortex_kb=None per the local-kb design (KB reads go via RecipeKB).

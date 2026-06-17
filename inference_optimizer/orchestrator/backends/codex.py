@@ -68,7 +68,19 @@ _BARE_JSON_RE = re.compile(r"(\{.*?\"intents\".*\})", re.DOTALL)
 
 
 def _extract_envelope(text: str) -> dict | None:
-    """Pull the first valid JSON envelope out of a model reply."""
+    """Pull the first valid JSON envelope out of a model reply.
+
+    Prefers a fenced ```json block (least ambiguous), then falls back to a bare
+    top-level object containing ``"intents"``, progressively trimming trailing
+    prose until ``json.loads`` accepts the candidate.
+
+    Args:
+        text (str): The raw model reply that may contain a JSON envelope.
+
+    Returns:
+        dict | None: The first dict envelope containing an ``"intents"`` key, or
+        ``None`` when no parseable envelope is found.
+    """
     if not text:
         return None
     for m in _FENCED_JSON_RE.finditer(text):
@@ -118,24 +130,28 @@ class CodexBackend:
     _client: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Construct the OpenAI client (or use the test factory).
+
+        When ``client_factory`` is set it builds the client directly (test
+        seam). Otherwise it imports the OpenAI SDK, resolves the API key and
+        base URL from the configured env vars (with legacy fallbacks), and
+        creates an :class:`AsyncOpenAI` client.
+
+        Raises:
+            BackendError: If the ``openai`` SDK is not installed or no API key
+                is found in the environment.
+        """
         if self.client_factory is not None:
             self._client = self.client_factory()
             return
         try:
             from openai import AsyncOpenAI  # type: ignore[import-not-found]
         except ImportError as exc:  # pragma: no cover
-            raise BackendError(
-                "openai SDK not installed; run `pip install openai>=1.50`"
-            ) from exc
+            raise BackendError("openai SDK not installed; run `pip install openai>=1.50`") from exc
 
-        api_key = (
-            os.environ.get(self.api_key_env)
-            or os.environ.get("OPENAI_API_KEY")
-        )
+        api_key = os.environ.get(self.api_key_env) or os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            raise BackendError(
-                f"{self.api_key_env} not set in env (CodexBackend cannot auth)"
-            )
+            raise BackendError(f"{self.api_key_env} not set in env (CodexBackend cannot auth)")
         base_url = (
             os.environ.get(self.base_url_env)
             or os.environ.get("OPENAI_BASE_URL")
@@ -155,6 +171,29 @@ class CodexBackend:
         tools: list[str] | None = None,
         max_turns: int = 1,  # ignored — single API call per turn
     ) -> BackendTurnResult:
+        """Run one turn via a single chat-completion call and parse intents.
+
+        Appends the JSON-envelope output instructions to ``prompt``, issues one
+        bounded chat-completion request, extracts and validates the returned
+        envelope, and records call telemetry.
+
+        Args:
+            prompt (str): The composed turn prompt.
+            system_prompt (str | None): Optional system prompt sent as the
+                leading system message.
+            tools (list[str] | None): Unused; Codex roles are no-tools by
+                default.
+            max_turns (int): Ignored; one API call is made per turn.
+
+        Returns:
+            BackendTurnResult: The validated intents plus raw reply text and
+            model/finish metadata.
+
+        Raises:
+            BackendError: If the API call times out or otherwise fails.
+            NoIntentEmitted: If the reply has no parseable envelope or the
+                envelope fails intent validation.
+        """
         full_prompt = f"{prompt}\n\n{_OUTPUT_INSTRUCTIONS}"
         messages: list[dict[str, Any]] = []
         if system_prompt:
@@ -172,14 +211,13 @@ class CodexBackend:
             )
         except asyncio.TimeoutError as exc:
             raise BackendError(
-                f"Codex API call timed out after {self.call_timeout_s:.0f}s "
-                "(likely upstream proxy stall)"
+                f"Codex API call timed out after {self.call_timeout_s:.0f}s (likely upstream proxy stall)"
             ) from exc
         except Exception as exc:  # noqa: BLE001
             raise BackendError(f"Codex API call failed: {exc!r}") from exc
 
         choice = resp.choices[0]
-        text = (choice.message.content or "")
+        text = choice.message.content or ""
         finish = getattr(choice, "finish_reason", None)
         # Token usage: the OpenAI chat-completions response carries a
         # ``usage`` object (prompt_tokens / completion_tokens). Map it
@@ -189,29 +227,28 @@ class CodexBackend:
         usage = getattr(resp, "usage", None)
         input_tokens = self._safe_int(getattr(usage, "prompt_tokens", None))
         output_tokens = self._safe_int(getattr(usage, "completion_tokens", None))
-        self.calls.append({
-            "prompt_chars": len(full_prompt),
-            "reply_chars": len(text),
-            "finish_reason": finish,
-            "model": self.model,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0,
-        })
+        self.calls.append(
+            {
+                "prompt_chars": len(full_prompt),
+                "reply_chars": len(text),
+                "finish_reason": finish,
+                "model": self.model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+            }
+        )
 
         envelope = _extract_envelope(text)
         if envelope is None:
             raise NoIntentEmitted(
-                f"codex reply contained no parseable JSON envelope "
-                f"(reply_chars={len(text)}, finish={finish})"
+                f"codex reply contained no parseable JSON envelope (reply_chars={len(text)}, finish={finish})"
             )
         try:
             intents = validate_envelope(envelope)
         except IntentValidationError as exc:
-            raise NoIntentEmitted(
-                f"codex envelope invalid: {exc}"
-            ) from exc
+            raise NoIntentEmitted(f"codex envelope invalid: {exc}") from exc
         return BackendTurnResult(
             intents=intents,
             raw_text=text,
@@ -238,6 +275,13 @@ class CodexBackend:
 
         Mirrors ``ClaudeBackend._safe_int`` so both backends report
         identically-shaped token counts on metadata.
+
+        Args:
+            value: A raw usage counter of any type to coerce to an integer.
+
+        Returns:
+            The integer value, or ``0`` when ``value`` is ``None`` or not
+            coercible.
         """
         try:
             return int(value or 0)

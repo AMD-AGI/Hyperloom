@@ -25,11 +25,30 @@ IMPLEMENTED_SEARCH_PROVIDERS: frozenset[str] = frozenset({"tavily", "serper"})
 
 
 def _env(name: str, default: str = "") -> str:
+    """Read a string environment variable.
+
+    Args:
+        name (str): Environment variable name.
+        default (str): Value returned when the variable is unset.
+
+    Returns:
+        str: The variable's value, or ``default``.
+    """
     val = os.environ.get(name)
     return val if val is not None else default
 
 
 def _env_bool(name: str, default: bool) -> bool:
+    """Read a boolean environment variable.
+
+    Args:
+        name (str): Environment variable name.
+        default (bool): Value returned when the variable is unset.
+
+    Returns:
+        bool: True when the value is one of ``1/true/yes/on`` (case-
+        insensitive); otherwise False or ``default`` when unset.
+    """
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -37,6 +56,15 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _env_int(name: str, default: int) -> int:
+    """Read an integer environment variable.
+
+    Args:
+        name (str): Environment variable name.
+        default (int): Value returned when unset, blank, or unparseable.
+
+    Returns:
+        int: The parsed integer, or ``default``.
+    """
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return default
@@ -47,14 +75,26 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _parse_csv(raw: str) -> tuple[str, ...]:
-    return tuple(
-        item.strip().lower()
-        for item in raw.split(",")
-        if item.strip()
-    )
+    """Split a comma-separated string into trimmed, lowercased items.
+
+    Args:
+        raw (str): The comma-separated source string.
+
+    Returns:
+        tuple[str, ...]: Non-empty, trimmed, lowercased items.
+    """
+    return tuple(item.strip().lower() for item in raw.split(",") if item.strip())
 
 
 def _normalize_provider(raw: str) -> ProviderName:
+    """Normalise a provider name, defaulting unknown values to ``disabled``.
+
+    Args:
+        raw (str): Raw provider name from config/env.
+
+    Returns:
+        ProviderName: A known provider name, or ``"disabled"``.
+    """
     p = raw.strip().lower()
     if p in KNOWN_PROVIDERS:
         return p  # type: ignore[return-value]
@@ -95,10 +135,19 @@ class WebToolsConfig:
 
     @classmethod
     def from_env(cls) -> "WebToolsConfig":
+        """Build a config instance from process environment variables.
+
+        Reads the ``CRITIC_WEB_*``, ``WEB_SEARCH_*``, ``WEB_FETCH_*`` and
+        provider API-key variables, applying conservative clamps/defaults.
+
+        Returns:
+            WebToolsConfig: The resolved, immutable configuration.
+        """
         provider = _normalize_provider(_env("WEB_SEARCH_PROVIDER", "disabled"))
         fallback_raw = _env("WEB_SEARCH_FALLBACK", "")
         fallback = tuple(
-            p for p in (s.strip().lower() for s in fallback_raw.split(","))
+            p
+            for p in (s.strip().lower() for s in fallback_raw.split(","))
             if p in KNOWN_PROVIDERS and p not in {"disabled", provider}
         )
         return cls(
@@ -109,7 +158,8 @@ class WebToolsConfig:
             search_domain_denylist=_parse_csv(_env("WEB_SEARCH_DOMAIN_DENYLIST", "")),
             search_max_results_cap=max(1, _env_int("WEB_SEARCH_MAX_RESULTS_CAP", 10)),
             search_rate_limit_per_min=max(
-                1, _env_int("WEB_SEARCH_RATE_LIMIT_PER_MIN", 30),
+                1,
+                _env_int("WEB_SEARCH_RATE_LIMIT_PER_MIN", 30),
             ),
             tavily_api_key=_env("TAVILY_API_KEY", ""),
             serper_api_key=_env("SERPER_API_KEY", ""),
@@ -117,23 +167,38 @@ class WebToolsConfig:
             fetch_enabled=_env_bool("WEB_FETCH_ENABLED", False),
             fetch_max_bytes=max(1024, _env_int("WEB_FETCH_MAX_BYTES", 10 * 1024 * 1024)),
             fetch_max_output_chars=max(
-                1024, _env_int("WEB_FETCH_MAX_OUTPUT_CHARS", 50_000),
+                1024,
+                _env_int("WEB_FETCH_MAX_OUTPUT_CHARS", 50_000),
             ),
             fetch_timeout_s=max(1, _env_int("WEB_FETCH_TIMEOUT_S", 60)),
             fetch_domain_denylist=_parse_csv(_env("WEB_FETCH_DOMAIN_DENYLIST", "")),
             fetch_cache_ttl_s=max(0, _env_int("WEB_FETCH_CACHE_TTL_S", 15 * 60)),
             fetch_cache_max_entries=max(
-                1, _env_int("WEB_FETCH_CACHE_MAX_ENTRIES", 256),
+                1,
+                _env_int("WEB_FETCH_CACHE_MAX_ENTRIES", 256),
             ),
         )
 
     def search_provider_chain(self) -> tuple[str, ...]:
-        """Resolved provider try-order, excluding ``disabled``."""
+        """Resolved provider try-order, excluding ``disabled``.
+
+        Returns:
+            tuple[str, ...]: The primary provider followed by fallbacks, or
+            just the fallbacks when the primary is ``disabled``.
+        """
         if self.search_provider == "disabled":
             return tuple(p for p in self.search_fallback if p != "disabled")
         return (self.search_provider, *self.search_fallback)
 
     def has_search_api_key(self, provider: str) -> bool:
+        """Report whether an API key is configured for a provider.
+
+        Args:
+            provider (str): Provider name (e.g. ``tavily``).
+
+        Returns:
+            bool: True when a non-empty key is set for ``provider``.
+        """
         return {
             "tavily": bool(self.tavily_api_key),
             "serper": bool(self.serper_api_key),

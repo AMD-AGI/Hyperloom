@@ -23,19 +23,19 @@ MODE B: ``--mode local``
 Examples
 --------
     # Single file -- write to perf_runs_dev via SSH+kubectl
-    python scripts/import_session_breakdown.py /path/to/session_breakdown.json
+    python ci/import_session_breakdown.py /path/to/session_breakdown.json
 
-    # Batch import everything we just pulled with fetch_remote_sessions.py
-    python scripts/import_session_breakdown.py --dir ./remote_sessions
+    # Batch import a directory of pulled session_breakdown.json files
+    python ci/import_session_breakdown.py --dir ./remote_sessions
 
     # Dry-run: parse + print row, do not write to DB
-    python scripts/import_session_breakdown.py --dry-run file.json
+    python ci/import_session_breakdown.py --dry-run file.json
 
     # Use a different table or DB
-    python scripts/import_session_breakdown.py --table perf_runs_dev file.json
+    python ci/import_session_breakdown.py --table perf_runs_dev file.json
 
     # Local psycopg2 mode (requires tunnel above)
-    python scripts/import_session_breakdown.py --mode local file.json
+    python ci/import_session_breakdown.py --mode local file.json
 
 Environment variables (used as defaults)
 ---------------------------------------
@@ -89,15 +89,15 @@ DEFAULT_IMAGES: Dict[str, str] = {
     # sglang profilerfix: rocprofiler captures HipGraphLaunch kernels (issue #352)
     # Pre-profilerfix image (restore when reverting): "harbor.core42.primus-safe.amd.com/proxy/lmsysorg/sglang:v0.5.11-rocm720-mi30x"
     "sglang": "harbor.core42.primus-safe.amd.com/proxy/primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix",
-    "vllm":   "harbor.core42.primus-safe.amd.com/proxy/vllm/vllm-openai-rocm:v0.19.0",
+    "vllm": "harbor.core42.primus-safe.amd.com/proxy/vllm/vllm-openai-rocm:v0.19.0",
 }
 
 DEFAULT_DB = {
-    "host":     os.environ.get("PERF_RUNS_DB_HOST", "127.0.0.1"),
-    "port":     int(os.environ.get("PERF_RUNS_DB_PORT", "5432")),
-    "user":     os.environ.get("PERF_RUNS_DB_USER", "postgres"),
+    "host": os.environ.get("PERF_RUNS_DB_HOST", "127.0.0.1"),
+    "port": int(os.environ.get("PERF_RUNS_DB_PORT", "5432")),
+    "user": os.environ.get("PERF_RUNS_DB_USER", "postgres"),
     "password": os.environ.get("PERF_RUNS_DB_PASSWORD", ""),
-    "dbname":   os.environ.get("PERF_RUNS_DB_NAME", "primus-safe-db"),
+    "dbname": os.environ.get("PERF_RUNS_DB_NAME", "primus-safe-db"),
 }
 
 DEFAULT_TABLE = os.environ.get("PERF_RUNS_TABLE", "perf_runs_dev")
@@ -106,10 +106,24 @@ DEFAULT_K8S_NAMESPACE = os.environ.get("PERF_RUNS_K8S_NS", "primus-safe")
 
 
 def _import_psycopg2():
-    """Lazy import so the script still runs in ssh-kubectl mode without the driver."""
+    """Lazily import psycopg2 so ssh-kubectl mode works without the driver.
+
+    Deferring the import keeps the script usable in the default ssh-kubectl
+    mode (which shells out to ``psql``) on machines that have no local
+    PostgreSQL driver installed.
+
+    Returns:
+        tuple: ``(psycopg2_module, psycopg2.extras.Json)`` when the driver is
+            importable.
+
+    Raises:
+        SystemExit: If psycopg2 is not installed; an install hint is written
+            to stderr and the process exits with status 1.
+    """
     try:
         import psycopg2 as _pg
         from psycopg2.extras import Json as _Json
+
         return _pg, _Json
     except ImportError:
         sys.stderr.write(
@@ -124,8 +138,19 @@ def _import_psycopg2():
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def safe_get(d: Any, *keys: str, default: Any = None) -> Any:
-    """Nested dict get with None-safety."""
+    """Walk a chain of nested dict keys, tolerating missing/None levels.
+
+    Args:
+        d (Any): The starting object, typically a dict.
+        *keys (str): Successive keys to descend through.
+        default (Any): Value returned when any level is missing, is not a
+            dict, or resolves to None.
+
+    Returns:
+        Any: The value found at the nested key path, otherwise ``default``.
+    """
     cur = d
     for k in keys:
         if isinstance(cur, dict):
@@ -136,13 +161,33 @@ def safe_get(d: Any, *keys: str, default: Any = None) -> Any:
 
 
 def truncate(s: Optional[str], n: int) -> Optional[str]:
+    """Truncate a string to at most ``n`` characters.
+
+    Args:
+        s (Optional[str]): The string to truncate, or None.
+        n (int): Maximum allowed length.
+
+    Returns:
+        Optional[str]: None when ``s`` is None, otherwise ``s`` clipped to the
+            first ``n`` characters.
+    """
     if s is None:
         return None
     return s if len(s) <= n else s[:n]
 
 
 def derive_image(framework_name: str, session_image: Optional[str]) -> str:
-    """Use session.image if present, else fall back by framework name."""
+    """Resolve the container image for a run, preferring the session value.
+
+    Args:
+        framework_name (str): Framework name (e.g. ``"sglang"`` / ``"vllm"``)
+            used to pick a default when no session image is present.
+        session_image (Optional[str]): Image recorded on the session, if any.
+
+    Returns:
+        str: ``session_image`` when set, else the framework's default image, or
+            ``"unknown"`` if the framework has no default.
+    """
     if session_image:
         return session_image
     fw = (framework_name or "").lower()
@@ -150,9 +195,19 @@ def derive_image(framework_name: str, session_image: Optional[str]) -> str:
 
 
 def derive_image_short(image: str) -> str:
-    """Strip version tag/digest, return the last 2 path components (or 1 if only one)."""
-    img = image.split("@")[0]            # strip digest
-    img = img.split(":")[0]              # strip tag
+    """Shorten a container image reference for display.
+
+    Strips the version tag/digest and keeps the last two path components
+    (or one when only one is present).
+
+    Args:
+        image: The full container image reference.
+
+    Returns:
+        The shortened image string, or ``"unknown"`` when empty.
+    """
+    img = image.split("@")[0]  # strip digest
+    img = img.split(":")[0]  # strip tag
     parts = [p for p in img.split("/") if p]
     if len(parts) >= 2:
         return "/".join(parts[-2:])
@@ -160,8 +215,18 @@ def derive_image_short(image: str) -> str:
 
 
 def derive_unique_key(model_name: str, image: str) -> str:
-    """BASE64("<model_name>+<image_short>"); matches the perf-runs API unique_key
-    contract so dev rows promote to prod without rekeying."""
+    """Build the perf-runs ``unique_key`` for a (model, image) pair.
+
+    Returns ``BASE64("<model_name>+<image_short>")``, matching the perf-runs
+    API contract so dev rows promote to prod without rekeying.
+
+    Args:
+        model_name: The model name.
+        image: The container image reference.
+
+    Returns:
+        The base64-encoded unique key.
+    """
     raw = f"{model_name}+{derive_image_short(image)}"
     return base64.b64encode(raw.encode("utf-8")).decode("ascii")
 
@@ -170,8 +235,15 @@ _STOP_REASON_FAILED_TOKENS = ("timeout", "killed", "error", "failed", "abort", "
 
 
 def derive_status(session: Dict) -> str:
-    """Map session.stop_reason to {success, running, failed}: empty=>running,
-    failure token=>failed, else success (report emitted = clean termination)."""
+    """Map ``session.stop_reason`` to a coarse status.
+
+    Args:
+        session: The session dict carrying ``stop_reason``.
+
+    Returns:
+        ``"running"`` (empty stop reason), ``"failed"`` (a failure token),
+        or ``"success"`` otherwise.
+    """
     stop = (session.get("stop_reason") or "").strip().lower()
     if not stop:
         return "running"
@@ -181,8 +253,17 @@ def derive_status(session: Dict) -> str:
 
 
 def detect_category(data: Dict) -> str:
-    """MoE if a kernel category/name or model name has MoE markers; VLM for
-    vision markers; else Dense."""
+    """Classify a session as MoE, VLM, or Dense.
+
+    MoE wins when a kernel category/name or the model name has MoE markers;
+    VLM for vision markers; otherwise Dense.
+
+    Args:
+        data: The session breakdown data dict.
+
+    Returns:
+        One of ``"MoE"``, ``"VLM"``, or ``"Dense"``.
+    """
     kernels = safe_get(data, "kernel_lifecycle", "detected", default=[]) or []
     if isinstance(kernels, list):
         for k in kernels:
@@ -196,13 +277,26 @@ def detect_category(data: Dict) -> str:
     model_name = (safe_get(data, "workload", "model_name") or "").lower()
     if any(tag in model_name for tag in ("moe", "mixtral", "a3b", "a14b", "a22b")):
         return "MoE"
-    if any(tag in model_name for tag in ("-vl-", "vision", "llava", "internvl", "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl")):
+    if any(
+        tag in model_name
+        for tag in ("-vl-", "vision", "llava", "internvl", "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl")
+    ):
         return "VLM"
 
     return "Dense"
 
 
 def reshape_snapshot(snap: Optional[Dict]) -> Optional[Dict]:
+    """Flatten a roofline snapshot into a compact display-friendly dict.
+
+    Args:
+        snap (Optional[Dict]): A raw roofline snapshot, or None.
+
+    Returns:
+        Optional[Dict]: A flattened dict with compute/idle/comm percentages,
+            top-kernel name/efficiency, and snapshot id/timestamp; None when
+            ``snap`` is not a dict.
+    """
     if not isinstance(snap, dict):
         return None
     return {
@@ -218,9 +312,17 @@ def reshape_snapshot(snap: Optional[Dict]) -> Optional[Dict]:
 
 
 def extract_roofline(data: Dict) -> Optional[Dict]:
-    """Pass through the first roofline entry verbatim for full fidelity (every
-    nested field). Previously reshaped fields remain under entry.baseline.* /
-    entry.latest.* — nothing removed."""
+    """Return the first roofline entry verbatim for full fidelity.
+
+    Every nested field is preserved; previously reshaped fields remain under
+    ``entry.baseline.*`` / ``entry.latest.*``.
+
+    Args:
+        data: The session breakdown data dict.
+
+    Returns:
+        A deep copy of the first roofline entry, or ``None`` when absent.
+    """
     rl_list = safe_get(data, "roofline", default=[]) or []
     if isinstance(rl_list, list) and rl_list and isinstance(rl_list[0], dict):
         return copy.deepcopy(rl_list[0])
@@ -228,6 +330,17 @@ def extract_roofline(data: Dict) -> Optional[Dict]:
 
 
 def compute_gain_pct(baseline_tput: Optional[float], opt_tput: Optional[float]) -> Optional[float]:
+    """Compute percentage throughput improvement from baseline to optimized.
+
+    Args:
+        baseline_tput (Optional[float]): Baseline throughput (tok/s/GPU).
+        opt_tput (Optional[float]): Optimized throughput (tok/s/GPU).
+
+    Returns:
+        Optional[float]: ``(opt - baseline) / baseline * 100`` rounded to two
+            decimals, or None when either input is missing or the baseline is
+            non-positive.
+    """
     if baseline_tput is None or opt_tput is None:
         return None
     try:
@@ -239,7 +352,15 @@ def compute_gain_pct(baseline_tput: Optional[float], opt_tput: Optional[float]) 
 
 
 def compute_kernel_gain(attribution_src: Dict) -> Optional[float]:
-    """Kernel-attribution gain = GEAK + OOB contributions to total cumulative gain."""
+    """Sum the GEAK + OOB contributions to total cumulative gain.
+
+    Args:
+        attribution_src (Dict): The ``attribution.source_breakdown`` sub-dict.
+
+    Returns:
+        Optional[float]: Combined ``geak_pct_of_total + oob_pct_of_total``
+            rounded to two decimals, or None when neither value is present.
+    """
     geak = attribution_src.get("geak_pct_of_total")
     oob = attribution_src.get("oob_pct_of_total")
     if geak is None and oob is None:
@@ -249,8 +370,18 @@ def compute_kernel_gain(attribution_src: Dict) -> Optional[float]:
 
 
 def compute_param_gain(attribution_src: Dict) -> Optional[float]:
-    """Param-attribution gain = params choice + sweep variant search (sweep is a
-    parameter-space search, so it belongs in the 'param' category)."""
+    """Compute the param-attribution gain.
+
+    Sums the params choice and sweep variant search (a sweep is a
+    parameter-space search, so it belongs in the 'param' category).
+
+    Args:
+        attribution_src: The ``attribution.source_breakdown`` sub-dict.
+
+    Returns:
+        The combined gain rounded to two decimals, or ``None`` when both
+        values are absent.
+    """
     params = attribution_src.get("params_pct_of_total")
     sweep = attribution_src.get("sweep_pct_of_total")
     if params is None and sweep is None:
@@ -260,7 +391,15 @@ def compute_param_gain(attribution_src: Dict) -> Optional[float]:
 
 
 def compute_backend_gain(attribution_src: Dict) -> Optional[float]:
-    """Backend-attribution gain = backend variant choice (e.g. attention=aiter)."""
+    """Return the backend variant-choice contribution (e.g. attention=aiter).
+
+    Args:
+        attribution_src (Dict): The ``attribution.source_breakdown`` sub-dict.
+
+    Returns:
+        Optional[float]: ``backends_pct_of_total`` rounded to two decimals, or
+            None when the value is absent.
+    """
     backends = attribution_src.get("backends_pct_of_total")
     if backends is None:
         return None
@@ -268,7 +407,15 @@ def compute_backend_gain(attribution_src: Dict) -> Optional[float]:
 
 
 def compute_geak_gain(attribution_src: Dict) -> Optional[float]:
-    """GEAK-source gain = attribution.source_breakdown.geak_pct_of_total."""
+    """Return the GEAK-source gain percentage.
+
+    Args:
+        attribution_src (Dict): The ``attribution.source_breakdown`` sub-dict.
+
+    Returns:
+        Optional[float]: ``geak_pct_of_total`` rounded to two decimals, or None
+            when the value is missing or non-numeric.
+    """
     v = attribution_src.get("geak_pct_of_total")
     if not isinstance(v, (int, float)):
         return None
@@ -276,7 +423,15 @@ def compute_geak_gain(attribution_src: Dict) -> Optional[float]:
 
 
 def compute_oob_gain(attribution_src: Dict) -> Optional[float]:
-    """OOB-source gain = attribution.source_breakdown.oob_pct_of_total."""
+    """Return the OOB-source gain percentage.
+
+    Args:
+        attribution_src (Dict): The ``attribution.source_breakdown`` sub-dict.
+
+    Returns:
+        Optional[float]: ``oob_pct_of_total`` rounded to two decimals, or None
+            when the value is missing or non-numeric.
+    """
     v = attribution_src.get("oob_pct_of_total")
     if not isinstance(v, (int, float)):
         return None
@@ -284,8 +439,18 @@ def compute_oob_gain(attribution_src: Dict) -> Optional[float]:
 
 
 def compute_framework_gain(attribution: Dict) -> Optional[float]:
-    """Framework-source gain = SUM(delta_pct) over gain_per_stack_entry[] where
-    action='framework_pr'. None when absent so normalisation collapses it to 0.00."""
+    """Compute the framework-source gain.
+
+    Sums ``delta_pct`` over ``gain_per_stack_entry[]`` where
+    ``action == "framework_pr"``.
+
+    Args:
+        attribution: The ``attribution`` sub-dict.
+
+    Returns:
+        The summed gain rounded to two decimals, or ``None`` when absent so
+        normalisation collapses it to ``0.00``.
+    """
     entries = attribution.get("gain_per_stack_entry")
     if not isinstance(entries, list):
         return None
@@ -319,10 +484,10 @@ DEFAULT_PREC = "fp8"
 
 _RE_TP_IN_ARGS = re.compile(
     r"(?:"
-    r"\bTP\s*=\s*"                                      # env style: TP=8
-    r"|\btensor[_-]parallel[_-]size\s*=\s*"             # vllm kwargs
-    r"|\btp_size\s*=\s*"                                # sglang ServerArgs
-    r"|--tp\s+|--tp=\s*"                                # cmdline
+    r"\bTP\s*=\s*"  # env style: TP=8
+    r"|\btensor[_-]parallel[_-]size\s*=\s*"  # vllm kwargs
+    r"|\btp_size\s*=\s*"  # sglang ServerArgs
+    r"|--tp\s+|--tp=\s*"  # cmdline
     r"|--tensor[_-]parallel[_-]size[=\s]+"
     r")(\d+)",
     re.IGNORECASE,
@@ -335,11 +500,19 @@ _RE_MODEL_SIZE_TOKEN = re.compile(r"(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)[Bb](?![A-Za
 
 
 def _collect_args_text(data: Dict) -> str:
-    """Concatenate every place where launcher args might live."""
+    """Concatenate every place where launcher args might live.
+
+    Args:
+        data (Dict): Full session breakdown JSON.
+
+    Returns:
+        str: A ``" | "``-joined string of all ``framework_args`` values found
+            under baseline/final/workload invocation blocks.
+    """
     parts: list[str] = []
     for path in (
         ("baseline", "invocation", "framework_args"),
-        ("final",    "invocation", "framework_args"),
+        ("final", "invocation", "framework_args"),
         ("workload", "invocation", "framework_args"),
     ):
         v = safe_get(data, *path)
@@ -349,6 +522,16 @@ def _collect_args_text(data: Dict) -> str:
 
 
 def _parse_int_from_args(rx: re.Pattern, text: str) -> Optional[int]:
+    """Search ``text`` with a regex and return its first group as an int.
+
+    Args:
+        rx (re.Pattern): Compiled regex whose first capture group is numeric.
+        text (str): Text to search (typically the joined launcher args).
+
+    Returns:
+        Optional[int]: The parsed integer, or None when there is no match or
+            the captured group is not an integer.
+    """
     m = rx.search(text)
     if not m:
         return None
@@ -359,6 +542,15 @@ def _parse_int_from_args(rx: re.Pattern, text: str) -> Optional[int]:
 
 
 def _infer_prec_from_name(name: str) -> str:
+    """Infer precision from quantization hints in a model name.
+
+    Args:
+        name (str): Model name to inspect.
+
+    Returns:
+        str: ``"int4"``, ``"fp4"``, or ``"bf16"`` when the name carries a
+            matching marker, otherwise the platform default precision.
+    """
     n = (name or "").lower()
     if any(t in n for t in ("awq", "gptq", "int4", "i4")):
         return "int4"
@@ -370,10 +562,18 @@ def _infer_prec_from_name(name: str) -> str:
 
 
 def _infer_tp_from_name(name: str) -> int:
-    """
-    Size-tier fallback: <=70B -> 1, 70-180B -> 4, >180B -> 8.
-    Recognises spelled-out 'kimi-k2' / 'deepseek-r1' / 'deepseek-v3' / '1T' as
-    very large.
+    """Infer a tensor-parallel size from the parameter size in a model name.
+
+    Size-tier fallback: ``<=70B -> 1``, ``70-180B -> 4``, ``>180B -> 8``. Also
+    recognises spelled-out very-large families (``kimi-k2`` / ``deepseek-r1`` /
+    ``deepseek-v3`` / ``1T``) and maps them to 8.
+
+    Args:
+        name (str): Model name to inspect for a ``<N>B`` size token.
+
+    Returns:
+        int: The inferred tensor-parallel size, or the platform default when no
+            size signal is found.
     """
     if not name:
         return DEFAULT_TP
@@ -397,14 +597,22 @@ def _infer_tp_from_name(name: str) -> int:
 
 
 def resolve_workload_dims(data: Dict) -> Dict[str, Any]:
-    """
-    Return finalised values for prec/tp/isl/osl/conc/duration_seconds.
+    """Resolve finalised workload dimensions for a session.
 
-    Order of precedence per field:
-      1. workload.<field> if set
-      2. parsed from framework_args (TP=, CONC=, ISL=, OSL=, precision=)
+    Determines values for ``prec``/``tp``/``isl``/``osl``/``conc``/
+    ``duration_seconds`` using this precedence per field:
+
+      1. ``workload.<field>`` if set
+      2. parsed from ``framework_args`` (TP=, CONC=, ISL=, OSL=, precision=)
       3. model-name inference (prec/tp only)
       4. platform default
+
+    Args:
+        data (Dict): Full session breakdown JSON.
+
+    Returns:
+        Dict[str, Any]: Mapping with keys ``prec``, ``tp``, ``isl``, ``osl``,
+            ``conc``, and ``duration_seconds``.
     """
     workload = data.get("workload") or {}
     session = data.get("session") or {}
@@ -432,14 +640,24 @@ def resolve_workload_dims(data: Dict) -> Dict[str, Any]:
 
     # isl / osl / conc
     def _pick(field_name: str, rx: re.Pattern, default: int) -> int:
+        """Pick an int workload dim from workload field, args, or default.
+
+        Args:
+            field_name (str): Key to read from the ``workload`` dict.
+            rx (re.Pattern): Regex used to parse the value from launcher args.
+            default (int): Platform default used as the final fallback.
+
+        Returns:
+            int: The resolved integer value.
+        """
         raw = workload.get(field_name)
         if isinstance(raw, (int, float)) and raw:
             return int(raw)
         parsed = _parse_int_from_args(rx, args)
         return parsed if parsed is not None else default
 
-    isl  = _pick("isl",  _RE_ISL_IN_ARGS,  DEFAULT_ISL)
-    osl  = _pick("osl",  _RE_OSL_IN_ARGS,  DEFAULT_OSL)
+    isl = _pick("isl", _RE_ISL_IN_ARGS, DEFAULT_ISL)
+    osl = _pick("osl", _RE_OSL_IN_ARGS, DEFAULT_OSL)
     conc = _pick("conc", _RE_CONC_IN_ARGS, DEFAULT_CONC)
 
     # duration_seconds
@@ -450,16 +668,30 @@ def resolve_workload_dims(data: Dict) -> Dict[str, Any]:
         duration_seconds = DEFAULT_DURATION_SECONDS
 
     return {
-        "prec":             prec,
-        "tp":               tp,
-        "isl":              isl,
-        "osl":              osl,
-        "conc":             conc,
+        "prec": prec,
+        "tp": tp,
+        "isl": isl,
+        "osl": osl,
+        "conc": conc,
         "duration_seconds": duration_seconds,
     }
 
 
 def extract_row(data: Dict) -> Dict[str, Any]:
+    """Convert a session breakdown JSON into a perf_runs DB row dict.
+
+    Cleans the model name, derives image/category/precision/dims, computes the
+    gain (preferring ``final.cumulative_gain_pct_validated`` then a raw
+    throughput delta), normalises missing attribution gains to 0.00, clips
+    negative gains to 0, and attaches the enriched ``raw_data`` payload.
+
+    Args:
+        data (Dict): Full (V2-shaped) session breakdown JSON.
+
+    Returns:
+        Dict[str, Any]: A row dict whose keys map to the perf_runs table
+            columns, including the nested ``raw_data`` JSON.
+    """
     workload = data.get("workload") or {}
     baseline = data.get("baseline") or {}
     final = data.get("final") or {}
@@ -469,8 +701,7 @@ def extract_row(data: Dict) -> Dict[str, Any]:
 
     # model_name sometimes arrives as a filesystem path; clean prefixes so the
     # leaderboard shows a HF-style name and unique_key stays comparable.
-    model_name = (_clean_model_name(workload.get("model_name"))
-                  or (workload.get("model_name") or "").strip())
+    model_name = _clean_model_name(workload.get("model_name")) or (workload.get("model_name") or "").strip()
     framework_name = (workload.get("framework") or "").strip()
     framework_ver = (workload.get("framework_version") or "").strip()
     framework_label = framework_name if not framework_ver else f"{framework_name} {framework_ver}"
@@ -501,45 +732,44 @@ def extract_row(data: Dict) -> Dict[str, Any]:
         gain_source = "missing"
 
     row: Dict[str, Any] = {
-        "model_name":                truncate(model_name, 255),
-        "framework":                 truncate(framework_label, 64),
-        "image":                     truncate(image, 512),
-        "category":                  truncate(detect_category(data), 32),
-        "prec":                      truncate(dims["prec"], 32),
-        "gain":                      gain_value,
-        "roofline":                  extract_roofline(data),
-        "duration_seconds":          dims["duration_seconds"],
-        "kernel_gain":               compute_kernel_gain(attribution_src),
-        "param_gain":                compute_param_gain(attribution_src),
-        "backend_gain":              compute_backend_gain(attribution_src),
-        "geak_gain":                 compute_geak_gain(attribution_src),
-        "oob_gain":                  compute_oob_gain(attribution_src),
-        "framework_gain":            compute_framework_gain(attribution),
+        "model_name": truncate(model_name, 255),
+        "framework": truncate(framework_label, 64),
+        "image": truncate(image, 512),
+        "category": truncate(detect_category(data), 32),
+        "prec": truncate(dims["prec"], 32),
+        "gain": gain_value,
+        "roofline": extract_roofline(data),
+        "duration_seconds": dims["duration_seconds"],
+        "kernel_gain": compute_kernel_gain(attribution_src),
+        "param_gain": compute_param_gain(attribution_src),
+        "backend_gain": compute_backend_gain(attribution_src),
+        "geak_gain": compute_geak_gain(attribution_src),
+        "oob_gain": compute_oob_gain(attribution_src),
+        "framework_gain": compute_framework_gain(attribution),
         "baseline_tok_per_s_per_gpu": baseline_tput,
-        "opt_tok_per_s_per_gpu":     opt_tput,
-        "tp":                        dims["tp"],
-        "isl":                       dims["isl"],
-        "osl":                       dims["osl"],
-        "conc":                      dims["conc"],
+        "opt_tok_per_s_per_gpu": opt_tput,
+        "tp": dims["tp"],
+        "isl": dims["isl"],
+        "osl": dims["osl"],
+        "conc": dims["conc"],
         # post_perf_runs.py's build_body rejects incomplete/baseline-failed
         # sessions, so anything POSTed is effectively a successful run.
-        "status":                    "success",
-        "version":                   truncate(code_rev, 64),
-        "unique_key":                truncate(derive_unique_key(model_name, image), 128),
-        "claw_session_id":           truncate(session.get("claw_session_id"), 128),
+        "status": "success",
+        "version": truncate(code_rev, 64),
+        "unique_key": truncate(derive_unique_key(model_name, image), 128),
+        "claw_session_id": truncate(session.get("claw_session_id"), 128),
     }
 
     # Derivation provenance, persisted by enrich_raw_data.
     row["_meta"] = {
-        "gain_source":           gain_source,
-        "validated_gain_pct":    float(validated_gain) if isinstance(validated_gain, (int, float)) else None,
-        "throughput_delta_pct":  throughput_delta_pct,
+        "gain_source": gain_source,
+        "validated_gain_pct": float(validated_gain) if isinstance(validated_gain, (int, float)) else None,
+        "throughput_delta_pct": throughput_delta_pct,
     }
 
     # Force missing attribution gains to 0.00 (never NULL) and round to 2dp for
     # the NUMERIC(8,2) target column.
-    for key in ("kernel_gain", "param_gain", "backend_gain",
-                "geak_gain", "oob_gain", "framework_gain"):
+    for key in ("kernel_gain", "param_gain", "backend_gain", "geak_gain", "oob_gain", "framework_gain"):
         v = row[key]
         if v is None:
             row[key] = 0.00
@@ -549,8 +779,7 @@ def extract_row(data: Dict) -> Dict[str, Any]:
     # Clip negative gains to 0 (only when present and < 0). Process-history paths
     # in raw_data keep negatives (meaningful for REVERT/NEEDS_REVIEW);
     # enrich_raw_data() mirrors this clip only on display-facing nested paths.
-    for key in ("gain", "kernel_gain", "param_gain", "backend_gain",
-                "geak_gain", "oob_gain", "framework_gain"):
+    for key in ("gain", "kernel_gain", "param_gain", "backend_gain", "geak_gain", "oob_gain", "framework_gain"):
         v = row.get(key)
         if isinstance(v, (int, float)) and v < 0:
             row[key] = 0.0
@@ -563,6 +792,15 @@ def extract_row(data: Dict) -> Dict[str, Any]:
 
 
 def format_duration_pretty(seconds: Optional[int]) -> str:
+    """Format a duration in seconds as a compact ``<h>h<mm>m<ss>s`` string.
+
+    Args:
+        seconds (Optional[int]): Duration in seconds, or None.
+
+    Returns:
+        str: ``"n/a"`` when ``seconds`` is None, otherwise the formatted
+            duration (e.g. ``"3h00m00s"``).
+    """
     if seconds is None:
         return "n/a"
     s = int(seconds)
@@ -572,9 +810,20 @@ def format_duration_pretty(seconds: Optional[int]) -> str:
 
 
 def enrich_raw_data(original: Dict, row: Dict[str, Any], meta: Optional[Dict] = None) -> Dict:
-    """Build the JSON persisted into perf_runs.raw_data: deep-copy the original,
-    backfill session.image when missing, and add a top-level `_enrichment` block
-    of inferred/computed values (`meta` carries derivation provenance)."""
+    """Build the JSON persisted into ``perf_runs.raw_data``.
+
+    Deep-copies the original, backfills ``session.image`` /
+    ``session.session_duration_seconds`` / workload dims when missing, and
+    adds a top-level ``_enrichment`` block of inferred/computed values.
+
+    Args:
+        original: The original session breakdown JSON.
+        row: The derived perf-runs row supplying fallbacks.
+        meta: Optional derivation provenance recorded under ``_enrichment``.
+
+    Returns:
+        The enriched, deep-copied data dict.
+    """
     enriched = copy.deepcopy(original)
 
     session = enriched.get("session")
@@ -595,10 +844,10 @@ def enrich_raw_data(original: Dict, row: Dict[str, Any], meta: Optional[Dict] = 
         enriched["workload"] = workload
     workload_fallbacks_applied: Dict[str, Any] = {}
     for wl_key, row_key in (
-        ("tp",        "tp"),
-        ("isl",       "isl"),
-        ("osl",       "osl"),
-        ("conc",      "conc"),
+        ("tp", "tp"),
+        ("isl", "isl"),
+        ("osl", "osl"),
+        ("conc", "conc"),
         ("precision", "prec"),
     ):
         if not workload.get(wl_key):
@@ -611,6 +860,14 @@ def enrich_raw_data(original: Dict, row: Dict[str, Any], meta: Optional[Dict] = 
     raw_clip_applied: Dict[str, Any] = {}
 
     def _clip_neg(container: Dict, key: str, full_path: str) -> None:
+        """Clip a negative numeric field to 0 in-place and record the change.
+
+        Args:
+            container (Dict): Dict holding the value to clip.
+            key (str): Key whose numeric value should be clipped.
+            full_path (str): Dotted path used as the key in the
+                ``raw_clip_applied`` provenance map.
+        """
         v = container.get(key)
         if isinstance(v, (int, float)) and v < 0:
             container[key] = 0
@@ -618,47 +875,47 @@ def enrich_raw_data(original: Dict, row: Dict[str, Any], meta: Optional[Dict] = 
 
     final_block = enriched.get("final")
     if isinstance(final_block, dict):
-        _clip_neg(final_block, "cumulative_gain_pct_validated",     "final.cumulative_gain_pct_validated")
+        _clip_neg(final_block, "cumulative_gain_pct_validated", "final.cumulative_gain_pct_validated")
         _clip_neg(final_block, "cumulative_gain_pct_per_round_sum", "final.cumulative_gain_pct_per_round_sum")
-        _clip_neg(final_block, "e2e_gain_pct",                       "final.e2e_gain_pct")
+        _clip_neg(final_block, "e2e_gain_pct", "final.e2e_gain_pct")
 
     attr_block = enriched.get("attribution")
     if isinstance(attr_block, dict):
         src_block = attr_block.get("source_breakdown")
         if isinstance(src_block, dict):
-            _clip_neg(src_block, "oob_pct_of_total",  "attribution.source_breakdown.oob_pct_of_total")
+            _clip_neg(src_block, "oob_pct_of_total", "attribution.source_breakdown.oob_pct_of_total")
             _clip_neg(src_block, "geak_pct_of_total", "attribution.source_breakdown.geak_pct_of_total")
 
     meta = meta or {}
     enrichment = {
-        "imported_at_utc":            datetime.now(timezone.utc).isoformat(),
-        "importer":                   IMPORTER_NAME,
-        "importer_version":           IMPORTER_VERSION,
-        "unique_key":                 row["unique_key"],
-        "category":                   row["category"],
-        "image_used":                 row["image"],
-        "image_fallback_applied":     not session_image_was_present,
-        "duration_fallback_applied":  not session_duration_was_present,
+        "imported_at_utc": datetime.now(timezone.utc).isoformat(),
+        "importer": IMPORTER_NAME,
+        "importer_version": IMPORTER_VERSION,
+        "unique_key": row["unique_key"],
+        "category": row["category"],
+        "image_used": row["image"],
+        "image_fallback_applied": not session_image_was_present,
+        "duration_fallback_applied": not session_duration_was_present,
         "workload_fallbacks_applied": workload_fallbacks_applied,
-        "gain_pct":                   row["gain"],
-        "gain_source":                meta.get("gain_source"),
-        "validated_gain_pct":         meta.get("validated_gain_pct"),
-        "throughput_delta_pct":       meta.get("throughput_delta_pct"),
-        "kernel_gain_pct":            row["kernel_gain"],
-        "param_gain_pct":             row["param_gain"],
-        "backend_gain_pct":           row["backend_gain"],
-        "geak_gain_pct":              row["geak_gain"],
-        "oob_gain_pct":               row["oob_gain"],
-        "framework_gain_pct":         row["framework_gain"],
-        "raw_data_neg_gain_clipped":  raw_clip_applied,
-        "duration_seconds":           row["duration_seconds"],
-        "duration_pretty":            format_duration_pretty(row["duration_seconds"]),
-        "baseline_tput":              row["baseline_tok_per_s_per_gpu"],
-        "opt_tput":                   row["opt_tok_per_s_per_gpu"],
-        "status":                     row["status"],
-        "stop_reason":                session.get("stop_reason"),
-        "version":                    row["version"],
-        "claw_session_id":            row.get("claw_session_id"),
+        "gain_pct": row["gain"],
+        "gain_source": meta.get("gain_source"),
+        "validated_gain_pct": meta.get("validated_gain_pct"),
+        "throughput_delta_pct": meta.get("throughput_delta_pct"),
+        "kernel_gain_pct": row["kernel_gain"],
+        "param_gain_pct": row["param_gain"],
+        "backend_gain_pct": row["backend_gain"],
+        "geak_gain_pct": row["geak_gain"],
+        "oob_gain_pct": row["oob_gain"],
+        "framework_gain_pct": row["framework_gain"],
+        "raw_data_neg_gain_clipped": raw_clip_applied,
+        "duration_seconds": row["duration_seconds"],
+        "duration_pretty": format_duration_pretty(row["duration_seconds"]),
+        "baseline_tput": row["baseline_tok_per_s_per_gpu"],
+        "opt_tput": row["opt_tok_per_s_per_gpu"],
+        "status": row["status"],
+        "stop_reason": session.get("stop_reason"),
+        "version": row["version"],
+        "claw_session_id": row.get("claw_session_id"),
     }
     enriched["_enrichment"] = enrichment
     return enriched
@@ -672,7 +929,18 @@ _SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def safe_table(name: str) -> str:
-    """Reject anything that isn't a plain identifier (defence in depth)."""
+    """Validate that a table name is a plain SQL identifier.
+
+    Args:
+        name (str): Proposed table name.
+
+    Returns:
+        str: The same ``name`` when it is a valid identifier.
+
+    Raises:
+        ValueError: If ``name`` is not a plain ``[A-Za-z_][A-Za-z0-9_]*``
+            identifier (defence in depth against SQL injection).
+    """
     if not _SAFE_IDENT.match(name):
         raise ValueError(f"Refusing unsafe table name: {name!r}")
     return name
@@ -682,7 +950,18 @@ def safe_table(name: str) -> str:
 # SQL builders
 # ---------------------------------------------------------------------------
 
+
 def build_upsert_sql(table: str) -> str:
+    """Build the parameterised INSERT ... ON CONFLICT upsert for local mode.
+
+    Args:
+        table (str): Destination table name (validated via :func:`safe_table`).
+
+    Returns:
+        str: A psycopg2-style SQL statement using ``%(name)s`` placeholders that
+            upserts on ``unique_key`` and returns the row id plus an inserted
+            flag.
+    """
     table = safe_table(table)
     return f"""
 INSERT INTO {table} (
@@ -731,31 +1010,63 @@ RETURNING id, (xmax = 0) AS inserted;
 
 
 def build_create_unique_index_sql(table: str) -> str:
+    """Build the ``CREATE UNIQUE INDEX IF NOT EXISTS`` SQL for ``unique_key``.
+
+    Args:
+        table (str): Destination table name (validated via :func:`safe_table`).
+
+    Returns:
+        str: SQL that ensures a unique index on ``<table>(unique_key)`` so the
+            upsert's ``ON CONFLICT (unique_key)`` clause works.
+    """
     table = safe_table(table)
-    return (
-        f"CREATE UNIQUE INDEX IF NOT EXISTS {table}_unique_key_idx "
-        f"ON {table}(unique_key);"
-    )
+    return f"CREATE UNIQUE INDEX IF NOT EXISTS {table}_unique_key_idx ON {table}(unique_key);"
 
 
 # ---------------------------------------------------------------------------
 # MODE A: local psycopg2
 # ---------------------------------------------------------------------------
 
+
 def connect_local(args: argparse.Namespace):
+    """Open a psycopg2 connection for local mode.
+
+    Prefers ``$PERF_RUNS_DB_URL`` / ``--db-url`` when set; otherwise builds the
+    connection from the individual host/port/user/dbname (and optional
+    password) flags.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args carrying the DB connection
+            settings.
+
+    Returns:
+        psycopg2.extensions.connection: An open database connection.
+    """
     pg, _ = _import_psycopg2()
     url = os.environ.get("PERF_RUNS_DB_URL") or args.db_url
     if url:
         return pg.connect(url)
-    kwargs = dict(host=args.host, port=args.port,
-                  user=args.user, dbname=args.dbname)
+    kwargs = dict(host=args.host, port=args.port, user=args.user, dbname=args.dbname)
     if args.password:
         kwargs["password"] = args.password
     return pg.connect(**kwargs)
 
 
 def upsert_row_local(conn, row: Dict[str, Any], sql: str) -> Tuple[int, bool]:
-    """Returns (id, inserted_bool)."""
+    """Execute the upsert for a single row over a local psycopg2 connection.
+
+    Wraps JSON columns (``roofline``/``raw_data``) in ``psycopg2.extras.Json``
+    and commits the transaction.
+
+    Args:
+        conn: An open psycopg2 connection.
+        row (Dict[str, Any]): The row dict produced by :func:`extract_row`.
+        sql (str): The upsert SQL from :func:`build_upsert_sql`.
+
+    Returns:
+        Tuple[int, bool]: The row id and a flag that is True when the row was
+            inserted (False when it updated an existing row).
+    """
     _, Json = _import_psycopg2()
     payload = dict(row)
     if payload.get("roofline") is not None:
@@ -773,8 +1084,18 @@ def upsert_row_local(conn, row: Dict[str, Any], sql: str) -> Tuple[int, bool]:
 # MODE B: ssh + kubectl exec + psql (no local DB driver needed)
 # ---------------------------------------------------------------------------
 
+
 def _dollar_tag(content: str, base: str = "perf") -> str:
-    """Find a $tag$ that does not appear inside `content`."""
+    """Find a PostgreSQL dollar-quote tag that does not appear in ``content``.
+
+    Args:
+        content (str): The string the tag will wrap; the chosen tag is
+            guaranteed not to occur within it.
+        base (str): Base label embedded in the tag for readability.
+
+    Returns:
+        str: A ``$<base>_<nonce>$`` tag safe to use as a dollar-quote delimiter.
+    """
     for _ in range(8):
         tag = f"${base}_{secrets.token_hex(4)}$"
         if tag not in content:
@@ -784,6 +1105,15 @@ def _dollar_tag(content: str, base: str = "perf") -> str:
 
 
 def _sql_str_literal(s: Optional[str]) -> str:
+    """Render a value as a safe dollar-quoted SQL string literal.
+
+    Args:
+        s (Optional[str]): The value to render, or None.
+
+    Returns:
+        str: ``"NULL"`` when ``s`` is None, otherwise the value wrapped in a
+            unique dollar-quote tag (no escaping required).
+    """
     if s is None:
         return "NULL"
     s = str(s)
@@ -792,6 +1122,15 @@ def _sql_str_literal(s: Optional[str]) -> str:
 
 
 def _sql_number_literal(v: Any) -> str:
+    """Render a numeric/bool value as a SQL literal.
+
+    Args:
+        v (Any): A number, bool, or None.
+
+    Returns:
+        str: ``"NULL"`` for None, ``"TRUE"``/``"FALSE"`` for booleans, or the
+            numeric value rendered as a float/int literal.
+    """
     if v is None:
         return "NULL"
     if isinstance(v, bool):
@@ -800,6 +1139,15 @@ def _sql_number_literal(v: Any) -> str:
 
 
 def _sql_jsonb_literal(obj: Any) -> str:
+    """Render a Python object as a dollar-quoted ``::jsonb`` SQL literal.
+
+    Args:
+        obj (Any): Any JSON-serialisable object, or None.
+
+    Returns:
+        str: ``"NULL"`` when ``obj`` is None, otherwise the JSON-encoded value
+            wrapped in a unique dollar-quote tag and cast to ``jsonb``.
+    """
     if obj is None:
         return "NULL"
     js = json.dumps(obj, ensure_ascii=False)
@@ -808,7 +1156,18 @@ def _sql_jsonb_literal(obj: Any) -> str:
 
 
 def build_upsert_statement_inline(row: Dict[str, Any], table: str) -> str:
-    """Build one SQL statement with all values inlined (dollar-quoted)."""
+    """Build one upsert SQL statement with all values inlined.
+
+    String values are dollar-quoted so the statement can be piped over SSH
+    without a parameter protocol.
+
+    Args:
+        row: The perf-runs row to upsert.
+        table: Target table name (sanitized internally).
+
+    Returns:
+        The complete SQL upsert statement.
+    """
     table = safe_table(table)
     parts = (
         f"INSERT INTO {table} (\n"
@@ -876,7 +1235,19 @@ def build_upsert_statement_inline(row: Dict[str, Any], table: str) -> str:
 
 
 def build_ssh_kubectl_psql(hop1: str, namespace: str, user: str, dbname: str) -> List[str]:
-    """Return argv to invoke psql on the master postgres pod via SSH+kubectl (stdin piped)."""
+    """Build the argv to run ``psql`` on the master Postgres pod over SSH.
+
+    The SQL is expected to be piped via stdin to the returned command.
+
+    Args:
+        hop1: SSH jump host (``user@host``) to reach the cluster.
+        namespace: Kubernetes namespace of the Postgres cluster.
+        user: Postgres user to connect as.
+        dbname: Target database name.
+
+    Returns:
+        The ``ssh`` argv list invoking ``kubectl exec ... psql``.
+    """
     remote_cmd = (
         f"kubectl exec -i -n {namespace} "
         f"$(kubectl get pod -n {namespace} "
@@ -886,22 +1257,36 @@ def build_ssh_kubectl_psql(hop1: str, namespace: str, user: str, dbname: str) ->
     )
     return [
         "ssh",
-        "-o", "StrictHostKeyChecking=accept-new",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
         hop1,
         remote_cmd,
     ]
 
 
 def execute_remote_sql(sql: str, *, hop1: str, namespace: str, user: str, dbname: str) -> Tuple[str, str]:
-    """Pipe `sql` through SSH+kubectl psql. Raises on non-zero exit."""
+    """Pipe SQL through SSH+kubectl ``psql`` and capture its output.
+
+    Args:
+        sql (str): SQL text to send on stdin.
+        hop1 (str): SSH jump host.
+        namespace (str): Kubernetes namespace of the postgres pod.
+        user (str): PostgreSQL role to connect as.
+        dbname (str): Database name to connect to.
+
+    Returns:
+        Tuple[str, str]: The captured ``(stdout, stderr)`` decoded as UTF-8.
+
+    Raises:
+        RuntimeError: If the remote ``psql`` process exits non-zero.
+    """
     argv = build_ssh_kubectl_psql(hop1, namespace, user, dbname)
     proc = subprocess.run(argv, input=sql.encode("utf-8"), capture_output=True)
     out = proc.stdout.decode("utf-8", errors="replace")
     err = proc.stderr.decode("utf-8", errors="replace")
     if proc.returncode != 0:
         raise RuntimeError(
-            f"psql via ssh+kubectl failed (exit={proc.returncode}):\n"
-            f"--- stderr ---\n{err}\n--- stdout ---\n{out}\n"
+            f"psql via ssh+kubectl failed (exit={proc.returncode}):\n--- stderr ---\n{err}\n--- stdout ---\n{out}\n"
         )
     return out, err
 
@@ -910,7 +1295,21 @@ def execute_remote_sql(sql: str, *, hop1: str, namespace: str, user: str, dbname
 # Main
 # ---------------------------------------------------------------------------
 
+
 def iter_json_files(paths: Iterable[str], scan_dir: Optional[str]) -> List[Path]:
+    """Expand input paths and an optional scan dir into a unique file list.
+
+    Directories are searched recursively for ``*.json``; missing paths emit a
+    warning. The result is de-duplicated while preserving order.
+
+    Args:
+        paths (Iterable[str]): Files and/or directories passed on the CLI.
+        scan_dir (Optional[str]): Extra directory to scan recursively for
+            ``*.json``, or None.
+
+    Returns:
+        List[Path]: Ordered, de-duplicated list of JSON file paths.
+    """
     files: List[Path] = []
     for p in paths or []:
         pp = Path(p)
@@ -934,15 +1333,37 @@ def iter_json_files(paths: Iterable[str], scan_dir: Optional[str]) -> List[Path]
 
 
 def looks_like_session_breakdown(data: Any) -> bool:
+    """Heuristically test whether ``data`` is a canonical V2 session breakdown.
+
+    Args:
+        data (Any): Parsed JSON object.
+
+    Returns:
+        bool: True when ``data`` is a dict carrying workload/baseline/session
+            keys (or a ``session_breakdown`` schema_version marker).
+    """
     if not isinstance(data, dict):
         return False
-    return ("workload" in data and "baseline" in data and "session" in data) or \
-           "schema_version" in data and "session_breakdown" in str(data.get("schema_version", ""))
+    return (
+        ("workload" in data and "baseline" in data and "session" in data)
+        or "schema_version" in data
+        and "session_breakdown" in str(data.get("schema_version", ""))
+    )
 
 
 def looks_like_v1_flat_schema(data: Any) -> bool:
-    """Recognise the legacy 'V1 flat' layout: top-level dict with model,
-    framework, baseline_tput and best_tput (not nested under workload/baseline)."""
+    """Recognise the legacy "V1 flat" schema layout.
+
+    A V1 flat doc is a top-level dict with ``model``, ``framework``,
+    ``baseline_tput`` and ``best_tput`` (not nested under
+    ``workload`` / ``baseline``).
+
+    Args:
+        data: The parsed JSON value to inspect.
+
+    Returns:
+        ``True`` when the value matches the V1 flat schema.
+    """
     if not isinstance(data, dict):
         return False
     return (
@@ -959,7 +1380,18 @@ def looks_like_v1_flat_schema(data: Any) -> bool:
 # Universal migrator -- handles every schema variant we've seen in the wild
 # ---------------------------------------------------------------------------
 
+
 def _deep_get(d: Any, *path, default=None):
+    """Descend nested dicts by a sequence of keys, tolerating gaps.
+
+    Args:
+        d (Any): Starting object, typically a dict.
+        *path: Successive keys to descend through.
+        default: Value returned when any level is missing/not a dict/None.
+
+    Returns:
+        Any: The value at the nested path, otherwise ``default``.
+    """
     cur = d
     for k in path:
         if not isinstance(cur, dict):
@@ -969,6 +1401,14 @@ def _deep_get(d: Any, *path, default=None):
 
 
 def _first_truthy(*vals):
+    """Return the first value that is neither None nor an empty string.
+
+    Args:
+        *vals: Candidate values in priority order.
+
+    Returns:
+        Any: The first non-None, non-empty value, or None if none qualify.
+    """
     for v in vals:
         if v is not None and v != "":
             return v
@@ -976,27 +1416,52 @@ def _first_truthy(*vals):
 
 
 def _is_pos_number(v: Any) -> bool:
+    """Test whether a value is a strictly positive (non-bool) number.
+
+    Args:
+        v (Any): Value to test.
+
+    Returns:
+        bool: True when ``v`` is an int/float (not a bool) greater than 0.
+    """
     return isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
 
 
 def _clean_model_name(raw: Any) -> Optional[str]:
-    """V1.5 sometimes stores '/wekafs/models/<org-repo>' as 'model'. Strip the
-    storage prefix so we get a clean HuggingFace-style name."""
+    """Strip storage path prefixes to recover a HuggingFace-style model name.
+
+    V1.5 sometimes stores ``/wekafs/models/<org-repo>`` as ``model``; this
+    removes known storage prefixes and surrounding slashes.
+
+    Args:
+        raw (Any): Candidate model name (possibly a storage path).
+
+    Returns:
+        Optional[str]: The cleaned model name, or None when ``raw`` is not a
+            usable non-empty string.
+    """
     if not isinstance(raw, str) or not raw:
         return None
     s = raw.strip()
     for prefix in ("/wekafs/models/", "/workspace/", "/data/models/"):
         if s.startswith(prefix):
-            s = s[len(prefix):]
+            s = s[len(prefix) :]
             break
     return s.strip("/") or None
 
 
 def looks_like_universal_schema(data: Any) -> bool:
-    """
-    Accept any dict that has *both* an identifiable model name and an
-    identifiable framework, even if workload/baseline/session are missing
-    or under non-standard keys. The real test is migrate_universal_to_v2().
+    """Loosely test whether ``data`` carries a model name and framework.
+
+    Accepts any dict that has *both* an identifiable model name and framework,
+    even if workload/baseline/session are missing or under non-standard keys.
+    The authoritative test remains :func:`migrate_universal_to_v2`.
+
+    Args:
+        data (Any): Parsed JSON object.
+
+    Returns:
+        bool: True when both a model name and framework can be located.
     """
     if not isinstance(data, dict):
         return False
@@ -1044,16 +1509,26 @@ def migrate_universal_to_v2(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         cumulative_gain_*_validated, cumulative_gain_pct, gain_pct,
         winner_gain_pct, best.gain_pct
         (else recompute (opt-base)/base*100)
+
+    Args:
+        raw (Dict[str, Any]): A session breakdown dict in any known layout.
+
+    Returns:
+        Optional[Dict[str, Any]]: A V2-shaped dict (workload/baseline/final/
+            session, plus ``_universal_source`` provenance), or None when the
+            essential model name or baseline throughput cannot be recovered.
     """
     if not isinstance(raw, dict):
         return None
 
-    model_name = _clean_model_name(_first_truthy(
-        raw.get("model_name"),
-        raw.get("model"),
-        _deep_get(raw, "workload", "model_name"),
-        _deep_get(raw, "workload", "model"),
-    ))
+    model_name = _clean_model_name(
+        _first_truthy(
+            raw.get("model_name"),
+            raw.get("model"),
+            _deep_get(raw, "workload", "model_name"),
+            _deep_get(raw, "workload", "model"),
+        )
+    )
     if not model_name:
         return None
 
@@ -1151,11 +1626,13 @@ def migrate_universal_to_v2(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # workload-dim defaults
     isl = _first_truthy(raw.get("isl"), _deep_get(raw, "workload", "isl"))
     osl = _first_truthy(raw.get("osl"), _deep_get(raw, "workload", "osl"))
-    conc = _first_truthy(raw.get("conc"), raw.get("concurrency"),
-                         _deep_get(raw, "workload", "conc"),
-                         _deep_get(raw, "workload", "concurrency"))
-    precision_raw = _first_truthy(raw.get("precision"),
-                                  _deep_get(raw, "workload", "precision"))
+    conc = _first_truthy(
+        raw.get("conc"),
+        raw.get("concurrency"),
+        _deep_get(raw, "workload", "conc"),
+        _deep_get(raw, "workload", "concurrency"),
+    )
+    precision_raw = _first_truthy(raw.get("precision"), _deep_get(raw, "workload", "precision"))
     precision = precision_raw.lower() if isinstance(precision_raw, str) else None
 
     # duration
@@ -1165,19 +1642,25 @@ def migrate_universal_to_v2(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         raw.get("session_duration_seconds"),
     ):
         if _is_pos_number(v):
-            duration_s = int(v); break
+            duration_s = int(v)
+            break
     if duration_s is None:
-        for minutes_field in ("wall_clock_minutes", "elapsed_minutes",
-                              "elapsed_minutes_before_sandbox_restart",
-                              "budget_used_minutes"):
+        for minutes_field in (
+            "wall_clock_minutes",
+            "elapsed_minutes",
+            "elapsed_minutes_before_sandbox_restart",
+            "budget_used_minutes",
+        ):
             v = raw.get(minutes_field)
             if _is_pos_number(v):
-                duration_s = int(v * 60); break
+                duration_s = int(v * 60)
+                break
     if duration_s is None:
         for hours_field in ("budget_used_hours", "wall_clock_hours"):
             v = raw.get(hours_field)
             if _is_pos_number(v):
-                duration_s = int(v * 3600); break
+                duration_s = int(v * 3600)
+                break
 
     # session id (use as claw_session_id fallback)
     session_id = _first_truthy(
@@ -1193,32 +1676,35 @@ def migrate_universal_to_v2(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     return {
         "workload": {
-            "model_name":        model_name,
-            "framework":         framework,
-            "framework_version": _first_truthy(raw.get("framework_version"),
-                                               _deep_get(raw, "workload", "framework_version")) or "",
-            "tp":                tp,
-            "isl":               isl,
-            "osl":               osl,
-            "conc":              conc,
-            "precision":         precision,
+            "model_name": model_name,
+            "framework": framework,
+            "framework_version": _first_truthy(
+                raw.get("framework_version"), _deep_get(raw, "workload", "framework_version")
+            )
+            or "",
+            "tp": tp,
+            "isl": isl,
+            "osl": osl,
+            "conc": conc,
+            "precision": precision,
             "invocation": {"framework_args": ""},
         },
         "baseline": {"throughput_tok_s_per_gpu": baseline_per_gpu},
         "final": {
-            "throughput_tok_s_per_gpu":      opt_per_gpu,
+            "throughput_tok_s_per_gpu": opt_per_gpu,
             "cumulative_gain_pct_validated": gain,
         },
         "session": {
             "session_duration_seconds": duration_s,
-            "claw_session_id":          session_id,
-            "code_revision":            _first_truthy(
+            "claw_session_id": session_id,
+            "code_revision": _first_truthy(
                 raw.get("hyperloom_source_commit"),
                 raw.get("hyperloom_commit"),
                 _deep_get(raw, "session", "code_revision"),
-            ) or "",
-            "image":                    image,
-            "stop_reason":              "",
+            )
+            or "",
+            "image": image,
+            "stop_reason": "",
         },
         "_universal_source": raw,  # provenance
     }
@@ -1238,6 +1724,13 @@ def migrate_v1_to_v2(v1: Dict[str, Any]) -> Dict[str, Any]:
         derive_image() fall back to DEFAULT_IMAGES[framework].
       * gain_pct goes into final.cumulative_gain_pct_validated since V1 agents
         only ever reported the post-validate cumulative gain.
+
+    Args:
+        v1 (Dict[str, Any]): A V1 flat session breakdown dict.
+
+    Returns:
+        Dict[str, Any]: The equivalent V2 nested dict, with the original V1
+            payload preserved under ``_v1_source``.
     """
     tp_raw = v1.get("tp")
     try:
@@ -1248,6 +1741,15 @@ def migrate_v1_to_v2(v1: Dict[str, Any]) -> Dict[str, Any]:
         tp = 1
 
     def to_per_gpu(total: Any) -> Optional[float]:
+        """Convert a cluster-total throughput to a per-GPU value.
+
+        Args:
+            total (Any): Total throughput across all GPUs.
+
+        Returns:
+            Optional[float]: ``total / tp`` when ``total`` is a positive
+                number, otherwise None.
+        """
         if isinstance(total, (int, float)) and total > 0:
             return float(total) / tp
         return None
@@ -1266,16 +1768,16 @@ def migrate_v1_to_v2(v1: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "workload": {
-            "model_name":        v1.get("model"),
-            "framework":         framework_lower,
+            "model_name": v1.get("model"),
+            "framework": framework_lower,
             "framework_version": fw_ver,
-            "tp":                tp,
-            "ep":                v1.get("ep"),
-            "isl":               v1.get("isl"),
-            "osl":               v1.get("osl"),
-            "conc":              v1.get("conc"),
-            "precision":         (v1.get("precision") or "").lower() if isinstance(v1.get("precision"), str) else None,
-            "gpu_type":          v1.get("gpu_type"),
+            "tp": tp,
+            "ep": v1.get("ep"),
+            "isl": v1.get("isl"),
+            "osl": v1.get("osl"),
+            "conc": v1.get("conc"),
+            "precision": (v1.get("precision") or "").lower() if isinstance(v1.get("precision"), str) else None,
+            "gpu_type": v1.get("gpu_type"),
             "invocation": {
                 "framework_args": "",  # V1 didn't preserve the launcher arg string
             },
@@ -1287,7 +1789,7 @@ def migrate_v1_to_v2(v1: Dict[str, Any]) -> Dict[str, Any]:
             },
         },
         "final": {
-            "throughput_tok_s_per_gpu":    best_per_gpu,
+            "throughput_tok_s_per_gpu": best_per_gpu,
             "cumulative_gain_pct_validated": v1.get("gain_pct"),
             "benchmark": {
                 "output_throughput": v1.get("best_tput"),
@@ -1295,10 +1797,10 @@ def migrate_v1_to_v2(v1: Dict[str, Any]) -> Dict[str, Any]:
         },
         "session": {
             "session_duration_seconds": duration_s,
-            "claw_session_id":          v1.get("claw_session_id") or v1.get("session_id"),
-            "code_revision":            v1.get("hyperloom_source_commit") or v1.get("hyperloom_commit") or "",
-            "image":                    v1.get("image"),  # usually None -> derive_image() falls back
-            "stop_reason":              "",
+            "claw_session_id": v1.get("claw_session_id") or v1.get("session_id"),
+            "code_revision": v1.get("hyperloom_source_commit") or v1.get("hyperloom_commit") or "",
+            "image": v1.get("image"),  # usually None -> derive_image() falls back
+            "stop_reason": "",
         },
         # Stash the original V1 payload so raw_data preserves provenance.
         "_v1_source": v1,
@@ -1306,7 +1808,19 @@ def migrate_v1_to_v2(v1: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def parse_file(path: Path) -> Optional[Dict[str, Any]]:
-    """Read + validate a JSON file. Returns the row dict or None if not a session breakdown."""
+    """Read and validate a JSON file, returning its extracted row.
+
+    Accepts both bare session breakdowns and the ``{"source": ..., "data":
+    <breakdown>}`` wrapper. Files that fail to parse or don't look like a
+    session breakdown are skipped (with a printed notice).
+
+    Args:
+        path (Path): Path to the JSON file.
+
+    Returns:
+        Optional[Dict[str, Any]]: The extracted row dict, or None when the file
+            is unparseable or not a session breakdown.
+    """
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
@@ -1326,6 +1840,14 @@ def parse_file(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def format_row_summary(row: Dict[str, Any]) -> str:
+    """Render a human-readable multi-line summary of a parsed row.
+
+    Args:
+        row (Dict[str, Any]): The row dict produced by :func:`extract_row`.
+
+    Returns:
+        str: A formatted summary used in dry-run and import logging.
+    """
     return (
         f"  model={row['model_name']!r} framework={row['framework']!r} "
         f"prec={row['prec']!r} category={row['category']!r}\n"
@@ -1343,6 +1865,11 @@ def format_row_summary(row: Dict[str, Any]) -> str:
 
 
 def main():
+    """CLI entry point: parse args and import the requested JSON files.
+
+    Builds the argument parser, validates the destination table, collects the
+    input files, and dispatches to dry-run, local, or ssh-kubectl mode.
+    """
     parser = argparse.ArgumentParser(
         description="Import session breakdown JSON files into perf_runs_dev.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1351,33 +1878,37 @@ def main():
     parser.add_argument("paths", nargs="*", help="JSON files or directories to import")
     parser.add_argument("--dir", help="Additionally scan a directory recursively for *.json")
     parser.add_argument("--dry-run", action="store_true", help="Parse but do not write to the DB")
-    parser.add_argument("--table", default=DEFAULT_TABLE,
-                        help=f"Destination table (default: {DEFAULT_TABLE})")
+    parser.add_argument("--table", default=DEFAULT_TABLE, help=f"Destination table (default: {DEFAULT_TABLE})")
 
     # Mode selection
-    parser.add_argument("--mode", choices=("ssh-kubectl", "local"),
-                        default="ssh-kubectl",
-                        help="Connection mode (default: ssh-kubectl)")
+    parser.add_argument(
+        "--mode", choices=("ssh-kubectl", "local"), default="ssh-kubectl", help="Connection mode (default: ssh-kubectl)"
+    )
 
     # ssh-kubectl mode
-    parser.add_argument("--hop1", default=DEFAULT_SSH_HOP1,
-                        help=f"SSH jump host (default: {DEFAULT_SSH_HOP1})")
-    parser.add_argument("--namespace", default=DEFAULT_K8S_NAMESPACE,
-                        help=f"K8s namespace (default: {DEFAULT_K8S_NAMESPACE})")
-    parser.add_argument("--batch-size", type=int, default=20,
-                        help="Number of rows per SSH+psql invocation in ssh-kubectl mode")
+    parser.add_argument("--hop1", default=DEFAULT_SSH_HOP1, help=f"SSH jump host (default: {DEFAULT_SSH_HOP1})")
+    parser.add_argument(
+        "--namespace", default=DEFAULT_K8S_NAMESPACE, help=f"K8s namespace (default: {DEFAULT_K8S_NAMESPACE})"
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=20, help="Number of rows per SSH+psql invocation in ssh-kubectl mode"
+    )
 
     # local mode
-    parser.add_argument("--db-url", default=os.environ.get("PERF_RUNS_DB_URL"),
-                        help="Full postgresql:// URL (overrides individual flags, local mode)")
+    parser.add_argument(
+        "--db-url",
+        default=os.environ.get("PERF_RUNS_DB_URL"),
+        help="Full postgresql:// URL (overrides individual flags, local mode)",
+    )
     parser.add_argument("--host", default=DEFAULT_DB["host"])
     parser.add_argument("--port", type=int, default=DEFAULT_DB["port"])
     parser.add_argument("--user", default=DEFAULT_DB["user"])
     parser.add_argument("--password", default=DEFAULT_DB["password"])
     parser.add_argument("--dbname", default=DEFAULT_DB["dbname"])
 
-    parser.add_argument("--skip-index-check", action="store_true",
-                        help="Do not attempt to create the unique index on unique_key")
+    parser.add_argument(
+        "--skip-index-check", action="store_true", help="Do not attempt to create the unique index on unique_key"
+    )
 
     args = parser.parse_args()
 
@@ -1412,6 +1943,15 @@ def main():
 
 
 def _run_local_mode(args: argparse.Namespace, files: List[Path]) -> None:
+    """Import files using a direct psycopg2 connection (local mode).
+
+    Connects, optionally ensures the unique index, then parses and upserts each
+    file, printing per-file status and a final tally.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args.
+        files (List[Path]): JSON files to import.
+    """
     print(f"== local mode: connecting to {args.host}:{args.port}/{args.dbname} ==")
     try:
         conn = connect_local(args)
@@ -1464,23 +2004,31 @@ def _run_local_mode(args: argparse.Namespace, files: List[Path]) -> None:
 
 
 def _run_ssh_kubectl_mode(args: argparse.Namespace, files: List[Path]) -> None:
-    print(
-        f"== ssh-kubectl mode: hop1={args.hop1} ns={args.namespace} "
-        f"db={args.dbname} table={args.table} ==")
+    """Import files by piping SQL through SSH+kubectl ``psql``.
+
+    Optionally ensures the unique index, parses all files, then upserts them in
+    batches (falling back to one-by-one retries on a failed batch) to amortise
+    SSH/kubectl startup cost.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args.
+        files (List[Path]): JSON files to import.
+    """
+    print(f"== ssh-kubectl mode: hop1={args.hop1} ns={args.namespace} db={args.dbname} table={args.table} ==")
 
     # Optionally ensure the unique index (one round trip).
     if not args.skip_index_check:
         try:
             execute_remote_sql(
                 build_create_unique_index_sql(args.table) + "\n",
-                hop1=args.hop1, namespace=args.namespace,
-                user=args.user, dbname=args.dbname,
+                hop1=args.hop1,
+                namespace=args.namespace,
+                user=args.user,
+                dbname=args.dbname,
             )
             print("[ok] unique index ensured")
         except Exception as e:
-            sys.stderr.write(
-                f"[WARN] could not ensure unique index on {args.table}(unique_key): {e}\n"
-            )
+            sys.stderr.write(f"[WARN] could not ensure unique index on {args.table}(unique_key): {e}\n")
 
     # Parse all files first; collect valid (path, row) pairs.
     parsed: List[Tuple[Path, Dict[str, Any]]] = []
@@ -1497,7 +2045,7 @@ def _run_ssh_kubectl_mode(args: argparse.Namespace, files: List[Path]) -> None:
     batch_size = max(1, int(args.batch_size))
     ok = 0
     for i in range(0, len(parsed), batch_size):
-        chunk = parsed[i:i + batch_size]
+        chunk = parsed[i : i + batch_size]
         sql_parts = ["BEGIN;\n"]
         for _, row in chunk:
             sql_parts.append(build_upsert_statement_inline(row, args.table))
@@ -1506,8 +2054,11 @@ def _run_ssh_kubectl_mode(args: argparse.Namespace, files: List[Path]) -> None:
 
         try:
             execute_remote_sql(
-                sql, hop1=args.hop1, namespace=args.namespace,
-                user=args.user, dbname=args.dbname,
+                sql,
+                hop1=args.hop1,
+                namespace=args.namespace,
+                user=args.user,
+                dbname=args.dbname,
             )
             for f, row in chunk:
                 print(f"[UPSERT] {f}")
@@ -1515,16 +2066,17 @@ def _run_ssh_kubectl_mode(args: argparse.Namespace, files: List[Path]) -> None:
                 print()
             ok += len(chunk)
         except Exception as e:
-            sys.stderr.write(
-                f"[ERROR] batch {i // batch_size} ({len(chunk)} files) failed: {e}\n"
-            )
+            sys.stderr.write(f"[ERROR] batch {i // batch_size} ({len(chunk)} files) failed: {e}\n")
             # Retry one-by-one to identify the bad file.
             for f, row in chunk:
                 try:
                     single_sql = "BEGIN;\n" + build_upsert_statement_inline(row, args.table) + "COMMIT;\n"
                     execute_remote_sql(
-                        single_sql, hop1=args.hop1, namespace=args.namespace,
-                        user=args.user, dbname=args.dbname,
+                        single_sql,
+                        hop1=args.hop1,
+                        namespace=args.namespace,
+                        user=args.user,
+                        dbname=args.dbname,
                     )
                     print(f"[UPSERT/retry] {f}")
                     print(format_row_summary(row))

@@ -11,16 +11,25 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import os
 import re
 import shlex
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 
 DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
+
+# #266 transcript field cap: a single tool_result / text / thinking block can
+# be megabytes (a big file Read, a CSV dump), and the transcript is diagnostic
+# only — so cap every serialized string field. Without this the
+# agent_transcript.jsonl grows unbounded and can dwarf the artifacts it exists
+# to point at. Truncation appends a marker so a reader knows it was clipped.
+_TRANSCRIPT_FIELD_MAX_CHARS = 16_384
 
 
 # Upstream TraceLens category enum (orchestrator_prepare.py CATEGORY_SKILL_MAP) → GEAK labels.
@@ -52,7 +61,18 @@ UPSTREAM_CATEGORY_TO_GEAK: dict[str, str] = {
 
 
 def normalize_upstream_category(raw: str) -> str:
-    """Normalize a TraceLens category string to a GEAK-facing label."""
+    """Normalize a TraceLens category string to a GEAK-facing label.
+
+    The raw value is lower-cased and its separators collapsed to underscores
+    before lookup in :data:`UPSTREAM_CATEGORY_TO_GEAK`.
+
+    Args:
+        raw (str): The upstream TraceLens category string.
+
+    Returns:
+        str: The mapped GEAK-facing label, ``"unknown"`` when ``raw`` is empty,
+            or the original ``raw`` value when no mapping exists.
+    """
 
     if not raw:
         return "unknown"
@@ -71,11 +91,31 @@ class TraceLensSkillRunResult:
 
 
 def shell_quote(path: Path | str) -> str:
+    """Shell-quote a path for safe inclusion in a command string.
+
+    Args:
+        path (Path | str): The path to quote.
+
+    Returns:
+        str: The string form of ``path`` quoted for POSIX shells.
+    """
     return shlex.quote(str(path))
 
 
 def write_local_cmd_prefix(output_dir: Path, tracelens_root: Path) -> Path:
-    """Create the command-prefix cache expected by the TraceLens skill."""
+    """Create the command-prefix cache expected by the TraceLens skill.
+
+    Writes a ``cache/cmd_prefix.txt`` file under ``output_dir`` whose contents
+    ``cd <tracelens_root> && {CMD}`` let the skill root every shell command at
+    the TraceLens project directory.
+
+    Args:
+        output_dir (Path): Directory under which the ``cache`` folder is created.
+        tracelens_root (Path): The TraceLens project root the prefix cd's into.
+
+    Returns:
+        Path: The path to the written ``cmd_prefix.txt`` file.
+    """
 
     cache_dir = output_dir / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -88,6 +128,21 @@ def write_local_cmd_prefix(output_dir: Path, tracelens_root: Path) -> Path:
 
 
 def infer_analysis_mode(framework: str, requested: str) -> str:
+    """Resolve the effective TraceLens analysis mode for a framework.
+
+    An explicit non-default ``requested`` mode always wins. Otherwise inference
+    frameworks (vllm/sglang/atom) default to ``"inference"`` grouping because
+    their traces share the chrome-trace shape produced by the torch profiler;
+    everything else falls back to the requested value or ``"default"``.
+
+    Args:
+        framework (str): The framework that produced the trace (e.g. ``vllm``).
+        requested (str): The caller-requested analysis mode, possibly empty or
+            ``"default"``.
+
+    Returns:
+        str: The resolved analysis mode string.
+    """
     requested = (requested or "").strip().lower()
     if requested and requested != "default":
         return requested
@@ -98,19 +153,35 @@ def infer_analysis_mode(framework: str, requested: str) -> str:
 
 
 def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path | None:
-    """Find a graph-capture folder near a Magpie torch_trace input."""
+    """Find a graph-capture folder near a Magpie torch_trace input.
+
+    Checks the conventional ``capture_traces`` / ``graph_capture`` siblings of
+    the trace input directory and of the first trace file, returning the first
+    one that exists.
+
+    Args:
+        trace_input (Path): The trace input path (file or directory).
+        trace_files (list[Path]): Discovered trace files; only the first is used.
+
+    Returns:
+        Path | None: The capture folder if one exists nearby, else ``None``.
+    """
 
     candidates: list[Path] = []
     if trace_input.is_dir():
-        candidates.extend([
-            trace_input / "capture_traces",
-            trace_input / "graph_capture",
-        ])
+        candidates.extend(
+            [
+                trace_input / "capture_traces",
+                trace_input / "graph_capture",
+            ]
+        )
     for trace_file in trace_files[:1]:
-        candidates.extend([
-            trace_file.parent / "capture_traces",
-            trace_file.parent.parent / "capture_traces",
-        ])
+        candidates.extend(
+            [
+                trace_file.parent / "capture_traces",
+                trace_file.parent.parent / "capture_traces",
+            ]
+        )
     for candidate in candidates:
         if candidate.is_dir():
             return candidate
@@ -129,7 +200,25 @@ def build_orchestrator_prompt(
     analysis_mode: str,
     capture_folder: Path | None,
 ) -> str:
-    """Prompt a Claude SDK agent to execute the TraceLens standalone skill."""
+    """Prompt a Claude SDK agent to execute the TraceLens standalone skill.
+
+    Assembles the full natural-language instruction that pins every Step 0
+    input (paths, platform, framework, analysis/execution mode, capture folder)
+    so the agent can run the analysis-orchestrator workflow without prompting.
+
+    Args:
+        skill_path (Path): Path to the TraceLens skill file to follow.
+        trace_path (Path): Path to the trace file to analyze.
+        output_dir (Path): Directory where TraceLens outputs must be written.
+        tracelens_root (Path): The TraceLens project root.
+        platform (str): The target platform string.
+        framework (str): The framework that produced the trace.
+        analysis_mode (str): The requested analysis mode (resolved internally).
+        capture_folder (Path | None): Graph-capture folder for inference runs.
+
+    Returns:
+        str: The fully assembled orchestrator prompt text.
+    """
 
     analysis_mode = infer_analysis_mode(framework, analysis_mode)
     if analysis_mode == "inference" and capture_folder is not None:
@@ -139,14 +228,8 @@ def build_orchestrator_prompt(
     else:
         exec_mode = "default"
 
-    internal_root_text = (
-        str(tracelens_internal_root) if tracelens_internal_root
-        else "(not installed; OSS-only mode)"
-    )
-    tl_extension_text = (
-        "TraceLens_internal" if tracelens_internal_root
-        else "(unset)"
-    )
+    internal_root_text = str(tracelens_internal_root) if tracelens_internal_root else "(not installed; OSS-only mode)"
+    tl_extension_text = "TraceLens_internal" if tracelens_internal_root else "(unset)"
 
     comparison_scope = "standalone"
     capture_text = str(capture_folder) if capture_folder else "N/A"
@@ -189,18 +272,37 @@ When complete, respond with a short summary of the artifacts you wrote.
 
 
 def _import_sdk() -> tuple[Any, Any]:
+    """Import the Claude Agent SDK and return its query primitives.
+
+    Returns:
+        tuple[Any, Any]: The ``(query, ClaudeAgentOptions)`` callables from
+            ``claude_agent_sdk``.
+
+    Raises:
+        RuntimeError: If the SDK is not installed or lacks the expected
+            ``query`` / ``ClaudeAgentOptions`` attributes.
+    """
     try:
         import claude_agent_sdk as sdk  # type: ignore
     except ImportError as exc:  # pragma: no cover - exercised via caller fallback
-        raise RuntimeError(
-            "claude_agent_sdk not installed; run inference_optimizer/kernel-agent install first"
-        ) from exc
+        raise RuntimeError("claude_agent_sdk not installed; run kernel-agent/scripts/install.sh first") from exc
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
         raise RuntimeError("claude_agent_sdk missing query / ClaudeAgentOptions")
     return sdk.query, sdk.ClaudeAgentOptions
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
+    """Yield text fragments from an SDK message.
+
+    Handles both content blocks exposing a ``.text`` attribute or ``"text"``
+    dict key, plus a top-level ``.result`` string.
+
+    Args:
+        message (Any): An SDK message object.
+
+    Yields:
+        str: Each non-empty text fragment found on the message.
+    """
     for block in list(getattr(message, "content", None) or []):
         text = getattr(block, "text", None)
         if isinstance(text, str) and text:
@@ -210,6 +312,139 @@ def _iter_message_text(message: Any) -> Iterable[str]:
     result_text = getattr(message, "result", None)
     if isinstance(result_text, str) and result_text:
         yield result_text
+
+
+def _cap_str(value: str, limit: int = _TRANSCRIPT_FIELD_MAX_CHARS) -> str:
+    """Truncate a transcript string, appending a clip marker when bounded.
+
+    Args:
+        value: The string to truncate.
+        limit: Maximum length before truncation.
+
+    Returns:
+        The original string, or a truncated copy with a clip marker (#266).
+    """
+    if len(value) <= limit:
+        return value
+    return value[:limit] + f"... [truncated {len(value) - limit} chars]"
+
+
+def _json_safe(value: Any, *, cap: bool = True) -> Any:
+    """Best-effort coercion of an SDK field into a JSON-serializable value.
+
+    Tool inputs / results are usually plain dicts already, but the SDK may
+    hand back nested objects; falling back to ``str`` keeps the transcript
+    write infallible so a serialization edge case never aborts a TraceLens
+    run (#266). When ``cap`` is set every string (at any nesting depth) is
+    bounded to ``_TRANSCRIPT_FIELD_MAX_CHARS`` so a megabyte tool_result cannot
+    bloat the transcript.
+
+    Args:
+        value: The value to coerce.
+        cap: When ``True``, bound every nested string to the field max.
+
+    Returns:
+        A JSON-serializable representation of ``value``.
+    """
+    if isinstance(value, str):
+        return _cap_str(value) if cap else value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v, cap=cap) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v, cap=cap) for v in value]
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        return _cap_str(str(value)) if cap else str(value)
+
+
+def _serialize_sdk_block(block: Any) -> dict[str, Any]:
+    """Serialize one message content block into a JSON-safe record.
+
+    Blocks are tagged by class name (``TextBlock`` / ``ToolUseBlock`` /
+    ``ToolResultBlock`` / ``ThinkingBlock`` / ...) and probed for the
+    union of fields those types expose, rather than importing the SDK's
+    concrete block classes. This mirrors
+    ``ClaudeBackend._iter_blocks`` so the runner stays decoupled from
+    claude-agent-sdk internals.
+
+    Args:
+        block: An SDK content block (or a plain dict).
+
+    Returns:
+        A JSON-safe record describing the block.
+    """
+    if isinstance(block, dict):
+        record = _json_safe(block)
+        if isinstance(record, dict):
+            record.setdefault("block", record.get("type", "dict"))
+            return record
+        return {"block": "dict", "value": record}
+    cls_name = type(block).__name__
+    record: dict[str, Any] = {"block": cls_name}
+    text = getattr(block, "text", None)
+    if isinstance(text, str):
+        record["text"] = _cap_str(text)
+    thinking = getattr(block, "thinking", None)
+    if isinstance(thinking, str):
+        record["thinking"] = _cap_str(thinking)
+    name = getattr(block, "name", None)
+    if isinstance(name, str):
+        record["name"] = name
+    block_id = getattr(block, "id", None)
+    if isinstance(block_id, str):
+        record["id"] = block_id
+    tool_input = getattr(block, "input", None)
+    if tool_input is not None:
+        record["input"] = _json_safe(tool_input)
+    tool_use_id = getattr(block, "tool_use_id", None)
+    if isinstance(tool_use_id, str):
+        record["tool_use_id"] = tool_use_id
+    # ``TextBlock`` has no ``content``; only tool-result-style blocks do.
+    content = getattr(block, "content", None)
+    if content is not None and cls_name != "TextBlock":
+        record["content"] = _json_safe(content)
+    is_error = getattr(block, "is_error", None)
+    if isinstance(is_error, bool):
+        record["is_error"] = is_error
+    if set(record.keys()) == {"block"}:
+        # Unknown block with no recognized fields: keep a bounded repr so
+        # the transcript still records that something streamed.
+        record["repr"] = str(block)[:2000]
+    return record
+
+
+def _serialize_sdk_message(message: Any, *, seq: int) -> dict[str, Any]:
+    """Serialize one SDK stream message into a JSON-safe transcript record.
+
+    The record carries the message class name (``AssistantMessage`` /
+    ``ResultMessage`` / ...), its content blocks, and — when present on a
+    terminal ``ResultMessage`` — the consolidated ``result`` text and the
+    Anthropic ``usage`` dict (token accounting).
+
+    Args:
+        message: An SDK stream message.
+        seq: The message sequence number within the stream.
+
+    Returns:
+        A JSON-safe transcript record for the message.
+    """
+    record: dict[str, Any] = {
+        "seq": seq,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "type": type(message).__name__,
+    }
+    blocks = getattr(message, "content", None)
+    if blocks:
+        record["content"] = [_serialize_sdk_block(b) for b in list(blocks)]
+    result_text = getattr(message, "result", None)
+    if isinstance(result_text, str) and result_text:
+        record["result"] = _cap_str(result_text)
+    usage = getattr(message, "usage", None)
+    if isinstance(usage, dict) and usage:
+        record["usage"] = _json_safe(usage)
+    return record
 
 
 async def run_tracelens_skill(
@@ -229,7 +464,36 @@ async def run_tracelens_skill(
     sdk_options_cls: Any | None = None,
     log: Callable[[str], None] | None = None,
 ) -> TraceLensSkillRunResult:
-    """Execute the standalone TraceLens skill with Claude SDK."""
+    """Execute the standalone TraceLens skill with Claude SDK.
+
+    Prepares the command-prefix cache and orchestrator prompt, drives the SDK
+    query loop, and treats the presence of ``analysis.md`` as the source of
+    truth: an SDK error after the report was written is recorded as metadata
+    rather than raised.
+
+    Args:
+        skill_path (Path): Path to the TraceLens skill file to follow.
+        trace_path (Path): Path to the trace file to analyze.
+        output_dir (Path): Directory where TraceLens outputs are written.
+        tracelens_root (Path): The TraceLens project root.
+        platform (str): The target platform string.
+        framework (str): The framework that produced the trace.
+        analysis_mode (str): The requested analysis mode.
+        capture_folder (Path | None): Graph-capture folder for inference runs.
+        budget_minutes (float): Soft time budget for the run (informational).
+        model (str | None): Optional model override; defaults to the SDK default.
+        sdk_query_factory (Callable[..., Any] | None): Optional injected query
+            factory (used by tests); imported from the SDK when ``None``.
+        sdk_options_cls (Any | None): Optional injected options class (used by
+            tests); imported from the SDK when ``None``.
+        log (Callable[[str], None] | None): Optional logging callback.
+
+    Returns:
+        TraceLensSkillRunResult: The artifacts produced by the run.
+
+    Raises:
+        RuntimeError: If ``analysis.md`` is not written by the run.
+    """
 
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix_path = write_local_cmd_prefix(output_dir, tracelens_root)
@@ -279,8 +543,34 @@ async def run_tracelens_skill(
     sdk_error = ""
     if log:
         log(f"TraceLens SDK runner: prefix cache={prefix_path}")
+
+    # #266: persist a stream-JSON transcript of the agent's turns (text +
+    # tool_use/tool_result blocks) so operators can inspect the lifecycle
+    # and the artifacts it produced during execution. Capture is
+    # best-effort: a serialization or IO error on the logging side must
+    # never abort an otherwise-successful TraceLens run, so every write is
+    # guarded and the transcript handle open is tolerant of IO failure.
+    transcript_path = output_dir / "agent_transcript.jsonl"
+    transcript_written = False
+    transcript_seq = 0
+    try:
+        transcript_fh: Any = transcript_path.open("w", encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001
+        transcript_fh = None
+        if log:
+            log(f"[claude-sdk] WARNING: cannot open transcript {transcript_path}: {exc}")
     try:
         async for message in sdk_query_factory(prompt=prompt, options=options):
+            if transcript_fh is not None:
+                try:
+                    record = _serialize_sdk_message(message, seq=transcript_seq)
+                    transcript_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    transcript_fh.flush()
+                    transcript_seq += 1
+                    transcript_written = True
+                except Exception:  # noqa: BLE001
+                    # Transcript is diagnostic-only; swallow and keep going.
+                    pass
             for text in _iter_message_text(message):
                 chunks.append(text)
                 if log:
@@ -290,21 +580,44 @@ async def run_tracelens_skill(
         sdk_error = f"{type(exc).__name__}: {exc}"
         if log:
             log(f"[claude-sdk] WARNING: {sdk_error}")
+    finally:
+        if transcript_fh is not None:
+            try:
+                transcript_fh.close()
+            except OSError as exc:
+                # Closing the diagnostic transcript must never abort an
+                # otherwise-successful run; surface it as a warning instead.
+                if log:
+                    log(f"[claude-sdk] WARNING: cannot close transcript {transcript_path}: {exc}")
 
     # Final report is ``analysis.md`` (contract since #148; the v0.2 standalone_analysis.md
     # fallback was dropped in #203 for masking orchestrator failures with stale data).
     report_path = output_dir / "analysis.md"
     if not report_path.exists():
         if sdk_error:
-            raise RuntimeError(
-                f"TraceLens SDK runner failed before writing {report_path}: {sdk_error}"
-            )
+            raise RuntimeError(f"TraceLens SDK runner failed before writing {report_path}: {sdk_error}")
         raise RuntimeError(f"TraceLens SDK runner did not write {report_path}")
 
     artifact_paths = {
         "tracelens_agent_report": str(report_path),
         "tracelens_cmd_prefix": str(prefix_path),
     }
+    # #266: surface the stream-JSON transcript so it flows into the
+    # kernel-agent status sidecar (``artifacts.update(skill_result
+    # .artifact_paths)`` in tracelens_analysis.py) and a launcher/operator
+    # can tail it during execution. Only advertise it when at least one
+    # turn was actually recorded.
+    if transcript_written:
+        artifact_paths["tracelens_agent_transcript"] = str(transcript_path)
+    else:
+        # No turn was recorded (empty stream, or every serialization failed):
+        # remove the zero-byte file we truncated open at start so we don't
+        # leave a misleading empty agent_transcript.jsonl on disk.
+        try:
+            transcript_path.unlink(missing_ok=True)
+        except OSError as exc:
+            if log:
+                log(f"[claude-sdk] WARNING: cannot remove empty transcript {transcript_path}: {exc}")
     if sdk_error:
         artifact_paths["tracelens_agent_sdk_error"] = sdk_error
 
@@ -317,6 +630,16 @@ async def run_tracelens_skill(
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Coerce a value to float, falling back to a default on failure.
+
+    Args:
+        value (Any): The value to coerce.
+        default (float): The value returned when ``value`` is ``None`` or not
+            convertible.
+
+    Returns:
+        float: The parsed float, or ``default`` on ``None`` / parse failure.
+    """
     try:
         if value is None:
             return default
@@ -338,9 +661,7 @@ _DATA_TABLE_HEADER_TOKENS = (
     "bound",
 )
 # Lowercased canonical header tokens; separates the 9 typed fields from trailing extras.
-_DATA_TABLE_CANONICAL_KEY_SET = frozenset(
-    tok.strip().lower() for tok in _DATA_TABLE_HEADER_TOKENS
-)
+_DATA_TABLE_CANONICAL_KEY_SET = frozenset(tok.strip().lower() for tok in _DATA_TABLE_HEADER_TOKENS)
 _PITEM_MARKER_RE = re.compile(
     r"<!--\s*impact-begin\s+kind=p_item\s+([^>]*?)-->",
     re.IGNORECASE,
@@ -376,13 +697,34 @@ _IMPACT_HIGH_RE = re.compile(
 
 
 def _parse_marker_attrs(blob: str) -> dict[str, str]:
+    """Parse ``key=value`` attributes from an HTML-comment marker blob.
+
+    Args:
+        blob (str): The inner text of a TraceLens marker comment.
+
+    Returns:
+        dict[str, str]: A mapping of attribute names to their string values.
+    """
     return dict(re.findall(r"(\w+)=([^\s>]+)", blob))
 
 
 def _extract_between(
-    text: str, start_marker: str, end_markers: tuple[str, ...],
+    text: str,
+    start_marker: str,
+    end_markers: tuple[str, ...],
 ) -> str:
-    """Return the substring between ``start_marker`` and the earliest ``end_markers`` (tail if none; empty if start absent)."""
+    """Extract the substring between a start marker and the earliest end marker.
+
+    Args:
+        text: The text to search.
+        start_marker: Marker that begins the region.
+        end_markers: Candidate markers that end the region; the earliest match
+            wins.
+
+    Returns:
+        The trimmed substring, the tail when no end marker is found, or an
+        empty string when the start marker is absent.
+    """
     start = text.find(start_marker)
     if start == -1:
         return ""
@@ -394,47 +736,76 @@ def _extract_between(
 
 
 def _extract_pitem_prose(body: str) -> dict[str, Any]:
-    """Extract Identification / Reasoning / Resolution / Impact-estimate fields from a P-item body (all default empty/0.0)."""
+    """Extract prose and impact fields from a P-item body.
+
+    Args:
+        body: The Markdown body of a single P-item.
+
+    Returns:
+        A dict with ``identification``, ``reasoning_for_slowdown``,
+        ``resolution``, and impact estimates (defaulting to empty / 0.0).
+    """
     identification = _extract_between(
-        body, _IDENTIFICATION_LABEL,
+        body,
+        _IDENTIFICATION_LABEL,
         (_DATA_LABEL, _REASONING_LABEL, _RESOLUTION_LABEL, _IMPACT_LABEL),
     )
     reasoning = _extract_between(
-        body, _REASONING_LABEL, (_RESOLUTION_LABEL, _IMPACT_LABEL),
+        body,
+        _REASONING_LABEL,
+        (_RESOLUTION_LABEL, _IMPACT_LABEL),
     )
     resolution = _extract_between(body, _RESOLUTION_LABEL, (_IMPACT_LABEL,))
     low_match = _IMPACT_LOW_RE.search(body)
     high_match = _IMPACT_HIGH_RE.search(body)
     return {
-        "identification":         identification,
+        "identification": identification,
         "reasoning_for_slowdown": reasoning,
-        "resolution":             resolution,
-        "impact_low_ms":          _safe_float(low_match.group(1)) if low_match else 0.0,
-        "impact_low_e2e_pct":     _safe_float(low_match.group(2)) if low_match else 0.0,
-        "impact_high_ms":         _safe_float(high_match.group(1)) if high_match else 0.0,
-        "impact_high_e2e_pct":    _safe_float(high_match.group(2)) if high_match else 0.0,
+        "resolution": resolution,
+        "impact_low_ms": _safe_float(low_match.group(1)) if low_match else 0.0,
+        "impact_low_e2e_pct": _safe_float(low_match.group(2)) if low_match else 0.0,
+        "impact_high_ms": _safe_float(high_match.group(1)) if high_match else 0.0,
+        "impact_high_e2e_pct": _safe_float(high_match.group(2)) if high_match else 0.0,
     }
 
 
 def _extract_pitem_categories(text: str) -> list[dict[str, Any]]:
-    """Return per-P-item metadata (``category``/``low``/``mid``/``high``), in priority order, from p_item markers."""
+    """Extract per-P-item category and impact metadata in priority order.
+
+    Args:
+        text: The full report text containing ``p_item`` markers.
+
+    Returns:
+        A list of dicts with ``category`` and ``impact_score*`` fields, one
+        per P-item marker.
+    """
 
     items: list[dict[str, Any]] = []
     for match in _PITEM_MARKER_RE.finditer(text):
         attrs = _parse_marker_attrs(match.group(1))
         if "category" not in attrs:
             continue
-        items.append({
-            "category": attrs.get("category", ""),
-            "impact_score_low": _safe_float(attrs.get("low")),
-            "impact_score": _safe_float(attrs.get("mid")),
-            "impact_score_high": _safe_float(attrs.get("high")),
-        })
+        items.append(
+            {
+                "category": attrs.get("category", ""),
+                "impact_score_low": _safe_float(attrs.get("low")),
+                "impact_score": _safe_float(attrs.get("mid")),
+                "impact_score_high": _safe_float(attrs.get("high")),
+            }
+        )
     return items
 
 
 def _split_data_blocks(text: str) -> list[tuple[int, str, str]]:
-    """Yield ``(rank, title, body)`` for each compute-tier reasoning block."""
+    """Split the report into compute-tier reasoning blocks.
+
+    Args:
+        text (str): The full ``analysis.md`` report text.
+
+    Returns:
+        list[tuple[int, str, str]]: One ``(rank, title, body)`` triple per
+            compute-tier reasoning-candidate block found.
+    """
 
     blocks: list[tuple[int, str, str]] = []
     matches = list(_REASONING_MARKER_RE.finditer(text))
@@ -455,12 +826,22 @@ def _split_data_blocks(text: str) -> list[tuple[int, str, str]]:
 
 
 def _extract_data_table(body: str) -> list[list[str]]:
-    """Pull the 9-column markdown table that follows ``**Data:**`` (raw header + data cells; ends at blank line or next ``**Field:**``)."""
+    """Pull the 9-column markdown table that follows a ``**Data:**`` marker.
+
+    The table includes the raw header and data cells and ends at a blank line
+    or the next ``**Field:**`` marker.
+
+    Args:
+        body: The P-item body text to scan.
+
+    Returns:
+        The table rows as lists of cell strings.
+    """
 
     marker = body.find("**Data:**")
     if marker < 0:
         return []
-    tail = body[marker + len("**Data:**"):]
+    tail = body[marker + len("**Data:**") :]
     rows: list[list[str]] = []
     in_table = False
     for line in tail.splitlines():
@@ -492,14 +873,32 @@ def _row_to_candidate(
     impact: dict[str, float],
     prose: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    """Convert one parsed data-table row into a hot-kernel candidate dict.
+
+    Maps the 9 canonical columns into typed candidate fields, preserves any
+    trailing extra columns under ``tracelens_extra_columns``, resolves the
+    launcher path to an absolute source file where possible, and attaches the
+    shared P-item prose.
+
+    Args:
+        headers (list[str]): Lower-cased column header names for ``cells``.
+        cells (list[str]): The row's cell strings, aligned with ``headers``.
+        category (str): The TraceLens category for the owning P-item.
+        rank (int): The P-item rank (1-based).
+        title (str): The P-item title.
+        library (str): The library name parsed from the P-item title.
+        impact (dict[str, float]): Impact scores for the owning P-item.
+        prose (dict[str, Any] | None): Shared P-item prose to attach, if any.
+
+    Returns:
+        dict[str, Any] | None: The candidate dict, or ``None`` when the row is
+            malformed (cell count mismatch) or names a placeholder operation.
+    """
     if len(cells) != len(headers):
         return None
     record = dict(zip(headers, cells))
     # Trailing extras (spec allows appended columns) preserved verbatim for downstream consumers.
-    extra_columns = {
-        key: value for key, value in record.items()
-        if key not in _DATA_TABLE_CANONICAL_KEY_SET
-    }
+    extra_columns = {key: value for key, value in record.items() if key not in _DATA_TABLE_CANONICAL_KEY_SET}
 
     name = record.get("operation", "").strip()
     if not name or name in {"-", "—"}:
@@ -580,7 +979,17 @@ _IDLE_PCT_TABLE_RE = re.compile(
 
 
 def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
-    """Extract ``Idle %`` from the Executive Summary table in ``analysis.md`` (§1/§2 idle-gate); ``None`` on missing/unparseable so callers skip the gate gracefully."""
+    """Extract ``Idle %`` from an ``analysis.md`` Executive Summary table.
+
+    Used by the §1/§2 idle gate.
+
+    Args:
+        md_path: Path to the ``analysis.md`` report.
+
+    Returns:
+        The idle percentage, or ``None`` when missing/unparseable so callers
+        skip the gate gracefully.
+    """
     try:
         text = md_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -598,7 +1007,14 @@ def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
 
 
 def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
-    """Per-row sort key for the ``Lower Efficiency`` budget filter (§2); rows with no efficiency (0.0) sort last."""
+    """Compute the per-row sort key for the ``Lower Efficiency`` filter (§2).
+
+    Args:
+        candidate: A candidate row carrying ``efficiency_percent``.
+
+    Returns:
+        The efficiency value, or ``inf`` so rows with no efficiency sort last.
+    """
     eff = candidate.get("efficiency_percent")
     try:
         value = float(eff)
@@ -610,7 +1026,19 @@ def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
 
 
 def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
-    """Parse the TraceLens ``analysis.md`` final report into hot-kernels in §2 priority order (P-item, then lower efficiency within); empty/missing → []."""
+    """Parse a TraceLens ``analysis.md`` report into hot-kernel rows.
+
+    Rows are returned in §2 priority order (P-item, then lower efficiency
+    within each item).
+
+    Args:
+        md_path: Path to the ``analysis.md`` report.
+        top_k: Maximum number of hot-kernel rows to return.
+
+    Returns:
+        The hot-kernel rows, or an empty list when the report is missing or
+        unparseable.
+    """
 
     if not md_path.exists():
         return []
@@ -692,13 +1120,33 @@ _LAUNCHER_PATH_RE = re.compile(
     r"(?P<path>.+?)\((?P<line>\d+)\)\s*:\s*(?P<func>[A-Za-z_][A-Za-z0-9_]*)\s*$",
 )
 # Placeholders for unresolved Kernel Paths; must not survive parsing (else all group under a bogus path).
-_LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset({
-    "", "-", "—", "–", "n/a", "none", "null", "tbd", "unknown",
-})
+_LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
+    {
+        "",
+        "-",
+        "—",
+        "–",
+        "n/a",
+        "none",
+        "null",
+        "tbd",
+        "unknown",
+    }
+)
 
 
 def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]:
-    """Parse a TraceLens kernel-path to ``(path, line, function_name)`` (accepts ``<path>(<line>): <func>``/``<path>#L<line>``/bare; placeholders → ``("", None, None)``)."""
+    """Parse a TraceLens kernel-path into its components.
+
+    Accepts ``<path>(<line>): <func>``, ``<path>#L<line>``, or a bare path.
+
+    Args:
+        kernel_path: The kernel-path string to parse.
+
+    Returns:
+        A ``(path, line, function_name)`` tuple; placeholders and empty input
+        return ``("", None, None)``.
+    """
     if not kernel_path:
         return "", None, None
     text = kernel_path.strip()
@@ -728,8 +1176,10 @@ _FRAMEWORK_PKG_FALLBACK_ROOTS: dict[str, tuple[str, ...]] = {
         "/sgl-workspace/vllm",
     ),
     # atom fallback roots for CSV-only / static-analysis parses (import atom may not have run).
-    # Kept in sync with the _REUSABLE_SOURCE_ROOTS in kernel_request_handlers / tracelens_analysis
-    # (pinned by test_framework_paths_units.py). /app/ATOM is the editable-install parent.
+    # Kept in sync with the reusable-source roots in kernel_request_handlers
+    # (``_reusable_source_roots``) / tracelens_analysis (``_reusable_roots`` /
+    # ``KNOWN_SEARCH_ROOTS``), pinned by test_framework_paths_units.py. /app/ATOM
+    # is the editable-install parent.
     "atom": (
         "/app/ATOM",
         "/usr/local/lib/python3.12/dist-packages",
@@ -742,7 +1192,13 @@ _FRAMEWORK_SOURCE_ROOTS_ENV = "HYPERLOOM_FRAMEWORK_SOURCE_ROOTS"
 
 
 def _env_framework_source_roots() -> dict[str, tuple[str, ...]]:
-    """Parse ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` (comma-separated ``pkg=/abs/parent``) into ``{pkg: (root,...)}``; unparseable entries skipped."""
+    """Parse ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` into a package-root map.
+
+    The variable is a comma-separated list of ``pkg=/abs/parent`` entries.
+
+    Returns:
+        A ``{pkg: (root, ...)}`` mapping; unparseable entries are skipped.
+    """
     raw = os.environ.get(_FRAMEWORK_SOURCE_ROOTS_ENV, "").strip()
     if not raw:
         return {}
@@ -760,7 +1216,14 @@ def _env_framework_source_roots() -> dict[str, tuple[str, ...]]:
 
 
 def _package_root_parent(pkg: str) -> str | None:
-    """Return the directory containing ``pkg/`` on the live ``sys.path`` via find_spec; ``None`` if not importable."""
+    """Find the directory containing a package on the live ``sys.path``.
+
+    Args:
+        pkg: The importable package name.
+
+    Returns:
+        The directory containing ``pkg/``, or ``None`` when not importable.
+    """
     try:
         spec = importlib.util.find_spec(pkg)
     except (ImportError, ValueError):
@@ -780,7 +1243,16 @@ def _package_root_parent(pkg: str) -> str | None:
 def _resolve_launcher_to_abs_source(
     kernel_path: str,
 ) -> tuple[str, int | None, str | None] | None:
-    """Resolve a TraceLens launcher-path to an absolute file; ``(abs_file, line, function_name)`` only when the file exists, else ``None`` (conservative miss → caller's grep locator)."""
+    """Resolve a TraceLens launcher-path to an absolute source file.
+
+    Args:
+        kernel_path: The TraceLens launcher-path to resolve.
+
+    Returns:
+        An ``(abs_file, line, function_name)`` tuple only when the file
+        exists, else ``None`` (a conservative miss defers to the caller's grep
+        locator).
+    """
     raw_path, line, func = _parse_launcher_path(kernel_path)
     if not raw_path:
         return None
@@ -816,7 +1288,16 @@ def _resolve_launcher_to_abs_source(
 
 
 def _function_line_from_ast(path: Path, function_name: str) -> int | None:
-    """Return the lineno of the first (Async)FunctionDef in ``path`` named ``function_name``; ``None`` if unreadable/unparseable/absent."""
+    """Find the line number of a named function definition via AST.
+
+    Args:
+        path: The source file to parse.
+        function_name: The function name to locate.
+
+    Returns:
+        The first matching ``def``/``async def`` line, or ``None`` when the
+        file is unreadable, unparseable, or the function is absent.
+    """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError, UnicodeDecodeError):
@@ -832,14 +1313,23 @@ def _resolve_source_target(
     *,
     source_root: Path | None,
 ) -> dict[str, Any] | None:
-    """Resolve a candidate's launcher path to a ``(source_path, definition_line, function_name)`` triple; ``None`` when unparseable. AST line overrides the reported call-site line when resolvable."""
+    """Resolve a candidate's launcher path to a source-target triple.
+
+    The AST-derived definition line overrides the reported call-site line when
+    resolvable.
+
+    Args:
+        candidate: The candidate dict carrying launcher/source paths.
+        source_root: Optional root to resolve relative paths against.
+
+    Returns:
+        A ``(source_path, definition_line, function_name)`` dict, or ``None``
+        when the path is unparseable.
+    """
     # Prefer verbatim tracelens_launcher_path so AST resolution survives _finalize_candidates'
     # source_file overwrite; fall back to source_file / kernel_path for non-TraceLens candidates.
     kernel_path = str(
-        candidate.get("tracelens_launcher_path")
-        or candidate.get("source_file")
-        or candidate.get("kernel_path")
-        or ""
+        candidate.get("tracelens_launcher_path") or candidate.get("source_file") or candidate.get("kernel_path") or ""
     )
     raw_path, reported_line, reported_func = _parse_launcher_path(kernel_path)
     if not raw_path:
@@ -854,20 +1344,32 @@ def _resolve_source_target(
         if ast_line is not None:
             definition_line = ast_line
     return {
-        "source_path":      str(source_path),
-        "definition_line":  definition_line,
-        "function_name":    function_name,
-        "reported_path":    raw_path,
-        "reported_line":    reported_line,
-        "reported_func":    reported_func,
-        "ast_resolved":     bool(reported_func and source_path.exists()
-                                  and reported_func == function_name
-                                  and reported_line != definition_line),
+        "source_path": str(source_path),
+        "definition_line": definition_line,
+        "function_name": function_name,
+        "reported_path": raw_path,
+        "reported_line": reported_line,
+        "reported_func": reported_func,
+        "ast_resolved": bool(
+            reported_func
+            and source_path.exists()
+            and reported_func == function_name
+            and reported_line != definition_line
+        ),
     }
 
 
 _NATIVE_SOURCE_SUFFIXES = (
-    ".cu", ".cuh", ".hip", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h", ".c",
+    ".cu",
+    ".cuh",
+    ".hip",
+    ".cpp",
+    ".cc",
+    ".cxx",
+    ".hpp",
+    ".hh",
+    ".h",
+    ".c",
 )
 
 
@@ -879,6 +1381,12 @@ def _is_native_source(path: str) -> bool:
     keying a task_group on that line splits one device kernel across
     groups. Callers therefore drop the line/function key components for
     these files.
+
+    Args:
+        path: The source file path to classify.
+
+    Returns:
+        ``True`` for C/C++/HIP/CUDA source files.
     """
     return str(path).lower().endswith(_NATIVE_SOURCE_SUFFIXES)
 
@@ -890,7 +1398,14 @@ def _normalize_operation_key(operation: str) -> str:
     SAME kernel profiled at different dtypes/shapes — e.g.
     ``rmsnorm_kernel<bf16>`` vs ``rmsnorm_kernel<fp16>`` — groups together,
     while DISTINCT kernels (different base names) stay separate (the Q1
-    invariant). Returns the original string when stripping leaves nothing.
+    invariant).
+
+    Args:
+        operation: The TraceLens operation name.
+
+    Returns:
+        The canonicalized operation name, or the original string when
+        stripping leaves nothing.
     """
     s = str(operation).strip()
     if "<" not in s:
@@ -914,7 +1429,24 @@ def aggregate_by_source_function(
     *,
     source_root: Path | str | None = None,
 ) -> list[dict[str, Any]]:
-    """Group TraceLens candidates into per-kernel ``task_group`` dicts, sorted by aggregate time (desc). Native (.cu/.hip/.cpp) key on ``(source_path, function)`` only (collapse #420 over-split instantiations); Python key on ``(operation, path, line, function)`` since one caller frame can launch distinct kernels (Q1). Each group carries task_group_id/source_path/definition_line/function_name/kernel_ids/primary_kernel_id/rows/aggregate_*. Unparseable candidates left out for legacy per-kernel dispatch."""
+    """Group TraceLens candidates into per-kernel ``task_group`` dicts.
+
+    Groups are sorted by aggregate time (descending). Native (.cu/.hip/.cpp)
+    candidates key on ``(source_path, function)`` only (collapsing #420
+    over-split instantiations); Python candidates key on
+    ``(operation, path, line, function)`` since one caller frame can launch
+    distinct kernels (Q1). Each group carries ``task_group_id``,
+    ``source_path``, ``definition_line``, ``function_name``, ``kernel_ids``,
+    ``primary_kernel_id``, ``rows``, and ``aggregate_*`` fields.
+
+    Args:
+        candidates: The TraceLens candidate rows to group.
+        source_root: Optional root to resolve relative source paths against.
+
+    Returns:
+        The task-group dicts. Unparseable candidates are left out for legacy
+        per-kernel dispatch.
+    """
     if not candidates:
         return []
     root: Path | None = None
@@ -952,22 +1484,22 @@ def aggregate_by_source_function(
         bucket = groups.get(key)
         if bucket is None:
             bucket = {
-                "task_group_id":          "",  # filled below after sorting
-                "operation":              operation,
-                "source_path":            src_norm,
-                "definition_line":        target["definition_line"],
-                "function_name":          target["function_name"],
-                "ast_resolved":           bool(target.get("ast_resolved")),
-                "reported_path":          target["reported_path"],
-                "kernel_ids":             [],
-                "primary_kernel_id":      "",
-                "rows":                   [],
-                "aggregate_duration_us":  0.0,
-                "aggregate_call_count":   0,
-                "aggregate_gpu_pct":      0.0,
+                "task_group_id": "",  # filled below after sorting
+                "operation": operation,
+                "source_path": src_norm,
+                "definition_line": target["definition_line"],
+                "function_name": target["function_name"],
+                "ast_resolved": bool(target.get("ast_resolved")),
+                "reported_path": target["reported_path"],
+                "kernel_ids": [],
+                "primary_kernel_id": "",
+                "rows": [],
+                "aggregate_duration_us": 0.0,
+                "aggregate_call_count": 0,
+                "aggregate_gpu_pct": 0.0,
                 # Q2: distinct per-P-item prose (deduped by (rank, title)) so build_prompt renders every P-item when one function spans multiple.
-                "all_pitem_prose":        [],
-                "_pitem_prose_seen":      set(),  # popped before return
+                "all_pitem_prose": [],
+                "_pitem_prose_seen": set(),  # popped before return
             }
             groups[key] = bucket
         kid = str(cand.get("kernel_id") or "") or cand.get("name") or ""
@@ -983,17 +1515,19 @@ def aggregate_by_source_function(
         pitem_key = (pitem_rank, pitem_title)
         if pitem_key not in bucket["_pitem_prose_seen"]:
             bucket["_pitem_prose_seen"].add(pitem_key)
-            bucket["all_pitem_prose"].append({
-                "rank":                    pitem_rank,
-                "title":                   pitem_title,
-                "identification":          str(cand.get("identification") or "").strip(),
-                "reasoning_for_slowdown":  str(cand.get("reasoning_for_slowdown") or "").strip(),
-                "resolution":              str(cand.get("resolution") or "").strip(),
-                "impact_low_ms":           _safe_float(cand.get("impact_low_ms")),
-                "impact_low_e2e_pct":      _safe_float(cand.get("impact_low_e2e_pct")),
-                "impact_high_ms":          _safe_float(cand.get("impact_high_ms")),
-                "impact_high_e2e_pct":     _safe_float(cand.get("impact_high_e2e_pct")),
-            })
+            bucket["all_pitem_prose"].append(
+                {
+                    "rank": pitem_rank,
+                    "title": pitem_title,
+                    "identification": str(cand.get("identification") or "").strip(),
+                    "reasoning_for_slowdown": str(cand.get("reasoning_for_slowdown") or "").strip(),
+                    "resolution": str(cand.get("resolution") or "").strip(),
+                    "impact_low_ms": _safe_float(cand.get("impact_low_ms")),
+                    "impact_low_e2e_pct": _safe_float(cand.get("impact_low_e2e_pct")),
+                    "impact_high_ms": _safe_float(cand.get("impact_high_ms")),
+                    "impact_high_e2e_pct": _safe_float(cand.get("impact_high_e2e_pct")),
+                }
+            )
         try:
             bucket["aggregate_duration_us"] += float(cand.get("duration_us") or 0.0)
         except (TypeError, ValueError):
@@ -1016,19 +1550,19 @@ def aggregate_by_source_function(
         group["task_group_id"] = f"tg{idx:03d}"
         # Heaviest row (by duration) becomes primary; the rest are additional benchmark cases.
         group["rows"].sort(
-            key=lambda r: float(r.get("duration_us") or 0.0), reverse=True,
+            key=lambda r: float(r.get("duration_us") or 0.0),
+            reverse=True,
         )
         if group["rows"]:
             primary = group["rows"][0]
-            group["primary_kernel_id"] = str(
-                primary.get("kernel_id") or primary.get("name") or ""
-            )
+            group["primary_kernel_id"] = str(primary.get("kernel_id") or primary.get("name") or "")
         group["aggregate_duration_us"] = round(group["aggregate_duration_us"], 3)
         group["aggregate_gpu_pct"] = round(group["aggregate_gpu_pct"], 3)
         # Sort prose by rank (P1 first); drop entirely-empty entries.
         group["all_pitem_prose"].sort(key=lambda e: (e["rank"], e["title"]))
         group["all_pitem_prose"] = [
-            e for e in group["all_pitem_prose"]
+            e
+            for e in group["all_pitem_prose"]
             if e["rank"]
             or e["identification"]
             or e["reasoning_for_slowdown"]

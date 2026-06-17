@@ -39,10 +39,18 @@ from typing import Any
 
 
 _ANALYSIS_MD_KEYWORDS = (
-    "analysis.md", "saturated", "comm-bound", "memory-bound",
-    "compute-bound", "efficiency", "Top Operations",
-    "Executive Summary", "Recommendations", "snapshot",
-    "rcclAllreduce", "bottleneck",
+    "analysis.md",
+    "saturated",
+    "comm-bound",
+    "memory-bound",
+    "compute-bound",
+    "efficiency",
+    "Top Operations",
+    "Executive Summary",
+    "Recommendations",
+    "snapshot",
+    "rcclAllreduce",
+    "bottleneck",
 )
 
 _FLAG_PATTERN = re.compile(r"--[a-z][a-z0-9_-]+")
@@ -53,6 +61,27 @@ _FLAG_PATTERN = re.compile(r"--[a-z][a-z0-9_-]+")
 # ---------------------------------------------------------------------------
 @dataclass
 class AuditReport:
+    """Decision-quality audit summary derived from one session's state.
+
+    Attributes:
+        session_dir (Path): Audited session directory.
+        has_state_json (bool): Whether ``state.json`` was found and parsed.
+        error (str): Error description when the state could not be read.
+        cumulative_gain_validated_pct (float): Validated cumulative gain.
+        snapshot_id (int): Last roofline snapshot id observed.
+        roofline_attempts (list[dict[str, Any]]): Recorded roofline attempts.
+        pruned_families_raw (list[dict[str, Any]]): Pruned-family dict entries.
+        discovered_flag_names (set[str]): Flags in the discovered namespace.
+        proposed_flag_names (list[str]): Flags the LLM proposed (with dupes).
+        hallucinated_flag_names (set[str]): Proposed flags absent from the
+            discovered namespace.
+        untested_flag_names (set[str]): Discovered flags never proposed.
+        analysis_md_referenced_count (int): Reasons/notes grounded on
+            analysis.md keywords.
+        cache_creation_input_tokens (int): Aggregated cache-creation tokens.
+        cache_read_input_tokens (int): Aggregated cache-read tokens.
+    """
+
     session_dir: Path
     has_state_json: bool = False
     error: str = ""
@@ -79,6 +108,16 @@ class AuditReport:
 
 
 def _safe_load_state(session_dir: Path) -> dict[str, Any] | None:
+    """Load ``state.json`` from a session directory if present and valid.
+
+    Args:
+        session_dir (Path): Session directory expected to contain
+            ``state.json``.
+
+    Returns:
+        dict[str, Any] | None: Parsed state mapping, or ``None`` when missing
+        or unreadable.
+    """
     p = session_dir / "state.json"
     if not p.is_file():
         return None
@@ -89,6 +128,17 @@ def _safe_load_state(session_dir: Path) -> dict[str, Any] | None:
 
 
 def _flatten_discovered_flag_names(state: dict[str, Any]) -> set[str]:
+    """Collect every discovered flag name across all frameworks.
+
+    Walks ``discovered_flags[framework].{backend_flags,param_flags}`` and
+    unions the flag names.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json`` mapping.
+
+    Returns:
+        set[str]: Set of discovered flag names; empty when none are present.
+    """
     discovered = state.get("discovered_flags") or {}
     names: set[str] = set()
     if not isinstance(discovered, dict):
@@ -104,6 +154,17 @@ def _flatten_discovered_flag_names(state: dict[str, Any]) -> set[str]:
 
 
 def _extract_proposed_flag_names(state: dict[str, Any]) -> list[str]:
+    """Pull every ``--flag-name`` proposed across explore variants.
+
+    Scans ``explore_attempts`` and ``explore_search.tested`` entries for
+    ``extra_server_args`` strings and extracts flag tokens.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json`` mapping.
+
+    Returns:
+        list[str]: Proposed flag names; may contain duplicates.
+    """
     found: list[str] = []
     attempts = state.get("explore_attempts") or []
     if isinstance(attempts, list):
@@ -125,6 +186,15 @@ def _extract_proposed_flag_names(state: dict[str, Any]) -> list[str]:
 
 
 def _count_analysis_md_references(state: dict[str, Any]) -> int:
+    """Count prune reasons and explore notes grounded on analysis.md.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json`` mapping.
+
+    Returns:
+        int: Number of ``pruned_families`` reasons plus ``explore_attempts``
+        notes that contain at least one analysis.md grounding keyword.
+    """
     count = 0
     pruned = state.get("pruned_families") or []
     if isinstance(pruned, list):
@@ -144,6 +214,18 @@ def _count_analysis_md_references(state: dict[str, Any]) -> int:
 
 
 def extract(session_dir: Path) -> AuditReport:
+    """Read a session directory and build its decision-quality audit.
+
+    Loads ``state.json`` and populates an :class:`AuditReport` with gain,
+    snapshot, roofline-attempt, prune, flag, and cache fields. A missing or
+    unreadable state is recorded in the report's ``error`` field.
+
+    Args:
+        session_dir (Path): Session directory to audit.
+
+    Returns:
+        AuditReport: Populated audit report for the session.
+    """
     r = AuditReport(session_dir=session_dir)
     state = _safe_load_state(session_dir)
     if state is None:
@@ -151,10 +233,9 @@ def extract(session_dir: Path) -> AuditReport:
         return r
     r.has_state_json = True
     try:
-        r.cumulative_gain_validated_pct = float(
-            state.get("cumulative_gain_validated", 0.0)
-        )
+        r.cumulative_gain_validated_pct = float(state.get("cumulative_gain_validated", 0.0))
     except (TypeError, ValueError):
+        # Missing/non-numeric gain field: leave the default and keep auditing.
         pass
     cached_ta = state.get("last_trace_analyze") or {}
     if isinstance(cached_ta, dict):
@@ -173,21 +254,15 @@ def extract(session_dir: Path) -> AuditReport:
     r.discovered_flag_names = _flatten_discovered_flag_names(state)
     r.proposed_flag_names = _extract_proposed_flag_names(state)
     if r.discovered_flag_names:
-        r.hallucinated_flag_names = {
-            f for f in r.proposed_flag_names if f not in r.discovered_flag_names
-        }
+        r.hallucinated_flag_names = {f for f in r.proposed_flag_names if f not in r.discovered_flag_names}
         proposed_set = set(r.proposed_flag_names)
         r.untested_flag_names = r.discovered_flag_names - proposed_set
     r.analysis_md_referenced_count = _count_analysis_md_references(state)
 
     cache_metrics = state.get("tick_cache_metrics") or {}
     if isinstance(cache_metrics, dict):
-        r.cache_creation_input_tokens = int(
-            cache_metrics.get("cache_creation_input_tokens") or 0
-        )
-        r.cache_read_input_tokens = int(
-            cache_metrics.get("cache_read_input_tokens") or 0
-        )
+        r.cache_creation_input_tokens = int(cache_metrics.get("cache_creation_input_tokens") or 0)
+        r.cache_read_input_tokens = int(cache_metrics.get("cache_read_input_tokens") or 0)
     return r
 
 
@@ -195,6 +270,15 @@ def extract(session_dir: Path) -> AuditReport:
 # Rendering
 # ---------------------------------------------------------------------------
 def _cache_hit_rate(r: AuditReport) -> float:
+    """Compute the prompt-cache read hit rate for an audit report.
+
+    Args:
+        r (AuditReport): Audit report carrying cache token counters.
+
+    Returns:
+        float: ``cache_read / (cache_creation + cache_read)`` in [0, 1], or
+        ``0.0`` when no cache tokens were recorded.
+    """
     total = r.cache_creation_input_tokens + r.cache_read_input_tokens
     if total <= 0:
         return 0.0
@@ -202,12 +286,19 @@ def _cache_hit_rate(r: AuditReport) -> float:
 
 
 def _format_roofline_timeline(attempts: list[dict[str, Any]]) -> str:
+    """Render roofline action attempts as an indented text table.
+
+    Args:
+        attempts (list[dict[str, Any]]): Recorded roofline attempt entries.
+
+    Returns:
+        str: Multi-line table (timestamp/status/task_id), or a placeholder
+        line when there are no attempts.
+    """
     if not attempts:
         return "    (no roofline action attempts recorded)"
     lines: list[str] = []
-    lines.append(
-        f"    {'#':>2s} {'ts':<28s} {'status':>10s} {'task_id':>14s}"
-    )
+    lines.append(f"    {'#':>2s} {'ts':<28s} {'status':>10s} {'task_id':>14s}")
     lines.append("    " + "-" * 64)
     for i, entry in enumerate(attempts, start=1):
         ts = str(entry.get("ts") or "?")[:27]
@@ -218,50 +309,65 @@ def _format_roofline_timeline(attempts: list[dict[str, Any]]) -> str:
 
 
 def _format_pruned_families(pruned: list[dict[str, Any]]) -> str:
+    """Render pruned families as a table flagging analysis.md grounding.
+
+    Args:
+        pruned (list[dict[str, Any]]): Pruned-family dict entries.
+
+    Returns:
+        str: Multi-line table (family/source/grounded/reason), or a
+        placeholder line when there are no pruned families.
+    """
     if not pruned:
         return "    (no pruned_families)"
     lines: list[str] = []
-    lines.append(
-        f"    {'family':<28s} {'source':<14s} {'analysis-md-grounded':<22s} {'reason'}"
-    )
+    lines.append(f"    {'family':<28s} {'source':<14s} {'analysis-md-grounded':<22s} {'reason'}")
     lines.append("    " + "-" * 90)
     for entry in pruned:
         fam = str(entry.get("family") or "?")
         source = str(entry.get("source") or "?")
         reason = str(entry.get("reason") or "")
-        grounded = any(
-            kw.lower() in reason.lower() for kw in _ANALYSIS_MD_KEYWORDS
-        )
+        grounded = any(kw.lower() in reason.lower() for kw in _ANALYSIS_MD_KEYWORDS)
         tag = "yes" if grounded else "no"
         # Truncate reason to 100 chars for readability
         reason_short = reason if len(reason) <= 100 else reason[:97] + "..."
-        lines.append(
-            f"    {fam:<28s} {source:<14s} {tag:<22s} {reason_short}"
-        )
+        lines.append(f"    {fam:<28s} {source:<14s} {tag:<22s} {reason_short}")
     return "\n".join(lines)
 
 
 def _format_flag_audit(r: AuditReport, *, max_show: int = 10) -> str:
+    """Render the flag-namespace audit (discovered/proposed/hallucinated).
+
+    Args:
+        r (AuditReport): Audit report holding the flag sets.
+        max_show (int): Maximum hallucinated flag names to list in the sample.
+
+    Returns:
+        str: Multi-line summary of flag namespace coverage.
+    """
     lines: list[str] = []
-    lines.append(
-        f"    discovered_flags namespace : {len(r.discovered_flag_names)} flags"
-    )
-    lines.append(
-        f"    flags proposed             : {len(set(r.proposed_flag_names))} unique"
-    )
-    lines.append(
-        f"    hallucinated (not in namespace): {len(r.hallucinated_flag_names)}"
-    )
+    lines.append(f"    discovered_flags namespace : {len(r.discovered_flag_names)} flags")
+    lines.append(f"    flags proposed             : {len(set(r.proposed_flag_names))} unique")
+    lines.append(f"    hallucinated (not in namespace): {len(r.hallucinated_flag_names)}")
     if r.hallucinated_flag_names:
         sample = sorted(r.hallucinated_flag_names)[:max_show]
         lines.append(f"      sample: {sample}")
-    lines.append(
-        f"    untested (in namespace, never proposed): {len(r.untested_flag_names)}"
-    )
+    lines.append(f"    untested (in namespace, never proposed): {len(r.untested_flag_names)}")
     return "\n".join(lines)
 
 
 def render(r: AuditReport) -> str:
+    """Build the human-readable decision-audit report for a session.
+
+    Combines the roofline timeline, prune grounding table, flag audit, and
+    the §10.3 decision-quality criteria into a single text block.
+
+    Args:
+        r (AuditReport): Audit report to render.
+
+    Returns:
+        str: Multi-line report text suitable for printing to stdout.
+    """
     out: list[str] = []
     out.append("=" * 72)
     out.append("Roofline-v2 N7 decision audit")
@@ -271,9 +377,7 @@ def render(r: AuditReport) -> str:
     if r.error:
         out.append(f"  ERROR: {r.error}")
         return "\n".join(out)
-    out.append(
-        f"  cumulative_gain_validated_pct : {r.cumulative_gain_validated_pct:.3f}%"
-    )
+    out.append(f"  cumulative_gain_validated_pct : {r.cumulative_gain_validated_pct:.3f}%")
     out.append(f"  last snapshot_id              : {r.snapshot_id}")
     out.append(f"  roofline_attempts             : {len(r.roofline_attempts)}")
     out.append(f"  pruned_families               : {len(r.pruned_families_raw)}")
@@ -293,7 +397,7 @@ def render(r: AuditReport) -> str:
         (
             "cache_hit_rate ≥ 50%",
             cache >= 0.50,
-            f"{cache*100:.1f}%",
+            f"{cache * 100:.1f}%",
         ),
         (
             "analysis_md_referenced_count ≥ 3",
@@ -322,17 +426,35 @@ def render(r: AuditReport) -> str:
 # CLI
 # ---------------------------------------------------------------------------
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="Audit Roofline-v2 decisions in a single session_dir."
-    )
-    p.add_argument("--session", required=True, type=Path,
-                   help="Session directory containing state.json")
-    p.add_argument("--json", action="store_true",
-                   help="Emit machine-readable JSON instead of pretty text")
+    """Parse command-line arguments for the decision-audit CLI.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; defaults to
+            ``sys.argv`` when ``None``.
+
+    Returns:
+        argparse.Namespace: Parsed arguments with ``session`` and ``json``
+        attributes.
+    """
+    p = argparse.ArgumentParser(description="Audit Roofline-v2 decisions in a single session_dir.")
+    p.add_argument("--session", required=True, type=Path, help="Session directory containing state.json")
+    p.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of pretty text")
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the decision audit for one session and return an exit code.
+
+    Extracts the audit report and prints it as JSON (``--json``) or pretty
+    text.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; defaults to
+            ``sys.argv`` when ``None``.
+
+    Returns:
+        int: ``0`` when ``state.json`` was read successfully, otherwise ``1``.
+    """
     args = _parse_args(argv)
     report = extract(args.session)
     if args.json:

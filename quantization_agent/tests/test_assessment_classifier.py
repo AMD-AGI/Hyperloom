@@ -17,37 +17,43 @@ from quantization_agent.driver.result_collector import collect_artifacts
 # bootstrap / sdk_error path
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_quark_root_missing_from_sdk_error(build_workspace):
     ws = build_workspace()
-    assert classify_attempt(
-        ws, sdk_error="RuntimeError: QUARK_ROOT not set; quark_root missing"
-    ) == OutcomeId.quark_root_missing
+    assert (
+        classify_attempt(ws, sdk_error="RuntimeError: QUARK_ROOT not set; quark_root missing")
+        == OutcomeId.quark_root_missing
+    )
 
 
 def test_workspace_unwritable_from_sdk_error(build_workspace):
     ws = build_workspace()
-    assert classify_attempt(
-        ws, sdk_error="PermissionError: [Errno 13] cannot write to workspace /tmp/foo"
-    ) == OutcomeId.workspace_unwritable
+    assert (
+        classify_attempt(ws, sdk_error="PermissionError: [Errno 13] cannot write to workspace /tmp/foo")
+        == OutcomeId.workspace_unwritable
+    )
 
 
 def test_quark_skill_unavailable_from_sdk_error(build_workspace):
     ws = build_workspace()
-    assert classify_attempt(
-        ws, sdk_error="Quark skill.md missing at .claude/skills/quark-torch-ptq/SKILL.md"
-    ) == OutcomeId.quark_skill_unavailable
+    assert (
+        classify_attempt(ws, sdk_error="Quark skill.md missing at .claude/skills/quark-torch-ptq/SKILL.md")
+        == OutcomeId.quark_skill_unavailable
+    )
 
 
 def test_sdk_runtime_error_rate_limit(build_workspace):
     ws = build_workspace()
-    assert classify_attempt(
-        ws, sdk_error="anthropic.RateLimitError: 429 rate limit exceeded"
-    ) == OutcomeId.sdk_runtime_error
+    assert (
+        classify_attempt(ws, sdk_error="anthropic.RateLimitError: 429 rate limit exceeded")
+        == OutcomeId.sdk_runtime_error
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # explicit blocked.md outcome marker
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_blocked_md_outcome_marker_wins(build_workspace):
     # Even with a fully-successful artifact set, an explicit blocked.md
@@ -65,6 +71,7 @@ def test_blocked_md_invalid_outcome_id_ignored(build_workspace):
 # ─────────────────────────────────────────────────────────────────────────────
 # phase-aware artifact gaps
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_analysis_missing_under_intake_phase(build_workspace):
     ws = build_workspace(
@@ -106,6 +113,7 @@ def test_manifest_missing_under_manifest_phase(build_workspace):
 # MUST-have on quantized dir
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_must_have_weights_missing(build_workspace):
     ws = build_workspace(include_weights=False, include_validation_report=False)
     assert classify_attempt(ws) == OutcomeId.must_have_weights_missing
@@ -124,6 +132,7 @@ def test_must_have_tokenizer_missing(build_workspace):
 # ─────────────────────────────────────────────────────────────────────────────
 # validator
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_validation_report_absent(build_workspace):
     ws = build_workspace(include_validation_report=False)
@@ -159,6 +168,7 @@ def test_must_validate_skipped(build_workspace):
 # eval
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_eval_gap_within_threshold_no_narrative_when_zero(build_workspace):
     # Default eval_report has gap=0.0 — clean success, no narrative tag.
     ws = build_workspace()
@@ -168,8 +178,12 @@ def test_eval_gap_within_threshold_no_narrative_when_zero(build_workspace):
 def test_eval_gap_within_threshold_narrative_tag(build_workspace):
     ws = build_workspace(
         eval_report={
-            "metric_name": "gsm8k", "dataset": "gsm8k", "backend": "vllm",
-            "source_score": 0.5, "quantized_score": 0.49, "relative_gap": 0.02,
+            "metric_name": "gsm8k",
+            "dataset": "gsm8k",
+            "backend": "vllm",
+            "source_score": 0.5,
+            "quantized_score": 0.49,
+            "relative_gap": 0.02,
         }
     )
     assert classify_attempt(ws, acceptable_eval_gap=0.03) == OutcomeId.eval_gap_accepted
@@ -178,8 +192,12 @@ def test_eval_gap_within_threshold_narrative_tag(build_workspace):
 def test_eval_gap_exceeded(build_workspace):
     ws = build_workspace(
         eval_report={
-            "metric_name": "gsm8k", "dataset": "gsm8k", "backend": "vllm",
-            "source_score": 0.5, "quantized_score": 0.45, "relative_gap": 0.10,
+            "metric_name": "gsm8k",
+            "dataset": "gsm8k",
+            "backend": "vllm",
+            "source_score": 0.5,
+            "quantized_score": 0.45,
+            "relative_gap": 0.10,
         }
     )
     assert classify_attempt(ws, acceptable_eval_gap=0.03) == OutcomeId.eval_gap_exceeded
@@ -220,6 +238,7 @@ def test_eval_report_malformed_treated_as_env_unavailable(build_workspace):
 # phase-tagged sdk errors
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_exec_oom_via_sdk_error_under_exec_phase(build_workspace):
     ws = build_workspace(
         include_manifest=False,
@@ -239,9 +258,7 @@ def test_exec_oom_via_sdk_error_under_exec_phase(build_workspace):
         include_eval_report=False,
         last_phase="exec",
     )
-    assert classify_attempt(
-        ws2, sdk_error="torch.OutOfMemoryError: CUDA out of memory"
-    ) == OutcomeId.exec_oom
+    assert classify_attempt(ws2, sdk_error="torch.OutOfMemoryError: CUDA out of memory") == OutcomeId.exec_oom
 
 
 def test_export_crashed_via_sdk_error(build_workspace):
@@ -251,9 +268,10 @@ def test_export_crashed_via_sdk_error(build_workspace):
         include_eval_report=False,
         last_phase="export",
     )
-    assert classify_attempt(
-        ws, sdk_error="OSError: [Errno 28] No space left on device during save_pretrained"
-    ) == OutcomeId.export_crashed
+    assert (
+        classify_attempt(ws, sdk_error="OSError: [Errno 28] No space left on device during save_pretrained")
+        == OutcomeId.export_crashed
+    )
 
 
 def test_exec_calibration_data_missing_via_sdk_error(build_workspace):
@@ -263,20 +281,23 @@ def test_exec_calibration_data_missing_via_sdk_error(build_workspace):
         include_eval_report=False,
         last_phase="exec",
     )
-    assert classify_attempt(
-        ws, sdk_error="RuntimeError: calibration dataloader returned 0 samples"
-    ) == OutcomeId.exec_calibration_data_missing
+    assert (
+        classify_attempt(ws, sdk_error="RuntimeError: calibration dataloader returned 0 samples")
+        == OutcomeId.exec_calibration_data_missing
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # fallback
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_unclassified_failure_when_unknown_sdk_error(build_workspace):
     ws = build_workspace()
-    assert classify_attempt(
-        ws, sdk_error="Mysterious upstream error nobody has seen before"
-    ) == OutcomeId.unclassified_failure
+    assert (
+        classify_attempt(ws, sdk_error="Mysterious upstream error nobody has seen before")
+        == OutcomeId.unclassified_failure
+    )
 
 
 def test_clean_success_returns_none(build_workspace):
@@ -287,6 +308,7 @@ def test_clean_success_returns_none(build_workspace):
 # ─────────────────────────────────────────────────────────────────────────────
 # Assessment assembly
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_build_assessment_single_clean_attempt(build_workspace):
     ws = build_workspace()
@@ -327,6 +349,7 @@ def test_assessment_to_dict_roundtrip(build_workspace):
 # ─────────────────────────────────────────────────────────────────────────────
 # derive_status
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_derive_status_clean_success(build_workspace):
     ws = build_workspace()

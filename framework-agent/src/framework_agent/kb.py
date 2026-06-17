@@ -34,9 +34,14 @@ def path_for_framework(framework: str) -> Path:
     Returns ``<KB_ROOT>/framework_optimization/<framework_lower>/``; the name
     is lowercased and stripped (``"  Atom  "`` and ``"ATOM"`` resolve to
     ``"atom"``). The partition dir may not exist until
-    ``contribute_to_kb_for_framework`` creates it. Empty / whitespace-only
-    names resolve to the ``framework_optimization`` root (treat as "not
-    selected" and fall back to the ``framework`` domain bag).
+    ``contribute_to_kb_for_framework`` creates it.
+
+    Args:
+        framework: Framework name; empty / whitespace-only resolves to the
+            ``framework_optimization`` root (treated as "not selected").
+
+    Returns:
+        The KB partition path for the framework.
     """
     fw = (framework or "").strip().lower()
     root = _resolve_kb_root()
@@ -57,18 +62,21 @@ def contribute_to_kb_for_framework(
     :func:`path_for_framework`, for findings tied to a specific framework
     rather than a cross-framework domain. Partition dir is created lazily on
     first write.
+
+    Args:
+        framework: Framework whose partition to write to.
+        finding: The finding body (Markdown).
+        source: Provenance string recorded in the entry header.
+        session_id: Session identifier recorded in the entry header.
+
+    Returns:
+        Path to the ``empirical_kb.md`` file that was appended to.
     """
     fw_dir = path_for_framework(framework)
     fw_dir.mkdir(parents=True, exist_ok=True)
     target = fw_dir / "empirical_kb.md"
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
-        "%Y-%m-%d %H:%M:%S UTC"
-    )
-    entry = (
-        f"\n\n---\n"
-        f"**[{timestamp}]** source=`{source}` session=`{session_id}`\n\n"
-        f"{finding}\n"
-    )
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    entry = f"\n\n---\n**[{timestamp}]** source=`{source}` session=`{session_id}`\n\n{finding}\n"
     with target.open("a") as f:
         f.write(entry)
     return target
@@ -77,7 +85,12 @@ def contribute_to_kb_for_framework(
 DOMAIN_KEYWORDS: dict[str, list[str]] = {
     "kernel": ["kernel", "gemm", "moe", "attention", "fmoe", "ck", "triton"],
     "communication": [
-        "allreduce", "nccl", "rccl", "quickreduce", "communication", "collective",
+        "allreduce",
+        "nccl",
+        "rccl",
+        "quickreduce",
+        "communication",
+        "collective",
     ],
     "compiler": ["compiler", "inductor", "codegen"],
     "framework": ["vllm", "sglang", "atom", "framework", "scheduler", "cuda_graph", "cudagraph"],
@@ -106,6 +119,9 @@ def _resolve_kb_root() -> Path:
 
     Order: (1) ``FRAMEWORK_AGENT_KB_DIR``; (2) ``${FRAMEWORK_AGENT_ROOT}/kb``;
     (3) ``${repo}/framework-agent/kb`` derived from this file's location.
+
+    Returns:
+        The resolved KB root path.
     """
     explicit = os.environ.get("FRAMEWORK_AGENT_KB_DIR", "").strip()
     if explicit:
@@ -118,7 +134,12 @@ def _resolve_kb_root() -> Path:
 
 
 def list_domains() -> list[str]:
-    """List domain directories under the active KB root (sorted)."""
+    """List domain directories under the active KB root (sorted).
+
+    Returns:
+        list[str]: Sorted domain directory names, or an empty list when the KB
+            root does not exist.
+    """
     root = _resolve_kb_root()
     if not root.is_dir():
         return []
@@ -126,7 +147,15 @@ def list_domains() -> list[str]:
 
 
 def get_domain_files(domain: str) -> list[Path]:
-    """List all files in a given domain directory (sorted)."""
+    """List all files in a given domain directory (sorted).
+
+    Args:
+        domain (str): Domain directory name under the KB root.
+
+    Returns:
+        list[Path]: Sorted entries in the domain directory, or an empty list
+            when the directory does not exist.
+    """
     root = _resolve_kb_root()
     domain_dir = root / domain
     if not domain_dir.is_dir():
@@ -135,7 +164,15 @@ def get_domain_files(domain: str) -> list[Path]:
 
 
 def _prioritized_files(domain: str) -> list[Path]:
-    """Return domain files with priority entries (empirical / pitfalls) first."""
+    """Return domain files with priority entries (empirical / pitfalls) first.
+
+    Args:
+        domain (str): Domain directory name under the KB root.
+
+    Returns:
+        list[Path]: Files with :data:`_PRIORITY_FILES` ordered first, followed
+            by the remaining files; empty when the directory does not exist.
+    """
     root = _resolve_kb_root()
     domain_dir = root / domain
     if not domain_dir.is_dir():
@@ -151,7 +188,14 @@ def _prioritized_files(domain: str) -> list[Path]:
 
 
 def _match_domains(task_description: str) -> list[str]:
-    """Match domains by keyword (case-insensitive) against the task text."""
+    """Match domains by keyword (case-insensitive) against the task text.
+
+    Args:
+        task_description (str): Free-text task description to match.
+
+    Returns:
+        list[str]: Sorted domain names whose keywords appear in the text.
+    """
     lower = task_description.lower()
     matched: set[str] = set()
     for domain, keywords in DOMAIN_KEYWORDS.items():
@@ -161,7 +205,16 @@ def _match_domains(task_description: str) -> list[str]:
 
 
 def _load_file(path: Path, domain: str) -> KBFile | None:
-    """Best-effort read of a single KB file; OSErrors swallowed."""
+    """Best-effort read of a single KB file; OSErrors swallowed.
+
+    Args:
+        path (Path): File to read.
+        domain (str): Domain the file belongs to, recorded on the record.
+
+    Returns:
+        KBFile | None: The loaded record, or ``None`` if the file cannot be
+            read.
+    """
     try:
         content = path.read_text()
     except OSError:
@@ -178,6 +231,16 @@ def select_kb(
     If ``domains`` is None, derive them from ``task_description`` via
     keyword match; if keywords don't hit anything, fall back to a
     full-text scan across all domains' priority files.
+
+    Args:
+        task_description (str): Task text used to derive domains when
+            ``domains`` is None.
+        domains (list[str] | None): Explicit domain list, or ``None`` to
+            auto-derive.
+
+    Returns:
+        list[KBFile]: Deduplicated, prioritised KB files for the resolved
+            domains.
     """
     if domains is None:
         domains = _match_domains(task_description)
@@ -205,7 +268,15 @@ def select_kb(
 
 
 def load_kb_content(paths: list[Path]) -> str:
-    """Concatenate the contents of multiple KB files with blank-line separation."""
+    """Concatenate the contents of multiple KB files with blank-line separation.
+
+    Args:
+        paths (list[Path]): Files to read and concatenate; unreadable files are
+            skipped.
+
+    Returns:
+        str: The concatenated file contents joined by blank lines.
+    """
     parts: list[str] = []
     for p in paths:
         try:
@@ -223,28 +294,38 @@ def contribute_to_kb(
 ) -> Path:
     """Append a single finding to ``${KB}/<domain>/empirical_kb.md``.
 
-    Creates the domain directory and the file if missing. Returns the
-    file path so callers can log/audit the location.
+    Creates the domain directory and the file if missing.
+
+    Args:
+        domain (str): Domain directory name under the KB root.
+        finding (str): Markdown finding body to append.
+        source (str): Source tag recorded in the entry header.
+        session_id (str): Session identifier recorded in the entry header.
+
+    Returns:
+        Path: The ``empirical_kb.md`` file the finding was appended to.
     """
     root = _resolve_kb_root()
     domain_dir = root / domain
     domain_dir.mkdir(parents=True, exist_ok=True)
     target = domain_dir / "empirical_kb.md"
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
-        "%Y-%m-%d %H:%M:%S UTC"
-    )
-    entry = (
-        f"\n\n---\n"
-        f"**[{timestamp}]** source=`{source}` session=`{session_id}`\n\n"
-        f"{finding}\n"
-    )
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    entry = f"\n\n---\n**[{timestamp}]** source=`{source}` session=`{session_id}`\n\n{finding}\n"
     with target.open("a") as f:
         f.write(entry)
     return target
 
 
 def _render_finding_markdown(finding: Finding) -> str:
-    """Render a single Finding into a markdown subsection."""
+    """Render a single Finding into a markdown subsection.
+
+    Args:
+        finding (Finding): The finding to render.
+
+    Returns:
+        str: A markdown subsection with the title, optional metadata, metrics,
+            and body.
+    """
     lines = [f"### {finding.title or 'untitled finding'}"]
     if finding.source:
         lines.append(f"- source: `{finding.source}`")
@@ -267,6 +348,13 @@ def _synthesize_pure_python(domain: str, findings: list[Finding]) -> str:
 
     Layout: ``## Synthesised findings - <domain>``, one ``###`` section per
     finding, then ``## Aggregate metrics`` when metric keys repeat.
+
+    Args:
+        domain: Domain label for the digest header.
+        findings: Findings to render.
+
+    Returns:
+        The deterministic Markdown digest.
     """
     if not findings:
         return f"## Synthesised findings - {domain}\n\n_no findings_\n"
@@ -289,7 +377,15 @@ def _synthesize_pure_python(domain: str, findings: list[Finding]) -> str:
 
 
 def _build_llm_prompt(domain: str, findings: list[Finding]) -> str:
-    """Build the prompt fed to claude_agent_sdk when ``with_llm=True``."""
+    """Build the prompt fed to claude_agent_sdk when ``with_llm=True``.
+
+    Args:
+        domain (str): Domain label included in the prompt.
+        findings (list[Finding]): Raw findings rendered into the prompt body.
+
+    Returns:
+        str: The full curator prompt string.
+    """
     raw = _synthesize_pure_python(domain, findings)
     return (
         "You are a curator for the framework-agent knowledge base. "
@@ -308,9 +404,22 @@ def _synthesize_via_llm(
     *,
     model: str,
 ) -> str:
-    """Distil findings via claude_agent_sdk. ImportError surfaces a
-    RuntimeError with install hint; network / SDK errors are not caught so
-    misconfiguration is loud.
+    """Distil findings via claude_agent_sdk.
+
+    Network / SDK errors are not caught so misconfiguration is loud.
+
+    Args:
+        domain: Domain label for the synthesis.
+        findings: Findings to summarize.
+        model: SDK model identifier to use.
+
+    Returns:
+        The LLM-synthesized Markdown, falling back to the pure-Python
+        digest when the SDK returns nothing.
+
+    Raises:
+        RuntimeError: If ``claude_agent_sdk`` is missing or lacks required
+            attributes.
     """
     try:
         import claude_agent_sdk as sdk  # type: ignore  # noqa: F401
@@ -320,9 +429,7 @@ def _synthesize_via_llm(
             "with the [claude] extra or reuse kernel-agent's install.sh"
         ) from exc
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
-        raise RuntimeError(
-            "claude_agent_sdk missing required attributes (query / ClaudeAgentOptions)"
-        )
+        raise RuntimeError("claude_agent_sdk missing required attributes (query / ClaudeAgentOptions)")
 
     prompt = _build_llm_prompt(domain, findings)
     options = sdk.ClaudeAgentOptions(model=model, system_prompt="")
@@ -332,6 +439,12 @@ def _synthesize_via_llm(
     import asyncio
 
     async def _drive() -> None:
+        """Stream the SDK query and accumulate text into ``chunks``.
+
+        Iterates the async generator returned by ``sdk.query`` and appends every
+        non-empty text fragment from each message to the enclosing ``chunks``
+        list.
+        """
         async for message in sdk.query(prompt=prompt, options=options):
             for text in _iter_message_text(message):
                 if text:
@@ -346,6 +459,12 @@ def _iter_message_text(message) -> Iterable[str]:
 
     Accepts a plain string, ``.text``, or a ``.content`` list of blocks each
     with ``.text`` (SDK message shape varies across versions).
+
+    Args:
+        message: An SDK message object or string.
+
+    Yields:
+        Each non-empty text fragment found on the message.
     """
     if isinstance(message, str):
         yield message
@@ -372,6 +491,15 @@ def synthesize_findings(
 
     Default is pure-Python (deterministic, no SDK/network). ``with_llm=True``
     routes through a lazy-imported claude_agent_sdk.
+
+    Args:
+        domain: Domain label for the synthesis.
+        findings: Findings to distill.
+        with_llm: Whether to route through the LLM synthesizer.
+        model: SDK model identifier (used only when ``with_llm`` is True).
+
+    Returns:
+        The synthesized Markdown blob.
     """
     if not with_llm:
         return _synthesize_pure_python(domain, findings)
@@ -381,8 +509,13 @@ def synthesize_findings(
 def search_kb(query: str, *, domains: list[str] | None = None) -> list[KBFile]:
     """Case-insensitive substring search across all (or selected) domains.
 
-    Returns deduplicated KBFile records whose ``content`` contains ``query``;
-    order follows :func:`_prioritized_files` within each domain.
+    Args:
+        query: Substring to search for (matched case-insensitively).
+        domains: Domains to search; defaults to all known domains.
+
+    Returns:
+        Deduplicated :class:`KBFile` records whose ``content`` contains the
+        query, ordered per :func:`_prioritized_files` within each domain.
     """
     needle = query.lower()
     domains = domains or list_domains()

@@ -54,13 +54,22 @@ from ._accuracy_gate import (
 from ._canonical_fingerprint import canonical_fingerprint, workload_signature
 from ._explore_roofline_filter import compute_saturation_advisory
 from ._grid_runner import (
+    _MN_BACKENDS_PRIORITY,
+    _MN_PARAMS_PRIORITY,
     GridVariant,
     _resolve_session_dir,
+    apply_multi_node_invalid_variants,
+    reorder_grid_for_multi_node,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
 )
+from ._server_lifecycle import (
+    resolve_lifecycle_params,
+    teardown_lifecycle_server,
+)
 from ._workload_envs import (
+    FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
 )
@@ -80,12 +89,23 @@ DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 # via ``params['stack_stable_threshold_pct']``.
 DEFAULT_STACK_STABLE_PCT = 0.5
 
+
 def _now_iso() -> str:
+    """Return the current UTC time as an ISO 8601 string.
+
+    Returns:
+        str: The current UTC timestamp in ISO 8601 format.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
 def _initial_explore_search_state() -> dict[str, Any]:
-    """Empty :attr:`SharedState.explore_search` ledger (M3 schema v1)."""
+    """Empty :attr:`SharedState.explore_search` ledger (M3 schema v1).
+
+    Returns:
+        dict[str, Any]: A fresh explore-search ledger with all sections
+        initialized to their empty defaults.
+    """
     return {
         "schema_version": 1,
         "tested": {},
@@ -112,6 +132,12 @@ def _coerce_args_str(value: Any) -> str:
     ``vllm serve ... $EXTRA_VLLM_ARGS`` splices verbatim, so the server rejects
     it as ``unrecognized arguments`` and every server-arg variant aborts.
     Lists/tuples are space-joined into individual tokens.
+
+    Args:
+        value: The raw payload value (string, list/tuple, or None).
+
+    Returns:
+        The coerced shell-arg string ("" when ``value`` is None).
     """
     if value is None:
         return ""
@@ -139,14 +165,18 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
 
     Unknown keys ignored; unstamped ``provenance`` defaults to
     ``'default_grid'`` (keeps seed grids distinct from ``'llm_direct'``).
+
+    Args:
+        payload: List of variant dicts from the LLM/specialist grid.
+
+    Returns:
+        The parsed ``GridVariant`` objects (entries without a name skipped).
     """
     out: list[GridVariant] = []
     for raw in payload or []:
         if not isinstance(raw, dict) or not raw.get("name"):
             continue
-        args = _coerce_args_str(
-            raw.get("extra_args") or raw.get("extra_server_args") or ""
-        ).strip()
+        args = _coerce_args_str(raw.get("extra_args") or raw.get("extra_server_args") or "").strip()
         envs_raw = raw.get("extra_envs") or {}
         envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
         gv = GridVariant(
@@ -158,10 +188,10 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         # Stash extra metadata on the GridVariant so the ledger writer can
         # pull provenance/evidence; safe on the plain dataclass.
         gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
-        gv.scope = str(raw.get("scope") or "")                       # type: ignore[attr-defined]
-        gv.kb_evidence = list(raw.get("kb_evidence") or [])         # type: ignore[attr-defined]
-        gv.pr_evidence = list(raw.get("pr_evidence") or [])         # type: ignore[attr-defined]
-        gv.source_evidence = list(raw.get("source_evidence") or []) # type: ignore[attr-defined]
+        gv.scope = str(raw.get("scope") or "")  # type: ignore[attr-defined]
+        gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
+        gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
+        gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
         out.append(gv)
     return out
 
@@ -176,10 +206,12 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
 # Curated MTP-capable model class set (needs multi-token-prediction heads,
 # DeepSeek family today). Cross-reference atom's ``atom/model_engine/``
 # before adding entries rather than guessing from the model name.
-_ATOM_MTP_CAPABLE_MODEL_CLASSES: frozenset[str] = frozenset({
-    "moe_mla",
-    "moe_mla_nsa",
-})
+_ATOM_MTP_CAPABLE_MODEL_CLASSES: frozenset[str] = frozenset(
+    {
+        "moe_mla",
+        "moe_mla_nsa",
+    }
+)
 
 
 def _atom_default_grid(
@@ -196,6 +228,15 @@ def _atom_default_grid(
     ``apply_compatibility_filter`` is the second-line drop for flags not in
     ``atom --help``. Variant names are ``atom_``-prefixed for cross-session
     disambiguation.
+
+    Args:
+        model_class: Model-class label that gates which variants are emitted.
+        conc: Live concurrency used to bracket cudagraph capture sizes.
+        isl: Input sequence length (reserved for future gating).
+        osl: Output sequence length (reserved for future gating).
+
+    Returns:
+        The curated list of atom ``GridVariant`` seeds.
     """
     mc_l = (model_class or "").strip().lower()
     is_moe = "moe" in mc_l
@@ -206,6 +247,15 @@ def _atom_default_grid(
     variants: list[GridVariant] = []
 
     def _add(name: str, args: str) -> None:
+        """Append a ``default_grid``-provenance variant to the grid.
+
+        Args:
+            name (str): Unique variant name (``atom_`` prefixed).
+            args (str): The extra server args for the variant.
+
+        Returns:
+            None: Appends to the enclosing ``variants`` list.
+        """
         gv = GridVariant(
             name=name,
             extra_server_args=args,
@@ -267,21 +317,40 @@ def _default_grid_for_framework(
 
     Atom returns a curated seed grid; sglang / vllm / unknown return ``[]``
     ("no programmatic seed") and rely on LLM-emitted ``default_grid`` variants.
+
+    Args:
+        framework: Inference framework name to dispatch on.
+        model_class: Model-class label forwarded to the seed grid builder.
+        conc: Live concurrency forwarded to the seed grid builder.
+        isl: Input sequence length forwarded to the seed grid builder.
+        osl: Output sequence length forwarded to the seed grid builder.
+
+    Returns:
+        The framework's default ``GridVariant`` seeds, or ``[]`` when none.
     """
     fw = (framework or "").strip().lower()
     if fw == "atom":
         return _atom_default_grid(
-            model_class=model_class, conc=conc, isl=isl, osl=osl,
+            model_class=model_class,
+            conc=conc,
+            isl=isl,
+            osl=osl,
         )
     return []
 
 
 def _gain_pct(tput: float | None, base_tput: float) -> float | None:
-    if (
-        not isinstance(tput, (int, float))
-        or tput <= 0
-        or base_tput <= 0
-    ):
+    """Compute the percentage throughput gain over a baseline.
+
+    Args:
+        tput (float | None): The variant's throughput.
+        base_tput (float): The baseline throughput to compare against.
+
+    Returns:
+        float | None: The gain as a percentage, or ``None`` when either
+        input is non-positive or ``tput`` is not numeric.
+    """
+    if not isinstance(tput, (int, float)) or tput <= 0 or base_tput <= 0:
         return None
     return (float(tput) - base_tput) / base_tput * 100.0
 
@@ -293,9 +362,9 @@ def _gain_pct(tput: float | None, base_tput: float) -> float | None:
 # soft-kill → hard-cap layering). Override per-task via
 # ``params['variant_timeout_sec']`` or ``--explore-variant-timeout-sec``;
 # floor/ceiling guard pathological inputs.
-DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC = 2400      # 40 min — legacy smoke-workload default
-DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC = 14400   # 4 h — matches roofline composite budget
-DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN = 0.5   # hard cap ≥ baseline × (kill_ratio + 0.5)
+DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC = 2400  # 40 min — legacy smoke-workload default
+DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC = 14400  # 4 h — matches roofline composite budget
+DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN = 0.5  # hard cap ≥ baseline × (kill_ratio + 0.5)
 
 
 def _compute_explore_variant_timeout(
@@ -331,6 +400,15 @@ def _compute_explore_variant_timeout(
 
 
 def _join_args(*parts: str) -> str:
+    """Join non-empty, stripped argument fragments with single spaces.
+
+    Args:
+        *parts (str): Argument fragments; empty/whitespace ones are
+            dropped.
+
+    Returns:
+        str: The space-joined argument string.
+    """
     return " ".join(p.strip() for p in parts if p and p.strip())
 
 
@@ -351,12 +429,24 @@ class ExploreExecutor:
         stack_stable_threshold_pct: float = DEFAULT_STACK_STABLE_PCT,
         enable_stack_rebench: bool = True,
     ):
-        self.default_config_path = (
-            Path(default_config_path) if default_config_path else None
-        )
-        self.session_dir = (
-            Path(session_dir) if session_dir else _resolve_session_dir()
-        )
+        """Initialize the explore executor and its gating thresholds.
+
+        Args:
+            default_config_path (Path | str | None): Fallback benchmark
+                config path; resolved from defaults when ``None``.
+            session_dir (Path | str | None): Session output directory;
+                auto-resolved when ``None``.
+            variant_timeout_sec (int): Legacy per-variant hard timeout
+                floor. Defaults to ``2400``.
+            keep_threshold_pct (float): Minimum gain to KEEP a variant.
+                Defaults to :data:`DEFAULT_KEEP_THRESHOLD_PCT`.
+            stack_stable_threshold_pct (float): Stability band for the
+                stack rebench. Defaults to :data:`DEFAULT_STACK_STABLE_PCT`.
+            enable_stack_rebench (bool): Whether to run the inlined
+                per-KEEP stack rebench. Defaults to ``True``.
+        """
+        self.default_config_path = Path(default_config_path) if default_config_path else None
+        self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
         self.stack_stable_threshold_pct = float(stack_stable_threshold_pct)
@@ -364,13 +454,24 @@ class ExploreExecutor:
         self.enable_stack_rebench = bool(enable_stack_rebench)
 
     async def __call__(self, ctx) -> dict[str, Any]:
+        """Run the merged ``explore`` action for one task.
+
+        Resolves the benchmark config and output workspace, builds the
+        candidate grid (programmatic seed and/or LLM/specialist variants),
+        benchmarks each variant with per-variant KEEP/REVERT gating, and
+        optionally performs an inlined per-KEEP stack rebench.
+
+        Args:
+            ctx: The action runner context carrying the task and params.
+
+        Returns:
+            dict[str, Any]: The explore result payload (status plus the
+            accepted/rejected variants and ledger updates), or a failure
+            dict on error.
+        """
         params = dict(ctx.task.params or {})
         # ----- Config / output workspace -----------------------------------
-        config_path = Path(
-            params.get("config_path")
-            or self.default_config_path
-            or default_baseline_config()
-        )
+        config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not config_path.exists():
             return {
                 "status": "failed",
@@ -388,13 +489,9 @@ class ExploreExecutor:
         # ----- Workload-contract materialization ---------------------------
         # Re-materialize so variant YAMLs honour the operator's actual
         # workload (CONC / ISL / OSL / TP / MAX_MODEL_LEN / PRECISION).
-        resolved_model = (
-            str(params.get("model_path") or "").strip()
-            or os.environ.get("MODEL_PATH", "").strip()
-        )
+        resolved_model = str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
         resolved_gpu = (
-            str(params.get("gpu_type") or "").strip().lower()
-            or os.environ.get("GPU_TYPE", "").strip().lower()
+            str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
         )
         try:
             override_script = sanitize_script_name(params.get("benchmark_script"))
@@ -405,14 +502,21 @@ class ExploreExecutor:
                 "error_class": "bad_param",
                 "error": str(exc),
             }
-        config_path = materialize_config_with_envs(
-            config_path,
-            output_root,
-            model_path=resolved_model or None,
-            gpu_type=resolved_gpu or None,
-            benchmark_script=override_script,
-            out_name="explore_base.with_envs.yaml",
-        )
+        try:
+            config_path = materialize_config_with_envs(
+                config_path,
+                output_root,
+                model_path=resolved_model or None,
+                gpu_type=resolved_gpu or None,
+                benchmark_script=override_script,
+                out_name="explore_base.with_envs.yaml",
+            )
+        except FrameworkScriptMismatchError as exc:
+            return {
+                "status": "failed",
+                "error_class": "framework_script_mismatch",
+                "error": str(exc),
+            }
 
         # ----- Inputs ------------------------------------------------------
         base_extra_args = str(params.get("base_extra_args") or "").strip()
@@ -430,22 +534,28 @@ class ExploreExecutor:
                 if isinstance(cb_tput, (int, float)) and cb_tput > 0:
                     base_tput = float(cb_tput)
                 else:
-                    base_tput = float(
-                        getattr(ss, "baseline_tput", 0.0) or 0.0
-                    )
-        baseline_accuracy = (
-            float(params.get("accuracy_baseline") or 0.0)
-            or float(params.get("baseline_accuracy") or 0.0)
+                    base_tput = float(getattr(ss, "baseline_tput", 0.0) or 0.0)
+        baseline_accuracy = float(params.get("accuracy_baseline") or 0.0) or float(
+            params.get("baseline_accuracy") or 0.0
         )
-        keep_threshold_pct = float(params.get(
-            "keep_threshold_pct", self.keep_threshold_pct,
-        ))
-        stack_stable_threshold_pct = float(params.get(
-            "stack_stable_threshold_pct", self.stack_stable_threshold_pct,
-        ))
-        enable_stack_rebench = bool(params.get(
-            "enable_stack_rebench", self.enable_stack_rebench,
-        ))
+        keep_threshold_pct = float(
+            params.get(
+                "keep_threshold_pct",
+                self.keep_threshold_pct,
+            )
+        )
+        stack_stable_threshold_pct = float(
+            params.get(
+                "stack_stable_threshold_pct",
+                self.stack_stable_threshold_pct,
+            )
+        )
+        enable_stack_rebench = bool(
+            params.get(
+                "enable_stack_rebench",
+                self.enable_stack_rebench,
+            )
+        )
 
         # per-variant overtime kill — anchored on baseline wall-clock,
         # single-variant runs only (not stack_rebench). Coordinator injects
@@ -454,24 +564,16 @@ class ExploreExecutor:
         # ``variant_timeout_sec`` hard cap gates.
         baseline_runtime_sec_raw = params.get("baseline_runtime_sec")
         try:
-            baseline_runtime_sec = (
-                float(baseline_runtime_sec_raw)
-                if baseline_runtime_sec_raw is not None else 0.0
-            )
+            baseline_runtime_sec = float(baseline_runtime_sec_raw) if baseline_runtime_sec_raw is not None else 0.0
         except (TypeError, ValueError):
             baseline_runtime_sec = 0.0
         overtime_kill_ratio_raw = params.get("explore_overtime_kill_ratio")
         try:
-            overtime_kill_ratio = (
-                float(overtime_kill_ratio_raw)
-                if overtime_kill_ratio_raw is not None else 0.0
-            )
+            overtime_kill_ratio = float(overtime_kill_ratio_raw) if overtime_kill_ratio_raw is not None else 0.0
         except (TypeError, ValueError):
             overtime_kill_ratio = 0.0
         if baseline_runtime_sec > 0 and overtime_kill_ratio > 0:
-            overtime_deadline_sec: float | None = (
-                baseline_runtime_sec * overtime_kill_ratio
-            )
+            overtime_deadline_sec: float | None = baseline_runtime_sec * overtime_kill_ratio
         else:
             overtime_deadline_sec = None
 
@@ -506,9 +608,7 @@ class ExploreExecutor:
         try:
             with config_path.open(encoding="utf-8") as _f:
                 _cfg = yaml.safe_load(_f) or {}
-            framework = str(
-                (_cfg.get("benchmark") or {}).get("framework") or ""
-            ).lower()
+            framework = str((_cfg.get("benchmark") or {}).get("framework") or "").lower()
             # Pull CONC so the seed grid's cudagraph-bracket variant brackets
             # the live decode concurrency.
             _yaml_envs = (_cfg.get("benchmark") or {}).get("envs") or {}
@@ -522,36 +622,18 @@ class ExploreExecutor:
             # No LLM variants: fall through to the framework's programmatic
             # seed grid (stamped ``provenance='default_grid'``) instead of
             # failing the task.
-            seed_model_class = (
-                str(params.get("model_class") or "").strip()
-                or os.environ.get("MODEL_CLASS", "").strip()
-            )
+            seed_model_class = str(params.get("model_class") or "").strip() or os.environ.get("MODEL_CLASS", "").strip()
             seed_conc = 0
             try:
-                _conc_raw = (
-                    params.get("conc")
-                    or _yaml_envs.get("CONC")
-                    or os.environ.get("CONC")
-                    or 0
-                )
+                _conc_raw = params.get("conc") or _yaml_envs.get("CONC") or os.environ.get("CONC") or 0
                 seed_conc = int(_conc_raw)
             except (TypeError, ValueError):
                 seed_conc = 0
             seed_isl = 0
             seed_osl = 0
             try:
-                seed_isl = int(
-                    params.get("isl")
-                    or _yaml_envs.get("ISL")
-                    or os.environ.get("ISL")
-                    or 0
-                )
-                seed_osl = int(
-                    params.get("osl")
-                    or _yaml_envs.get("OSL")
-                    or os.environ.get("OSL")
-                    or 0
-                )
+                seed_isl = int(params.get("isl") or _yaml_envs.get("ISL") or os.environ.get("ISL") or 0)
+                seed_osl = int(params.get("osl") or _yaml_envs.get("OSL") or os.environ.get("OSL") or 0)
             except (TypeError, ValueError):
                 pass
             seed = _default_grid_for_framework(
@@ -566,8 +648,10 @@ class ExploreExecutor:
                     "explore: empty grid for framework=%s; falling through "
                     "to %d default_grid seed variants "
                     "(model_class=%r conc=%d)",
-                    framework or "?", len(seed),
-                    seed_model_class or "?", seed_conc,
+                    framework or "?",
+                    len(seed),
+                    seed_model_class or "?",
+                    seed_conc,
                 )
                 grid_payload = [
                     {
@@ -601,9 +685,7 @@ class ExploreExecutor:
             }
 
         # ----- explore_search dedup ----------------------------------------
-        search = dict(
-            params.get("explore_search") or _initial_explore_search_state()
-        )
+        search = dict(params.get("explore_search") or _initial_explore_search_state())
         # Defensive default fill (resume / first-run guards).
         for key, default in (
             ("schema_version", 1),
@@ -619,6 +701,16 @@ class ExploreExecutor:
             search.setdefault(key, default)
 
         def _entry_fp(entry: Any) -> str:
+            """Resolve a ledger entry's variant fingerprint.
+
+            Args:
+                entry (Any): A ledger entry; expected to be a dict with
+                    a ``fingerprint`` or server-args/envs to derive one.
+
+            Returns:
+                str: The stored or canonically-derived fingerprint, or
+                ``""`` when ``entry`` is not a dict.
+            """
             if not isinstance(entry, dict):
                 return ""
             fp = entry.get("fingerprint")
@@ -629,15 +721,65 @@ class ExploreExecutor:
                 dict(entry.get("extra_envs") or {}),
             )
 
+        # Conditional dedup. KEEP'd variants are permanently blocked (never
+        # re-proposed). A variant that ran but did not promote (REVERT /
+        # KEEP_UNSTABLE / no_promote) only stays blocked while its prior measured
+        # gain is below the current KEEP bar; once the (decaying) bar drops to or
+        # below that gain the variant unblocks so a later cycle can re-test it.
+        # Infra failures (KILLED_OVERTIME / FAILED) stay blocked regardless of
+        # gain. Unblocking only lifts the hard skip — the variant still re-runs
+        # the full KEEP + stack-rebench gate, so a stale measurement can't
+        # promote on its own.
+        gain_unlockable = {"REVERT", "KEEP_UNSTABLE", "no_promote"}
+
+        def _is_blocked(entry: Any) -> bool:
+            """Whether a tested-ledger entry should still be skipped this round.
+
+            KEEP'd and infra-failed entries stay blocked; gain-unlockable
+            outcomes (REVERT / KEEP_UNSTABLE / no_promote) unblock once the
+            current KEEP bar drops to or below their prior measured gain.
+
+            Args:
+                entry (Any): A ``tested`` ledger entry (expected dict).
+
+            Returns:
+                bool: ``True`` when the variant should remain skipped, ``False``
+                when it may be re-tested this round.
+            """
+            if not isinstance(entry, dict):
+                return True
+            if str(entry.get("outcome") or "") in gain_unlockable:
+                try:
+                    prior_gain = float(entry.get("gain_pct"))
+                except (TypeError, ValueError):
+                    return True
+                return prior_gain < keep_threshold_pct
+            return True
+
         tested_dict = search.get("tested") or {}
-        seen_fps: set[str] = set(tested_dict.keys())
-        for v in tested_dict.values():
-            seen_fps.add(_entry_fp(v))
+        seen_fps: set[str] = set()
+        unlocked_reference: list[dict[str, Any]] = []
+        for fp_key, v in tested_dict.items():
+            if _is_blocked(v):
+                seen_fps.add(str(fp_key))
+                seen_fps.add(_entry_fp(v))
+            elif isinstance(v, dict):
+                unlocked_reference.append(v)
+        # accepted == KEEP'd: always blocked.
         for v in search.get("accepted") or []:
             seen_fps.add(_entry_fp(v))
         for v in search.get("rejected") or []:
-            seen_fps.add(_entry_fp(v))
+            if _is_blocked(v):
+                seen_fps.add(_entry_fp(v))
+            elif isinstance(v, dict):
+                unlocked_reference.append(v)
         seen_fps.discard("")
+        if unlocked_reference:
+            log.info(
+                "explore: %d prior sub-threshold variant(s) unblocked at keep_threshold=%.3f%% for re-test",
+                len(unlocked_reference),
+                keep_threshold_pct,
+            )
         name_index = dict(search.get("name_index") or {})
 
         # Attach the per-variant fingerprint as an attribute so the result
@@ -650,26 +792,32 @@ class ExploreExecutor:
             fp = canonical_fingerprint(gv.extra_server_args, gv.extra_envs)
             gv.canonical_fp = fp  # type: ignore[attr-defined]
             if fp in seen_fps:
-                skipped_dup.append({
-                    "name": gv.name,
-                    "fingerprint": fp,
-                    "reason": "ledger_dup",
-                })
+                skipped_dup.append(
+                    {
+                        "name": gv.name,
+                        "fingerprint": fp,
+                        "reason": "ledger_dup",
+                    }
+                )
                 continue
             if fp in unique_in_round:
                 # In-round duplicate — keep the first occurrence.
-                skipped_dup.append({
-                    "name": gv.name,
-                    "fingerprint": fp,
-                    "reason": "round_dup",
-                })
+                skipped_dup.append(
+                    {
+                        "name": gv.name,
+                        "fingerprint": fp,
+                        "reason": "round_dup",
+                    }
+                )
                 continue
             unique_in_round[fp] = gv
 
         runnable: list[GridVariant] = list(unique_in_round.values())
         log.info(
             "explore dedup: payload=%d → runnable=%d (ledger_dup+round_dup=%d)",
-            len(grid), len(runnable), len(skipped_dup),
+            len(grid),
+            len(runnable),
+            len(skipped_dup),
         )
 
         # Roofline saturation advisory (annotates, never drops): flags
@@ -679,19 +827,47 @@ class ExploreExecutor:
         saturation_snapshot = params.get("roofline_saturation_snapshot")
         if isinstance(saturation_snapshot, dict) and saturation_snapshot and runnable:
             roofline_advisory = compute_saturation_advisory(
-                runnable, saturation_snapshot,
+                runnable,
+                saturation_snapshot,
             )
             if roofline_advisory:
                 log.info(
-                    "explore roofline advisory: %d/%d variants flagged "
-                    "as likely_saturated (saturated=%s)",
+                    "explore roofline advisory: %d/%d variants flagged as likely_saturated (saturated=%s)",
                     len(roofline_advisory),
                     len(runnable),
-                    ",".join(sorted(
-                        d for d, p in saturation_snapshot.items()
-                        if isinstance(p, (int, float)) and float(p) >= 80.0
-                    )),
+                    ",".join(
+                        sorted(
+                            d
+                            for d, p in saturation_snapshot.items()
+                            if isinstance(p, (int, float)) and float(p) >= 80.0
+                        )
+                    ),
                 )
+
+        # Multi-node grid shaping (companion to the roofline gate above).
+        # Both helpers short-circuit on ``is_multi_node() is False``: the
+        # invalid filter returns ``(list(grid), [])`` and reorder preserves the
+        # original order, so the single-node ``runnable`` is bit-for-bit
+        # identical and ``skipped_dup`` gains nothing — single-node behaviour is
+        # never altered (hard requirement). In multi-node mode: drop
+        # known-regression variants (cuda-graph-max-bs < CONC), then surface
+        # likely-winners first so a max-hours cut still benches the strong
+        # candidates. (apply_single_node_invalid_variants is intentionally NOT
+        # called here: it would mutate the single-node grid.)
+        if runnable:
+            runnable, _mn_dropped = apply_multi_node_invalid_variants(runnable)
+            for _d in _mn_dropped:
+                skipped_dup.append(
+                    {
+                        "name": _d.get("name", ""),
+                        "reason": _d.get("source", "grid_invalid"),
+                        "detail": _d.get("reason", ""),
+                    }
+                )
+            runnable = reorder_grid_for_multi_node(
+                runnable,
+                priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
+            )
 
         round_id_seed = int(search.get("cursor") or 0) + 1
         round_id = f"explore-{round_id_seed:03d}"
@@ -702,9 +878,7 @@ class ExploreExecutor:
         keep_unstable: list[dict[str, Any]] = []
         tested_update: dict[str, dict[str, Any]] = dict(tested_dict)
         rejected_update: list[dict[str, Any]] = list(search.get("rejected") or [])
-        winners_history_update: list[dict[str, Any]] = list(
-            search.get("winners_history") or []
-        )
+        winners_history_update: list[dict[str, Any]] = list(search.get("winners_history") or [])
 
         # ``stack_extra_args`` / ``stack_extra_envs`` carry the running
         # accumulation; after a KEEP they extend with the KEEP'd variant so
@@ -717,6 +891,13 @@ class ExploreExecutor:
 
         last_run_tput: float | None = None  # rebench/single-variant tput
 
+        # Single-node server_lifecycle eligibility (multi-node / non-builtin
+        # script / profiler-on falls back to a fresh cold boot for round 2).
+        lifecycle = resolve_lifecycle_params(config_path)
+        lifecycle_eligible = bool(lifecycle.get("eligible"))
+        lifecycle_framework = str(lifecycle.get("framework") or "")
+        lifecycle_port = int(lifecycle.get("port") or 0)
+
         if runnable:
             for idx, gv in enumerate(runnable):
                 fp = getattr(gv, "canonical_fp", "")
@@ -724,347 +905,392 @@ class ExploreExecutor:
                 scope = str(getattr(gv, "scope", "") or "")
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
-                # 1. Run the single variant on the running stack.
-                #    ``soft_deadline_sec`` is the overtime kill; stack_rebench
-                #    below intentionally omits it (Q4).
-                results = await run_grid(
-                    base_yaml_path=config_path,
-                    base_extra_args=stack_extra_args,
-                    grid=[gv],
-                    output_root=slot,
-                    variant_timeout_sec=timeout_sec,
-                    model_path=resolved_model,
-                    gpu_type=resolved_gpu,
-                    benchmark_script=override_script,
-                    result_dir=override_result_dir,
-                    soft_deadline_sec=overtime_deadline_sec,
+                # Round 1 + round 2 share this slot as the lifecycle pid_dir so
+                # round 2 re-attaches to round 1's hot server; teardown in the
+                # finally below reaps it on every exit path.
+                round1_lifecycle = (
+                    {"cleanup": False, "pid_dir": str(slot), "port": lifecycle_port} if lifecycle_eligible else None
                 )
-                if not results:
-                    # Defensive — run_grid returns one result per grid entry.
-                    log.warning("explore: variant %s produced no result", gv.name)
-                    continue
-                r = results[0]
-
-                # Overtime gate fired: record a ``KILLED_OVERTIME`` row with
-                # runtime_sec + wall_clock_ratio (no faked tput/gain, per Q3),
-                # skip all downstream gates + dedup, leave the stack unadvanced.
-                if getattr(r, "killed_overtime", False):
-                    variant_runtime = float(r.runtime_sec or 0.0)
-                    wall_clock_ratio = (
-                        round(variant_runtime / baseline_runtime_sec, 3)
-                        if baseline_runtime_sec > 0 else None
+                try:
+                    # 1. Round 1: run the variant on the running stack. When
+                    #    eligible, cleanup=false keeps the server hot for the
+                    #    warm round 2; ``soft_deadline_sec`` is the overtime
+                    #    kill (round 2 below intentionally omits it, Q4).
+                    results = await run_grid(
+                        base_yaml_path=config_path,
+                        base_extra_args=stack_extra_args,
+                        grid=[gv],
+                        output_root=slot,
+                        variant_timeout_sec=timeout_sec,
+                        model_path=resolved_model,
+                        gpu_type=resolved_gpu,
+                        benchmark_script=override_script,
+                        result_dir=override_result_dir,
+                        soft_deadline_sec=overtime_deadline_sec,
+                        server_lifecycle=round1_lifecycle,
                     )
+                    if not results:
+                        # Defensive — run_grid returns one result per grid entry.
+                        log.warning(
+                            "explore: variant %s produced no result",
+                            gv.name,
+                        )
+                        continue
+                    r = results[0]
+
+                    # Overtime gate fired: record a ``KILLED_OVERTIME`` row with
+                    # runtime_sec + wall_clock_ratio (no faked tput/gain, per Q3),
+                    # skip all downstream gates + dedup, leave the stack unadvanced.
+                    if getattr(r, "killed_overtime", False):
+                        variant_runtime = float(r.runtime_sec or 0.0)
+                        wall_clock_ratio = (
+                            round(variant_runtime / baseline_runtime_sec, 3) if baseline_runtime_sec > 0 else None
+                        )
+                        # Rough output tok/s salvaged from the engine's partial
+                        # server.log throughput logs. Informational only: ``tput``
+                        # stays None so this never enters winner selection or gain
+                        # math; the estimate rides alongside as a separate key.
+                        est_tput = getattr(r, "estimated_output_throughput", None)
+                        tested_update[fp] = {
+                            "fingerprint": fp,
+                            "name": gv.name,
+                            "extra_server_args": gv.extra_server_args,
+                            "extra_envs": dict(gv.extra_envs),
+                            "note": gv.note,
+                            "outcome": "KILLED_OVERTIME",
+                            "status": r.status,
+                            "tput": None,
+                            "gain_pct": None,
+                            "estimated_output_throughput": est_tput,
+                            "base_tput": running_base_tput,
+                            "round_id": round_id,
+                            "ts": _now_iso(),
+                            "provenance": provenance,
+                            "workload_signature": ws_sig,
+                            "framework": framework,
+                            "workspace": r.workspace,
+                            "runtime_sec": round(variant_runtime, 2),
+                            "wall_clock_ratio_vs_baseline": wall_clock_ratio,
+                            "baseline_runtime_sec": round(
+                                baseline_runtime_sec,
+                                2,
+                            ),
+                            "overtime_kill_ratio": overtime_kill_ratio,
+                        }
+                        if gv.name:
+                            name_index[gv.name] = fp
+                        rejected_update.append(
+                            {
+                                "fingerprint": fp,
+                                "name": gv.name,
+                                "extra_server_args": gv.extra_server_args,
+                                "extra_envs": dict(gv.extra_envs),
+                                "note": gv.note,
+                                "reason": "killed_overtime",
+                                "gain_pct": None,
+                                "tput": None,
+                                "estimated_output_throughput": est_tput,
+                                "runtime_sec": round(variant_runtime, 2),
+                                "wall_clock_ratio_vs_baseline": wall_clock_ratio,
+                                "round_id": round_id,
+                                "ts": _now_iso(),
+                                "provenance": provenance,
+                            }
+                        )
+                        losers.append(
+                            {
+                                "fingerprint": fp,
+                                "name": gv.name,
+                                "extra_server_args": gv.extra_server_args,
+                                "extra_envs": dict(gv.extra_envs),
+                                "provenance": provenance,
+                                "gain_pct": None,
+                                "tput": None,
+                                "estimated_output_throughput": est_tput,
+                                "reason": "killed_overtime",
+                                "workspace": r.workspace,
+                                "runtime_sec": round(variant_runtime, 2),
+                                "wall_clock_ratio_vs_baseline": wall_clock_ratio,
+                            }
+                        )
+                        log.warning(
+                            "explore: variant %s KILLED_OVERTIME "
+                            "(runtime=%.1fs vs baseline=%.1fs, ratio=%.2fx, "
+                            "kill_ratio=%.2fx, est_output_tput=%s tok/s); "
+                            "skipping KEEP/REVERT ladder.",
+                            gv.name,
+                            variant_runtime,
+                            baseline_runtime_sec,
+                            wall_clock_ratio if wall_clock_ratio is not None else -1.0,
+                            overtime_kill_ratio,
+                            f"{est_tput:.1f}" if est_tput is not None else "n/a",
+                        )
+                        continue
+
+                    # Cold round-1 gain is the cost gate: only variants that
+                    # already clear keep_threshold (and the accuracy gate) earn
+                    # a warm round 2.
+                    gain = _gain_pct(r.output_throughput, running_base_tput)
+                    outcome = "FAILED"
+                    reason: str = ""
+                    if r.status != "succeeded" or gain is None:
+                        reason = (r.error or "")[-256:] or "no_measurement"
+                    elif gain < keep_threshold_pct:
+                        outcome = "REVERT"
+                        reason = "gain_below_threshold"
+                    else:
+                        # Accuracy gate (only for high-risk variants), on round 1.
+                        accuracy_ok = True
+                        accuracy_value: float | None = None
+                        if baseline_accuracy > 0 and is_high_accuracy_risk(
+                            extra_args=gv.extra_server_args,
+                            extra_envs=gv.extra_envs,
+                        ):
+                            eval_out = parse_eval_results(slot)
+                            accuracy_value = eval_out.get("accuracy")
+                            if isinstance(accuracy_value, (int, float)):
+                                accuracy_ok = accuracy_passed(
+                                    baseline_accuracy,
+                                    float(accuracy_value),
+                                )
+                            else:
+                                # No eval result: follow the legacy "no accuracy
+                                # data => skip the gate" convention so high-risk
+                                # flags aren't auto-rejected on a benign gap.
+                                accuracy_ok = True
+                        if not accuracy_ok:
+                            outcome = "REVERT"
+                            reason = "accuracy_drop"
+                        else:
+                            outcome = "KEEP"
+
+                    cold_tput = r.output_throughput
                     tested_update[fp] = {
                         "fingerprint": fp,
                         "name": gv.name,
                         "extra_server_args": gv.extra_server_args,
                         "extra_envs": dict(gv.extra_envs),
                         "note": gv.note,
-                        "outcome": "KILLED_OVERTIME",
+                        "outcome": outcome,
                         "status": r.status,
-                        "tput": None,
-                        "gain_pct": None,
+                        "tput": cold_tput,
+                        "cold_tput": cold_tput,
+                        "gain_pct": gain,
                         "base_tput": running_base_tput,
                         "round_id": round_id,
                         "ts": _now_iso(),
                         "provenance": provenance,
+                        "scope": scope,
                         "workload_signature": ws_sig,
                         "framework": framework,
                         "workspace": r.workspace,
-                        "runtime_sec": round(variant_runtime, 2),
-                        "wall_clock_ratio_vs_baseline": wall_clock_ratio,
-                        "baseline_runtime_sec": round(
-                            baseline_runtime_sec, 2,
-                        ),
-                        "overtime_kill_ratio": overtime_kill_ratio,
                     }
                     if gv.name:
                         name_index[gv.name] = fp
-                    rejected_update.append({
-                        "fingerprint": fp,
-                        "name": gv.name,
-                        "extra_server_args": gv.extra_server_args,
-                        "extra_envs": dict(gv.extra_envs),
-                        "note": gv.note,
-                        "reason": "killed_overtime",
-                        "gain_pct": None,
-                        "tput": None,
-                        "runtime_sec": round(variant_runtime, 2),
-                        "wall_clock_ratio_vs_baseline": wall_clock_ratio,
-                        "round_id": round_id,
-                        "ts": _now_iso(),
-                        "provenance": provenance,
-                    })
-                    losers.append({
-                        "fingerprint": fp,
-                        "name": gv.name,
-                        "extra_server_args": gv.extra_server_args,
-                        "extra_envs": dict(gv.extra_envs),
-                        "provenance": provenance,
-                        "gain_pct": None,
-                        "tput": None,
-                        "reason": "killed_overtime",
-                        "workspace": r.workspace,
-                        "runtime_sec": round(variant_runtime, 2),
-                        "wall_clock_ratio_vs_baseline": wall_clock_ratio,
-                    })
-                    log.warning(
-                        "explore: variant %s KILLED_OVERTIME "
-                        "(runtime=%.1fs vs baseline=%.1fs, ratio=%.2fx, "
-                        "kill_ratio=%.2fx); skipping KEEP/REVERT ladder.",
-                        gv.name, variant_runtime, baseline_runtime_sec,
-                        wall_clock_ratio if wall_clock_ratio is not None else -1.0,
-                        overtime_kill_ratio,
-                    )
-                    continue
 
-                gain = _gain_pct(r.output_throughput, running_base_tput)
-                outcome = "FAILED"
-                reason: str = ""
-                if r.status != "succeeded" or gain is None:
-                    reason = (r.error or "")[-256:] or "no_measurement"
-                elif gain < keep_threshold_pct:
-                    outcome = "REVERT"
-                    reason = "gain_below_threshold"
-                else:
-                    # 2. Accuracy gate (only for high-risk variants).
-                    accuracy_ok = True
-                    accuracy_value: float | None = None
-                    if (
-                        baseline_accuracy > 0
-                        and is_high_accuracy_risk(
-                            extra_args=gv.extra_server_args,
-                            extra_envs=gv.extra_envs,
-                        )
-                    ):
-                        eval_out = parse_eval_results(slot)
-                        accuracy_value = eval_out.get("accuracy")
-                        if isinstance(accuracy_value, (int, float)):
-                            accuracy_ok = accuracy_passed(
-                                baseline_accuracy, float(accuracy_value),
+                    # ---- KEEP path (with warm round-2 rebench) ------------
+                    if outcome == "KEEP":
+                        keep_entry = {
+                            "fingerprint": fp,
+                            "name": gv.name,
+                            "extra_server_args": gv.extra_server_args,
+                            "extra_envs": dict(gv.extra_envs),
+                            "note": gv.note,
+                            "provenance": provenance,
+                            "gain_pct": gain,
+                            "tput": cold_tput,
+                            "cold_tput": cold_tput,
+                            "single_workspace": r.workspace,
+                            "round_id": round_id,
+                            "accepted_at_round": round_id,
+                            "ts": _now_iso(),
+                        }
+                        # Layer onto the running stack BEFORE rebench.
+                        next_args = _join_args(stack_extra_args, gv.extra_server_args)
+                        next_envs = dict(stack_extra_envs)
+                        next_envs.update(gv.extra_envs)
+                        in_batch_keeps.append(keep_entry)
+
+                        stack_rebench_tput: float | None = None
+                        stack_rebench_workspace: str | None = None
+                        stack_rebench_warnings: list[str] = []
+
+                        if enable_stack_rebench and base_tput > 0:
+                            # Round 2: same config as round 1. When eligible,
+                            # reuse round 1's hot server (cleanup=true tears it
+                            # down) so the measurement is warm and baseline-
+                            # comparable; otherwise a fresh cold boot. No
+                            # ``soft_deadline_sec`` (parity with the legacy
+                            # rebench).
+                            rebench_slot = slot / "stack_rebench"
+                            rebench_slot.mkdir(parents=True, exist_ok=True)
+                            rebench_variant = GridVariant(
+                                name=f"{gv.name}__stack_rebench",
+                                extra_server_args=gv.extra_server_args,
+                                extra_envs=dict(gv.extra_envs),
+                                note="stack_rebench",
                             )
-                        else:
-                            # No eval result: follow the legacy "no accuracy
-                            # data => skip the gate" convention so high-risk
-                            # flags aren't auto-rejected on a benign gap.
-                            accuracy_ok = True
-                    if not accuracy_ok:
-                        outcome = "REVERT"
-                        reason = "accuracy_drop"
-                    else:
-                        outcome = "KEEP"
+                            round2_lifecycle = (
+                                {
+                                    "cleanup": True,
+                                    "pid_dir": str(slot),
+                                    "port": lifecycle_port,
+                                }
+                                if lifecycle_eligible
+                                else None
+                            )
+                            rebench_results = await run_grid(
+                                base_yaml_path=config_path,
+                                base_extra_args=stack_extra_args,
+                                grid=[rebench_variant],
+                                output_root=rebench_slot,
+                                variant_timeout_sec=timeout_sec,
+                                model_path=resolved_model,
+                                gpu_type=resolved_gpu,
+                                benchmark_script=override_script,
+                                result_dir=override_result_dir,
+                                server_lifecycle=round2_lifecycle,
+                            )
+                            rb = rebench_results[0] if rebench_results else None
 
-                tested_update[fp] = {
-                    "fingerprint": fp,
-                    "name": gv.name,
-                    "extra_server_args": gv.extra_server_args,
-                    "extra_envs": dict(gv.extra_envs),
-                    "note": gv.note,
-                    "outcome": outcome,
-                    "status": r.status,
-                    "tput": r.output_throughput,
-                    "gain_pct": gain,
-                    "base_tput": running_base_tput,
-                    "round_id": round_id,
-                    "ts": _now_iso(),
-                    "provenance": provenance,
-                    "workload_signature": ws_sig,
-                    "framework": framework,
-                    "workspace": r.workspace,
-                }
-                if gv.name:
-                    name_index[gv.name] = fp
+                            if rb is not None and rb.status == "succeeded":
+                                stack_rebench_tput = rb.output_throughput
+                                stack_rebench_workspace = rb.workspace
+                                stack_rebench_warnings = list(rb.nonfatal_warnings)
+                            elif rb is not None:
+                                stack_rebench_warnings.append(f"stack_rebench_failed:{(rb.error or '')[-120:]}")
+                            else:
+                                stack_rebench_warnings.append("stack_rebench_no_result")
 
-                # ---- KEEP path (with inlined stack rebench) ---------------
-                if outcome == "KEEP":
-                    keep_entry = {
-                        "fingerprint": fp,
-                        "name": gv.name,
-                        "extra_server_args": gv.extra_server_args,
-                        "extra_envs": dict(gv.extra_envs),
-                        "note": gv.note,
-                        "provenance": provenance,
-                        "gain_pct": gain,
-                        "tput": r.output_throughput,
-                        "single_workspace": r.workspace,
-                        "round_id": round_id,
-                        "accepted_at_round": round_id,
-                        "ts": _now_iso(),
-                    }
-                    # Layer onto the running stack BEFORE rebench.
-                    next_args = _join_args(stack_extra_args, gv.extra_server_args)
-                    next_envs = dict(stack_extra_envs)
-                    next_envs.update(gv.extra_envs)
-                    in_batch_keeps.append(keep_entry)
-
-                    stack_rebench_tput: float | None = None
-                    stack_rebench_workspace: str | None = None
-                    stack_rebench_warnings: list[str] = []
-
-                    if enable_stack_rebench and base_tput > 0:
-                        rebench_slot = slot / "stack_rebench"
-                        rebench_slot.mkdir(parents=True, exist_ok=True)
-                        rebench_variant = GridVariant(
-                            name=f"{gv.name}__stack_rebench",
-                            extra_server_args="",  # all args in next_args
-                            extra_envs={},          # all envs in next_envs
-                            note="stack_rebench",
-                        )
-                        rebench_results = await run_grid(
-                            base_yaml_path=config_path,
-                            base_extra_args=next_args,
-                            grid=[rebench_variant],
-                            output_root=rebench_slot,
-                            variant_timeout_sec=timeout_sec,
-                            model_path=resolved_model,
-                            gpu_type=resolved_gpu,
-                            benchmark_script=override_script,
-                            result_dir=override_result_dir,
-                        )
-                        rb = rebench_results[0] if rebench_results else None
-                        # Apply the in-batch env stack to the rebench step
-                        # (run_grid only sees envs via variant.extra_envs),
-                        # re-running when the merged envs aren't present.
-                        if rb is not None and next_envs:
-                            if rb.extra_envs != next_envs:
-                                rebench_variant_envs = GridVariant(
-                                    name=f"{gv.name}__stack_rebench_envs",
-                                    extra_server_args="",
-                                    extra_envs=next_envs,
-                                    note="stack_rebench_envs",
+                            stable_floor = base_tput * (1.0 + stack_stable_threshold_pct / 100.0)
+                            # KEEP_UNSTABLE: rebench missed the stability floor —
+                            # evict the KEEP and treat as REVERT.
+                            if stack_rebench_tput is None or stack_rebench_tput < stable_floor:
+                                log.warning(
+                                    "explore: variant %s KEEP -> KEEP_UNSTABLE "
+                                    "(stack_rebench_tput=%s vs stable_floor=%.2f "
+                                    "with base_tput=%.2f * (1+%.2f%%))",
+                                    gv.name,
+                                    stack_rebench_tput,
+                                    stable_floor,
+                                    base_tput,
+                                    stack_stable_threshold_pct,
                                 )
-                                rebench_envs_slot = slot / "stack_rebench_envs"
-                                rebench_envs_slot.mkdir(parents=True, exist_ok=True)
-                                rb2 = await run_grid(
-                                    base_yaml_path=config_path,
-                                    base_extra_args=next_args,
-                                    grid=[rebench_variant_envs],
-                                    output_root=rebench_envs_slot,
-                                    variant_timeout_sec=timeout_sec,
-                                    model_path=resolved_model,
-                                    gpu_type=resolved_gpu,
-                                    benchmark_script=override_script,
-                                    result_dir=override_result_dir,
+                                tested_update[fp]["outcome"] = "KEEP_UNSTABLE"
+                                tested_update[fp]["stack_rebench_tput"] = stack_rebench_tput
+                                tested_update[fp]["stack_rebench_workspace"] = stack_rebench_workspace
+                                tested_update[fp]["stack_rebench_warnings"] = stack_rebench_warnings
+                                keep_unstable.append(
+                                    {
+                                        **keep_entry,
+                                        "stack_rebench_tput": stack_rebench_tput,
+                                        "stack_rebench_workspace": stack_rebench_workspace,
+                                        "stack_rebench_warnings": stack_rebench_warnings,
+                                    }
                                 )
-                                if rb2:
-                                    rb = rb2[0]
-
-                        if rb is not None and rb.status == "succeeded":
-                            stack_rebench_tput = rb.output_throughput
-                            stack_rebench_workspace = rb.workspace
-                            stack_rebench_warnings = list(rb.nonfatal_warnings)
-                        elif rb is not None:
-                            stack_rebench_warnings.append(
-                                f"stack_rebench_failed:{(rb.error or '')[-120:]}"
-                            )
+                                rejected_update.append(
+                                    {
+                                        "fingerprint": fp,
+                                        "name": gv.name,
+                                        "extra_server_args": gv.extra_server_args,
+                                        "extra_envs": dict(gv.extra_envs),
+                                        "note": gv.note,
+                                        "reason": "stack_unstable",
+                                        "gain_pct": gain,
+                                        "tput": cold_tput,
+                                        "stack_rebench_tput": stack_rebench_tput,
+                                        "round_id": round_id,
+                                        "ts": _now_iso(),
+                                        "provenance": provenance,
+                                    }
+                                )
+                                # Roll the stack back to the prior accumulation.
+                                in_batch_keeps.pop()
+                                continue
+                            else:
+                                # Stable — the warm round-2 tput is the headline;
+                                # recompute gain from it and fold the variant onto
+                                # the stack so the next variant benches against it.
+                                gain = _gain_pct(stack_rebench_tput, running_base_tput)
+                                stack_extra_args = next_args
+                                stack_extra_envs = next_envs
+                                running_base_tput = stack_rebench_tput
+                                last_run_tput = stack_rebench_tput
+                                keep_entry["gain_pct"] = gain
+                                keep_entry["tput"] = stack_rebench_tput
+                                keep_entry["stack_rebench_tput"] = stack_rebench_tput
+                                keep_entry["stack_rebench_workspace"] = stack_rebench_workspace
+                                keep_entry["stack_rebench_warnings"] = stack_rebench_warnings
+                                tested_update[fp]["tput"] = stack_rebench_tput
+                                tested_update[fp]["gain_pct"] = gain
+                                tested_update[fp]["stack_rebench_tput"] = stack_rebench_tput
+                                tested_update[fp]["stack_rebench_workspace"] = stack_rebench_workspace
+                                tested_update[fp]["stack_rebench_warnings"] = stack_rebench_warnings
                         else:
-                            stack_rebench_warnings.append("stack_rebench_no_result")
-
-                        stable_floor = base_tput * (
-                            1.0 + stack_stable_threshold_pct / 100.0
-                        )
-                        # KEEP_UNSTABLE: rebench missed the stability floor —
-                        # evict the KEEP and treat as REVERT.
-                        if (
-                            stack_rebench_tput is None
-                            or stack_rebench_tput < stable_floor
-                        ):
-                            log.warning(
-                                "explore: variant %s KEEP -> KEEP_UNSTABLE "
-                                "(stack_rebench_tput=%s vs stable_floor=%.2f "
-                                "with base_tput=%.2f * (1+%.2f%%))",
-                                gv.name, stack_rebench_tput, stable_floor,
-                                base_tput, stack_stable_threshold_pct,
-                            )
-                            tested_update[fp]["outcome"] = "KEEP_UNSTABLE"
-                            tested_update[fp]["stack_rebench_tput"] = stack_rebench_tput
-                            tested_update[fp]["stack_rebench_workspace"] = stack_rebench_workspace
-                            tested_update[fp]["stack_rebench_warnings"] = stack_rebench_warnings
-                            keep_unstable.append({
-                                **keep_entry,
-                                "stack_rebench_tput": stack_rebench_tput,
-                                "stack_rebench_workspace": stack_rebench_workspace,
-                                "stack_rebench_warnings": stack_rebench_warnings,
-                            })
-                            rejected_update.append({
-                                "fingerprint": fp,
-                                "name": gv.name,
-                                "extra_server_args": gv.extra_server_args,
-                                "extra_envs": dict(gv.extra_envs),
-                                "note": gv.note,
-                                "reason": "stack_unstable",
-                                "gain_pct": gain,
-                                "tput": r.output_throughput,
-                                "stack_rebench_tput": stack_rebench_tput,
-                                "round_id": round_id,
-                                "ts": _now_iso(),
-                                "provenance": provenance,
-                            })
-                            # Roll the stack back to the prior accumulation.
-                            in_batch_keeps.pop()
-                            continue
-                        else:
-                            # Stable — fold the variant onto the stack so the
-                            # next variant benches against the new baseline.
+                            # Round 2 disabled — KEEP on the cold round-1
+                            # measurement, advance the running baseline naively.
                             stack_extra_args = next_args
                             stack_extra_envs = next_envs
-                            running_base_tput = stack_rebench_tput
-                            last_run_tput = stack_rebench_tput
-                            keep_entry["stack_rebench_tput"] = stack_rebench_tput
-                            keep_entry["stack_rebench_workspace"] = stack_rebench_workspace
-                            keep_entry["stack_rebench_warnings"] = stack_rebench_warnings
-                            tested_update[fp]["stack_rebench_tput"] = stack_rebench_tput
-                            tested_update[fp]["stack_rebench_workspace"] = stack_rebench_workspace
-                            tested_update[fp]["stack_rebench_warnings"] = stack_rebench_warnings
-                    else:
-                        # Stack rebench disabled — KEEP on the single-variant
-                        # measurement, advance the running baseline naively.
-                        stack_extra_args = next_args
-                        stack_extra_envs = next_envs
-                        running_base_tput = r.output_throughput or running_base_tput
-                        last_run_tput = r.output_throughput
+                            running_base_tput = cold_tput or running_base_tput
+                            last_run_tput = cold_tput
 
-                    winners.append(keep_entry)
-                    winners_history_update.append({
-                        "round_id": round_id,
-                        "variant_name": gv.name,
-                        "fingerprint": fp,
-                        "gain_pct": gain,
-                        "extra_args": gv.extra_server_args,
-                        "extra_envs": dict(gv.extra_envs),
-                        "provenance": provenance,
-                        "scope": scope,
-                        "ts": _now_iso(),
-                    })
-                    continue
+                        winners.append(keep_entry)
+                        winners_history_update.append(
+                            {
+                                "round_id": round_id,
+                                "variant_name": gv.name,
+                                "fingerprint": fp,
+                                "gain_pct": gain,
+                                "extra_args": gv.extra_server_args,
+                                "extra_envs": dict(gv.extra_envs),
+                                "provenance": provenance,
+                                "scope": scope,
+                                "ts": _now_iso(),
+                            }
+                        )
+                        continue
 
-                # ---- REVERT / FAILED ----
-                rejected_update.append({
-                    "fingerprint": fp,
-                    "name": gv.name,
-                    "extra_server_args": gv.extra_server_args,
-                    "extra_envs": dict(gv.extra_envs),
-                    "note": gv.note,
-                    "reason": reason or "not_keep",
-                    "gain_pct": gain,
-                    "tput": r.output_throughput,
-                    "round_id": round_id,
-                    "ts": _now_iso(),
-                    "provenance": provenance,
-                })
-                losers.append({
-                    "fingerprint": fp,
-                    "name": gv.name,
-                    "extra_server_args": gv.extra_server_args,
-                    "extra_envs": dict(gv.extra_envs),
-                    "provenance": provenance,
-                    "gain_pct": gain,
-                    "tput": r.output_throughput,
-                    "reason": reason or "not_keep",
-                    "workspace": r.workspace,
-                })
-                if r.output_throughput:
-                    last_run_tput = r.output_throughput
+                    # ---- REVERT / FAILED ----
+                    rejected_update.append(
+                        {
+                            "fingerprint": fp,
+                            "name": gv.name,
+                            "extra_server_args": gv.extra_server_args,
+                            "extra_envs": dict(gv.extra_envs),
+                            "note": gv.note,
+                            "reason": reason or "not_keep",
+                            "gain_pct": gain,
+                            "tput": cold_tput,
+                            "round_id": round_id,
+                            "ts": _now_iso(),
+                            "provenance": provenance,
+                        }
+                    )
+                    losers.append(
+                        {
+                            "fingerprint": fp,
+                            "name": gv.name,
+                            "extra_server_args": gv.extra_server_args,
+                            "extra_envs": dict(gv.extra_envs),
+                            "provenance": provenance,
+                            "gain_pct": gain,
+                            "tput": cold_tput,
+                            "reason": reason or "not_keep",
+                            "workspace": r.workspace,
+                        }
+                    )
+                    if cold_tput:
+                        last_run_tput = cold_tput
+                finally:
+                    # Reap the persistent server on every exit path (KEEP,
+                    # REVERT, KEEP_UNSTABLE, KILLED_OVERTIME, exceptions).
+                    # Idempotent + no-op when reuse was ineligible.
+                    if lifecycle_eligible:
+                        teardown_lifecycle_server(
+                            pid_dir=slot,
+                            framework=lifecycle_framework,
+                            port=lifecycle_port,
+                        )
 
         # ----- Ledger compaction (dedup + accepted preservation) -----------
         accepted_fps_now = {_entry_fp(v) for v in (search.get("accepted") or [])}
@@ -1090,7 +1316,10 @@ class ExploreExecutor:
                 continue
             outcome = str(te.get("outcome") or "")
             if outcome not in (
-                "KEEP", "REVERT", "FAILED", "KEEP_UNSTABLE",
+                "KEEP",
+                "REVERT",
+                "FAILED",
+                "KEEP_UNSTABLE",
                 "KILLED_OVERTIME",
             ):
                 continue
@@ -1101,6 +1330,13 @@ class ExploreExecutor:
                 metrics["gain_pct"] = te.get("gain_pct")
             if te.get("stack_rebench_tput") is not None:
                 metrics["stack_rebench_tput"] = te.get("stack_rebench_tput")
+            # Rough decode tput salvaged from a killed-overtime variant's
+            # partial server.log. Informational only (no ``tput``/gain), but
+            # lets the LLM/KB see roughly how fast the killed run was decoding.
+            if te.get("estimated_output_throughput") is not None:
+                metrics["estimated_output_throughput"] = te.get(
+                    "estimated_output_throughput",
+                )
             # surface wall-clock + kill ratio so the LLM/KB sees "ran too
             # slow → early kill" instead of an opaque FAILED row.
             if te.get("runtime_sec") is not None:
@@ -1109,38 +1345,49 @@ class ExploreExecutor:
                 metrics["wall_clock_ratio_vs_baseline"] = te.get(
                     "wall_clock_ratio_vs_baseline",
                 )
-            per_variant_outcomes.append({
-                "variant_name": str(te.get("name") or ""),
-                "outcome":      outcome,
-                "fingerprint":  fp_key,
-                "provenance":   str(te.get("provenance") or ""),
-                "metrics":      metrics,
-                "reason":       reasons_by_fp.get(fp_key, ""),
-            })
+            per_variant_outcomes.append(
+                {
+                    "variant_name": str(te.get("name") or ""),
+                    "outcome": outcome,
+                    "fingerprint": fp_key,
+                    "provenance": str(te.get("provenance") or ""),
+                    "scope": str(te.get("scope") or ""),
+                    "metrics": metrics,
+                    "reason": reasons_by_fp.get(fp_key, ""),
+                    # Carry the variant knobs so the journal can classify the change
+                    # kind (backend / param / env) at decision-write time -- without
+                    # this dict ``classify_change_kind`` always falls back to OTHER.
+                    "variant": {
+                        "name": str(te.get("name") or ""),
+                        "extra_server_args": str(te.get("extra_server_args") or ""),
+                        "extra_envs": dict(te.get("extra_envs") or {}),
+                        "note": str(te.get("note") or ""),
+                    },
+                }
+            )
         for sd in skipped_dup:
-            per_variant_outcomes.append({
-                "variant_name": str(sd.get("name") or ""),
-                "outcome":      "SKIPPED_DEDUP",
-                "fingerprint":  str(sd.get("fingerprint") or ""),
-                "provenance":   "",
-                "metrics":      {},
-                "reason":       str(sd.get("reason") or ""),
-            })
+            per_variant_outcomes.append(
+                {
+                    "variant_name": str(sd.get("name") or ""),
+                    "outcome": "SKIPPED_DEDUP",
+                    "fingerprint": str(sd.get("fingerprint") or ""),
+                    "provenance": "",
+                    "metrics": {},
+                    "reason": str(sd.get("reason") or ""),
+                }
+            )
 
         # ``last_round`` summary for the prompt / breakdown.
         killed_overtime_fps = [
             str(te.get("fingerprint") or "")
             for te in tested_update.values()
-            if te.get("round_id") == round_id
-            and te.get("outcome") == "KILLED_OVERTIME"
+            if te.get("round_id") == round_id and te.get("outcome") == "KILLED_OVERTIME"
         ]
         last_round_summary = {
             "round_id": round_id,
             "base_tput": base_tput,
             "base_extra_args": base_extra_args,
-            "tested": [w["fingerprint"] for w in winners] + [
-                lr["fingerprint"] for lr in losers
-            ],
+            "tested": [w["fingerprint"] for w in winners] + [lr["fingerprint"] for lr in losers],
             "round_winners": [w["fingerprint"] for w in winners],
             "keep_unstable": [k["fingerprint"] for k in keep_unstable],
             "killed_overtime": killed_overtime_fps,
@@ -1170,11 +1417,7 @@ class ExploreExecutor:
         best_gain_pct = float(best_winner.get("gain_pct") or 0.0) if best_winner else 0.0
 
         if winners:
-            output_throughput = (
-                float(running_base_tput)
-                if last_run_tput is not None
-                else None
-            )
+            output_throughput = float(running_base_tput) if last_run_tput is not None else None
         else:
             output_throughput = None
 
@@ -1182,8 +1425,12 @@ class ExploreExecutor:
         # REVERT / KEEP_UNSTABLE) or was reaped by the overtime gate
         # (KILLED_OVERTIME is a real signal the LLM needs to see).
         produced_measurement = any(
-            t.get("outcome") in (
-                "KEEP", "REVERT", "KEEP_UNSTABLE", "KILLED_OVERTIME",
+            t.get("outcome")
+            in (
+                "KEEP",
+                "REVERT",
+                "KEEP_UNSTABLE",
+                "KILLED_OVERTIME",
             )
             for t in tested_update.values()
             if t.get("round_id") == round_id
@@ -1216,7 +1463,15 @@ class ExploreExecutor:
 
 
 def _safe(name: str) -> str:
-    """Filesystem-safe slug for variant directory names."""
+    """Filesystem-safe slug for variant directory names.
+
+    Args:
+        name (str): The raw variant name.
+
+    Returns:
+        str: A slug with non-alphanumeric characters replaced by ``_``,
+        truncated to 60 characters.
+    """
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
 
 

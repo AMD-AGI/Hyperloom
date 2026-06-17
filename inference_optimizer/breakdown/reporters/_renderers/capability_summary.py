@@ -15,12 +15,30 @@ from ..base import Decision, RenderedSection, fmt_pct, md_table, register_render
 _CAPABILITY_ORDER = (
     # ``explore`` is primary; legacy rows remain for archived sessions.
     "explore",
-    "backends", "params", "sweep", "geak", "oob", "validate_stack",
+    "backends",
+    "params",
+    "sweep",
+    "geak",
+    "oob",
+    "validate_stack",
 )
 
 
 @register_renderer("capability_summary")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the capability-summary section.
+
+    Produces a status/attempts/keeps table for each capability in a
+    stable order, one structured :class:`Decision` per non-``not_attempted``
+    capability, and a one-line fact per row. Skipped when no capabilities
+    were recorded.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered capability-summary section.
+    """
     cap = breakdown.get("capability_summary") or {}
     rows: list[list[Any]] = []
     facts: list[str] = []
@@ -33,16 +51,12 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         v = cap.get(name)
         if v is None:
             continue
-        status   = str(v.get("status") or "not_attempted")
+        status = str(v.get("status") or "not_attempted")
         attempts = int(v.get("attempts") or 0)
-        keeps    = int(v.get("keeps") or 0)
+        keeps = int(v.get("keeps") or 0)
         # validate_stack "not_attempted" but with a prior validated gain ->
         # ``stale_validated`` so the row isn't self-contradicting.
-        if (
-            name == "validate_stack"
-            and status == "not_attempted"
-            and v.get("last_validated_gain_pct") is not None
-        ):
+        if name == "validate_stack" and status == "not_attempted" and v.get("last_validated_gain_pct") is not None:
             status = "stale_validated"
         extras: list[str] = []
         if "best_gain_pct" in v and v["best_gain_pct"] is not None:
@@ -64,19 +78,21 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
         rows.append([name, status, attempts, keeps, extras_str])
         facts.append(
-            f"`{name}` status={status}, attempts={attempts}, keeps={keeps}"
-            + (f" ({extras_str})" if extras_str else "")
+            f"`{name}` status={status}, attempts={attempts}, keeps={keeps}" + (f" ({extras_str})" if extras_str else "")
         )
         if status != "not_attempted":
-            decisions.append(Decision(
-                kind=status,
-                subject=name,
-                metric_pct=None,
-                rationale=(
-                    f"{keeps}/{attempts} attempts promoted"
-                    if attempts else "promoted via optimization_stack fallback"
-                ),
-            ))
+            decisions.append(
+                Decision(
+                    kind=status,
+                    subject=name,
+                    metric_pct=None,
+                    rationale=(
+                        f"{keeps}/{attempts} attempts promoted"
+                        if attempts
+                        else "promoted via optimization_stack fallback"
+                    ),
+                )
+            )
 
     if not rows:
         warnings.append(

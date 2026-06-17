@@ -62,6 +62,13 @@ short GPU experiments or microbenchmarks, set `needs_gpu=true` and
 specialist GPU pool and injects GPU visibility env vars into the subprocess.
 GPU specialists must not launch persistent serving servers or Magpie loops.
 
+GPU requests are governed identically for **every** scope: a `scope=freeform`
+dispatch that sets `needs_gpu` clears the same `gpu_specialist_ceiling`
+checks (`specialist_gpu_pool_disabled` / `specialist_gpu_request_exceeds_capacity`)
+as a domain-anchored one — freeform is not a GPU loophole. Pair
+`mode=patch + bench=true + needs_gpu` to give a freeform specialist an in-loop
+`run_bench` measure → edit → measure loop inside its worktree.
+
 ## Inputs (task.params)
 
 | Key                  | Type     | Required | Description |
@@ -110,8 +117,14 @@ Each specialist subprocess sees:
   - the worktree path
   - allocated GPU ids when `needs_gpu=true`
 * A tool whitelist including `Read / Grep / Glob / Bash / Edit / Write
-  / MultiEdit / WebSearch / WebFetch` and the relevant MCP servers,
-  scoped to the worktree directory (`--add-dir <worktree>`).
+  / MultiEdit / TodoWrite / WebSearch / WebFetch` and the relevant MCP
+  servers, scoped to the worktree directory (`--add-dir <worktree>`).
+  `run_bench` is added only when the dispatch sets `mode=patch & bench=true`.
+  `Task` is **denied** (`SPECIALIST_TOOL_DENYLIST`): a specialist may not
+  recursively spawn its own sub-agents — recursive fan-out would bypass the
+  dispatcher's `research_lane` / `gpu_specialist_pool` accounting. Fanning
+  out more work is the Coordinator's job (a `scope=freeform` + `tasks=[...]`
+  wave), not the specialist's.
 * A 60s heartbeat protocol — the subprocess writes
   `runs/specialist/<task_id>/heartbeat.json`; SpecialistRunner reaps
   stale agents after 5 minutes (`HEARTBEAT_STALE_THRESHOLD_S`).

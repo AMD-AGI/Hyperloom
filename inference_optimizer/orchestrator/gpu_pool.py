@@ -20,10 +20,25 @@ DEFAULT_GPU_LEASE_TTL_SEC = 1800
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond ISO-8601 string.
+
+    Returns:
+        The current UTC time formatted as a microsecond-precision ISO-8601
+        string.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _parse_gpu_list(raw: str) -> list[int]:
+    """Parse a comma/semicolon-separated GPU id list.
+
+    Args:
+        raw: Raw string of GPU ids (``,`` or ``;`` separated).
+
+    Returns:
+        Unique non-negative GPU ids in first-seen order; malformed entries are
+        skipped.
+    """
     out: list[int] = []
     for part in (raw or "").replace(";", ",").split(","):
         p = part.strip()
@@ -43,13 +58,20 @@ def resolve_gpu_specialist_devices(capacity: int) -> list[int]:
 
     ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES`` may name an explicit pool;
     absent → ``range(capacity)``. Capacity zero disables dispatch.
+
+    Args:
+        capacity: Maximum number of GPU ids to make available; values ``<= 0``
+            disable dispatch.
+
+    Returns:
+        The GPU ids available to specialists (explicit pool capped to
+        ``capacity``, else ``range(capacity)``); ``[]`` when capacity is
+        non-positive.
     """
     cap = max(0, int(capacity or 0))
     if cap <= 0:
         return []
-    explicit = _parse_gpu_list(
-        os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", "")
-    )
+    explicit = _parse_gpu_list(os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", ""))
     if explicit:
         return explicit[:cap]
     return list(range(cap))
@@ -73,11 +95,23 @@ class SpecialistGpuPool:
         *,
         gpu_ids: list[int] | tuple[int, ...],
     ):
+        """Initialize the pool over a fixed set of GPU ids.
+
+        Args:
+            db: SQLite connection backing the lease table.
+            gpu_ids: GPU ids managed by this pool; duplicates and negatives are
+                dropped.
+        """
         self.db = db
         self.gpu_ids = tuple(dict.fromkeys(int(g) for g in gpu_ids if int(g) >= 0))
 
     @property
     def capacity(self) -> int:
+        """Return the number of GPUs the pool manages.
+
+        Returns:
+            The count of GPU ids managed by this pool.
+        """
         return len(self.gpu_ids)
 
     async def try_acquire(
@@ -88,7 +122,18 @@ class SpecialistGpuPool:
         task_id: str,
         ttl_sec: int = DEFAULT_GPU_LEASE_TTL_SEC,
     ) -> GpuLease | None:
-        """Acquire ``count`` GPU ids or return ``None`` if the pool is full."""
+        """Acquire ``count`` GPU ids or return ``None`` if the pool is full.
+
+        Args:
+            count: Number of GPU ids to acquire.
+            holder_id: Identifier of the lease holder.
+            task_id: Identifier of the task the lease is for.
+            ttl_sec: Lease time-to-live in seconds.
+
+        Returns:
+            A :class:`GpuLease` for the acquired GPUs, or ``None`` when the
+            request is invalid or insufficient GPUs are free.
+        """
         n = int(count or 0)
         if n <= 0 or n > self.capacity:
             return None
@@ -96,7 +141,8 @@ class SpecialistGpuPool:
         now_iso = _now_iso()
         expires_ts = now_ts + max(1, int(ttl_sec or DEFAULT_GPU_LEASE_TTL_SEC))
         expires_iso = datetime.fromtimestamp(
-            expires_ts, tz=timezone.utc,
+            expires_ts,
+            tz=timezone.utc,
         ).isoformat(timespec="microseconds")
 
         async with self.db.transaction() as cur:
@@ -133,18 +179,27 @@ class SpecialistGpuPool:
         )
 
     async def release(self, lease: GpuLease | None) -> None:
+        """Release the GPUs held by a lease.
+
+        Args:
+            lease: The lease to release; ``None`` or an empty lease is a no-op.
+        """
         if lease is None or not lease.gpu_ids:
             return
         placeholders = ",".join("?" * len(lease.gpu_ids))
         params = list(lease.gpu_ids) + [lease.holder_id]
         async with self.db.transaction() as cur:
             cur.execute(
-                f"DELETE FROM gpu_leases "
-                f"WHERE gpu_id IN ({placeholders}) AND holder_id=?",
+                f"DELETE FROM gpu_leases WHERE gpu_id IN ({placeholders}) AND holder_id=?",
                 params,
             )
 
     async def heartbeat(self, lease: GpuLease | None) -> None:
+        """Refresh the heartbeat timestamp for a lease's GPUs.
+
+        Args:
+            lease: The lease to refresh; ``None`` or an empty lease is a no-op.
+        """
         if lease is None or not lease.gpu_ids:
             return
         now_iso = _now_iso()
@@ -152,10 +207,28 @@ class SpecialistGpuPool:
         params = [now_iso] + list(lease.gpu_ids) + [lease.holder_id]
         async with self.db.transaction() as cur:
             cur.execute(
-                f"UPDATE gpu_leases SET heartbeat_at=? "
-                f"WHERE gpu_id IN ({placeholders}) AND holder_id=?",
+                f"UPDATE gpu_leases SET heartbeat_at=? WHERE gpu_id IN ({placeholders}) AND holder_id=?",
                 params,
             )
+
+    async def reap_expired(self) -> int:
+        """Actively delete TTL-expired GPU leases; returns rows reaped.
+
+        ``try_acquire`` already clears expired rows opportunistically, but a
+        multi-day run may go long stretches without an acquire (e.g. an idle
+        EXPLORE phase), leaking capacity. The reaper tick calls this so stale
+        leases never pin a GPU id indefinitely.
+
+        Returns:
+            The number of expired lease rows deleted.
+        """
+        now_iso = _now_iso()
+        async with self.db.transaction() as cur:
+            cur.execute(
+                "DELETE FROM gpu_leases WHERE expires_at <= ?",
+                (now_iso,),
+            )
+            return int(cur.rowcount or 0)
 
 
 __all__ = [

@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 
 from inference_optimizer.orchestrator import framework_agent_client as _fa_client
-from inference_optimizer.orchestrator import coordinator as _coord_mod
 from inference_optimizer.orchestrator.coordinator import (
     DEFAULT_FRAMEWORK_PR_MAX_CANDIDATES,
     Coordinator,
@@ -78,7 +77,8 @@ def test_repo_urls_cover_pr_intel_set_with_framework_primary():
 
 
 def test_discover_merges_candidates_across_repos(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Each repo returns a distinct candidate; the batch merges them all."""
     seen_repo_urls: list[str] = []
@@ -107,7 +107,8 @@ def test_discover_merges_candidates_across_repos(
 
 
 def test_discover_threads_directed_gap_and_keywords(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """compose_gap output (directed gap + keywords) is threaded into the
     phase_discover request."""
@@ -133,7 +134,8 @@ def test_discover_threads_directed_gap_and_keywords(
 
 
 def test_discover_uses_max_candidates_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     captured: dict[str, Any] = {}
 
@@ -150,7 +152,8 @@ def test_discover_uses_max_candidates_override(
 
 
 def test_discover_default_max_candidates_when_unset(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     captured: dict[str, Any] = {}
 
@@ -167,7 +170,8 @@ def test_discover_default_max_candidates_when_unset(
 
 
 def test_discover_dedups_against_prior_batches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """A candidate already present in an earlier batch is dropped from the
     new batch, even when a repo re-surfaces it."""
@@ -200,7 +204,8 @@ def test_discover_dedups_against_prior_batches(
 
 
 def test_discover_intra_batch_dedup_across_repos(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """When multiple repos all surface the same PR in one scan, the merged
     batch keeps a single copy."""
@@ -221,7 +226,8 @@ def test_discover_intra_batch_dedup_across_repos(
 
 
 def test_discover_survives_partial_repo_failures(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """If some repos error but at least one succeeds, the batch is built
     from the survivors and the failure counter is NOT bumped."""
@@ -248,7 +254,8 @@ def test_discover_survives_partial_repo_failures(
 
 
 def test_discover_keywords_dedup_in_client(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """phase_discover lowercases + dedups keywords while preserving order."""
     captured: dict[str, Any] = {}
@@ -265,7 +272,9 @@ def test_discover_keywords_dedup_in_client(
 
     asyncio.run(
         _fa_client.phase_discover(
-            model="m", framework="sglang", gpu_type="MI300X",
+            model="m",
+            framework="sglang",
+            gpu_type="MI300X",
             gaps=[{"gap_canonical_id": "", "gap_description": "x"}],
             session_dir=tmp_path,
             repo_url="https://github.com/sgl-project/sglang.git",

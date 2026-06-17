@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -50,6 +51,12 @@ def _merge_sglang_defaults(extra_args: str) -> str:
 
     Mirrors ``sglang_mi300x.sh:74-79``; a caller's explicit value for a flag
     wins and that default is dropped.
+
+    Args:
+        extra_args: The caller's existing server-arg string.
+
+    Returns:
+        The merged server-arg string with missing defaults appended.
     """
     user = (extra_args or "").strip()
     parts = [user] if user else []
@@ -58,6 +65,7 @@ def _merge_sglang_defaults(extra_args: str) -> str:
             continue
         parts.append(default_token)
     return " ".join(p for p in parts if p)
+
 
 # Round-trip context so callers (profile.py) can recover the trace dir the
 # server was restarted with, even after this helper restored the env.
@@ -69,7 +77,11 @@ class ServerRestartFailed(RuntimeError):
 
 
 def last_round_trace_dir() -> str:
-    """Return the trace dir the most recent restart was wired with (or '')."""
+    """Return the trace dir the most recent restart was wired with (or '').
+
+    Returns:
+        str: The most recent round's profiler trace dir, or ``""`` if none.
+    """
     return _LAST_ROUND_TRACE_DIR
 
 
@@ -90,18 +102,31 @@ def _resolve_pd_args(
     Resolution per field: explicit kwarg > ``state["last_restart_pd_*"]`` >
     ``$PD_*`` env > defaults (mode=colocated, prefill/decode TP=tp). Validates
     ``pd_mode`` and disaggregated prefill/decode TP.
+
+    Args:
+        pd_mode: Prefill/decode mode (``colocated`` or ``disaggregated``).
+        pd_prefill_nodes: Node count for the prefill group.
+        pd_decode_nodes: Node count for the decode group.
+        pd_prefill_tp: Tensor-parallel size for the prefill group.
+        pd_decode_tp: Tensor-parallel size for the decode group.
+        pd_transfer_backend: KV transfer backend name.
+        pd_ib_device: InfiniBand device name.
+        tp_int: Resolved overall tensor-parallel size used as a TP default.
+
+    Returns:
+        A flat dict of resolved PD values for the multi_node CLI Namespace.
+
+    Raises:
+        ServerRestartFailed: If ``pd_mode`` is unsupported, the cluster has
+            fewer than 2 nodes for disaggregated mode, the prefill/decode node
+            split is invalid, or the prefill/decode TP values are non-positive.
     """
     state = _read_state()
     mode = (
-        pd_mode
-        or state.get("last_restart_pd_mode")
-        or os.environ.get("PD_MODE", "")
-        or "colocated"
-    ).strip().lower()
+        (pd_mode or state.get("last_restart_pd_mode") or os.environ.get("PD_MODE", "") or "colocated").strip().lower()
+    )
     if mode not in ("colocated", "disaggregated"):
-        raise ServerRestartFailed(
-            f"unsupported pd_mode {mode!r}; expected 'colocated' or 'disaggregated'"
-        )
+        raise ServerRestartFailed(f"unsupported pd_mode {mode!r}; expected 'colocated' or 'disaggregated'")
 
     out: dict = {"pd_mode": mode}
     if mode == "colocated":
@@ -118,6 +143,16 @@ def _resolve_pd_args(
         )
 
     def _intf(kw, sk, ek):
+        """Resolve an int field from kwarg > state key > env var.
+
+        Args:
+            kw: The explicit kwarg value (wins when not ``None``).
+            sk (str): The ``state.json`` key to read next.
+            ek (str): The environment variable name to read last.
+
+        Returns:
+            int: The first parseable integer found, or ``0`` when none.
+        """
         if kw is not None:
             return int(kw)
         v = state.get(sk)
@@ -144,37 +179,48 @@ def _resolve_pd_args(
         or os.environ.get("PD_TRANSFER_BACKEND", "")
         or ""
     ).strip()
-    ib = (
-        pd_ib_device
-        or state.get("last_restart_pd_ib_device")
-        or os.environ.get("PD_IB_DEVICE", "")
-        or ""
+    ib = (pd_ib_device or state.get("last_restart_pd_ib_device") or os.environ.get("PD_IB_DEVICE", "") or "").strip()
+    # Per-role EP / extra server args (InferenceX disagg recipes give
+    # prefill and decode different MoE topologies). Resolved from state +
+    # $PD_PREFILL_EP / $PD_DECODE_EP / $PD_PREFILL_EXTRA_ARGS /
+    # $PD_DECODE_EXTRA_ARGS only (no explicit kwarg — the prompt exports
+    # them). 0 / "" means "fall back to the shared --ep / --extra-args",
+    # so colocated and single-flag PD callers are unchanged.
+    pep = _intf(None, "last_restart_pd_prefill_ep", "PD_PREFILL_EP")
+    dep = _intf(None, "last_restart_pd_decode_ep", "PD_DECODE_EP")
+    prefill_extra = (
+        state.get("last_restart_pd_prefill_extra_args") or os.environ.get("PD_PREFILL_EXTRA_ARGS", "") or ""
+    ).strip()
+    decode_extra = (
+        state.get("last_restart_pd_decode_extra_args") or os.environ.get("PD_DECODE_EXTRA_ARGS", "") or ""
     ).strip()
 
     state_nodes = int(state.get("nodes") or 0)
     if pn <= 0 or dn <= 0:
         raise ServerRestartFailed(
-            f"pd_mode=disaggregated requires pd_prefill_nodes>0 and "
-            f"pd_decode_nodes>0; got pn={pn} dn={dn}"
+            f"pd_mode=disaggregated requires pd_prefill_nodes>0 and pd_decode_nodes>0; got pn={pn} dn={dn}"
         )
     if state_nodes > 0 and pn + dn != state_nodes:
         raise ServerRestartFailed(
-            f"pd_prefill_nodes ({pn}) + pd_decode_nodes ({dn}) must equal "
-            f"total nodes ({state_nodes})"
+            f"pd_prefill_nodes ({pn}) + pd_decode_nodes ({dn}) must equal total nodes ({state_nodes})"
         )
     if ptp <= 0 or dtp <= 0:
-        raise ServerRestartFailed(
-            f"pd_prefill_tp ({ptp}) and pd_decode_tp ({dtp}) must be positive"
-        )
+        raise ServerRestartFailed(f"pd_prefill_tp ({ptp}) and pd_decode_tp ({dtp}) must be positive")
 
-    out.update({
-        "pd_prefill_nodes": pn,
-        "pd_decode_nodes": dn,
-        "pd_prefill_tp": ptp,
-        "pd_decode_tp": dtp,
-        "pd_transfer_backend": tb,
-        "pd_ib_device": ib,
-    })
+    out.update(
+        {
+            "pd_prefill_nodes": pn,
+            "pd_decode_nodes": dn,
+            "pd_prefill_tp": ptp,
+            "pd_decode_tp": dtp,
+            "pd_transfer_backend": tb,
+            "pd_ib_device": ib,
+            "pd_prefill_ep": pep,
+            "pd_decode_ep": dep,
+            "pd_prefill_extra_args": prefill_extra,
+            "pd_decode_extra_args": decode_extra,
+        }
+    )
     return out
 
 
@@ -188,24 +234,33 @@ def _resolve_round_args(
 
     Resolution per field: explicit kwarg > ``state["last_restart_*"]`` >
     ``$FRAMEWORK`` / ``$MODEL_PATH`` / ``$TP`` / ``$EP`` env > defaults (ep=1).
-    Raises :class:`ServerRestartFailed` if model/tp are empty, framework is
-    unsupported, or ``ep > tp``.
+
+    Args:
+        framework: Inference framework override (``sglang`` or ``vllm``).
+        model_path: Model path/id override.
+        tp: Tensor-parallel size override.
+        ep: Expert-parallel size override (defaults to 1).
+
+    Returns:
+        A ``(framework, model, tp, ep)`` tuple of resolved restart args.
+
+    Raises:
+        ServerRestartFailed: If model/tp are empty, the framework is
+            unsupported, or ``ep > tp``.
     """
     state = _read_state()
-    fw = (framework or state.get("last_restart_framework")
-          or os.environ.get("FRAMEWORK", "sglang") or "sglang").strip().lower()
-    mdl = (model_path or state.get("last_restart_model")
-           or os.environ.get("MODEL_PATH", "") or "").strip()
+    fw = (
+        (framework or state.get("last_restart_framework") or os.environ.get("FRAMEWORK", "sglang") or "sglang")
+        .strip()
+        .lower()
+    )
+    mdl = (model_path or state.get("last_restart_model") or os.environ.get("MODEL_PATH", "") or "").strip()
     try:
-        tp_int = int(tp if tp is not None else (
-            state.get("last_restart_tp") or os.environ.get("TP", "") or 0
-        ))
+        tp_int = int(tp if tp is not None else (state.get("last_restart_tp") or os.environ.get("TP", "") or 0))
     except (TypeError, ValueError):
         tp_int = 0
     try:
-        ep_int = int(ep if ep is not None else (
-            state.get("last_restart_ep") or os.environ.get("EP", "") or 1
-        ))
+        ep_int = int(ep if ep is not None else (state.get("last_restart_ep") or os.environ.get("EP", "") or 1))
     except (TypeError, ValueError):
         ep_int = 1
     if ep_int < 1:
@@ -218,9 +273,7 @@ def _resolve_round_args(
             "`multi_node restart-server` once so state.json is populated."
         )
     if fw not in ("sglang", "vllm"):
-        raise ServerRestartFailed(
-            f"unsupported framework {fw!r}; expected 'sglang' or 'vllm'"
-        )
+        raise ServerRestartFailed(f"unsupported framework {fw!r}; expected 'sglang' or 'vllm'")
     if ep_int > tp_int:
         raise ServerRestartFailed(
             f"ep={ep_int} > tp={tp_int} is not supported by sglang/vllm "
@@ -233,6 +286,7 @@ def _resolve_round_args(
 async def restart_server_for_round(
     *,
     extra_server_args: str = "",
+    extra_env: dict[str, str] | None = None,
     torch_profiler_dir: str = "",
     framework: str | None = None,
     model_path: str | None = None,
@@ -260,7 +314,29 @@ async def restart_server_for_round(
     this invocation so a fresh kill+launch runs — required after kernel-agent
     fans patched source so sglang re-imports the new modules.
 
-    Raises :class:`ServerRestartFailed` on any failure (callers let it bubble).
+    Args:
+        extra_server_args: Extra framework server args for this round.
+        torch_profiler_dir: Per-round profiler trace dir; exported via
+            ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` and restored afterward.
+        framework: Inference framework override.
+        model_path: Model path/id override.
+        tp: Tensor-parallel size override.
+        ep: Expert-parallel size override.
+        pd_mode: Prefill/decode mode override.
+        pd_prefill_nodes: Node count for the prefill group.
+        pd_decode_nodes: Node count for the decode group.
+        pd_prefill_tp: Tensor-parallel size for the prefill group.
+        pd_decode_tp: Tensor-parallel size for the decode group.
+        pd_transfer_backend: KV transfer backend name.
+        pd_ib_device: InfiniBand device name.
+        health_timeout_s: Timeout for the post-launch /health poll.
+        poll_interval_s: Poll interval passed to the restart driver.
+        force_full_restart: When True, force a fresh kill+launch instead of
+            resuming a running server.
+
+    Raises:
+        ServerRestartFailed: On any restart or post-launch /health failure
+            (callers let it bubble).
     """
     global _LAST_ROUND_TRACE_DIR
 
@@ -269,8 +345,13 @@ async def restart_server_for_round(
 
     fw, mdl, tp_int, ep_int = _resolve_round_args(framework, model_path, tp, ep)
     pd = _resolve_pd_args(
-        pd_mode, pd_prefill_nodes, pd_decode_nodes,
-        pd_prefill_tp, pd_decode_tp, pd_transfer_backend, pd_ib_device,
+        pd_mode,
+        pd_prefill_nodes,
+        pd_decode_nodes,
+        pd_prefill_tp,
+        pd_decode_tp,
+        pd_transfer_backend,
+        pd_ib_device,
         tp_int=tp_int,
     )
 
@@ -293,9 +374,7 @@ async def restart_server_for_round(
         try:
             Path(torch_profiler_dir).mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            raise ServerRestartFailed(
-                f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}"
-            ) from exc
+            raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
         os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = torch_profiler_dir
         _LAST_ROUND_TRACE_DIR = torch_profiler_dir
     else:
@@ -303,6 +382,17 @@ async def restart_server_for_round(
         # reuse a previous round's path.
         os.environ.pop("HYPERLOOM_MN_PROFILE_TRACE_DIR", None)
         _LAST_ROUND_TRACE_DIR = ""
+
+    # Per-variant env overrides → forwarded to the SSH-launched sglang via
+    # ``multi_node/cli.py::_collect_forward_env`` (which reads this control
+    # env). Mirrors the HYPERLOOM_MN_PROFILE_TRACE_DIR set/restore pattern:
+    # scoped to this single restart so a later arg-only round doesn't
+    # inherit this round's envs. Restored in the ``finally`` below.
+    saved_fwd_env = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV")
+    if extra_env:
+        os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] = json.dumps({str(k): str(v) for k, v in extra_env.items()})
+    else:
+        os.environ.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", None)
 
     # Multi-node TraceLens SGLang patch fan-out (fail-soft). The controller
     # can't ``import sglang`` (it lives in the pods), so the local patcher
@@ -316,17 +406,17 @@ async def restart_server_for_round(
         _tracelens_patch_enabled_fn = lambda: True  # noqa: E731 - safe default
     else:
         _tracelens_patch_enabled_fn = _tracelens_patch_enabled
-    if _tracelens_patch_enabled_fn() and (
-        os.environ.get("TRACELENS_ROOT", "").strip()
-    ):
+    if _tracelens_patch_enabled_fn() and (os.environ.get("TRACELENS_ROOT", "").strip()):
         try:
             from ...multi_node.cli import cmd_apply_tracelens_patch
 
             patch_ns = argparse.Namespace(
                 tracelens_root=os.environ.get("TRACELENS_ROOT", "").strip(),
                 sglang_version_pin=os.environ.get(
-                    "HYPERLOOM_SGLANG_VERSION_PIN", "",
-                ).strip() or None,
+                    "HYPERLOOM_SGLANG_VERSION_PIN",
+                    "",
+                ).strip()
+                or None,
                 print_logs=False,
                 poll_interval=poll_interval_s,
                 poll_timeout=int(
@@ -348,8 +438,7 @@ async def restart_server_for_round(
                 )
         except Exception as exc:  # noqa: BLE001 - fail-soft envelope
             log.warning(
-                "restart_server_for_round: TraceLens patch fan-out raised "
-                "(%s); proceeding with restart (fail-soft)",
+                "restart_server_for_round: TraceLens patch fan-out raised (%s); proceeding with restart (fail-soft)",
                 exc,
             )
 
@@ -394,13 +483,23 @@ async def restart_server_for_round(
             pd_decode_tp=pd.get("pd_decode_tp", 0),
             pd_transfer_backend=pd.get("pd_transfer_backend", ""),
             pd_ib_device=pd.get("pd_ib_device", ""),
+            # Per-role EP / extra-args (disaggregated only; 0 / "" => fall
+            # back to the shared ep / extra_args in the CLI fan-out).
+            pd_prefill_ep=pd.get("pd_prefill_ep", 0),
+            pd_decode_ep=pd.get("pd_decode_ep", 0),
+            pd_prefill_extra_args=pd.get("pd_prefill_extra_args", ""),
+            pd_decode_extra_args=pd.get("pd_decode_extra_args", ""),
             pd_bootstrap_port=8998,
             pd_vllm_router_cmd="",
         )
         from ._multi_node_env import log_mn_banner
+
         log_mn_banner(
-            "server_restart", log,
-            framework=fw, tp=tp_int, ep=ep_int,
+            "server_restart",
+            log,
+            framework=fw,
+            tp=tp_int,
+            ep=ep_int,
             pd_mode=pd.get("pd_mode"),
             trace_dir=torch_profiler_dir or "",
         )
@@ -408,11 +507,18 @@ async def restart_server_for_round(
             "restart_server_for_round: framework=%s tp=%d ep=%d pd_mode=%s "
             "pd_prefill=%dx tp%d pd_decode=%dx tp%d backend=%r ib=%r "
             "extra_args=%r torch_profiler_dir=%r",
-            fw, tp_int, ep_int, pd.get("pd_mode"),
-            pd.get("pd_prefill_nodes", 0), pd.get("pd_prefill_tp", 0),
-            pd.get("pd_decode_nodes", 0), pd.get("pd_decode_tp", 0),
-            pd.get("pd_transfer_backend", ""), pd.get("pd_ib_device", ""),
-            extra_server_args, torch_profiler_dir,
+            fw,
+            tp_int,
+            ep_int,
+            pd.get("pd_mode"),
+            pd.get("pd_prefill_nodes", 0),
+            pd.get("pd_prefill_tp", 0),
+            pd.get("pd_decode_nodes", 0),
+            pd.get("pd_decode_tp", 0),
+            pd.get("pd_transfer_backend", ""),
+            pd.get("pd_ib_device", ""),
+            extra_server_args,
+            torch_profiler_dir,
         )
 
         # After kernel-agent patches sglang source, the resume fast-path would
@@ -424,9 +530,7 @@ async def restart_server_for_round(
         try:
             rc = await asyncio.to_thread(cmd_restart_server, ns)
         except Exception as exc:  # noqa: BLE001
-            raise ServerRestartFailed(
-                f"cmd_restart_server raised: {exc!r}"
-            ) from exc
+            raise ServerRestartFailed(f"cmd_restart_server raised: {exc!r}") from exc
         finally:
             if force_full_restart:
                 if prev_resume is None:
@@ -446,24 +550,136 @@ async def restart_server_for_round(
         try:
             await _wait_for_server_health_async(
                 timeout_s=health_wait_s,
-                poll_every_s=int(os.environ.get(
-                    "HYPERLOOM_MN_HEALTH_POLL_S", "10",
-                )),
+                poll_every_s=int(
+                    os.environ.get(
+                        "HYPERLOOM_MN_HEALTH_POLL_S",
+                        "10",
+                    )
+                ),
             )
         except ServerRestartFailed:
             raise
         except Exception as exc:  # noqa: BLE001
-            raise ServerRestartFailed(
-                f"post-launch /health wait raised: {exc!r}"
-            ) from exc
+            raise ServerRestartFailed(f"post-launch /health wait raised: {exc!r}") from exc
     finally:
         # Restore env so this round's profiler path doesn't leak forward.
         if saved_trace_env is None:
             os.environ.pop("HYPERLOOM_MN_PROFILE_TRACE_DIR", None)
         else:
             os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = saved_trace_env
+        # Symmetric restore for the per-variant env forwarding control var.
+        if saved_fwd_env is None:
+            os.environ.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", None)
+        else:
+            os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] = saved_fwd_env
 
 
+# Dynamo system status server port (mirror of launch_dynamo_node.py
+# _DEFAULT_DYN_SYSTEM_PORT). The controller POSTs /engine/{start,stop}_profile
+# here to drive torch profiling on each disagg worker for roofline rounds.
+DEFAULT_DYN_SYSTEM_PORT = 9090
+
+
+def _dynamo_gpu_pod_ips(state: dict | None = None) -> list[str]:
+    """Return the dynamo GPU worker pod IPs (prefill + decode + worker).
+
+    Args:
+        state: Pre-read state mapping, or ``None`` to read ``state.json``.
+
+    Returns:
+        The deduplicated prefill + decode + worker pod IPs, in that order.
+    """
+    st = state if state is not None else (_read_state() or {})
+    ips: list[str] = []
+    seen: set[str] = set()
+    for key in ("prefill_pod_ips", "decode_pod_ips", "worker_pod_ips"):
+        for ip in st.get(key) or []:
+            s = str(ip).strip()
+            if s and s not in seen:
+                seen.add(s)
+                ips.append(s)
+    return ips
+
+
+async def trigger_dynamo_engine_profile(
+    action: str,
+    body: dict | None = None,
+) -> None:
+    """Drive torch profiling on every dynamo disagg worker via the system
+    server's ``/engine/{start,stop}_profile`` route.
+
+    No-op unless multi-node AND ``backend == "dynamo"``: the RayJob path
+    triggers profiling through Magpie's own /start_profile against the
+    sglang server, and single-node never reaches a multi-node restart.
+
+    Best-effort / fail-soft: a worker that 404s (system server not enabled
+    on an older launch) or errors is logged and skipped so the profile
+    round still completes (an empty trace just surfaces the existing
+    roofline ``profile_no_trace`` path — no regression vs before this fix).
+
+    ``action`` is ``"start"`` or ``"stop"``. ``body`` is forwarded as the
+    JSON payload to ``start_profile`` (e.g. the optimizer-computed
+    ``PROFILE_EXTRA_BODY`` carrying start_step / num_steps); ignored for
+    stop.
+
+    Args:
+        action: ``"start"`` or ``"stop"`` — selects the engine profile route.
+        body: Optional JSON payload forwarded to ``start_profile``; ignored
+            for ``stop``.
+    """
+    if not is_multi_node():
+        return
+    state = _read_state() or {}
+    if str(state.get("backend") or "").strip().lower() != "dynamo":
+        return
+    ips = _dynamo_gpu_pod_ips(state)
+    if not ips:
+        log.warning(
+            "trigger_dynamo_engine_profile(%s): no GPU pod IPs in state",
+            action,
+        )
+        return
+    try:
+        import httpx as _httpx
+    except ImportError:  # pragma: no cover
+        log.warning("httpx unavailable; cannot trigger dynamo profiling")
+        return
+    port = int(
+        os.environ.get(
+            "HYPERLOOM_DYN_SYSTEM_PORT",
+            str(DEFAULT_DYN_SYSTEM_PORT),
+        )
+        or DEFAULT_DYN_SYSTEM_PORT
+    )
+    route = "start_profile" if action == "start" else "stop_profile"
+    payload = dict(body or {}) if action == "start" else {}
+    # stop_profile blocks while torch.profiler flushes the (potentially
+    # large) trace to shared-FS synchronously, so it needs a much longer
+    # read timeout than the quick start_profile arm. Overridable via env.
+    if action == "start":
+        client_timeout = 30.0
+    else:
+        client_timeout = float(os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600)
+    async with _httpx.AsyncClient(timeout=client_timeout) as client:
+        for ip in ips:
+            url = f"http://{ip}:{port}/engine/{route}"
+            try:
+                resp = await client.post(url, json=payload)
+                log.info(
+                    "dynamo profile %s -> %s:%d HTTP %d",
+                    route,
+                    ip,
+                    port,
+                    resp.status_code,
+                )
+            except Exception as exc:  # noqa: BLE001 — fail-soft per worker
+                log.warning(
+                    "dynamo profile %s -> %s:%d failed (%s); continuing",
+                    route,
+                    ip,
+                    port,
+                    exc,
+                )
 
 
 async def _wait_for_server_health_async(
@@ -474,9 +690,18 @@ async def _wait_for_server_health_async(
 
     Reads ``service_url`` from ``state.json``; rewrites a ClusterIP DNS URL to
     ``head_pod_ip`` when available so the sandbox can reach it directly.
+
+    Args:
+        timeout_s: Maximum seconds to wait for a 200 from /health.
+        poll_every_s: Seconds between successive /health polls.
+
+    Raises:
+        ServerRestartFailed: If /health does not return 200 within
+            ``timeout_s``.
     """
     import time as _time
     import re as _re
+
     try:
         import httpx as _httpx
     except ImportError:  # pragma: no cover
@@ -485,6 +710,7 @@ async def _wait_for_server_health_async(
 
     state = _read_state() or {}
     service_url = str(state.get("service_url") or "").strip()
+    backend = str(state.get("backend") or "").strip().lower()
     head_ip = str(state.get("head_pod_ip") or "").strip()
     if head_ip and ".svc.cluster.local" in service_url:
         m = _re.search(r":(\d+)$", service_url)
@@ -500,31 +726,132 @@ async def _wait_for_server_health_async(
     last_err = ""
     log.info(
         "post-restart /health wait: url=%s timeout_s=%d poll_every_s=%d",
-        health_url, timeout_s, poll_every_s,
+        health_url,
+        timeout_s,
+        poll_every_s,
     )
-    async with _httpx.AsyncClient(timeout=5.0) as client:
+    # Dynamo-ONLY serving-readiness extension. STRICTLY gated on
+    # backend == "dynamo": for Dynamo the service_url points at the
+    # frontend, whose /health returns 200 the moment its HTTP server is up
+    # -- decoupled from whether the prefill/decode workers finished loading
+    # weights and registered with the frontend (KvStore/NATS discovery).
+    # On huge-shard models (e.g. GLM-5, 282 safetensors) the optimizer
+    # otherwise races baseline against an empty router and gets 0 completed
+    # requests -> baseline_failed. We therefore additionally require
+    # /v1/models non-empty AND a 1-token /v1/completions to succeed.
+    #
+    # Explicitly NOT applied to other backends:
+    #   * RayJob multi-node -> service_url is the sglang server itself,
+    #     whose /health already gates on weight-load; keep /health-only.
+    #   * single-node       -> never reaches here (restart_server_for_round
+    #     is a no-op when not is_multi_node).
+    wait_model_ready = backend == "dynamo"
+    # When wait_model_ready is on, also do a 1-token completion probe to
+    # confirm workers actually serve traffic (Dynamo registers models in
+    # /v1/models before the worker is ready to accept requests; this
+    # causes the first benchmark to get 503 "Model temporarily
+    # unavailable" for every request, surfacing as `completed=0` →
+    # `baseline_failed`).
+    models_url = service_url.rstrip("/") + "/v1/models"
+    completions_url = service_url.rstrip("/") + "/v1/completions"
+    health_ok_at = None
+    models_ready_at = None
+    consecutive_completion_ok = 0
+    # require N consecutive successful 1-token completions before declaring ready
+    completion_probe_required = int(os.environ.get("HYPERLOOM_MN_COMPLETION_PROBE_COUNT", "2") or 2)
+    async with _httpx.AsyncClient(timeout=15.0) as client:
         while True:
             elapsed = int(_time.monotonic() - started)
             try:
                 resp = await client.get(health_url)
                 if resp.status_code == 200:
-                    log.info(
-                        "post-restart /health OK after %ds (url=%s)",
-                        elapsed, health_url,
-                    )
-                    return
-                last_err = f"http_status={resp.status_code}"
+                    if health_ok_at is None:
+                        health_ok_at = elapsed
+                        log.info(
+                            "post-restart /health OK after %ds (url=%s)%s",
+                            elapsed,
+                            health_url,
+                            "; now also waiting for /v1/models to be non-empty" if wait_model_ready else "",
+                        )
+                    if not wait_model_ready:
+                        return
+                    # /v1/models probe
+                    try:
+                        mresp = await client.get(models_url)
+                        if mresp.status_code == 200:
+                            try:
+                                data = mresp.json()
+                            except Exception:
+                                data = {}
+                            models = data.get("data") if isinstance(data, dict) else None
+                            if isinstance(models, list) and len(models) > 0:
+                                if models_ready_at is None:
+                                    models_ready_at = elapsed
+                                    log.info(
+                                        "post-restart /v1/models populated after %ds (n=%d, health_ok_at=%ds); now probing /v1/completions",
+                                        elapsed,
+                                        len(models),
+                                        health_ok_at,
+                                    )
+                                # Worker-readiness probe: tiny completion
+                                model_id = ""
+                                try:
+                                    model_id = str(models[0].get("id") or "") if isinstance(models[0], dict) else ""
+                                except Exception:
+                                    model_id = ""
+                                if not model_id:
+                                    last_err = "completion_probe: no model id"
+                                    consecutive_completion_ok = 0
+                                else:
+                                    try:
+                                        cresp = await client.post(
+                                            completions_url,
+                                            json={
+                                                "model": model_id,
+                                                "prompt": "hi",
+                                                "max_tokens": 1,
+                                                "temperature": 0,
+                                                "stream": False,
+                                            },
+                                        )
+                                        if cresp.status_code == 200:
+                                            consecutive_completion_ok += 1
+                                            if consecutive_completion_ok >= completion_probe_required:
+                                                log.info(
+                                                    "post-restart READY after %ds (n=%d, models_at=%ds, completion_ok_x%d)",
+                                                    elapsed,
+                                                    len(models),
+                                                    models_ready_at,
+                                                    consecutive_completion_ok,
+                                                )
+                                                return
+                                            last_err = f"completion_probe ok x{consecutive_completion_ok}/{completion_probe_required}"
+                                        else:
+                                            consecutive_completion_ok = 0
+                                            last_err = f"completion_probe_http={cresp.status_code}"
+                                    except Exception as cexc:  # noqa: BLE001
+                                        consecutive_completion_ok = 0
+                                        last_err = f"completion_probe {type(cexc).__name__}: {str(cexc)[:80]}"
+                            else:
+                                last_err = f"models_empty (health_ok_at={health_ok_at}s)"
+                                consecutive_completion_ok = 0
+                        else:
+                            last_err = f"models_http_status={mresp.status_code}"
+                    except Exception as mexc:  # noqa: BLE001
+                        last_err = f"models_probe {type(mexc).__name__}: {str(mexc)[:80]}"
+                else:
+                    last_err = f"http_status={resp.status_code}"
             except Exception as exc:  # noqa: BLE001
                 last_err = f"{type(exc).__name__}: {str(exc)[:120]}"
             if elapsed > timeout_s:
                 raise ServerRestartFailed(
-                    f"server /health did not return 200 within {timeout_s}s "
-                    f"(url={health_url}, last_err={last_err})"
+                    f"server /health did not return 200 within {timeout_s}s (url={health_url}, last_err={last_err})"
                 )
             if elapsed % 60 < poll_every_s:
                 log.info(
                     "post-restart /health still waiting t=%ds last_err=%s",
-                    elapsed, last_err,
+                    elapsed,
+                    last_err,
                 )
             await asyncio.sleep(poll_every_s)
 

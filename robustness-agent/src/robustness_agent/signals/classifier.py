@@ -77,38 +77,20 @@ class Classifier:
     event_config: EventConfig = field(default_factory=EventConfig)
     health_config: HealthConfig = field(default_factory=HealthConfig)
     local_health_config: LocalHealthConfig = field(default_factory=LocalHealthConfig)
-    cluster_fault_config: ClusterFaultConfig = field(
-        default_factory=ClusterFaultConfig
-    )
+    cluster_fault_config: ClusterFaultConfig = field(default_factory=ClusterFaultConfig)
     gpu_leak_config: GpuLeakConfig = field(default_factory=GpuLeakConfig)
     budget_config: BudgetConfig = field(default_factory=BudgetConfig)
     aiter_jit_config: AiterJitConfig = field(default_factory=AiterJitConfig)
     progress_config: ProgressConfig = field(default_factory=ProgressConfig)
-    repeated_payload_config: RepeatedPayloadConfig = field(
-        default_factory=RepeatedPayloadConfig
-    )
-    decision_audit_config: DecisionAuditConfig = field(
-        default_factory=DecisionAuditConfig
-    )
-    model_gpu_fit_config: ModelGpuFitConfig = field(
-        default_factory=ModelGpuFitConfig
-    )
-    amdahl_ceiling_config: AmdahlCeilingConfig = field(
-        default_factory=AmdahlCeilingConfig
-    )
+    repeated_payload_config: RepeatedPayloadConfig = field(default_factory=RepeatedPayloadConfig)
+    decision_audit_config: DecisionAuditConfig = field(default_factory=DecisionAuditConfig)
+    model_gpu_fit_config: ModelGpuFitConfig = field(default_factory=ModelGpuFitConfig)
+    amdahl_ceiling_config: AmdahlCeilingConfig = field(default_factory=AmdahlCeilingConfig)
     cold_start_config: ColdStartConfig = field(default_factory=ColdStartConfig)
-    critic_health_config: CriticHealthConfig = field(
-        default_factory=CriticHealthConfig
-    )
-    kernel_pipeline_config: KernelPipelineConfig = field(
-        default_factory=KernelPipelineConfig
-    )
-    state_integrity_config: StateIntegrityConfig = field(
-        default_factory=StateIntegrityConfig
-    )
-    external_deps_config: ExternalDepsConfig = field(
-        default_factory=ExternalDepsConfig
-    )
+    critic_health_config: CriticHealthConfig = field(default_factory=CriticHealthConfig)
+    kernel_pipeline_config: KernelPipelineConfig = field(default_factory=KernelPipelineConfig)
+    state_integrity_config: StateIntegrityConfig = field(default_factory=StateIntegrityConfig)
+    external_deps_config: ExternalDepsConfig = field(default_factory=ExternalDepsConfig)
     extra_evaluators: list[SignalEvaluator] = field(default_factory=list)
     # Cross-tick persistence for stateful sub-detectors so they survive
     # subprocess restarts; ``None`` keeps everything in-memory only.
@@ -117,13 +99,17 @@ class Classifier:
     _aiter_jit_detector: AiterJitDetector = field(init=False, repr=False)
     _progress_detector: ProgressDetector = field(init=False, repr=False)
     _model_gpu_fit_detector: ModelGpuFitDetector = field(init=False, repr=False)
-    _amdahl_ceiling_detector: AmdahlCeilingDetector = field(
-        init=False, repr=False
-    )
+    _amdahl_ceiling_detector: AmdahlCeilingDetector = field(init=False, repr=False)
     _ray_pending_detector: RayPendingDetector = field(init=False, repr=False)
     _tracelens_cli_latch: TraceLensCliFiredOnce = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Construct the stateful sub-detectors with their persistence views.
+
+        Each stateful detector receives a per-name state view from
+        ``state_store`` (or ``None`` for in-memory-only operation) so it can
+        survive subprocess restarts.
+        """
         store = self.state_store
         self._gpu_leak_detector = GpuLeakDetector(
             self.gpu_leak_config,
@@ -154,72 +140,82 @@ class Classifier:
         )
 
     def classify(self, data: SourceData, ctx: ReactorContext) -> list[Symptom]:
+        """Run every configured signal evaluator and return de-duplicated symptoms.
+
+        Invokes the pure-function rules and the stateful detectors, appends any
+        ``extra_evaluators``, then folds duplicates via :func:`_dedup`.
+
+        Args:
+            data (SourceData): Collected source data for this tick.
+            ctx (ReactorContext): Reactor context for this tick.
+
+        Returns:
+            list[Symptom]: De-duplicated symptoms ordered by severity (HIGH
+                first) then name and subject.
+        """
         symptoms: list[Symptom] = []
-        symptoms.extend(
-            evaluate_stall_signals(ctx, data, config=self.stall_config)
-        )
-        symptoms.extend(
-            evaluate_crash_signals(ctx, data, config=self.crash_config)
-        )
-        symptoms.extend(
-            evaluate_event_signals(ctx, data, config=self.event_config)
-        )
-        symptoms.extend(
-            evaluate_health_signals(ctx, data, config=self.health_config)
-        )
-        symptoms.extend(
-            evaluate_local_health_signals(ctx, data, config=self.local_health_config)
-        )
+        symptoms.extend(evaluate_stall_signals(ctx, data, config=self.stall_config))
+        symptoms.extend(evaluate_crash_signals(ctx, data, config=self.crash_config))
+        symptoms.extend(evaluate_event_signals(ctx, data, config=self.event_config))
+        symptoms.extend(evaluate_health_signals(ctx, data, config=self.health_config))
+        symptoms.extend(evaluate_local_health_signals(ctx, data, config=self.local_health_config))
         symptoms.extend(self._gpu_leak_detector.evaluate(ctx, data))
-        symptoms.extend(
-            evaluate_cluster_fault_signals(
-                ctx, data, config=self.cluster_fault_config
-            )
-        )
+        symptoms.extend(evaluate_cluster_fault_signals(ctx, data, config=self.cluster_fault_config))
         # Budget signals are pure-context (no SourceData fetch needed).
-        symptoms.extend(
-            evaluate_budget_signals(ctx, config=self.budget_config)
-        )
+        symptoms.extend(evaluate_budget_signals(ctx, config=self.budget_config))
         symptoms.extend(self._aiter_jit_detector.evaluate(ctx, data))
         symptoms.extend(self._progress_detector.evaluate(ctx, data))
         symptoms.extend(
             evaluate_repeated_payload_signals(
-                ctx, data, config=self.repeated_payload_config,
+                ctx,
+                data,
+                config=self.repeated_payload_config,
             )
         )
         symptoms.extend(
             evaluate_decision_audit_signals(
-                ctx, data, config=self.decision_audit_config,
+                ctx,
+                data,
+                config=self.decision_audit_config,
             )
         )
         symptoms.extend(self._model_gpu_fit_detector.evaluate(ctx, data))
         symptoms.extend(self._amdahl_ceiling_detector.evaluate(ctx, data))
         symptoms.extend(
             evaluate_cold_start_signals(
-                ctx, data, config=self.cold_start_config,
+                ctx,
+                data,
+                config=self.cold_start_config,
             )
         )
         symptoms.extend(
             evaluate_critic_health_signals(
-                ctx, data, config=self.critic_health_config,
+                ctx,
+                data,
+                config=self.critic_health_config,
             )
         )
         # F1 ray-pending is stateful; F2/F4/F5 live in the module helper.
         symptoms.extend(self._ray_pending_detector.evaluate(ctx, data))
         symptoms.extend(
             evaluate_kernel_pipeline_signals(
-                ctx, data, config=self.kernel_pipeline_config,
+                ctx,
+                data,
+                config=self.kernel_pipeline_config,
             )
         )
         symptoms.extend(
             evaluate_state_integrity_signals(
-                ctx, data, config=self.state_integrity_config,
+                ctx,
+                data,
+                config=self.state_integrity_config,
             )
         )
         # TraceLens CLI latch is owned here so J3 fires at most once per session.
         symptoms.extend(
             evaluate_external_deps_signals(
-                ctx, data,
+                ctx,
+                data,
                 config=self.external_deps_config,
                 tracelens_latch=self._tracelens_cli_latch,
             )
@@ -230,6 +226,15 @@ class Classifier:
 
 
 def _dedup(symptoms: list[Symptom]) -> list[Symptom]:
+    """Collapse symptoms sharing a dedup key, keeping the highest severity.
+
+    Args:
+        symptoms (list[Symptom]): Raw symptoms from all evaluators.
+
+    Returns:
+        list[Symptom]: De-duplicated symptoms sorted by descending severity,
+            then name, then subject.
+    """
     by_key: dict[tuple[str, ...], Symptom] = {}
     for sym in symptoms:
         key = sym.dedup_key()

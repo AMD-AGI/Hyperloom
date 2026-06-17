@@ -40,6 +40,7 @@ def _sym(
 # Tier mapping
 # ---------------------------------------------------------------------------
 
+
 async def test_low_severity_yields_observation_send_message():
     ladder = ActionLadder()
     out = await ladder.decide(
@@ -66,7 +67,7 @@ async def test_medium_severity_yields_alert_only():
 
 
 async def test_high_crash_emits_alert_only():
-    """Strategic HIGH symptoms surface alert(high) only (escalate/prune auto-emit dropped in loosen P3_19)."""
+    """Strategic HIGH symptoms surface alert(high) only (escalate/prune auto-emit dropped)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("crash_count_high", SymptomSeverity.HIGH, suggestion="revert")],
@@ -138,7 +139,7 @@ async def test_high_agent_stall_emits_alert_only():
 
 
 async def test_repeated_failure_emits_alert_only():
-    """prune_branch suggestion lives in the alert detail; auto-emit dropped in loosen P3_19."""
+    """prune_branch suggestion lives in the alert detail; auto-emit dropped."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -161,8 +162,9 @@ async def test_repeated_failure_emits_alert_only():
 # Wind-down path: recover_unsuccessful / deadline_imminent → delegate(report)
 # ---------------------------------------------------------------------------
 
+
 async def test_recover_unsuccessful_emits_alert_plus_delegate_report():
-    """``recover_unsuccessful`` keeps the ``delegate(report)`` finalization path (escalate auto-emit dropped, loosen P3_19)."""
+    """``recover_unsuccessful`` keeps the ``delegate(report)`` finalization path (escalate auto-emit dropped)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -193,22 +195,17 @@ async def test_recover_unsuccessful_emits_alert_plus_delegate_report():
     delegate = next(i for i in out.intents if i.type is IntentType.DELEGATE)
     assert delegate.payload["action_name"] == "report"
     assert delegate.payload["params"]["reason"] == "recover_unsuccessful"
-    assert (
-        delegate.payload["params"]["evidence"]["error_class"]
-        == "gpu_unhealthy_after_gpureset"
-    )
-    assert delegate.payload["idempotency_key"] == (
-        "report-recover-unsuccessful-tick-7"
-    )
+    assert delegate.payload["params"]["evidence"]["error_class"] == "gpu_unhealthy_after_gpureset"
+    assert delegate.payload["idempotency_key"] == ("report-recover-unsuccessful-tick-7")
 
 
 async def test_state_json_corrupt_alert_only():
-    """I1: state.json broken → HIGH alert only (can't auto-heal; escalate auto-emit dropped in loosen P3_19)."""
+    """I1: state.json broken → HIGH alert only (can't auto-heal; escalate auto-emit dropped)."""
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("state_json_corrupt", SymptomSeverity.HIGH,
-              evidence={"path": "/p/state.json"}, subject={})],
-        tick_index=0, now_unix=1.0,
+        [_sym("state_json_corrupt", SymptomSeverity.HIGH, evidence={"path": "/p/state.json"}, subject={})],
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
@@ -222,9 +219,16 @@ async def test_coordinator_wal_bloat_high_alert_only():
     """I2: HIGH (4 GiB+) alerts with the checkpoint hint in detail."""
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("coordinator_wal_bloat", SymptomSeverity.HIGH,
-              evidence={"wal_bytes": 5 * 1024 * 1024 * 1024}, subject={})],
-        tick_index=0, now_unix=1.0,
+        [
+            _sym(
+                "coordinator_wal_bloat",
+                SymptomSeverity.HIGH,
+                evidence={"wal_bytes": 5 * 1024 * 1024 * 1024},
+                subject={},
+            )
+        ],
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
@@ -235,9 +239,16 @@ async def test_coordinator_wal_bloat_medium_alert_only():
     """I2 MEDIUM (1-4 GiB) falls to default _diagnose tier."""
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("coordinator_wal_bloat", SymptomSeverity.MEDIUM,
-              evidence={"wal_bytes": 2 * 1024 * 1024 * 1024}, subject={})],
-        tick_index=0, now_unix=1.0,
+        [
+            _sym(
+                "coordinator_wal_bloat",
+                SymptomSeverity.MEDIUM,
+                evidence={"wal_bytes": 2 * 1024 * 1024 * 1024},
+                subject={},
+            )
+        ],
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
@@ -246,14 +257,19 @@ async def test_coordinator_wal_bloat_medium_alert_only():
 
 
 async def test_stale_lease_emits_kill_task_for_owner_lane():
-    """I3: HIGH emits kill_task(task_id) to release a lane held by a dead PID (paired escalate auto-emit dropped, loosen P3_19)."""
+    """I3: HIGH emits kill_task(task_id) to release a lane held by a dead PID (paired escalate auto-emit dropped)."""
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("stale_lease", SymptomSeverity.HIGH,
-              evidence={"task_id": "tsk-7", "lane": "lane-1",
-                        "holder_pid": 9999},
-              subject={"task_id": "tsk-7"})],
-        tick_index=0, now_unix=1.0,
+        [
+            _sym(
+                "stale_lease",
+                SymptomSeverity.HIGH,
+                evidence={"task_id": "tsk-7", "lane": "lane-1", "holder_pid": 9999},
+                subject={"task_id": "tsk-7"},
+            )
+        ],
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
@@ -269,9 +285,9 @@ async def test_stale_lease_without_task_id_does_not_kill():
     """Missing task_id → skip kill_task to avoid bad payloads; alert still fires for visibility."""
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("stale_lease", SymptomSeverity.HIGH,
-              evidence={}, subject={})],
-        tick_index=0, now_unix=1.0,
+        [_sym("stale_lease", SymptomSeverity.HIGH, evidence={}, subject={})],
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.KILL_TASK not in types
@@ -283,30 +299,39 @@ async def test_inbox_bloat_low_emits_observation_only():
     """I4 LOW falls to the observe tier (send_message)."""
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("inbox_bloat", SymptomSeverity.LOW,
-              evidence={"role": "orchestration", "kind": "inbox"},
-              subject={"role": "orchestration", "kind": "inbox"})],
-        tick_index=0, now_unix=1.0,
+        [
+            _sym(
+                "inbox_bloat",
+                SymptomSeverity.LOW,
+                evidence={"role": "orchestration", "kind": "inbox"},
+                subject={"role": "orchestration", "kind": "inbox"},
+            )
+        ],
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     # LOW tier → send_message(observation), not alert / escalate.
-    msg_types = {
-        i.payload.get("topic") for i in out.intents
-        if i.type is IntentType.SEND_MESSAGE
-    }
+    msg_types = {i.payload.get("topic") for i in out.intents if i.type is IntentType.SEND_MESSAGE}
     assert "observation" in msg_types
     assert IntentType.KILL_TASK not in types
 
 
 async def test_coordinator_zombie_alert_only():
-    """I5: HIGH alert — cannot self-heal (Robustness shares the process tree); escalate auto-emit dropped in loosen P3_19."""
+    """I5: HIGH alert — cannot self-heal (Robustness shares the process tree); escalate auto-emit dropped."""
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("coordinator_zombie", SymptomSeverity.HIGH,
-              evidence={"recorded_pid": 1234},
-              suggestion="operator restart required",
-              subject={})],
-        tick_index=0, now_unix=1.0,
+        [
+            _sym(
+                "coordinator_zombie",
+                SymptomSeverity.HIGH,
+                evidence={"recorded_pid": 1234},
+                suggestion="operator restart required",
+                subject={},
+            )
+        ],
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
@@ -317,10 +342,16 @@ async def test_gateway_auth_outage_alert_only():
     """J1: HIGH alert with the key-rotation hint in detail."""
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("gateway_auth_outage", SymptomSeverity.HIGH,
-              evidence={"status_code": 401, "url": "https://gw/v1/models"},
-              subject={})],
-        tick_index=0, now_unix=1.0,
+        [
+            _sym(
+                "gateway_auth_outage",
+                SymptomSeverity.HIGH,
+                evidence={"status_code": 401, "url": "https://gw/v1/models"},
+                subject={},
+            )
+        ],
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
@@ -331,11 +362,16 @@ async def test_wekafs_degraded_alert_only():
     """J2: HIGH alert — operator decides wait vs remount."""
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("wekafs_degraded", SymptomSeverity.HIGH,
-              evidence={"env_name": "TRACELENS_ROOT",
-                        "path": "/wekafs/hyperloom"},
-              subject={"path": "/wekafs/hyperloom"})],
-        tick_index=0, now_unix=1.0,
+        [
+            _sym(
+                "wekafs_degraded",
+                SymptomSeverity.HIGH,
+                evidence={"env_name": "TRACELENS_ROOT", "path": "/wekafs/hyperloom"},
+                subject={"path": "/wekafs/hyperloom"},
+            )
+        ],
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
@@ -347,9 +383,9 @@ async def test_tracelens_cli_missing_alert_only():
     """J3: HIGH alert — re-run install.sh hint in detail."""
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("tracelens_cli_missing", SymptomSeverity.HIGH,
-              evidence={"cli_names": ["a", "b"]}, subject={})],
-        tick_index=0, now_unix=1.0,
+        [_sym("tracelens_cli_missing", SymptomSeverity.HIGH, evidence={"cli_names": ["a", "b"]}, subject={})],
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
@@ -360,7 +396,8 @@ async def test_critic_kb_outage_alert_only():
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("critic_kb_outage", SymptomSeverity.HIGH, subject={})],
-        tick_index=0, now_unix=1.0,
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
@@ -372,9 +409,9 @@ async def test_critic_kb_outage_alert_only():
 async def test_critic_unavailable_streak_alert_only():
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("critic_unavailable_streak", SymptomSeverity.HIGH,
-              suggestion="switch to --critic-mock", subject={})],
-        tick_index=0, now_unix=1.0,
+        [_sym("critic_unavailable_streak", SymptomSeverity.HIGH, suggestion="switch to --critic-mock", subject={})],
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
@@ -385,7 +422,8 @@ async def test_critic_runtime_stuck_alert_only():
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("critic_runtime_stuck", SymptomSeverity.HIGH, subject={})],
-        tick_index=0, now_unix=1.0,
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
@@ -394,12 +432,12 @@ async def test_critic_runtime_stuck_alert_only():
 
 async def test_ray_pending_starvation_alert_only():
     """F1: kernel pipeline is wedged — alert + suggestion only.
-    Loosen P3_19 dropped the auto prune_branch."""
+    The auto prune_branch was dropped."""
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("ray_pending_starvation", SymptomSeverity.HIGH,
-              evidence={"pending_tasks": 50}, subject={})],
-        tick_index=0, now_unix=1.0,
+        [_sym("ray_pending_starvation", SymptomSeverity.HIGH, evidence={"pending_tasks": 50}, subject={})],
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
@@ -409,10 +447,16 @@ async def test_ray_pending_starvation_alert_only():
 async def test_geak_budget_starvation_alert_only():
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("geak_budget_starvation", SymptomSeverity.HIGH,
-              evidence={"kernel_id": "rms_norm"},
-              subject={"kernel_id": "rms_norm"})],
-        tick_index=0, now_unix=1.0,
+        [
+            _sym(
+                "geak_budget_starvation",
+                SymptomSeverity.HIGH,
+                evidence={"kernel_id": "rms_norm"},
+                subject={"kernel_id": "rms_norm"},
+            )
+        ],
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
@@ -424,9 +468,9 @@ async def test_kernel_opt_no_progress_alert_only():
     """F5: pipeline structurally cannot optimise — alert only; Orchestration may emit prune_branch/escalate itself."""
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("kernel_opt_no_progress", SymptomSeverity.HIGH,
-              evidence={"kernel_count": 3}, subject={})],
-        tick_index=0, now_unix=1.0,
+        [_sym("kernel_opt_no_progress", SymptomSeverity.HIGH, evidence={"kernel_count": 3}, subject={})],
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
@@ -440,7 +484,8 @@ async def test_critic_prune_stuck_falls_to_medium_alert():
     for name in ("critic_prune_stuck", "cursor_auth_storm"):
         out = await ladder.decide(
             [_sym(name, SymptomSeverity.MEDIUM, subject={})],
-            tick_index=0, now_unix=1.0,
+            tick_index=0,
+            now_unix=1.0,
         )
         types = [i.type for i in out.intents]
         assert IntentType.ALERT in types
@@ -449,7 +494,7 @@ async def test_critic_prune_stuck_falls_to_medium_alert():
 
 
 async def test_model_gpu_infeasible_alert_only():
-    """C1: config cannot fit in HBM — alert only (auto prune of server-launching families dropped, loosen P3_19)."""
+    """C1: config cannot fit in HBM — alert only (auto prune of server-launching families dropped)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -660,7 +705,7 @@ async def test_g_medium_signals_fall_to_diagnose_alert():
 
 
 async def test_deadline_warning_high_emits_delegate_report():
-    """``deadline_warning`` HIGH (no validated gain) = alert(high) + finalization ``delegate(report)`` (escalate dropped, loosen P3_19)."""
+    """``deadline_warning`` HIGH (no validated gain) = alert(high) + finalization ``delegate(report)`` (escalate dropped)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -688,9 +733,7 @@ async def test_deadline_warning_high_emits_delegate_report():
     delegate = next(i for i in out.intents if i.type is IntentType.DELEGATE)
     assert delegate.payload["action_name"] == "report"
     assert delegate.payload["params"]["reason"] == "deadline_warning"
-    assert delegate.payload["idempotency_key"] == (
-        "report-deadline-warning-tick-200"
-    )
+    assert delegate.payload["idempotency_key"] == ("report-deadline-warning-tick-200")
 
 
 async def test_deadline_warning_medium_only_emits_alert():
@@ -741,9 +784,7 @@ async def test_deadline_hard_cutoff_emits_emergency_delegate():
     delegate = next(i for i in out.intents if i.type is IntentType.DELEGATE)
     assert delegate.payload["action_name"] == "report"
     assert delegate.payload["params"]["reason"] == "deadline_hard_cutoff"
-    assert delegate.payload["idempotency_key"] == (
-        "report-deadline-hard-cutoff-tick-355"
-    )
+    assert delegate.payload["idempotency_key"] == ("report-deadline-hard-cutoff-tick-355")
 
 
 async def test_budget_strategy_drift_falls_to_medium_diagnose():
@@ -776,10 +817,7 @@ async def test_deadline_imminent_emits_alert_plus_delegate_report():
             _sym(
                 "deadline_imminent",
                 SymptomSeverity.HIGH,
-                summary=(
-                    "wall-clock budget 92% consumed with "
-                    "cumulative_gain_validated=0.00%"
-                ),
+                summary=("wall-clock budget 92% consumed with cumulative_gain_validated=0.00%"),
                 evidence={
                     "elapsed_minutes": 330.0,
                     "remaining_minutes": 30.0,
@@ -803,9 +841,7 @@ async def test_deadline_imminent_emits_alert_plus_delegate_report():
     delegate = next(i for i in out.intents if i.type is IntentType.DELEGATE)
     assert delegate.payload["action_name"] == "report"
     assert delegate.payload["params"]["reason"] == "deadline_imminent"
-    assert delegate.payload["idempotency_key"] == (
-        "report-deadline-imminent-tick-12"
-    )
+    assert delegate.payload["idempotency_key"] == ("report-deadline-imminent-tick-12")
 
 
 async def test_same_payload_loop_alert_only():
@@ -896,7 +932,7 @@ async def test_shm_pressure_high_alert_only():
 
 
 async def test_no_levers_found_falls_to_medium_alert():
-    """Loosen P3_19 demoted ``no_levers_found`` to MEDIUM (advisory) and dropped the auto ``delegate(report)``."""
+    """``no_levers_found`` is demoted to MEDIUM (advisory) and the auto ``delegate(report)`` is dropped."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -917,7 +953,7 @@ async def test_no_levers_found_falls_to_medium_alert():
 
 
 async def test_gain_plateau_falls_to_medium_alert():
-    """Loosen P3_19 demoted ``gain_plateau`` to MEDIUM (advisory)."""
+    """``gain_plateau`` is demoted to MEDIUM (advisory)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -970,16 +1006,8 @@ async def test_wind_down_idempotency_key_varies_per_tick():
     )
     first = await ladder.decide([sym], tick_index=3, now_unix=1.0)
     second = await ladder.decide([sym], tick_index=20, now_unix=2.0)
-    first_keys = [
-        i.payload.get("idempotency_key")
-        for i in first.intents
-        if i.type is IntentType.DELEGATE
-    ]
-    second_keys = [
-        i.payload.get("idempotency_key")
-        for i in second.intents
-        if i.type is IntentType.DELEGATE
-    ]
+    first_keys = [i.payload.get("idempotency_key") for i in first.intents if i.type is IntentType.DELEGATE]
+    second_keys = [i.payload.get("idempotency_key") for i in second.intents if i.type is IntentType.DELEGATE]
     assert first_keys == ["report-recover-unsuccessful-tick-3"]
     assert second_keys == ["report-recover-unsuccessful-tick-20"]
 
@@ -987,6 +1015,7 @@ async def test_wind_down_idempotency_key_varies_per_tick():
 # ---------------------------------------------------------------------------
 # Cooldown / heartbeat
 # ---------------------------------------------------------------------------
+
 
 async def test_no_symptoms_falls_back_to_heartbeat():
     ladder = ActionLadder()
@@ -1004,9 +1033,7 @@ async def test_cooldown_suppresses_duplicate_within_window():
     suppressed = await ladder.decide([sym], tick_index=1, now_unix=2.0)
     assert any(i.type is IntentType.ALERT for i in first.intents)
     # Suppressed tick: no symptom-derived intent emitted, only heartbeat.
-    assert all(
-        not (i.type is IntentType.ALERT) for i in suppressed.intents
-    )
+    assert all(i.type is not IntentType.ALERT for i in suppressed.intents)
     assert any(i.payload.get("topic") == "heartbeat" for i in suppressed.intents)
     assert suppressed.findings == []
 
@@ -1080,6 +1107,7 @@ async def test_rca_provider_failure_does_not_break_ladder():
 # gpu_memory_leaked — Change B contract
 # ---------------------------------------------------------------------------
 
+
 def _gpu_leak_symptom(*, summary: str = "all 4 GPUs full, no owner") -> Symptom:
     return Symptom(
         name="gpu_memory_leaked",
@@ -1098,16 +1126,21 @@ def _gpu_leak_symptom(*, summary: str = "all 4 GPUs full, no owner") -> Symptom:
 
 
 async def test_gpu_memory_leaked_emits_alert_and_delegate():
-    """``gpu_memory_leaked`` keeps the ``delegate(recover, force_gpu_cleanup=True)`` cleanup path (escalate dropped, loosen P3_19)."""
+    """``gpu_memory_leaked`` keeps the ``delegate(recover, force_gpu_cleanup=True)`` cleanup path (escalate dropped)."""
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_gpu_leak_symptom()], tick_index=7, now_unix=1.0,
+        [_gpu_leak_symptom()],
+        tick_index=7,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert types == [IntentType.ALERT, IntentType.DELEGATE]
     alert = out.intents[0]
     assert alert.payload["severity"] == "high"
-    assert "gpu_memory_leaked" in alert.payload["summary"] or alert.payload.get("detail", {}).get("symptom") == "gpu_memory_leaked"
+    assert (
+        "gpu_memory_leaked" in alert.payload["summary"]
+        or alert.payload.get("detail", {}).get("symptom") == "gpu_memory_leaked"
+    )
 
     delegate = out.intents[1]
     assert delegate.payload["action_name"] == "recover"
@@ -1127,7 +1160,9 @@ async def test_gpu_memory_leaked_does_not_emit_prune_branch():
     """Resource recovery does not prune families — ``recover`` is the fix; on failure ``recover_unsuccessful`` triggers report."""
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_gpu_leak_symptom()], tick_index=0, now_unix=1.0,
+        [_gpu_leak_symptom()],
+        tick_index=0,
+        now_unix=1.0,
     )
     types = [i.type for i in out.intents]
     assert IntentType.PRUNE_BRANCH not in types
@@ -1137,29 +1172,35 @@ async def test_gpu_memory_leaked_cooldown_dedups_within_window():
     """Same dedup_key suppressed within ``cooldown_ticks``."""
     ladder = ActionLadder(config=ActionLadderConfig(cooldown_ticks=5))
     first = await ladder.decide(
-        [_gpu_leak_symptom()], tick_index=0, now_unix=1.0,
+        [_gpu_leak_symptom()],
+        tick_index=0,
+        now_unix=1.0,
     )
     second = await ladder.decide(
-        [_gpu_leak_symptom()], tick_index=1, now_unix=2.0,
+        [_gpu_leak_symptom()],
+        tick_index=1,
+        now_unix=2.0,
     )
     first_types = [i.type for i in first.intents]
     assert IntentType.DELEGATE in first_types
     second_types = [i.type for i in second.intents]
     assert IntentType.DELEGATE not in second_types
     assert IntentType.ALERT not in second_types
-    assert any(
-        i.payload.get("topic") == "heartbeat" for i in second.intents
-    )
+    assert any(i.payload.get("topic") == "heartbeat" for i in second.intents)
 
 
 async def test_gpu_memory_leaked_idempotency_key_advances_with_tick():
     """After cooldown elapses, the next emit carries a fresh tick-indexed key."""
     ladder = ActionLadder(config=ActionLadderConfig(cooldown_ticks=3))
     first = await ladder.decide(
-        [_gpu_leak_symptom()], tick_index=0, now_unix=1.0,
+        [_gpu_leak_symptom()],
+        tick_index=0,
+        now_unix=1.0,
     )
     second = await ladder.decide(
-        [_gpu_leak_symptom()], tick_index=5, now_unix=2.0,
+        [_gpu_leak_symptom()],
+        tick_index=5,
+        now_unix=2.0,
     )
     first_delegate = next(i for i in first.intents if i.type is IntentType.DELEGATE)
     second_delegate = next(i for i in second.intents if i.type is IntentType.DELEGATE)

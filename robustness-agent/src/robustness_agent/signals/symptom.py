@@ -10,12 +10,25 @@ from typing import Any
 
 
 class SymptomSeverity(str, Enum):
+    """Severity level of a :class:`Symptom`.
+
+    Attributes:
+        LOW: Informational; soft actions only.
+        MEDIUM: Actionable alert; strategy nudges become reachable.
+        HIGH: Urgent; hard actions and wind-down become reachable.
+    """
+
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
 
     @property
     def rank(self) -> int:
+        """Ordinal rank used for severity comparison and sorting.
+
+        Returns:
+            int: ``0`` for LOW, ``1`` for MEDIUM, ``2`` for HIGH.
+        """
         return {"low": 0, "medium": 1, "high": 2}[self.value]
 
 
@@ -50,7 +63,12 @@ class Symptom:
     suggestion: str = ""
 
     def dedup_key(self) -> tuple[str, ...]:
-        """Stable identity used by the classifier to drop duplicates."""
+        """Stable identity used by the classifier to drop duplicates.
+
+        Returns:
+            tuple[str, ...]: ``(name,)`` when there is no subject, otherwise the
+                name followed by sorted ``key=value`` subject pairs.
+        """
         if not self.subject:
             return (self.name,)
         return (self.name, *sorted(f"{k}={v}" for k, v in self.subject.items()))

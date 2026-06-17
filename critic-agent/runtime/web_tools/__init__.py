@@ -56,6 +56,15 @@ def build_clients(
     Tests should construct ``WebSearchClient`` / ``WebFetchClient``
     directly with their own provider list and transport instead of going
     through this factory.
+
+    Args:
+        config (WebToolsConfig): Resolved web-tools configuration.
+        http_client (httpx.Client | None): Transport to reuse; a default
+            client is created when ``None``.
+
+    Returns:
+        WebToolClients: Bundle whose ``search`` / ``fetch`` slots are
+        ``None`` when the corresponding feature is disabled or unusable.
     """
     if not config.critic_web_tools_enabled:
         return WebToolClients(search=None, fetch=None)
@@ -66,12 +75,14 @@ def build_clients(
     for name in config.search_provider_chain():
         if name not in IMPLEMENTED_SEARCH_PROVIDERS:
             log.info(
-                "skipping web search provider %s — not implemented yet", name,
+                "skipping web search provider %s — not implemented yet",
+                name,
             )
             continue
         if not config.has_search_api_key(name):
             log.info(
-                "skipping web search provider %s — no API key configured", name,
+                "skipping web search provider %s — no API key configured",
+                name,
             )
             continue
         try:
@@ -84,17 +95,32 @@ def build_clients(
 
     if search is None and fetch is None:
         log.info(
-            "web tools enabled but neither search nor fetch is usable "
-            "(provider chain=%s, fetch_enabled=%s)",
-            config.search_provider_chain(), config.fetch_enabled,
+            "web tools enabled but neither search nor fetch is usable (provider chain=%s, fetch_enabled=%s)",
+            config.search_provider_chain(),
+            config.fetch_enabled,
         )
 
     return WebToolClients(search=search, fetch=fetch)
 
 
 def _provider_factory(
-    name: str, config: WebToolsConfig, http: httpx.Client,
+    name: str,
+    config: WebToolsConfig,
+    http: httpx.Client,
 ) -> WebSearchProvider:
+    """Construct a search provider by name.
+
+    Args:
+        name (str): Implemented provider name (``tavily`` or ``serper``).
+        config (WebToolsConfig): Configuration holding the API keys.
+        http (httpx.Client): Shared HTTP transport to inject.
+
+    Returns:
+        WebSearchProvider: The constructed provider.
+
+    Raises:
+        ValueError: If ``name`` is not a known provider.
+    """
     if name == "tavily":
         return TavilyProvider(api_key=config.tavily_api_key, http_client=http)
     if name == "serper":

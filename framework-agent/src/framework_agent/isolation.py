@@ -53,16 +53,34 @@ class WorkspacePaths:
 # ---------------------------------------------------------------------------
 # Subprocess helpers
 # ---------------------------------------------------------------------------
-def _run_subprocess(
-    args: list[str], *, cwd: Path | None = None, timeout_sec: int = 1800
-) -> None:
-    """Run a subprocess with a timeout; raise CalledProcessError on non-zero."""
+def _run_subprocess(args: list[str], *, cwd: Path | None = None, timeout_sec: int = 1800) -> None:
+    """Run a subprocess with a timeout; raise CalledProcessError on non-zero.
+
+    Args:
+        args (list[str]): Argument vector passed to :func:`subprocess.run`.
+        cwd (Path | None): Working directory, or ``None`` for the current one.
+        timeout_sec (int): Hard timeout in seconds. Defaults to 1800.
+
+    Raises:
+        subprocess.CalledProcessError: If the process exits non-zero.
+        subprocess.TimeoutExpired: If the process exceeds ``timeout_sec``.
+    """
     log.debug("subprocess %s cwd=%s timeout=%ds", " ".join(args[:4]), cwd, timeout_sec)
     subprocess.run(args, cwd=str(cwd) if cwd else None, check=True, timeout=timeout_sec)
 
 
 def _run_git(args: list[str], *, cwd: Path | None = None, timeout_sec: int = 1800) -> None:
-    """Run a git command with a timeout; thin wrapper over :func:`_run_subprocess`."""
+    """Run a git command with a timeout; thin wrapper over :func:`_run_subprocess`.
+
+    Args:
+        args (list[str]): Full git argument vector (including ``"git"``).
+        cwd (Path | None): Working directory, or ``None`` for the current one.
+        timeout_sec (int): Hard timeout in seconds. Defaults to 1800.
+
+    Raises:
+        subprocess.CalledProcessError: If git exits non-zero.
+        subprocess.TimeoutExpired: If git exceeds ``timeout_sec``.
+    """
     _run_subprocess(args, cwd=cwd, timeout_sec=timeout_sec)
 
 
@@ -70,7 +88,15 @@ def _run_git(args: list[str], *, cwd: Path | None = None, timeout_sec: int = 180
 # Disk preflight
 # ---------------------------------------------------------------------------
 def _resolve_min_free_gb(explicit: float | None) -> float:
-    """Pick the threshold (explicit > env > default 20 GB)."""
+    """Pick the threshold (explicit > env > default 20 GB).
+
+    Args:
+        explicit (float | None): Explicit minimum free GB; ``None`` defers to
+            the ``FRAMEWORK_EXPLORER_DISK_MIN_GB`` env var then the default.
+
+    Returns:
+        float: The resolved minimum-free-GB threshold.
+    """
     if explicit is not None:
         return float(explicit)
     raw = os.environ.get(_DISK_MIN_GB_ENV)
@@ -80,7 +106,9 @@ def _resolve_min_free_gb(explicit: float | None) -> float:
         except ValueError:
             log.warning(
                 "%s=%r is not a number; falling back to default %.1f GB",
-                _DISK_MIN_GB_ENV, raw, _DEFAULT_DISK_MIN_GB,
+                _DISK_MIN_GB_ENV,
+                raw,
+                _DEFAULT_DISK_MIN_GB,
             )
     return _DEFAULT_DISK_MIN_GB
 
@@ -96,17 +124,31 @@ def disk_preflight(
 
     Required = ``max(min_free_gb, n_candidates * per_candidate_gb)``. The
     work_dir is created when missing so :func:`shutil.disk_usage` doesn't
-    fail. Raises :class:`DiskPreflightError` on failure.
+    fail.
+
+    Args:
+        work_dir: Working directory whose mount is checked.
+        n_candidates: Number of candidates used to size the requirement.
+        min_free_gb: Floor on required free space; resolved from env when
+            ``None``.
+        per_candidate_gb: Estimated disk per candidate in GB.
+
+    Raises:
+        DiskPreflightError: If free space is below the computed requirement.
     """
     floor_gb = _resolve_min_free_gb(min_free_gb)
     required_gb = max(floor_gb, float(n_candidates) * per_candidate_gb)
     work_dir.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(str(work_dir))
-    free_gb = usage.free / (1024 ** 3)
+    free_gb = usage.free / (1024**3)
     log.info(
-        "disk_preflight: work_dir=%s free=%.1fGB required=%.1fGB (n=%d, "
-        "floor=%.1fGB, per_cand=%.1fGB)",
-        work_dir, free_gb, required_gb, n_candidates, floor_gb, per_candidate_gb,
+        "disk_preflight: work_dir=%s free=%.1fGB required=%.1fGB (n=%d, floor=%.1fGB, per_cand=%.1fGB)",
+        work_dir,
+        free_gb,
+        required_gb,
+        n_candidates,
+        floor_gb,
+        per_candidate_gb,
     )
     if free_gb < required_gb:
         raise DiskPreflightError(
@@ -123,13 +165,31 @@ def disk_preflight(
 # Repo cache (mirror clone)
 # ---------------------------------------------------------------------------
 def _repo_cache_dir(req: ExploreRequest) -> Path:
-    """Stable per-repo cache directory under work_dir/_repos."""
+    """Stable per-repo cache directory under work_dir/_repos.
+
+    Args:
+        req (ExploreRequest): Request supplying ``repo_url`` and ``work_dir``.
+
+    Returns:
+        Path: A deterministic cache directory derived from the sanitized repo
+            URL.
+    """
     safe = "".join(ch if ch.isalnum() else "-" for ch in req.repo_url.lower()).strip("-")
     return req.work_dir / "_repos" / (safe or "repo")
 
 
 def prepare_repo_cache(req: ExploreRequest) -> Path:
-    """Mirror-clone the repo into the cache dir; fetch when already present."""
+    """Mirror-clone the repo into the cache dir; fetch when already present.
+
+    Args:
+        req (ExploreRequest): Request supplying ``repo_url`` and ``work_dir``.
+
+    Returns:
+        Path: The mirror cache directory (freshly cloned or fetched).
+
+    Raises:
+        subprocess.CalledProcessError: If the underlying git command fails.
+    """
     repo_dir = _repo_cache_dir(req)
     if repo_dir.exists():
         log.debug("prepare_repo_cache: fetching existing mirror at %s", repo_dir)
@@ -142,7 +202,16 @@ def prepare_repo_cache(req: ExploreRequest) -> Path:
 
 
 def _worktree_ref(candidate: Candidate) -> str:
-    """Choose the ref to materialise in a detached worktree."""
+    """Choose the ref to materialise in a detached worktree.
+
+    Args:
+        candidate (Candidate): Candidate whose ``head_sha`` or ``ref`` decides
+            the worktree ref.
+
+    Returns:
+        str: The explicit head SHA, a ``refs/pull/<n>/head`` ref for PR refs, or
+            the candidate ref verbatim.
+    """
     if candidate.head_sha:
         return candidate.head_sha
     if candidate.ref.startswith("PR:"):
@@ -152,7 +221,17 @@ def _worktree_ref(candidate: Candidate) -> str:
 
 
 def fetch_candidate_ref(repo_dir: Path, candidate: Candidate) -> None:
-    """Pre-fetch the candidate's ref into the cache mirror."""
+    """Pre-fetch the candidate's ref into the cache mirror.
+
+    No-op for candidates that are neither a head SHA nor a ``PR:`` ref.
+
+    Args:
+        repo_dir (Path): Mirror cache directory to fetch into.
+        candidate (Candidate): Candidate whose ref/SHA is fetched.
+
+    Raises:
+        subprocess.CalledProcessError: If the underlying git fetch fails.
+    """
     if candidate.head_sha:
         _run_git(["git", "fetch", "origin", candidate.head_sha], cwd=repo_dir)
         return
@@ -182,9 +261,17 @@ def prepare_candidate_workspace(
 ) -> WorkspacePaths:
     """Materialise ``candidate_dir`` + (when execute) worktree + venv.
 
-    Returns :class:`WorkspacePaths`. ``execute=False`` /
-    ``prepare_candidate_env=False`` short-circuits before the git worktree
-    and venv steps so plan mode stays cheap.
+    ``execute=False`` / ``prepare_candidate_env=False`` short-circuits
+    before the git worktree and venv steps so plan mode stays cheap.
+
+    Args:
+        req: The explore request (work dir + env policy).
+        candidate: The candidate to prepare a workspace for.
+        index: Candidate index used in the directory name.
+        execute: Whether to materialize the worktree and venv.
+
+    Returns:
+        The :class:`WorkspacePaths` for the candidate.
     """
     candidate_dir = req.work_dir / "candidates" / f"{index:02d}_{candidate.slug}"
     worktree_dir = candidate_dir / "worktree"
@@ -194,7 +281,8 @@ def prepare_candidate_workspace(
     if not execute or not req.prepare_candidate_env:
         log.debug(
             "prepare_candidate_workspace[%02d] %s: plan mode (no worktree/venv)",
-            index, candidate.ref,
+            index,
+            candidate.ref,
         )
         return WorkspacePaths(candidate_dir, worktree_dir, venv_dir)
 
@@ -204,7 +292,9 @@ def prepare_candidate_workspace(
         shutil.rmtree(worktree_dir)
     log.info(
         "prepare_candidate_workspace[%02d] %s: worktree -> %s",
-        index, candidate.ref, worktree_dir,
+        index,
+        candidate.ref,
+        worktree_dir,
     )
     _run_git(
         [
@@ -222,7 +312,9 @@ def prepare_candidate_workspace(
         shutil.rmtree(venv_dir)
     log.info(
         "prepare_candidate_workspace[%02d] %s: venv -> %s",
-        index, candidate.ref, venv_dir,
+        index,
+        candidate.ref,
+        venv_dir,
     )
     _run_subprocess(
         [sys.executable, "-m", "venv", "--system-site-packages", str(venv_dir)],
@@ -245,6 +337,12 @@ def cleanup_workspace(
     but ``candidate_dir`` (and its ``pr.patches`` / ``pr_files.json`` audit
     artefacts) is kept so reviewers can still diff. Best-effort: cleanup
     errors are logged, never re-raised.
+
+    Args:
+        workspace: Paths for the candidate workspace to clean up.
+        is_winner: Whether this candidate is a winner (winners are kept).
+        keep_winner_only: When False, nothing is removed.
+        repo_dir: Mirror repo dir used to detach the worktree cleanly.
     """
     if not keep_winner_only or is_winner:
         return

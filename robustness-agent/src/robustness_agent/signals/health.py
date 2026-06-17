@@ -19,15 +19,24 @@ from .symptom import Symptom, SymptomSeverity
 
 @dataclass
 class HealthConfig:
+    """Tunables for :func:`evaluate_health_signals`.
+
+    Attributes:
+        no_metrics_warn_s (float): Minimum pod age in seconds before an empty
+            ``available_metrics`` list triggers a ``pod_no_metrics`` symptom.
+    """
+
     no_metrics_warn_s: float = 600.0
 
 
-_POD_RUNNING_PHASES: frozenset[str] = frozenset({
-    "Running",
-    "Succeeded",
-    "Pending",  # transient; we do not flag Pending here
-    "",         # missing phase
-})
+_POD_RUNNING_PHASES: frozenset[str] = frozenset(
+    {
+        "Running",
+        "Succeeded",
+        "Pending",  # transient; we do not flag Pending here
+        "",  # missing phase
+    }
+)
 
 
 def evaluate_health_signals(
@@ -36,6 +45,22 @@ def evaluate_health_signals(
     *,
     config: HealthConfig | None = None,
 ) -> list[Symptom]:
+    """Emit pod-health symptoms from the server session snapshot.
+
+    Flags pods in a non-running phase (``pod_not_running``) and hands pods that
+    have produced no metric series for longer than the configured age
+    (``pod_no_metrics``).
+
+    Args:
+        ctx (ReactorContext): Reactor context (provides the current unix time).
+        data (SourceData): Collected source data including ``session_pods`` and
+            ``session_summary``.
+        config (HealthConfig | None): Tunables; defaults to :class:`HealthConfig`
+            when ``None``.
+
+    Returns:
+        list[Symptom]: All pod-health symptoms found this tick, possibly empty.
+    """
     cfg = config or HealthConfig()
     out: list[Symptom] = []
 
@@ -48,9 +73,7 @@ def evaluate_health_signals(
             ns = str(pod.get("namespace") or "")
             name = str(pod.get("name") or "")
             role = str(assignment.get("role") or "")
-            severity = (
-                SymptomSeverity.HIGH if phase == "Failed" else SymptomSeverity.MEDIUM
-            )
+            severity = SymptomSeverity.HIGH if phase == "Failed" else SymptomSeverity.MEDIUM
             out.append(
                 Symptom(
                     name="pod_not_running",
@@ -66,9 +89,9 @@ def evaluate_health_signals(
                     subject={"namespace": ns, "name": name, "phase": phase},
                     source="server",
                     suggestion=(
-                        "kill_task on the related task and escalate"
-                        " strategy" if phase == "Failed" else
-                        "escalate_strategy_change to monitor recovery"
+                        "kill_task on the related task and escalate strategy"
+                        if phase == "Failed"
+                        else "escalate_strategy_change to monitor recovery"
                     ),
                 )
             )
@@ -95,10 +118,7 @@ def evaluate_health_signals(
                 Symptom(
                     name="pod_no_metrics",
                     severity=SymptomSeverity.LOW,
-                    summary=(
-                        f"pod {ns}/{name} ({role}) has no metric series for "
-                        f"{int(age)}s"
-                    ),
+                    summary=(f"pod {ns}/{name} ({role}) has no metric series for {int(age)}s"),
                     evidence={
                         "namespace": ns,
                         "name": name,
@@ -115,6 +135,14 @@ def evaluate_health_signals(
 
 
 def _pod_dict(entry: dict[str, Any]) -> dict[str, Any]:
+    """Extract the nested ``pod`` dict from an assignment/summary entry.
+
+    Args:
+        entry (dict[str, Any]): A session-pod assignment or summary row.
+
+    Returns:
+        dict[str, Any]: The nested ``pod`` dict, or an empty dict when absent.
+    """
     pod = entry.get("pod")
     if isinstance(pod, dict):
         return pod
@@ -122,6 +150,15 @@ def _pod_dict(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def _phase(entry: dict[str, Any], pod: dict[str, Any]) -> str:
+    """Resolve a pod's phase from the entry or its nested pod dict.
+
+    Args:
+        entry (dict[str, Any]): The assignment/summary row.
+        pod (dict[str, Any]): The nested pod dict (see :func:`_pod_dict`).
+
+    Returns:
+        str: The trimmed phase string, or an empty string when unset.
+    """
     phase = entry.get("phase") or pod.get("phase")
     return str(phase or "").strip()
 

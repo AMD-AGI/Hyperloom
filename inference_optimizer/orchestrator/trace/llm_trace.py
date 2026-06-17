@@ -3,10 +3,10 @@
 """Closed-schema writer for ``reports/trace/llm_calls.jsonl``.
 
 One module owns the canonical field contract for a single LLM call so
-every producer — the orchestration/kernel reactor, dynamic_action and
-specialist sub-agents, the Codex/critic/scorer inference steps, and the
-out-of-process children that write their own ``ext/*.jsonl`` shards — emits
-rows that the collector can join without guessing.
+every producer — the orchestration/kernel reactor, specialist sub-agents,
+the Codex/critic/scorer inference steps, and the out-of-process children
+that write their own ``ext/*.jsonl`` shards — emits rows that the collector
+can join without guessing.
 
 Design contract (FULL_TRACE_DESIGN §3.1, §4):
 
@@ -14,8 +14,7 @@ Design contract (FULL_TRACE_DESIGN §3.1, §4):
   required one — fails fast (:class:`LLMTraceRowError`) so a buggy call
   site cannot silently pollute the audit stream.
 * **Best-effort I/O**: disk failures while appending are logged and
-  swallowed; trace writes must never break the optimization loop. This
-  mirrors :mod:`..dynamic_action_history`.
+  swallowed; trace writes must never break the optimization loop.
 * **Token shape**: the four counters mirror the keys both
   :class:`ClaudeBackend` and :class:`CodexBackend` put on
   ``BackendTurnResult.metadata``. Backends without a prompt-cache split
@@ -48,39 +47,43 @@ log = logging.getLogger(__name__)
 # fragmenting the per-component rollup. Extend this set deliberately when a
 # new producer lands (P1/P2 add specialist subprocess parsing, geak, oob,
 # robustness, tracelens, breakdown).
-VALID_COMPONENTS: frozenset[str] = frozenset({
-    "orchestration",
-    "kernel",
-    "dynamic_action",
-    "specialist",
-    "critic",
-    "robustness",
-    "proposal_scorer",
-    "geak",
-    "oob",
-    "tracelens",
-    "breakdown",
-})
+VALID_COMPONENTS: frozenset[str] = frozenset(
+    {
+        "orchestration",
+        "kernel",
+        "dynamic_action",
+        "specialist",
+        "critic",
+        "robustness",
+        "proposal_scorer",
+        "geak",
+        "oob",
+        "tracelens",
+        "breakdown",
+    }
+)
 
 
 # Canonical, ordered field contract for one ``llm_calls.jsonl`` row. The
 # closed-schema check compares serialized keys against this set exactly.
-_ROW_FIELDS: frozenset[str] = frozenset({
-    "session_id",
-    "ts",
-    "component",
-    "role",
-    "task_id",
-    "dyn_id",
-    "tick",
-    "phase",
-    "turn",
-    "model",
-    "input_tokens",
-    "output_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-})
+_ROW_FIELDS: frozenset[str] = frozenset(
+    {
+        "session_id",
+        "ts",
+        "component",
+        "role",
+        "task_id",
+        "dyn_id",
+        "tick",
+        "phase",
+        "turn",
+        "model",
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    }
+)
 
 
 class LLMTraceRowError(ValueError):
@@ -88,6 +91,11 @@ class LLMTraceRowError(ValueError):
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond-precision ISO string.
+
+    Returns:
+        ISO 8601 timestamp in UTC.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
@@ -142,6 +150,9 @@ class LLMCallRecord:
         Normalizes the identity fields to ``str`` and the four token
         counters via :func:`_coerce_optional_int` so a stray float / numpy
         scalar from an SDK ``usage`` object never lands raw in the ledger.
+
+        Returns:
+            The on-disk LLM-call row dict.
         """
         return {
             "session_id": str(self.session_id),
@@ -156,12 +167,8 @@ class LLMCallRecord:
             "model": _coerce_optional_str(self.model),
             "input_tokens": _coerce_optional_int(self.input_tokens),
             "output_tokens": _coerce_optional_int(self.output_tokens),
-            "cache_creation_input_tokens": _coerce_optional_int(
-                self.cache_creation_input_tokens
-            ),
-            "cache_read_input_tokens": _coerce_optional_int(
-                self.cache_read_input_tokens
-            ),
+            "cache_creation_input_tokens": _coerce_optional_int(self.cache_creation_input_tokens),
+            "cache_read_input_tokens": _coerce_optional_int(self.cache_read_input_tokens),
         }
 
     @classmethod
@@ -186,6 +193,20 @@ class LLMCallRecord:
         orchestration/kernel, A2 dynamic_action, A3 specialist fallback).
         Missing token keys degrade to ``None`` rather than ``0`` so the
         collector can distinguish "unreported" from "reported zero".
+
+        Args:
+            session_id: Cross-process aggregation primary key.
+            component: Producer label; must be in :data:`VALID_COMPONENTS`.
+            metadata: Backend turn metadata carrying model + token counters.
+            role: Reactor role name, when known.
+            task_id: Decision-association task id, when known.
+            dyn_id: Dynamic-action id, when known.
+            tick: Timeline tick, when known.
+            phase: Phase name, when known.
+            turn: Multi-turn sub-agent sequence index, when known.
+
+        Returns:
+            A populated :class:`LLMCallRecord`.
         """
         md = metadata or {}
         return cls(
@@ -206,6 +227,14 @@ class LLMCallRecord:
 
 
 def _coerce_optional_str(value: Any) -> str | None:
+    """Coerce a value to a non-empty stripped string or ``None``.
+
+    Args:
+        value: Arbitrary value to normalize.
+
+    Returns:
+        The stripped string, or ``None`` if it is empty or ``None``.
+    """
     if value is None:
         return None
     s = str(value).strip()
@@ -218,6 +247,12 @@ def _coerce_optional_int(value: Any) -> int | None:
     Unlike the backends' ``_safe_int`` (which floors to 0), this keeps
     ``None`` distinct from ``0``: a backend that does not report a counter
     must not be indistinguishable from one that genuinely spent zero.
+
+    Args:
+        value: Arbitrary token / index value.
+
+    Returns:
+        The integer value, or ``None`` on a miss or bad type.
     """
     if value is None:
         return None
@@ -228,27 +263,26 @@ def _coerce_optional_int(value: Any) -> int | None:
 
 
 def _validate_row(row: dict[str, Any]) -> None:
-    """Fail fast if ``row`` deviates from the closed schema."""
+    """Fail fast if ``row`` deviates from the closed schema.
+
+    Args:
+        row: A serialized LLM-call row dict.
+
+    Raises:
+        LLMTraceRowError: If the row has extra/missing fields, an empty
+            ``session_id``, or an unknown ``component``.
+    """
     keys = set(row.keys())
     extra = sorted(keys - _ROW_FIELDS)
     missing = sorted(_ROW_FIELDS - keys)
     if extra or missing:
-        raise LLMTraceRowError(
-            f"llm_calls row violates closed schema: "
-            f"extra={extra!r} missing={missing!r}"
-        )
+        raise LLMTraceRowError(f"llm_calls row violates closed schema: extra={extra!r} missing={missing!r}")
     session_id = row.get("session_id")
     if not isinstance(session_id, str) or not session_id.strip():
-        raise LLMTraceRowError(
-            f"llm_calls row requires a non-empty 'session_id'; got "
-            f"{session_id!r}"
-        )
+        raise LLMTraceRowError(f"llm_calls row requires a non-empty 'session_id'; got {session_id!r}")
     component = row.get("component")
     if component not in VALID_COMPONENTS:
-        raise LLMTraceRowError(
-            f"llm_calls row 'component'={component!r} is not one of "
-            f"{sorted(VALID_COMPONENTS)!r}"
-        )
+        raise LLMTraceRowError(f"llm_calls row 'component'={component!r} is not one of {sorted(VALID_COMPONENTS)!r}")
 
 
 def append_llm_call(
@@ -273,6 +307,15 @@ def append_llm_call(
     :class:`LLMTraceRowError` (schema violation) is *not* swallowed: a
     malformed row is a programming error at the call site, not a runtime
     disk condition, and must surface in tests.
+
+    Args:
+        session_dir: Session directory used to resolve the ledger path.
+        record: The LLM-call record to serialize and append.
+        target: Optional override destination (e.g. an ext shard path);
+            defaults to the session's ``llm_calls.jsonl``.
+
+    Raises:
+        LLMTraceRowError: If the serialized row violates the closed schema.
     """
     row = record.to_row()
     _validate_row(row)
@@ -284,24 +327,38 @@ def append_llm_call(
     except OSError as exc:
         log.warning(
             "llm_trace: append failed for component=%s session_id=%s: %r",
-            record.component, record.session_id, exc,
+            record.component,
+            record.session_id,
+            exc,
         )
+
+    # Second sink (opt-in): mirror in-process calls to Langfuse live. Skipped
+    # for ext/ shards (target set) — those are out-of-process children that
+    # the parent backfills at flush_session. Best-effort; never raises.
+    if target is None:
+        try:
+            from .langfuse_emitter import get_emitter
+
+            get_emitter(session_dir).record_llm_call(row)
+        except Exception:  # noqa: BLE001 — Langfuse must never break the ledger
+            log.debug("llm_trace: langfuse mirror failed", exc_info=True)
 
 
 def row_field_set() -> frozenset[str]:
-    """Public accessor for the closed row schema (used by the collector)."""
+    """Public accessor for the closed row schema (used by the collector).
+
+    Returns:
+        The frozenset of canonical row field names.
+    """
     return _ROW_FIELDS
 
 
 # Sanity guard: the dataclass fields (minus the write-time ``ts``) must
 # stay in lockstep with the on-disk row schema. A drift here means a new
 # field was added to one side only — caught at import, not at runtime.
-_DATACLASS_FIELDS: frozenset[str] = frozenset(
-    f.name for f in fields(LLMCallRecord)
-)
+_DATACLASS_FIELDS: frozenset[str] = frozenset(f.name for f in fields(LLMCallRecord))
 assert _DATACLASS_FIELDS | {"ts"} == _ROW_FIELDS, (
-    "LLMCallRecord fields drifted from _ROW_FIELDS: "
-    f"dataclass={sorted(_DATACLASS_FIELDS)} row={sorted(_ROW_FIELDS)}"
+    f"LLMCallRecord fields drifted from _ROW_FIELDS: dataclass={sorted(_DATACLASS_FIELDS)} row={sorted(_ROW_FIELDS)}"
 )
 
 

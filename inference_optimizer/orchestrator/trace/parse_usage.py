@@ -48,6 +48,14 @@ _TOKEN_KEYS: tuple[str, ...] = (
 
 
 def _coerce_optional_int(value: Any) -> int | None:
+    """Coerce a value to ``int`` or ``None`` if it cannot be parsed.
+
+    Args:
+        value: Arbitrary value to convert.
+
+    Returns:
+        The integer value, or ``None`` on failure.
+    """
     if value is None:
         return None
     try:
@@ -63,12 +71,16 @@ def normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | None] | Non
     recognized counters (so a stray ``{}`` or an unrelated dict doesn't
     masquerade as a real measurement). Unknown keys are dropped; absent
     counters become ``None``.
+
+    Args:
+        usage: Arbitrary usage dict, or ``None``.
+
+    Returns:
+        The canonical four-key token dict, or ``None`` when nothing usable.
     """
     if not isinstance(usage, dict) or not usage:
         return None
-    projected: dict[str, int | None] = {
-        k: _coerce_optional_int(usage.get(k)) for k in _TOKEN_KEYS
-    }
+    projected: dict[str, int | None] = {k: _coerce_optional_int(usage.get(k)) for k in _TOKEN_KEYS}
     if all(v is None for v in projected.values()):
         return None
     return projected
@@ -92,6 +104,12 @@ def parse_claude_stream_json_usage(
     onto a different terminal message still works). Malformed lines are
     skipped. Returns ``None`` if the file is missing or no ``usage`` is
     found.
+
+    Args:
+        log_path: Path to the Claude CLI ``stream-json`` log.
+
+    Returns:
+        The canonical token dict, or ``None`` when no usage was found.
     """
     path = Path(log_path)
     last_usage: dict[str, Any] | None = None
@@ -116,11 +134,87 @@ def parse_claude_stream_json_usage(
     except FileNotFoundError:
         return None
     except OSError as exc:
-        log.warning(
-            "parse_usage: failed reading stream-json log %s: %r", path, exc
-        )
+        log.warning("parse_usage: failed reading stream-json log %s: %r", path, exc)
         return None
     return normalize_usage(last_usage)
+
+
+def parse_claude_stream_json_response(
+    log_path: str | Path,
+) -> str | None:
+    """Recover the assistant's full reply text from a Claude CLI stream-json log.
+
+    Sibling of :func:`parse_claude_stream_json_usage`: that function reads the
+    *token* counts off the same ``process.log``, this one reads the
+    *conversation* response so the production-default specialist path (B1)
+    can land its completion in ``conversations.jsonl``. The prompt is not
+    echoed into the stream (the CLI takes it via ``-p`` / a prompt file), so
+    only the response is recovered here; the caller already holds the prompt
+    in memory and pairs the two.
+
+    The ``claude --output-format stream-json`` log is one JSON object per
+    line. We reconstruct the reply from two sources, preferring the
+    authoritative one:
+
+    1. the terminal ``{"type": "result", ..., "result": "<text>"}`` row,
+       whose ``result`` is the consolidated final answer (mirrors the SDK's
+       ``ResultMessage.result``); when present and non-empty it wins;
+    2. otherwise we concatenate the ``text`` blocks from every
+       ``{"type": "assistant"}`` message in order — covering a truncated or
+       crashed run that never emitted a ``result`` row. ``thinking`` and
+       ``tool_use`` blocks are intentionally dropped: the response field is
+       the model's externally-visible answer, not its scratch reasoning or
+       tool plumbing.
+
+    Tolerant by contract: a missing file, malformed lines, or a stream with
+    no recoverable text returns ``None`` so the best-effort trace path
+    degrades to "no response captured" instead of raising.
+
+    Args:
+        log_path: Path to the Claude CLI ``stream-json`` log.
+
+    Returns:
+        The recovered response text, or ``None`` when none could be read.
+    """
+    path = Path(log_path)
+    result_text: str | None = None
+    assistant_chunks: list[str] = []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                obj_type = obj.get("type")
+                if obj_type == "result":
+                    res = obj.get("result")
+                    if isinstance(res, str) and res.strip():
+                        result_text = res
+                elif obj_type == "assistant":
+                    message = obj.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    for block in message.get("content") or []:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text = block.get("text")
+                            if isinstance(text, str) and text:
+                                assistant_chunks.append(text)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        log.warning("parse_usage: failed reading stream-json log %s: %r", path, exc)
+        return None
+    if result_text is not None:
+        return result_text
+    if assistant_chunks:
+        return "\n".join(assistant_chunks)
+    return None
 
 
 def parse_oob_json_usage(stdout: str) -> dict[str, int | None] | None:
@@ -137,6 +231,12 @@ def parse_oob_json_usage(stdout: str) -> dict[str, int | None] | None:
 
     OpenAI-style OOB has no prompt-cache split, so ``cache_*`` stay
     ``None``. Returns ``None`` when nothing parseable is found.
+
+    Args:
+        stdout: Captured ``oob run --json`` stdout text.
+
+    Returns:
+        The canonical token dict, or ``None`` when nothing parseable.
     """
     if not stdout or not stdout.strip():
         return None
@@ -179,6 +279,12 @@ def parse_geak_usage(
 
     No prompt-cache split, so ``cache_*`` stay ``None``. Returns ``None``
     when nothing parseable is found.
+
+    Args:
+        payload: A parsed litellm response dict, a JSON string, or ``None``.
+
+    Returns:
+        The canonical token dict, or ``None`` when nothing parseable.
     """
     obj: Any = payload
     if isinstance(payload, str):
@@ -207,6 +313,13 @@ def _find_usage_in_obj(obj: Any, _depth: int = 0) -> dict[str, Any] | None:
     keys, then recurses one extra level into nested dicts. Bounded depth
     keeps this cheap and avoids pathological deep structures; out-of-process
     envelopes nest ``usage`` at most a couple of levels down in practice.
+
+    Args:
+        obj: Arbitrary parsed JSON value to search.
+        _depth: Internal recursion depth guard.
+
+    Returns:
+        The first ``usage``/``token_usage`` dict found, or ``None``.
     """
     if _depth > 4 or not isinstance(obj, dict):
         return None
@@ -231,7 +344,6 @@ def _find_usage_in_obj(obj: Any, _depth: int = 0) -> dict[str, Any] | None:
 
 __all__ = [
     "normalize_usage",
+    "parse_claude_stream_json_response",
     "parse_claude_stream_json_usage",
-    "parse_geak_usage",
-    "parse_oob_json_usage",
 ]

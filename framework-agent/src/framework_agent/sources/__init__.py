@@ -36,7 +36,15 @@ class SourceConfigError(RuntimeError):
 
 
 def _dedupe(items: Iterable[Candidate]) -> list[Candidate]:
-    """Stable-deduplicate candidates by ref, preserving first-seen order."""
+    """Stable-deduplicate candidates by ref, preserving first-seen order.
+
+    Args:
+        items (Iterable[Candidate]): Candidates to deduplicate.
+
+    Returns:
+        list[Candidate]: Candidates with duplicate refs removed, first-seen
+            order preserved.
+    """
     seen: set[str] = set()
     out: list[Candidate] = []
     for item in items:
@@ -56,8 +64,15 @@ def _pr_to_candidate(
 ) -> Candidate:
     """Convert a GitHubPr (any backend) into a downstream Candidate.
 
-    ``score`` is the gap-relevance value from :func:`_rank_by_keyword_overlap`;
-    0.0 for paths that skip ranking (explicit refs, label-only listing).
+    Args:
+        pr: The source PR record.
+        repo_url: Repository URL the PR belongs to.
+        source: Source label recorded on the candidate (e.g. ``"github"``).
+        score: Gap-relevance value from :func:`_rank_by_keyword_overlap`;
+            ``0.0`` for paths that skip ranking.
+
+    Returns:
+        The downstream :class:`Candidate`.
     """
     return Candidate(
         ref=pr.ref,
@@ -83,6 +98,19 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
 
     Hard-fails when ``primus_cortex`` is requested without configuration,
     or when the primus-cortex transport fails.
+
+    Args:
+        request (ExploreRequest): Request carrying explicit refs, search modes,
+            repo URL, and search configuration.
+
+    Returns:
+        list[Candidate]: Deduplicated candidates unioned across explicit refs
+            and every enabled search mode.
+
+    Raises:
+        SourceConfigError: If an unknown search mode is requested, or
+            ``primus_cortex`` is requested without configuration.
+        PrimusCortexError: If a primus_cortex query fails.
     """
     out: list[Candidate] = []
 
@@ -117,13 +145,24 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
     deduped = _dedupe(out)
     _log.info(
         "enumerate_candidates: total=%d after dedup (explicit=%d, searched=%d)",
-        len(deduped), len(request.candidate_refs), len(out) - len(request.candidate_refs),
+        len(deduped),
+        len(request.candidate_refs),
+        len(out) - len(request.candidate_refs),
     )
     return deduped
 
 
 def _run_github(request: ExploreRequest) -> list[Candidate]:
-    """Query anonymous GitHub Search; best-effort - empty list on failure."""
+    """Query anonymous GitHub Search; best-effort - empty list on failure.
+
+    Args:
+        request (ExploreRequest): Request supplying repo URL, gap description,
+            and candidate cap.
+
+    Returns:
+        list[Candidate]: Candidates from GitHub Search, or an empty list on any
+            failure.
+    """
     prs = github_backend.search_perf_prs(
         request.repo_url,
         gap_description=request.gap_description,
@@ -138,6 +177,12 @@ def _resolve_keywords(request: ExploreRequest) -> list[str]:
     Priority: (1) ``request.keywords`` non-empty -> used verbatim (lowercased,
     bypasses extract_keywords); (2) ``gap_description`` -> auto-extract via
     :func:`extract_keywords`; (3) else ``[]`` (label-only path).
+
+    Args:
+        request: The explore request carrying keywords / gap description.
+
+    Returns:
+        The resolved keyword list (possibly empty).
     """
     if request.keywords:
         return [k.lower() for k in request.keywords if k.strip()]
@@ -146,15 +191,19 @@ def _resolve_keywords(request: ExploreRequest) -> list[str]:
     return []
 
 
-def _rank_by_keyword_overlap(
-    prs: list[GitHubPr], keywords: list[str]
-) -> list[GitHubPr]:
+def _rank_by_keyword_overlap(prs: list[GitHubPr], keywords: list[str]) -> list[GitHubPr]:
     """Stable-rerank PRs by anti-aware keyword score.
 
     Uses :func:`score_title_with_anti_signal` so wrong-axis PRs (e.g.
     ``MegaMoE`` when gap calls for ``dense``) are demoted below correct-axis
-    PRs. Higher score first; ties preserve upstream order. Zero-score PRs drop
-    to the tail but are not filtered out. Anti-signal is gated per-gap-keyword.
+    PRs. Zero-score PRs drop to the tail but are not filtered out.
+
+    Args:
+        prs: PRs to rerank.
+        keywords: Active keywords driving the score.
+
+    Returns:
+        PRs sorted by descending score; ties preserve upstream order.
     """
     if not keywords:
         return list(prs)
@@ -166,12 +215,22 @@ def _rank_by_keyword_overlap(
 
 
 def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
-    """Query primus-cortex with gap-aware ranking; hard-fail on transport errors.
+    """Query primus-cortex with gap-aware ranking.
 
     With non-empty keywords, prefer the free-text ``/v1/search/prs`` endpoint
     (over-fetch, then client-rerank by title overlap, trim to
     ``max_search_candidates``); fall back to ``list_perf_prs`` if search is
     unimplemented. With no keywords, use the cheap label-only path.
+
+    Args:
+        request: The explore request carrying the Primus config.
+
+    Returns:
+        Candidates from Primus Cortex, ranked when keywords are present.
+
+    Raises:
+        SourceConfigError: If ``primus_cortex`` is requested without config.
+        PrimusCortexError: On Primus transport errors.
     """
     cfg = request.primus_cortex
     if cfg is None:

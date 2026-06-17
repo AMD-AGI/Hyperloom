@@ -41,27 +41,61 @@ log = logging.getLogger("dump_session_report")
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for the session-report CLI.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; defaults to
+            ``sys.argv`` when ``None``.
+
+    Returns:
+        argparse.Namespace: Parsed arguments with ``input``, ``output``,
+        ``no_llm``, and ``debug_dump`` attributes.
+    """
     p = argparse.ArgumentParser(
         description="Render a Hyperloom session_breakdown.json to markdown.",
     )
-    p.add_argument("--input", "-i", required=True, type=Path,
-                   help="Path to session_breakdown.json")
-    p.add_argument("--output", "-o", type=Path, default=None,
-                   help="Output markdown path (defaults to <session_dir>/session_report.md)")
-    p.add_argument("--no-llm", action="store_true",
-                   help="Skip LLM narrative pass even if env vars are configured")
-    p.add_argument("--debug-dump", action="store_true",
-                   help="Also write LLM prompt + raw response next to the report")
+    p.add_argument("--input", "-i", required=True, type=Path, help="Path to session_breakdown.json")
+    p.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        default=None,
+        help="Output markdown path (defaults to <session_dir>/session_report.md)",
+    )
+    p.add_argument("--no-llm", action="store_true", help="Skip LLM narrative pass even if env vars are configured")
+    p.add_argument("--debug-dump", action="store_true", help="Also write LLM prompt + raw response next to the report")
     return p.parse_args(argv)
 
 
 def _resolve_output(input_path: Path, requested: Path | None) -> Path:
+    """Resolve the markdown output path for the report.
+
+    Args:
+        input_path (Path): Path to the input ``session_breakdown.json``.
+        requested (Path | None): Explicitly requested output path, if any.
+
+    Returns:
+        Path: ``requested`` when provided, otherwise ``session_report.md`` next
+        to the input file.
+    """
     if requested is not None:
         return requested
     return input_path.parent / "session_report.md"
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Render a session breakdown to a markdown report.
+
+    Loads the breakdown JSON, optionally builds an LLM client from the
+    environment, renders the report, and writes it (plus optional debug dumps).
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; defaults to
+            ``sys.argv`` when ``None``.
+
+    Returns:
+        int: ``0`` on success, or ``2`` when the input is missing/unparseable.
+    """
     logging.basicConfig(
         level=os.environ.get("HYPERLOOM_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -87,8 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     out_path = _resolve_output(args.input, args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(result.markdown)
-    log.info("wrote %s (%d bytes, used_llm=%s)",
-             out_path, len(result.markdown), result.used_llm)
+    log.info("wrote %s (%d bytes, used_llm=%s)", out_path, len(result.markdown), result.used_llm)
 
     if args.debug_dump:
         (out_path.parent / "session_report_prompt.json").write_text(result.llm_user_prompt)

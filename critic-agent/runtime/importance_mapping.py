@@ -37,6 +37,9 @@ def importance_for_verdict(
             falls back to ``medium``.
         has_measurement: True when the packet carries a comparable
             before/after benchmark or reproducer evidence.
+
+    Returns:
+        float: The chosen importance within Critic's allowed range.
     """
     confidence_label = (confidence or "medium").lower()
     # ``advise`` and ``needs_review`` are usually informational — keep them
@@ -44,11 +47,7 @@ def importance_for_verdict(
     if verdict in ("advise", "needs_review"):
         return _LOW_VERDICT
     if confidence_label == "high":
-        return (
-            _HIGH_VERDICT_WITH_MEASUREMENT
-            if has_measurement
-            else _HIGH_VERDICT_WITHOUT_MEASUREMENT
-        )
+        return _HIGH_VERDICT_WITH_MEASUREMENT if has_measurement else _HIGH_VERDICT_WITHOUT_MEASUREMENT
     if confidence_label == "low":
         return _LOW_VERDICT
     return _MEDIUM_VERDICT if has_measurement else _DEFAULT_VERDICT
@@ -60,6 +59,13 @@ def importance_for_kb_draft(*, confidence: float | None) -> float:
     The Critic SKILL emits ``confidence`` as a float in ``[0.0, 1.0]``; we
     promote drafts that pass ``0.8`` to ``0.6`` and otherwise default to
     ``0.5`` (contract §2.3 Critic default).
+
+    Args:
+        confidence (float | None): Draft confidence in ``[0.0, 1.0]``;
+            ``None`` uses the default.
+
+    Returns:
+        float: The chosen draft importance.
     """
     if confidence is None:
         return _DRAFT_DEFAULT
@@ -69,7 +75,14 @@ def importance_for_kb_draft(*, confidence: float | None) -> float:
 
 
 def cap_importance(value: float) -> float:
-    """Clamp ``value`` to Critic's allowed write range."""
+    """Clamp ``value`` to Critic's allowed write range.
+
+    Args:
+        value (float): The proposed importance value.
+
+    Returns:
+        float: ``value`` clamped to ``[0.0, CRITIC_IMPORTANCE_CEILING]``.
+    """
     return min(max(0.0, float(value)), CRITIC_IMPORTANCE_CEILING)
 
 

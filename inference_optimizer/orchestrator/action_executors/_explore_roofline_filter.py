@@ -18,36 +18,21 @@ from typing import Any, Iterable
 # Direction names match ``roofline_snapshot._SATURATION_LABEL_MAP``:
 # ``compute`` / ``memory`` / ``host_overhead`` / ``comm``.
 _FLAG_TO_DIRECTIONS: tuple[tuple[re.Pattern[str], frozenset[str]], ...] = (
-    (re.compile(r"(?<!\S)--num-continuous-decode-steps(?!\S)"),
-        frozenset({"host_overhead"})),
-    (re.compile(r"(?<!\S)--scheduler-recv-interval(?!\S)"),
-        frozenset({"host_overhead"})),
-    (re.compile(r"(?<!\S)--cuda-graph-max-bs(?!\S)"),
-        frozenset({"host_overhead"})),
-    (re.compile(r"(?<!\S)--enable-cuda-graph(?!\S)"),
-        frozenset({"host_overhead"})),
-    (re.compile(r"(?<!\S)--tokenizer-worker-num(?!\S)"),
-        frozenset({"host_overhead"})),
-    (re.compile(r"(?<!\S)--stream-interval(?!\S)"),
-        frozenset({"host_overhead"})),
-    (re.compile(r"(?<!\S)--enable-torch-compile(?!\S)"),
-        frozenset({"compute"})),
-    (re.compile(r"(?<!\S)--torch-compile-max-bs(?!\S)"),
-        frozenset({"compute"})),
-    (re.compile(r"(?<!\S)--enable-spec-v2(?!\S)"),
-        frozenset({"compute"})),
-    (re.compile(r"(?<!\S)--speculative-"),
-        frozenset({"compute"})),
-    (re.compile(r"(?<!\S)--disable-radix-cache(?!\S)"),
-        frozenset({"memory"})),
-    (re.compile(r"(?<!\S)--mem-fraction-static(?!\S)"),
-        frozenset({"memory"})),
-    (re.compile(r"(?<!\S)--max-running-requests(?!\S)"),
-        frozenset({"memory"})),
-    (re.compile(r"(?<!\S)--kv-cache-dtype(?!\S)"),
-        frozenset({"memory"})),
-    (re.compile(r"(?<!\S)--attention-backend(?!\S)"),
-        frozenset({"compute", "memory"})),
+    (re.compile(r"(?<!\S)--num-continuous-decode-steps(?!\S)"), frozenset({"host_overhead"})),
+    (re.compile(r"(?<!\S)--scheduler-recv-interval(?!\S)"), frozenset({"host_overhead"})),
+    (re.compile(r"(?<!\S)--cuda-graph-max-bs(?!\S)"), frozenset({"host_overhead"})),
+    (re.compile(r"(?<!\S)--enable-cuda-graph(?!\S)"), frozenset({"host_overhead"})),
+    (re.compile(r"(?<!\S)--tokenizer-worker-num(?!\S)"), frozenset({"host_overhead"})),
+    (re.compile(r"(?<!\S)--stream-interval(?!\S)"), frozenset({"host_overhead"})),
+    (re.compile(r"(?<!\S)--enable-torch-compile(?!\S)"), frozenset({"compute"})),
+    (re.compile(r"(?<!\S)--torch-compile-max-bs(?!\S)"), frozenset({"compute"})),
+    (re.compile(r"(?<!\S)--enable-spec-v2(?!\S)"), frozenset({"compute"})),
+    (re.compile(r"(?<!\S)--speculative-"), frozenset({"compute"})),
+    (re.compile(r"(?<!\S)--disable-radix-cache(?!\S)"), frozenset({"memory"})),
+    (re.compile(r"(?<!\S)--mem-fraction-static(?!\S)"), frozenset({"memory"})),
+    (re.compile(r"(?<!\S)--max-running-requests(?!\S)"), frozenset({"memory"})),
+    (re.compile(r"(?<!\S)--kv-cache-dtype(?!\S)"), frozenset({"memory"})),
+    (re.compile(r"(?<!\S)--attention-backend(?!\S)"), frozenset({"compute", "memory"})),
 )
 
 _ENV_PREFIX_TO_DIRECTIONS: tuple[tuple[str, frozenset[str]], ...] = (
@@ -75,6 +60,13 @@ def categorize_variant(
     """Return the set of roofline directions a variant's flags target.
 
     An empty set means the variant is uncategorized (no advisory).
+
+    Args:
+        extra_args: Extra server-arg string for the variant, or None.
+        extra_envs: Mapping of extra environment variables, or None.
+
+    Returns:
+        Frozenset of roofline direction names the variant targets.
     """
     cats: set[str] = set()
     args = (extra_args or "").strip()
@@ -139,13 +131,15 @@ def compute_saturation_advisory(
         if not cats:
             continue
         if cats <= saturated:
-            advisory.append({
-                "name": getattr(gv, "name", "?"),
-                "extra_server_args": variant_args or "",
-                "categories": sorted(cats),
-                "saturated_directions": sorted(saturated),
-                "reason": "likely_saturated",
-            })
+            advisory.append(
+                {
+                    "name": getattr(gv, "name", "?"),
+                    "extra_server_args": variant_args or "",
+                    "categories": sorted(cats),
+                    "saturated_directions": sorted(saturated),
+                    "reason": "likely_saturated",
+                }
+            )
     return advisory
 
 

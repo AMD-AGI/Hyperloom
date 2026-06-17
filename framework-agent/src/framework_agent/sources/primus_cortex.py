@@ -27,14 +27,34 @@ class PrimusCortexError(RuntimeError):
 
 
 def _normalise_base_url(base_url: str) -> str:
-    """Trim trailing slash on the configured base URL."""
+    """Trim trailing slash on the configured base URL.
+
+    Args:
+        base_url (str): The configured primus_cortex base URL.
+
+    Returns:
+        str: The base URL with any trailing slash removed.
+
+    Raises:
+        PrimusCortexError: If ``base_url`` is empty.
+    """
     if not base_url:
         raise PrimusCortexError("primus_cortex.base_url is empty")
     return base_url.rstrip("/")
 
 
 def _build_url(base_url: str, path: str, query: dict[str, Any] | None = None) -> str:
-    """Compose a full URL, urlencoding the query (skipping empty values)."""
+    """Compose a full URL, urlencoding the query (skipping empty values).
+
+    Args:
+        base_url (str): The primus_cortex base URL.
+        path (str): Request path; a leading slash is added when missing.
+        query (dict[str, Any] | None): Query parameters; ``None``/empty values
+            are skipped.
+
+    Returns:
+        str: The fully composed URL with an encoded query string.
+    """
     base = _normalise_base_url(base_url)
     if not path.startswith("/"):
         path = "/" + path
@@ -51,7 +71,20 @@ def _build_url(base_url: str, path: str, query: dict[str, Any] | None = None) ->
 
 
 def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
-    """Return ``(status, body_bytes, content_type)``; raise on transport errors."""
+    """Return ``(status, body_bytes, content_type)``; raise on transport errors.
+
+    Args:
+        url (str): Fully composed URL to GET.
+        timeout_sec (float): Per-request timeout in seconds.
+
+    Returns:
+        tuple[int, bytes, str]: The HTTP status code, raw body bytes, and the
+            ``Content-Type`` header value.
+
+    Raises:
+        PrimusCortexError: On HTTP errors, unreachable hosts, timeouts, or other
+            transport failures.
+    """
     req = urllib.request.Request(
         url,
         headers={
@@ -63,30 +96,33 @@ def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             status = int(getattr(resp, "status", 200) or 200)
             body = resp.read()
-            content_type = (
-                resp.headers.get("Content-Type", "") if resp.headers else ""
-            )
+            content_type = resp.headers.get("Content-Type", "") if resp.headers else ""
             return status, body, content_type
     except urllib.error.HTTPError as exc:
         try:
             err_body = exc.read().decode("utf-8", errors="replace")[:512]
         except Exception:  # noqa: BLE001 - read can raise OSError on closed body
             err_body = ""
-        raise PrimusCortexError(
-            f"primus_cortex HTTP {exc.code} at {url}: {err_body}"
-        ) from exc
+        raise PrimusCortexError(f"primus_cortex HTTP {exc.code} at {url}: {err_body}") from exc
     except urllib.error.URLError as exc:
-        raise PrimusCortexError(
-            f"primus_cortex unreachable at {url}: {exc.reason}"
-        ) from exc
+        raise PrimusCortexError(f"primus_cortex unreachable at {url}: {exc.reason}") from exc
     except (TimeoutError, OSError) as exc:
-        raise PrimusCortexError(
-            f"primus_cortex transport error at {url}: {exc}"
-        ) from exc
+        raise PrimusCortexError(f"primus_cortex transport error at {url}: {exc}") from exc
 
 
 def _http_get_json(url: str, *, timeout_sec: float) -> Any:
-    """GET and parse JSON body; raise PrimusCortexError on >=400 or bad JSON."""
+    """GET and parse JSON body; raise PrimusCortexError on >=400 or bad JSON.
+
+    Args:
+        url (str): Fully composed URL to GET.
+        timeout_sec (float): Per-request timeout in seconds.
+
+    Returns:
+        Any: The parsed JSON payload.
+
+    Raises:
+        PrimusCortexError: On a >=400 status or a non-JSON body.
+    """
     status, body, _ = _http_get(url, timeout_sec=timeout_sec)
     if status >= 400:
         raise PrimusCortexError(f"primus_cortex HTTP {status} at {url}")
@@ -94,13 +130,22 @@ def _http_get_json(url: str, *, timeout_sec: float) -> Any:
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
-        raise PrimusCortexError(
-            f"primus_cortex returned non-JSON at {url}: {exc}; body[:200]={text[:200]!r}"
-        ) from exc
+        raise PrimusCortexError(f"primus_cortex returned non-JSON at {url}: {exc}; body[:200]={text[:200]!r}") from exc
 
 
 def _http_get_text(url: str, *, timeout_sec: float) -> str:
-    """GET and return raw text body; raise PrimusCortexError on >=400."""
+    """GET and return raw text body; raise PrimusCortexError on >=400.
+
+    Args:
+        url (str): Fully composed URL to GET.
+        timeout_sec (float): Per-request timeout in seconds.
+
+    Returns:
+        str: The decoded response body.
+
+    Raises:
+        PrimusCortexError: On a >=400 status.
+    """
     status, body, _ = _http_get(url, timeout_sec=timeout_sec)
     if status >= 400:
         raise PrimusCortexError(f"primus_cortex HTTP {status} at {url}")
@@ -108,16 +153,24 @@ def _http_get_text(url: str, *, timeout_sec: float) -> str:
 
 
 def _coerce_pr_item(item: Any, *, source_url: str) -> GitHubPr:
-    """Coerce a primus-cortex PR list item into the shared GitHubPr record."""
+    """Coerce a primus-cortex PR list item into the shared GitHubPr record.
+
+    Args:
+        item (Any): A single PR list item, expected to be a JSON object.
+        source_url (str): URL the item came from, used in error messages.
+
+    Returns:
+        GitHubPr: The normalised PR record.
+
+    Raises:
+        PrimusCortexError: If ``item`` is not an object or lacks an int
+            ``number``.
+    """
     if not isinstance(item, dict):
-        raise PrimusCortexError(
-            f"primus_cortex item at {source_url} is not a JSON object: {type(item).__name__}"
-        )
+        raise PrimusCortexError(f"primus_cortex item at {source_url} is not a JSON object: {type(item).__name__}")
     number = item.get("number")
     if not isinstance(number, int):
-        raise PrimusCortexError(
-            f"primus_cortex item at {source_url} has non-int 'number': {number!r}"
-        )
+        raise PrimusCortexError(f"primus_cortex item at {source_url} has non-int 'number': {number!r}")
     return GitHubPr(
         number=number,
         title=str(item.get("title") or ""),
@@ -126,7 +179,21 @@ def _coerce_pr_item(item: Any, *, source_url: str) -> GitHubPr:
 
 
 def _extract_pr_list(payload: Any, *, source_url: str) -> list[dict[str, Any]]:
-    """Normalise a primus-cortex PR list response into ``list[dict]``."""
+    """Normalise a primus-cortex PR list response into ``list[dict]``.
+
+    Args:
+        payload (Any): The decoded response; a list, or a dict carrying a list
+            under ``items``/``prs``/``data``/``results``.
+        source_url (str): URL the payload came from, used in error messages.
+
+    Returns:
+        list[dict[str, Any]]: The extracted PR objects (non-dict entries
+            dropped).
+
+    Raises:
+        PrimusCortexError: If the payload is neither a list nor a dict with a
+            recognised list field.
+    """
     if isinstance(payload, list):
         items = payload
     elif isinstance(payload, dict):
@@ -141,10 +208,7 @@ def _extract_pr_list(payload: Any, *, source_url: str) -> list[dict[str, Any]]:
                 f"field (tried items/prs/data/results); keys={list(payload.keys())!r}"
             )
     else:
-        raise PrimusCortexError(
-            f"primus_cortex response at {source_url} is not list or dict: "
-            f"{type(payload).__name__}"
-        )
+        raise PrimusCortexError(f"primus_cortex response at {source_url} is not list or dict: {type(payload).__name__}")
     out: list[dict[str, Any]] = []
     for item in items:
         if isinstance(item, dict):
@@ -161,17 +225,29 @@ def list_perf_prs(
     label: str | None = None,
     timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
-    """List PRs from primus-cortex; hard-fails on transport/parse errors.
+    """List PRs from primus-cortex.
 
     Returns :class:`GitHubPr` (same as the GitHub backend) so the dispatcher
     can union both sources without per-source branching.
+
+    Args:
+        repo_url: Repository URL to list PRs for.
+        base_url: Primus Cortex base URL.
+        limit: Maximum number of PRs to return.
+        state: PR state filter (e.g. ``"open"``).
+        label: Optional label filter.
+        timeout_sec: Per-request timeout.
+
+    Returns:
+        A list of :class:`GitHubPr` records.
+
+    Raises:
+        PrimusCortexError: On bad repo URL or transport/parse errors.
     """
     try:
         repo_slug = _repo_slug(repo_url)
     except ValueError as exc:
-        raise PrimusCortexError(
-            f"cannot derive repo slug from repo_url={repo_url!r}: {exc}"
-        ) from exc
+        raise PrimusCortexError(f"cannot derive repo slug from repo_url={repo_url!r}: {exc}") from exc
 
     query: dict[str, Any] = {"state": state, "limit": limit}
     if label:
@@ -192,13 +268,24 @@ def pr_get(
     base_url: str,
     timeout_sec: float = 10.0,
 ) -> dict[str, Any]:
-    """GET ``/v1/repos/{repo}/prs/{number}`` returning the PR detail object."""
+    """GET ``/v1/repos/{repo}/prs/{number}`` returning the PR detail object.
+
+    Args:
+        repo_slug (str): Repository slug in ``owner/name`` form.
+        number (int): PR number to fetch.
+        base_url (str): primus_cortex service base URL.
+        timeout_sec (float): Per-request timeout. Defaults to 10.0.
+
+    Returns:
+        dict[str, Any]: The PR detail object.
+
+    Raises:
+        PrimusCortexError: On transport/parse errors or a non-object response.
+    """
     url = _build_url(base_url, f"/v1/repos/{repo_slug}/prs/{number}")
     payload = _http_get_json(url, timeout_sec=timeout_sec)
     if not isinstance(payload, dict):
-        raise PrimusCortexError(
-            f"primus_cortex pr_get at {url} did not return an object: {type(payload).__name__}"
-        )
+        raise PrimusCortexError(f"primus_cortex pr_get at {url} did not return an object: {type(payload).__name__}")
     return payload
 
 
@@ -209,7 +296,21 @@ def pr_files(
     base_url: str,
     timeout_sec: float = 10.0,
 ) -> list[dict[str, Any]]:
-    """GET ``/v1/repos/{repo}/prs/{number}/files`` returning the file list."""
+    """GET ``/v1/repos/{repo}/prs/{number}/files`` returning the file list.
+
+    Args:
+        repo_slug (str): Repository slug in ``owner/name`` form.
+        number (int): PR number to fetch files for.
+        base_url (str): primus_cortex service base URL.
+        timeout_sec (float): Per-request timeout. Defaults to 10.0.
+
+    Returns:
+        list[dict[str, Any]]: The changed-file objects.
+
+    Raises:
+        PrimusCortexError: On transport/parse errors or an unexpected response
+            shape.
+    """
     url = _build_url(base_url, f"/v1/repos/{repo_slug}/prs/{number}/files")
     payload = _http_get_json(url, timeout_sec=timeout_sec)
     if isinstance(payload, list):
@@ -226,9 +327,7 @@ def pr_files(
                 f"(tried files/items/data); keys={list(payload.keys())!r}"
             )
     else:
-        raise PrimusCortexError(
-            f"primus_cortex pr_files at {url} returned non-list/dict: {type(payload).__name__}"
-        )
+        raise PrimusCortexError(f"primus_cortex pr_files at {url} returned non-list/dict: {type(payload).__name__}")
     return [item for item in items if isinstance(item, dict)]
 
 
@@ -245,6 +344,18 @@ def pr_patches(
     ``diff --git`` / ``--- a/`` / ``+++ b/`` headers per file so ``git apply``
     can consume it. Honours ``previous_path`` / ``status`` for renames+deletes;
     items missing ``patch`` (binary) emit only the file header.
+
+    Args:
+        repo_slug: ``owner/name`` repository slug.
+        number: PR number to fetch patches for.
+        base_url: Primus Cortex base URL.
+        timeout_sec: Per-request timeout.
+
+    Returns:
+        A unified-diff string suitable for ``git apply``.
+
+    Raises:
+        PrimusCortexError: On unexpected payload shapes or transport errors.
     """
     url = _build_url(base_url, f"/v1/repos/{repo_slug}/prs/{number}/patches")
     payload = _http_get_json(url, timeout_sec=timeout_sec)
@@ -273,21 +384,12 @@ def pr_patches(
         if not isinstance(item, dict):
             continue
         file_meta = item.get("file") if isinstance(item.get("file"), dict) else item
-        path = (
-            file_meta.get("file_path")
-            or file_meta.get("filename")
-            or file_meta.get("path")
-            or ""
-        )
+        path = file_meta.get("file_path") or file_meta.get("filename") or file_meta.get("path") or ""
         if not isinstance(path, str) or not path:
             continue
         previous_path = file_meta.get("previous_path") or path
         status = (file_meta.get("status") or "").lower()
-        old_path = (
-            previous_path
-            if isinstance(previous_path, str) and previous_path
-            else path
-        )
+        old_path = previous_path if isinstance(previous_path, str) and previous_path else path
         if status == "added":
             old_label = "/dev/null"
         else:
@@ -316,13 +418,27 @@ def search_perf_prs_via_primus_search(
     state: str = "all",
     timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
-    """Free-text search via ``/v1/search/prs``; alternate to ``list_perf_prs``."""
+    """Free-text search via ``/v1/search/prs``; alternate to ``list_perf_prs``.
+
+    Args:
+        repo_url (str): Git URL of the repo; parsed to an ``owner/name`` slug.
+        base_url (str): primus_cortex service base URL.
+        query (str): Free-text search query.
+        limit (int): Maximum number of PRs to return. Defaults to 5.
+        state (str): PR state filter. Defaults to ``"all"``.
+        timeout_sec (float): Per-request timeout. Defaults to 10.0.
+
+    Returns:
+        list[GitHubPr]: The matching PRs (at most ``limit``).
+
+    Raises:
+        PrimusCortexError: On an unparseable repo URL or any transport/parse
+            error.
+    """
     try:
         repo_slug = _repo_slug(repo_url)
     except ValueError as exc:
-        raise PrimusCortexError(
-            f"cannot derive repo slug from repo_url={repo_url!r}: {exc}"
-        ) from exc
+        raise PrimusCortexError(f"cannot derive repo slug from repo_url={repo_url!r}: {exc}") from exc
 
     url = _build_url(
         base_url,

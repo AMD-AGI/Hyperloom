@@ -25,7 +25,10 @@ import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..models import ExploreRequest
 
 
 class RuntimeAdapterError(RuntimeError):
@@ -33,7 +36,15 @@ class RuntimeAdapterError(RuntimeError):
 
 
 def _emit_json(obj: Any, out: str | None) -> None:
-    """Serialize obj as JSON to stdout or a file path."""
+    """Serialize obj as JSON to stdout or a file path.
+
+    Always writes to stdout; additionally writes to ``out`` when it names a
+    real path (not ``None`` or ``"-"``).
+
+    Args:
+        obj (Any): JSON-serialisable object to emit.
+        out (str | None): Destination path, or ``None``/``"-"`` for stdout only.
+    """
     text = json.dumps(obj, ensure_ascii=False, indent=2)
     if out and out != "-":
         path = Path(out)
@@ -44,7 +55,18 @@ def _emit_json(obj: Any, out: str | None) -> None:
 
 
 def _load_request(path: str) -> "ExploreRequest":
-    """Load and parse a JSON request file into an ExploreRequest."""
+    """Load and parse a JSON request file into an ExploreRequest.
+
+    Args:
+        path (str): Path to the JSON request file.
+
+    Returns:
+        ExploreRequest: The parsed request.
+
+    Raises:
+        RuntimeAdapterError: If the file is missing, not valid JSON, or its root
+            is not a JSON object.
+    """
     from ..models import ExploreRequest
 
     req_path = Path(path).expanduser()
@@ -55,20 +77,26 @@ def _load_request(path: str) -> "ExploreRequest":
     except json.JSONDecodeError as exc:
         raise RuntimeAdapterError(f"request file is not valid JSON: {exc}") from exc
     if not isinstance(raw, dict):
-        raise RuntimeAdapterError(
-            f"request file root must be a JSON object, got {type(raw).__name__}"
-        )
+        raise RuntimeAdapterError(f"request file root must be a JSON object, got {type(raw).__name__}")
     return ExploreRequest.from_dict(raw)
 
 
 def _cmd_schema(args: argparse.Namespace) -> None:
-    """Print the ExploreRequest schema summary."""
+    """Print the ExploreRequest schema summary.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (unused).
+    """
     del args
     _emit_json(
         {
             "required": ["framework", "repo_url", "baseline"],
             "subcommands_available": [
-                "schema", "candidates", "explore", "kb", "phase-discover",
+                "schema",
+                "candidates",
+                "explore",
+                "kb",
+                "phase-discover",
             ],
             "subcommands_planned": [],
             "search_modes_supported": ["primus_cortex", "github"],
@@ -84,7 +112,12 @@ def _cmd_schema(args: argparse.Namespace) -> None:
 
 
 def _cmd_explore(args: argparse.Namespace) -> None:
-    """Run the full exploration; plan by default, build/bench when --execute."""
+    """Run the full exploration; plan by default, build/bench when --execute.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args with ``request``,
+            ``execute``, and ``out``.
+    """
     from ..explorer import explore
 
     request = _load_request(args.request)
@@ -93,7 +126,11 @@ def _cmd_explore(args: argparse.Namespace) -> None:
 
 
 def _cmd_candidates(args: argparse.Namespace) -> None:
-    """Enumerate candidates per request.search_modes and emit JSON."""
+    """Enumerate candidates per request.search_modes and emit JSON.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args with ``request`` and ``out``.
+    """
     from ..sources import enumerate_candidates
 
     request = _load_request(args.request)
@@ -113,6 +150,16 @@ def _cmd_candidates(args: argparse.Namespace) -> None:
 def _read_json_request(path: str) -> dict[str, Any]:
     """Load a JSON request file for the ``phase-*`` subcommands; enforces a
     dict at the top level since every ``phase-*`` request is an object.
+
+    Args:
+        path (str): Path to the JSON request file.
+
+    Returns:
+        dict[str, Any]: The decoded request object.
+
+    Raises:
+        RuntimeAdapterError: If the file is missing, not valid JSON, or its root
+            is not a JSON object.
     """
     req_path = Path(path).expanduser()
     if not req_path.exists():
@@ -122,13 +169,21 @@ def _read_json_request(path: str) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise RuntimeAdapterError(f"request file is not valid JSON: {exc}") from exc
     if not isinstance(raw, dict):
-        raise RuntimeAdapterError(
-            f"request file root must be a JSON object, got {type(raw).__name__}"
-        )
+        raise RuntimeAdapterError(f"request file root must be a JSON object, got {type(raw).__name__}")
     return raw
 
 
 def _pr_url_for(repo: str, pr_number: int | str) -> str:
+    """Build a canonical GitHub PR URL from a repo slug and PR number.
+
+    Args:
+        repo (str): Repository slug in ``owner/name`` form.
+        pr_number (int | str): PR number; only an ``int`` yields a URL.
+
+    Returns:
+        str: The PR URL, or an empty string when ``repo`` is empty or
+            ``pr_number`` is not an int.
+    """
     if repo and isinstance(pr_number, int):
         return f"https://github.com/{repo}/pull/{pr_number}"
     return ""
@@ -149,6 +204,12 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
          "candidates": [{"pr_url", "repo", "ref", "pr_number", "title",
                           "summary", "score", "diff_url",
                           "gap_canonical_id"}, ...]}
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args with ``request`` and ``out``.
+
+    Raises:
+        RuntimeAdapterError: If no repo URL can be resolved for the framework.
     """
     import uuid as _uuid
     from dataclasses import asdict as _asdict
@@ -162,11 +223,10 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     if not repo_url:
         # Standalone repo_map; no reverse-import of inference_optimizer.
         from framework_agent.repo_map import repo_url_for_framework
+
         repo_url = repo_url_for_framework(framework)
     if not repo_url:
-        raise RuntimeAdapterError(
-            f"phase-discover: no repo_url for framework={framework!r}"
-        )
+        raise RuntimeAdapterError(f"phase-discover: no repo_url for framework={framework!r}")
     work_dir = str(request.get("work_dir") or "/tmp/framework-agent")
     max_candidates = int(request.get("max_search_candidates") or 5)
     batch_id = str(request.get("batch_id") or f"batch-{_uuid.uuid4().hex[:8]}")
@@ -181,15 +241,17 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
             continue
         gap_id = str(gap.get("gap_canonical_id") or "")
         gap_desc = str(gap.get("gap_description") or "")
-        req = ExploreRequest.from_dict({
-            "framework": framework,
-            "repo_url": repo_url,
-            "work_dir": work_dir,
-            "baseline": {"throughput": 1.0},
-            "gap_description": gap_desc,
-            "search_modes": ["primus_cortex", "github"],
-            "max_search_candidates": max_candidates,
-        })
+        req = ExploreRequest.from_dict(
+            {
+                "framework": framework,
+                "repo_url": repo_url,
+                "work_dir": work_dir,
+                "baseline": {"throughput": 1.0},
+                "gap_description": gap_desc,
+                "search_modes": ["primus_cortex", "github"],
+                "max_search_candidates": max_candidates,
+            }
+        )
         try:
             cands = enumerate_candidates(req)
         except Exception as exc:  # noqa: BLE001 — best-effort per gap
@@ -214,11 +276,9 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                     pr_number = ""
             html_url = str(entry.get("html_url") or "")
             diff_url = (
-                f"{html_url}.diff" if html_url and isinstance(pr_number, int)
-                else (
-                    f"https://github.com/{repo}/pull/{pr_number}.diff"
-                    if repo and isinstance(pr_number, int) else ""
-                )
+                f"{html_url}.diff"
+                if html_url and isinstance(pr_number, int)
+                else (f"https://github.com/{repo}/pull/{pr_number}.diff" if repo and isinstance(pr_number, int) else "")
             )
             pr_url = html_url or _pr_url_for(repo, pr_number)
             labels = entry.get("labels") or ()
@@ -226,19 +286,21 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 score = float(entry.get("score") or 0.0)
             except (TypeError, ValueError):
                 score = 0.0
-            out_cands.append({
-                "pr_url": pr_url,
-                "repo": repo,
-                "ref": ref,
-                "pr_number": pr_number,
-                "title": str(entry.get("title") or ""),
-                "summary": ", ".join(str(l) for l in labels) if labels else "",
-                "score": score,
-                "diff_url": diff_url,
-                "labels": [str(l) for l in labels] if labels else [],
-                "author": str(entry.get("author") or ""),
-                "gap_canonical_id": gap_id,
-            })
+            out_cands.append(
+                {
+                    "pr_url": pr_url,
+                    "repo": repo,
+                    "ref": ref,
+                    "pr_number": pr_number,
+                    "title": str(entry.get("title") or ""),
+                    "summary": ", ".join(str(l) for l in labels) if labels else "",
+                    "score": score,
+                    "diff_url": diff_url,
+                    "labels": [str(l) for l in labels] if labels else [],
+                    "author": str(entry.get("author") or ""),
+                    "gap_canonical_id": gap_id,
+                }
+            )
     _emit_json(
         {
             "batch_id": batch_id,
@@ -254,7 +316,16 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
 
 
 def _cmd_kb(args: argparse.Namespace) -> None:
-    """Dispatch ``fa kb <op>`` to the appropriate kb-module helper."""
+    """Dispatch ``fa kb <op>`` to the appropriate kb-module helper.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args carrying ``kb_op`` and the
+            op-specific options (``domain``, ``query``, ``body``, etc.).
+
+    Raises:
+        RuntimeAdapterError: On an unknown op, a missing domain/body, or an
+            invalid ``--findings`` file.
+    """
     from .. import kb as kb_mod
     from ..models import Finding
 
@@ -271,17 +342,11 @@ def _cmd_kb(args: argparse.Namespace) -> None:
     if op == "show":
         files = kb_mod.get_domain_files(args.domain)
         if not files:
-            raise RuntimeAdapterError(
-                f"domain {args.domain!r} not found under {kb_mod._resolve_kb_root()}"
-            )
+            raise RuntimeAdapterError(f"domain {args.domain!r} not found under {kb_mod._resolve_kb_root()}")
         _emit_json(
             {
                 "domain": args.domain,
-                "files": [
-                    {"path": str(p), "size_bytes": p.stat().st_size}
-                    for p in files
-                    if p.is_file()
-                ],
+                "files": [{"path": str(p), "size_bytes": p.stat().st_size} for p in files if p.is_file()],
             },
             args.out,
         )
@@ -293,18 +358,14 @@ def _cmd_kb(args: argparse.Namespace) -> None:
                 "query": args.query,
                 "domain_filter": list(args.domain) if args.domain else None,
                 "count": len(hits),
-                "hits": [
-                    {"domain": h.domain, "path": str(h.path)} for h in hits
-                ],
+                "hits": [{"domain": h.domain, "path": str(h.path)} for h in hits],
             },
             args.out,
         )
         return
     if op == "contribute":
         if not args.body and not args.body_file:
-            raise RuntimeAdapterError(
-                "fa kb contribute requires --body or --body-file"
-            )
+            raise RuntimeAdapterError("fa kb contribute requires --body or --body-file")
         text = args.body or Path(args.body_file).read_text(encoding="utf-8")
         path = kb_mod.contribute_to_kb(
             domain=args.domain,
@@ -319,9 +380,7 @@ def _cmd_kb(args: argparse.Namespace) -> None:
         if args.findings:
             raw = json.loads(Path(args.findings).read_text(encoding="utf-8"))
             if not isinstance(raw, list):
-                raise RuntimeAdapterError(
-                    "--findings file must contain a JSON array of Finding objects"
-                )
+                raise RuntimeAdapterError("--findings file must contain a JSON array of Finding objects")
             for item in raw:
                 if not isinstance(item, dict):
                     continue
@@ -358,7 +417,12 @@ def _cmd_kb(args: argparse.Namespace) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Construct the top-level argparse parser for framework-agent CLI."""
+    """Construct the top-level argparse parser for framework-agent CLI.
+
+    Returns:
+        argparse.ArgumentParser: The configured parser with all subcommands and
+            global logging flags registered.
+    """
     parser = argparse.ArgumentParser(
         prog="framework-agent",
         description="Explore serving framework PRs/refs in isolated worktrees.",
@@ -378,18 +442,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--log-json",
         action="store_true",
         default=False,
-        help=(
-            "Emit one JSON object per record (machine-friendly). "
-            "Env fallback: FRAMEWORK_AGENT_LOG_JSON=1."
-        ),
+        help=("Emit one JSON object per record (machine-friendly). Env fallback: FRAMEWORK_AGENT_LOG_JSON=1."),
     )
     parser.add_argument(
         "--log-file",
         default=None,
-        help=(
-            "Append log records to this path in addition to stderr. "
-            "Env fallback: FRAMEWORK_AGENT_LOG_FILE."
-        ),
+        help=("Append log records to this path in addition to stderr. Env fallback: FRAMEWORK_AGENT_LOG_FILE."),
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -475,9 +533,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     kb_contrib_p.add_argument("--domain", required=True)
     kb_contrib_p.add_argument("--body", default="", help="Finding markdown body")
-    kb_contrib_p.add_argument(
-        "--body-file", default="", help="Read finding body from this file"
-    )
+    kb_contrib_p.add_argument("--body-file", default="", help="Read finding body from this file")
     kb_contrib_p.add_argument("--source", default="manual")
     kb_contrib_p.add_argument("--session-id", default="manual")
     kb_contrib_p.add_argument("--out", default="-", help="Output path (default stdout)")
@@ -511,10 +567,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point invoked by both `framework-agent` and `fa` scripts."""
+    """Entry point invoked by both `framework-agent` and `fa` scripts.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; ``None`` uses
+            ``sys.argv``.
+
+    Returns:
+        int: Process exit code: ``0`` on success, ``2`` on a handled or
+            unexpected error.
+    """
     parser = _build_parser()
     args = parser.parse_args(argv)
     from ..logging_setup import configure_logging, get_logger
+
     configure_logging(
         level=args.log_level,
         json_output=args.log_json or None,

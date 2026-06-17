@@ -63,21 +63,31 @@ You MUST:
 
 
 def _section_input(rendered: RenderedSection) -> dict[str, Any]:
+    """Project a rendered section into the JSON shape the LLM receives.
+
+    Args:
+        rendered (RenderedSection): The section to project.
+
+    Returns:
+        dict[str, Any]: A JSON-friendly dict with the section id, title,
+            skipped flag, key facts, decisions and warnings (the markdown
+            block is deliberately excluded so the LLM cannot rewrite it).
+    """
     return {
-        "section_id":  rendered.section_id,
-        "title":       rendered.title,
-        "skipped":     rendered.skipped,
-        "key_facts":   list(rendered.key_facts),
-        "decisions":   [
+        "section_id": rendered.section_id,
+        "title": rendered.title,
+        "skipped": rendered.skipped,
+        "key_facts": list(rendered.key_facts),
+        "decisions": [
             {
-                "kind":       d.kind,
-                "subject":    d.subject,
+                "kind": d.kind,
+                "subject": d.subject,
                 "metric_pct": d.metric_pct,
-                "rationale":  d.rationale,
+                "rationale": d.rationale,
             }
             for d in rendered.decisions
         ],
-        "warnings":    list(rendered.warnings),
+        "warnings": list(rendered.warnings),
     }
 
 
@@ -85,11 +95,19 @@ def build_user_prompt(
     rendered: list[RenderedSection],
     global_facts: GlobalFacts,
 ) -> str:
-    """Build the user-message JSON the LLM sees (string so the exact bytes are log-inspectable)."""
+    """Build the user-message JSON the LLM sees (string so the exact bytes are log-inspectable).
+
+    Args:
+        rendered: Rendered sections to include; skipped sections are withheld.
+        global_facts: Global facts block prepended to the prompt payload.
+
+    Returns:
+        A pretty-printed JSON string representing the user message.
+    """
     payload = {
         "global_facts": global_facts.as_prompt_dict(),
         # Skipped sections are withheld so the model can't "explain" a phantom section.
-        "sections":     [_section_input(s) for s in rendered if not s.skipped],
+        "sections": [_section_input(s) for s in rendered if not s.skipped],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
 
@@ -99,6 +117,13 @@ def parse_llm_response(raw: str) -> dict[str, Any]:
 
     Tolerates a code fence; on any failure returns empty fields so the
     deterministic-only output path stays usable.
+
+    Args:
+        raw: Raw text returned by the LLM, optionally wrapped in a code fence.
+
+    Returns:
+        A dict with ``executive_summary`` and ``section_narratives`` keys;
+        both empty when parsing fails.
     """
     text = (raw or "").strip()
     if text.startswith("```"):
@@ -116,8 +141,5 @@ def parse_llm_response(raw: str) -> dict[str, Any]:
         return {"executive_summary": "", "section_narratives": {}}
     return {
         "executive_summary": str(data.get("executive_summary") or "").strip(),
-        "section_narratives": {
-            str(k): str(v).strip()
-            for k, v in (data.get("section_narratives") or {}).items()
-        },
+        "section_narratives": {str(k): str(v).strip() for k, v in (data.get("section_narratives") or {}).items()},
     }

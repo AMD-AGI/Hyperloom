@@ -33,6 +33,25 @@ test = [
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
     "respx>=0.21",
+    "requests>=2.28",
+    # Exercises the optional psutil-based live-compiler probe in _aiter_jit
+    # (psutil stays an optional runtime dep — the probe degrades to None when
+    # it is absent — but the test suite needs it to cover that path).
+    "psutil>=5.9",
+]
+# CI / local mirror of the coverage job: ``pip install -e ".[test,ci]"``.
+# ``tomli`` is only required on Python <3.11 when inline scripts read
+# ``pyproject.toml`` with the same loader as Actions.
+ci = [
+    "pytest-cov>=5.0",
+    "coverage>=7.0",
+    "tomli>=2.0.1; python_version < '3.11'",
+]
+# Optional live-Langfuse trace push (HYPERLOOM_LANGFUSE_ENABLE=1). The local
+# reports/trace/*.jsonl ledger never needs this; only the opt-in Langfuse
+# sink imports the SDK (lazily, with a friendly no-op when absent).
+trace = [
+    "langfuse>=2.0",
 ]
 
 [project.scripts]
@@ -59,9 +78,23 @@ testpaths = [
     "inference_optimizer/tests",
     "robustness-agent/tests",
     "critic-agent/runtime/tests",
+    "quantization_agent/tests",
     "kernel-agent/tools/test_tracelens_arch_benchmark.py",
+    "kernel-agent/tools/test_ray_fd_limit.py",
+    "kernel-agent/tools/test_gemm_tuning.py",
+    "kernel-agent/tools/test_rocprof_roofline.py",
+    "kernel-agent/tools/test_harness_generator.py",
+    # ci/ inference-optimization pipeline: the genuine unit tests
+    # (test_submit_body.py + the new test_ci_*.py suites) were never
+    # collected before because ci/ was absent from testpaths. The two
+    # live smoke scripts (test_claw_flow.py / test_tool4.py) define only a
+    # module-level main()/run_test() and no ``test_`` functions, so pytest
+    # collects zero items from them and never hits their network calls.
+    "ci",
 ]
-pythonpath = [".", "robustness-agent/src", "critic-agent"]
+# ``ci`` is on the import path and is now both collected for tests (see
+# ``testpaths``) and measured for coverage (see ``[tool.coverage.run].source``).
+pythonpath = [".", "ci", "robustness-agent/src", "critic-agent", "framework-agent/src"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
@@ -72,8 +105,10 @@ filterwarnings = [
 ]
 
 # Coverage configuration: limit coverage measurement to first-party
-# source so test files / __init__.py do not dilute the
-# headline number. Run with ``pytest --cov`` to use these defaults.
+# ``source`` trees. The ``ci/`` benchmark pipeline is now collected for tests
+# (see ``testpaths``) and measured for coverage (listed in ``source``), so it
+# DOES count toward the ``fail_under`` (90%) settlement. ``OOB/`` and
+# ``quantization_agent/`` are included and measured as well.
 #
 # omit patterns exclude:
 #   * tests / __init__.py / __main__.py — non-source
@@ -91,7 +126,12 @@ branch = false
 source = [
     "inference_optimizer",
     "robustness_agent",
+    "critic-agent/runtime",
+    "framework-agent/src",
     "kernel-agent/tools",
+    "quantization_agent",
+    "OOB",
+    "ci",
 ]
 omit = [
     "*/tests/*",
@@ -124,6 +164,21 @@ omit = [
     # exercise; treated as test files for coverage purposes).
     "kernel-agent/tools/test_*.py",
     "kernel-agent/tools/_collective_names.py",
+    # kernel-agent skill harness validator — standalone operator script.
+    "kernel-agent/skills/unittest/validate_harness.py",
+    # quantization_agent CLI driver (argparse entrypoint).
+    "quantization_agent/cli.py",
+    # OOB agent_mcp_server entrypoints / server-side runtime: CLI, HTTP
+    # server, scheduler, auth proxy, and the subprocess agent backends are
+    # network / long-running services exercised end-to-end, not by unit
+    # tests. The unit-testable OOB logic (config, database, convergence_check,
+    # tools/agent_tools, tools/benchmark_tools, task_manager) stays measured
+    # and is covered by ``inference_optimizer/tests/test_oob_units.py``.
+    "OOB/cli.py",
+    "OOB/server.py",
+    "OOB/scheduler.py",
+    "OOB/auth_proxy.py",
+    "OOB/backends/*",
     # Local-host metrics probes — wrap ``rocm-smi`` / ``nvidia-smi`` /
     # ``ps`` / ``df`` / ``ray status``. Each shell-out has a unit test
     # through the provider/factory layers; the local_probe glue itself
@@ -166,6 +221,32 @@ omit = [
     "robustness-agent/src/robustness_agent/providers/hybrid.py",
     "robustness-agent/src/robustness_agent/providers/robust.py",
     "robustness-agent/src/robustness_agent/providers/local.py",
+    # ── ci/ inference-optimization pipeline ──
+    # The measured ci/ set is the library-shaped logic modules
+    # (generate_hf_matrix, generate_matrix, progress, build_rolling_pool,
+    # inferenceX_parser, artifact_normalizer, transform_to_session_summary_v2,
+    # build_summary, report_generator). Everything below is a SaFE/Claw/HF/
+    # GitHub network client or a subprocess-driven CLI driver — the same
+    # "subprocess plumbing dominated" reasoning that omits inference_optimizer
+    # cli.py and the kernel-agent tool CLIs. Each is exercised end-to-end by
+    # the live optimize-submit / optimize-tiny workflows, not unit tests.
+    "ci/optimize_submit.py",
+    "ci/tiny_submit.py",
+    "ci/orchestrator.py",
+    "ci/pipeline_run.py",
+    "ci/import_session_breakdown.py",
+    "ci/claw_client.py",
+    "ci/post_perf_runs.py",
+    "ci/prewarm_models.py",
+    "ci/send_webhook.py",
+    "ci/publish_results.py",
+    "ci/publish_artifacts.py",
+    "ci/download_ab_stitched_session_logs.py",
+    "ci/run_llm_batch.py",
+    "ci/build_candidates.py",
+    "ci/build_production_hf_pool.py",
+    # In-tree CLI test scripts / live smoke scripts (treated as test files).
+    "ci/test_*.py",
 ]
 
 [tool.coverage.report]
@@ -177,6 +258,25 @@ exclude_also = [
 ]
 skip_empty = true
 precision = 2
+# Line coverage across all ``[tool.coverage.run].source`` trees (UT run in CI).
+fail_under = 90
+
+# GitHub Actions ``tests-coverage.yml`` reads ``pytest_ci_args`` from this table
+# using inline Python (no separate helper script under ``ci/``).
+[tool.hyperloom.tests_coverage]
+# Full trailing argv for ``pytest`` in ``tests-coverage.yml`` (marker filter + cov).
+pytest_ci_args = [
+    "-m", "not critic_agent_e2e and not robustness_agent_e2e",
+    "--cov=.", "--cov-report=xml", "--cov-report=term",
+]
+# Repository variable name: when set to 1/true/yes/on, CI skips fail_under
+# enforcement (``--cov-fail-under=0`` + no ``coverage report --fail-under`` gate).
+relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
+
+# Pylint: minimal defaults for local runs; CI passes ``--errors-only`` so only
+# fatal/error-severity messages are reported there (see ``lint.yml``).
+[tool.pylint.main]
+jobs = 1
 
 # Ruff configuration. Pins the rule set that the BRAIN audit ran with
 # (default ``E`` + ``F``, plus ``W`` for explicitness) so future
@@ -186,12 +286,33 @@ precision = 2
 # rationale behind each ignore.
 [tool.ruff]
 target-version = "py310"
-line-length = 100
-extend-exclude = ["slides", "_audit_artifacts"]
+line-length = 120
+# Exclude generated/vendored trees: ``slides`` + audit artifacts, build
+# output, virtualenvs, and the vendored sub-repos (TraceLens-internal /
+# InferenceX) that ship their own linting and are not part of this repo's
+# tracked sources.
+extend-exclude = [
+    "slides",
+    "_audit_artifacts",
+    "build",
+    ".venv",
+    "TraceLens-internal",
+    "InferenceX",
+]
 
 [tool.ruff.lint]
 # Default Ruff selection (what the audit ran with) -- pin it explicitly.
 select = ["E", "F", "W"]
+
+# E501 (line-too-long) is owned by ``ruff format``: it reflows code to
+# ``line-length``; the only residual long lines are strings / comments / URLs
+# the formatter intentionally does not wrap. Linting them adds noise, so E501
+# is disabled here (standard practice when a formatter is in use).
+#
+# E741 (ambiguous variable name, e.g. ``l``) is a stylistic check already
+# tolerated in tests; disabled repo-wide to avoid churn-only renames in math
+# / parsing helpers where single-letter locals are idiomatic.
+ignore = ["E501", "E741"]
 
 # Future-proofing -- uncomment once the current findings are at zero.
 # extend-select = ["B", "I", "UP", "SIM", "RUF"]
@@ -199,7 +320,15 @@ select = ["E", "F", "W"]
 [tool.ruff.lint.per-file-ignores]
 # matplotlib backend must be set before pyplot import
 "slides/*.py" = ["E402"]
-# Tests routinely re-import inside function bodies and use single-char loop vars
-"**/tests/**/*.py" = ["F811", "E741"]
+# Tests routinely re-import inside function bodies (E402), redefine fixtures
+# (F811), and bind setup values they assert on indirectly (F841).
+"**/tests/**/*.py" = ["F811", "E402", "F841"]
 # CLI dispatchers use string forward-refs to keep startup cheap
 "inference_optimizer/cli.py" = ["F821"]  # remove after fixing the 5 real ones first
+# Modules that intentionally place imports after a module docstring + early
+# constants / conditional setup (lazy or ordering-sensitive imports).
+"inference_optimizer/orchestrator/coordinator.py" = ["E402"]
+"inference_optimizer/orchestrator/specialist_runner.py" = ["E402"]
+"inference_optimizer/orchestrator/roofline_ceiling.py" = ["E402"]
+"inference_optimizer/orchestrator/system_prompts/specialist_prompt_builder.py" = ["E402"]
+"critic-agent/runtime/decision_reviewer.py" = ["E402"]

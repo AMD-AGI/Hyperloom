@@ -31,12 +31,22 @@ _DEFAULT_STATE_PATH = "/tmp/multi_node_state.json"
 
 
 def _state_path() -> Path:
-    """Resolve where the multi_node CLI dropped its state file."""
+    """Resolve where the multi_node CLI dropped its state file.
+
+    Returns:
+        Path: The state-file path from ``$MULTI_NODE_STATE_FILE`` or the
+            default ``/tmp/multi_node_state.json``.
+    """
     return Path(os.environ.get("MULTI_NODE_STATE_FILE", _DEFAULT_STATE_PATH))
 
 
 def _read_state() -> dict[str, Any]:
-    """Best-effort read of the state file. Returns {} on any failure."""
+    """Best-effort read of the state file. Returns {} on any failure.
+
+    Returns:
+        dict[str, Any]: The parsed state dict, or ``{}`` if the file is
+            missing, unreadable, or not a JSON object.
+    """
     p = _state_path()
     if not p.is_file():
         return {}
@@ -54,6 +64,9 @@ def is_multi_node() -> bool:
     State file wins over env so ``--resume`` works (manifest.json doesn't
     persist ``nodes``): ``/tmp/multi_node_state.json`` ``nodes`` >= 2 wins;
     else fall back to ``$INFERENCE_OPTIMIZER_NODES``.
+
+    Returns:
+        True when operating on a >=2-node RayJob cluster, else False.
     """
     state = _read_state()
     try:
@@ -70,7 +83,12 @@ def is_multi_node() -> bool:
 
 
 def ray_gcs_address_from_state() -> str:
-    """Ray GCS address for ``ray.init`` (head pod IP + default GCS port)."""
+    """Ray GCS address for ``ray.init`` (head pod IP + default GCS port).
+
+    Returns:
+        str: The explicit ``ray_address`` from state, ``<head_pod_ip>:6379``
+            when only the head IP is known, or ``""`` if neither is present.
+    """
     state = _read_state()
     addr = str(state.get("ray_address") or "").strip()
     if addr:
@@ -81,12 +99,46 @@ def ray_gcs_address_from_state() -> str:
     return ""
 
 
+def dynamo_ssh_env_from_state() -> dict[str, str]:
+    """Env that routes kernel-agent GEAK GPU work to a Dynamo pod over SSH.
+
+    Returns ``{KERNEL_AGENT_GPU_PLACEMENT=ssh, MN_SSH_HOST/PORT/KEY}`` ONLY when
+    the multi_node backend is Dynamo and a GPU pod IP + ssh key are known.
+    Returns ``{}`` for the RayJob backend and single-node so the Ray placement
+    path (``ray_gcs_address_from_state`` / ``RAY_ADDRESS``) is left untouched —
+    this is the isolation seam that keeps the SSH path Dynamo-only.
+
+    Returns:
+        A ``{KERNEL_AGENT_GPU_PLACEMENT, MN_SSH_HOST/PORT/KEY}`` mapping for the
+        Dynamo backend when a GPU pod IP and ssh key are known, else ``{}``.
+    """
+    state = _read_state()
+    if state.get("backend") != "dynamo":
+        return {}
+    if (state.get("pd_mode") or "").lower() == "disaggregated":
+        gpu_ips = list(state.get("prefill_pod_ips") or []) + list(state.get("decode_pod_ips") or [])
+    else:
+        gpu_ips = list(state.get("worker_pod_ips") or [])
+    key = str(state.get("ssh_key_path") or "").strip()
+    if not gpu_ips or not key:
+        return {}
+    return {
+        "KERNEL_AGENT_GPU_PLACEMENT": "ssh",
+        "MN_SSH_HOST": str(gpu_ips[0]),
+        "MN_SSH_PORT": str(state.get("ssh_port") or 2222),
+        "MN_SSH_KEY": key,
+    }
+
+
 def rayjob_id_from_state() -> str:
     """Return the SaFE-allocated RayJob workload id, or ``""`` if absent.
 
     Reads the ``$MULTI_NODE_STATE_FILE`` checkpoint. Used to scope per-RayJob
     shared artefacts when ``$HYPERLOOM_MN_PROFILE_TRACE_DIR`` was not exported
     in-process.
+
+    Returns:
+        The SaFE-allocated RayJob workload id, or ``""`` if absent.
     """
     return str(_read_state().get("rayjob_id") or "").strip()
 
@@ -108,6 +160,10 @@ def magpie_remote_env() -> dict[str, str]:
     "BENCHMARK_BASE_URL": "<service_url>"}`` so Magpie skips its local server
     launch and points ``benchmark_serving`` at the head pod. Multi-node without
     a state file: ``{}`` + WARN (the local-launch failure surfaces clearly).
+
+    Returns:
+        Env vars to inject into the Magpie subprocess, or ``{}`` for the
+        single-node path or when no service URL is available.
     """
     if not is_multi_node():
         return {}
@@ -118,6 +174,7 @@ def magpie_remote_env() -> dict[str, str]:
     head_ip = str(state.get("head_pod_ip") or "").strip()
     if head_ip and ".svc.cluster.local" in service_url:
         import re
+
         port = re.search(r":(\d+)$", service_url)
         port = port.group(1) if port else "8888"
         service_url = f"http://{head_ip}:{port}"
@@ -150,6 +207,12 @@ def log_mn_banner(
     Multi-node prints ``[MN component=<name> nodes=N head=<ip>
     service_url=<url> key=value ...]``; ``**extra`` keys are appended for
     round-specific context (e.g. ``trace_dir=`` / ``variant=``).
+
+    Args:
+        component: Name of the component emitting the banner.
+        target_log: Logger the banner line is written to.
+        **extra: Round-specific key/value context appended to the banner;
+            keys with empty or None values are skipped.
     """
     if not is_multi_node():
         return

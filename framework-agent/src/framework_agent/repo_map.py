@@ -13,8 +13,8 @@ from __future__ import annotations
 
 _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
     "sglang": "https://github.com/sgl-project/sglang.git",
-    "vllm":   "https://github.com/ROCm/vllm.git",
-    "atom":   "https://github.com/ROCm/ATOM.git",
+    "vllm": "https://github.com/ROCm/vllm.git",
+    "atom": "https://github.com/ROCm/ATOM.git",
 }
 
 
@@ -26,8 +26,16 @@ KNOWN_FRAMEWORKS: frozenset[str] = frozenset(_FRAMEWORK_TO_REPO_URL.keys())
 def repo_url_for_framework(framework: str) -> str:
     """Return the canonical GitHub repo URL for ``framework``.
 
-    Returns an empty string for unknown frameworks; the caller is
-    expected to bail out / log when this happens.
+    The lookup is case-insensitive and tolerant of surrounding whitespace.
+
+    Args:
+        framework (str): Framework name (e.g. ``"sglang"``, ``"vllm"``,
+            ``"atom"``). Compared case-insensitively after stripping.
+
+    Returns:
+        str: The canonical git repo URL, or an empty string for unknown
+            frameworks; the caller is expected to bail out / log when this
+            happens.
     """
     return _FRAMEWORK_TO_REPO_URL.get((framework or "").strip().lower(), "")
 

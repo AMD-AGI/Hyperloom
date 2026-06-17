@@ -24,6 +24,15 @@ _DEPRECATION_MESSAGE: str = (
 
 
 def _coerce_str(value: Any) -> str:
+    """Coerce an arbitrary value to a string.
+
+    Args:
+        value (Any): The value to coerce.
+
+    Returns:
+        str: ``""`` for ``None``, the value unchanged when already a
+        string, otherwise ``str(value)``.
+    """
     if value is None:
         return ""
     if isinstance(value, str):
@@ -33,7 +42,17 @@ def _coerce_str(value: Any) -> str:
 
 def read_extra_server_args(payload: dict, *, default: str = "") -> str:
     """Read ``extra_server_args`` from a payload dict with a one-release
-    read-only fallback to the legacy ``extra_sglang_args`` key."""
+    read-only fallback to the legacy ``extra_sglang_args`` key.
+
+    Emits a ``DeprecationWarning`` when only the legacy key is present.
+
+    Args:
+        payload (dict): The payload dict to read from.
+        default (str): Value returned when neither key is present.
+
+    Returns:
+        str: The canonical value, the legacy value, or ``default``.
+    """
     if CANONICAL_KEY in payload:
         return _coerce_str(payload[CANONICAL_KEY])
     if LEGACY_KEY in payload:

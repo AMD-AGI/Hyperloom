@@ -13,7 +13,7 @@ import ast
 import re
 import sys
 import textwrap
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable
@@ -21,8 +21,20 @@ from typing import Callable
 
 # Data classes
 
+
 @dataclass
 class FuncInfo:
+    """Metadata about a function discovered in the benchmark source.
+
+    Attributes:
+        name (str): The function's name.
+        params (list[str]): Positional parameter names.
+        source (str): The original source text (including decorators).
+        decorator (str): The recognised decorator name (``perftest`` /
+            ``benchmark`` / empty for orchestrators).
+        lineno (int): 1-based line number of the ``def`` statement.
+    """
+
     name: str
     params: list[str]
     source: str
@@ -32,6 +44,18 @@ class FuncInfo:
 
 @dataclass
 class TensorInfo:
+    """A tensor-creating assignment extracted from a function body.
+
+    Attributes:
+        var_name (str): Name of the assigned variable.
+        creation_expr (str): The unparsed creation expression (e.g.
+            ``torch.randn(M, N, dtype=...)``).
+        shape_args (list[str]): Unparsed positional shape args plus any
+            non-device keyword args.
+        dtype_expr (str | None): The unparsed ``dtype=`` expression, or
+            ``None`` when not specified.
+    """
+
     var_name: str
     creation_expr: str
     shape_args: list[str]
@@ -40,12 +64,22 @@ class TensorInfo:
 
 @dataclass
 class CallInfo:
+    """A captured call site and its arguments.
+
+    Attributes:
+        func_name (str): The callee name being matched.
+        args (list[str]): Unparsed positional argument expressions.
+        kwargs (dict[str, str]): Mapping of keyword name to unparsed
+            value expression.
+    """
+
     func_name: str
     args: list[str]
     kwargs: dict[str, str]
 
 
 # BenchmarkAnalyzer — generic AST-based benchmark file analyzer
+
 
 class BenchmarkAnalyzer:
     """Analyze a benchmark Python file to extract structure for harness generation."""
@@ -55,13 +89,26 @@ class BenchmarkAnalyzer:
     KERNEL_HINTS = {"ck", "hip", "triton", "kernel", "optimized", "custom", "fused"}
 
     def __init__(self, source: str, source_file_module: str = ""):
+        """Parse the benchmark source into an AST for later queries.
+
+        Args:
+            source (str): Full Python source of the benchmark file.
+            source_file_module (str): Dotted module path of the kernel's
+                source file, used to recognise kernel calls by package
+                prefix. Optional.
+        """
         self.source = source
         self.lines = source.splitlines()
         self.tree = ast.parse(source)
         self.source_module = source_file_module
 
     def get_imports(self) -> list[str]:
-        """Return original source lines for all import statements."""
+        """Return original source lines for all import statements.
+
+        Returns:
+            list[str]: One entry per ``import`` / ``from ... import``
+                statement, preserving the original source text.
+        """
         import_lines: list[str] = []
         for node in ast.walk(self.tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -71,7 +118,13 @@ class BenchmarkAnalyzer:
         return import_lines
 
     def get_decorated_functions(self) -> dict[str, FuncInfo]:
-        """Find all functions decorated with @perftest or @benchmark."""
+        """Find all functions decorated with @perftest or @benchmark.
+
+        Returns:
+            dict[str, FuncInfo]: Mapping of function name to its
+                :class:`FuncInfo` for every function carrying a
+                recognised performance decorator.
+        """
         result: dict[str, FuncInfo] = {}
         for node in ast.walk(self.tree):
             if not isinstance(node, ast.FunctionDef):
@@ -95,6 +148,16 @@ class BenchmarkAnalyzer:
         return result
 
     def _decorator_name(self, dec: ast.expr) -> str:
+        """Resolve the simple name of a decorator AST node.
+
+        Args:
+            dec (ast.expr): A decorator expression (Name, Call, or
+                Attribute).
+
+        Returns:
+            str: The decorator's leaf name (e.g. ``perftest``), or an
+                empty string when it cannot be resolved.
+        """
         if isinstance(dec, ast.Name):
             return dec.id
         if isinstance(dec, ast.Call):
@@ -106,10 +169,16 @@ class BenchmarkAnalyzer:
             return dec.attr
         return ""
 
-    def classify_functions(
-        self, decorated: dict[str, FuncInfo]
-    ) -> tuple[FuncInfo | None, FuncInfo | None]:
-        """Classify decorated functions into (reference, kernel); either can be None."""
+    def classify_functions(self, decorated: dict[str, FuncInfo]) -> tuple[FuncInfo | None, FuncInfo | None]:
+        """Classify decorated functions into a reference/kernel pair.
+
+        Args:
+            decorated: Mapping of function name to its :class:`FuncInfo`.
+
+        Returns:
+            A ``(reference, kernel)`` tuple; either element may be ``None``
+            when no suitable candidate is found.
+        """
         ref_candidates: list[FuncInfo] = []
         kernel_candidates: list[FuncInfo] = []
 
@@ -117,7 +186,6 @@ class BenchmarkAnalyzer:
             if fi.decorator == "benchmark":
                 continue
             name_lower = fi.name.lower()
-            body_lower = fi.source.lower()
 
             is_ref = any(h in name_lower for h in self.REF_HINTS)
             is_kernel = any(h in name_lower for h in self.KERNEL_HINTS)
@@ -148,9 +216,7 @@ class BenchmarkAnalyzer:
 
         # Fallback when classification found nothing.
         if ref is None and kernel is None and len(decorated) >= 1:
-            perftest_funcs = [
-                fi for fi in decorated.values() if fi.decorator == "perftest"
-            ]
+            perftest_funcs = [fi for fi in decorated.values() if fi.decorator == "perftest"]
             if len(perftest_funcs) == 1:
                 kernel = perftest_funcs[0]
             elif len(perftest_funcs) >= 2:
@@ -160,7 +226,14 @@ class BenchmarkAnalyzer:
         return ref, kernel
 
     def get_test_function(self, decorated: dict[str, FuncInfo]) -> FuncInfo | None:
-        """Find the main test/benchmark orchestrator function."""
+        """Find the main test/benchmark orchestrator function.
+
+        Args:
+            decorated: Mapping of function name to its :class:`FuncInfo`.
+
+        Returns:
+            The orchestrator :class:`FuncInfo`, or ``None`` if none is found.
+        """
         # Prefer a @benchmark-decorated function; else a top-level test_*/bench_* caller.
         for fi in decorated.values():
             if fi.decorator == "benchmark":
@@ -173,9 +246,7 @@ class BenchmarkAnalyzer:
             if node.name in decorated:
                 continue
             if "test" in node.name.lower() or "bench" in node.name.lower():
-                body_src = "\n".join(
-                    self.lines[node.lineno - 1 : node.end_lineno or node.lineno]
-                )
+                body_src = "\n".join(self.lines[node.lineno - 1 : node.end_lineno or node.lineno])
                 if any(dn in body_src for dn in dec_names):
                     params = [a.arg for a in node.args.args]
                     start = node.lineno - 1
@@ -190,7 +261,17 @@ class BenchmarkAnalyzer:
         return None
 
     def extract_tensor_creation(self, func: FuncInfo) -> list[TensorInfo]:
-        """Extract torch.randn/empty/zeros/ones calls from a function."""
+        """Extract torch.randn/empty/zeros/ones calls from a function.
+
+        Args:
+            func (FuncInfo): The function whose body is scanned for
+                tensor-creating assignments.
+
+        Returns:
+            list[TensorInfo]: One :class:`TensorInfo` per recognised
+                tensor-creation assignment; empty if the body fails to
+                parse or contains none.
+        """
         results: list[TensorInfo] = []
         try:
             func_tree = ast.parse(textwrap.dedent(func.source))
@@ -205,8 +286,12 @@ class BenchmarkAnalyzer:
             call = node.value
             func_name = self._call_func_name(call)
             if func_name not in (
-                "torch.randn", "torch.empty", "torch.zeros",
-                "torch.ones", "torch.rand", "torch.empty_like",
+                "torch.randn",
+                "torch.empty",
+                "torch.zeros",
+                "torch.ones",
+                "torch.rand",
+                "torch.empty_like",
                 "torch.randn_like",
             ):
                 continue
@@ -227,16 +312,29 @@ class BenchmarkAnalyzer:
                     shape_args.append(f"{kw.arg}={ast.unparse(kw.value)}")
 
             creation_expr = ast.unparse(node.value)
-            results.append(TensorInfo(
-                var_name=var_name,
-                creation_expr=creation_expr,
-                shape_args=shape_args,
-                dtype_expr=dtype_expr,
-            ))
+            results.append(
+                TensorInfo(
+                    var_name=var_name,
+                    creation_expr=creation_expr,
+                    shape_args=shape_args,
+                    dtype_expr=dtype_expr,
+                )
+            )
         return results
 
     def extract_call_to(self, func: FuncInfo, callee_name: str) -> CallInfo | None:
-        """Find a call to callee_name within func's body and extract its args."""
+        """Find a call to callee_name within func's body and extract its args.
+
+        Args:
+            func (FuncInfo): The function whose body is searched.
+            callee_name (str): The callee name to match (suffix matches
+                are accepted, e.g. ``mod.foo`` matches ``foo``).
+
+        Returns:
+            CallInfo | None: The matched call's :class:`CallInfo`, or
+                ``None`` when no matching call is found / body fails to
+                parse.
+        """
         try:
             func_tree = ast.parse(textwrap.dedent(func.source))
         except SyntaxError:
@@ -253,6 +351,15 @@ class BenchmarkAnalyzer:
         return None
 
     def _call_func_name(self, call: ast.Call) -> str:
+        """Reconstruct the dotted name of a call's callee.
+
+        Args:
+            call (ast.Call): The call node to inspect.
+
+        Returns:
+            str: The dotted callee name (e.g. ``torch.randn``), or an
+                empty string when it cannot be resolved.
+        """
         if isinstance(call.func, ast.Name):
             return call.func.id
         if isinstance(call.func, ast.Attribute):
@@ -267,7 +374,12 @@ class BenchmarkAnalyzer:
         return ""
 
     def get_toplevel_statements(self) -> list[str]:
-        """Get top-level assignment statements (e.g. torch.set_default_device)."""
+        """Get top-level assignment statements (e.g. torch.set_default_device).
+
+        Returns:
+            list[str]: Source lines of top-level call statements that set
+                the default device or manual seed.
+        """
         results = []
         for node in ast.iter_child_nodes(self.tree):
             if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
@@ -279,8 +391,16 @@ class BenchmarkAnalyzer:
 
 # Config builder — from TraceLens input_shapes
 
+
 def _build_configs(candidate: dict) -> tuple[str, str, str]:
-    """Build (ALL_CONFIGS, cfg unpack, config_str) code from candidate shapes."""
+    """Build harness config code from a candidate's trace shapes.
+
+    Args:
+        candidate: Candidate dict carrying ``input_shapes`` from TraceLens.
+
+    Returns:
+        A tuple of ``(ALL_CONFIGS, cfg unpack, config_str)`` code fragments.
+    """
     input_shapes = candidate.get("input_shapes") or []
     if not input_shapes:
         return _default_configs()
@@ -331,9 +451,14 @@ def _build_configs(candidate: dict) -> tuple[str, str, str]:
                 break
 
     dim_names = _dim_names(max_ndim)
-    dtype_map = {"bf16": "torch.bfloat16", "fp16": "torch.float16",
-                 "fp32": "torch.float32", "bfloat16": "torch.bfloat16",
-                 "float16": "torch.float16", "float32": "torch.float32"}
+    dtype_map = {
+        "bf16": "torch.bfloat16",
+        "fp16": "torch.float16",
+        "fp32": "torch.float32",
+        "bfloat16": "torch.bfloat16",
+        "float16": "torch.float16",
+        "float32": "torch.float32",
+    }
 
     config_entries = []
     for dims, dtype in unique_configs:
@@ -343,15 +468,19 @@ def _build_configs(candidate: dict) -> tuple[str, str, str]:
 
     all_configs = "[\n" + ",\n".join(config_entries) + ",\n]"
     unpack = ", ".join(dim_names[:max_ndim]) + ", dtype = cfg"
-    config_str_parts = " ".join(
-        f"{n}={{{n}}}" for n in dim_names[:max_ndim]
-    )
+    config_str_parts = " ".join(f"{n}={{{n}}}" for n in dim_names[:max_ndim])
     config_str_code = f'f"{config_str_parts} {{dtype}}"'
 
     return all_configs, unpack, config_str_code
 
 
 def _default_configs() -> tuple[str, str, str]:
+    """Return a generic 2D ``(M, N, dtype)`` config fallback.
+
+    Returns:
+        tuple[str, str, str]: ``(all_configs_code, cfg_unpack_code,
+            config_str_code)`` for a default bf16 M×4096 sweep.
+    """
     return (
         "[\n    (1, 4096, torch.bfloat16),\n    (32, 4096, torch.bfloat16),\n"
         "    (256, 4096, torch.bfloat16),\n    (1024, 4096, torch.bfloat16),\n"
@@ -362,7 +491,17 @@ def _default_configs() -> tuple[str, str, str]:
 
 
 def _parse_shape_string(s: str) -> tuple[tuple[int, ...], str]:
-    """Parse '(256, 128) bf16' → ((256, 128), 'bf16')."""
+    """Parse '(256, 128) bf16' → ((256, 128), 'bf16').
+
+    Args:
+        s (str): A shape string of the form ``(d0, d1, ...) dtype``.
+
+    Returns:
+        tuple[tuple[int, ...], str]: The parsed integer dims and dtype
+            token; returns ``((), "")`` when the string does not match
+            or dims are non-integer. Dtype defaults to ``bfloat16`` when
+            omitted.
+    """
     m = re.match(r"\(([^)]+)\)\s*(\w+)?", s.strip())
     if not m:
         return (), ""
@@ -376,11 +515,21 @@ def _parse_shape_string(s: str) -> tuple[tuple[int, ...], str]:
 
 
 def _dim_names(ndim: int) -> list[str]:
+    """Return human-friendly dimension names for ``ndim`` dimensions.
+
+    Args:
+        ndim (int): Number of dimensions to name.
+
+    Returns:
+        list[str]: ``["M", "N", "K", ...]`` truncated to ``ndim``, or
+            ``["D0", "D1", ...]`` when ``ndim`` exceeds the preset names.
+    """
     names = ["M", "N", "K", "L", "P", "Q"]
     return names[:ndim] if ndim <= len(names) else [f"D{i}" for i in range(ndim)]
 
 
 # Adapter function generator
+
 
 def _generate_setup_inputs(
     analyzer: BenchmarkAnalyzer,
@@ -389,7 +538,20 @@ def _generate_setup_inputs(
     ref_func: FuncInfo | None,
     kernel_func: FuncInfo | None,
 ) -> str:
-    """Generate the setup_inputs(cfg) body, creating inputs only for args the test actually passes."""
+    """Generate the ``setup_inputs(cfg)`` body for the harness.
+
+    Inputs are created only for args the test actually passes.
+
+    Args:
+        analyzer: The benchmark analyzer for the source module.
+        test_func: The orchestrator test function, if any.
+        cfg_unpack: The config-unpack code line (e.g. ``M, N = cfg``).
+        ref_func: The reference function, if any.
+        kernel_func: The kernel function, if any.
+
+    Returns:
+        The generated ``setup_inputs`` body as source text.
+    """
     dim_vars = cfg_unpack.replace(" = cfg", "").split(", ")
     dim_vars = [v.strip() for v in dim_vars if v.strip() != "dtype"]
 
@@ -446,10 +608,18 @@ def _generate_setup_inputs(
     return "\n".join(lines)
 
 
-def _match_call_args_to_params(
-    call: CallInfo, params: list[str]
-) -> list[tuple[str, str | None]]:
-    """Match call args to params, returning [(param, call_value_or_None), ...] (positional + tensor kwargs)."""
+def _match_call_args_to_params(call: CallInfo, params: list[str]) -> list[tuple[str, str | None]]:
+    """Match a call's args to a function's parameters.
+
+    Handles positional args and tensor keyword args.
+
+    Args:
+        call: The call-site info to match.
+        params: The target function's parameter names.
+
+    Returns:
+        A list of ``(param, call_value_or_None)`` tuples.
+    """
     result: list[tuple[str, str | None]] = []
 
     # Positional args are always required.
@@ -459,9 +629,17 @@ def _match_call_args_to_params(
 
     # Skip kwargs for dtypes, quant settings, modes, flags, etc.
     SKIP_KWARG_HINTS = {
-        "dtype", "q_dtype", "quant_dtype", "quant_type", "type",
-        "mode", "model_sensitive", "use_model_sensitive", "group_size",
-        "shuffle", "out_before_quant",
+        "dtype",
+        "q_dtype",
+        "quant_dtype",
+        "quant_type",
+        "type",
+        "mode",
+        "model_sensitive",
+        "use_model_sensitive",
+        "group_size",
+        "shuffle",
+        "out_before_quant",
     }
     matched_params = {p for p, _ in result}
     for kw_name, kw_val in call.kwargs.items():
@@ -476,12 +654,29 @@ def _match_call_args_to_params(
 
 
 def _is_scalar_param(name: str) -> bool:
+    """Heuristically decide whether a parameter is a scalar.
+
+    Args:
+        name (str): Lowercased parameter name.
+
+    Returns:
+        bool: True for known scalar names (e.g. ``eps``, ``dropout``).
+    """
     SCALAR_EXACT = {"eps", "epsilon", "p", "dropout", "model_sensitive"}
     SCALAR_CONTAINS = {"use_model_sensitive"}
     return name in SCALAR_EXACT or any(h in name for h in SCALAR_CONTAINS)
 
 
 def _is_weight_param(name: str) -> bool:
+    """Heuristically decide whether a parameter is a 1D weight/bias.
+
+    Args:
+        name (str): Lowercased parameter name.
+
+    Returns:
+        bool: True for known weight/bias names or ``*_weight``-style
+            suffixes (so a 1D tensor is created for them).
+    """
     WEIGHT_EXACT = {"weight", "w", "gamma", "bias", "beta"}
     return name in WEIGHT_EXACT or any(name.endswith(f"_{h}") for h in WEIGHT_EXACT)
 
@@ -491,7 +686,18 @@ def _generate_run_kernel(
     test_func: FuncInfo | None,
     kernel_func: FuncInfo | None,
 ) -> str:
-    """Generate the run_kernel(inputs) function body."""
+    """Generate the run_kernel(inputs) function body.
+
+    Args:
+        analyzer (BenchmarkAnalyzer): Analyzer over the benchmark source.
+        test_func (FuncInfo | None): The orchestrator function, used to
+            mirror how the kernel is invoked.
+        kernel_func (FuncInfo | None): The kernel function to call.
+
+    Returns:
+        str: The indented body source for ``run_kernel``; a passthrough
+            that returns the first input when no kernel function exists.
+    """
     if not kernel_func:
         return '    return inputs.get("x", list(inputs.values())[0])'
 
@@ -504,7 +710,20 @@ def _generate_run_ref(
     ref_func: FuncInfo | None,
     kernel_func: FuncInfo | None,
 ) -> str:
-    """Generate the run_ref(inputs) function body."""
+    """Generate the run_ref(inputs) function body.
+
+    Args:
+        analyzer (BenchmarkAnalyzer): Analyzer over the benchmark source.
+        test_func (FuncInfo | None): The orchestrator function, used to
+            mirror how the reference is invoked.
+        ref_func (FuncInfo | None): The reference function to call.
+        kernel_func (FuncInfo | None): The kernel function (unused
+            directly; present for signature symmetry).
+
+    Returns:
+        str: The indented body source for ``run_ref``; delegates to
+            ``run_kernel`` when no reference function exists.
+    """
     if not ref_func:
         return "    return run_kernel(inputs)"
 
@@ -516,7 +735,18 @@ def _generate_run_func_body(
     test_func: FuncInfo | None,
     target_func: FuncInfo,
 ) -> str:
-    """Generate a body that calls target_func with inputs dict values; missing params use defaults."""
+    """Generate a run-function body that calls the target function.
+
+    Arguments are pulled from the inputs dict; missing params use defaults.
+
+    Args:
+        analyzer: The benchmark analyzer for the source module.
+        test_func: The orchestrator test function, if any.
+        target_func: The function the generated body should call.
+
+    Returns:
+        The generated run-function body as source text.
+    """
     call = None
     if test_func:
         call = analyzer.extract_call_to(test_func, target_func.name)
@@ -544,9 +774,19 @@ def _generate_run_func_body(
 
 
 def _is_variable(s: str) -> bool:
-    """Check if a string looks like a Python variable name (not a literal)."""
+    """Check if a string looks like a Python variable name (not a literal).
+
+    Args:
+        s (str): The unparsed argument expression to test.
+
+    Returns:
+        bool: True if ``s`` is a bare identifier and not ``True`` /
+            ``False`` / ``None``.
+    """
     return bool(re.match(r"^[a-zA-Z_]\w*$", s)) and s not in (
-        "True", "False", "None",
+        "True",
+        "False",
+        "None",
     )
 
 
@@ -751,6 +991,7 @@ if __name__ == "__main__":
 
 # Main entry point
 
+
 def maybe_generate_harness(
     benchmark_file: str,
     candidate: dict,
@@ -761,12 +1002,40 @@ def maybe_generate_harness(
 ) -> SimpleNamespace | None:
     """Generate a GEAK-compatible harness from a benchmark file.
 
-    Returns SimpleNamespace(harness_path, test_command) on success, None on failure.
+    Analyzes the benchmark, classifies reference/kernel functions,
+    synthesises config + adapter code, renders the fixed harness
+    template, writes it under ``<out_dir>/unittest/``, and validates it
+    with ``static_check``. Fail-soft: returns ``None`` on any
+    unrecoverable condition (already-valid input, no decorated functions,
+    parse error, failed validation).
+
+    Args:
+        benchmark_file (str): Path to the source benchmark ``.py`` file.
+        candidate (dict): Hot-kernel candidate supplying ``input_shapes``.
+        source_file (str): Path to the kernel's source file, used to
+            derive the module path and guess the repo root.
+        out_dir (Path): Base output directory; the harness is written to
+            its ``unittest`` subdirectory.
+        kernel_repo (str): Optional repo root; auto-detected from
+            ``source_file`` when empty.
+        log_fn (Callable[[str], None] | None): Optional logging callback;
+            messages are prefixed and exceptions in it are swallowed.
+
+    Returns:
+        SimpleNamespace | None: ``SimpleNamespace(harness_path,
+            test_command)`` on success, or ``None`` on any failure.
     """
     from pathlib import Path as _Path
+
     out_dir = _Path(out_dir)
 
     def _log(msg: str) -> None:
+        """Forward a prefixed message to ``log_fn`` if one was provided.
+
+        Args:
+            msg (str): The message to log; emitted with a ``[harness_gen]``
+                prefix. Failures in the callback are ignored.
+        """
         if log_fn:
             try:
                 log_fn(f"[harness_gen] {msg}")
@@ -784,6 +1053,7 @@ def maybe_generate_harness(
         if validator_path.is_file():
             sys.path.insert(0, str(validator_path.parent))
             from validate_harness import static_check
+
             ok, _ = static_check(benchmark_file)
             if ok:
                 _log("benchmark file already passes static_check, skipping generation")
@@ -799,12 +1069,7 @@ def maybe_generate_harness(
         sf = _Path(source_file)
         parts = sf.parts
         for i, p in enumerate(parts):
-            if (
-                i > 0
-                and p != "__init__.py"
-                and not p.startswith(".")
-                and _Path(*parts[: i + 1]).is_dir()
-            ):
+            if i > 0 and p != "__init__.py" and not p.startswith(".") and _Path(*parts[: i + 1]).is_dir():
                 pkg_dir = _Path(*parts[:i]) / p
                 if (pkg_dir / "__init__.py").exists():
                     module_parts = list(parts[i:])
@@ -832,9 +1097,11 @@ def maybe_generate_harness(
     ref_func, kernel_func = analyzer.classify_functions(decorated)
     test_func = analyzer.get_test_function(decorated)
 
-    _log(f"found: ref={ref_func.name if ref_func else None}, "
-         f"kernel={kernel_func.name if kernel_func else None}, "
-         f"test={test_func.name if test_func else None}")
+    _log(
+        f"found: ref={ref_func.name if ref_func else None}, "
+        f"kernel={kernel_func.name if kernel_func else None}, "
+        f"test={test_func.name if test_func else None}"
+    )
 
     if not kernel_func and not ref_func:
         _log("could not identify kernel or reference function")
@@ -843,13 +1110,22 @@ def maybe_generate_harness(
     all_configs, cfg_unpack, config_str_code = _build_configs(candidate)
 
     setup_body = _generate_setup_inputs(
-        analyzer, test_func, cfg_unpack, ref_func, kernel_func,
+        analyzer,
+        test_func,
+        cfg_unpack,
+        ref_func,
+        kernel_func,
     )
     run_kernel_body = _generate_run_kernel(
-        analyzer, test_func, kernel_func,
+        analyzer,
+        test_func,
+        kernel_func,
     )
     run_ref_body = _generate_run_ref(
-        analyzer, test_func, ref_func, kernel_func,
+        analyzer,
+        test_func,
+        ref_func,
+        kernel_func,
     )
 
     # Copy decorated defs, excluding the test orchestrator (its argparse would conflict).
@@ -892,6 +1168,7 @@ def maybe_generate_harness(
     # L2: Validate with static_check
     try:
         from validate_harness import static_check
+
         ok, errs = static_check(str(harness_path))
         if not ok:
             _log(f"generated harness failed static_check: {errs}")

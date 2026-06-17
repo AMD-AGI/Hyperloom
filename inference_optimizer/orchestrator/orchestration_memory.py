@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -24,11 +24,20 @@ DEFAULT_CHECKPOINT_CHAR_BUDGET: int = 400_000
 
 
 _MEMORY_KEYS: tuple[str, ...] = (
-    "current_plan", "hypotheses", "tried_and_why", "pending", "learnings",
+    "current_plan",
+    "hypotheses",
+    "tried_and_why",
+    "pending",
+    "learnings",
 )
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a second-resolution ISO-8601 string.
+
+    Returns:
+        The current UTC time formatted as a second-resolution ISO-8601 string.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
@@ -50,6 +59,18 @@ class CheckpointPolicy:
         chars_since_last: int,
         phase_changed: bool,
     ) -> bool:
+        """Decide whether a checkpoint is due under this policy.
+
+        Args:
+            ticks_since_last: Ticks elapsed since the last checkpoint.
+            minutes_since_last: Minutes elapsed since the last checkpoint.
+            chars_since_last: Characters accumulated since the last checkpoint.
+            phase_changed: Whether a phase boundary was just crossed.
+
+        Returns:
+            ``True`` when any enabled trigger (phase boundary, tick, time, or
+            char budget) is met.
+        """
         if phase_changed and self.on_phase_boundary:
             return True
         if self.every_ticks > 0 and ticks_since_last >= self.every_ticks:
@@ -93,6 +114,14 @@ def parse_checkpoint_reply(raw_text: str) -> dict[str, Any]:
     Tolerant: accepts a fenced ```json block or bare object; missing keys
     default to empty. Never raises — malformed replies yield a best-effort
     dict (with a ``parse_error`` marker).
+
+    Args:
+        raw_text: The agent's raw checkpoint reply text.
+
+    Returns:
+        The parsed memory dict (``current_plan`` / ``hypotheses`` /
+        ``tried_and_why`` / ``pending`` / ``learnings``), with a
+        ``parse_error`` marker when no JSON object was found.
     """
     obj = _extract_json_object(raw_text)
     if obj is None:
@@ -118,6 +147,16 @@ def parse_checkpoint_reply(raw_text: str) -> dict[str, Any]:
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
+    """Extract the first JSON object embedded in free-form text.
+
+    Args:
+        text: Text that may contain a fenced ```json``` block or a bare
+            ``{ ... }`` span.
+
+    Returns:
+        The parsed JSON object, or ``None`` when none is found or it does not
+        parse to a dict.
+    """
     if not text:
         return None
     # Prefer a fenced ```json ... ``` block.
@@ -149,6 +188,16 @@ def build_memory_record(
 
     ``learnings`` accumulate across checkpoints (deduped, capped) so durable
     lessons survive a later checkpoint that forgets to repeat them.
+
+    Args:
+        parsed: The parsed checkpoint reply from :func:`parse_checkpoint_reply`.
+        seq: The checkpoint sequence number.
+        tick: The current tick.
+        previous: The prior persisted memory record, or ``None``.
+
+    Returns:
+        The persisted ``orchestration_memory`` record with accumulated,
+        deduped, capped ``learnings`` and checkpoint bookkeeping.
     """
     prev = previous or {}
     learnings = list(prev.get("learnings") or [])
@@ -175,6 +224,12 @@ def render_memory_for_seed(memory: dict[str, Any]) -> str:
 
     Used for compaction re-seed and resume rebuild. Returns "" when memory
     is empty (fresh session).
+
+    Args:
+        memory: An ``orchestration_memory`` record.
+
+    Returns:
+        The rendered prompt text, or ``""`` when ``memory`` is empty.
     """
     if not memory:
         return ""
@@ -184,6 +239,12 @@ def render_memory_for_seed(memory: dict[str, Any]) -> str:
         lines.append(f"current_plan: {plan}")
 
     def _block(label: str, key: str) -> None:
+        """Append a labeled bullet block for a memory list field.
+
+        Args:
+            label: Section heading to render.
+            key: Memory key whose list items are rendered as bullets.
+        """
         items = memory.get(key) or []
         if items:
             lines.append(f"{label}:")
@@ -212,9 +273,21 @@ class CheckpointTracker:
     last_phase: str = ""
 
     def chars_add(self, n: int) -> None:
+        """Accumulate characters produced since the last checkpoint.
+
+        Args:
+            n: Number of characters to add (negatives are clamped to 0).
+        """
         self.chars_since_last += max(0, int(n))
 
     def reset(self, *, tick: int, minute_mark: float, phase: str) -> None:
+        """Reset the tracker after a checkpoint lands.
+
+        Args:
+            tick: Current tick to record as the last checkpoint tick.
+            minute_mark: Current minute mark to record.
+            phase: Current phase to record.
+        """
         self.last_tick = int(tick)
         self.last_minute_mark = float(minute_mark)
         self.chars_since_last = 0

@@ -64,9 +64,25 @@ REGISTRY: list[tuple[str, RendererFn]] = []
 
 
 def register_renderer(section_id: str) -> Callable[[RendererFn], RendererFn]:
-    """Decorator: register ``fn`` under ``section_id`` (re-registration replaces the prior entry)."""
+    """Decorator: register ``fn`` under ``section_id`` (re-registration replaces the prior entry).
+
+    Args:
+        section_id: Identifier under which the decorated renderer is stored.
+
+    Returns:
+        A decorator that registers the renderer function and returns it
+        unchanged.
+    """
 
     def _wrap(fn: RendererFn) -> RendererFn:
+        """Register ``fn`` under ``section_id`` and return it unchanged.
+
+        Args:
+            fn (RendererFn): The renderer function being decorated.
+
+        Returns:
+            RendererFn: The same function, after registration.
+        """
         for i, (sid, _) in enumerate(REGISTRY):
             if sid == section_id:
                 REGISTRY[i] = (section_id, fn)
@@ -78,17 +94,30 @@ def register_renderer(section_id: str) -> Callable[[RendererFn], RendererFn]:
 
 
 def renderer_names() -> list[str]:
+    """List the section ids of all registered renderers, in order.
+
+    Returns:
+        list[str]: Section identifiers in registry insertion order.
+    """
     return [sid for sid, _ in REGISTRY]
 
 
 # Small markdown helpers — kept here so individual renderers stay terse.
 def md_table(headers: list[str], rows: Iterable[list[Any]]) -> str:
-    """Render a GitHub-flavored markdown table; empty rows yield ``""``."""
+    """Render a GitHub-flavored markdown table; empty rows yield ``""``.
+
+    Args:
+        headers (list[str]): Column header labels.
+        rows (Iterable[list[Any]]): Row values; each inner list is rendered as
+            one table row via :func:`_md_cell`.
+
+    Returns:
+        str: The markdown table text, or an empty string when there are no rows.
+    """
     rows = list(rows)
     if not rows:
         return ""
-    out = ["| " + " | ".join(headers) + " |",
-           "|" + "|".join("---" for _ in headers) + "|"]
+    out = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
     for r in rows:
         out.append("| " + " | ".join(_md_cell(c) for c in r) + " |")
     return "\n".join(out)
@@ -96,7 +125,16 @@ def md_table(headers: list[str], rows: Iterable[list[Any]]) -> str:
 
 def md_kv_list(items: list[tuple[str, Any]]) -> str:
     """Render ``[(k, v), ...]`` as a bullet list, skipping ``None`` /
-    empty-string values."""
+    empty-string values.
+
+    Args:
+        items (list[tuple[str, Any]]): Key/value pairs to render as bold-keyed
+            bullet points; entries whose value is ``None``, ``""`` or ``[]``
+            are omitted.
+
+    Returns:
+        str: The newline-joined markdown bullet list.
+    """
     out = []
     for k, v in items:
         if v in (None, "", []):
@@ -106,6 +144,18 @@ def md_kv_list(items: list[tuple[str, Any]]) -> str:
 
 
 def _md_cell(v: Any) -> str:
+    """Format a single value for display inside a markdown table cell.
+
+    Handles ``None`` (em dash), booleans (check/cross marks), floats
+    (compact numeric formatting, NaN as em dash), sequences (comma-joined)
+    and escapes pipe/newline characters in strings.
+
+    Args:
+        v (Any): The value to format.
+
+    Returns:
+        str: A markdown-safe cell string.
+    """
     if v is None:
         return "—"
     if isinstance(v, bool):
@@ -121,6 +171,16 @@ def _md_cell(v: Any) -> str:
 
 
 def fmt_pct(v: Any, *, plus: bool = False) -> str:
+    """Format a numeric value as a percentage string.
+
+    Args:
+        v (Any): The value to format; non-numeric or ``None`` yields an em dash.
+        plus (bool): If ``True``, prefix a ``+`` for strictly positive values.
+
+    Returns:
+        str: A string like ``"+12.34%"`` / ``"12.34%"``, or ``"—"`` when the
+            value is missing or non-numeric.
+    """
     if v is None:
         return "—"
     try:
@@ -132,6 +192,15 @@ def fmt_pct(v: Any, *, plus: bool = False) -> str:
 
 
 def fmt_int(v: Any) -> str:
+    """Format a value as a thousands-separated integer string.
+
+    Args:
+        v (Any): The value to format.
+
+    Returns:
+        str: The integer with thousands separators (e.g. ``"1,234"``), the
+            raw ``str(v)`` when it is non-numeric, or ``"—"`` when ``None``.
+    """
     if v is None:
         return "—"
     try:

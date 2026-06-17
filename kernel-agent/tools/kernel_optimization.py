@@ -23,16 +23,26 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _collective_names import kernel_name_implies_multigpu  # noqa: E402
 from _paths import workspace_root  # noqa: E402
+
 sys.path.pop(0)
 
 
 def utc_now() -> str:
-    """Return the current UTC time as an ISO8601 string."""
+    """Return the current UTC time as an ISO8601 string.
+
+    Returns:
+        str: The current UTC timestamp in ISO-8601 format.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    """Atomically write JSON to ``path`` using a temp file then rename."""
+    """Atomically write JSON to ``path`` using a temp file then rename.
+
+    Args:
+        path (Path): Destination JSON file; parent dirs are created.
+        data (dict[str, Any]): JSON-serializable payload to write.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tmp:
         json.dump(data, tmp, indent=2, sort_keys=True)
@@ -42,21 +52,41 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def append_jsonl(path: Path, data: dict[str, Any]) -> None:
-    """Append one JSON object as a line to the given JSONL file."""
+    """Append one JSON object as a line to the given JSONL file.
+
+    Args:
+        path (Path): Destination JSONL file; parent dirs are created.
+        data (dict[str, Any]): JSON-serializable object to append.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(data, sort_keys=True) + "\n")
 
 
 def append_log(log_path: Path, message: str) -> None:
-    """Append a log line to ``log_path`` (ensuring parent dirs exist)."""
+    """Append a log line to ``log_path`` (ensuring parent dirs exist).
+
+    Args:
+        log_path (Path): Log file to append to.
+        message (str): Text to append; trailing whitespace is stripped and a
+            newline is added.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(message.rstrip() + "\n")
 
 
 def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
-    """Return the last ``limit`` lines of a log file, empty if missing."""
+    """Return the last ``limit`` lines of a log file, empty if missing.
+
+    Args:
+        log_path (Path): Log file to read.
+        limit (int): Maximum number of trailing lines to return.
+
+    Returns:
+        list[str]: The trailing lines, or an empty list when the file does
+            not exist.
+    """
     if not log_path.exists():
         return []
     lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -74,7 +104,18 @@ def update_status(
     started_at: str,
     error: str | None = None,
 ) -> None:
-    """Persist a status snapshot for the current run."""
+    """Persist a status snapshot for the current run.
+
+    Args:
+        status_path (Path): Destination status JSON file.
+        state (str): Current run state (e.g. ``running``, ``succeeded``).
+        current_step (str): Human-readable label of the active step.
+        log_path (Path): Log file whose size/tail are recorded.
+        artifact_paths (dict[str, str]): Map of artifact names to paths.
+        run_id (str): Unique identifier for this run.
+        started_at (str): ISO-8601 start time of the run.
+        error (str | None): Error message recorded when the run failed.
+    """
     payload: dict[str, Any] = {
         "tool": "kernel_optimization",
         "run_id": run_id,
@@ -115,6 +156,12 @@ def resolve_candidates_path(run_dir: Path) -> Path:
     Falls back to the flat path (which ``load_candidates`` will surface as a
     clean ``FileNotFoundError``) when nothing matches, preserving the
     "no fabricated target" failure mode for genuinely missing analyses.
+
+    Args:
+        run_dir: The ``runs/<session_id>/`` root for the session.
+
+    Returns:
+        The resolved ``kernel_candidates.json`` path (possibly non-existent).
     """
     flat = run_dir / "kernel_candidates.json"
     if flat.is_file():
@@ -136,7 +183,15 @@ def resolve_candidates_path(run_dir: Path) -> Path:
 def load_candidates(path: Path) -> list[dict[str, Any]]:
     """Load kernel candidates from JSON, normalizing legacy shapes.
 
-    Per Hyperloom#314 returns the union of ``hot_kernels`` (routable) + ``skipped_kernels`` so id lookup still resolves non-routable kernels; legacy flat-list / ``kernel_candidates`` shapes respected.
+    Per Hyperloom#314 returns the union of ``hot_kernels`` (routable) +
+    ``skipped_kernels`` so id lookup still resolves non-routable kernels;
+    legacy flat-list / ``kernel_candidates`` shapes are respected.
+
+    Args:
+        path: Path to the ``kernel_candidates.json`` file.
+
+    Returns:
+        The list of candidate dicts, with trace-report paths backfilled.
     """
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, list):
@@ -144,10 +199,7 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
     candidates = list(payload.get("hot_kernels") or payload.get("kernel_candidates") or [])
     skipped = payload.get("skipped_kernels") or []
     if isinstance(skipped, list):
-        seen_ids = {
-            c.get("kernel_id") for c in candidates
-            if isinstance(c, dict) and c.get("kernel_id")
-        }
+        seen_ids = {c.get("kernel_id") for c in candidates if isinstance(c, dict) and c.get("kernel_id")}
         for entry in skipped:
             if not isinstance(entry, dict):
                 continue
@@ -160,10 +212,7 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
     artifact_paths = payload.get("artifact_paths")
     if not isinstance(artifact_paths, dict):
         artifact_paths = {}
-    report_path = (
-        payload.get("trace_report_path")
-        or artifact_paths.get("trace_report_path")
-    )
+    report_path = payload.get("trace_report_path") or artifact_paths.get("trace_report_path")
     if report_path:
         for candidate in candidates:
             if isinstance(candidate, dict):
@@ -172,18 +221,38 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
 
 
 def _normalize_kernel_id(value: str) -> str:
-    """Fold hallucinated ``kn``/``rn`` prefixes onto the real ``k`` numbering, lower-cased, for tolerant comparison."""
+    """Normalize a kernel id for tolerant comparison.
+
+    Folds hallucinated ``kn``/``rn`` prefixes onto the real ``k`` numbering and
+    lower-cases the value.
+
+    Args:
+        value: The raw kernel id.
+
+    Returns:
+        The normalized kernel id.
+    """
     s = value.strip().lower()
     for prefix in ("kn", "rn"):
-        if s.startswith(prefix) and s[len(prefix):].isdigit():
-            return "k" + s[len(prefix):]
+        if s.startswith(prefix) and s[len(prefix) :].isdigit():
+            return "k" + s[len(prefix) :]
     return s
 
 
-def find_candidate(
-    candidates: list[dict[str, Any]], kernel_id: str
-) -> dict[str, Any] | None:
-    """Resolve a candidate by exact ``kernel_id``, then unique routable ``name``, then normalized id (``kn``/``rn``→``k``); ``None`` if nothing matches (caller skips gracefully)."""
+def find_candidate(candidates: list[dict[str, Any]], kernel_id: str) -> dict[str, Any] | None:
+    """Resolve a candidate by id with progressively looser matching.
+
+    Tries exact ``kernel_id`` first, then a unique routable ``name`` match,
+    then a normalized id (``kn``/``rn`` → ``k``).
+
+    Args:
+        candidates: The candidate dicts to search.
+        kernel_id: The kernel id (or name) to resolve.
+
+    Returns:
+        The matching candidate, or ``None`` when nothing matches (the caller
+        skips gracefully).
+    """
     for candidate in candidates:
         if candidate.get("kernel_id") == kernel_id:
             return candidate
@@ -205,6 +274,15 @@ def find_candidate(
 
 
 def existing_path(value: str) -> str:
+    """Resolve ``value`` to an absolute path if it exists, else empty string.
+
+    Args:
+        value (str): A filesystem path (possibly ``~``-prefixed) or empty.
+
+    Returns:
+        str: The resolved absolute path when the file/dir exists; otherwise
+            an empty string (including when ``value`` is falsy).
+    """
     if not value:
         return ""
     path = Path(value).expanduser()
@@ -212,6 +290,22 @@ def existing_path(value: str) -> str:
 
 
 def has_benchmark(args: argparse.Namespace, candidate: dict[str, Any]) -> bool:
+    """Report whether any usable benchmark/test harness exists for a kernel.
+
+    Checks the CLI-supplied benchmark/harness paths and the candidate's own
+    ``benchmark_file`` / ``test_harness_path`` / ``benchmark_files`` fields,
+    treating only paths that resolve on disk as available.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args carrying ``benchmark_file``
+            and ``test_harness_path``.
+        candidate (dict[str, Any]): Kernel candidate dict that may declare
+            benchmark/harness paths.
+
+    Returns:
+        bool: True when at least one referenced benchmark or harness file
+            exists on disk.
+    """
     bench_files = candidate.get("benchmark_files") or []
     return bool(
         existing_path(args.benchmark_file)
@@ -234,6 +328,15 @@ def _resolve_source_file(
     kernel, e.g. DeepSeek-R1 routed an MHA rewrite at ``fused_moe.py``); a
     differing LLM path emits a ``[source-override]`` warning. Falls back to the
     LLM path when the candidate has no source_file.
+
+    Args:
+        llm_source: The LLM-supplied ``--source-file`` path.
+        candidate: The TraceLens candidate dict (source of truth).
+        kernel_id: The kernel id, used in log messages.
+        log_path: Optional path to append override/fallback notes.
+
+    Returns:
+        The effective source file path to use.
     """
     cand_source = str((candidate or {}).get("source_file") or "").strip()
     llm = str(llm_source or "").strip()
@@ -243,6 +346,15 @@ def _resolve_source_file(
     # A candidate "source" can be a profiler frame label (pseudo-ops, TraceLens PR #668),
     # not a real file; prefer the caller's explicit source_file when it's a readable file.
     def _is_real_file(p: str) -> bool:
+        """Return True when ``p`` is a non-empty path pointing at a real file.
+
+        Args:
+            p (str): Candidate filesystem path to test.
+
+        Returns:
+            bool: True if ``p`` is truthy and refers to an existing file;
+                False on any OS/runtime error or non-file path.
+        """
         try:
             return bool(p) and Path(p).is_file()
         except (OSError, RuntimeError):
@@ -324,6 +436,13 @@ def _match_benchmark_for_kernel(
     kernel-name regex hoists that family's bench files to the front (earlier
     patterns win). No match preserves the original order. Prevents picking an
     off-topic benchmark (e.g. fmha → test_pa.py stalling GEAK Step-5).
+
+    Args:
+        kernel_name: The kernel name to match patterns against.
+        bench_files: Candidate benchmark file paths.
+
+    Returns:
+        The benchmark paths reordered so the matching family comes first.
     """
     existing = [p for p in (bench_files or []) if isinstance(p, str) and p]
     if not existing:
@@ -334,6 +453,17 @@ def _match_benchmark_for_kernel(
             continue
 
         def _priority(path: str, _bench_res=bench_res) -> int:
+            """Return the sort rank of a benchmark path within its family.
+
+            Args:
+                path (str): Benchmark file path whose basename is matched.
+                _bench_res (list[re.Pattern[str]]): Priority-ordered bench
+                    patterns for the matched kernel family (bound default).
+
+            Returns:
+                int: Index of the first matching pattern, or ``len(_bench_res)``
+                    when none match (sorts after all matched files).
+            """
             base = Path(path).name
             for idx, br in enumerate(_bench_res):
                 if br.search(base):
@@ -349,8 +479,11 @@ def _profile_timeout_sec() -> int:
 
     Injected as a ``timeout <N>`` prefix on the test_command so a default-matrix
     benchmark (e.g. aiter test_pa.py) can't stall Step 5 for hours; SIGTERM at N
-    surfaces as a normal profiling failure. Default 600s, override via
-    ``KERNEL_OPT_PROFILE_TIMEOUT_SEC``, floored at 1.
+    surfaces as a normal profiling failure.
+
+    Returns:
+        The timeout in seconds: 600 by default, overridable via
+        ``KERNEL_OPT_PROFILE_TIMEOUT_SEC``, floored at 1.
     """
     try:
         value = int(os.environ.get("KERNEL_OPT_PROFILE_TIMEOUT_SEC", "600"))
@@ -374,6 +507,19 @@ def _render_geak_test_command(
     GEAK's subprocess can ``init_process_group`` correctly. Returns ``""``
     when no usable benchmark exists; the caller leaves
     ``--test-command`` blank so GEAK falls back to its own discovery.
+
+    Args:
+        kernel_name (str): Kernel name used to order benchmark candidates.
+        bench_files (list[Any]): Candidate benchmark/test file paths.
+        is_multigpu (bool): True when the kernel implies a multi-GPU
+            collective and needs ``torchrun``.
+        num_gpus (int): Number of GPUs to pass to ``--nproc_per_node`` when
+            multi-GPU.
+        timeout_sec (int): Per-subprocess timeout prefixed via ``timeout``.
+
+    Returns:
+        str: The rendered ``--test-command`` string, or empty string when no
+            usable benchmark file is found.
     """
     ordered = _match_benchmark_for_kernel(kernel_name, bench_files)
     for bf in ordered:
@@ -390,14 +536,34 @@ def _render_geak_test_command(
 
 
 def parse_backends(backends: str) -> list[str]:
+    """Parse and validate a comma-separated backend list.
+
+    Args:
+        backends (str): Comma-separated backend names (case-insensitive),
+            e.g. ``"geak,claude"``.
+
+    Returns:
+        list[str]: The normalized (lowercased, trimmed) backend names in the
+            order given.
+
+    Raises:
+        ValueError: When any backend is outside the allowed set
+            (``geak``, ``claude``, ``codex``, ``cursor``).
+    """
     parsed = [b.strip().lower() for b in backends.split(",") if b.strip()]
-    allowed = {"geak", "claude", "codex", "cursor"}
+    # `forge` is the Kernel-Forge autonomous-loop backend; it is first in the
+    # default ladder (choose_backends) and falls through to geak/claude/codex
+    # when it skips a non-triton candidate or misses a KEEP. See
+    # claw-dev/docs-zh/forge-as-hyperloom-backend-integration.md.
+    allowed = {"geak", "claude", "codex", "cursor", "forge"}
     invalid = [b for b in parsed if b not in allowed]
     if invalid:
-        raise ValueError(f"unsupported backend(s): {', '.join(invalid)} "
-                         f"(allowed: {sorted(allowed)}; the 'llm' single-shot "
-                         "backend was removed because max_tokens=2048 truncates "
-                         "any non-trivial kernel)")
+        raise ValueError(
+            f"unsupported backend(s): {', '.join(invalid)} "
+            f"(allowed: {sorted(allowed)}; the 'llm' single-shot "
+            "backend was removed because max_tokens=2048 truncates "
+            "any non-trivial kernel)"
+        )
     return parsed
 
 
@@ -417,8 +583,28 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     backends.
 
     Only ``[]`` returns: vendor binaries (nothing rewritable upstream).
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args carrying ``backends`` and
+            benchmark/harness paths.
+        candidate (dict[str, Any]): Kernel candidate dict, used for
+            ``source_type`` and benchmark availability.
+
+    Returns:
+        tuple[list[str], dict[str, Any]]: The selected backend ladder and a
+            notes dict describing the selection (benchmark availability,
+            ``geak_without_benchmark`` flag, cursor key presence, etc.).
     """
     user_backends = parse_backends(args.backends)
+    # Honor the coordinator's KERNEL_OPT_BACKEND_ORDER / KERNEL_OPT_BACKENDS env
+    # when no explicit --backends was passed: the single-kernel subprocess used to
+    # ignore it and fall back to the full default ladder, so a forge-only run
+    # (KERNEL_OPT_BACKEND_ORDER=forge) still fired geak/claude/codex. Mirror the
+    # handler's _backend_order precedence here so the subprocess agrees.
+    if not user_backends:
+        env_order = (os.environ.get("KERNEL_OPT_BACKEND_ORDER") or os.environ.get("KERNEL_OPT_BACKENDS") or "").strip()
+        if env_order:
+            user_backends = parse_backends(env_order)
     benchmark_available = has_benchmark(args, candidate)
     source_type = str(candidate.get("source_type") or "unknown")
     # Skip cursor from auto-selected defaults when CURSOR_API_KEY is unset (explicit --backends still wins).
@@ -438,9 +624,13 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     if source_type == "vendor_binary":
         return [], notes
 
-    # Unified ladder (#144): GEAK first, then claude/codex. Without a benchmark GEAK still
-    # attempts but flags geak_without_benchmark=True so KEEP gates know confidence is reduced.
-    selected = ["geak", "claude", "codex"]
+    # Unified ladder: forge FIRST (Kernel-Forge autonomous loop; falls through to
+    # geak when forge skips a non-triton candidate or misses a KEEP), then GEAK.
+    # claude/codex are NOT auto-selected anymore — enable them only via explicit
+    # --backends or KERNEL_OPT_BACKEND_ORDER/KERNEL_OPT_BACKENDS env (handled
+    # above). Without a benchmark GEAK still attempts but flags
+    # geak_without_benchmark=True so KEEP gates know confidence is reduced.
+    selected = ["forge", "geak"]
     if not benchmark_available:
         notes["geak_without_benchmark"] = True
     return selected, notes
@@ -493,10 +683,30 @@ _GPU_HW: dict[str, dict[str, Any]] = {
 
 
 def _normalize_target_platform(value: str) -> str:
+    """Normalize a target-platform string for ``_GPU_HW`` lookups.
+
+    Args:
+        value (str): Raw platform name (e.g. ``"MI300X"``) or empty.
+
+    Returns:
+        str: The lowercased, whitespace-stripped platform key.
+    """
     return str(value or "").strip().lower()
 
 
 def _hardware_prompt_blocks(target_platform: str) -> tuple[str, str]:
+    """Build the intro and hardware-notes prompt blocks for a target GPU.
+
+    Looks up the platform in :data:`_GPU_HW`; when unknown, returns generic
+    blocks instructing the agent to inspect the runtime device.
+
+    Args:
+        target_platform (str): Target GPU platform name (e.g. ``"mi300x"``).
+
+    Returns:
+        tuple[str, str]: A ``(intro, notes)`` pair of prompt text — the
+            optimization intro line and the hardware-notes block.
+    """
     platform = _normalize_target_platform(target_platform)
     hw = _GPU_HW.get(platform)
     if not hw:
@@ -505,14 +715,15 @@ def _hardware_prompt_blocks(target_platform: str) -> tuple[str, str]:
             "inference serving. Produce an actual edited kernel file with "
             "measurable speedup; do NOT just analyze and submit unchanged."
         )
-        notes = "\n".join([
-            "Hardware notes (target platform unknown):",
-            "- Before benchmarking, query the runtime environment for the ROCm arch ",
-            "(hipDeviceGetName/rocminfo), visible GPU IDs (ROCR_VISIBLE_DEVICES), "
-            + "and memory size/bandwidth.",
-            "- Record those values in the result and choose --offload-arch=<arch> "
-            + "accordingly; replace <arch> with the inspected ROCm arch before running.",
-        ])
+        notes = "\n".join(
+            [
+                "Hardware notes (target platform unknown):",
+                "- Before benchmarking, query the runtime environment for the ROCm arch ",
+                "(hipDeviceGetName/rocminfo), visible GPU IDs (ROCR_VISIBLE_DEVICES), " + "and memory size/bandwidth.",
+                "- Record those values in the result and choose --offload-arch=<arch> "
+                + "accordingly; replace <arch> with the inspected ROCm arch before running.",
+            ]
+        )
         return intro, notes
 
     intro = (
@@ -521,29 +732,54 @@ def _hardware_prompt_blocks(target_platform: str) -> tuple[str, str]:
         "edited kernel file with measurable speedup; do NOT just analyze and "
         "submit unchanged."
     )
-    notes = "\n".join([
-        f"Hardware notes (target platform: `{platform}`):",
-        f"- {hw['cus']} CUs, {hw['uarch']}, ROCm arch `{hw['arch']}`",
-        f"- {hw['mem']}",
-        f"- Build flag: `{hw['build_flag']}`",
-        f"- Use optimizations compatible with `{hw['arch']}` and verify runtime "
-        "device properties before benchmarking.",
-    ])
+    notes = "\n".join(
+        [
+            f"Hardware notes (target platform: `{platform}`):",
+            f"- {hw['cus']} CUs, {hw['uarch']}, ROCm arch `{hw['arch']}`",
+            f"- {hw['mem']}",
+            f"- Build flag: `{hw['build_flag']}`",
+            f"- Use optimizations compatible with `{hw['arch']}` and verify runtime "
+            "device properties before benchmarking.",
+        ]
+    )
     return intro, notes
 
 
 def _target_build_flag(target_platform: str) -> str:
+    """Return the ``--offload-arch`` build flag for a target platform.
+
+    Args:
+        target_platform (str): Target GPU platform name (e.g. ``"mi355x"``).
+
+    Returns:
+        str: The platform's build flag (e.g. ``--offload-arch=gfx950``), or
+            the ``--offload-arch=<arch>`` placeholder when unknown.
+    """
     platform = _normalize_target_platform(target_platform)
     hw = _GPU_HW.get(platform)
     return str(hw["build_flag"]) if hw else "--offload-arch=<arch>"
 
 
 def _env_target_platform() -> str:
+    """Read the target GPU platform from the environment.
+
+    Returns:
+        str: The value of ``TARGET_GPU_TYPE``, falling back to ``GPU_TYPE``,
+            or an empty string when neither is set.
+    """
     return os.environ.get("TARGET_GPU_TYPE", "") or os.environ.get("GPU_TYPE", "")
 
 
 def _format_shapes_for_case(shapes: Any) -> str:
-    """Render a candidate row's ``shapes`` field as one comma-joined line."""
+    """Render a candidate row's ``shapes`` field as a comma-joined line.
+
+    Args:
+        shapes: A shapes value (string, list, or list of ``{call_num, shape}``
+            dicts).
+
+    Returns:
+        The rendered single-line shapes string, or empty when none.
+    """
     if not shapes:
         return ""
     if isinstance(shapes, str):
@@ -565,6 +801,189 @@ def _format_shapes_for_case(shapes: Any) -> str:
     return str(shapes)
 
 
+_SHAPE_ARG_RE = re.compile(r"^\s*\((?P<dims>[^)]*)\)\s*(?P<dtype>[A-Za-z0-9_]+)?\s*$")
+
+
+def _split_shape_fragments(shape_text: Any) -> list[str]:
+    """Split TraceLens ``Args`` text into per-argument shape fragments.
+
+    Args:
+        shape_text: The raw TraceLens ``Args`` text (any type; coerced to str).
+
+    Returns:
+        The non-empty per-argument shape fragments.
+    """
+    text = str(shape_text or "").strip()
+    if not text:
+        return []
+    return [frag.strip() for frag in re.split(r"\s*(?:<br\s*/?>|\n)\s*", text, flags=re.IGNORECASE) if frag.strip()]
+
+
+def _parse_shape_arg(raw: Any, *, index: int) -> dict[str, Any]:
+    """Parse one shape fragment such as ``(15360,8,768) bf16``.
+
+    Args:
+        raw: The raw shape fragment text (any type; coerced to str).
+        index: The argument index recorded on the parsed result.
+
+    Returns:
+        A dict with ``index`` / ``raw`` and, when parseable, ``shape`` (dims)
+        and ``dtype``.
+    """
+    text = str(raw or "").strip()
+    out: dict[str, Any] = {"index": index, "raw": text}
+    match = _SHAPE_ARG_RE.match(text)
+    if not match:
+        return out
+    dims: list[int | str] = []
+    dims_text = match.group("dims").strip()
+    if dims_text:
+        for part in dims_text.split(","):
+            item = part.strip()
+            if not item:
+                continue
+            try:
+                dims.append(int(item))
+            except ValueError:
+                dims.append(item)
+    out["shape"] = dims
+    dtype = (match.group("dtype") or "").strip()
+    if dtype:
+        out["dtype"] = dtype
+    return out
+
+
+def _shape_case_from_value(
+    value: Any,
+    *,
+    call_count: Any = None,
+    primary: bool = False,
+) -> dict[str, Any]:
+    """Build one structured benchmark shape case from TraceLens shape data.
+
+    Args:
+        value: The shape data (dict, list/tuple, or scalar) to convert.
+        call_count: Fallback call count when the value carries none.
+        primary: Whether this case is the primary benchmark case.
+
+    Returns:
+        A shape-case dict with ``primary`` / ``call_count`` / ``raw`` / ``args``
+        keys.
+    """
+    if isinstance(value, dict):
+        structured_args = value.get("args")
+        raw_shape = value.get("shape") or value.get("Args") or value.get("args") or ""
+        case_count = value.get("call_num", value.get("call_count", call_count))
+    elif isinstance(value, (list, tuple)):
+        structured_args = None
+        fragments: list[str] = []
+        case_count = call_count
+        for item in value:
+            if isinstance(item, dict):
+                shape = item.get("shape") or item.get("Args") or item.get("args") or ""
+                if case_count is None:
+                    case_count = item.get("call_num", item.get("call_count"))
+            else:
+                shape = item
+            if shape not in (None, "", [], ()):
+                fragments.append(str(shape))
+        raw_shape = "<br>".join(fragments)
+    else:
+        structured_args = None
+        raw_shape = value
+        case_count = call_count
+    try:
+        parsed_count = int(float(case_count or 1))
+    except (TypeError, ValueError):
+        parsed_count = 1
+    if isinstance(structured_args, list):
+        args = list(structured_args)
+    else:
+        fragments = _split_shape_fragments(raw_shape)
+        args = [_parse_shape_arg(fragment, index=idx) for idx, fragment in enumerate(fragments)]
+    return {
+        "primary": bool(primary),
+        "call_count": parsed_count,
+        "raw": str(raw_shape or "").strip(),
+        "args": args,
+    }
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Coerce a TraceLens numeric field, returning ``default`` on drift.
+
+    Args:
+        value: The value to coerce to ``float``.
+        default: Fallback returned when ``value`` cannot be parsed.
+
+    Returns:
+        The parsed float, or ``default`` on any failure.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _structured_benchmark_shape_cases(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Expose primary/supplementary serving shapes in machine-readable form.
+
+    Args:
+        candidate: The kernel candidate dict, possibly carrying a
+            ``task_group`` or ``input_shapes``.
+
+    Returns:
+        A dict with ``primary_shape`` and ``supplementary_shapes``, or ``{}``
+        when no usable shapes are present.
+    """
+    group = candidate.get("task_group")
+    rows = group.get("rows") if isinstance(group, dict) else None
+    cases: list[dict[str, Any]] = []
+    input_shapes = candidate.get("input_shapes")
+    is_synthetic = bool(candidate.get("_input_shapes_synthetic"))
+    if isinstance(rows, list) and rows:
+        # A task_group represents one dispatch covering multiple observed
+        # shapes for the same source function. Prefer its rows so the prompt
+        # keeps supplementary shapes instead of only the primary candidate.
+        for idx, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            case = _shape_case_from_value(
+                row.get("shapes"),
+                call_count=row.get("call_count"),
+                primary=idx == 0,
+            )
+            case.update(
+                {
+                    "operation": str(row.get("name") or ""),
+                    "aggregate_time_ms": _safe_float(row.get("duration_us")) / 1000.0,
+                    "percent_e2e": row.get("percent_of_total"),
+                    "bound": str(row.get("bound_type") or ""),
+                    "source": "task_group",
+                }
+            )
+            if case["raw"] or case["args"]:
+                cases.append(case)
+    if not cases and isinstance(input_shapes, list) and input_shapes and not is_synthetic:
+        # Only use input_shapes when they come from a real program output
+        # (TraceLens / runtime enrichment), not from the synthetic
+        # legacy-shapes conversion in enrich_candidates_with_runtime_metadata.
+        for idx, entry in enumerate(input_shapes):
+            case = _shape_case_from_value(entry, primary=idx == 0)
+            case["source"] = "input_shapes"
+            if case["raw"] or case["args"]:
+                cases.append(case)
+    if not cases:
+        return {}
+    cases[0]["primary"] = True
+    for case in cases[1:]:
+        case["primary"] = False
+    return {
+        "primary_shape": cases[0],
+        "supplementary_shapes": cases[1:],
+    }
+
+
 def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
     """Fallback shapes block when no TraceLens ``task_group`` is attached.
 
@@ -574,6 +993,13 @@ def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
     speedup will not translate to an end-to-end gain. Generic: applies to any
     candidate carrying captured shapes; returns ``""`` when none exist so the
     prompt stays byte-identical to legacy in that case.
+
+    Args:
+        candidate: The kernel candidate dict, possibly carrying captured
+            shapes.
+
+    Returns:
+        The captured-shapes prompt block, or ``""`` when no shapes exist.
     """
     shapes = candidate.get("shapes") or candidate.get("kernel_shapes")
     rendered = _format_shapes_for_case(shapes)
@@ -596,7 +1022,18 @@ def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
 def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
     """Render the multi-row benchmark cases section for a task_group.
 
-    Falls back to :func:`_build_captured_shapes_block` when ``candidate["task_group"]`` is absent/empty so captured shapes still reach GEAK. With a task_group, emits one bullet per TraceLens row (sorted by aggregate time desc) surfacing operation/args/aggregate_time_ms/percent_e2e/count/per_call_ms/flops_per_byte/efficiency/bound (bound + per_call_ms drive backend dispatch).
+    Falls back to :func:`_build_captured_shapes_block` when
+    ``candidate["task_group"]`` is absent/empty so captured shapes still reach
+    GEAK. With a task_group, emits one bullet per TraceLens row (sorted by
+    aggregate time descending) surfacing operation, args, aggregate time,
+    percent E2E, count, per-call ms, flops/byte, efficiency, and bound (bound +
+    per-call ms drive backend dispatch).
+
+    Args:
+        candidate: The kernel candidate dict, optionally with a ``task_group``.
+
+    Returns:
+        The rendered benchmark-cases prompt block.
     """
     group = candidate.get("task_group")
     rows = group.get("rows") if isinstance(group, dict) else None
@@ -617,25 +1054,29 @@ def _build_benchmark_cases_block(candidate: dict[str, Any]) -> str:
         "",
     ]
     if len(rows) > 1:
-        lines.extend([
-            f"This kernel resolves to the same source function across "
-            f"{len(rows)} TraceLens rows ("
-            f"{function_name or '<unknown function>'}"
-            + (f" at {location}" if location else "")
-            + (", AST-resolved" if ast_resolved else "")
-            + "). Optimize the source function once; the patch applies "
-            f"to all rows below. Use the first row as the primary",
-            "benchmark case; treat the rest as supplementary shape coverage.",
-            "",
-        ])
+        lines.extend(
+            [
+                f"This kernel resolves to the same source function across "
+                f"{len(rows)} TraceLens rows ("
+                f"{function_name or '<unknown function>'}"
+                + (f" at {location}" if location else "")
+                + (", AST-resolved" if ast_resolved else "")
+                + "). Optimize the source function once; the patch applies "
+                "to all rows below. Use the first row as the primary",
+                "benchmark case; treat the rest as supplementary shape coverage.",
+                "",
+            ]
+        )
     else:
-        lines.extend([
-            f"This kernel maps to a single TraceLens row in "
-            f"{function_name or '<unknown function>'}"
-            + (f" at {location}" if location else "")
-            + ". The case below is the primary benchmark target.",
-            "",
-        ])
+        lines.extend(
+            [
+                f"This kernel maps to a single TraceLens row in "
+                f"{function_name or '<unknown function>'}"
+                + (f" at {location}" if location else "")
+                + ". The case below is the primary benchmark target.",
+                "",
+            ]
+        )
 
     for idx, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
@@ -734,25 +1175,26 @@ _PRIORITY_BULLETS: dict[str, list[str]] = {
             "1. **Structural simplification**: hoist loop-invariant computations, "
             + "remove redundant address arithmetic, collapse dual-pass logic."
         ),
-        (
-            "2. **Shape-aware tuning**: specialize block sizes and grid indexing "
-            + "for the dominant TraceLens Args."
-        ),
+        ("2. **Shape-aware tuning**: specialize block sizes and grid indexing " + "for the dominant TraceLens Args."),
         (
             "3. **Memory traffic reduction**: improve coalescing / vectorization, "
             + "reduce intermediate writes, avoid extra global-memory round trips."
         ),
         "4. **Launch amortization** for tiny high-count decode shapes.",
-        (
-            "5. **Compute utilization**: improve MFMA tile choice, occupancy, "
-            + "register / shared-memory balance."
-        ),
+        ("5. **Compute utilization**: improve MFMA tile choice, occupancy, " + "register / shared-memory balance."),
     ],
 }
 
 
 def _classify_bound(bound_type: str) -> str:
-    """Map TraceLens ``bound`` strings to one of ``memory`` / ``compute`` / ``unknown``."""
+    """Classify a TraceLens ``bound`` string into a coarse bucket.
+
+    Args:
+        bound_type: The TraceLens bound description.
+
+    Returns:
+        One of ``"memory"``, ``"compute"``, or ``"unknown"``.
+    """
     text = (bound_type or "").lower()
     if "memory" in text or "bandwidth" in text or "hbm" in text:
         return "memory"
@@ -762,9 +1204,16 @@ def _classify_bound(bound_type: str) -> str:
 
 
 def _build_priority_block(candidate: dict[str, Any]) -> str:
-    """Render the bound-keyed optimization priority list (uses the primary row's bound for a task_group).
+    """Render the bound-keyed optimization priority list.
 
-    Empty string when ``bound_type`` is missing and no ``task_group`` is attached.
+    Uses the primary row's bound when the candidate carries a ``task_group``.
+
+    Args:
+        candidate: The kernel candidate dict.
+
+    Returns:
+        The priority-list prompt block, or ``""`` when ``bound_type`` is
+        missing and no ``task_group`` is attached.
     """
     group = candidate.get("task_group")
     bound_type = str(candidate.get("bound_type") or "").strip()
@@ -776,9 +1225,7 @@ def _build_priority_block(candidate: dict[str, Any]) -> str:
         return ""
     bucket = _classify_bound(bound_type)
     label = bound_type or "unknown"
-    header_line = (
-        f"## Optimization priorities (TraceLens bound: `{label}`)"
-    )
+    header_line = f"## Optimization priorities (TraceLens bound: `{label}`)"
     intro = (
         "The list below orders optimization levers by expected payoff for "
         "this kernel's bottleneck. Try lever 1 first; only move to lever 2 "
@@ -794,7 +1241,16 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     ``int / float / numeric str`` to ``float``; everything else (None,
     empty string, malformed) → ``default``. Used by hypothesis-block
     helpers so per-row impact numbers from ``all_pitem_prose`` survive
-    JSON round-trips that may have already converted them to strings."""
+    JSON round-trips that may have already converted them to strings.
+
+    Args:
+        value (Any): Value to coerce to ``float``.
+        default (float): Fallback returned when ``value`` is None/empty or
+            cannot be parsed.
+
+    Returns:
+        float: The parsed float, or ``default`` on any failure.
+    """
     try:
         if value is None or value == "":
             return default
@@ -804,9 +1260,23 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 
 def _format_impact_range(
-    low_ms: float, low_e2e: float, high_ms: float, high_e2e: float,
+    low_ms: float,
+    low_e2e: float,
+    high_ms: float,
+    high_e2e: float,
 ) -> str:
-    """One-line impact range formatter; empty string when both ends zero."""
+    """One-line impact range formatter; empty string when both ends zero.
+
+    Args:
+        low_ms (float): Low-end estimated savings in milliseconds.
+        low_e2e (float): Low-end savings as a percent of end-to-end time.
+        high_ms (float): High-end estimated savings in milliseconds.
+        high_e2e (float): High-end savings as a percent of end-to-end time.
+
+    Returns:
+        str: The formatted impact-range line, or empty string when both
+            ``low_ms`` and ``high_ms`` are zero.
+    """
     if not (low_ms or high_ms):
         return ""
     return (
@@ -824,6 +1294,13 @@ def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
     every P-item's prose under a ``### P{rank}`` header; otherwise a single block.
     The reasoning/resolution prose is labelled a hypothesis to validate (it is
     itself LLM-generated); the numeric impact range is roofline arithmetic.
+
+    Args:
+        candidate: The kernel candidate dict, optionally with a ``task_group``
+            carrying P-item prose.
+
+    Returns:
+        The hypothesis prompt block, or ``""`` when no prose is present.
     """
     # Multi-P-item case (Q2): render every P-item's prose so GEAK sees all framings.
     group = candidate.get("task_group")
@@ -908,6 +1385,16 @@ def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
 
 
 def _coerce_cli_value(value: str | bool) -> Any:
+    """Coerce a CLI token to a bool/int/float, falling back to the string.
+
+    Args:
+        value (str | bool): A raw CLI value (already a bool, or a string
+            token such as ``"true"``, ``"42"``, or ``"0.5"``).
+
+    Returns:
+        Any: The bool/int/float parsed from ``value``, or the original
+            string when it is not a recognized scalar.
+    """
     if isinstance(value, bool):
         return value
     text = str(value)
@@ -924,7 +1411,21 @@ def _coerce_cli_value(value: str | bool) -> Any:
 
 
 def parse_extra_server_args(extra_args: str) -> dict[str, Any]:
-    """Parse selected SGLang flags from an EXTRA_SGLANG_ARGS-style string."""
+    """Parse selected SGLang flags from an EXTRA_SGLANG_ARGS-style string.
+
+    Splits the string with shell rules, turning ``--flag value`` pairs into
+    coerced dict entries and bare ``--flag`` tokens into ``True``. The raw
+    string is preserved under the ``raw`` key.
+
+    Args:
+        extra_args (str): A shell-style argument string (e.g.
+            ``"--page-size 16 --disable-cuda-graph"``).
+
+    Returns:
+        dict[str, Any]: Parsed flags keyed by normalized name (dashes →
+            underscores), always including ``raw`` with the original text;
+            an empty dict when ``extra_args`` is blank.
+    """
     if not extra_args.strip():
         return {}
     try:
@@ -949,6 +1450,18 @@ def parse_extra_server_args(extra_args: str) -> dict[str, Any]:
 
 
 def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any]]:
+    """Normalize a shapes list into ``{call_num, shape}`` entries.
+
+    Args:
+        shapes (Any): Shapes value; only a list is processed (each item may
+            be a ``{call_num, shape}`` dict or a bare shape).
+        call_num (Any): Default call count applied to bare-shape entries;
+            coerced to int, defaulting to 1.
+
+    Returns:
+        list[dict[str, Any]]: One ``{"call_num", "shape"}`` dict per
+            non-empty shape; empty list when ``shapes`` is not a list.
+    """
     if not isinstance(shapes, list):
         return []
     try:
@@ -958,17 +1471,35 @@ def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any
     entries: list[dict[str, Any]] = []
     for shape in shapes:
         if isinstance(shape, dict) and "shape" in shape:
-            entries.append({
-                "call_num": int(shape.get("call_num") or count),
-                "shape": shape["shape"],
-            })
+            entries.append(
+                {
+                    "call_num": int(shape.get("call_num") or count),
+                    "shape": shape["shape"],
+                }
+            )
         elif shape not in (None, "", [], ()):
             entries.append({"call_num": count, "shape": shape})
     return entries
 
 
 def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
-    """Build structured runtime context for GEAK task prompts."""
+    """Build structured runtime context for GEAK task prompts.
+
+    Merges the candidate's shape/dtype/runtime fields with parsed
+    ``extra_server_args`` so GEAK receives a single normalized metadata
+    dict (kernel path/name, input/output shapes and dtypes, runtime args
+    and flags, kernel params, env vars, etc.).
+
+    Args:
+        candidate (dict[str, Any]): Kernel candidate dict supplying shapes,
+            dtypes, runtime flags/args, and kernel params.
+        args (argparse.Namespace): Parsed CLI args; provides overrides such
+            as ``source_file`` and ``extra_server_args``.
+
+    Returns:
+        dict[str, Any]: The structured kernel-metadata dict consumed when
+            rendering GEAK task prompts.
+    """
     source_file = getattr(args, "source_file", "") or candidate.get("source_file", "")
     kernel_name = str(candidate.get("name") or getattr(args, "kernel_id", ""))
     input_shapes = candidate.get("input_shapes")
@@ -977,6 +1508,7 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
     input_dtypes = candidate.get("input_dtypes")
     if input_dtypes is None:
         input_dtypes = candidate.get("dtypes", [])
+    benchmark_shape_cases = _structured_benchmark_shape_cases(candidate)
 
     runtime_flags: dict[str, Any] = {}
     if isinstance(candidate.get("runtime_flags"), dict):
@@ -987,6 +1519,7 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
     from _payload_aliases import (  # type: ignore[import-not-found]
         read_extra_server_args as _read_eserver,
     )
+
     extra_server_args = (
         getattr(args, "extra_server_args", "")
         or _read_eserver(candidate)
@@ -1033,7 +1566,7 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
     for key in ("KV_DTYPE", "BLOCK_SIZE", "HEAD_SIZE"):
         kernel_params.setdefault(key, candidate.get(key))
 
-    return {
+    metadata = {
         "kernel_path": str(source_file or ""),
         "kernel_name": kernel_name,
         "input_shapes": input_shapes or [],
@@ -1052,6 +1585,9 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
             candidate.get("source_promoted_from_launcher"),
         ),
     }
+    if benchmark_shape_cases:
+        metadata["benchmark_shape_cases"] = benchmark_shape_cases
+    return metadata
 
 
 def build_prompt(
@@ -1060,6 +1596,23 @@ def build_prompt(
     *,
     backend: str | None = None,
 ) -> str:
+    """Render the full optimization prompt handed to a rewrite backend.
+
+    Assembles the hardware/budget/source-attribution preamble, the source
+    listing, semantically-ordered benchmark references, and the TraceLens
+    benchmark-cases / priority / hypothesis blocks into one prompt string.
+
+    Args:
+        candidate (dict[str, Any]): Kernel candidate dict supplying source,
+            benchmarks, shapes, and TraceLens context.
+        args (argparse.Namespace): Parsed CLI args (source override, GPU
+            count, kernel id, etc.).
+        backend (str | None): Target backend name, used to tailor backend-
+            specific prompt sections; None for the generic prompt.
+
+    Returns:
+        str: The fully rendered prompt text for the rewrite backend.
+    """
     source_file = args.source_file or candidate.get("source_file", "")
     source_block = ""
     if source_file and Path(str(source_file)).exists():
@@ -1070,13 +1623,10 @@ def build_prompt(
     if isinstance(bench_files, str):
         bench_files = [bench_files]
     # Sort by semantic match so the most-relevant benchmarks head the [:8]-clipped list.
-    bench_files = _match_benchmark_for_kernel(
-        str(candidate.get("name") or ""), bench_files
-    )
+    bench_files = _match_benchmark_for_kernel(str(candidate.get("name") or ""), bench_files)
     is_multigpu = bool(candidate.get("is_multigpu"))
     # GPU count: CLI override, then candidate hint, then 1.
-    num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0)
-                   or int(candidate.get("num_gpus_recommended") or 1))
+    num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0) or int(candidate.get("num_gpus_recommended") or 1))
     # Map source_type to GEAK's kernel_type vocabulary for task_parser routing.
     geak_kernel_type = _GEAK_KERNEL_TYPE.get(str(candidate.get("source_type", "unknown")), "other")
     kernel_name = str(candidate.get("name", args.kernel_id))
@@ -1139,9 +1689,7 @@ def build_prompt(
         budget_min = int(getattr(args, "geak_budget_min", 130) or 130)
     else:
         budget_min = int(getattr(args, "budget_minutes", 60) or 60)
-    target_platform = (
-        getattr(args, "target_platform", "") or _env_target_platform()
-    )
+    target_platform = getattr(args, "target_platform", "") or _env_target_platform()
     platform_intro, hardware_notes = _hardware_prompt_blocks(target_platform)
     platform_build_flag = _target_build_flag(target_platform)
     hypothesis_block = _build_hypothesis_block(candidate)
@@ -1187,14 +1735,14 @@ def build_prompt(
         "  or `rg ... <repo>`, NEVER `find /`.\n"
         "\n"
         "GOAL & TIME BUDGET:\n"
-        # GEAK v3.2.0 LLM-parses prompt for `--mode full` / `mode=quick` etc.
+        # GEAK v3.2.1 LLM-parses prompt for `--mode full` / `mode=quick` etc.
         # (prompts.py:73-76 trigger list). Emit the explicit token so the
         # parser locks in the right preset (yaml run.budgets.<mode>) instead
         # of leaking off other prompt phrases like "quick micro-benchmark".
         f"- Run mode: {'full' if budget_min >= 120 else 'quick'} "
         f"(--mode {'full' if budget_min >= 120 else 'quick'}).\n"
         f"- Hard wall-clock budget: ~{budget_min} minutes. Iterate up to minute "
-        f"{int(budget_min*0.85)},\n"
+        f"{int(budget_min * 0.85)},\n"
         "  then STOP iterating and finalize the report with your best so-far measured\n"
         "  speedup. The runner will SIGTERM at minute "
         f"{budget_min}; any in-flight work not on disk is lost.\n"
@@ -1235,7 +1783,7 @@ def build_prompt(
         "from your_v3 import <fn> as optimized` — Triton is JIT-compiled, NO rebuild.\n"
         "(option 2) STANDALONE HIP/CUDA program. Write a single .hip/.cu under\n"
         "  ./benchmarks/ that #include's BOTH the aiter baseline header (e.g.\n"
-        f"  `#include \"{kernel_repo}/csrc/include/<the_target>.cuh\"`) AND your\n"
+        f'  `#include "{kernel_repo}/csrc/include/<the_target>.cuh"`) AND your\n'
         "  optimized .cuh from ./optimized_versions/, then build with:\n"
         f"  `hipcc -O3 -std=c++17 -DUSE_ROCM -I{kernel_repo or '/sgl-workspace/aiter'}/csrc/include "
         f"{platform_build_flag} -o ./benchmarks/bench ./benchmarks/bench.hip`.\n"
@@ -1268,9 +1816,20 @@ def build_prompt(
         "Pick whichever option matches the kernel; do NOT just measure baseline\n"
         "and write `speedup: N/A` — that wastes the run.\n"
     )
-    # Multi-node sandbox is GPU-less: tell the LLM to dispatch compile+bench to a
-    # GPU-bearing pod via `inference_optimizer.multi_node kernel-bench`.
-    mn_state_file = Path("/tmp/multi_node_state.json")
+    # Multi-node sandbox is GPU-less: any local `hipcc` / `torch.cuda.*` /
+    # `torch.utils.cpp_extension.load` call WILL fail. Direct the LLM to
+    # delegate compile + execution to a GPU-bearing pod via the
+    # `inference_optimizer.multi_node kernel-bench` subcommand (head pod,
+    # single-GPU actor); LLM still iterates locally on source, just
+    # off-loads each measurement step. The CLI base64-encodes any
+    # supporting files, stages them under --workspace on the pod, runs
+    # the bench inside that workspace with the GPU, and returns
+    # stdout/stderr + any matching result*.json artifacts.
+    # Honour $MULTI_NODE_STATE_FILE (default /tmp/multi_node_state.json), same
+    # resolution as apply_kernel_patch._mn_state_path / _multi_node_env. This
+    # keeps test isolation intact: a stale real /tmp state file no longer
+    # misclassifies a single-node run as multi-node.
+    mn_state_file = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))
     is_multinode_run = False
     try:
         if mn_state_file.is_file():
@@ -1291,13 +1850,13 @@ def build_prompt(
             "       python3 -m inference_optimizer.multi_node kernel-bench \\\n"
             "         --workspace /tmp/kbench_$KERNEL_ID \\\n"
             "         --bench-command 'cd /tmp/kbench_$KERNEL_ID && bash bench.sh' \\\n"
-            "         --files-b64-json '<{\"bench.sh\":\"<b64>\",\"v1.cu\":\"<b64>\",...}>' \\\n"
+            '         --files-b64-json \'<{"bench.sh":"<b64>","v1.cu":"<b64>",...}>\' \\\n'
             "         --result-glob 'result*.json'\n"
             "  3. Parse the printed JSON document's `result.stdout_tail`\n"
             "     and `result.artifacts[].content` for the speedup number;\n"
             "     write it into optimization_report.md as `[MICRO_SPEEDUP]`.\n"
             "Helper script to construct the b64 map cleanly:\n"
-            "    python3 -c 'import base64,json,glob;print(json.dumps({p:base64.b64encode(open(p,\"rb\").read()).decode() for p in glob.glob(\"**/*\",recursive=True) if __import__(\"os\").path.isfile(p)}))'\n"
+            '    python3 -c \'import base64,json,glob;print(json.dumps({p:base64.b64encode(open(p,"rb").read()).decode() for p in glob.glob("**/*",recursive=True) if __import__("os").path.isfile(p)}))\'\n'
             "Treat `kernel-bench` as your only measurement gate; everything\n"
             "else (code edits, correctness reasoning) still happens locally.\n"
         )
@@ -1339,81 +1898,132 @@ def build_prompt(
                     )
                 else:
                     focus_line = "Use the report below as full context for this kernel.\n"
-                tracelens_context_block = (
-                    "\n## TraceLens Context\n\n"
-                    + focus_line
-                    + "\n"
-                    + full_report
-                )
+                tracelens_context_block = "\n## TraceLens Context\n\n" + focus_line + "\n" + full_report
     # Use GEAK task_parser field names so its parser can extract them; OOB reads the same body as prose.
-    return "\n".join([
-        f"# TASK: Optimize the `{kernel_name}` kernel",
-        "",
-        budget_protocol_block,
-        platform_intro,
-        "",
-        f"kernel_name: {kernel_name}",
-        f"kernel_url: {source_file}",
-        f"kernel_type: {geak_kernel_type}",
-        f"repo: {kernel_repo}",
-        f"GPU percent: {candidate.get('gpu_pct', 'unknown')}",
-        f"Shapes: {json.dumps(candidate.get('shapes', []), sort_keys=True)}",
-        promotion_block,
-        "",
-        "Kernel runtime metadata (structured context for GEAK; unknown fields are null, empty arrays, or empty objects):",
-        "```json",
-        json.dumps(kernel_metadata, indent=2, sort_keys=True),
-        "```",
-        "",
-        hardware_notes,
-        hypothesis_block,
-        benchmark_cases_block,
-        priority_block,
-        "",
-        "Preserve function name, signature, decorators, and numerical behavior.",
-        "Return complete optimized code plus explanation of correctness assumptions.",
-        repo_block,
-        bench_block,
-        safety,
-        source_block,
-        tracelens_context_block,
-    ])
+    return "\n".join(
+        [
+            f"# TASK: Optimize the `{kernel_name}` kernel",
+            "",
+            budget_protocol_block,
+            platform_intro,
+            "",
+            f"kernel_name: {kernel_name}",
+            f"kernel_url: {source_file}",
+            f"kernel_type: {geak_kernel_type}",
+            f"repo: {kernel_repo}",
+            f"GPU percent: {candidate.get('gpu_pct', 'unknown')}",
+            f"Shapes: {json.dumps(candidate.get('shapes', []), sort_keys=True)}",
+            (
+                "Shape contract: when `benchmark_shape_cases` is present in the "
+                "metadata, benchmark its `primary_shape` first and use "
+                "`supplementary_shapes` only as additional coverage. Do not invent "
+                "shapes or reorder tensor arguments."
+                if kernel_metadata.get("benchmark_shape_cases")
+                else ""
+            ),
+            promotion_block,
+            "",
+            "Kernel runtime metadata (structured context for GEAK; unknown fields are null, empty arrays, or empty objects):",
+            "```json",
+            json.dumps(kernel_metadata, indent=2, sort_keys=True),
+            "```",
+            "",
+            hardware_notes,
+            hypothesis_block,
+            benchmark_cases_block,
+            priority_block,
+            "",
+            "Preserve function name, signature, decorators, and numerical behavior.",
+            "Return complete optimized code plus explanation of correctness assumptions.",
+            repo_block,
+            bench_block,
+            safety,
+            source_block,
+            tracelens_context_block,
+        ]
+    )
 
 
 def ray_available() -> bool:
+    """Report whether the optional ``ray`` dependency can be imported.
+
+    Returns:
+        bool: True when ``import ray`` succeeds; False on any import error.
+    """
     try:
         import ray  # noqa: F401
+
         return True
     except Exception:
         return False
 
 
 def _backends_module_dir() -> Path:
+    """Return the directory holding the per-backend submitter modules.
+
+    Returns:
+        Path: The ``backends`` directory next to this module.
+    """
     return Path(__file__).resolve().parent / "backends"
 
 
 def _import_backend(name: str):
-    """Dynamically load kernel-agent/tools/backends/<name>.py (dir added to sys.path so submodules cross-import)."""
+    """Dynamically import a per-backend submitter module.
+
+    The ``backends`` directory is added to ``sys.path`` so its submodules can
+    cross-import each other.
+
+    Args:
+        name: The backend module name (without ``.py``).
+
+    Returns:
+        The imported backend module.
+    """
     backends_dir = _backends_module_dir()
     if str(backends_dir) not in sys.path:
         sys.path.insert(0, str(backends_dir))
     import importlib
+
     return importlib.import_module(name)
 
 
 def _kernel_agent_root() -> Path:
-    """Output root for kernel-agent tools at ``$USER_DATA_PATH/kernel-agent`` (via workspace_root, which warns once when unset)."""
+    """Resolve the kernel-agent tools output root.
+
+    Uses :func:`workspace_root` (which warns once when ``$USER_DATA_PATH`` is
+    unset).
+
+    Returns:
+        The ``$USER_DATA_PATH/kernel-agent`` output root path.
+    """
     return Path(workspace_root()) / "kernel-agent"
 
 
 def _geak_output_dir(session_id: str, prompt_file: Path) -> Path:
+    """Return (creating if needed) the GEAK output dir for a run.
+
+    Args:
+        session_id (str): Per-session identifier namespacing the output.
+        prompt_file (Path): Prompt file whose stem names the run subdir.
+
+    Returns:
+        Path: The created ``.../geak/<session_id>/<prompt_stem>`` directory.
+    """
     out = _kernel_agent_root() / "geak" / session_id / prompt_file.stem
     out.mkdir(parents=True, exist_ok=True)
     return out
 
 
 def _set_yaml_tools_rag(text: str, enabled: bool) -> str:
-    """Return YAML text with tools.rag set without mutating the source config."""
+    """Return YAML text with tools.rag set without mutating the source config.
+
+    Args:
+        text (str): The original GEAK YAML config text.
+        enabled (bool): Whether ``tools.rag`` should be ``true`` or ``false``.
+
+    Returns:
+        str: A new YAML string with the ``tools.rag`` value set/inserted.
+    """
     value = "true" if enabled else "false"
     lines = text.splitlines()
     out: list[str] = []
@@ -1457,7 +2067,18 @@ _DEFAULT_GEAK_FALLBACK_TIMEOUT_SEC = 3600
 
 
 def _ensure_yaml_env_timeout(text: str, *, timeout: int = _DEFAULT_GEAK_FALLBACK_TIMEOUT_SEC) -> str:
-    """Inject ``env.timeout`` (default 3600s) if absent; mini-swe-agent defaults to 30s and would kill the test command."""
+    """Ensure the GEAK YAML carries a sufficient ``env.timeout``.
+
+    Injects or raises ``env.timeout`` (default 3600s) because mini-swe-agent
+    defaults to 30s and would kill the test command.
+
+    Args:
+        text: The original GEAK YAML config text.
+        timeout: Desired timeout in seconds (floored at 60).
+
+    Returns:
+        The YAML text with ``env.timeout`` set to at least ``timeout``.
+    """
     timeout = max(60, int(timeout))
     has_env = re.search(r"^env\s*:\s*(?:#.*)?$", text, flags=re.MULTILINE)
     if has_env:
@@ -1509,7 +2130,20 @@ def _geak_config_for_run(
     args: argparse.Namespace,
     prompt_file: Path,
 ) -> str:
-    """Create a per-run GEAK config only when runtime overrides need it."""
+    """Create a per-run GEAK config only when runtime overrides need it.
+
+    Reads the base ``GEAK_CONFIG`` file and, when CLI overrides (RAG
+    disable, env timeout) change it, writes a per-run override file next to
+    the prompt; otherwise the original config path is returned unchanged.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (e.g. ``disable_rag``).
+        prompt_file (Path): Prompt file whose directory hosts any override.
+
+    Returns:
+        str: Path to the config GEAK should use — the base config when no
+            override is needed, otherwise the per-run override file.
+    """
     base_config = os.environ.get("GEAK_CONFIG", "")
     if not base_config or not Path(base_config).is_file():
         return base_config
@@ -1526,7 +2160,15 @@ def _geak_config_for_run(
 
 
 def _extract_py_path(test_command: str) -> str | None:
-    """Extract the .py file path from a test command string."""
+    """Extract the .py file path from a test command string.
+
+    Args:
+        test_command (str): A shell-style test command string.
+
+    Returns:
+        str | None: The first ``.py`` token found, or None when none is
+            present or the command cannot be split.
+    """
     try:
         for part in shlex.split(test_command):
             if part.endswith(".py"):
@@ -1547,6 +2189,19 @@ def _try_generate_harness(
     """Try to auto-generate a GEAK-compatible harness from a benchmark file.
 
     Returns a new test_command pointing to the generated harness, or None.
+
+    Args:
+        test_command (str): Existing test command whose ``.py`` path is the
+            benchmark source for generation.
+        candidate (dict): Kernel candidate dict passed to the generator.
+        source_file (str): Path to the kernel source under optimization.
+        out_dir (Path): Directory the generated harness is written to.
+        kernel_repo (str): Repo root used to resolve imports for the harness.
+        log_path (Path | None): Optional run log for generator diagnostics.
+
+    Returns:
+        str | None: A new ``test_command`` pointing at the generated harness,
+            or None when generation is not possible or fails.
     """
     bench_py = _extract_py_path(test_command)
     if not bench_py or not Path(bench_py).is_file():
@@ -1575,11 +2230,22 @@ def _try_generate_harness(
 
 
 def _rocprof_roofline_enabled() -> bool:
+    """Return whether rocprof roofline profiling is enabled.
+
+    Returns:
+        ``True`` unless ``HYPERLOOM_ROCPROF_ROOFLINE`` is set to a falsy value.
+    """
     value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE", "1").strip().lower()
     return value not in {"0", "false", "no", "off"}
 
 
 def _rocprof_timeout_sec() -> int:
+    """Return the per-kernel rocprof roofline timeout in seconds.
+
+    Returns:
+        The value from ``HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC`` (floored at
+        60s), or ``1800`` when unset or invalid.
+    """
     try:
         return max(60, int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800")))
     except ValueError:
@@ -1587,6 +2253,17 @@ def _rocprof_timeout_sec() -> int:
 
 
 def _rocprof_workdir(candidate: dict[str, Any], source_file: str, out_dir: Path) -> Path:
+    """Choose a working directory for the rocprof profiling run.
+
+    Args:
+        candidate: Candidate metadata containing ``kernel_repo``.
+        source_file: Path to the kernel source file.
+        out_dir: Fallback directory when no candidate path resolves.
+
+    Returns:
+        The first existing directory derived from the candidate/source paths,
+        else ``out_dir``.
+    """
     for raw in (candidate.get("kernel_repo"), source_file):
         if not raw:
             continue
@@ -1599,6 +2276,15 @@ def _rocprof_workdir(candidate: dict[str, Any], source_file: str, out_dir: Path)
 
 
 def _rocprof_profile_command(test_command: str) -> str:
+    """Convert a harness correctness command into a profiling command.
+
+    Args:
+        test_command: Original harness test command.
+
+    Returns:
+        The command with a single ``--correctness`` swapped for ``--profile``
+        when it targets a generated harness; otherwise the command unchanged.
+    """
     if "--correctness" not in test_command:
         return test_command
     if "/unittest/harness_" not in test_command and " harness_" not in test_command:
@@ -1607,6 +2293,15 @@ def _rocprof_profile_command(test_command: str) -> str:
 
 
 def _compact_rocprof_prompt(payload: dict[str, Any]) -> str:
+    """Render a compact roofline-evidence addendum for the agent prompt.
+
+    Args:
+        payload: Structured rocprof roofline payload.
+
+    Returns:
+        A Markdown snippet summarizing up to three kernels' roofline signals,
+        or an empty string when there are no results.
+    """
     rows = payload.get("results") if isinstance(payload, dict) else []
     if not isinstance(rows, list) or not rows:
         return ""
@@ -1622,14 +2317,16 @@ def _compact_rocprof_prompt(payload: dict[str, Any]) -> str:
         roof = row.get("rocprof_roofline") or {}
         if not isinstance(roof, dict):
             roof = {}
-        lines.extend([
-            f"- Device kernel: {row.get('matched_kernel_name') or row.get('name') or 'unknown'}",
-            f"  - Bound type: {roof.get('bound_type') or row.get('bottleneck') or 'unknown'}",
-            f"  - Roofline efficiency: {roof.get('roofline_efficiency_pct')}",
-            f"  - AI HBM: {roof.get('ai_hbm')}",
-            f"  - Compute util pct: {roof.get('compute_utilization_pct')}",
-            f"  - Bandwidth util pct: {roof.get('bandwidth_utilization_pct')}",
-        ])
+        lines.extend(
+            [
+                f"- Device kernel: {row.get('matched_kernel_name') or row.get('name') or 'unknown'}",
+                f"  - Bound type: {roof.get('bound_type') or row.get('bottleneck') or 'unknown'}",
+                f"  - Roofline efficiency: {roof.get('roofline_efficiency_pct')}",
+                f"  - AI HBM: {roof.get('ai_hbm')}",
+                f"  - Compute util pct: {roof.get('compute_utilization_pct')}",
+                f"  - Bandwidth util pct: {roof.get('bandwidth_utilization_pct')}",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -1642,6 +2339,23 @@ def _run_rocprof_roofline(
     prompt_file: Path,
     log_path: Path | None,
 ) -> dict[str, Any]:
+    """Run rocprof roofline before GEAK and append evidence to the prompt.
+
+    Profiles the kernel via the ``rocprof_roofline.py`` helper, writes the
+    JSON/text artifacts, and appends a compact evidence section to the prompt.
+
+    Args:
+        test_command: Harness command used to exercise the kernel.
+        candidate: Candidate kernel metadata.
+        source_file: Path to the kernel source file.
+        out_dir: Output directory for this attempt.
+        prompt_file: Prompt file to append roofline evidence to.
+        log_path: Optional log file for progress messages.
+
+    Returns:
+        A status dict with the run outcome and artifact paths (``status`` is
+        ``skipped``/``failed``/``ok``).
+    """
     roof_dir = out_dir / "rocprof_roofline"
     roof_dir.mkdir(parents=True, exist_ok=True)
     out_json = roof_dir / "before.json"
@@ -1658,11 +2372,16 @@ def _run_rocprof_roofline(
     cmd = [
         sys.executable,
         str(tool),
-        "--workdir", str(workdir),
-        "--cmd", profiling_command,
-        "--out-json", str(out_json),
-        "--out-txt", str(out_txt),
-        "--timeout-sec", str(_rocprof_timeout_sec()),
+        "--workdir",
+        str(workdir),
+        "--cmd",
+        profiling_command,
+        "--out-json",
+        str(out_json),
+        "--out-txt",
+        str(out_txt),
+        "--timeout-sec",
+        str(_rocprof_timeout_sec()),
     ]
     if target_kernel:
         cmd.extend(["--target-kernel", target_kernel])
@@ -1705,6 +2424,15 @@ def _run_rocprof_roofline(
 
 
 def _rocprof_kernel_matches(row: dict[str, Any], target_kernel: str) -> bool:
+    """Return whether a roofline result row matches the target kernel.
+
+    Args:
+        row: Result row with ``matched_kernel_name`` / ``name`` fields.
+        target_kernel: Kernel name to match; empty matches any row.
+
+    Returns:
+        ``True`` if the row corresponds to ``target_kernel``.
+    """
     if not target_kernel:
         return True
     target = target_kernel.strip()
@@ -1716,6 +2444,17 @@ def _rocprof_kernel_matches(row: dict[str, Any], target_kernel: str) -> bool:
 
 
 def _rocprof_sidecar_from_payload(payload: dict[str, Any], txt_path: str, json_path: str) -> dict[str, Any]:
+    """Project a roofline payload into a sidecar record for one kernel.
+
+    Args:
+        payload: Structured rocprof roofline payload.
+        txt_path: Path to the text report, recorded on the result.
+        json_path: Path to the JSON report, recorded on the result.
+
+    Returns:
+        A roofline record for the matched (or first) kernel, or a
+        skipped/failed status record when no match is found.
+    """
     rows = payload.get("results") if isinstance(payload, dict) else []
     if not isinstance(rows, list) or not rows:
         return {
@@ -1746,17 +2485,28 @@ def _rocprof_sidecar_from_payload(payload: dict[str, Any], txt_path: str, json_p
     else:
         first = rows[0] if isinstance(rows[0], dict) else {}
     roof = dict(first.get("rocprof_roofline") or {})
-    roof.update({
-        "status": first.get("status") or payload.get("status") or "matched",
-        "matched_kernel_name": first.get("matched_kernel_name") or first.get("name"),
-        "target_kernel": target_kernel,
-        "report_path": txt_path,
-        "json_path": json_path,
-    })
+    roof.update(
+        {
+            "status": first.get("status") or payload.get("status") or "matched",
+            "matched_kernel_name": first.get("matched_kernel_name") or first.get("name"),
+            "target_kernel": target_kernel,
+            "report_path": txt_path,
+            "json_path": json_path,
+        }
+    )
     return roof
 
 
 def _rocprof_phase_has_measurement(phase_data: dict[str, Any]) -> bool:
+    """Return whether a roofline phase contains real numeric measurements.
+
+    Args:
+        phase_data: A before/after roofline phase record.
+
+    Returns:
+        ``True`` only when the phase did not fail/skip and carries at least one
+        numeric roofline metric (metadata alone does not count).
+    """
     status = str(phase_data.get("status") or "").lower()
     if status in {"failed", "skipped"}:
         return False
@@ -1802,6 +2552,17 @@ def _update_kernel_roofline_sidecar(
     Even when ``_run_rocprof_roofline`` skipped (e.g. no ``test_command``)
     or failed, we still write a tagged entry so the dashboard can distinguish
     "considered but skipped/failed" from "not yet evaluated" (``null``).
+
+    Args:
+        workspace_path: Workspace root containing ``reports/``.
+        kernel_id: The kernel id whose sidecar entry is updated.
+        rocprof_json_path: Path to the rocprof JSON artifact, if any.
+        rocprof_txt_path: Path to the rocprof text report, if any.
+        log_path: Optional path to append diagnostics.
+        rocprof_status: Status tag to record when no JSON is available.
+        rocprof_reason: Reason tag to record when no JSON is available.
+        phase: Which sub-key to write (``before_kernel_opt`` or
+            ``after_kernel_opt``).
     """
     sidecar_path = Path(workspace_path) / "reports" / "kernel_roofline.json"
     if not sidecar_path.is_file():
@@ -1882,7 +2643,20 @@ def _apply_geak_env_overrides(
     args: argparse.Namespace,
     prompt_file: Path,
 ) -> dict[str, str | None]:
-    """Temporarily tune GEAK env for this attempt; caller must restore."""
+    """Temporarily tune GEAK env for this attempt; caller must restore.
+
+    Sets ``GEAK_CONFIG`` (and disables the knowledge base when requested)
+    for the duration of one attempt, returning the prior values so the
+    caller can restore them via :func:`_restore_env`.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args (e.g. ``disable_xs_memory``).
+        prompt_file (Path): Prompt file used to derive any per-run config.
+
+    Returns:
+        dict[str, str | None]: The previous values of the mutated env vars
+            (None for vars that were previously unset).
+    """
     keys = ("GEAK_CONFIG", "GEAK_USE_KNOWLEDGE_BASE", "GEAK_SAVE_TO_KNOWLEDGE_BASE")
     previous = {key: os.environ.get(key) for key in keys}
     config = _geak_config_for_run(args, prompt_file)
@@ -1895,6 +2669,12 @@ def _apply_geak_env_overrides(
 
 
 def _restore_env(previous: dict[str, str | None]) -> None:
+    """Restore environment variables captured by ``_apply_geak_env_overrides``.
+
+    Args:
+        previous (dict[str, str | None]): Map of env var name to its prior
+            value; a None value means the var was unset and is removed.
+    """
     for key, value in previous.items():
         if value is None:
             os.environ.pop(key, None)
@@ -1903,6 +2683,15 @@ def _restore_env(previous: dict[str, str | None]) -> None:
 
 
 def _oob_output_dir(session_id: str, prompt_file: Path) -> Path:
+    """Return the per-attempt output directory for an OOB run.
+
+    Args:
+        session_id: Session identifier for the run.
+        prompt_file: Prompt file whose stem scopes the attempt directory.
+
+    Returns:
+        The created ``.../oob/<session_id>/<prompt_stem>`` directory.
+    """
     # Per-attempt, mirroring _geak_output_dir. A session-level dir would let
     # concurrent OOB attempts share artifacts AND the per-attempt compile
     # caches (isolated_compile_cache_env keys off output_dir), reintroducing
@@ -1912,8 +2701,37 @@ def _oob_output_dir(session_id: str, prompt_file: Path) -> Path:
     return out
 
 
+def _forge_output_dir(session_id: str, prompt_file: Path) -> Path:
+    """Return the per-attempt output directory for a Forge run.
+
+    Mirrors _oob_output_dir but scopes Forge artifacts under their own
+    ``forge/`` root instead of the legacy ``oob/`` directory, so the Forge
+    backend's outputs (forge_loop.log, forge_experiments/, optimization_report,
+    optimized_versions/) are not confusingly nested under a sibling backend's
+    name.
+
+    Args:
+        session_id: Session identifier for the run.
+        prompt_file: Prompt file whose stem scopes the attempt directory.
+
+    Returns:
+        The created ``.../forge/<session_id>/<prompt_stem>`` directory.
+    """
+    out = _kernel_agent_root() / "forge" / session_id / prompt_file.stem
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 def _mirror_path_link(run_dir: Path, mirror: Path) -> None:
-    """Create a relative symlink inside the run dir pointing at the mirror."""
+    """Create a relative symlink inside the run dir pointing at the mirror.
+
+    Best-effort: failures (unsupported filesystem, existing link) are
+    swallowed so artifact mirroring never breaks a run.
+
+    Args:
+        run_dir (Path): The run directory the symlink is created under.
+        mirror (Path): The target directory the symlink should point at.
+    """
     try:
         link_dir = run_dir / mirror.parent.name  # geak / oob
         link_dir.mkdir(parents=True, exist_ok=True)
@@ -1926,7 +2744,14 @@ def _mirror_path_link(run_dir: Path, mirror: Path) -> None:
 
 
 def _git_checkout_fallback(kernel_repo: str, log_path: Path) -> None:
-    """Best-effort `git checkout -- .` to undo rogue agent writes under the kernel repo. Idempotent."""
+    """Run a best-effort ``git checkout -- .`` to undo rogue agent writes.
+
+    Idempotent and safe to call when the repo has no changes.
+
+    Args:
+        kernel_repo: Path to the kernel repo to clean.
+        log_path: Path to append checkout diagnostics.
+    """
     if not kernel_repo:
         return
     git_dir = Path(kernel_repo) / ".git"
@@ -1935,7 +2760,9 @@ def _git_checkout_fallback(kernel_repo: str, log_path: Path) -> None:
     try:
         proc = subprocess.run(
             ["git", "-C", kernel_repo, "checkout", "--", "."],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         append_log(log_path, f"[git-fallback] checkout rc={proc.returncode}")
         if proc.stderr.strip():
@@ -1956,11 +2783,23 @@ def invoke_backend(
 
     Returns a normalized dict: returncode, stdout_tail, stderr_tail, stdout,
     gpu_ids, elapsed_s, cmd, optimized_path (optional), cli_workspace (oob).
+
+    Args:
+        backend (str): Backend name to run (e.g. ``geak``, ``claude``).
+        prompt_file (Path): File containing the rendered optimization prompt.
+        source_file (str): Path to the kernel source to be rewritten.
+        args (argparse.Namespace): Parsed CLI args carrying backend settings.
+        candidate (dict[str, Any] | None): Kernel candidate dict, when known.
+        log_path (Path | None): Optional run log for backend diagnostics.
+
+    Returns:
+        dict[str, Any]: A normalized result dict (returncode, stdout/stderr
+            tails, gpu_ids, elapsed_s, cmd, and optional optimized_path /
+            cli_workspace).
     """
     # GEAK needs more wall-clock than claude/codex; 130min default triggers GEAK's mode=full path.
     if backend == "geak":
-        budget_min = float(getattr(args, "geak_budget_min", 0)
-                           or getattr(args, "budget_minutes", 60) or 60)
+        budget_min = float(getattr(args, "geak_budget_min", 0) or getattr(args, "budget_minutes", 60) or 60)
     else:
         budget_min = float(getattr(args, "budget_minutes", 60) or 60)
     timeout_s = max(60, int(budget_min * 60))
@@ -1969,8 +2808,7 @@ def invoke_backend(
     kernel_repo = str(candidate.get("kernel_repo") or "")
     bench_files: list[str] = list(candidate.get("benchmark_files") or [])
     # GPU count: CLI override, then candidate hint, then 1.
-    num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0)
-                   or int(candidate.get("num_gpus_recommended") or 1))
+    num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0) or int(candidate.get("num_gpus_recommended") or 1))
 
     # ---------------------------------------------------------------------------
     # Common test-command + before_kernel_opt rocprof — runs for ALL backends
@@ -1978,10 +2816,7 @@ def invoke_backend(
     # pre-optimization roofline snapshot without duplicating the logic.
     # ---------------------------------------------------------------------------
     cand_name = str(candidate.get("name") or "")
-    is_multigpu_common = (
-        bool(candidate.get("is_multigpu"))
-        or kernel_name_implies_multigpu(cand_name)
-    )
+    is_multigpu_common = bool(candidate.get("is_multigpu")) or kernel_name_implies_multigpu(cand_name)
     # Derive a shared test_command that GEAK will use and rocprof will profile.
     # OOB backends don't accept --test-command but we still want the rocprof
     # snapshot, so we compute it here unconditionally.
@@ -1999,12 +2834,18 @@ def invoke_backend(
     _shared_out_dir = (
         _geak_output_dir(args.session_id, prompt_file)
         if backend == "geak"
+        else _forge_output_dir(args.session_id, prompt_file)
+        if backend == "forge"
         else _oob_output_dir(args.session_id, prompt_file)
     )
     if common_test_command:
         _harness_cmd = _try_generate_harness(
-            common_test_command, candidate, source_file, _shared_out_dir,
-            kernel_repo, log_path,
+            common_test_command,
+            candidate,
+            source_file,
+            _shared_out_dir,
+            kernel_repo,
+            log_path,
         )
         if _harness_cmd:
             common_test_command = _harness_cmd
@@ -2030,6 +2871,7 @@ def invoke_backend(
                 append_log(log_path, f"[geak] test_command={test_command}")
             if test_command:
                 import shutil as _shutil
+
                 harness_dir = out_dir / "unittest"
                 harness_dir.mkdir(parents=True, exist_ok=True)
                 for _tc_part in test_command.split("&&"):
@@ -2139,19 +2981,65 @@ def invoke_backend(
                 if rocprof_before.get("txt_path"):
                     result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
             return result
+        if backend == "forge":
+            # Kernel-Forge autonomous-loop backend. Runs entirely inside a git
+            # worktree of kernel_repo (never mutates the live repo) and emits the
+            # same artifacts as OOB (optimized_versions/ + optimization_report.md),
+            # so the downstream verify/propose/integrate path is unchanged.
+            forge = _import_backend("forge_submit")
+            out_dir = _forge_output_dir(args.session_id, prompt_file)
+            result = forge.submit(
+                source_file=source_file,
+                prompt_file=prompt_file,
+                output_dir=out_dir,
+                test_command=common_test_command,
+                source_type=str((candidate or {}).get("source_type") or "unknown"),
+                candidate=candidate or {},
+                num_gpus=num_gpus,
+                timeout_s=timeout_s,
+                prefer_ray=prefer_ray,
+                kernel_repo=kernel_repo,
+            )
+            result["output_dir"] = str(out_dir)
+            if common_test_command:
+                result["test_command"] = common_test_command
+            if rocprof_before:
+                result["rocprof_before_kernel_opt_status"] = str(rocprof_before.get("status") or "")
+                if rocprof_before.get("reason"):
+                    result["rocprof_before_kernel_opt_reason"] = str(rocprof_before["reason"])
+                if rocprof_before.get("json_path"):
+                    result["rocprof_before_kernel_opt_json"] = str(rocprof_before["json_path"])
+                if rocprof_before.get("txt_path"):
+                    result["rocprof_before_kernel_opt_txt"] = str(rocprof_before["txt_path"])
+            return result
         return {
             "returncode": 2,
             "stdout_tail": f"unknown backend: {backend}",
-            "stderr_tail": "", "stdout": "", "gpu_ids": "",
-            "elapsed_s": 0.0, "cmd": [],
+            "stderr_tail": "",
+            "stdout": "",
+            "gpu_ids": "",
+            "elapsed_s": 0.0,
+            "cmd": [],
         }
     finally:
         # Always undo rogue writes under the kernel repo, regardless of exit code.
-        if log_path is not None:
+        # Skip for forge: it manages its own restore (per-file write-back on a
+        # temp branch); a blanket `git checkout -- .` here would overwrite the
+        # dirty-file state that forge just carefully restored.
+        if log_path is not None and backend != "forge":
             _git_checkout_fallback(kernel_repo, log_path)
 
 
 def env_first(*names: str) -> str:
+    """Return the first non-empty environment variable among ``names``.
+
+    Args:
+        *names (str): Environment variable names to check, in priority order.
+
+    Returns:
+        str: The value of the first set, non-empty variable, or an empty
+            string when none are set.
+    """
     for name in names:
         value = os.environ.get(name)
         if value:
@@ -2167,6 +3055,23 @@ def run_attempt(
     run_dir: Path,
     log_path: Path,
 ) -> dict[str, Any]:
+    """Run a single backend optimization attempt and record its artifacts.
+
+    Renders the prompt, invokes the backend (or a dry-run placeholder),
+    captures stdout to a durable log, locates any optimized-source artifact,
+    and returns a structured attempt record.
+
+    Args:
+        backend (str): Backend name to run for this attempt.
+        args (argparse.Namespace): Parsed CLI args controlling the attempt.
+        candidate (dict[str, Any]): Kernel candidate dict being optimized.
+        run_dir (Path): Run directory for prompts/optimized/log outputs.
+        log_path (Path): Run log appended with attempt progress.
+
+    Returns:
+        dict[str, Any]: An attempt record (id, backend, status, returncode,
+            elapsed, optimized_path, backend_paths, stdout tail, etc.).
+    """
     attempt_id = f"{backend}-{uuid.uuid4().hex[:8]}"
     prompt_dir = run_dir / "prompts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
@@ -2196,13 +3101,12 @@ def run_attempt(
         if source_suffix == ".py":
             placeholder = "def optimized_kernel_placeholder():\n    return None\n"
         else:
-            placeholder = "extern \"C\" __global__ void optimized_kernel_placeholder() {}\n"
+            placeholder = 'extern "C" __global__ void optimized_kernel_placeholder() {}\n'
         optimized_path.write_text(placeholder, encoding="utf-8")
         result = {}
     else:
         append_log(log_path, f"$ invoke_backend({backend})")
-        result = invoke_backend(backend, prompt_file, source_file, args,
-                                candidate=candidate, log_path=log_path)
+        result = invoke_backend(backend, prompt_file, source_file, args, candidate=candidate, log_path=log_path)
         returncode = int(result.get("returncode", 1))
         full_stdout = result.get("stdout") or result.get("stdout_tail") or ""
         stdout_tail = (full_stdout or "")[-4000:] or result.get("stderr_tail", "")
@@ -2247,10 +3151,14 @@ def run_attempt(
             # /home/user/ rescue: claude sometimes writes to ~/optimized_versions/ instead of the
             # workspace; surface fresh files there when the workspace's optimized_versions/ is empty.
             home_opt = Path("/home/user/optimized_versions")
-            if (cli_workspace
-                    and (not (Path(cli_workspace) / "optimized_versions").is_dir()
-                         or not list((Path(cli_workspace) / "optimized_versions").iterdir()))
-                    and home_opt.is_dir()):
+            if (
+                cli_workspace
+                and (
+                    not (Path(cli_workspace) / "optimized_versions").is_dir()
+                    or not list((Path(cli_workspace) / "optimized_versions").iterdir())
+                )
+                and home_opt.is_dir()
+            ):
                 rescued = sorted(
                     [p for p in home_opt.iterdir() if p.is_file() and p.stat().st_mtime >= started],
                     key=lambda p: p.stat().st_mtime,
@@ -2260,9 +3168,11 @@ def run_attempt(
                     backend_paths["partial_latest_optimized"] = str(rescued[-1])
                     backend_paths["partial_optimized_rescued_from"] = str(home_opt)
                     home_report = Path("/home/user/optimization_report.md")
-                    if (home_report.is_file()
-                            and home_report.stat().st_mtime >= started
-                            and "partial_report" not in backend_paths):
+                    if (
+                        home_report.is_file()
+                        and home_report.stat().st_mtime >= started
+                        and "partial_report" not in backend_paths
+                    ):
                         backend_paths["partial_report"] = str(home_report)
             if cli_workspace:
                 backend_paths["cli_workspace"] = cli_workspace
@@ -2305,8 +3215,7 @@ def run_attempt(
                 backend_paths["geak_latest_patch"] = geak_patch
                 backend_paths["geak_patch_count"] = str(result.get("geak_patch_count") or 0)
             # Per-task best speedup salvage (when select_patch didn't finish before SIGTERM).
-            per_task_sp = (result.get("geak_per_task_best_speedup")
-                           if isinstance(result, dict) else None)
+            per_task_sp = result.get("geak_per_task_best_speedup") if isinstance(result, dict) else None
             if per_task_sp:
                 backend_paths["geak_per_task_best_speedup"] = str(per_task_sp)
                 bt = result.get("geak_per_task_best_task")
@@ -2323,21 +3232,19 @@ def run_attempt(
             # EXCEPTION: refuse promotion on a persistent inner-LLM auth loop (>= _AUTH_RETRY_THRESHOLD),
             # which leaves an empty optimized_versions/ that would falsely ship PARTIAL.
             partial_evidence_keys = (
-                "partial_latest_optimized", "partial_report",
-                "geak_final_report", "geak_latest_patch",
+                "partial_latest_optimized",
+                "partial_report",
+                "geak_final_report",
+                "geak_latest_patch",
             )
             auth_loop_hits = _count_auth_failures(full_stdout)
             if auth_loop_hits >= _AUTH_RETRY_THRESHOLD:
                 backend_paths["auth_failure_count"] = str(auth_loop_hits)
-                backend_paths["auth_failure_marker"] = (
-                    "persistent_inner_llm_401_loop_no_partial_promotion"
-                )
+                backend_paths["auth_failure_marker"] = "persistent_inner_llm_401_loop_no_partial_promotion"
                 # Force a non-partial terminal state so build_verification excludes it and make_proposal REVERTs.
                 if status == "timeout":
                     status = "failed"
-            elif status in {"timeout", "failed"} and any(
-                k in backend_paths for k in partial_evidence_keys
-            ):
+            elif status in {"timeout", "failed"} and any(k in backend_paths for k in partial_evidence_keys):
                 status = "partial"
 
     return {
@@ -2378,7 +3285,16 @@ _AUTH_RETRY_THRESHOLD = 3
 
 
 def _count_auth_failures(text: str) -> int:
-    """Count distinct inner-LLM auth-failure markers in *text* (distinguishes a transient 401 from an unrecoverable loop)."""
+    """Count inner-LLM auth-failure markers in captured text.
+
+    Distinguishes a transient 401 from an unrecoverable loop.
+
+    Args:
+        text: The captured backend output to scan.
+
+    Returns:
+        The number of auth-failure markers found.
+    """
     if not text:
         return 0
     total = 0
@@ -2388,7 +3304,17 @@ def _count_auth_failures(text: str) -> int:
 
 
 def _extract_speedup_from_report(report_path: str | Path) -> float | None:
-    """Best-effort scan of an OOB optimization_report.md for a speedup figure (median-of-top-3; None if absent)."""
+    """Scan an OOB ``optimization_report.md`` for a speedup figure.
+
+    Uses a median-of-top-3 to dodge cherry-picked best-shape numbers.
+
+    Args:
+        report_path: Path to the optimization report.
+
+    Returns:
+        The estimated speedup, or ``None`` when the report is missing or no
+        plausible figure is found.
+    """
     if not report_path:
         return None
     p = Path(report_path)
@@ -2417,7 +3343,15 @@ def _extract_speedup_from_report(report_path: str | Path) -> float | None:
 
 
 def _extract_speedup_from_geak(final_report_path: str | Path) -> float | None:
-    """Pull best_speedup from a GEAK final_report.json if present and >0."""
+    """Pull best_speedup from a GEAK final_report.json if present and >0.
+
+    Args:
+        final_report_path (str | Path): Path to a GEAK ``final_report.json``.
+
+    Returns:
+        float | None: The reported ``best_speedup`` when positive, else None
+            (also None when the file is missing or unparseable).
+    """
     if not final_report_path:
         return None
     p = Path(final_report_path)
@@ -2432,7 +3366,18 @@ def _extract_speedup_from_geak(final_report_path: str | Path) -> float | None:
 
 
 def _extract_correctness_from_report(report_path: str | Path) -> bool | None:
-    """Best-effort correctness signal from backend markdown/json reports."""
+    """Best-effort correctness signal from backend markdown/json reports.
+
+    Looks for an explicit ``[correctness] pass/fail`` marker first, then
+    falls back to scanning for known pass/fail phrasings.
+
+    Args:
+        report_path (str | Path): Path to a backend report (markdown/text).
+
+    Returns:
+        bool | None: True/False when a correctness signal is found, or None
+            when the file is missing/unreadable or no signal is present.
+    """
     if not report_path:
         return None
     p = Path(report_path)
@@ -2447,19 +3392,39 @@ def _extract_correctness_from_report(report_path: str | Path) -> bool | None:
     if marker:
         return marker.group(1).lower().startswith("pass")
     fail_markers = (
-        "correctness failed", "incorrect", "mismatch", "assert_close failed",
-        "not close", "wrong output", "validation failed", "correctness: fail",
-        "correctness: failed", "does not match", "do not match",
-        "failed against reference", "reference check failed",
+        "correctness failed",
+        "incorrect",
+        "mismatch",
+        "assert_close failed",
+        "not close",
+        "wrong output",
+        "validation failed",
+        "correctness: fail",
+        "correctness: failed",
+        "does not match",
+        "do not match",
+        "failed against reference",
+        "reference check failed",
     )
     pass_markers = (
-        "correctness passed", "correctness: pass", "all tests passed",
-        "assert_close passed", "torch.testing.assert_close passed",
-        "validation passed", "matches reference", "match reference",
-        "matched reference", "matches the reference", "verified against original",
-        "verified against the original", "validated against original",
-        "validated against the original", "validated against baseline",
-        "outputs match", "output matches", "numerically matches",
+        "correctness passed",
+        "correctness: pass",
+        "all tests passed",
+        "assert_close passed",
+        "torch.testing.assert_close passed",
+        "validation passed",
+        "matches reference",
+        "match reference",
+        "matched reference",
+        "matches the reference",
+        "verified against original",
+        "verified against the original",
+        "validated against original",
+        "validated against the original",
+        "validated against baseline",
+        "outputs match",
+        "output matches",
+        "numerically matches",
         "reference comparison passed",
     )
     if any(marker in lower for marker in fail_markers):
@@ -2475,6 +3440,10 @@ def _trust_geak_correctness() -> bool:
     GEAK's save_and_test only checks compile + import, not numerical output, so without this
     every GEAK KEEP would degrade to NEEDS_REVIEW; integrate's E2E magpie benchmark is the
     ground-truth check. Set ``HYPERLOOM_TRUST_GEAK_CORRECTNESS=0`` to restore the conservative behaviour.
+
+    Returns:
+        ``True`` when GEAK correctness should be trusted (the default),
+        ``False`` when the env var disables it.
     """
     raw = os.environ.get("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "").strip().lower()
     if raw in {"0", "false", "no", "off"}:
@@ -2483,7 +3452,18 @@ def _trust_geak_correctness() -> bool:
 
 
 def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None:
-    """Read correctness from GEAK-style JSON reports when present."""
+    """Read correctness from GEAK-style JSON reports when present.
+
+    Recursively walks the JSON looking for correctness/validity keys; any
+    False seen wins over True (fail-safe).
+
+    Args:
+        final_report_path (str | Path): Path to a GEAK-style JSON report.
+
+    Returns:
+        bool | None: False if any correctness key is falsy, True if only
+            truthy ones are found, or None when nothing relevant is present.
+    """
     if not final_report_path:
         return None
     p = Path(final_report_path)
@@ -2497,6 +3477,12 @@ def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None
     found: list[bool] = []
 
     def walk(obj: Any) -> None:
+        """Recursively collect correctness/validity booleans from ``obj``.
+
+        Args:
+            obj (Any): A JSON value (dict, list, or scalar) to traverse;
+                matching keys append their resolved bool to ``found``.
+        """
         if isinstance(obj, dict):
             for k, v in obj.items():
                 lk = str(k).lower()
@@ -2523,7 +3509,15 @@ def _extract_correctness_from_geak(final_report_path: str | Path) -> bool | None
 
 
 _SOURCE_SUFFIXES = {
-    ".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".hip", ".py",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cu",
+    ".cuh",
+    ".h",
+    ".hpp",
+    ".hip",
+    ".py",
 }
 _FENCE_RE = re.compile(
     r"```(?P<lang>[A-Za-z0-9_+.-]*)\s*\n(?P<body>.*?)\n```",
@@ -2532,6 +3526,20 @@ _FENCE_RE = re.compile(
 
 
 def _source_text_looks_complete(text: str, suffix: str) -> bool:
+    """Heuristically decide whether ``text`` is a complete source file.
+
+    For ``.py`` it must parse and contain Python markers; for C/C++/CUDA
+    suffixes it must contain typical source markers. Text containing a code
+    fence is rejected (handled by :func:`_extract_source_block` instead).
+
+    Args:
+        text (str): Candidate file contents.
+        suffix (str): File suffix that selects the language heuristic.
+
+    Returns:
+        bool: True when ``text`` plausibly is a complete source file for the
+            given suffix; False otherwise.
+    """
     stripped = text.strip()
     if not stripped or "```" in stripped:
         return False
@@ -2540,22 +3548,44 @@ def _source_text_looks_complete(text: str, suffix: str) -> bool:
             compile(stripped + "\n", "<optimized_kernel>", "exec")
         except SyntaxError:
             return False
-        return any(
-            marker in stripped
-            for marker in ("def ", "class ", "import ", "@triton.jit", "torch.")
-        )
+        return any(marker in stripped for marker in ("def ", "class ", "import ", "@triton.jit", "torch."))
     if suffix in {".cu", ".cuh", ".hip", ".cpp", ".cc", ".c", ".h", ".hpp"}:
         return any(
             marker in stripped
             for marker in (
-                "#include", "__global__", "__device__", "extern ", "namespace ",
-                "template", "void ", "int ", "float ", "half", "torch::",
+                "#include",
+                "__global__",
+                "__device__",
+                "extern ",
+                "namespace ",
+                "template",
+                "void ",
+                "int ",
+                "float ",
+                "half",
+                "torch::",
             )
         )
     return False
 
 
 def _extract_source_block(text_path: Path, target_suffix: str, output_path: Path) -> str:
+    """Extract a complete fenced source block from a backend stdout log.
+
+    Scans ``text_path`` for fenced code blocks whose language hint matches
+    ``target_suffix`` and that look like complete source; the last such
+    block is written to ``output_path``.
+
+    Args:
+        text_path (Path): File (typically backend stdout) to scan for fences.
+        target_suffix (str): Target source suffix used to filter fences and
+            validate completeness (e.g. ``.cu``, ``.py``).
+        output_path (Path): Where the extracted source block is written.
+
+    Returns:
+        str: The string path of the written artifact, or empty string when
+            no suitable code block is found.
+    """
     try:
         text = text_path.read_text(encoding="utf-8", errors="replace")
     except Exception:
@@ -2587,9 +3617,17 @@ def _extract_source_block(text_path: Path, target_suffix: str, output_path: Path
 
 
 def _geak_best_worktree(best_patch_path: str) -> Path | None:
-    """Map a GEAK best-patch file path to the ``worktrees/slot_<M>`` it edited (shares ``parallel_<M>``'s suffix).
+    """Map a GEAK best-patch path to the ``worktrees/slot_<M>`` it edited.
 
-    Lets callers pick up the real source file instead of scraping a diff; ``None`` on layout mismatch.
+    The slot shares the ``parallel_<M>`` suffix, letting callers pick up the
+    real source file instead of scraping a diff.
+
+    Args:
+        best_patch_path: Path to the GEAK best-patch file.
+
+    Returns:
+        The corresponding ``worktrees/slot_<M>`` path, or ``None`` on layout
+        mismatch.
     """
     if not best_patch_path:
         return None
@@ -2597,7 +3635,7 @@ def _geak_best_worktree(best_patch_path: str) -> Path | None:
     parallel_name = parent.name
     if not parallel_name.startswith("parallel_"):
         return None
-    slot_id = parallel_name[len("parallel_"):]
+    slot_id = parallel_name[len("parallel_") :]
     if not slot_id:
         return None
     worktree = parent.parent / "worktrees" / f"slot_{slot_id}"
@@ -2612,10 +3650,18 @@ def _worktree_source_paths(
     source_file: str,
     kernel_repo: str,
 ) -> list[Path]:
-    """Return existing files under ``worktree`` mirroring ``source_file``.
+    """Find existing files under a worktree mirroring a source file.
 
-    Tries source_file relative to kernel_repo first, then a basename rglob within
-    the worktree. Empty list when nothing matches.
+    Tries ``source_file`` relative to ``kernel_repo`` first, then a basename
+    rglob within the worktree.
+
+    Args:
+        worktree: The worktree directory to search.
+        source_file: The source file path to mirror.
+        kernel_repo: The kernel repo root used for relative resolution.
+
+    Returns:
+        Matching paths under the worktree, or an empty list when none match.
     """
     if not worktree.is_dir() or not source_file:
         return []
@@ -2644,6 +3690,22 @@ def _candidate_artifact_paths(
     source_file: str = "",
     kernel_repo: str = "",
 ) -> list[Path]:
+    """Collect candidate optimized-artifact paths for an attempt, in priority.
+
+    Gathers GEAK worktree files, partial/patch outputs, ``optimized_versions``
+    directories, and the recorded ``optimized_path`` into a priority-ordered
+    list for downstream source selection.
+
+    Args:
+        attempt (dict[str, Any]): Attempt record carrying ``backend_paths``
+            and ``optimized_path``.
+        target_suffix (str): Target source suffix (used by callers to match).
+        source_file (str): Original kernel source path, for worktree mapping.
+        kernel_repo (str): Kernel repo root, for worktree-relative resolution.
+
+    Returns:
+        list[Path]: Candidate artifact paths ordered most- to least-precise.
+    """
     paths: list[Path] = []
     bp = attempt.get("backend_paths") or {}
     # GEAK worktree files first (ground-truth edited source), before .patch candidates.
@@ -2668,20 +3730,24 @@ def _candidate_artifact_paths(
     if cli_workspace:
         opt_dir = Path(cli_workspace) / "optimized_versions"
         if opt_dir.is_dir():
-            paths.extend(sorted(
-                (p for p in opt_dir.iterdir() if p.is_file()),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            ))
+            paths.extend(
+                sorted(
+                    (p for p in opt_dir.iterdir() if p.is_file()),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+            )
     out_dir = bp.get("output_dir")
     if out_dir:
         opt_dir = Path(out_dir) / "optimized_versions"
         if opt_dir.is_dir():
-            paths.extend(sorted(
-                (p for p in opt_dir.iterdir() if p.is_file()),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            ))
+            paths.extend(
+                sorted(
+                    (p for p in opt_dir.iterdir() if p.is_file()),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+            )
     optimized_path = attempt.get("optimized_path")
     if optimized_path:
         paths.append(Path(optimized_path))
@@ -2707,7 +3773,24 @@ def _select_source_artifact(
     run_dir: Path | None = None,
     kernel_repo: str = "",
 ) -> tuple[str, str, str]:
-    """Return (artifact_path, source, error) for a complete source artifact."""
+    """Return (artifact_path, source, error) for a complete source artifact.
+
+    Tries suffix-matching complete-source candidates first, then falls back
+    to extracting a fenced code block from text/log/patch candidates.
+
+    Args:
+        attempt (dict[str, Any]): Attempt record to source artifacts from.
+        target_file (str): Original kernel source path; its suffix selects
+            the expected artifact type.
+        run_dir (Path | None): Directory used to write extracted blocks;
+            defaults to the optimized-path parent when None.
+        kernel_repo (str): Kernel repo root, for worktree-relative resolution.
+
+    Returns:
+        tuple[str, str, str]: ``(artifact_path, source, error)`` where
+            ``source`` is one of ``source_file`` / ``extracted_code_block`` /
+            ``missing`` / ``unsupported`` and ``error`` describes failures.
+    """
     target_suffix = Path(target_file).suffix.lower()
     if target_suffix not in _SOURCE_SUFFIXES:
         return "", "unsupported", f"unsupported target suffix: {target_suffix or '<none>'}"
@@ -2742,7 +3825,23 @@ def _select_source_artifact(
     return "", "missing", f"no complete {target_suffix} source artifact found; tried: {tried}"
 
 
-def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]], benchmark_available: bool) -> dict[str, Any]:
+def build_verification(
+    args: argparse.Namespace, attempts: list[dict[str, Any]], benchmark_available: bool
+) -> dict[str, Any]:
+    """Summarize attempt results into a verification record.
+
+    Selects the best usable attempt (by extracted speedup, falling back to the
+    first usable one) and reports whether a real speedup was measured.
+
+    Args:
+        args: Parsed CLI arguments for the run.
+        attempts: Per-attempt result records.
+        benchmark_available: Whether a benchmark/harness was available to
+            measure speedups.
+
+    Returns:
+        A verification dict describing the best attempt and measured speedup.
+    """
     # Usable = completed cleanly OR killed-but-left-artifacts (status=partial).
     usable = [a for a in attempts if a.get("status") in {"completed", "partial"}]
     best = None
@@ -2779,11 +3878,7 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
     if best is not None:
         target_file = str(getattr(args, "source_file", "") or "")
         # kernel_repo lets worktree recovery map an absolute source path to GEAK's edited relative path.
-        kernel_repo = str(
-            getattr(args, "kernel_repo", "")
-            or getattr(args, "repo", "")
-            or ""
-        )
+        kernel_repo = str(getattr(args, "kernel_repo", "") or getattr(args, "repo", "") or "")
         run_dir = None
         optimized_path = best.get("optimized_path")
         if optimized_path:
@@ -2799,16 +3894,12 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
     correctness_source = "cli_override" if correctness_signal is not None else "missing"
     if correctness_signal is None and best is not None:
         bp = best.get("backend_paths") or {}
-        correctness_signal = _extract_correctness_from_report(
-            bp.get("partial_report") or bp.get("report") or ""
-        )
+        correctness_signal = _extract_correctness_from_report(bp.get("partial_report") or bp.get("report") or "")
         if correctness_signal is not None:
             correctness_source = "report_scan"
     if correctness_signal is None and best is not None:
         bp = best.get("backend_paths") or {}
-        correctness_signal = _extract_correctness_from_geak(
-            bp.get("geak_final_report", "")
-        )
+        correctness_signal = _extract_correctness_from_geak(bp.get("geak_final_report", ""))
         if correctness_signal is not None:
             correctness_source = "geak_report"
     # PR-E (default ON): trust GEAK status=complete + measured speedup as correctness=True
@@ -2825,10 +3916,7 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
         geak_status = ""
         if bp_geak and Path(bp_geak).is_file():
             try:
-                geak_status = str(
-                    json.loads(Path(bp_geak).read_text(encoding="utf-8"))
-                    .get("status") or ""
-                ).lower()
+                geak_status = str(json.loads(Path(bp_geak).read_text(encoding="utf-8")).get("status") or "").lower()
             except Exception:  # noqa: BLE001
                 geak_status = ""
         if geak_status in {"complete", "succeeded", "ok"}:
@@ -2877,14 +3965,28 @@ def build_verification(args: argparse.Namespace, attempts: list[dict[str, Any]],
 
 
 def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
+    """Turn a verification result into a KEEP/REVERT/PARTIAL/REVIEW decision.
+
+    Applies the policy gates (compile, correctness, artifact validity,
+    measured speedup vs the KEEP threshold, E2E/accuracy signals) to choose
+    a disposition and the reasons behind it.
+
+    Args:
+        verification (dict[str, Any]): The dict returned by
+            :func:`build_verification`.
+
+    Returns:
+        dict[str, Any]: A proposal dict with a ``decision`` (one of
+            ``KEEP`` / ``REVERT`` / ``PARTIAL`` / ``NEEDS_REVIEW``) and a
+            ``reasons`` list.
+    """
     reasons: list[str] = []
     if not verification["compile_passed"]:
         # compile_passed == bool(best); use artifact_error to distinguish a real compile
         # failure from a backend-dispatch failure (no usable attempt to compile from).
         err = (verification.get("artifact_error") or "").strip()
         if err and verification.get("best_attempt_id", "") == "":
-            return {"decision": "REVERT",
-                    "reasons": [f"backend dispatch failed: {err}"]}
+            return {"decision": "REVERT", "reasons": [f"backend dispatch failed: {err}"]}
         return {"decision": "REVERT", "reasons": ["compile failed"]}
     if not verification["correctness_passed"]:
         reasons.append("correctness evidence missing or failed")
@@ -2897,13 +3999,10 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         return {"decision": "PARTIAL", "reasons": reasons}
     if verification["micro_speedup"] <= 1.0:
         return {"decision": "REVERT", "reasons": ["microbench did not improve"]}
-    # 1.10x KEEP threshold; below is treated as noise and routed to NEEDS_REVIEW.
-    KEEP_THRESHOLD = 1.10
+    # 1.05x KEEP threshold (issue #442); below is routed to NEEDS_REVIEW.
+    KEEP_THRESHOLD = 1.05
     if verification["micro_speedup"] < KEEP_THRESHOLD:
-        reasons.append(
-            f"speedup {verification['micro_speedup']:.3f}x below KEEP "
-            f"threshold {KEEP_THRESHOLD:.2f}x"
-        )
+        reasons.append(f"speedup {verification['micro_speedup']:.3f}x below KEEP threshold {KEEP_THRESHOLD:.2f}x")
     if verification["e2e_gain_pct"] is not None and verification["e2e_gain_pct"] < 0:
         return {"decision": "REVERT", "reasons": ["E2E regressed"]}
     if verification["accuracy_passed"] is False:
@@ -2924,6 +4023,15 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> int:
+    """CLI entry point for the kernel-optimization tool.
+
+    Parses command-line arguments, runs the configured backend ladder for
+    the requested kernel, builds the verification result and proposal, and
+    persists status/artifacts.
+
+    Returns:
+        int: Process exit code (0 on success, non-zero on failure).
+    """
     parser = argparse.ArgumentParser(description="Kernel Agent optimization tool")
     parser.add_argument("--kernel-id", required=True)
     parser.add_argument("--session-id", default="")
@@ -2943,19 +4051,26 @@ def main() -> int:
     parser.add_argument("--source-file", default="")
     parser.add_argument("--target-platform", default=_env_target_platform())
     parser.add_argument("--extra-sglang-args", default="")
-    parser.add_argument("--budget-minutes", type=float, default=60.0,
-                        help="Per-attempt wall-clock budget for claude/codex "
-                             "OOB backends. GEAK uses --geak-budget-min.")
+    parser.add_argument(
+        "--budget-minutes",
+        type=float,
+        default=60.0,
+        help="Per-attempt wall-clock budget for claude/codex OOB backends. GEAK uses --geak-budget-min.",
+    )
     # Default tracks $GEAK_RUN_MODE: quick -> 70 min, full -> 130 min.
     _geak_budget_default = 70.0 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 130.0
-    parser.add_argument("--geak-budget-min", type=float, default=_geak_budget_default,
-                        help="Per-attempt wall-clock budget for GEAK only "
-                             "(default tracks $GEAK_RUN_MODE: full -> 130, "
-                             "quick -> 70; both aligned with yaml "
-                             "run.budgets.<mode>.total_s + finalize_grace + "
-                             "kill_buffer + safety so the prompt-quoted "
-                             "budget triggers the matching GEAK mode at "
-                             "mini.py:435 task_extracted_mode).")
+    parser.add_argument(
+        "--geak-budget-min",
+        type=float,
+        default=_geak_budget_default,
+        help="Per-attempt wall-clock budget for GEAK only "
+        "(default tracks $GEAK_RUN_MODE: full -> 130, "
+        "quick -> 70; both aligned with yaml "
+        "run.budgets.<mode>.total_s + finalize_grace + "
+        "kill_buffer + safety so the prompt-quoted "
+        "budget triggers the matching GEAK mode at "
+        "mini.py:435 task_extracted_mode).",
+    )
     parser.add_argument("--micro-speedup", type=float, default=None)
     parser.add_argument("--e2e-gain-pct", type=float, default=None)
     parser.add_argument("--correctness-passed", choices=["true", "false", "unknown"], default="unknown")
@@ -2974,18 +4089,26 @@ def main() -> int:
             "$HYPERLOOM_GEAK_COST_LIMIT or this flag for CI budgets."
         ),
     )
-    parser.add_argument("--disable-rag", action="store_true",
-                        help="Run GEAK with tools.rag disabled for this request.")
-    parser.add_argument("--disable-xs-memory", action="store_true",
-                        help="Disable GEAK cross-session memory retrieval/write-back for this request.")
-    parser.add_argument("--test-command", type=str, default="",
-                        help="Test command from unittest skill. "
-                             "Passed to GEAK as --test-command.")
-    parser.add_argument("--num-gpus", type=int,
-                        default=int(os.environ.get("KERNEL_AGENT_NUM_GPUS", "0")),
-                        help="Per-task GPU reservation; 0 means follow the "
-                             "candidate's num_gpus_recommended (1 for compute "
-                             "kernels, 2 for communication kernels).")
+    parser.add_argument("--disable-rag", action="store_true", help="Run GEAK with tools.rag disabled for this request.")
+    parser.add_argument(
+        "--disable-xs-memory",
+        action="store_true",
+        help="Disable GEAK cross-session memory retrieval/write-back for this request.",
+    )
+    parser.add_argument(
+        "--test-command",
+        type=str,
+        default="",
+        help="Test command from unittest skill. Passed to GEAK as --test-command.",
+    )
+    parser.add_argument(
+        "--num-gpus",
+        type=int,
+        default=int(os.environ.get("KERNEL_AGENT_NUM_GPUS", "0")),
+        help="Per-task GPU reservation; 0 means follow the "
+        "candidate's num_gpus_recommended (1 for compute "
+        "kernels, 2 for communication kernels).",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -2999,14 +4122,16 @@ def main() -> int:
     artifacts: dict[str, str] = {}
 
     try:
-        update_status(status_path, state="running", current_step="load_candidate",
-                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                      started_at=started_at)
-        candidates_path = (
-            Path(args.candidates_path)
-            if args.candidates_path
-            else resolve_candidates_path(run_dir)
+        update_status(
+            status_path,
+            state="running",
+            current_step="load_candidate",
+            log_path=log_path,
+            artifact_paths=artifacts,
+            run_id=run_id,
+            started_at=started_at,
         )
+        candidates_path = Path(args.candidates_path) if args.candidates_path else resolve_candidates_path(run_dir)
         all_candidates = load_candidates(candidates_path)
         candidate = find_candidate(all_candidates, args.kernel_id)
         if candidate is None:
@@ -3017,26 +4142,36 @@ def main() -> int:
                 f"candidates {known}; skipping (no fabricated target)"
             )
             append_log(log_path, f"[skip] {msg}")
-            update_status(status_path, state="skipped", current_step="skipped",
-                          log_path=log_path, artifact_paths=artifacts,
-                          run_id=run_id, started_at=started_at, error=msg)
-            print(json.dumps({
-                "tool": "kernel_optimization",
-                "session_id": session_id,
-                "run_id": run_id,
-                "kernel_id": args.kernel_id,
-                "status": "skipped",
-                "reason": "kernel_id_not_in_candidates",
-                "error_class": "invalid_kernel_id",
-                "known_kernel_ids": known,
-                "cli_log_path": str(log_path),
-                "status_path": str(status_path),
-            }, indent=2, sort_keys=True))
+            update_status(
+                status_path,
+                state="skipped",
+                current_step="skipped",
+                log_path=log_path,
+                artifact_paths=artifacts,
+                run_id=run_id,
+                started_at=started_at,
+                error=msg,
+            )
+            print(
+                json.dumps(
+                    {
+                        "tool": "kernel_optimization",
+                        "session_id": session_id,
+                        "run_id": run_id,
+                        "kernel_id": args.kernel_id,
+                        "status": "skipped",
+                        "reason": "kernel_id_not_in_candidates",
+                        "error_class": "invalid_kernel_id",
+                        "known_kernel_ids": known,
+                        "cli_log_path": str(log_path),
+                        "status_path": str(status_path),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
             return 0
-        if (
-            candidate.get("reusable_native_kernel") is False
-            or not candidate.get("source_file")
-        ):
+        if candidate.get("reusable_native_kernel") is False or not candidate.get("source_file"):
             reason = (
                 candidate.get("skip_reason")
                 or candidate.get("optimization_notes")
@@ -3047,42 +4182,51 @@ def main() -> int:
                 f"TraceLens candidate {candidate.get('kernel_id')!r}: {reason}"
             )
             append_log(log_path, f"[skip] {msg}")
-            update_status(status_path, state="skipped", current_step="skipped",
-                          log_path=log_path, artifact_paths=artifacts,
-                          run_id=run_id, started_at=started_at, error=msg)
-            print(json.dumps({
-                "tool": "kernel_optimization",
-                "session_id": session_id,
-                "run_id": run_id,
-                "kernel_id": candidate.get("kernel_id") or args.kernel_id,
-                "requested_kernel_id": args.kernel_id,
-                "resolved_kernel_id": candidate.get("kernel_id"),
-                "kernel_name": candidate.get("name"),
-                "status": "skipped",
-                "decision": "REVERT",
-                "error_class": (
-                    "missing_native_source"
-                    if not candidate.get("source_file")
-                    else "non_reusable_kernel"
-                ),
-                "reason": "non_routable_candidate",
-                "skip_reason": reason,
-                "verification": {
-                    "micro_speedup": 0.0,
-                    "best_artifact_path": "",
-                },
-                "proposal": {
-                    "decision": "REVERT",
-                    "reasons": [reason],
-                },
-                "cli_log_path": str(log_path),
-                "status_path": str(status_path),
-            }, indent=2, sort_keys=True))
+            update_status(
+                status_path,
+                state="skipped",
+                current_step="skipped",
+                log_path=log_path,
+                artifact_paths=artifacts,
+                run_id=run_id,
+                started_at=started_at,
+                error=msg,
+            )
+            print(
+                json.dumps(
+                    {
+                        "tool": "kernel_optimization",
+                        "session_id": session_id,
+                        "run_id": run_id,
+                        "kernel_id": candidate.get("kernel_id") or args.kernel_id,
+                        "requested_kernel_id": args.kernel_id,
+                        "resolved_kernel_id": candidate.get("kernel_id"),
+                        "kernel_name": candidate.get("name"),
+                        "status": "skipped",
+                        "decision": "REVERT",
+                        "error_class": (
+                            "missing_native_source" if not candidate.get("source_file") else "non_reusable_kernel"
+                        ),
+                        "reason": "non_routable_candidate",
+                        "skip_reason": reason,
+                        "verification": {
+                            "micro_speedup": 0.0,
+                            "best_artifact_path": "",
+                        },
+                        "proposal": {
+                            "decision": "REVERT",
+                            "reasons": [reason],
+                        },
+                        "cli_log_path": str(log_path),
+                        "status_path": str(status_path),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
             return 0
         # TraceLens is source of truth: _resolve_source_file overrides a disagreeing LLM path.
-        resolved_source = _resolve_source_file(
-            args.source_file, candidate, args.kernel_id, log_path
-        )
+        resolved_source = _resolve_source_file(args.source_file, candidate, args.kernel_id, log_path)
         args.source_file = resolved_source
         # Forward the candidate's repo root so worktree artifact recovery can map source_file to GEAK's relative path.
         if not getattr(args, "kernel_repo", None):
@@ -3100,20 +4244,31 @@ def main() -> int:
         append_log(log_path, f"resolved_source={resolved_source or 'NONE'}")
         append_log(log_path, f"selected_backends={','.join(selected_backends) or 'none'}")
 
-        update_status(status_path, state="running", current_step="run_backends",
-                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                      started_at=started_at)
+        update_status(
+            status_path,
+            state="running",
+            current_step="run_backends",
+            log_path=log_path,
+            artifact_paths=artifacts,
+            run_id=run_id,
+            started_at=started_at,
+        )
         attempts: list[dict[str, Any]] = []
         for backend in selected_backends:
-            attempt = run_attempt(backend, args=args, candidate=candidate,
-                                  run_dir=run_dir, log_path=log_path)
+            attempt = run_attempt(backend, args=args, candidate=candidate, run_dir=run_dir, log_path=log_path)
             attempt.update(backend_notes)
             attempts.append(attempt)
             append_jsonl(run_dir / "optimization_attempts.jsonl", attempt)
 
-        update_status(status_path, state="running", current_step="verify_and_propose",
-                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                      started_at=started_at)
+        update_status(
+            status_path,
+            state="running",
+            current_step="verify_and_propose",
+            log_path=log_path,
+            artifact_paths=artifacts,
+            run_id=run_id,
+            started_at=started_at,
+        )
         accuracy = None if args.accuracy_passed == "unknown" else args.accuracy_passed == "true"
         args.accuracy_passed = accuracy
         correctness = None if args.correctness_passed == "unknown" else args.correctness_passed == "true"
@@ -3149,25 +4304,44 @@ def main() -> int:
         }
         atomic_write_json(result_path, result)
         artifacts.update(result["artifact_paths"])
-        update_status(status_path, state="succeeded", current_step="done",
-                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                      started_at=started_at)
+        update_status(
+            status_path,
+            state="succeeded",
+            current_step="done",
+            log_path=log_path,
+            artifact_paths=artifacts,
+            run_id=run_id,
+            started_at=started_at,
+        )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     except Exception as exc:
         append_log(log_path, f"[error] {type(exc).__name__}: {exc}")
-        update_status(status_path, state="failed", current_step="failed",
-                      log_path=log_path, artifact_paths=artifacts, run_id=run_id,
-                      started_at=started_at, error=f"{type(exc).__name__}: {exc}")
-        print(json.dumps({
-            "tool": "kernel_optimization",
-            "session_id": session_id,
-            "run_id": run_id,
-            "status": "failed",
-            "error": f"{type(exc).__name__}: {exc}",
-            "cli_log_path": str(log_path),
-            "status_path": str(status_path),
-        }, indent=2, sort_keys=True))
+        update_status(
+            status_path,
+            state="failed",
+            current_step="failed",
+            log_path=log_path,
+            artifact_paths=artifacts,
+            run_id=run_id,
+            started_at=started_at,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        print(
+            json.dumps(
+                {
+                    "tool": "kernel_optimization",
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "cli_log_path": str(log_path),
+                    "status_path": str(status_path),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 1
 
 

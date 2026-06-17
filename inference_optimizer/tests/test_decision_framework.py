@@ -24,17 +24,16 @@ from inference_optimizer.paths import make_session_dir
 
 
 def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE,
-                  payload={"topic": "heartbeat", "body_md": "ok"})
+    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 
 
 def _silent_backends() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel":        MockBackend(silent, name="k"),
-        "critic":        MockBackend(silent, name="c"),
-        "robustness":    MockBackend(silent, name="r"),
+        "kernel": MockBackend(silent, name="k"),
+        "critic": MockBackend(silent, name="c"),
+        "robustness": MockBackend(silent, name="r"),
     }
 
 
@@ -47,8 +46,11 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     # Stub the interpreter resolver so the unit test never spawns a real Magpie import probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     from inference_optimizer.orchestrator.action_executors import _grid_runner
+
     monkeypatch.setattr(
-        _grid_runner, "_resolve_magpie_python", lambda: "/usr/bin/python3",
+        _grid_runner,
+        "_resolve_magpie_python",
+        lambda: "/usr/bin/python3",
     )
     return make_session_dir()
 
@@ -56,7 +58,8 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 # C — kernel-opt response recorded to SharedState
 @pytest.mark.asyncio
 async def test_run_optimization_response_records_to_shared_state(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
@@ -69,25 +72,28 @@ async def test_run_optimization_response_records_to_shared_state(
         c.shared_state.save(session_dir)
         # Stub the handler so we don't shell out.
         from inference_optimizer.orchestrator import kernel_request_handlers
+
         async def fake(payload, *, session_dir, **kwargs):
             return {
                 "status": "ok",
                 "kernel_id": "k006",
-                "proposal": {"decision": "PARTIAL",
-                             "reasons": ["correctness evidence missing"]},
-                "verification": {"compile_passed": True,
-                                 "correctness_passed": False,
-                                 "micro_speedup": 1.0,
-                                 "best_artifact_path": "/tmp/v3.hip"},
+                "proposal": {"decision": "PARTIAL", "reasons": ["correctness evidence missing"]},
+                "verification": {
+                    "compile_passed": True,
+                    "correctness_passed": False,
+                    "micro_speedup": 1.0,
+                    "best_artifact_path": "/tmp/v3.hip",
+                },
             }
+
         monkeypatch.setitem(
             kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "run_optimization", fake,
+            "run_optimization",
+            fake,
         )
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "run_optimization",
-                     "params": {"kernel_id": "k006"}},
+            payload={"target_agent": "kernel", "kind": "run_optimization", "params": {"kernel_id": "k006"}},
         )
         await c._handle_intent("orchestration", intent)
         # SharedState gained a last_kernel_opt entry.
@@ -109,22 +115,25 @@ async def test_run_optimization_response_records_to_shared_state(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_does_not_record_kernel_opt(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """Only run_optimization (not trace_analyze) writes to last_kernel_opt."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from inference_optimizer.orchestrator import kernel_request_handlers
+
         async def fake(payload, *, session_dir):
             return {"status": "ok", "hot_kernels": [{"kernel_id": "k001"}]}
+
         monkeypatch.setitem(
             kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "trace_analyze", fake,
+            "trace_analyze",
+            fake,
         )
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "trace_analyze",
-                     "params": {"trace_input": "/tmp/t.json"}},
+            payload={"target_agent": "kernel", "kind": "trace_analyze", "params": {"trace_input": "/tmp/t.json"}},
         )
         await c._handle_intent("orchestration", intent)
         assert c.shared_state.last_kernel_opt == {}
@@ -134,7 +143,8 @@ async def test_trace_analyze_does_not_record_kernel_opt(
 
 @pytest.mark.asyncio
 async def test_run_gemm_tuning_response_records_to_shared_state(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
@@ -160,12 +170,16 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
 
         monkeypatch.setitem(
             kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "run_gemm_tuning", fake,
+            "run_gemm_tuning",
+            fake,
         )
-        await c._handle_intent("orchestration", Intent(
-            type=IntentType.REQUEST,
-            payload={"target_agent": "kernel", "kind": "run_gemm_tuning", "params": {}},
-        ))
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={"target_agent": "kernel", "kind": "run_gemm_tuning", "params": {}},
+            ),
+        )
 
         assert c.shared_state.last_gemm_tuning["status"] == "ok"
         assert c.shared_state.last_gemm_tuning["best_speedup"] == 1.2
@@ -196,7 +210,8 @@ async def test_run_optimization_no_longer_gated_on_fp8_gemm_tuning(session_dir):
 
 @pytest.mark.asyncio
 async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
@@ -246,7 +261,8 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
 
 @pytest.mark.asyncio
 async def test_kernel_entry_continues_to_kernel_opt_after_gemm(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
@@ -325,7 +341,8 @@ async def test_run_optimization_handler_rejects_missing_native_source(session_di
 
 @pytest.mark.asyncio
 async def test_run_optimization_handler_uses_candidates_path_native_guard(
-    session_dir, tmp_path,
+    session_dir,
+    tmp_path,
 ):
     from inference_optimizer.orchestrator.kernel_request_handlers import (
         run_optimization_handler,
@@ -363,7 +380,9 @@ async def test_run_optimization_handler_uses_candidates_path_native_guard(
 
 @pytest.mark.asyncio
 async def test_run_optimization_handler_forwards_verification_evidence(
-    session_dir, tmp_path, monkeypatch,
+    session_dir,
+    tmp_path,
+    monkeypatch,
 ):
     from inference_optimizer.orchestrator import kernel_request_handlers as krh
 
@@ -413,7 +432,9 @@ async def test_run_optimization_handler_forwards_verification_evidence(
 
 @pytest.mark.asyncio
 async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fallback(
-    session_dir, tmp_path, monkeypatch,
+    session_dir,
+    tmp_path,
+    monkeypatch,
 ):
     from inference_optimizer.orchestrator import kernel_request_handlers as krh
 
@@ -472,6 +493,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
     result = await krh.run_optimization_handler(
         {
             "candidates_path": str(candidates),
+            "backend_order": "geak,claude,codex",
             "budget_minutes": 60,
             "max_parallel": 2,
         },
@@ -493,13 +515,11 @@ async def test_run_optimization_handler_batches_reusable_kernels_with_backend_fa
 
 
 # E — record_kernel_opt retires kernels stuck in PARTIAL (regression for the r24 custom_allreduce GEAK retry-loop that only retired on REVERT).
-def _partial_kernel_opt_result(kernel_id: str,
-                                decision: str = "PARTIAL") -> dict[str, Any]:
+def _partial_kernel_opt_result(kernel_id: str, decision: str = "PARTIAL") -> dict[str, Any]:
     return {
         "status": "ok",
         "kernel_id": kernel_id,
-        "proposal": {"decision": decision,
-                     "reasons": ["no measurable speedup found"]},
+        "proposal": {"decision": decision, "reasons": ["no measurable speedup found"]},
         "verification": {
             "compile_passed": True,
             "correctness_passed": False,
@@ -558,10 +578,7 @@ def test_record_kernel_opt_max_partial_env_override(monkeypatch):
     assert "k004" not in state.rejected_kernel_ids
     state.record_kernel_opt(_partial_kernel_opt_result("k004"))
     assert "k004" in state.rejected_kernel_ids
-    assert (
-        state.kernel_opt_attempts["k004"]["rejected_reason"]
-        == "max_partial_attempts_3_without_keep"
-    )
+    assert state.kernel_opt_attempts["k004"]["rejected_reason"] == "max_partial_attempts_3_without_keep"
 
 
 def test_record_kernel_opt_history_capped_at_ten():
@@ -598,28 +615,30 @@ def test_record_kernel_opt_persists_test_command():
     """test_command from backend_paths must survive into kernel_opt_attempts
     so that after_kernel_opt rocprof can retrieve it without re-deriving."""
     state = SharedState()
-    state.record_kernel_opt({
-        "status": "ok",
-        "kernel_id": "k_tc",
-        "source_file": "/src/kernel.cu",
-        "proposal": {"decision": "KEEP", "reasons": []},
-        "verification": {
-            "micro_speedup": 1.25,
-            "best_artifact_path": "/tmp/k_tc.hip",
-            "compile_passed": True,
-            "correctness_passed": True,
-        },
-        "attempts": [
-            {
-                "backend": "geak",
-                "status": "ok",
-                "backend_paths": {
-                    "test_command": "timeout 600 python /sgl-workspace/aiter/tests/test_moe.py",
-                    "output_dir": "/tmp/geak_out",
-                },
-            }
-        ],
-    })
+    state.record_kernel_opt(
+        {
+            "status": "ok",
+            "kernel_id": "k_tc",
+            "source_file": "/src/kernel.cu",
+            "proposal": {"decision": "KEEP", "reasons": []},
+            "verification": {
+                "micro_speedup": 1.25,
+                "best_artifact_path": "/tmp/k_tc.hip",
+                "compile_passed": True,
+                "correctness_passed": True,
+            },
+            "attempts": [
+                {
+                    "backend": "geak",
+                    "status": "ok",
+                    "backend_paths": {
+                        "test_command": "timeout 600 python /sgl-workspace/aiter/tests/test_moe.py",
+                        "output_dir": "/tmp/geak_out",
+                    },
+                }
+            ],
+        }
+    )
     entry = state.kernel_opt_attempts.get("k_tc") or {}
     assert entry.get("test_command") == "timeout 600 python /sgl-workspace/aiter/tests/test_moe.py"
 

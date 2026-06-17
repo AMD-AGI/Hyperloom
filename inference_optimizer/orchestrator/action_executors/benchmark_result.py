@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -23,9 +24,7 @@ log = logging.getLogger(__name__)
 # Default rescue path: scripts hardcoding ``--result-dir /workspace/``
 # leak to ``/workspace/inferencex_result.json``. Extend/replace via
 # ``$INFERENCE_OPTIMIZER_RESCUE_PATHS`` (see :func:`_rescue_candidate_paths`).
-_DEFAULT_RESCUE_PATHS: tuple[Path, ...] = (
-    Path("/workspace/inferencex_result.json"),
-)
+_DEFAULT_RESCUE_PATHS: tuple[Path, ...] = (Path("/workspace/inferencex_result.json"),)
 
 
 # Wrapper-side diagnostic files hardcoded under ``/workspace/`` (server
@@ -49,6 +48,15 @@ _MTIME_GATE_SLACK_SEC: float = 1.0
 
 
 def _to_float(value: Any) -> float | None:
+    """Coerce a value to ``float``, rejecting bools and ``None``.
+
+    Args:
+        value (Any): The value to coerce.
+
+    Returns:
+        float | None: The parsed float, or ``None`` when the value is a
+        bool, ``None``, or not convertible.
+    """
     if isinstance(value, bool) or value is None:
         return None
     try:
@@ -58,6 +66,15 @@ def _to_float(value: Any) -> float | None:
 
 
 def _to_int(value: Any) -> int | None:
+    """Coerce a value to ``int``, rejecting bools and ``None``.
+
+    Args:
+        value (Any): The value to coerce.
+
+    Returns:
+        int | None: The parsed int, or ``None`` when the value is a
+        bool, ``None``, or not convertible.
+    """
     if isinstance(value, bool) or value is None:
         return None
     try:
@@ -67,6 +84,14 @@ def _to_int(value: Any) -> int | None:
 
 
 def _first_float(*values: Any) -> float | None:
+    """Return the first value that parses as a float.
+
+    Args:
+        *values (Any): Candidate values, tried in order.
+
+    Returns:
+        float | None: The first successfully parsed float, or ``None``.
+    """
     for value in values:
         parsed = _to_float(value)
         if parsed is not None:
@@ -75,6 +100,14 @@ def _first_float(*values: Any) -> float | None:
 
 
 def _first_int(*values: Any) -> int | None:
+    """Return the first value that parses as an int.
+
+    Args:
+        *values (Any): Candidate values, tried in order.
+
+    Returns:
+        int | None: The first successfully parsed int, or ``None``.
+    """
     for value in values:
         parsed = _to_int(value)
         if parsed is not None:
@@ -83,6 +116,15 @@ def _first_int(*values: Any) -> int | None:
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
+    """Load a JSON object from ``path``, tolerating read/parse errors.
+
+    Args:
+        path (Path): The JSON file to read.
+
+    Returns:
+        dict[str, Any] | None: The parsed mapping, or ``None`` on IO /
+        decode error or when the top-level JSON is not an object.
+    """
     try:
         with path.open(encoding="utf-8") as f:
             data = json.load(f)
@@ -92,11 +134,16 @@ def _load_json(path: Path) -> dict[str, Any] | None:
 
 
 def _candidate_raw_jsons(workspace: Path) -> list[Path]:
-    """Return likely InferenceX result files, preferring baseline over profile."""
-    paths = [
-        p for p in workspace.rglob("*.json")
-        if p.name != "benchmark_report.json"
-    ]
+    """Return likely InferenceX result files, preferring baseline over profile.
+
+    Args:
+        workspace (Path): The task workspace to scan recursively.
+
+    Returns:
+        list[Path]: Candidate ``*.json`` result paths (excluding
+        ``benchmark_report.json``), ordered baseline-before-profile.
+    """
+    paths = [p for p in workspace.rglob("*.json") if p.name != "benchmark_report.json"]
     return sorted(
         paths,
         key=lambda p: (
@@ -122,11 +169,31 @@ def _rescue_candidate_paths(
     When ``subprocess_started_unix`` is given, candidates older than it
     (minus :data:`_MTIME_GATE_SLACK_SEC`) are dropped as stale prior-run
     leaks. Never raises: per-candidate I/O errors are swallowed.
+
+    Args:
+        workspace: The per-task workspace; in-workspace files are skipped.
+        subprocess_started_unix: Optional launch time used to drop stale
+            prior-run leaks.
+
+    Returns:
+        Absolute paths to fresh, out-of-workspace Magpie leak destinations.
     """
     candidates: list[Path] = []
     seen: set[Path] = set()
 
     def _push(path: Path) -> None:
+        """Add ``path`` to the candidate list if it passes all gates.
+
+        Resolves the path, skips duplicates and in-workspace files,
+        requires a regular file, and (when a start time is known)
+        drops stale candidates older than the subprocess launch.
+
+        Args:
+            path (Path): A candidate leak path to consider.
+
+        Returns:
+            None: Mutates the enclosing ``candidates``/``seen`` sets.
+        """
         try:
             resolved = path.resolve()
         except OSError:
@@ -154,9 +221,7 @@ def _rescue_candidate_paths(
         candidates.append(path)
 
     env_raw = os.environ.get("INFERENCE_OPTIMIZER_RESCUE_PATHS", "").strip()
-    env_entries = [
-        part.strip() for part in env_raw.split(":") if part.strip()
-    ] if env_raw else []
+    env_entries = [part.strip() for part in env_raw.split(":") if part.strip()] if env_raw else []
     for entry in env_entries:
         p = Path(entry)
         if p.is_dir():
@@ -184,6 +249,14 @@ def _materialize_rescue_into_workspace(
     self-contained. Returns the destination on success, or ``None`` on I/O
     error (caller falls back to the leak path) or when the source already
     lives inside the workspace.
+
+    Args:
+        rescue_path: The leaked InferenceX result file to copy in.
+        workspace: The per-task workspace to copy the result into.
+
+    Returns:
+        The in-workspace destination path on success, or ``None`` on I/O error
+        or when the source already lives inside the workspace.
     """
     try:
         rescue_resolved = rescue_path.resolve()
@@ -202,7 +275,9 @@ def _materialize_rescue_into_workspace(
     except OSError as exc:
         log.warning(
             "benchmark_result: failed to copy rescued result %s -> %s: %s",
-            rescue_path, destination, exc,
+            rescue_path,
+            destination,
+            exc,
         )
         return None
     return destination
@@ -214,6 +289,13 @@ def _resolve_leak_roots(leak_root: Path | None) -> tuple[Path, ...]:
     Order: explicit ``leak_root`` kwarg (tests) →
     ``$INFERENCE_OPTIMIZER_LEAK_ROOTS`` (colon-separated) →
     :data:`_DEFAULT_LEAK_ARTIFACT_ROOT` (``/workspace``).
+
+    Args:
+        leak_root: Optional explicit root override (used by tests); when
+            ``None`` the env var or default is used.
+
+    Returns:
+        A tuple of directory roots to scan for wrapper-side leak files.
     """
     if leak_root is not None:
         return (leak_root,)
@@ -240,6 +322,17 @@ def harvest_leaked_artifacts(
     ``shutil.copy2``-s each match (source never moved). Returns
     ``(leak_path, copy_path)`` tuples for audit; never raises (per-artifact
     errors are isolated).
+
+    Args:
+        destination: Directory the harvested artifacts are copied into.
+        subprocess_started_unix: Optional launch time used to skip stale
+            prior-run leaks.
+        leak_root: Optional explicit root override forwarded to
+            :func:`_resolve_leak_roots`.
+        extra_globs: Additional filename globs to harvest beyond the defaults.
+
+    Returns:
+        A list of ``(leak_path, copy_path)`` tuples for the artifacts copied.
     """
     harvested: list[tuple[Path, Path]] = []
     leak_roots = _resolve_leak_roots(leak_root)
@@ -248,7 +341,8 @@ def harvest_leaked_artifacts(
     except OSError as exc:
         log.warning(
             "benchmark_result.harvest: cannot prepare destination=%s: %s",
-            destination, exc,
+            destination,
+            exc,
         )
         return harvested
     try:
@@ -290,9 +384,7 @@ def harvest_leaked_artifacts(
                         mtime = match.stat().st_mtime
                     except OSError:
                         continue
-                    if mtime + _MTIME_GATE_SLACK_SEC < float(
-                        subprocess_started_unix
-                    ):
+                    if mtime + _MTIME_GATE_SLACK_SEC < float(subprocess_started_unix):
                         continue
                 destination_path = destination / match.name
                 try:
@@ -300,7 +392,9 @@ def harvest_leaked_artifacts(
                 except OSError as exc:
                     log.warning(
                         "benchmark_result.harvest: copy %s -> %s failed: %s",
-                        match, destination_path, exc,
+                        match,
+                        destination_path,
+                        exc,
                     )
                     continue
                 harvested.append((match, destination_path))
@@ -313,14 +407,27 @@ def _merge_raw_result(
     *,
     source_path: Path,
 ) -> None:
+    """Fill missing measurement fields from a raw InferenceX result.
+
+    Only keys that are still ``None`` in ``measurement`` are populated,
+    so an earlier (preferred) source is never overwritten.
+
+    Args:
+        measurement (dict[str, Any]): The measurement dict to fill in
+            place.
+        raw (dict[str, Any]): The raw InferenceX result mapping.
+        source_path (Path): Path the raw result was read from; recorded
+            as ``raw_result_path`` when not already set.
+
+    Returns:
+        None: ``measurement`` is mutated in place.
+    """
     if measurement.get("output_throughput") is None:
         measurement["output_throughput"] = _to_float(raw.get("output_throughput"))
     if measurement.get("request_throughput") is None:
         measurement["request_throughput"] = _to_float(raw.get("request_throughput"))
     if measurement.get("total_token_throughput") is None:
-        measurement["total_token_throughput"] = _to_float(
-            raw.get("total_token_throughput")
-        )
+        measurement["total_token_throughput"] = _to_float(raw.get("total_token_throughput"))
     if measurement.get("completed_requests") is None:
         measurement["completed_requests"] = _first_int(
             raw.get("completed_requests"),
@@ -362,6 +469,17 @@ def extract_benchmark_measurement(
     ``subprocess_started_unix`` enables an opt-in salvage pass over the
     Magpie leak destinations (see :func:`_rescue_candidate_paths`) when the
     in-workspace search fails; only leaks written after this run are adopted.
+
+    Args:
+        report: The Magpie ``benchmark_report.json`` mapping, or ``None``.
+        workspace: Optional task workspace scanned for raw InferenceX results
+            and (as a fallback) salvageable leaks.
+        subprocess_started_unix: Optional launch time enabling the mtime-gated
+            leak salvage pass.
+
+    Returns:
+        A normalized measurement dict (including ``valid_measurement`` and any
+        ``nonfatal_warnings``).
     """
     report = report or {}
     throughput = report.get("throughput") or {}
@@ -376,9 +494,7 @@ def extract_benchmark_measurement(
         "model": report.get("model"),
         "request_throughput": _to_float(throughput.get("request_throughput")),
         "output_throughput": _to_float(throughput.get("output_throughput")),
-        "total_token_throughput": _to_float(
-            throughput.get("total_token_throughput")
-        ),
+        "total_token_throughput": _to_float(throughput.get("total_token_throughput")),
         "completed_requests": _first_int(
             throughput.get("completed_requests"),
             throughput.get("completed"),
@@ -413,10 +529,7 @@ def extract_benchmark_measurement(
 
     # Second-chance salvage from Magpie leak destinations when the
     # in-workspace search found no usable measurement (mtime-gated).
-    if (
-        not measurement["valid_measurement"]
-        and workspace is not None
-    ):
+    if not measurement["valid_measurement"] and workspace is not None:
         for rescue_path in _rescue_candidate_paths(
             workspace,
             subprocess_started_unix=subprocess_started_unix,
@@ -429,17 +542,15 @@ def extract_benchmark_measurement(
             # NFS clone stays self-contained. Best-effort: on copy failure
             # we fall back to the leak path rather than drop the measurement.
             materialized = _materialize_rescue_into_workspace(
-                rescue_path, workspace,
+                rescue_path,
+                workspace,
             )
             recorded_path = materialized if materialized is not None else rescue_path
             _merge_raw_result(measurement, raw, source_path=recorded_path)
             if is_valid_measurement(measurement):
                 warnings.append(f"rescued_from_leaked_path:{rescue_path}")
                 if materialized is None:
-                    warnings.append(
-                        "rescued_copy_into_workspace_failed: "
-                        f"{rescue_path}"
-                    )
+                    warnings.append(f"rescued_copy_into_workspace_failed: {rescue_path}")
                 break
         _derive_tpot_if_missing(measurement, report)
         measurement["valid_measurement"] = is_valid_measurement(measurement)
@@ -455,6 +566,11 @@ def _derive_tpot_if_missing(
     Best-effort: only derives when end-to-end and TTFT latencies are
     available and an output sequence length greater than 1 can be
     resolved from the report. Leaves the field untouched otherwise.
+
+    Args:
+        measurement: The measurement dict to fill in place.
+        report: The Magpie report mapping used to resolve the output sequence
+            length, or ``None``.
     """
     if measurement.get("tpot_mean_ms") is not None:
         return
@@ -469,16 +585,21 @@ def _derive_tpot_if_missing(
 
 
 def _resolve_osl(report: dict[str, Any] | None) -> int | None:
-    """Pull the output sequence length from common report locations."""
+    """Pull the output sequence length from common report locations.
+
+    Args:
+        report: The Magpie report mapping to search, or ``None``.
+
+    Returns:
+        The first positive output sequence length found, or ``None``.
+    """
     if not isinstance(report, dict):
         return None
     candidates: list[Any] = [report.get("osl"), report.get("output_len")]
     for section_key in ("config", "request", "params", "workload"):
         section = report.get(section_key)
         if isinstance(section, dict):
-            candidates.extend(
-                section.get(k) for k in ("osl", "output_len", "max_tokens")
-            )
+            candidates.extend(section.get(k) for k in ("osl", "output_len", "max_tokens"))
     for value in candidates:
         n = _to_int(value)
         if n is not None and n > 0:
@@ -487,19 +608,200 @@ def _resolve_osl(report: dict[str, Any] | None) -> int | None:
 
 
 def is_valid_measurement(result: dict[str, Any] | None) -> bool:
+    """Return whether a measurement reflects a usable benchmark result.
+
+    A measurement is valid when it reports positive output throughput
+    and at least one completed request.
+
+    Args:
+        result (dict[str, Any] | None): The measurement dict to check.
+
+    Returns:
+        bool: ``True`` if throughput and completed requests are both
+        positive; ``False`` otherwise.
+    """
     if not isinstance(result, dict):
         return False
     output_tput = _to_float(result.get("output_throughput"))
     completed = _to_int(result.get("completed_requests"))
-    return (
-        output_tput is not None
-        and output_tput > 0
-        and completed is not None
-        and completed > 0
-    )
+    return output_tput is not None and output_tput > 0 and completed is not None and completed > 0
+
+
+# ── Approximate throughput for killed-overtime variants ──
+#
+# A variant reaped at the soft overtime deadline never writes a
+# ``benchmark_report.json`` / ``inferencex_result.json``, so the normal
+# measurement path yields nothing. The inference engine, however, prints its
+# instantaneous decode throughput to ``server.log`` every few hundred steps:
+#   sglang: ``... gen throughput (token/s): 1234.56, #queue-req: 0``
+#   vllm:   ``... Avg generation throughput: 1234.5 tokens/s, Running: 64 ...``
+# Averaging the steady-state samples gives a rough (intentionally imprecise)
+# output-throughput estimate so the run is still legible post-mortem. This is
+# informational only — callers keep the variant marked killed/failed.
+_SGLANG_GEN_TPUT_RE = re.compile(
+    r"gen throughput \(token/s\):\s*([0-9]+(?:\.[0-9]+)?)",
+    re.IGNORECASE,
+)
+_VLLM_GEN_TPUT_RE = re.compile(
+    r"Avg generation throughput:\s*([0-9]+(?:\.[0-9]+)?)\s*tokens?/s",
+    re.IGNORECASE,
+)
+
+# Fraction of the leading (warmup/ramp-up) samples dropped before averaging so
+# the estimate reflects sustained decode rather than the cold-start climb.
+_DEFAULT_WARMUP_SKIP_FRAC: float = 0.25
+
+
+def _parse_server_log_gen_throughput(log_path: Path) -> list[float]:
+    """Return every positive decode-throughput sample logged in ``server.log``.
+
+    Scans the file line by line (tolerating decode errors) for the sglang and
+    vllm periodic ``gen throughput`` / ``Avg generation throughput`` markers.
+    Zero samples (prefill-only windows) are kept here and filtered downstream.
+
+    Args:
+        log_path (Path): Path to a captured ``server.log``.
+
+    Returns:
+        list[float]: Parsed throughput values in log order; empty on IO error
+        or when no markers are present.
+    """
+    samples: list[float] = []
+    try:
+        with log_path.open(encoding="utf-8", errors="replace") as f:
+            for line in f:
+                match = _SGLANG_GEN_TPUT_RE.search(line) or _VLLM_GEN_TPUT_RE.search(line)
+                if match is None:
+                    continue
+                value = _to_float(match.group(1))
+                if value is not None:
+                    samples.append(value)
+    except OSError:
+        return []
+    return samples
+
+
+def _steady_state_mean(
+    samples: list[float],
+    *,
+    warmup_skip_frac: float = _DEFAULT_WARMUP_SKIP_FRAC,
+) -> float | None:
+    """Average the steady-state portion of throughput ``samples``.
+
+    Drops non-positive samples (prefill-only windows) and the leading
+    ``warmup_skip_frac`` of what remains before averaging. Falls back to the
+    full positive set when the warmup trim would empty it.
+
+    Args:
+        samples (list[float]): Throughput samples in chronological order.
+        warmup_skip_frac (float): Fraction of leading positive samples to drop.
+
+    Returns:
+        float | None: The steady-state mean, or ``None`` when no positive
+        samples exist.
+    """
+    positive = [s for s in samples if s > 0]
+    if not positive:
+        return None
+    skip = int(len(positive) * max(0.0, min(1.0, warmup_skip_frac)))
+    steady = positive[skip:] or positive
+    return sum(steady) / len(steady)
+
+
+def _find_server_logs(slot: Path) -> list[Path]:
+    """Return ``server.log`` files under ``slot``, largest first.
+
+    Args:
+        slot (Path): The variant slot directory to scan recursively.
+
+    Returns:
+        list[Path]: Matching log paths ordered by descending size; empty on
+        IO error or when none exist.
+    """
+    try:
+        logs = list(slot.rglob("server.log"))
+    except OSError:
+        return []
+
+    def _size(path: Path) -> int:
+        """Best-effort byte size used to rank candidate logs (0 on error).
+
+        Args:
+            path: The log file whose byte size to read.
+
+        Returns:
+            The file size in bytes, or ``0`` on stat error.
+        """
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+
+    return sorted(logs, key=_size, reverse=True)
+
+
+def estimate_output_throughput_from_server_log(
+    log_path: Path,
+    *,
+    warmup_skip_frac: float = _DEFAULT_WARMUP_SKIP_FRAC,
+) -> dict[str, Any] | None:
+    """Estimate sustained output throughput from one engine ``server.log``.
+
+    Args:
+        log_path (Path): Path to a captured ``server.log``.
+        warmup_skip_frac (float): Fraction of leading samples treated as
+            warmup and excluded from the average.
+
+    Returns:
+        dict[str, Any] | None: ``{"output_throughput", "num_samples",
+        "source_path"}`` when at least one positive sample is found, else
+        ``None``.
+    """
+    samples = _parse_server_log_gen_throughput(log_path)
+    mean = _steady_state_mean(samples, warmup_skip_frac=warmup_skip_frac)
+    if mean is None:
+        return None
+    return {
+        "output_throughput": mean,
+        "num_samples": sum(1 for s in samples if s > 0),
+        "source_path": str(log_path),
+    }
+
+
+def estimate_killed_variant_throughput(
+    slot: Path,
+    *,
+    warmup_skip_frac: float = _DEFAULT_WARMUP_SKIP_FRAC,
+) -> dict[str, Any] | None:
+    """Estimate output throughput for a killed-overtime variant from its logs.
+
+    Locates the richest ``server.log`` under ``slot`` (largest first) and
+    returns the first usable steady-state estimate. Best-effort and never
+    raises; intended purely as informational post-mortem context.
+
+    Args:
+        slot (Path): The variant slot directory (after artifact harvest).
+        warmup_skip_frac (float): Fraction of leading samples treated as
+            warmup and excluded from the average.
+
+    Returns:
+        dict[str, Any] | None: The estimate dict from
+        :func:`estimate_output_throughput_from_server_log`, or ``None`` when no
+        log yields a positive sample.
+    """
+    for log_path in _find_server_logs(slot):
+        estimate = estimate_output_throughput_from_server_log(
+            log_path,
+            warmup_skip_frac=warmup_skip_frac,
+        )
+        if estimate is not None:
+            return estimate
+    return None
 
 
 __all__ = [
+    "estimate_killed_variant_throughput",
+    "estimate_output_throughput_from_server_log",
     "extract_benchmark_measurement",
     "harvest_leaked_artifacts",
     "is_valid_measurement",

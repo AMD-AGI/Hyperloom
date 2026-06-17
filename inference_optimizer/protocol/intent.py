@@ -17,6 +17,13 @@ from typing import Any
 
 # ---------------------------------------------------------------------------
 class IntentType(str, Enum):
+    """Enumeration of every structured intent an agent may emit.
+
+    String-valued so the literal wire token equals the member value.
+    PolicyGate restricts which sources may emit which members; this enum
+    only defines the vocabulary shared by both transports.
+    """
+
     SEND_MESSAGE = "send_message"
     DELEGATE = "delegate"
     PROPOSE_ACTION = "propose_action"
@@ -52,6 +59,18 @@ class Intent:
 
     @classmethod
     def from_envelope_item(cls, item: dict[str, Any]) -> "Intent":
+        """Build an :class:`Intent` from one raw envelope item.
+
+        Args:
+            item (dict[str, Any]): Raw item with an ``intent_type`` key and
+                an optional ``payload`` mapping.
+
+        Returns:
+            Intent: The parsed intent with a copied payload dict.
+
+        Raises:
+            ValueError: If ``intent_type`` is not a valid :class:`IntentType`.
+        """
         intent_type = IntentType(item["intent_type"])
         return cls(type=intent_type, payload=dict(item.get("payload") or {}))
 
@@ -86,27 +105,26 @@ INTENT_ENVELOPE_SCHEMA: dict[str, Any] = {
 
 # Per-intent payload required-field map (DESIGN §14.1 / §15 dispatch / §18.2)
 _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
-    IntentType.SEND_MESSAGE:    ("topic",),
-    IntentType.DELEGATE:        ("action_name",),
-    IntentType.PROPOSE_ACTION:  ("action_name", "predicted_gain_pct"),
-    IntentType.UPDATE_STATE:    ("changes",),
-    IntentType.UPDATE_PERSONA:  ("body_md",),
-    IntentType.ASK_QUESTION:    ("topic", "question"),
-    IntentType.ANSWER:          ("in_reply_to", "answer"),
-    IntentType.ALERT:           ("severity", "summary"),
-    IntentType.REQUEST:         ("target_agent", "kind"),
-    IntentType.RESPONSE:        ("in_reply_to", "kind"),
+    IntentType.SEND_MESSAGE: ("topic",),
+    IntentType.DELEGATE: ("action_name",),
+    IntentType.PROPOSE_ACTION: ("action_name", "predicted_gain_pct"),
+    IntentType.UPDATE_STATE: ("changes",),
+    IntentType.UPDATE_PERSONA: ("body_md",),
+    IntentType.ASK_QUESTION: ("topic", "question"),
+    IntentType.ANSWER: ("in_reply_to", "answer"),
+    IntentType.ALERT: ("severity", "summary"),
+    IntentType.REQUEST: ("target_agent", "kind"),
+    IntentType.RESPONSE: ("in_reply_to", "kind"),
     # verdict/verdict_map mutual exclusion enforced by
     # _validate_review_verdict_payload; only the structural field required here.
-    IntentType.REVIEW_VERDICT:  ("target_proposal_msg_id",),
-    IntentType.KILL_TASK:       ("task_id", "reason"),
-    IntentType.FORCE_DISPATCH:  ("task_id", "reason"),
-    IntentType.PRUNE_BRANCH:    ("family", "reason"),
+    IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
+    IntentType.KILL_TASK: ("task_id", "reason"),
+    IntentType.FORCE_DISPATCH: ("task_id", "reason"),
+    IntentType.PRUNE_BRANCH: ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
     # specialist exit envelope; per-variant schema enforced by PolicyGate R3
     # (policy._validate_specialist_done).
-    IntentType.SPECIALIST_DONE: ("gap_canonical_id", "domain",
-                                  "proposal_set", "empty", "summary"),
+    IntentType.SPECIALIST_DONE: ("gap_canonical_id", "domain", "proposal_set", "empty", "summary"),
 }
 
 
@@ -165,6 +183,13 @@ class IntentValidationError(RuntimeError):
     """Envelope present but schema invalid (raw + reason captured)."""
 
     def __init__(self, reason: str, raw: str | None = None):
+        """Initialise the validation error.
+
+        Args:
+            reason (str): Human-readable description of the schema problem.
+            raw (str | None): The raw envelope text, captured for repair
+                prompts / diagnostics.
+        """
         super().__init__(reason)
         self.raw = raw
 
@@ -172,9 +197,16 @@ class IntentValidationError(RuntimeError):
 def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
     """Validate the top-level envelope shape + per-intent payloads.
 
-    Returns the validated :class:`Intent` list. Raises
-    :class:`IntentValidationError` on any structural issue so the caller
-    can surface a single repair-prompt path (DESIGN §14.4).
+    Args:
+        envelope (dict[str, Any]): The decoded envelope, expected to carry
+            an ``intents`` list of ``{intent_type, payload}`` items.
+
+    Returns:
+        list[Intent]: The validated intents in envelope order.
+
+    Raises:
+        IntentValidationError: On any structural issue so the caller can
+            surface a single repair-prompt path (DESIGN §14.4).
     """
     if not isinstance(envelope, dict):
         raise IntentValidationError(f"envelope must be object, got {type(envelope).__name__}")
@@ -189,25 +221,18 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
         if not isinstance(item, dict):
             raise IntentValidationError(f"intents[{i}] must be object, got {type(item).__name__}")
         if "intent_type" not in item or "payload" not in item:
-            raise IntentValidationError(
-                f"intents[{i}] missing intent_type or payload"
-            )
+            raise IntentValidationError(f"intents[{i}] missing intent_type or payload")
         try:
             it = IntentType(item["intent_type"])
         except ValueError:
-            raise IntentValidationError(
-                f"intents[{i}].intent_type {item['intent_type']!r} not in allowed set"
-            )
+            raise IntentValidationError(f"intents[{i}].intent_type {item['intent_type']!r} not in allowed set")
         payload = item["payload"]
         if not isinstance(payload, dict):
-            raise IntentValidationError(
-                f"intents[{i}].payload must be object, got {type(payload).__name__}"
-            )
+            raise IntentValidationError(f"intents[{i}].payload must be object, got {type(payload).__name__}")
         for required in _PAYLOAD_REQUIRED[it]:
             if required not in payload:
                 raise IntentValidationError(
-                    f"intents[{i}] (type={it.value}) missing required "
-                    f"payload field: {required!r}"
+                    f"intents[{i}] (type={it.value}) missing required payload field: {required!r}"
                 )
         if it is IntentType.REVIEW_VERDICT:
             _validate_review_verdict_payload(payload, index=i)
@@ -216,13 +241,23 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
 
 
 def _validate_review_verdict_payload(
-    payload: dict[str, Any], *, index: int,
+    payload: dict[str, Any],
+    *,
+    index: int,
 ) -> None:
     """Enforce REVIEW_VERDICT structural shape: exactly one of ``verdict``
     (single) or ``verdict_map`` (per-variant batch) must be present.
 
     PolicyGate handles content validation (verdict vocab, variant_name vs
     grid); this only guarantees at-most-one-present for downstream callers.
+
+    Args:
+        payload: The REVIEW_VERDICT intent payload to validate.
+        index: Position of the intent in the envelope (for error messages).
+
+    Raises:
+        IntentValidationError: If neither or both of ``verdict`` and
+            ``verdict_map`` are present, or ``verdict_map`` is malformed.
     """
     has_single = "verdict" in payload
     has_map = "verdict_map" in payload
@@ -233,15 +268,13 @@ def _validate_review_verdict_payload(
         )
     if has_single and has_map:
         raise IntentValidationError(
-            f"intents[{index}] (type=review_verdict): 'verdict' and "
-            f"'verdict_map' are mutually exclusive"
+            f"intents[{index}] (type=review_verdict): 'verdict' and 'verdict_map' are mutually exclusive"
         )
     if has_map:
         vm = payload["verdict_map"]
         if not isinstance(vm, dict) or not vm:
             raise IntentValidationError(
-                f"intents[{index}] (type=review_verdict).verdict_map must "
-                f"be a non-empty object keyed by variant_name"
+                f"intents[{index}] (type=review_verdict).verdict_map must be a non-empty object keyed by variant_name"
             )
         for vname, entry in vm.items():
             if not isinstance(vname, str) or not vname.strip():
@@ -257,8 +290,7 @@ def _validate_review_verdict_payload(
                 )
             if "verdict" not in entry:
                 raise IntentValidationError(
-                    f"intents[{index}] (type=review_verdict).verdict_map"
-                    f"[{vname!r}] missing required 'verdict' key"
+                    f"intents[{index}] (type=review_verdict).verdict_map[{vname!r}] missing required 'verdict' key"
                 )
 
 

@@ -44,8 +44,8 @@ from ..protocol.intent import IntentType
 class BackendType(str, Enum):
     """How a role talks to the LLM."""
 
-    CLAUDE = "claude"   # tool-using (emit_intent + Read/Bash/Edit gated by Policy)
-    CODEX = "codex"     # no-tools, validated_json_output only (KB Bash exception)
+    CLAUDE = "claude"  # tool-using (emit_intent + Read/Bash/Edit gated by Policy)
+    CODEX = "codex"  # no-tools, validated_json_output only (KB Bash exception)
 
 
 # Built-in default model + API key env table
@@ -57,48 +57,58 @@ DEFAULT_CODEX_API_KEY_ENV = "OPENAI_API_KEY"
 
 
 # Role permission catalogue (DESIGN §7.6)
-_BASE_INTENTS: frozenset[IntentType] = frozenset({
-    IntentType.SEND_MESSAGE,
-    IntentType.ASK_QUESTION,
-    IntentType.ANSWER,
-    IntentType.ALERT,
-    IntentType.UPDATE_PERSONA,
-})
+_BASE_INTENTS: frozenset[IntentType] = frozenset(
+    {
+        IntentType.SEND_MESSAGE,
+        IntentType.ASK_QUESTION,
+        IntentType.ANSWER,
+        IntentType.ALERT,
+        IntentType.UPDATE_PERSONA,
+    }
+)
 
 
 # Orchestration — only role with REQUEST authority; holds PRUNE_BRANCH (Roofline-v2 C3) + ESCALATE_STRATEGY_CHANGE. FORCE_DISPATCH stays robustness-only.
-_ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
-    IntentType.PROPOSE_ACTION,
-    IntentType.DELEGATE,
-    IntentType.UPDATE_STATE,
-    IntentType.REQUEST,
-    IntentType.PRUNE_BRANCH,
-    IntentType.ESCALATE_STRATEGY_CHANGE,
-})
+_ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
+    {
+        IntentType.PROPOSE_ACTION,
+        IntentType.DELEGATE,
+        IntentType.UPDATE_STATE,
+        IntentType.REQUEST,
+        IntentType.PRUNE_BRANCH,
+        IntentType.ESCALATE_STRATEGY_CHANGE,
+    }
+)
 
 
 # Kernel — responder-only; never initiates RPC, never proposes / delegates.
-_KERNEL_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
-    IntentType.RESPONSE,
-    IntentType.UPDATE_STATE,  # only its own action's metric fields (§7.6 ※5)
-})
+_KERNEL_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
+    {
+        IntentType.RESPONSE,
+        IntentType.UPDATE_STATE,  # only its own action's metric fields (§7.6 ※5)
+    }
+)
 
 
 # Critic — review verdicts only; devil's advocate via send_message(topic="advice").
-_CRITIC_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
-    IntentType.REVIEW_VERDICT,
-})
+_CRITIC_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
+    {
+        IntentType.REVIEW_VERDICT,
+    }
+)
 
 
 # Robustness — always-on health monitoring + RCA + recovery; holds the scheduling-police set + KILL_TASK exclusively.
-_ROBUSTNESS_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset({
-    IntentType.UPDATE_STATE,  # crash_count / current_action only
-    IntentType.DELEGATE,      # only handle actions: accuracy_gate / recover / server_lifecycle
-    IntentType.KILL_TASK,
-    IntentType.FORCE_DISPATCH,
-    IntentType.PRUNE_BRANCH,
-    IntentType.ESCALATE_STRATEGY_CHANGE,
-})
+_ROBUSTNESS_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
+    {
+        IntentType.UPDATE_STATE,  # crash_count / current_action only
+        IntentType.DELEGATE,  # only handle actions: accuracy_gate / recover / server_lifecycle
+        IntentType.KILL_TASK,
+        IntentType.FORCE_DISPATCH,
+        IntentType.PRUNE_BRANCH,
+        IntentType.ESCALATE_STRATEGY_CHANGE,
+    }
+)
 
 
 # AgentRole dataclass
@@ -122,15 +132,36 @@ class AgentRole:
 
     @property
     def system_prompt_path(self) -> Path:
+        """Path to this role's system prompt markdown file.
+
+        Uses ``system_prompt_filename`` when set, else ``<name>.md`` under
+        the shared system-prompts asset directory.
+
+        Returns:
+            Path: Absolute path to the role's system prompt file.
+        """
         return asset_system_prompts_dir() / (self.system_prompt_filename or f"{self.name}.md")
 
     def load_system_prompt(self) -> str:
+        """Read and return this role's system prompt text.
+
+        Returns:
+            str: The UTF-8 decoded contents of :attr:`system_prompt_path`.
+        """
         return self.system_prompt_path.read_text(encoding="utf-8")
 
 
 # Default registry
 def default_role_registry() -> dict[str, AgentRole]:
-    """Return the canonical v0.6 4-agent registry (PascalCase capable)."""
+    """Return the canonical v0.6 4-agent registry (PascalCase capable).
+
+    Builds fresh :class:`AgentRole` records for orchestration, kernel,
+    critic, and robustness with their default backends, models, and
+    permission flags.
+
+    Returns:
+        dict[str, AgentRole]: Mapping of role name to its static record.
+    """
     return {
         "orchestration": AgentRole(
             name="orchestration",
@@ -177,7 +208,13 @@ def default_role_registry() -> dict[str, AgentRole]:
 
 @lru_cache(maxsize=1)
 def roles_for_run() -> tuple[str, ...]:
-    """Stable, deterministic ordering for reactor loop iteration."""
+    """Stable, deterministic ordering for reactor loop iteration.
+
+    Cached so every caller observes the same tuple instance.
+
+    Returns:
+        tuple[str, ...]: Role names in fixed reactor-iteration order.
+    """
     return ("orchestration", "kernel", "critic", "robustness")
 
 

@@ -47,6 +47,13 @@ from ..paths import session_dir as default_session_dir
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for the session-breakdown CLI.
+
+    Returns:
+        argparse.ArgumentParser: Parser configured with ``--session-dir``,
+        ``--output``, ``--dry-run``, ``--print``, ``--include-transcripts``,
+        and ``--verbose`` options.
+    """
     parser = argparse.ArgumentParser(
         prog="dump_session_breakdown",
         description=__doc__,
@@ -63,13 +70,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=Path,
         default=None,
-        help=(
-            f"Override output file path. Defaults to "
-            f"<session_dir>/{BREAKDOWN_FILENAME}."
-        ),
+        help=(f"Override output file path. Defaults to <session_dir>/{BREAKDOWN_FILENAME}."),
     )
     parser.add_argument(
         "--dry-run",
@@ -92,13 +97,22 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--verbose", "-v", action="count", default=0,
+        "--verbose",
+        "-v",
+        action="count",
+        default=0,
         help="-v INFO, -vv DEBUG.",
     )
     return parser
 
 
 def _setup_logging(verbose: int) -> None:
+    """Configure root logging level from a verbosity count.
+
+    Args:
+        verbose (int): Verbosity count; ``0`` -> WARNING, ``1`` -> INFO,
+            ``>=2`` -> DEBUG.
+    """
     level = logging.WARNING
     if verbose == 1:
         level = logging.INFO
@@ -111,9 +125,17 @@ def _setup_logging(verbose: int) -> None:
 
 
 def _summary_line(breakdown: dict) -> str:
+    """Format a one-line summary of a session breakdown.
+
+    Args:
+        breakdown (dict): Session breakdown mapping produced by ``build``.
+
+    Returns:
+        str: Single-line summary with session id, stop reason, validated gain,
+        and assorted invocation/lifecycle counts.
+    """
     sess = breakdown.get("session") or {}
     final = breakdown.get("final") or {}
-    cap = breakdown.get("capability_summary") or {}
     geak_n = len(breakdown.get("geak_invocations") or [])
     oob_n = len(breakdown.get("oob_invocations") or [])
     lifecycle = breakdown.get("kernel_lifecycle") or {}
@@ -136,6 +158,19 @@ def _summary_line(breakdown: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Build and (optionally) write the session breakdown JSON.
+
+    Resolves the session directory, then either prints a dry-run summary or
+    writes ``session_breakdown.json`` and prints the summary line.
+
+    Args:
+        argv (list[str] | None): Argument vector to parse; defaults to
+            ``sys.argv`` when ``None``.
+
+    Returns:
+        int: ``0`` on success, ``2`` when the session directory is missing, or
+        ``1`` when writing the breakdown fails.
+    """
     args = _build_parser().parse_args(argv)
     _setup_logging(args.verbose)
     log = logging.getLogger("dump_session_breakdown")

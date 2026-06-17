@@ -28,13 +28,15 @@ KB_DRAFT_REQUEST = "kb_draft_request"
 KB_HINT_REQUEST = "kb_hint_request"
 OBJECTION_REQUEST = "objection_signal"
 
-REQUEST_KINDS: frozenset[str] = frozenset({
-    COORDINATOR_INBOX,
-    DECISION_REQUEST,
-    KB_DRAFT_REQUEST,
-    KB_HINT_REQUEST,
-    OBJECTION_REQUEST,
-})
+REQUEST_KINDS: frozenset[str] = frozenset(
+    {
+        COORDINATOR_INBOX,
+        DECISION_REQUEST,
+        KB_DRAFT_REQUEST,
+        KB_HINT_REQUEST,
+        OBJECTION_REQUEST,
+    }
+)
 
 
 # Context dimensions that the KB scope is built from. ``model`` and
@@ -78,6 +80,11 @@ class Proposal:
     predicted_gain_pct: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the proposal as a plain dict via :func:`dataclasses.asdict`.
+
+        Returns:
+            dict[str, Any]: All proposal fields keyed by name.
+        """
         return asdict(self)
 
 
@@ -105,6 +112,14 @@ class CriticRequest:
     raw: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the request as a plain JSON-serialisable dict.
+
+        The raw payload (``raw``) is intentionally omitted; proposals are
+        converted via :meth:`Proposal.to_dict`.
+
+        Returns:
+            dict[str, Any]: The request fields keyed by name.
+        """
         out: dict[str, Any] = {
             "kind": self.kind,
             "session_id": self.session_id,
@@ -123,17 +138,42 @@ class CriticRequest:
 # Parsing
 # ---------------------------------------------------------------------------
 def _require_str(d: dict[str, Any], key: str, *, where: str) -> str:
+    """Extract a required non-empty string field.
+
+    Args:
+        d (dict[str, Any]): The source mapping.
+        key (str): The field name to read.
+        where (str): Context label used in error messages.
+
+    Returns:
+        str: The field value.
+
+    Raises:
+        RequestValidationError: If the key is missing or not a non-empty
+            string.
+    """
     if key not in d:
         raise RequestValidationError(f"{where}: missing required field {key!r}")
     value = d[key]
     if not isinstance(value, str) or not value.strip():
-        raise RequestValidationError(
-            f"{where}: field {key!r} must be a non-empty string, got {type(value).__name__}"
-        )
+        raise RequestValidationError(f"{where}: field {key!r} must be a non-empty string, got {type(value).__name__}")
     return value
 
 
 def _optional_str(d: dict[str, Any], key: str, *, where: str) -> str | None:
+    """Extract an optional string field.
+
+    Args:
+        d (dict[str, Any]): The source mapping.
+        key (str): The field name to read.
+        where (str): Context label used in error messages.
+
+    Returns:
+        str | None: The string value, or ``None`` when absent/``None``.
+
+    Raises:
+        RequestValidationError: If present but not a string.
+    """
     if key not in d or d[key] is None:
         return None
     value = d[key]
@@ -145,6 +185,20 @@ def _optional_str(d: dict[str, Any], key: str, *, where: str) -> str | None:
 
 
 def _optional_dict(d: dict[str, Any], key: str, *, where: str) -> dict[str, Any]:
+    """Extract an optional object field.
+
+    Args:
+        d (dict[str, Any]): The source mapping.
+        key (str): The field name to read.
+        where (str): Context label used in error messages.
+
+    Returns:
+        dict[str, Any]: A copy of the dict value, or ``{}`` when
+        absent/``None``.
+
+    Raises:
+        RequestValidationError: If present but not a dict.
+    """
     if key not in d or d[key] is None:
         return {}
     value = d[key]
@@ -156,13 +210,24 @@ def _optional_dict(d: dict[str, Any], key: str, *, where: str) -> dict[str, Any]
 
 
 def _optional_list(d: dict[str, Any], key: str, *, where: str) -> list[Any]:
+    """Extract an optional list field.
+
+    Args:
+        d (dict[str, Any]): The source mapping.
+        key (str): The field name to read.
+        where (str): Context label used in error messages.
+
+    Returns:
+        list[Any]: A copy of the list value, or ``[]`` when absent/``None``.
+
+    Raises:
+        RequestValidationError: If present but not a list.
+    """
     if key not in d or d[key] is None:
         return []
     value = d[key]
     if not isinstance(value, list):
-        raise RequestValidationError(
-            f"{where}: field {key!r} must be a list when present, got {type(value).__name__}"
-        )
+        raise RequestValidationError(f"{where}: field {key!r} must be a list when present, got {type(value).__name__}")
     return list(value)
 
 
@@ -173,17 +238,23 @@ def parse_request(raw: dict[str, Any]) -> CriticRequest:
     but strict about required ones, mirroring contract §14.4 — invalid
     requests should fail fast so the SKILL never produces a bogus
     verdict.
+
+    Args:
+        raw (dict[str, Any]): The raw request payload.
+
+    Returns:
+        CriticRequest: The validated, normalised request.
+
+    Raises:
+        RequestValidationError: If the payload shape, ``kind``, required
+            fields, or nested proposals/messages are invalid.
     """
     if not isinstance(raw, dict):
-        raise RequestValidationError(
-            f"top-level must be an object, got {type(raw).__name__}"
-        )
+        raise RequestValidationError(f"top-level must be an object, got {type(raw).__name__}")
 
     kind = _require_str(raw, "kind", where="request")
     if kind not in REQUEST_KINDS:
-        raise RequestValidationError(
-            f"request: kind {kind!r} is not in {sorted(REQUEST_KINDS)!r}"
-        )
+        raise RequestValidationError(f"request: kind {kind!r} is not in {sorted(REQUEST_KINDS)!r}")
     session_id = _require_str(raw, "session_id", where="request")
 
     decision_id = _optional_str(raw, "decision_id", where="request")
@@ -192,16 +263,12 @@ def parse_request(raw: dict[str, Any]) -> CriticRequest:
 
     raw_prompt = _optional_str(raw, "raw_prompt", where="request")
     if kind == COORDINATOR_INBOX and not (raw_prompt and raw_prompt.strip()):
-        raise RequestValidationError(
-            "coordinator_inbox: raw_prompt must be a non-empty string"
-        )
+        raise RequestValidationError("coordinator_inbox: raw_prompt must be a non-empty string")
 
     messages = _optional_list(raw, "messages", where="request")
     for i, msg in enumerate(messages):
         if not isinstance(msg, dict):
-            raise RequestValidationError(
-                f"request.messages[{i}] must be an object, got {type(msg).__name__}"
-            )
+            raise RequestValidationError(f"request.messages[{i}] must be an object, got {type(msg).__name__}")
 
     context = _optional_dict(raw, "context", where="request")
     decision = _optional_dict(raw, "decision", where="request")
@@ -211,31 +278,29 @@ def parse_request(raw: dict[str, Any]) -> CriticRequest:
     proposals: list[Proposal] = []
     for i, prop in enumerate(proposals_raw):
         if not isinstance(prop, dict):
-            raise RequestValidationError(
-                f"request.proposals[{i}] must be an object, got {type(prop).__name__}"
-            )
+            raise RequestValidationError(f"request.proposals[{i}] must be an object, got {type(prop).__name__}")
         msg_id = _require_str(prop, "msg_id", where=f"request.proposals[{i}]")
         from_agent = _require_str(prop, "from_agent", where=f"request.proposals[{i}]")
         payload = _optional_dict(prop, "payload", where=f"request.proposals[{i}]")
         seq = prop.get("seq")
         if seq is not None and not isinstance(seq, int):
-            raise RequestValidationError(
-                f"request.proposals[{i}].seq must be int when present"
-            )
+            raise RequestValidationError(f"request.proposals[{i}].seq must be int when present")
         action_name = payload.get("action_name") if isinstance(payload.get("action_name"), str) else None
         gain_raw = payload.get("predicted_gain_pct")
         if isinstance(gain_raw, (int, float)):
             predicted_gain_pct: float | None = float(gain_raw)
         else:
             predicted_gain_pct = None
-        proposals.append(Proposal(
-            msg_id=msg_id,
-            from_agent=from_agent,
-            payload=payload,
-            seq=seq,
-            action_name=action_name,
-            predicted_gain_pct=predicted_gain_pct,
-        ))
+        proposals.append(
+            Proposal(
+                msg_id=msg_id,
+                from_agent=from_agent,
+                payload=payload,
+                seq=seq,
+                action_name=action_name,
+                predicted_gain_pct=predicted_gain_pct,
+            )
+        )
 
     return CriticRequest(
         kind=kind,

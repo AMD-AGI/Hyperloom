@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import warnings
 
-import pytest
 
 from inference_optimizer.compat import payload_aliases as pa
 from inference_optimizer.compat.payload_aliases import (
@@ -112,19 +111,19 @@ def test_list_value_space_joined_not_repr():
     """A list/tuple of flags is space-joined into shell tokens, NOT rendered as
     a Python repr (which Magpie would splice verbatim into ``vllm serve`` and
     the server would reject as ``unrecognized arguments``)."""
-    out = read_extra_server_args(
-        {CANONICAL_KEY: ["--max-num-batched-tokens", "32768"]}
-    )
+    out = read_extra_server_args({CANONICAL_KEY: ["--max-num-batched-tokens", "32768"]})
     assert out == "--max-num-batched-tokens 32768"
     assert "[" not in out and "'" not in out
-    assert read_extra_server_args(
-        {CANONICAL_KEY: ("--distributed-executor-backend", "mp")}
-    ) == "--distributed-executor-backend mp"
+    assert (
+        read_extra_server_args({CANONICAL_KEY: ("--distributed-executor-backend", "mp")})
+        == "--distributed-executor-backend mp"
+    )
 
 
 # Stacklevel
 def test_deprecation_stacklevel_points_at_caller():
     """``stacklevel=3`` makes the warning report the caller's caller filename."""
+
     def _wrapper(payload):
         return read_extra_server_args(payload)
 
@@ -136,8 +135,7 @@ def test_deprecation_stacklevel_points_at_caller():
     assert len(dep_warnings) == 1
     # Reported filename should be this test file, not payload_aliases.py.
     assert dep_warnings[0].filename.endswith("test_payload_aliases.py"), (
-        f"expected stacklevel=3 to report the test caller; "
-        f"got filename={dep_warnings[0].filename!r}"
+        f"expected stacklevel=3 to report the test caller; got filename={dep_warnings[0].filename!r}"
     )
 
 
@@ -211,6 +209,7 @@ def test_public_api_exports_match_all():
 def test_compat_package_importable():
     """End-to-end import smoke: the compat helpers resolve and are callable."""
     from inference_optimizer.compat import payload_aliases as imported
+
     assert callable(imported.read_extra_server_args)
     assert callable(imported.read_extra_server_args_from_envs)
     assert callable(imported.migrate_legacy_key_in_place)

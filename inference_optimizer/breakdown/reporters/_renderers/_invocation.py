@@ -20,12 +20,31 @@ _ENVS_MAX_DISPLAY = 12
 
 
 def _truncate(text: str, limit: int) -> str:
+    """Truncate ``text`` to ``limit`` characters with an ellipsis.
+
+    Args:
+        text (str): The text to truncate.
+        limit (int): The maximum length of the returned string.
+
+    Returns:
+        str: ``text`` unchanged when within ``limit``, otherwise a prefix
+            ending in ``...``.
+    """
     if len(text) <= limit:
         return text
     return text[: max(limit - 3, 0)] + "..."
 
 
 def _format_envs(envs: dict[str, Any] | None) -> str:
+    """Format environment variables as a compact, capped string.
+
+    Args:
+        envs (dict[str, Any] | None): Environment variable name/value pairs.
+
+    Returns:
+        str: A comma-joined ``k=v`` listing (capped at ``_ENVS_MAX_DISPLAY``
+            entries with a ``+N more`` suffix), or an empty string when empty.
+    """
     if not isinstance(envs, dict) or not envs:
         return ""
     items = sorted(envs.items())
@@ -40,7 +59,17 @@ def render_invocation_block(
     invocation: Any,
     session_image: Any,
 ) -> str:
-    """Render an ``### Invocation`` markdown block, or "" when absent/empty."""
+    """Render an ``### Invocation`` markdown block, or "" when absent/empty.
+
+    Args:
+        invocation: Invocation record (dict) describing framework args,
+            environment overrides and config/log paths.
+        session_image: Container image associated with the session, if any.
+
+    Returns:
+        The rendered markdown block, or an empty string when the invocation
+        is missing or has nothing to show.
+    """
     if not isinstance(invocation, dict):
         return ""
     framework_args = str(invocation.get("framework_args") or "").strip()
@@ -49,19 +78,12 @@ def render_invocation_block(
     config_path = invocation.get("config_path")
     server_log_path = invocation.get("server_log_path")
 
-    has_anything = (
-        framework_args
-        or (isinstance(extra_envs, dict) and extra_envs)
-        or config_path
-        or server_log_path
-    )
+    has_anything = framework_args or (isinstance(extra_envs, dict) and extra_envs) or config_path or server_log_path
     if not has_anything:
         return ""
 
     image_display = (
-        str(session_image).strip()
-        if isinstance(session_image, str) and session_image.strip()
-        else "(not configured)"
+        str(session_image).strip() if isinstance(session_image, str) and session_image.strip() else "(not configured)"
     )
     lines = ["### Invocation"]
     lines.append(f"- **image**: {image_display}")
@@ -71,11 +93,7 @@ def render_invocation_block(
         lines.append(f"- **command**: `{_truncate(framework_args, _FRAMEWORK_ARGS_MAX)}`")
     # Lineage label under ``command`` shows where the echoed string came from.
     if framework_args_source:
-        suffix = (
-            "  (extraction failed; try server.log or config yaml)"
-            if framework_args_source == "unknown"
-            else ""
-        )
+        suffix = "  (extraction failed; try server.log or config yaml)" if framework_args_source == "unknown" else ""
         lines.append(f"- **source**: {framework_args_source}{suffix}")
     envs_str = _format_envs(extra_envs if isinstance(extra_envs, dict) else None)
     if envs_str:

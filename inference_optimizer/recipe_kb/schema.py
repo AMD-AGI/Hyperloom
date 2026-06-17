@@ -51,6 +51,7 @@ from typing import Any
 @dataclass
 class Finding:
     """An "X helped" insight — what worked + the measured impact."""
+
     description: str
     measured_impact: str
 
@@ -58,6 +59,7 @@ class Finding:
 @dataclass
 class Failure:
     """An "X didn't help" insight — what failed + the reason."""
+
     description: str
     reason: str
 
@@ -65,6 +67,7 @@ class Failure:
 @dataclass
 class Gap:
     """A "we still don't know" — open question + relevant metrics."""
+
     description: str
     metrics: str
 
@@ -72,6 +75,7 @@ class Gap:
 @dataclass
 class PRResult:
     """An upstream PR that was tried during the optimisation run."""
+
     repo: str
     number: int
     outcome: str
@@ -86,6 +90,7 @@ class Pitfall:
     field the Coordinator stamps so the warm-start prompt can rank
     pitfalls by disruption; arbor consumers simply ignore it.
     """
+
     description: str
     severity: str = ""
 
@@ -104,6 +109,7 @@ class Lesson:
     plain string is also accepted for arbor-compat — it is preserved
     verbatim (never str()-ed) so the structured payload round-trips.
     """
+
     statement: str
     measured_impact: Any = ""
 
@@ -119,11 +125,18 @@ class StackFingerprint:
     ``stack_fingerprint_extras`` (a free-form sibling field is
     coordinated separately).
     """
+
     vllm_version: str = ""
     aiter_commit: str = ""
     rocm_version: str = ""
 
     def to_dict(self) -> dict[str, str]:
+        """Serialise the fingerprint to a plain dict.
+
+        Returns:
+            dict[str, str]: A dict with keys ``vllm_version``,
+                ``aiter_commit`` and ``rocm_version``.
+        """
         return {
             "vllm_version": self.vllm_version,
             "aiter_commit": self.aiter_commit,
@@ -132,6 +145,17 @@ class StackFingerprint:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> StackFingerprint:
+        """Build a fingerprint from a (possibly partial) dict.
+
+        Missing keys default to empty strings.
+
+        Args:
+            d (dict[str, Any]): Source mapping; recognised keys are
+                ``vllm_version`` / ``aiter_commit`` / ``rocm_version``.
+
+        Returns:
+            StackFingerprint: The reconstructed fingerprint.
+        """
         return cls(
             vllm_version=str(d.get("vllm_version") or ""),
             aiter_commit=str(d.get("aiter_commit") or ""),
@@ -159,6 +183,7 @@ class KernelOptimization:
     integrated (so warm-start can tell "micro-only, E2E unknown" apart
     from "E2E-verified, no gain").
     """
+
     kernel_id: str = ""
     source_file: str = ""
     artifact_path: str = ""
@@ -174,21 +199,39 @@ class KernelOptimization:
     ts: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the kernel-optimization record to a plain dict.
+
+        Returns:
+            dict[str, Any]: All fields coerced to their JSON-friendly
+                types (floats, ints, strings, bool).
+        """
         return {
-            "kernel_id":     str(self.kernel_id),
-            "source_file":   str(self.source_file),
+            "kernel_id": str(self.kernel_id),
+            "source_file": str(self.source_file),
             "artifact_path": str(self.artifact_path),
             "micro_speedup": float(self.micro_speedup),
-            "decision":      str(self.decision),
-            "e2e_gain_pct":  float(self.e2e_gain_pct),
-            "e2e_tput":      float(self.e2e_tput),
-            "e2e_decision":  str(self.e2e_decision),
-            "integrated":    bool(self.integrated),
-            "ts":            str(self.ts),
+            "decision": str(self.decision),
+            "e2e_gain_pct": float(self.e2e_gain_pct),
+            "e2e_tput": float(self.e2e_tput),
+            "e2e_decision": str(self.e2e_decision),
+            "integrated": bool(self.integrated),
+            "ts": str(self.ts),
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> KernelOptimization:
+        """Build a kernel-optimization record from a dict.
+
+        Missing keys fall back to the dataclass defaults; numeric and
+        boolean fields are coerced.
+
+        Args:
+            d (dict[str, Any]): Source mapping matching the
+                :meth:`to_dict` shape.
+
+        Returns:
+            KernelOptimization: The reconstructed record.
+        """
         return cls(
             kernel_id=str(d.get("kernel_id") or ""),
             source_file=str(d.get("source_file") or ""),
@@ -215,6 +258,7 @@ class SessionSummary:
     ``throughput_after`` / ``actions_taken`` stay available for arbor
     consumers (all default to empty so a hyperloom-only write is valid).
     """
+
     date: str = ""
     throughput_before: float = 0.0
     throughput_after: float = 0.0
@@ -285,64 +329,58 @@ class Recipe:
     extras: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the recipe to the on-disk ``recipe.json`` shape.
+
+        Nested sub-shapes (findings, failures, gaps, PRs, pitfalls,
+        lessons, sessions, kernel optimizations, stack fingerprint)
+        are expanded to plain dicts, and free-form ``extras`` are
+        splatted at the top level without shadowing well-known keys.
+
+        Returns:
+            dict[str, Any]: The arbor-shape recipe row.
+        """
         out: dict[str, Any] = {
-            "canonical_id":      self.canonical_id,
-            "version":           int(self.version),
-            "created_at":        str(self.created_at),
-            "updated_at":        str(self.updated_at),
-            "model":             str(self.model),
-            "hardware":          str(self.hardware),
-            "framework":         str(self.framework),
+            "canonical_id": self.canonical_id,
+            "version": int(self.version),
+            "created_at": str(self.created_at),
+            "updated_at": str(self.updated_at),
+            "model": str(self.model),
+            "hardware": str(self.hardware),
+            "framework": str(self.framework),
             "framework_version": str(self.framework_version),
-            "precision":         str(self.precision),
-            "best_config":       dict(self.best_config),
-            "best_throughput":   float(self.best_throughput),
+            "precision": str(self.precision),
+            "best_config": dict(self.best_config),
+            "best_throughput": float(self.best_throughput),
             "what_worked": [
-                {"description": f.description,
-                 "measured_impact": f.measured_impact}
-                for f in self.what_worked
+                {"description": f.description, "measured_impact": f.measured_impact} for f in self.what_worked
             ],
-            "what_failed": [
-                {"description": f.description, "reason": f.reason}
-                for f in self.what_failed
-            ],
-            "remaining_gaps": [
-                {"description": g.description, "metrics": g.metrics}
-                for g in self.remaining_gaps
-            ],
+            "what_failed": [{"description": f.description, "reason": f.reason} for f in self.what_failed],
+            "remaining_gaps": [{"description": g.description, "metrics": g.metrics} for g in self.remaining_gaps],
             "prs_tested": [
-                {"repo": p.repo, "number": int(p.number),
-                 "outcome": p.outcome, "notes": p.notes}
+                {"repo": p.repo, "number": int(p.number), "outcome": p.outcome, "notes": p.notes}
                 for p in self.prs_tested
             ],
-            "pitfalls": [
-                {"description": p.description, "severity": p.severity}
-                for p in self.pitfalls
-            ],
-            "lessons": [
-                {"statement": l.statement,
-                 "measured_impact": l.measured_impact}
-                for l in self.lessons
-            ],
-            "last_profiled":     str(self.last_profiled),
+            "pitfalls": [{"description": p.description, "severity": p.severity} for p in self.pitfalls],
+            "lessons": [{"statement": l.statement, "measured_impact": l.measured_impact} for l in self.lessons],
+            "last_profiled": str(self.last_profiled),
             "stack_fingerprint": self.stack_fingerprint.to_dict(),
             "sessions": [
-                {"date": s.date,
-                 "throughput_before": float(s.throughput_before),
-                 "throughput_after": float(s.throughput_after),
-                 "actions_taken": list(s.actions_taken),
-                 "session_id": s.session_id,
-                 "gain_pct": float(s.gain_pct),
-                 "stack_len": int(s.stack_len)}
+                {
+                    "date": s.date,
+                    "throughput_before": float(s.throughput_before),
+                    "throughput_after": float(s.throughput_after),
+                    "actions_taken": list(s.actions_taken),
+                    "session_id": s.session_id,
+                    "gain_pct": float(s.gain_pct),
+                    "stack_len": int(s.stack_len),
+                }
                 for s in self.sessions
             ],
-            "kernel_optimizations": [
-                k.to_dict() for k in self.kernel_optimizations
-            ],
-            "authority":     str(self.authority),
-            "confidence":    float(self.confidence),
+            "kernel_optimizations": [k.to_dict() for k in self.kernel_optimizations],
+            "authority": str(self.authority),
+            "confidence": float(self.confidence),
             "evidence_refs": list(self.evidence_refs),
-            "provenance":    dict(self.provenance),
+            "provenance": dict(self.provenance),
         }
         # Splat the free-form extras at the top level so they look
         # exactly the way arbor stores them (no nested ``extras`` key
@@ -355,19 +393,48 @@ class Recipe:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Recipe:
+        """Build a recipe from an on-disk / wire dict.
+
+        Nested arrays are parsed back into their typed sub-shapes
+        (skipping non-dict entries), and any unrecognised top-level
+        keys are preserved verbatim in ``extras`` so a newer/older
+        writer's data is never dropped.
+
+        Args:
+            d (dict[str, Any]): Source mapping in arbor recipe shape.
+
+        Returns:
+            Recipe: The reconstructed recipe row.
+        """
         # Stripped set of well-known top-level keys we parse — anything
         # else gets bucketed into ``extras`` so a future read by a
         # newer (or older) writer doesn't lose data.
         well_known = {
-            "canonical_id", "version", "created_at", "updated_at",
-            "model", "hardware", "framework", "framework_version",
+            "canonical_id",
+            "version",
+            "created_at",
+            "updated_at",
+            "model",
+            "hardware",
+            "framework",
+            "framework_version",
             "precision",
-            "best_config", "best_throughput",
-            "what_worked", "what_failed", "remaining_gaps",
-            "prs_tested", "pitfalls", "lessons",
-            "last_profiled", "stack_fingerprint", "sessions",
+            "best_config",
+            "best_throughput",
+            "what_worked",
+            "what_failed",
+            "remaining_gaps",
+            "prs_tested",
+            "pitfalls",
+            "lessons",
+            "last_profiled",
+            "stack_fingerprint",
+            "sessions",
             "kernel_optimizations",
-            "authority", "confidence", "evidence_refs", "provenance",
+            "authority",
+            "confidence",
+            "evidence_refs",
+            "provenance",
         }
         extras = {k: v for k, v in d.items() if k not in well_known}
         return cls(
@@ -450,9 +517,7 @@ class Recipe:
                 if isinstance(s, dict)
             ],
             kernel_optimizations=[
-                KernelOptimization.from_dict(k)
-                for k in (d.get("kernel_optimizations") or [])
-                if isinstance(k, dict)
+                KernelOptimization.from_dict(k) for k in (d.get("kernel_optimizations") or []) if isinstance(k, dict)
             ],
             authority=str(d.get("authority") or "EXPERIENTIAL"),
             confidence=float(d.get("confidence") or 0.85),
@@ -486,16 +551,25 @@ class Attempt:
     rationale: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise the attempt to a plain dict.
+
+        ``fitness`` is omitted entirely when ``None`` (rather than
+        emitted as null) to match the on-disk NDJSON contract.
+
+        Returns:
+            dict[str, Any]: The attempt row; includes ``fitness`` only
+                when it is set.
+        """
         out: dict[str, Any] = {
-            "id":                  int(self.id),
+            "id": int(self.id),
             "recipe_canonical_id": str(self.recipe_canonical_id),
-            "session_id":          str(self.session_id),
-            "attempt_at":          str(self.attempt_at),
-            "diff":                dict(self.diff),
-            "predicted_delta":     dict(self.predicted_delta),
-            "measured_metrics":    dict(self.measured_metrics),
-            "outcome":             str(self.outcome),
-            "rationale":           str(self.rationale),
+            "session_id": str(self.session_id),
+            "attempt_at": str(self.attempt_at),
+            "diff": dict(self.diff),
+            "predicted_delta": dict(self.predicted_delta),
+            "measured_metrics": dict(self.measured_metrics),
+            "outcome": str(self.outcome),
+            "rationale": str(self.rationale),
         }
         if self.fitness is not None:
             out["fitness"] = float(self.fitness)
@@ -503,6 +577,18 @@ class Attempt:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Attempt:
+        """Build an attempt from a dict.
+
+        ``fitness`` stays ``None`` when absent; all other fields fall
+        back to their dataclass defaults.
+
+        Args:
+            d (dict[str, Any]): Source mapping matching the
+                :meth:`to_dict` shape.
+
+        Returns:
+            Attempt: The reconstructed attempt row.
+        """
         fitness = d.get("fitness")
         return cls(
             id=int(d.get("id") or 0),

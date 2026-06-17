@@ -19,6 +19,13 @@ serialized via ``fcntl.flock``, written atomically. When the legacy block is
 absent the patcher is upstream-aware: if Magpie already copies atomically it
 returns ``True`` (redundant no-op); only a genuinely-unexpected shape returns
 ``False`` so the install script can fail-loud.
+
+:class:`MagpiePatchStatus` carries a classified ``atomic_reason`` so a caller
+can tell an EXPECTED no-op (``upstream_atomic`` / ``already_patched`` /
+``missing``) apart from a GENUINE failure (``unrecognized_shape`` / ``io_error``)
+where the script-tearing race is actually unmitigated. ``install.sh`` reads
+``atomic_genuine_failure`` to fail-loud by default (``MAGPIE_PATCH_STRICT=1``)
+on a real failure while still warning-and-continuing on a benign no-op.
 """
 
 from __future__ import annotations
@@ -28,18 +35,37 @@ import logging
 import os
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
 log = logging.getLogger(__name__)
 
 
+# Atomic-patch outcome reasons. These let a caller (install.sh) tell an
+# EXPECTED no-op apart from a GENUINE failure instead of collapsing both into a
+# single ``False``. Only ``UNRECOGNIZED_SHAPE`` and ``IO_ERROR`` mean the
+# script-tearing race (bugs.md §C #1) may be unmitigated; the rest are benign.
+_ATOMIC_REASON_APPLIED = "applied"  # legacy block rewritten this run
+_ATOMIC_REASON_ALREADY_PATCHED = "already_patched"  # sentinel already present
+_ATOMIC_REASON_UPSTREAM_ATOMIC = "upstream_atomic"  # Magpie already atomic
+_ATOMIC_REASON_MISSING = "missing"  # MAGPIE_DIR unset / file absent
+_ATOMIC_REASON_UNRECOGNIZED_SHAPE = "unrecognized_shape"  # genuine: unpatched
+_ATOMIC_REASON_IO_ERROR = "io_error"  # read/write failed mid-patch
+
+# Reasons that mean the atomic-copy race is genuinely NOT mitigated — a strict
+# caller should fail-loud on these, a lenient one warns conspicuously.
+_ATOMIC_REASONS_GENUINE_FAILURE = frozenset(
+    {
+        _ATOMIC_REASON_UNRECOGNIZED_SHAPE,
+        _ATOMIC_REASON_IO_ERROR,
+    }
+)
+
+
 # Exact upstream two-line block we replace, whitespace-anchored so we don't
 # match an unrelated ``shutil.copy2`` elsewhere.
-_LEGACY_BLOCK = (
-    "            shutil.copy2(script, target_file)\n"
-    "            target_file.chmod(0o755)\n"
-)
+_LEGACY_BLOCK = "            shutil.copy2(script, target_file)\n            target_file.chmod(0o755)\n"
 
 # Replacement block; ``_hyperloom_*`` aliases keep the injected imports from
 # shadowing upstream names.
@@ -61,15 +87,15 @@ _PATCHED_BLOCK = (
     "            else:\n"
     "                try:\n"
     "                    _tmp_fd, _tmp_name = _hyperloom_tempfile.mkstemp(\n"
-    "                        prefix=f\".{script.name}.hyperloom_\", dir=str(target_dir),\n"
+    '                        prefix=f".{script.name}.hyperloom_", dir=str(target_dir),\n'
     "                    )\n"
     "                except OSError as _hyperloom_err:\n"
     "                    raise OSError(\n"
-    "                        f\"Hyperloom #C1: cannot stage benchmark script \"\n"
-    "                        f\"{script.name} into read-only {target_dir}: \"\n"
-    "                        f\"{_hyperloom_err}. Use a writable per-install \"\n"
-    "                        f\"InferenceX clone (unset INFERENCEX_PATH so \"\n"
-    "                        f\"install.sh clones a per-session copy).\"\n"
+    '                        f"Hyperloom #C1: cannot stage benchmark script "\n'
+    '                        f"{script.name} into read-only {target_dir}: "\n'
+    '                        f"{_hyperloom_err}. Use a writable per-install "\n'
+    '                        f"InferenceX clone (unset INFERENCEX_PATH so "\n'
+    '                        f"install.sh clones a per-session copy)."\n'
     "                    ) from _hyperloom_err\n"
     "                _hyperloom_os.close(_tmp_fd)\n"
     "                _hyperloom_shutil.copy2(script, _tmp_name)\n"
@@ -79,6 +105,19 @@ _PATCHED_BLOCK = (
 
 # "Already patched?" sentinel.
 _PATCH_SENTINEL = "Hyperloom #C1 patch"
+_REMOTE_TRUST_SENTINEL = "MAGPIE_TRUST_REMOTE_CODE"
+
+# Magpie's remote-server SGLang client path bypasses the local run_benchmark
+# helper, so it used to miss --trust-remote-code for custom tokenizer models.
+_REMOTE_DIRECT_LEGACY_BLOCK = "    SERVER_MONITOR_ARGS=()\n    magpie_run_benchmark_serving_remote_direct || exit $?\n"
+_REMOTE_DIRECT_PATCHED_BLOCK = (
+    "    SERVER_MONITOR_ARGS=()\n"
+    '    if [[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" ]]; then\n'
+    "      magpie_run_benchmark_serving_remote_direct trust || exit $?\n"
+    "    else\n"
+    "      magpie_run_benchmark_serving_remote_direct || exit $?\n"
+    "    fi\n"
+)
 
 # Helper upstream Magpie introduced when it made the copy loop race-safe; its
 # presence means the legacy block is gone because upstream already fixed it.
@@ -102,6 +141,40 @@ def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:
 
     Returns ``None`` when unconfigured or missing on disk (callers skip
     patching).
+
+    Args:
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+            falsy.
+
+    Returns:
+        The resolved ``benchmarker.py`` path, or ``None`` when unconfigured or
+        absent on disk.
+    """
+    root: Path | None = None
+    if magpie_dir:
+        root = Path(magpie_dir)
+    else:
+        env = (os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR") or "").strip()
+        if env:
+            root = Path(env)
+    if root is None:
+        return None
+    candidate = root / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
+    return candidate if candidate.is_file() else None
+
+
+def _resolve_sglang_mi300x_script_path(
+    magpie_dir: Path | str | None,
+) -> Path | None:
+    """Resolve Magpie's generic SGLang MI300X benchmark script when present.
+
+    Args:
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+            falsy.
+
+    Returns:
+        The resolved ``sglang_mi300x.sh`` path, or ``None`` when unconfigured
+        or absent on disk.
     """
     root: Path | None = None
     if magpie_dir:
@@ -112,7 +185,7 @@ def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:
             root = Path(env)
     if root is None:
         return None
-    candidate = root / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
+    candidate = root / "Magpie" / "scripts" / "benchmark" / "sglang_mi300x.sh"
     return candidate if candidate.is_file() else None
 
 
@@ -122,14 +195,20 @@ def _file_lock(lock_path: str) -> Iterator[None]:
 
     Falls through without exclusion if the lock file can't be opened; the
     atomic-replace still guarantees no torn writes (idempotent).
+
+    Args:
+        lock_path: Filesystem path of the lock file to acquire exclusively.
+
+    Yields:
+        Control while the exclusive lock is held; the lock is released on exit.
     """
     try:
         fp = open(lock_path, "w")  # noqa: SIM115 — kept open across yield
     except OSError as e:
         log.warning(
-            "_magpie_patcher: cannot open lock file %s (%s); "
-            "proceeding without exclusion",
-            lock_path, e,
+            "_magpie_patcher: cannot open lock file %s (%s); proceeding without exclusion",
+            lock_path,
+            e,
         )
         yield
         return
@@ -144,6 +223,15 @@ def _file_lock(lock_path: str) -> Iterator[None]:
 
 
 def _is_patched(src: Path) -> bool:
+    """Return whether ``src`` already contains the patch sentinel.
+
+    Args:
+        src (Path): The ``benchmarker.py`` file to inspect.
+
+    Returns:
+        bool: True iff the Hyperloom patch sentinel is present (and False on
+            any read error).
+    """
     try:
         return _PATCH_SENTINEL in src.read_text(encoding="utf-8")
     except OSError as e:
@@ -158,6 +246,13 @@ def _extract_prepare_region(text: str) -> str:
     Scopes inline-atomic detection to one method body (header down to the next
     line indented at/below the header column) so an unrelated ``os.replace``
     can't masquerade as a fixed copy loop.
+
+    Args:
+        text: The full ``benchmarker.py`` source text to slice.
+
+    Returns:
+        The source slice covering the ``_prepare_benchmark_scripts`` method
+        body, or ``""`` when the header is absent.
     """
     start = text.find(_PREPARE_METHOD_MARKER)
     if start == -1:
@@ -182,6 +277,13 @@ def _upstream_is_already_atomic(text: str) -> bool:
     redundant). Either signal suffices: ``_copy_benchmark_script_atomic``
     present, or an inline ``tempfile.mkstemp(`` + ``os.replace(`` in the
     ``_prepare_benchmark_scripts`` body.
+
+    Args:
+        text: The full ``benchmarker.py`` source text to inspect.
+
+    Returns:
+        True when the cloned Magpie already copies scripts atomically (making
+        the #C1 patch redundant), False otherwise.
     """
     if _UPSTREAM_ATOMIC_HELPER in text:
         return True
@@ -189,15 +291,28 @@ def _upstream_is_already_atomic(text: str) -> bool:
     return _ATOMIC_MKSTEMP in region and _ATOMIC_REPLACE in region
 
 
-def _apply_patch_atomic(src: Path) -> bool:
-    """Rewrite ``src`` via temp-file + atomic rename so a crash
-    mid-write cannot leave a corrupt ``benchmarker.py``.
+def _apply_patch_atomic_reason(src: Path) -> str:
+    """Rewrite ``src`` via temp-file + atomic rename so a crash mid-write
+    cannot leave a corrupt ``benchmarker.py``, returning a classified reason.
+
+    Unlike a bare bool, the reason lets a caller distinguish an EXPECTED no-op
+    (already-patched / upstream-atomic) from a GENUINE failure (unrecognized
+    shape / I/O error) where bugs.md §C #1 is actually unmitigated.
+
+    Args:
+        src (Path): The ``benchmarker.py`` file to patch in place.
+
+    Returns:
+        str: One of the ``_ATOMIC_REASON_*`` constants.
     """
     try:
         original = src.read_text(encoding="utf-8")
     except OSError as e:
         log.warning("_magpie_patcher: cannot read %s: %s", src, e)
-        return False
+        return _ATOMIC_REASON_IO_ERROR
+
+    if _PATCH_SENTINEL in original:
+        return _ATOMIC_REASON_ALREADY_PATCHED
 
     if _LEGACY_BLOCK not in original:
         if _upstream_is_already_atomic(original):
@@ -207,7 +322,7 @@ def _apply_patch_atomic(src: Path) -> bool:
                 "mkstemp+os.replace); Hyperloom #C1 patch is a no-op for %s",
                 src,
             )
-            return True
+            return _ATOMIC_REASON_UPSTREAM_ATOMIC
         log.warning(
             "_magpie_patcher: neither the legacy shutil.copy2/chmod block nor "
             "an atomic copy implementation found in %s; Magpie may have been "
@@ -218,11 +333,11 @@ def _apply_patch_atomic(src: Path) -> bool:
             "needed.",
             src,
         )
-        return False
+        return _ATOMIC_REASON_UNRECOGNIZED_SHAPE
 
     patched = original.replace(_LEGACY_BLOCK, _PATCHED_BLOCK, 1)
     if patched == original:
-        return False
+        return _ATOMIC_REASON_UNRECOGNIZED_SHAPE
 
     tmp_dir = src.parent
     try:
@@ -233,7 +348,108 @@ def _apply_patch_atomic(src: Path) -> bool:
     except OSError as e:
         log.warning(
             "_magpie_patcher: cannot create temp file in %s: %s",
-            tmp_dir, e,
+            tmp_dir,
+            e,
+        )
+        return _ATOMIC_REASON_IO_ERROR
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(patched)
+        os.chmod(tmp_name, src.stat().st_mode)
+        os.replace(tmp_name, src)
+    except OSError as e:
+        log.warning("_magpie_patcher: cannot write %s: %s", src, e)
+        try:
+            os.unlink(tmp_name)
+        except OSError as cleanup_err:
+            log.debug(
+                "_magpie_patcher: best-effort cleanup failed for temp file %s: %s",
+                tmp_name,
+                cleanup_err,
+            )
+        return _ATOMIC_REASON_IO_ERROR
+
+    log.info(
+        "_magpie_patcher: applied Hyperloom #C1 atomic-write patch to %s",
+        src,
+    )
+    return _ATOMIC_REASON_APPLIED
+
+
+def _apply_patch_atomic(src: Path) -> bool:
+    """Bool wrapper over :func:`_apply_patch_atomic_reason`: True when the
+    atomic-copy race is closed (applied / already-patched / upstream-atomic).
+
+    Args:
+        src: The ``benchmarker.py`` file to patch in place.
+
+    Returns:
+        True when the atomic-copy race is closed, False on a genuine failure.
+    """
+    return _apply_patch_atomic_reason(src) not in _ATOMIC_REASONS_GENUINE_FAILURE
+
+
+def _is_remote_trust_patched(src: Path) -> bool:
+    """Return whether the SGLang remote-client trust gate is already present.
+
+    Args:
+        src: The ``sglang_mi300x.sh`` file to inspect.
+
+    Returns:
+        True iff the remote-trust sentinel is present, False on a miss or read
+        error.
+    """
+    try:
+        return _REMOTE_TRUST_SENTINEL in src.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_magpie_patcher: cannot read %s: %s", src, e)
+        return False
+
+
+def _apply_remote_trust_patch_atomic(src: Path) -> bool:
+    """Patch ``sglang_mi300x.sh`` so remote clients can pass trust mode.
+
+    Args:
+        src: The ``sglang_mi300x.sh`` file to patch in place.
+
+    Returns:
+        True when the trust gate is present after the call (already patched or
+        freshly written), False when the legacy block is missing or any IO
+        step fails.
+    """
+    try:
+        original = src.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_magpie_patcher: cannot read %s: %s", src, e)
+        return False
+
+    if _REMOTE_TRUST_SENTINEL in original:
+        return True
+    if _REMOTE_DIRECT_LEGACY_BLOCK not in original:
+        log.warning(
+            "_magpie_patcher: remote benchmark direct-call block not found in "
+            "%s; Magpie custom-tokenizer trust patch could not be applied",
+            src,
+        )
+        return False
+
+    patched = original.replace(
+        _REMOTE_DIRECT_LEGACY_BLOCK,
+        _REMOTE_DIRECT_PATCHED_BLOCK,
+        1,
+    )
+    tmp_dir = src.parent
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".sglang_mi300x.sh.hyperloom_",
+            dir=str(tmp_dir),
+        )
+    except OSError as e:
+        log.warning(
+            "_magpie_patcher: cannot create temp file in %s: %s",
+            tmp_dir,
+            e,
         )
         return False
 
@@ -248,16 +464,108 @@ def _apply_patch_atomic(src: Path) -> bool:
             os.unlink(tmp_name)
         except OSError as cleanup_err:
             log.debug(
-                "_magpie_patcher: best-effort cleanup failed for temp "
-                "file %s: %s", tmp_name, cleanup_err,
+                "_magpie_patcher: best-effort cleanup failed for temp file %s: %s",
+                tmp_name,
+                cleanup_err,
             )
         return False
 
     log.info(
-        "_magpie_patcher: applied Hyperloom #C1 atomic-write patch to %s",
+        "_magpie_patcher: applied SGLang remote trust patch to %s",
         src,
     )
     return True
+
+
+@dataclass(frozen=True)
+class MagpiePatchStatus:
+    atomic_ok: bool
+    remote_trust_ok: bool
+    # Classified atomic-patch outcome (``_ATOMIC_REASON_*``). Lets callers tell
+    # an EXPECTED no-op (upstream-atomic / already-patched / missing tree) apart
+    # from a GENUINE failure where bugs.md §C #1 is unmitigated.
+    atomic_reason: str = _ATOMIC_REASON_MISSING
+
+    @property
+    def ok(self) -> bool:
+        """Whether the patch result is fully successful.
+
+        Returns:
+            ``True`` only when both the atomic write and remote-trust
+            checks succeeded.
+        """
+        return self.atomic_ok and self.remote_trust_ok
+
+    @property
+    def atomic_genuine_failure(self) -> bool:
+        """True when ``atomic_ok`` is False for a real reason (unrecognized
+        shape / I/O error) — i.e. the script-tearing race is NOT mitigated, as
+        opposed to a benign no-op. A strict install should fail-loud on this.
+
+        Returns:
+            True when the atomic-copy patch failed for a genuine reason
+            (unrecognized shape / I/O error), False for a benign no-op.
+        """
+        return self.atomic_reason in _ATOMIC_REASONS_GENUINE_FAILURE
+
+
+def magpie_scripts_patch_status(
+    magpie_dir: Path | str | None = None,
+) -> MagpiePatchStatus:
+    """Return independent status for atomic-copy and remote-trust patches.
+
+    This keeps a drift in the optional SGLang remote-client trust patch from
+    being reported as a generic atomic-copy failure. The bool-valued
+    ``ensure_magpie_atomic_scripts_patch`` wrapper remains for compatibility.
+
+    Args:
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+            falsy.
+
+    Returns:
+        A ``MagpiePatchStatus`` carrying the atomic-copy and remote-trust
+        outcomes plus the classified ``atomic_reason``.
+    """
+    src = _resolve_benchmarker_path(magpie_dir)
+    if src is None:
+        log.info(
+            "_magpie_patcher: MAGPIE_DIR unset or benchmarker.py missing — skipping patch (fine for tests / dry-runs)",
+        )
+        # remote_trust_ok=True here means "not applicable / not checked"
+        # (no Magpie tree to inspect), NOT "trust patch verified". It is set
+        # True only so this no-op path does not emit a spurious remote-trust
+        # warning. atomic_ok=False + reason=missing keeps the legacy fail-soft
+        # (install.sh warns, does not abort) but is NOT a genuine failure.
+        return MagpiePatchStatus(
+            atomic_ok=False,
+            remote_trust_ok=True,
+            atomic_reason=_ATOMIC_REASON_MISSING,
+        )
+
+    with _file_lock(_LOCK_PATH):
+        atomic_reason = _apply_patch_atomic_reason(src)
+        atomic_ok = atomic_reason not in _ATOMIC_REASONS_GENUINE_FAILURE
+        sglang_script = _resolve_sglang_mi300x_script_path(magpie_dir)
+        if sglang_script is None:
+            log.info(
+                "_magpie_patcher: sglang_mi300x.sh missing — skipping "
+                "remote trust patch (fine for reduced tests / non-SGLang "
+                "Magpie layouts)",
+            )
+            remote_trust_ok = True
+        else:
+            remote_trust_ok = _is_remote_trust_patched(sglang_script) or _apply_remote_trust_patch_atomic(sglang_script)
+        if not remote_trust_ok:
+            log.warning(
+                "_magpie_patcher: SGLang remote trust patch did not apply; "
+                "MAGPIE_TRUST_REMOTE_CODE=1 will not reach remote "
+                "benchmark_serving.py for custom-code models",
+            )
+        return MagpiePatchStatus(
+            atomic_ok=atomic_ok,
+            remote_trust_ok=remote_trust_ok,
+            atomic_reason=atomic_reason,
+        )
 
 
 def ensure_magpie_atomic_scripts_patch(
@@ -271,24 +579,32 @@ def ensure_magpie_atomic_scripts_patch(
     or neither the legacy block nor an atomic impl is found — the install script
     should fail-loud on ``False`` (this is a known root-cause fix).
     Concurrency-safe (flock + atomic rename; patched fast-path skips the lock).
+
+    Reflects the atomic-copy patch only (matching this function's name). The
+    optional SGLang remote-client trust patch is independent and can drift
+    without the atomic race being open, so it is intentionally NOT folded in
+    here; callers that need both must use :func:`magpie_scripts_patch_status`
+    and check ``remote_trust_ok`` / ``ok`` (install.sh does this).
+
+    Args:
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_DIR`` when
+            falsy.
+
+    Returns:
+        True when the atomic-copy race is closed, False when the file is
+        missing or neither the legacy block nor an atomic impl is found.
     """
-    src = _resolve_benchmarker_path(magpie_dir)
-    if src is None:
-        log.info(
-            "_magpie_patcher: MAGPIE_DIR unset or benchmarker.py missing — "
-            "skipping patch (fine for tests / dry-runs)",
-        )
-        return False
-
-    if _is_patched(src):
-        return True
-
-    with _file_lock(_LOCK_PATH):
-        if _is_patched(src):
-            return True
-        return _apply_patch_atomic(src)
+    return magpie_scripts_patch_status(magpie_dir).atomic_ok
 
 
 __all__ = [
+    "MagpiePatchStatus",
     "ensure_magpie_atomic_scripts_patch",
+    "magpie_scripts_patch_status",
+    "_ATOMIC_REASON_APPLIED",
+    "_ATOMIC_REASON_ALREADY_PATCHED",
+    "_ATOMIC_REASON_UPSTREAM_ATOMIC",
+    "_ATOMIC_REASON_MISSING",
+    "_ATOMIC_REASON_UNRECOGNIZED_SHAPE",
+    "_ATOMIC_REASON_IO_ERROR",
 ]
