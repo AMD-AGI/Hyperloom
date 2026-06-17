@@ -1147,8 +1147,14 @@ def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> boo
     Recognised label keys map to top-level fields:
 
     * ``model`` / ``hardware`` / ``framework`` /
-      ``framework_version`` / ``precision`` → the 5-tuple identity
-      slots stamped at the top level.
+      ``framework_version`` / ``precision`` / ``model_type`` /
+      ``architectures`` → the 7-tuple identity slots.
+
+    For ``architectures`` the semantics are *contains*: the query's
+    architecture slug(s) must be a subset of the recipe's architectures
+    (matching gbrain_remote_client behaviour). Both slug strings
+    (``"llamaforcausallm"``) and lists (``["LlamaForCausalLM"]``) are
+    accepted and normalized before comparison.
 
     Any other key is matched against the recipe's free-form
     ``extras`` (preserved arbor session-level keys) so a caller
@@ -1164,16 +1170,69 @@ def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> boo
             match. Empty matches everything.
 
     Returns:
-        bool: ``True`` iff every requested label equals the row's
+        bool: ``True`` iff every requested label matches the row's
             corresponding value.
     """
     if not label_match:
         return True
     for key, expected in label_match.items():
-        actual = payload.get(key)
-        if actual != expected:
-            return False
+        if key == "architectures":
+            if not _arch_contains(payload.get("architectures"), expected):
+                return False
+        elif key == "model_type":
+            if not _model_type_matches(payload.get("model_type"), expected):
+                return False
+        else:
+            actual = payload.get(key)
+            if actual != expected:
+                return False
     return True
+
+
+def _arch_contains(recipe_arch: Any, query_arch: Any) -> bool:
+    """True when the recipe's architectures contain all queried architectures.
+
+    Handles slug strings ("llamaforcausallm"), "+" joined multi-arch slugs,
+    and raw lists (["LlamaForCausalLM"]). None / empty / default on either
+    side is a wildcard so legacy recipes without architecture tags match.
+    """
+    from ..recipe_snapshot_constants import DEFAULT_ARCHITECTURES_SLUG
+    query_slug = _normalize_arch_to_slug(query_arch)
+    if not query_slug or query_slug in (DEFAULT_ARCHITECTURES_SLUG, "none"):
+        return True
+    recipe_slug = _normalize_arch_to_slug(recipe_arch)
+    if not recipe_slug or recipe_slug in (DEFAULT_ARCHITECTURES_SLUG, "none"):
+        return True
+    query_parts = set(query_slug.split("+"))
+    recipe_parts = set(recipe_slug.split("+"))
+    return query_parts.issubset(recipe_parts)
+
+
+def _model_type_matches(recipe_mt: Any, query_mt: Any) -> bool:
+    """Compare model_type with slug normalization.
+
+    None / empty / default on either side is treated as a wildcard
+    so legacy recipes without model_type tags are still reachable.
+    """
+    from ..recipe_snapshot_constants import DEFAULT_MODEL_TYPE_SLUG
+    q = str(query_mt or "").strip().lower().replace("/", "_").replace(" ", "_")
+    if not q or q in (DEFAULT_MODEL_TYPE_SLUG, "none"):
+        return True
+    r = str(recipe_mt or "").strip().lower().replace("/", "_").replace(" ", "_")
+    if not r or r in (DEFAULT_MODEL_TYPE_SLUG, "none"):
+        return True
+    return r == q
+
+
+def _normalize_arch_to_slug(value: Any) -> str:
+    """Normalize architectures to a sorted '+'-joined lowercase slug."""
+    if isinstance(value, list):
+        parts = sorted(
+            str(v).strip().lower().replace("/", "_").replace(" ", "_")
+            for v in value if str(v or "").strip()
+        )
+        return "+".join(parts) if parts else ""
+    return str(value or "").strip().lower().replace("/", "_").replace(" ", "_")
 
 
 def _matches_metrics(

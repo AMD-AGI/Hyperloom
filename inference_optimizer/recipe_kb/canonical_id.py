@@ -121,7 +121,7 @@ def cid_to_path_components(
             raw,
             f"expected {1 + CANONICAL_ID_DIMENSIONS} colon-separated "
             f"segments (prefix + {CANONICAL_ID_DIMENSIONS} dimensions), "
-            f"got {len(parts) if len(parts) != 8 else parts}",
+            f"got {len(parts)}",
         )
     if parts[0] != CANONICAL_ID_PREFIX:
         raise InvalidCanonicalIdError(

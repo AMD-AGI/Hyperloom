@@ -6367,8 +6367,7 @@ class Coordinator:
 
         best_config: dict[str, Any] = {}
         if args.strip():
-            # RecipeKB + warm-replay readers still key on the legacy field name.
-            best_config["extra_sglang_args"] = args.strip()
+            best_config["extra_server_args"] = args.strip()
         if envs:
             best_config["extra_envs"] = envs
         return best_config

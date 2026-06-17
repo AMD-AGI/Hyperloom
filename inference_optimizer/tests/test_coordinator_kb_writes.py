@@ -117,7 +117,7 @@ def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> N
     row = coord.cortex_kb.get_recipe(canonical_id=_expected_cid())
     assert row is not None
     bc = row.get("best_config") or {}
-    assert bc.get("extra_sglang_args") == "--disable-radix-cache"
+    assert bc.get("extra_server_args") == "--disable-radix-cache"
     assert float(row.get("best_throughput") or 0.0) == 6700.0
     assert any(
         "disable-radix-cache" in str(l.get("statement") or "")
