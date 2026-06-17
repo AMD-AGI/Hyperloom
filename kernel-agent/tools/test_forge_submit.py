@@ -391,3 +391,42 @@ def test_apply_fellow_env_timeout_respects_operator_override(monkeypatch):
     env = {"API_TIMEOUT_MS": "60000"}
     forge_submit._apply_fellow_env(env)
     assert env["API_TIMEOUT_MS"] == "60000"
+
+
+def _capture_cli_env(tmp_path, monkeypatch, worktree_kernel):
+    """Run _run_loop_via_cli with subprocess mocked, return the child env."""
+    import subprocess as _sp
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["env"] = kwargs.get("env", {})
+
+        class P:
+            returncode = 0
+            stdout = '__FORGE_RESULT__{"baseline_ms":1.0,"best_ms":1.0,"improved":false}__FORGE_RESULT__'
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    exp = tmp_path / "forge_experiments"
+    exp.mkdir(parents=True)
+    forge_submit._run_loop_via_cli(
+        worktree_kernel=worktree_kernel, driver=str(tmp_path / "d.py"),
+        workspace=str(tmp_path), shapes={}, snr_threshold=30.0, max_iters=1,
+        max_hours=0.1, branch="forge/t/k", gpu_target="gfx942",
+        fellow="hip-fellow", program_md_file="", experiments_dir=exp,
+        forge_log=tmp_path / "forge_loop.log", timeout_s=60)
+    return captured["env"]
+
+
+def test_cli_sets_aiter_rebuild_for_aiter_kernel(tmp_path, monkeypatch):
+    """C: an aiter kernel forces AITER_REBUILD=1 so edits recompile."""
+    env = _capture_cli_env(tmp_path, monkeypatch, "/sgl-workspace/aiter/csrc/x.cuh")
+    assert env.get("AITER_REBUILD") == "1"
+
+
+def test_cli_no_aiter_rebuild_for_non_aiter_kernel(tmp_path, monkeypatch):
+    """A non-aiter (e.g. triton) kernel must not set AITER_REBUILD."""
+    env = _capture_cli_env(tmp_path, monkeypatch, "/sgl-workspace/sglang/python/x.py")
+    assert "AITER_REBUILD" not in env

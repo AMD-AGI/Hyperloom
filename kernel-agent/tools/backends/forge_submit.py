@@ -523,6 +523,9 @@ WORKTREE = {worktree!r}
 def _run_harness(command=None):
     env = dict(os.environ)
     env["PYTHONPATH"] = WORKTREE + os.pathsep + env.get("PYTHONPATH", "")
+    # aiter perftest only logs "avg: N us/iter" (which bench-mode parses) when
+    # AITER_LOG_MORE is set; otherwise the timing is buried in a pandas table.
+    env.setdefault("AITER_LOG_MORE", "1")
     p = subprocess.run(command or TEST_COMMAND, shell=True, cwd=WORKTREE, env=env,
                        capture_output=True, text=True)
     return p.returncode, (p.stdout or "") + "\\n" + (p.stderr or "")
@@ -1155,6 +1158,13 @@ def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
     # Fellow stability defaults (IS_SANDBOX/TLS/llm-proxy) scoped to THIS child
     # env only, so they never leak to sibling ladder backends (claude/codex).
     _apply_fellow_env(env)
+    # Compiled-kernel rebuild (RCA compiled-kernel C): aiter ships editable +
+    # JITs each op from source. Editing an aiter .cuh/.cu only takes effect if
+    # the op is recompiled, so force AITER_REBUILD=1 for aiter kernels -- each
+    # per-iteration harness subprocess then rebuilds the edited op from source
+    # before measuring. setdefault so an operator override wins.
+    if "/aiter/" in (worktree_kernel or ""):
+        env.setdefault("AITER_REBUILD", "1")
     cmd = [
         sys.executable, "-m", "kernel_agents.cli", "forge-loop",
         "--kernel", worktree_kernel,
