@@ -430,3 +430,34 @@ def test_cli_no_aiter_rebuild_for_non_aiter_kernel(tmp_path, monkeypatch):
     """A non-aiter (e.g. triton) kernel must not set AITER_REBUILD."""
     env = _capture_cli_env(tmp_path, monkeypatch, "/sgl-workspace/sglang/python/x.py")
     assert "AITER_REBUILD" not in env
+
+
+def test_flydsl_compat_adds_alias_when_missing(tmp_path):
+    """flydsl shim appends fly_values alias when only extract_to_ir_values exists."""
+    proto = tmp_path / "protocol.py"
+    proto.write_text("def extract_to_ir_values(obj):\n    return []\n")
+    assert forge_submit._ensure_flydsl_aiter_compat(str(proto)) is True
+    text = proto.read_text()
+    assert "fly_values = extract_to_ir_values" in text
+    # Importable and the alias actually binds.
+    ns: dict = {}
+    exec(compile(text, str(proto), "exec"), ns)
+    assert ns["fly_values"] is ns["extract_to_ir_values"]
+
+
+def test_flydsl_compat_idempotent(tmp_path):
+    """Second call must not append a duplicate alias."""
+    proto = tmp_path / "protocol.py"
+    proto.write_text("def extract_to_ir_values(obj):\n    return []\n")
+    forge_submit._ensure_flydsl_aiter_compat(str(proto))
+    once = proto.read_text()
+    forge_submit._ensure_flydsl_aiter_compat(str(proto))
+    assert proto.read_text() == once
+
+
+def test_flydsl_compat_untouched_when_no_extract(tmp_path):
+    """Unexpected flydsl layout (no extract_to_ir_values) is left untouched."""
+    proto = tmp_path / "protocol.py"
+    proto.write_text("def something_else():\n    return 1\n")
+    assert forge_submit._ensure_flydsl_aiter_compat(str(proto)) is False
+    assert "fly_values" not in proto.read_text()

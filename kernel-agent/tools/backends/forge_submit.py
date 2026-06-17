@@ -1054,6 +1054,47 @@ def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float,
     }
 
 
+def _ensure_flydsl_aiter_compat(protocol_path: str = "") -> bool:
+    """Self-heal aiter's flydsl dependency so HIP/CK ops aren't disabled.
+
+    flydsl >=0.2 renamed ``fly_values`` to ``extract_to_ir_values``, but aiter's
+    flydsl kernels still ``from flydsl.compiler.protocol import fly_values``. The
+    failed import makes aiter disable ALL CK/HIP ops -> any aiter forge loop is
+    dead on arrival. The sglang sandbox image ships the incompatible flydsl, and
+    the container FS is ephemeral, so idempotently append a back-compat alias
+    before running an aiter loop. Returns True when the alias is present.
+
+    Args:
+        protocol_path: Override for flydsl.compiler.protocol's file (tests);
+            resolved via importlib when empty.
+    """
+    try:
+        path = protocol_path
+        if not path:
+            import importlib.util
+            spec = importlib.util.find_spec("flydsl.compiler.protocol")
+            path = spec.origin if (spec and spec.origin) else ""
+        if not path or not os.path.isfile(path):
+            return False
+        text = ""
+        try:
+            with open(path) as f:
+                text = f.read()
+        except OSError:
+            return False
+        if "fly_values" in text:
+            return True  # original export or our shim already present
+        if "def extract_to_ir_values" not in text:
+            return False  # unexpected flydsl layout; don't touch it
+        with open(path, "a") as f:
+            f.write("\n\n# Forge compat shim: aiter imports fly_values, renamed to\n"
+                    "# extract_to_ir_values in flydsl>=0.2 (same List[ir.Value] result).\n"
+                    "fly_values = extract_to_ir_values\n")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _apply_fellow_env(env: dict) -> None:
     """Apply fellow (claude CLI / claude-agent-sdk) stability defaults to ``env``.
 
@@ -1165,6 +1206,9 @@ def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
     # before measuring. setdefault so an operator override wins.
     if "/aiter/" in (worktree_kernel or ""):
         env.setdefault("AITER_REBUILD", "1")
+        # Self-heal aiter's flydsl dep (fly_values rename) so HIP/CK ops aren't
+        # disabled in the sandbox image before the loop imports aiter.
+        _ensure_flydsl_aiter_compat()
     cmd = [
         sys.executable, "-m", "kernel_agents.cli", "forge-loop",
         "--kernel", worktree_kernel,
