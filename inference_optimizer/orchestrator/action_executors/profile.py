@@ -73,6 +73,13 @@ _PROFILE_UNSAFE_VALUE_FLAGS = frozenset(
 def _sanitize_profile_server_args(args: str) -> str:
     """Drop server flags known to conflict with profiler/shape discovery.
 
+    Tokenize with ``posix=False`` and re-join with spaces so embedded JSON
+    values survive verbatim. ``shlex.split`` in POSIX mode strips the inner
+    double-quotes of values like
+    ``--speculative-config {"method":"deepseek_mtp",...}`` (yielding the
+    unparseable ``{method:...}``), which made every profile/roofline server
+    boot fail and starved the kernel phase of a fresh trace shape.
+
     Args:
         args: Raw server-args string to sanitize.
 
@@ -83,7 +90,7 @@ def _sanitize_profile_server_args(args: str) -> str:
     if not raw:
         return ""
     try:
-        tokens = shlex.split(raw)
+        tokens = shlex.split(raw, posix=False)
     except ValueError:
         tokens = raw.split()
     out: list[str] = []
@@ -100,7 +107,7 @@ def _sanitize_profile_server_args(args: str) -> str:
         if any(token.startswith(f"{flag}=") for flag in _PROFILE_UNSAFE_VALUE_FLAGS):
             continue
         out.append(token)
-    return shlex.join(out)
+    return " ".join(out)
 
 
 def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) -> bool:

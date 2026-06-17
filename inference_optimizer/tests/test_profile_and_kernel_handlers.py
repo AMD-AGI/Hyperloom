@@ -1015,6 +1015,20 @@ def test_profile_server_args_sanitizer_drops_torch_compile_flags():
     assert "--foo=bar" in sanitized
 
 
+def test_profile_server_args_sanitizer_preserves_json_value_quotes():
+    """Regression: embedded JSON values (e.g. --speculative-config) must keep
+    their inner double-quotes. POSIX shlex.split would strip them, yielding the
+    unparseable {method:...} and failing every profile/roofline server boot."""
+    spec = '--speculative-config {"method":"deepseek_mtp","num_speculative_tokens":1}'
+    assert _sanitize_profile_server_args(spec) == spec
+
+    mixed = spec + " --enable-torch-compile --torch-compile-max-bs 8"
+    sanitized = _sanitize_profile_server_args(mixed)
+    assert '{"method":"deepseek_mtp","num_speculative_tokens":1}' in sanitized
+    assert "--enable-torch-compile" not in sanitized
+    assert "--torch-compile-max-bs" not in sanitized
+
+
 # Regression: $FRAMEWORK env switches the default yaml between sglang/vllm without an explicit config_path (entry-layer fix for vLLM support).
 def test_default_baseline_config_resolves_sglang_by_default(monkeypatch):
     monkeypatch.delenv("FRAMEWORK", raising=False)
