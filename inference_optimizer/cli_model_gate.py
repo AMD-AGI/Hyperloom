@@ -110,6 +110,8 @@ def _autodetect_gpu_type() -> str | None:
             if tag in out:
                 return tag.lower()
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
+        # rocm-smi missing / slow / not permitted — fall through to the torch
+        # gcnArchName probe below (autodetect is best-effort).
         pass
     try:
         import torch
