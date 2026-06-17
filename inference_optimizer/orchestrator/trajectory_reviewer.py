@@ -32,7 +32,16 @@ _EXHAUSTED_MAX_GAIN_PCT: float = 1.0
 
 
 def _load_journal_entries(session_dir: Path, shared_state: Any) -> list[Any]:
-    """Return journal entries (empty on miss); header fields are read-only here."""
+    """Return journal entries (empty on miss); header fields are read-only here.
+
+    Args:
+        session_dir: The session directory holding the optimization journal.
+        shared_state: The session's shared state, read for journal header
+            fields.
+
+    Returns:
+        The journal entries, or ``[]`` when the journal cannot be loaded.
+    """
     try:
         journal = Journal.load_or_create(
             session_dir,
@@ -46,7 +55,15 @@ def _load_journal_entries(session_dir: Path, shared_state: Any) -> list[Any]:
 
 
 def _exhausted_clusters(entries: list[Any]) -> list[dict[str, Any]]:
-    """Group repeated REVERT / no_promote attempts by (kind, change); dead ends first."""
+    """Group repeated REVERT / no_promote attempts by (kind, change); dead ends first.
+
+    Args:
+        entries: The optimization journal entries to cluster.
+
+    Returns:
+        Exhausted-cluster dicts (``kind`` / ``change`` / ``count`` /
+        ``max_gain``) sorted by attempt count descending.
+    """
     clusters: dict[tuple[str, str], dict[str, Any]] = {}
     for e in entries:
         outcome = getattr(e, "outcome", "")
@@ -72,7 +89,16 @@ def _exhausted_clusters(entries: list[Any]) -> list[dict[str, Any]]:
 
 
 def _stalled_cycle_count(shared_state: Any) -> int:
-    """Consecutive most-recent macro-cycles that produced no explore winner."""
+    """Consecutive most-recent macro-cycles that produced no explore winner.
+
+    Args:
+        shared_state: The session's shared state, read for explore winners
+            history and the current macro cycle.
+
+    Returns:
+        The count of consecutive most-recent macro-cycles with no explore
+        winner.
+    """
     search = getattr(shared_state, "explore_search", None) or {}
     wh = search.get("winners_history") if isinstance(search, dict) else None
     cycles_with_winner = {
@@ -99,6 +125,15 @@ def build_trajectory_digest(
     Deterministic aggregation only (no model call). Surfaces stall depth,
     exhausted directions to avoid, and the dominant roofline bottleneck with a
     suggested specialist lever to redirect exploration.
+
+    Args:
+        session_dir: The session directory holding the optimization journal.
+        shared_state: The session's shared state.
+        max_directions: Maximum number of exhausted directions to list.
+
+    Returns:
+        The advisory trajectory-review block, or ``""`` when there is nothing
+        to report.
     """
     try:
         entries = _load_journal_entries(Path(session_dir), shared_state)

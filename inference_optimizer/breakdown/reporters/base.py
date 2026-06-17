@@ -64,7 +64,15 @@ REGISTRY: list[tuple[str, RendererFn]] = []
 
 
 def register_renderer(section_id: str) -> Callable[[RendererFn], RendererFn]:
-    """Decorator: register ``fn`` under ``section_id`` (re-registration replaces the prior entry)."""
+    """Decorator: register ``fn`` under ``section_id`` (re-registration replaces the prior entry).
+
+    Args:
+        section_id: Identifier under which the decorated renderer is stored.
+
+    Returns:
+        A decorator that registers the renderer function and returns it
+        unchanged.
+    """
 
     def _wrap(fn: RendererFn) -> RendererFn:
         """Register ``fn`` under ``section_id`` and return it unchanged.

@@ -34,11 +34,24 @@ _SANITIZE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as a microsecond-precision ISO-8601 string.
+
+    Returns:
+        The current UTC time formatted as an ISO-8601 string with microsecond
+        precision.
+    """
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _slug(value: str) -> str:
-    """Filesystem-safe token; empty input collapses to ``unknown``."""
+    """Filesystem-safe token; empty input collapses to ``unknown``.
+
+    Args:
+        value: The raw string to sanitise into a filesystem-safe token.
+
+    Returns:
+        The sanitised token, or ``"unknown"`` when the input is empty.
+    """
     s = _SANITIZE.sub("-", str(value or "").strip())
     return s.strip("-.") or "unknown"
 
@@ -47,6 +60,14 @@ class Recorder:
     """Per-(session, producer) writer of breakdown record fragments."""
 
     def __init__(self, parts_dir: Path | str, *, producer: str) -> None:
+        """Initialize a recorder writing into ``parts_dir`` for ``producer``.
+
+        Args:
+            parts_dir (Path | str): the spool directory fragments are written
+                into.
+            producer (str): the producer label owning the written fragments
+                (sanitized into a filesystem-safe slug).
+        """
         self._dir = Path(parts_dir)
         self._producer = _slug(producer)
         self._seq = 0
@@ -54,13 +75,28 @@ class Recorder:
 
     @property
     def producer(self) -> str:
+        """Return the sanitized producer slug owning this recorder's fragments.
+
+        Returns:
+            The sanitized producer slug.
+        """
         return self._producer
 
     @property
     def parts_dir(self) -> Path:
+        """Return the spool directory fragments are written into.
+
+        Returns:
+            The spool directory path.
+        """
         return self._dir
 
     def _next_seq(self) -> int:
+        """Return the next monotonically increasing per-recorder sequence number.
+
+        Returns:
+            int: the next sequence number (thread-safe).
+        """
         with self._lock:
             self._seq += 1
             return self._seq
@@ -70,7 +106,16 @@ class Recorder:
         section: str,
         payload: Mapping[str, Any],
     ) -> Path:
-        """Write/overwrite this producer's single final blob for ``section``."""
+        """Write/overwrite this producer's single final blob for ``section``.
+
+        Args:
+            section: The breakdown section name (must be declared
+                ``singleton``-shaped).
+            payload: The final payload mapping for the section.
+
+        Returns:
+            The path of the written singleton fragment.
+        """
         self._check_shape(section, "singleton")
         filename = f"{_slug(section)}__{self._producer}.json"
         return self._write(section, "singleton", payload, filename=filename)
@@ -87,6 +132,16 @@ class Recorder:
         ``key`` (optional): a stable per-item identity. When given the fragment
         filename is derived from it, so re-recording the same key overwrites
         rather than duplicates (idempotent across retries / resume).
+
+        Args:
+            section: The breakdown section name (must be declared
+                ``item``-shaped).
+            payload: The event fragment payload mapping.
+            key: Optional stable per-item identity for idempotent rewrites;
+                when omitted a pid/sequence-unique filename is used.
+
+        Returns:
+            The path of the written item fragment.
         """
         self._check_shape(section, "item")
         if key:
@@ -101,6 +156,15 @@ class Recorder:
 
     @staticmethod
     def _check_shape(section: str, kind: str) -> None:
+        """Validate that ``section`` is used with its declared shape.
+
+        Args:
+            section: The breakdown section name being written.
+            kind: The shape being used (``"singleton"`` or ``"item"``).
+
+        Raises:
+            ValueError: If ``section`` is declared with a different shape.
+        """
         declared = SECTION_SHAPES.get(section)
         if declared is not None and declared != kind:
             raise ValueError(
@@ -116,6 +180,25 @@ class Recorder:
         *,
         filename: str,
     ) -> Path:
+        """Atomically write one fragment record to ``filename`` in the spool dir.
+
+        Wraps ``payload`` in the fragment envelope (section / kind / seq / ts /
+        producer) and writes it via a temp file plus ``os.replace`` so readers
+        never observe a partial write.
+
+        Args:
+            section (str): the breakdown section name.
+            kind (str): the fragment kind (``singleton`` or ``item``).
+            payload (Mapping[str, Any]): the record payload.
+            filename (str): the destination filename within the spool directory.
+
+        Returns:
+            Path: the path of the written fragment.
+
+        Raises:
+            Exception: re-raised if writing or replacing the file fails (the
+                temp file is removed first).
+        """
         self._dir.mkdir(parents=True, exist_ok=True)
         record = {
             "section":  section,
@@ -152,6 +235,15 @@ def get_recorder(session_dir: Path | str, *, producer: str) -> Recorder:
 
     Lets deep call sites obtain the writer without threading it through every
     function signature.
+
+    Args:
+        session_dir: The session directory whose breakdown parts dir backs the
+            recorder.
+        producer: The producer name owning the written fragments.
+
+    Returns:
+        The process-cached :class:`Recorder` for the
+        ``(session_dir, producer)`` pair.
     """
     from ...session_paths import breakdown_parts_dir  # local: avoid import cycle
 

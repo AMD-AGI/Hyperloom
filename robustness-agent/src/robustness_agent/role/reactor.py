@@ -167,9 +167,17 @@ class Reactor:
         return validated_intents
 
     def _resolve_authoritative_tick(self, ctx: ReactorContext) -> int:
-        """Pick the most reliable tick index: prefer the Coordinator's
-        session-wide ``ctx.shared_state.tick``, else the in-memory counter
-        (tests / first tick before the prompt is written).
+        """Pick the most reliable tick index for this reactor pass.
+
+        Prefers the Coordinator's session-wide ``ctx.shared_state.tick``,
+        else the in-memory counter (tests / first tick before the prompt is
+        written).
+
+        Args:
+            ctx: Reactor context for the current tick.
+
+        Returns:
+            The resolved authoritative tick index.
         """
         shared_tick = getattr(ctx.shared_state, "tick", 0) or 0
         if shared_tick > 0:

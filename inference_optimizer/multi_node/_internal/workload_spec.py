@@ -107,7 +107,31 @@ def build_rayjob_workload_body(
     extra_env: dict[str, str] | None = None,
     extra_labels: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Build a SaFE CreateWorkloadRequest body for a multi-node RayJob (resource quantities as K8s-notation strings; json.dumps-safe)."""
+    """Build a SaFE CreateWorkloadRequest body for a multi-node RayJob (resource quantities as K8s-notation strings; json.dumps-safe).
+
+    Args:
+        workspace: SaFE workspace id the workload belongs to.
+        display_name: Human-readable name for the workload.
+        image: Container image used for both head and worker roles.
+        nodes: Total node count; head is 1 and workers are ``nodes - 1``.
+        gpus_per_node: GPUs requested per node.
+        cpus_per_node: CPUs requested per node.
+        mem_gi_per_node: Memory in GiB requested per node.
+        ephemeral_gi_per_node: Ephemeral storage in GiB requested per node.
+        description: Optional workload description.
+        owner_id: Optional owner id to attach to the workload.
+        session_id: Optional session id injected as ``primus-claw/session-id``
+            for Brain correlation.
+        extra_env: Optional user environment variables (reserved keys stripped).
+        extra_labels: Optional user labels (Brain-managed prefixes stripped).
+
+    Returns:
+        dict[str, Any]: A json.dumps-safe CreateWorkloadRequest body.
+
+    Raises:
+        ValueError: If ``nodes`` or ``gpus_per_node`` is below 1, or if
+            ``workspace``, ``display_name``, or ``image`` is empty.
+    """
     if nodes < 1:
         raise ValueError(f"nodes must be >= 1, got {nodes}")
     if gpus_per_node < 1:
@@ -273,6 +297,46 @@ def build_dynamo_workload_body(
     ``entryPoints`` are base64-encoded per the SaFE contract (the apiserver
     stores them verbatim; the dispatcher decodes/append/re-encodes the
     launcher payload).
+
+    Args:
+        workspace: SaFE workspace id the workload belongs to.
+        display_name: Human-readable name for the workload.
+        image: Container image used for the frontend and worker roles.
+        nodes: Total node count for the aggregated worker role.
+        gpus_per_node: GPUs requested per GPU pod.
+        cpus_per_node: CPUs requested per GPU pod.
+        mem_gi_per_node: Memory in GiB requested per GPU pod.
+        ephemeral_gi_per_node: Ephemeral storage in GiB requested per GPU pod.
+        ssh_authorized_key: Public key injected as ``MN_SSH_AUTHORIZED_KEY``
+            for the idle-pod control plane.
+        backend_framework: Dynamo backend (``sglang`` / ``vllm`` / ``trtllm``).
+        kv_transfer_backend: KV transfer backend (``nixl`` / ``mori`` /
+            ``mooncake``).
+        ssh_port: SSH port exported as ``MN_SSH_PORT``.
+        shared_mem_gi: Shared memory in GiB requested per GPU pod.
+        rdma_resource: RDMA resource quantity for multinode / PD roles.
+        frontend_cpu: CPUs requested for the frontend pod.
+        frontend_mem_gi: Memory in GiB for the frontend pod.
+        frontend_port: Frontend HTTP port (benchmark target).
+        pd_mode: ``aggregated`` or ``disaggregated`` prefill/decode topology.
+        pd_prefill_nodes: Prefill group node count (disaggregated).
+        pd_decode_nodes: Decode group node count (disaggregated).
+        pd_prefill_tp: Prefill group tensor-parallel size (disaggregated).
+        pd_decode_tp: Decode group tensor-parallel size (disaggregated).
+        description: Optional workload description.
+        owner_id: Optional owner id to attach to the workload.
+        session_id: Optional session id injected as ``primus-claw/session-id``.
+        extra_env: Optional user environment variables (reserved keys stripped).
+        extra_labels: Optional user labels (Brain-managed prefixes stripped).
+
+    Returns:
+        A json.dumps-safe CreateWorkloadRequest body for the Dynamo deployment.
+
+    Raises:
+        ValueError: If ``nodes`` / ``gpus_per_node`` is below 1; if
+            ``workspace`` / ``display_name`` / ``image`` / ``ssh_authorized_key``
+            is empty; or if ``backend_framework`` / ``kv_transfer_backend`` is
+            not a supported enum value.
     """
     if nodes < 1:
         raise ValueError(f"nodes must be >= 1, got {nodes}")
@@ -309,7 +373,15 @@ def build_dynamo_workload_body(
 
     def _gpu_resource(replica: int, *, multinode: bool) -> dict[str, Any]:
         """One GPU pod slot (worker / prefill / decode). RDMA only when the
-        role spans nodes (a single-node role has no cross-node NCCL/KV)."""
+        role spans nodes (a single-node role has no cross-node NCCL/KV).
+
+        Args:
+            replica: The replica count for this pod role.
+            multinode: Whether the role spans nodes (adds ``rdmaResource``).
+
+        Returns:
+            The resource dict for one GPU pod slot.
+        """
         res: dict[str, Any] = {
             "replica": replica,
             "cpu": str(cpus_per_node),

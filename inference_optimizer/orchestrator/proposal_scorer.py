@@ -71,7 +71,14 @@ _BARE_JSON_RE = re.compile(r"(\{.*?\"scores\".*\})", re.DOTALL)
 
 
 def _extract_scores_json(text: str) -> dict[str, Any] | None:
-    """Pull the first valid ``{"scores": {...}}`` object out of a reply."""
+    """Pull the first valid ``{"scores": {...}}`` object out of a reply.
+
+    Args:
+        text: Raw model reply that may contain a fenced or bare JSON object.
+
+    Returns:
+        The parsed ``{"scores": {...}}`` dict, or ``None`` if none was found.
+    """
     if not text:
         return None
     for m in _FENCED_JSON_RE.finditer(text):
@@ -109,7 +116,15 @@ def _clip(value: Any, *, limit: int = _MAX_FIELD_CHARS) -> str:
 
 
 def _coerce_score(raw: Any) -> float | None:
-    """Coerce a model-emitted score into a clamped [0, 10] float."""
+    """Coerce a model-emitted score into a clamped [0, 10] float.
+
+    Args:
+        raw: Raw score value emitted by a model.
+
+    Returns:
+        The score clamped to ``[0, 10]``, or ``None`` if it could not be
+        coerced to a finite number.
+    """
     try:
         val = float(raw)
     except (TypeError, ValueError):
@@ -122,7 +137,16 @@ def _coerce_score(raw: Any) -> float | None:
 def _normalise_model_scores(
     parsed: dict[str, Any], *, proposal_names: list[str],
 ) -> dict[str, dict[str, Any]]:
-    """Project parsed ``{"scores": {...}}`` onto known names (drop unknowns, clamp [0,10], truncate reasons)."""
+    """Project parsed ``{"scores": {...}}`` onto known names (drop unknowns, clamp [0,10], truncate reasons).
+
+    Args:
+        parsed: A parsed ``{"scores": {...}}`` dict from a model reply.
+        proposal_names: Names of the proposals that were actually scored;
+            scores for any other name are discarded.
+
+    Returns:
+        A mapping of proposal name to its clamped score and truncated reason.
+    """
     out: dict[str, dict[str, Any]] = {}
     scores = parsed.get("scores")
     if not isinstance(scores, dict):
@@ -227,7 +251,15 @@ class ProposalScorer:
     def _build_prompt(
         self, *, gap: dict[str, Any], proposals: list[dict[str, Any]],
     ) -> str:
-        """Build ONE group-scoring prompt covering every proposal."""
+        """Build ONE group-scoring prompt covering every proposal.
+
+        Args:
+            gap: The gap being addressed (domain, symptom, evidence, etc.).
+            proposals: Candidate variants to embed in the prompt.
+
+        Returns:
+            The assembled prompt text describing the gap and proposals.
+        """
         lines: list[str] = ["=== Gap ==="]
         lines.append(f"domain: {_clip(gap.get('domain'), limit=80)}")
         lines.append(
@@ -262,7 +294,20 @@ class ProposalScorer:
     async def _score_one_model(
         self, model: str, prompt: str, proposal_names: list[str],
     ) -> dict[str, dict[str, Any]]:
-        """Score every proposal with a single model (raises on failure; caller records the per-model error)."""
+        """Score every proposal with a single model (raises on failure; caller records the per-model error).
+
+        Args:
+            model: The model slug to score with.
+            prompt: The base scoring prompt (instructions are appended).
+            proposal_names: Names of the proposals being scored.
+
+        Returns:
+            A mapping of proposal name to its normalised score and reason.
+
+        Raises:
+            RuntimeError: If the call times out or the reply has no
+                parseable scores JSON.
+        """
         client = self._ensure_client()
         full_prompt = f"{prompt}\n\n{_SCORING_INSTRUCTIONS}"
         messages = [{"role": "user", "content": full_prompt}]
@@ -301,6 +346,10 @@ class ProposalScorer:
         phase are unknown here (the scorer runs off the dispatch path) — the
         collector backfills phase from the ts window. Best-effort: never
         raises into the scoring path.
+
+        Args:
+            model: The model slug whose usage is being recorded.
+            usage: The OpenAI usage object from the response, or ``None``.
         """
         if self.session_dir is None:
             return
@@ -339,6 +388,11 @@ class ProposalScorer:
         unknown here (the scorer runs off the dispatch path); the collector
         backfills phase from the ts window. Best-effort: never raises into
         the scoring path.
+
+        Args:
+            model: The model slug whose conversation is being recorded.
+            prompt: The full (redacted) scoring prompt sent to the model.
+            response: The model's reply text.
         """
         if self.session_dir is None:
             return
@@ -363,7 +417,16 @@ class ProposalScorer:
     async def score(
         self, *, gap: dict[str, Any], proposals: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Score ``proposals`` against ``gap`` with every configured model (per-model failures land in ``errors``, never raised)."""
+        """Score ``proposals`` against ``gap`` with every configured model (per-model failures land in ``errors``, never raised).
+
+        Args:
+            gap: The gap the proposals are meant to address.
+            proposals: Candidate variants to score (non-dict entries ignored).
+
+        Returns:
+            A dict with the scoring ``scale``, per-model ``models`` scores,
+            and per-model ``errors``.
+        """
         proposals = [p for p in (proposals or []) if isinstance(p, dict)]
         if not proposals or not self.models:
             return {"scale": "0-10", "models": {}, "errors": {}}
