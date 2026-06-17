@@ -270,8 +270,17 @@ def _disk_pressure_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
-    """Emit ``disk_pressure`` for non-SHM mountpoints under capacity stress; SHM is handled
-    separately with stricter thresholds, so it's skipped here to avoid double-firing.
+    """Emit ``disk_pressure`` for non-SHM mountpoints under capacity stress.
+
+    SHM is handled separately with stricter thresholds, so it is skipped
+    here to avoid double-firing.
+
+    Args:
+        data: Collected source data (per-mountpoint disk stats).
+        cfg: Local-health configuration thresholds.
+
+    Returns:
+        Symptoms for stressed mountpoints, possibly empty.
     """
     if not isinstance(data.local_disk, dict) or not data.local_disk:
         return []
@@ -328,8 +337,18 @@ def _shm_pressure_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
-    """Emit ``shm_pressure`` (stricter thresholds): SGLang/vLLM crash hard when /dev/shm fills,
-    surfaced at runtime before the next server start fails with ``shared memory allocation failed``.
+    """Emit ``shm_pressure`` (stricter thresholds) for SHM mountpoints.
+
+    SGLang/vLLM crash hard when /dev/shm fills; this surfaces the pressure
+    before the next server start fails with ``shared memory allocation
+    failed``.
+
+    Args:
+        data: Collected source data (per-mountpoint disk stats).
+        cfg: Local-health configuration thresholds.
+
+    Returns:
+        Symptoms for stressed SHM mountpoints, possibly empty.
     """
     if not isinstance(data.local_disk, dict) or not data.local_disk:
         return []
@@ -382,8 +401,17 @@ def _shm_pressure_symptoms(
 
 
 def _ray_head_dead_symptoms(data: SourceData) -> list[Symptom]:
-    """Emit ``ray_head_dead`` (HIGH) when ``data.local_ray`` reports ``healthy=False``;
-    silent when the probe slot is empty or healthy. Prompts Orchestration to prune kernel_opt.
+    """Emit ``ray_head_dead`` (HIGH) when the Ray head is unhealthy.
+
+    Fires when ``data.local_ray`` reports ``healthy=False``; silent when the
+    probe slot is empty or healthy. Prompts Orchestration to prune
+    kernel_opt.
+
+    Args:
+        data: Collected source data (Ray head probe).
+
+    Returns:
+        A list with one :class:`Symptom` when unhealthy, else empty.
     """
     ray_info = getattr(data, "local_ray", None)
     if not isinstance(ray_info, dict) or not ray_info:
@@ -416,8 +444,17 @@ def _fd_pressure_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
-    """Emit ``fd_pressure`` from ``data.local_fd`` when Coordinator FD usage nears the limit;
-    leaked sockets hitting ``ulimit -n`` surface as agent_stall(kernel) whose real cause is here.
+    """Emit ``fd_pressure`` when Coordinator FD usage nears the limit.
+
+    Leaked sockets hitting ``ulimit -n`` surface as agent_stall(kernel)
+    whose real cause is here.
+
+    Args:
+        data: Collected source data (file-descriptor usage).
+        cfg: Local-health configuration thresholds.
+
+    Returns:
+        A list with one :class:`Symptom` when FD pressure trips, else empty.
     """
     fd_info = getattr(data, "local_fd", None)
     if not isinstance(fd_info, dict) or not fd_info:
