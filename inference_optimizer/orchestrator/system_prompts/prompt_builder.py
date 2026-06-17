@@ -28,18 +28,24 @@ from ...protocol.action_surfaces import (
 
 # Phase ordering for the catalogue; unknown phases appended at the end.
 _PHASE_ORDER: tuple[str, ...] = (
-    "prep", "measure", "analysis", "explore", "deep", "validate",
-    "finalize", "support",
+    "prep",
+    "measure",
+    "analysis",
+    "explore",
+    "deep",
+    "validate",
+    "finalize",
+    "support",
 )
 _PHASE_HEADERS: dict[str, str] = {
-    "prep":     "Prep — initialise session metadata. Always finishes first.",
-    "measure":  "Measure — establish baseline_tput. Gate for everything else.",
+    "prep": "Prep — initialise session metadata. Always finishes first.",
+    "measure": "Measure — establish baseline_tput. Gate for everything else.",
     "analysis": "Analysis — read-only; produces traces / candidate kernels.",
-    "explore":  "Explore — propose modifications; one round produces a candidate, not yet validated.",
-    "deep":     "Deep — kernel-owned. Emit via REQUEST(target_agent='kernel', kind=...).",
+    "explore": "Explore — propose modifications; one round produces a candidate, not yet validated.",
+    "deep": "Deep — kernel-owned. Emit via REQUEST(target_agent='kernel', kind=...).",
     "validate": "Validate — apply the accumulated optimization_stack and re-bench to get an honest cumulative gain.",
     "finalize": "Finalize — write the final report.",
-    "support":  "Support — invoke only when triggered (plateau / crash / re-exploration).",
+    "support": "Support — invoke only when triggered (plateau / crash / re-exploration).",
 }
 
 
@@ -58,10 +64,10 @@ def _section_mission() -> list[str]:
         "(percent over baseline_tput) within the wall-clock budget.",
         "",
         "Every tick, ask yourself:",
-        "  \"Given current SharedState, remaining time, and the action catalogue below,",
-        "   which next action gives the highest expected_gain / cost_minutes?\"",
+        '  "Given current SharedState, remaining time, and the action catalogue below,',
+        '   which next action gives the highest expected_gain / cost_minutes?"',
         "",
-        "An optimization is only \"real\" once it has been validated as part of the",
+        'An optimization is only "real" once it has been validated as part of the',
         "full optimization_stack. v0.8 M3 inlines that validation into every",
         "``explore`` KEEP (per-KEEP stack rebench), so the validated cumulative",
         "gain advances automatically — sums of per-round gains still do NOT",
@@ -109,8 +115,7 @@ def _section_session_context(
         f"- framework        : {framework}",
         f"- kernel_enabled   : {'true' if kernel_enabled else 'false'}",
         f"- explore_enabled  : {'true' if explore_enabled else 'false'}",
-        f"- framework_phase_enabled : "
-        f"{'true' if framework_phase_enabled else 'false'}",
+        f"- framework_phase_enabled : {'true' if framework_phase_enabled else 'false'}",
         f"- objective        : {obj}",
         f"- max_minutes      : {max_minutes}",
         f"- framework_source_roots: {roots_line}",
@@ -133,9 +138,7 @@ def _section_session_context(
         "anything outside that set returns `policy_denied` with rule",
         "`phase_incompatible`. The 6-phase chain is:",
         "  PRELUDE → FRAMEWORK_PR → EXPLORE → KERNEL → SWEEP → CLOSE",
-        "Disabled phases (see PHASE CONTRACT below) are skipped but keep "
-        "their place in the chain. Transitions are Coordinator-owned "
-        "(you cannot write phase).",
+        "Disabled phases (see PHASE CONTRACT below) are skipped but keep their place in the chain. Transitions are Coordinator-owned (you cannot write phase).",
     ]
 
 
@@ -186,26 +189,20 @@ def _section_phase_semantics(
         "",
     ]
     if disabled_suffix:
-        skipped = ", ".join(
-            f"{ph} ({flag})" for ph, flag in disabled_suffix.items()
-        )
-        lines.append(
-            f"Phases SKIPPED this run (never entered): {skipped}."
-        )
+        skipped = ", ".join(f"{ph} ({flag})" for ph, flag in disabled_suffix.items())
+        lines.append(f"Phases SKIPPED this run (never entered): {skipped}.")
         lines.append("")
     for phase in PHASE_NAMES:
         proposable = sorted(
             llm_proposable_actions_for_with_interleave(
-                phase, interleave=interleave,
+                phase,
+                interleave=interleave,
                 explore_enabled=explore_enabled if interleave else None,
             )
         )
         flag = disabled_suffix.get(phase)
         if flag:
-            lines.append(
-                f"- **{phase}**: {', '.join(proposable)} "
-                f"(DISABLED: {flag} — phase skipped)"
-            )
+            lines.append(f"- **{phase}**: {', '.join(proposable)} (DISABLED: {flag} — phase skipped)")
         else:
             lines.append(f"- **{phase}**: {', '.join(proposable)}")
     lines.extend([
@@ -234,21 +231,41 @@ def _section_phase_semantics(
     if interleave:
         lines.extend([
             "",
-            "**Phase interleave mode is ON** (on by default; set env "
-            + "`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable):",
-            "- EXPLORE may also REQUEST kernel-owned kinds "
-            + "(kernel_opt / integrate / deep_kernel_analysis / "
-            + "operator_tuning / vendor_kernel_config / gemm_tuning) when "
-            + "a probe of the kernel surface is needed mid-EXPLORE.",
-            "- KERNEL may also propose / delegate explore / specialist /",
-            "  integrate_patch when a config / patch refinement is needed",
-            "  mid-KERNEL.",
-            "- The phase chain stays monotonic for resume / audit / the",
-            "  CLOSE sequencer; only the per-phase action contract is",
-            "  widened. Data-dependency (trace_analyze→run_optimization),",
-            "  the integrate_patch Critic gate, and sweep singletons are",
-            "  unchanged.",
-        ])
+            "roofline, profile, replay_warm_recipe and framework_pr are never",
+            "in the sets above: the Coordinator auto-manages them and PolicyGate",
+            "denies any attempt to propose them.",
+            "",
+            "Phase transitions are Coordinator-owned. The hard advance gates",
+            "are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit, the per-",
+            "phase budget cap, or a terminal stop_reason exit EXPLORE / KERNEL",
+            "/ SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
+            "You may also emit `escalate_strategy_change{next_action_hint=",
+            "'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}` directly",
+            "(no longer robustness-only) when you judge the current phase",
+            "exhausted; the Coordinator validates the hint vocab and routes",
+            "the transition on the next tick.",
+        ]
+    )
+    if interleave:
+        lines.extend(
+            [
+                "",
+                "**Phase interleave mode is ON** (on by default; set env "
+                + "`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable):",
+                "- EXPLORE may also REQUEST kernel-owned kinds "
+                + "(kernel_opt / integrate / deep_kernel_analysis / "
+                + "operator_tuning / vendor_kernel_config / gemm_tuning) when "
+                + "a probe of the kernel surface is needed mid-EXPLORE.",
+                "- KERNEL may also propose / delegate explore / specialist /",
+                "  integrate_patch when a config / patch refinement is needed",
+                "  mid-KERNEL.",
+                "- The phase chain stays monotonic for resume / audit / the",
+                "  CLOSE sequencer; only the per-phase action contract is",
+                "  widened. Data-dependency (trace_analyze→run_optimization),",
+                "  the integrate_patch Critic gate, and sweep singletons are",
+                "  unchanged.",
+            ]
+        )
     return lines
 
 
@@ -337,21 +354,23 @@ def _section_pipeline_and_budget(
         joined = ", ".join(names) or "(none enabled)"
         lines.append(f"- **{phase}** (~{eta:.0f} min) — {header}")
         lines.append(f"    actions: {joined}")
-    lines.extend([
-        "",
-        f"Sum of typical phase ETAs: ~{eta_total:.0f} min vs max_minutes={max_minutes}.",
-        "If sum >> budget, prefer high-gain/low-cost actions and skip optional",
-        "phases (analysis / support). If sum << budget, do an extra explore round",
-        "before report.",
-        "",
-        "``explore`` runs its per-KEEP stack rebench inline — there is no",
-        "standalone validation step. Route every grid attempt through",
-        "``delegate{action_name='explore', params={grid: ...}}``.",
-        "",
-        "At the wall-clock deadline the Coordinator auto-enqueues a deterministic",
-        "`report` (no LLM) during closing phase — do not waste ticks re-proposing",
-        "it unless you want an earlier narrative version before time runs out.",
-    ])
+    lines.extend(
+        [
+            "",
+            f"Sum of typical phase ETAs: ~{eta_total:.0f} min vs max_minutes={max_minutes}.",
+            "If sum >> budget, prefer high-gain/low-cost actions and skip optional",
+            "phases (analysis / support). If sum << budget, do an extra explore round",
+            "before report.",
+            "",
+            "``explore`` runs its per-KEEP stack rebench inline — there is no",
+            "standalone validation step. Route every grid attempt through",
+            "``delegate{action_name='explore', params={grid: ...}}``.",
+            "",
+            "At the wall-clock deadline the Coordinator auto-enqueues a deterministic",
+            "`report` (no LLM) during closing phase — do not waste ticks re-proposing",
+            "it unless you want an earlier narrative version before time runs out.",
+        ]
+    )
     return lines
 
 
@@ -393,9 +412,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             kind_hint = "integrate"
         else:
             kind_hint = meta.name
-        return (
-            f"REQUEST{{target_agent='kernel', kind='{kind_hint}', params={{...}}}}"
-        )
+        return f"REQUEST{{target_agent='kernel', kind='{kind_hint}', params={{...}}}}"
     if meta.name == "report":
         return "propose_action{action_name='report', predicted_gain_pct=0.0}"
     if meta.name == "specialist":
@@ -418,10 +435,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "keep_threshold_pct?=1.0, "
             "accuracy_baseline?={task: {metric: score}}}}"
         )
-    return (
-        f"propose_action{{action_name='{meta.name}', "
-        f"predicted_gain_pct=<your estimate>}}"
-    )
+    return f"propose_action{{action_name='{meta.name}', predicted_gain_pct=<your estimate>}}"
 
 
 def _format_grid_injection_hint(name: str) -> str | None:
@@ -499,9 +513,7 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
             if name in KERNEL_OWNED_ACTIONS:
                 tag_parts.append("KERNEL-OWNED")
             tag = (" (" + ", ".join(tag_parts) + ")") if tag_parts else ""
-            lines.append(
-                f"- **{name}**{tag} — {meta.description}"
-            )
+            lines.append(f"- **{name}**{tag} — {meta.description}")
             lines.append(
                 f"    cost ~{meta.typical_runtime_min:.0f}min  "
                 f"gain {_format_gain_pair(meta)}  "
@@ -821,8 +833,7 @@ def _section_rules(rules_md: str) -> list[str]:
         list[str]: Markdown lines for the RULES & OUTPUT PROTOCOL section.
     """
     body = rules_md.strip() or (
-        "(orchestration.md rules fragment not found — Coordinator will still"
-        " enforce PolicyGate hard rules at runtime.)"
+        "(orchestration.md rules fragment not found — Coordinator will still enforce PolicyGate hard rules at runtime.)"
     )
     return ["## 7. RULES & OUTPUT PROTOCOL", "", body]
 
@@ -870,9 +881,7 @@ def build_orchestration_prompt(
     """
     actions = _filter_actions(action_registry, enabled_actions)
     if kernel_enabled is None:
-        kernel_enabled = any(
-            a.name in KERNEL_OWNED_ACTIONS for a in actions
-        )
+        kernel_enabled = any(a.name in KERNEL_OWNED_ACTIONS for a in actions)
     framework_norm = (framework or "sglang").strip().lower() or "sglang"
 
     rules_md = _read_rules_fragment(rules_fragment_path)
@@ -909,7 +918,9 @@ def build_orchestration_prompt(
 
 
 def default_enabled_actions(
-    *, no_kernel: bool, no_explore: bool = False,
+    *,
+    no_kernel: bool,
+    no_explore: bool = False,
 ) -> tuple[str, ...]:
     """Return the canonical enabled-action set used by the CLI.
 

@@ -95,7 +95,6 @@ def render_template(
     unknown = sorted(set(re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", rendered)))
     if unknown:
         raise ValueError(
-            "command template references unknown variable(s): "
-            + ", ".join(repr(item) for item in unknown)
+            "command template references unknown variable(s): " + ", ".join(repr(item) for item in unknown)
         )
     return rendered

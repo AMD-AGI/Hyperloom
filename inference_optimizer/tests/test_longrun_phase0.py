@@ -114,9 +114,7 @@ async def test_prune_events_respects_min_cursor_and_recent_window(conn):
     bus = MessageBus(conn)
     cursors = CursorStore(conn)
     for i in range(100):
-        await bus.append_and_seq(
-            Message.new("orchestration", "*", "heartbeat", {"i": i})
-        )
+        await bus.append_and_seq(Message.new("orchestration", "*", "heartbeat", {"i": i}))
     # No cursor yet => nothing is safe to prune.
     assert await dbm.prune_events(conn, cursors, keep_recent=0) == 0
 
@@ -359,8 +357,11 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
     from inference_optimizer.paths import make_session_dir
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.orchestrator.backends import (
-        MockBackend, MockCriticBackend, MockKernelBackend,
-        MockRobustnessBackend, ScriptedPlan,
+        MockBackend,
+        MockCriticBackend,
+        MockKernelBackend,
+        MockRobustnessBackend,
+        ScriptedPlan,
     )
     from .conftest import seed_target_analysis_marker
 
@@ -379,14 +380,11 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
         await c.db.execute(
             "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, "
             "expires_at, heartbeat_at) VALUES (?,?,?,?,?,?)",
-            (0, "h", "t", _iso(now - timedelta(hours=2)),
-             _iso(now - timedelta(hours=1)), _iso(now)),
+            (0, "h", "t", _iso(now - timedelta(hours=2)), _iso(now - timedelta(hours=1)), _iso(now)),
         )
         c.gpu_specialist_pool = SpecialistGpuPool(c.db, gpu_ids=[0, 1])
         for i in range(30):
-            await c.bus.append_and_seq(
-                Message.new("orchestration", "*", "heartbeat", {"i": i})
-            )
+            await c.bus.append_and_seq(Message.new("orchestration", "*", "heartbeat", {"i": i}))
         await c.cursors.advance("orchestration", seq=30, msg_id="m")
 
         # Off-cadence ticks are a no-op.
@@ -445,10 +443,10 @@ async def test_claude_backend_retries_transient_then_succeeds():
                 raise asyncio.TimeoutError("proxy stall")
             block = ToolUseBlock(
                 EMIT_INTENT_TOOL_QUALIFIED,
-                {"intent_type": "send_message",
-                 "payload": {"topic": "heartbeat", "body_md": "ok"}},
+                {"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}},
             )
             yield _Msg(content=[block])
+
         return _gen()
 
     backend = ClaudeBackend(

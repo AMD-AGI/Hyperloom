@@ -14,34 +14,20 @@ from framework_agent.repo_map import (
 
 
 def test_repo_url_for_framework_known():
-    assert repo_url_for_framework("sglang") == (
-        "https://github.com/sgl-project/sglang.git"
-    )
-    assert repo_url_for_framework("vllm") == (
-        "https://github.com/ROCm/vllm.git"
-    )
+    assert repo_url_for_framework("sglang") == ("https://github.com/sgl-project/sglang.git")
+    assert repo_url_for_framework("vllm") == ("https://github.com/ROCm/vllm.git")
 
 
 def test_repo_url_for_atom():
     """atom must resolve to the public ROCm/ATOM repo so ``fa phase-discover --framework atom`` has a target to scout."""
-    assert repo_url_for_framework("atom") == (
-        "https://github.com/ROCm/ATOM.git"
-    )
+    assert repo_url_for_framework("atom") == ("https://github.com/ROCm/ATOM.git")
 
 
 def test_repo_url_for_framework_lowercases_and_strips():
-    assert repo_url_for_framework("SGLang") == (
-        "https://github.com/sgl-project/sglang.git"
-    )
-    assert repo_url_for_framework("  vllm  ") == (
-        "https://github.com/ROCm/vllm.git"
-    )
-    assert repo_url_for_framework("ATOM") == (
-        "https://github.com/ROCm/ATOM.git"
-    )
-    assert repo_url_for_framework("  Atom  ") == (
-        "https://github.com/ROCm/ATOM.git"
-    )
+    assert repo_url_for_framework("SGLang") == ("https://github.com/sgl-project/sglang.git")
+    assert repo_url_for_framework("  vllm  ") == ("https://github.com/ROCm/vllm.git")
+    assert repo_url_for_framework("ATOM") == ("https://github.com/ROCm/ATOM.git")
+    assert repo_url_for_framework("  Atom  ") == ("https://github.com/ROCm/ATOM.git")
 
 
 def test_repo_url_for_framework_unknown_returns_empty():
@@ -76,12 +62,7 @@ def test_repo_map_in_sync_with_io_fallback():
         import ast
         import textwrap
 
-        src = textwrap.dedent(
-            (
-                __import__("pathlib").Path(fac.__file__)
-                .read_text(encoding="utf-8")
-            )
-        )
+        src = textwrap.dedent((__import__("pathlib").Path(fac.__file__).read_text(encoding="utf-8")))
         tree = ast.parse(src)
         fallback = None
         for node in ast.walk(tree):
@@ -94,11 +75,9 @@ def test_repo_map_in_sync_with_io_fallback():
                 fallback = ast.literal_eval(node.value)
                 break
         assert fallback is not None, (
-            "could not locate _FRAMEWORK_TO_REPO_URL fallback dict in "
-            "framework_agent_client source"
+            "could not locate _FRAMEWORK_TO_REPO_URL fallback dict in framework_agent_client source"
         )
 
     assert fallback == _FRAMEWORK_TO_REPO_URL, (
-        "IO fallback dict drifted from framework_agent.repo_map; "
-        "update both in lock-step."
+        "IO fallback dict drifted from framework_agent.repo_map; update both in lock-step."
     )

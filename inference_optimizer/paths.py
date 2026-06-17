@@ -59,20 +59,20 @@ _SESSION_SKELETON: tuple[str, ...] = (
     "runs/integrate",
     "runs/kernel_opt",
     "kernel-agent-workspace",
-    "kernel-agent",            # tools/<name>.py output root (runs/<session_id>/...)
+    "kernel-agent",  # tools/<name>.py output root (runs/<session_id>/...)
     "patches",
-    "optimizer_runs",          # launcher stdout / pid / robustness monitor logs
+    "optimizer_runs",  # launcher stdout / pid / robustness monitor logs
 )
 
 # Workspace-shared layout (one copy per $USER_DATA_PATH). mkdir-ed by
 # install.sh + reused for every session_dir launched from this workspace.
 _WORKSPACE_SKELETON: tuple[str, ...] = (
-    "runtime",                 # pod-local env files (kernel-agent.env.sh, etc.)
-    "runtime/geak-config",     # generated litellm config consumed by GEAK CLI
+    "runtime",  # pod-local env files (kernel-agent.env.sh, etc.)
+    "runtime/geak-config",  # generated litellm config consumed by GEAK CLI
     # Cortex KB per-session bookkeeping (.kb_sid / .kb_warm.json / ...);
     # created up-front so the KB client never mkdir's on the hot path.
     "runtime/cortex",
-    "logs",                    # launcher stdout (workspace-shared)
+    "logs",  # launcher stdout (workspace-shared)
 )
 
 # Filename-safety regex for model_basename (ROCm/Magpie/Claude CLI choke
@@ -182,10 +182,7 @@ def find_latest_per_session_dir(
         model_root = ws / basename
         if not model_root.is_dir():
             return None
-        candidates = [
-            p for p in model_root.iterdir()
-            if p.is_dir() and len(p.name) == 16 and p.name.endswith("Z")
-        ]
+        candidates = [p for p in model_root.iterdir() if p.is_dir() and len(p.name) == 16 and p.name.endswith("Z")]
     else:
         # Scan every model_basename subdir; the timestamp-shaped name check
         # skips workspace-shared subdirs (runtime/, logs/).
@@ -223,9 +220,7 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
 
     if _layout_mode() == "per_model_ts" and model_name:
         basename = _sanitize_model_basename(model_name)
-        ts = datetime.datetime.now(datetime.timezone.utc).strftime(
-            "%Y%m%dT%H%M%SZ"
-        )
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         sd = ws / basename / ts
     else:
         sd = ws
@@ -268,9 +263,7 @@ def asset_root() -> Path:
     if override:
         root = Path(override).expanduser()
         if not root.exists():
-            raise AssetRootNotFound(
-                f"{ENV_OVERRIDE_ASSET_ROOT} points at missing dir: {root}"
-            )
+            raise AssetRootNotFound(f"{ENV_OVERRIDE_ASSET_ROOT} points at missing dir: {root}")
         return root
     return PACKAGE_ROOT
 

@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 _LEGACY_LINE = '        num_prompts="$max_concurrency"'
 _PATCHED_LINE = '        num_prompts="${NUM_PROMPTS:-$max_concurrency}"'
 # "Already patched?" sentinel.
-_PATCH_SENTINEL = '${NUM_PROMPTS:-$max_concurrency}'
+_PATCH_SENTINEL = "${NUM_PROMPTS:-$max_concurrency}"
 
 # System-wide lock (``/tmp`` is writable; cross-reboot persistence not needed).
 _LOCK_PATH = "/tmp/hyperloom_benchmark_lib_patcher.lock"
@@ -104,9 +104,7 @@ def _discover_inferencex_roots(
 
     _add(inferencex_path)
     _add(os.environ.get("INFERENCEX_PATH", "").strip() or None)
-    magpie_dir = (
-        os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR") or ""
-    ).strip()
+    magpie_dir = (os.environ.get("MAGPIE_PATH") or os.environ.get("MAGPIE_DIR") or "").strip()
     if magpie_dir:
         _add(Path(magpie_dir) / "InferenceX")
     return roots
@@ -169,9 +167,9 @@ def _file_lock(lock_path: str) -> Iterator[None]:
         fp = open(lock_path, "w")
     except OSError as e:
         log.warning(
-            "_inferencex_patcher: cannot open lock file %s (%s); "
-            "proceeding without exclusion",
-            lock_path, e,
+            "_inferencex_patcher: cannot open lock file %s (%s); proceeding without exclusion",
+            lock_path,
+            e,
         )
         yield
         return
@@ -242,7 +240,8 @@ def _apply_patch_atomic(src: Path) -> bool:
     except OSError as e:
         log.warning(
             "_inferencex_patcher: cannot create temp file in %s: %s",
-            tmp_dir, e,
+            tmp_dir,
+            e,
         )
         return False
 
@@ -259,14 +258,14 @@ def _apply_patch_atomic(src: Path) -> bool:
         except OSError as cleanup_err:
             # Best-effort temp cleanup; main write already failed.
             log.debug(
-                "_inferencex_patcher: best-effort cleanup failed for temp "
-                "file %s: %s", tmp_name, cleanup_err,
+                "_inferencex_patcher: best-effort cleanup failed for temp file %s: %s",
+                tmp_name,
+                cleanup_err,
             )
         return False
 
     log.info(
-        "_inferencex_patcher: applied NUM_PROMPTS-respecting patch to "
-        "%s (Hyperloom issue #194 §2)",
+        "_inferencex_patcher: applied NUM_PROMPTS-respecting patch to %s (Hyperloom issue #194 §2)",
         src,
     )
     return True
@@ -315,8 +314,8 @@ def ensure_benchmark_lib_patched(
                 any_patched = True
             else:
                 log.warning(
-                    "_inferencex_patcher: failed to patch %s; other "
-                    "discovered roots will still be attempted", src,
+                    "_inferencex_patcher: failed to patch %s; other discovered roots will still be attempted",
+                    src,
                 )
     return any_patched
 
@@ -405,12 +404,15 @@ def _apply_benchmark_serving_patch_atomic(src: Path) -> bool:
             "needs an updated patch. PROFILE_EXTRA_BODY env var will be "
             "ignored — TraceLens shape_discovery / roofline_annotations / "
             "steady-state start_step won't reach the server. Manual review "
-            "needed.", src,
+            "needed.",
+            src,
         )
         return False
 
     patched = original.replace(
-        _BENCH_SERVING_LEGACY, _BENCH_SERVING_PATCHED, 1,
+        _BENCH_SERVING_LEGACY,
+        _BENCH_SERVING_PATCHED,
+        1,
     )
     if patched == original:
         return False
@@ -424,7 +426,8 @@ def _apply_benchmark_serving_patch_atomic(src: Path) -> bool:
     except OSError as e:
         log.warning(
             "_inferencex_patcher: cannot create temp file in %s: %s",
-            tmp_dir, e,
+            tmp_dir,
+            e,
         )
         return False
 
@@ -439,8 +442,9 @@ def _apply_benchmark_serving_patch_atomic(src: Path) -> bool:
             os.unlink(tmp_name)
         except OSError as cleanup_err:
             log.debug(
-                "_inferencex_patcher: best-effort cleanup failed for temp "
-                "file %s: %s", tmp_name, cleanup_err,
+                "_inferencex_patcher: best-effort cleanup failed for temp file %s: %s",
+                tmp_name,
+                cleanup_err,
             )
         return False
 
@@ -448,7 +452,8 @@ def _apply_benchmark_serving_patch_atomic(src: Path) -> bool:
         "_inferencex_patcher: patched %s to consume PROFILE_EXTRA_BODY env "
         "var (PR-D §2: fixes silently-ignored shape_discovery / "
         "roofline_annotations / steady-state start_step from "
-        "_workload_envs.py)", src,
+        "_workload_envs.py)",
+        src,
     )
     return True
 
@@ -498,7 +503,8 @@ def ensure_benchmark_serving_patched(
                 log.warning(
                     "_inferencex_patcher: failed to PROFILE_EXTRA_BODY-"
                     "patch %s; other discovered roots will still be "
-                    "attempted", src,
+                    "attempted",
+                    src,
                 )
     return any_patched
 

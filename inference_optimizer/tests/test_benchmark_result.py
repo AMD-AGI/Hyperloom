@@ -20,6 +20,7 @@ from inference_optimizer.orchestrator.action_executors.benchmark_result import (
 
 # Unit helpers (formerly test_benchmark_result_units.py)
 
+
 # scalar coercion helpers
 class TestScalarHelpers:
     @pytest.mark.parametrize(
@@ -28,7 +29,7 @@ class TestScalarHelpers:
             ("3.14", 3.14),
             (42, 42.0),
             (None, None),
-            (True, None),     # booleans are skipped intentionally
+            (True, None),  # booleans are skipped intentionally
             ("nope", None),
             ([], None),
         ],
@@ -165,7 +166,8 @@ class TestRescueCandidatePaths:
         ws = tmp_path / "ws"
         ws.mkdir()
         out = br._rescue_candidate_paths(
-            ws, subprocess_started_unix=leak.stat().st_mtime + 60.0,
+            ws,
+            subprocess_started_unix=leak.stat().st_mtime + 60.0,
         )
         assert out == []
 
@@ -189,7 +191,8 @@ def _write_inferencex(path: Path, tput: float = 1761.6, completed: int = 640) ->
 
 
 def test_rescue_from_env_path_adopted_after_subprocess_start(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -208,18 +211,13 @@ def test_rescue_from_env_path_adopted_after_subprocess_start(
     assert measurement["valid_measurement"] is True
     assert measurement["output_throughput"] == pytest.approx(1761.6)
     assert measurement["completed_requests"] == 640
-    assert any(
-        w.startswith("rescued_from_leaked_path:") for w in measurement["nonfatal_warnings"]
-    )
+    assert any(w.startswith("rescued_from_leaked_path:") for w in measurement["nonfatal_warnings"])
     copied = workspace / leak_path.name
     assert copied.exists()
     assert measurement["raw_result_path"] == str(copied)
     assert json.loads(copied.read_text())["output_throughput"] == 1761.6
     assert leak_path.exists()
-    assert any(
-        w == f"rescued_from_leaked_path:{leak_path}"
-        for w in measurement["nonfatal_warnings"]
-    )
+    assert any(w == f"rescued_from_leaked_path:{leak_path}" for w in measurement["nonfatal_warnings"])
 
 
 def test_rescue_rejects_stale_leak_with_older_mtime(tmp_path, monkeypatch):
@@ -238,10 +236,7 @@ def test_rescue_rejects_stale_leak_with_older_mtime(tmp_path, monkeypatch):
     )
     assert measurement["valid_measurement"] is False
     assert measurement.get("output_throughput") is None
-    assert not any(
-        w.startswith("rescued_from_leaked_path:")
-        for w in measurement["nonfatal_warnings"]
-    )
+    assert not any(w.startswith("rescued_from_leaked_path:") for w in measurement["nonfatal_warnings"])
 
 
 def test_rescue_skips_when_in_workspace_salvage_succeeded(tmp_path, monkeypatch):
@@ -260,10 +255,7 @@ def test_rescue_skips_when_in_workspace_salvage_succeeded(tmp_path, monkeypatch)
     # in-workspace value wins; rescue path should not have been used.
     assert measurement["valid_measurement"] is True
     assert measurement["output_throughput"] == pytest.approx(2000.0)
-    assert not any(
-        w.startswith("rescued_from_leaked_path:")
-        for w in measurement["nonfatal_warnings"]
-    )
+    assert not any(w.startswith("rescued_from_leaked_path:") for w in measurement["nonfatal_warnings"])
 
 
 def test_rescue_no_candidates_keeps_invalid_measurement(tmp_path, monkeypatch):
@@ -279,14 +271,12 @@ def test_rescue_no_candidates_keeps_invalid_measurement(tmp_path, monkeypatch):
         subprocess_started_unix=0.0,
     )
     assert measurement["valid_measurement"] is False
-    assert not any(
-        w.startswith("rescued_from_leaked_path:")
-        for w in measurement["nonfatal_warnings"]
-    )
+    assert not any(w.startswith("rescued_from_leaked_path:") for w in measurement["nonfatal_warnings"])
 
 
 def test_rescue_directory_scanned_for_inferencex_result_glob(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -306,14 +296,12 @@ def test_rescue_directory_scanned_for_inferencex_result_glob(
     )
     assert measurement["valid_measurement"] is True
     assert measurement["output_throughput"] in (100.0, 200.0)
-    assert any(
-        w.startswith("rescued_from_leaked_path:")
-        for w in measurement["nonfatal_warnings"]
-    )
+    assert any(w.startswith("rescued_from_leaked_path:") for w in measurement["nonfatal_warnings"])
 
 
 def test_subprocess_started_unix_none_disables_mtime_gate(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -353,16 +341,14 @@ def test_rescue_copies_leaked_file_into_workspace(tmp_path, monkeypatch):
     assert body["output_throughput"] == 1234.5
     assert body["completed_requests"] == 500
     assert measurement["raw_result_path"] == str(copied)
-    assert any(
-        w == f"rescued_from_leaked_path:{leak_path}"
-        for w in measurement["nonfatal_warnings"]
-    )
+    assert any(w == f"rescued_from_leaked_path:{leak_path}" for w in measurement["nonfatal_warnings"])
     # The leak file itself is not touched (we copy, never move/delete).
     assert leak_path.exists()
 
 
 def test_rescue_copy_failure_falls_back_to_leak_path(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """If the copy step fails, salvage must still advertise the leaked measurement."""
     workspace = tmp_path / "workspace"
@@ -373,7 +359,9 @@ def test_rescue_copy_failure_falls_back_to_leak_path(
 
     # Force the copy helper to fail so we exercise the fallback branch.
     monkeypatch.setattr(
-        br, "_materialize_rescue_into_workspace", lambda *_a, **_k: None,
+        br,
+        "_materialize_rescue_into_workspace",
+        lambda *_a, **_k: None,
     )
 
     measurement = extract_benchmark_measurement(
@@ -386,10 +374,7 @@ def test_rescue_copy_failure_falls_back_to_leak_path(
     assert measurement["raw_result_path"] == str(leak_path)
     warnings = measurement["nonfatal_warnings"]
     assert any(w.startswith("rescued_from_leaked_path:") for w in warnings)
-    assert any(
-        w.startswith("rescued_copy_into_workspace_failed:")
-        for w in warnings
-    )
+    assert any(w.startswith("rescued_copy_into_workspace_failed:") for w in warnings)
 
 
 # Harvest pass (formerly test_harvest_leaked_artifacts.py): copy diagnostics leaked under /workspace/ into the per-task workspace.
@@ -427,8 +412,7 @@ def test_harvest_copies_every_default_glob(tmp_path):
     )
 
     by_name = {src.name: dst for src, dst in harvested}
-    assert {"server.log", "gpu_metrics.csv", "profile_run.trace.json.gz",
-            "inferencex_result.json"} <= set(by_name)
+    assert {"server.log", "gpu_metrics.csv", "profile_run.trace.json.gz", "inferencex_result.json"} <= set(by_name)
     for dst in by_name.values():
         assert dst.parent == destination
         assert dst.exists()
@@ -569,7 +553,8 @@ def test_harvest_reads_env_leak_roots(tmp_path, monkeypatch):
     _touch(root_a / "server.log", "from-a")
     _touch(root_b / "gpu_metrics.csv", "from-b")
     monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LEAK_ROOTS", f"{root_a}:{root_b}",
+        "INFERENCE_OPTIMIZER_LEAK_ROOTS",
+        f"{root_a}:{root_b}",
     )
 
     harvested = harvest_leaked_artifacts(
@@ -673,10 +658,7 @@ def test_estimate_returns_none_without_samples(tmp_path):
 
 def test_estimate_returns_none_for_missing_file(tmp_path):
     """A non-existent log path is tolerated (returns None, never raises)."""
-    assert (
-        br.estimate_output_throughput_from_server_log(tmp_path / "absent.log")
-        is None
-    )
+    assert br.estimate_output_throughput_from_server_log(tmp_path / "absent.log") is None
 
 
 def test_estimate_killed_variant_prefers_richest_log(tmp_path):

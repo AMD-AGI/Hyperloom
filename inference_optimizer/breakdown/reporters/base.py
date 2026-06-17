@@ -117,8 +117,7 @@ def md_table(headers: list[str], rows: Iterable[list[Any]]) -> str:
     rows = list(rows)
     if not rows:
         return ""
-    out = ["| " + " | ".join(headers) + " |",
-           "|" + "|".join("---" for _ in headers) + "|"]
+    out = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
     for r in rows:
         out.append("| " + " | ".join(_md_cell(c) for c in r) + " |")
     return "\n".join(out)

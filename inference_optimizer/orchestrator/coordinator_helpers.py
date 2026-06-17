@@ -29,6 +29,7 @@ def _infer_model_class_from_config(model_path: str) -> str:
         ``dense``.
     """
     import json
+
     raw_path = (model_path or "").strip()
     payload: dict[str, Any] = {}
     if raw_path:
@@ -74,24 +75,44 @@ def _infer_model_class_from_config(model_path: str) -> str:
                 continue
         return False
 
-    is_moe = (
-        _positive_int(
-            "num_experts",
-            "n_routed_experts",
-            "num_local_experts",
-            "moe_num_experts",
+    is_moe = _positive_int(
+        "num_experts",
+        "n_routed_experts",
+        "num_local_experts",
+        "moe_num_experts",
+    ) or any(
+        k in text
+        for k in (
+            "moe",
+            "mixtral",
+            "deepseek-v2",
+            "deepseek-v3",
+            "deepseek-r1",
+            "kimi",
+            "glm-5",
+            "glm5",
         )
-        or any(k in text for k in (
-            "moe", "mixtral", "deepseek-v2", "deepseek-v3", "deepseek-r1",
-            "kimi", "glm-5", "glm5",
-        ))
     )
-    is_mla = any(k in text for k in (
-        "mla", "multi-head latent", "deepseek", "kimi", "glm-5", "glm5",
-    ))
-    is_nsa = any(k in text for k in (
-        "nsa", "native sparse attention", "glm-5", "glm5",
-    ))
+    is_mla = any(
+        k in text
+        for k in (
+            "mla",
+            "multi-head latent",
+            "deepseek",
+            "kimi",
+            "glm-5",
+            "glm5",
+        )
+    )
+    is_nsa = any(
+        k in text
+        for k in (
+            "nsa",
+            "native sparse attention",
+            "glm-5",
+            "glm5",
+        )
+    )
     if is_moe and is_mla and is_nsa:
         return "moe_mla_nsa"
     if is_moe and is_mla:
@@ -116,10 +137,12 @@ _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
 _BASELINE_SELF_LOOP_THRESHOLD: int = 2
 
 # Flags whose argparse consumes multiple bare tokens before the next ``--``.
-_MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset({
-    "--cuda-graph-bs",
-    "--cuda-graph-max-bs",
-})
+_MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset(
+    {
+        "--cuda-graph-bs",
+        "--cuda-graph-max-bs",
+    }
+)
 
 _DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 _ROOFLINE_WATERMARK_RATIO_ENV: str = "HYPERLOOM_ROOFLINE_WATERMARK_RATIO"
@@ -171,7 +194,9 @@ def _parse_iso_unix(ts: str) -> float:
 
 
 def _summarize_failed_variants(
-    all_results: Any, *, max_entries: int = 10,
+    all_results: Any,
+    *,
+    max_entries: int = 10,
 ) -> list[dict[str, Any]]:
     """Project ``status=='failed'`` grid_runner rows into a compact list.
 
@@ -194,12 +219,14 @@ def _summarize_failed_variants(
         if str(row.get("status") or "") != "failed":
             continue
         err = str(row.get("error") or "")
-        failed.append({
-            "name": str(row.get("name") or ""),
-            "error_class": str(row.get("error_class") or "") or None,
-            "error_excerpt": err[:400] if err else None,
-            "extra_server_args": str(row.get("extra_server_args") or ""),
-        })
+        failed.append(
+            {
+                "name": str(row.get("name") or ""),
+                "error_class": str(row.get("error_class") or "") or None,
+                "error_excerpt": err[:400] if err else None,
+                "extra_server_args": str(row.get("extra_server_args") or ""),
+            }
+        )
         if len(failed) >= max_entries:
             break
     return failed
@@ -219,6 +246,7 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
         The extracted workload-tag fields, or ``{}`` on parse error.
     """
     import yaml as _yaml
+
     try:
         with open(yaml_path, "r", encoding="utf-8") as f:
             cfg = _yaml.safe_load(f) or {}
@@ -230,7 +258,7 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
         return out
     for src, dst in (
         ("workload_mode", "workload_mode"),
-        ("quant_scheme",  "quant_scheme"),
+        ("quant_scheme", "quant_scheme"),
     ):
         v = bm.get(src)
         if v not in (None, "", 0):
@@ -265,7 +293,10 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
         tc_env = envs.get("ENABLE_TORCH_COMPILE")
         if isinstance(tc_env, str):
             out["enable_torch_compile"] = tc_env.strip().lower() in (
-                "1", "true", "yes", "on",
+                "1",
+                "true",
+                "yes",
+                "on",
             )
     return out
 
@@ -289,9 +320,7 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
         if key == "extra_envs":
             envs = params.get(key) or {}
             if isinstance(envs, dict):
-                out[key] = sorted(
-                    [str(k), str(v)] for k, v in envs.items()
-                )
+                out[key] = sorted([str(k), str(v)] for k, v in envs.items())
             else:
                 out[key] = None
             continue

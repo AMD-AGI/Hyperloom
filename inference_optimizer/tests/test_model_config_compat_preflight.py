@@ -37,7 +37,8 @@ def _args(model: str, *, gpu_type: str | None = None) -> argparse.Namespace:
 
 def _seed_state(session_dir: Path, monkeypatch):
     monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session_dir),
+        "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR",
+        str(session_dir),
     )
     from inference_optimizer.orchestrator.shared_state import SharedState
 
@@ -68,7 +69,9 @@ def test_detect_healthy_config_returns_none(tmp_path):
 def test_detect_rope_with_maxpos_ok(tmp_path):
     m = tmp_path / "rope_ok"
     _write_config(
-        m, model_type="llama", max_position_embeddings=8192,
+        m,
+        model_type="llama",
+        max_position_embeddings=8192,
         rope_scaling={"type": "yarn", "factor": 4.0},
     )
     assert cli._detect_incompatible_model_config(str(m)) is None
@@ -78,8 +81,10 @@ def test_detect_missing_tokenizer_blocks(tmp_path):
     # Gensyn-Swarm fine-tune class: weights + config, no tokenizer artifacts.
     m = tmp_path / "no_tok"
     _write_config(
-        m, with_tokenizer=False,
-        model_type="qwen2", max_position_embeddings=32768,
+        m,
+        with_tokenizer=False,
+        model_type="qwen2",
+        max_position_embeddings=32768,
     )
     reason = cli._detect_incompatible_model_config(str(m))
     assert reason is not None
@@ -89,8 +94,10 @@ def test_detect_missing_tokenizer_blocks(tmp_path):
 def test_detect_with_tokenizer_ok(tmp_path):
     m = tmp_path / "with_tok"
     _write_config(
-        m, with_tokenizer=False,
-        model_type="qwen2", max_position_embeddings=32768,
+        m,
+        with_tokenizer=False,
+        model_type="qwen2",
+        max_position_embeddings=32768,
     )
     (m / "tokenizer.json").write_text("{}", encoding="utf-8")
     assert cli._detect_incompatible_model_config(str(m)) is None
@@ -100,8 +107,10 @@ def test_detect_missing_tokenizer_but_auto_map_ok(tmp_path):
     # A custom AutoTokenizer in auto_map can supply the tokenizer at load time.
     m = tmp_path / "auto_tok"
     _write_config(
-        m, with_tokenizer=False,
-        model_type="custom", max_position_embeddings=4096,
+        m,
+        with_tokenizer=False,
+        model_type="custom",
+        max_position_embeddings=4096,
         auto_map={"AutoTokenizer": ["x.TokClass", None]},
     )
     assert cli._detect_incompatible_model_config(str(m)) is None
@@ -111,8 +120,10 @@ def test_detect_minimax_m1_blocked_on_amd(tmp_path):
     # minimax_m1 lightning-attention kernel needs 128KB LDS > MI300X 64KB.
     m = tmp_path / "minimax"
     _write_config(
-        m, model_type="minimax_m1",
-        architectures=["MiniMaxM1ForCausalLM"], max_position_embeddings=80000,
+        m,
+        model_type="minimax_m1",
+        architectures=["MiniMaxM1ForCausalLM"],
+        max_position_embeddings=80000,
     )
     reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
     assert reason is not None
@@ -123,8 +134,10 @@ def test_detect_minimax_m1_not_blocked_off_amd(tmp_path):
     # AMD-specific LDS limit; do not block on non-AMD hardware.
     m = tmp_path / "minimax_non_amd"
     _write_config(
-        m, model_type="minimax_m1",
-        architectures=["MiniMaxM1ForCausalLM"], max_position_embeddings=80000,
+        m,
+        model_type="minimax_m1",
+        architectures=["MiniMaxM1ForCausalLM"],
+        max_position_embeddings=80000,
     )
     assert cli._detect_incompatible_model_config(str(m)) is None
 
@@ -133,8 +146,10 @@ def test_detect_unrecognized_arch_blocked_hardware_agnostic(tmp_path):
     # glm4_moe_lite: Transformers does not recognize → ValidationError on any GPU.
     m = tmp_path / "glm47flash"
     _write_config(
-        m, model_type="glm4_moe_lite",
-        architectures=["Glm4MoeLiteForCausalLM"], max_position_embeddings=131072,
+        m,
+        model_type="glm4_moe_lite",
+        architectures=["Glm4MoeLiteForCausalLM"],
+        max_position_embeddings=131072,
     )
     reason_amd = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
     reason_off = cli._detect_incompatible_model_config(str(m))
@@ -146,8 +161,10 @@ def test_detect_mimo_v2_flash_unrecognized_blocked(tmp_path):
     # mimo_v2_flash: unrecognized arch + Unknown attention backend TRITON.
     m = tmp_path / "mimo"
     _write_config(
-        m, model_type="mimo_v2_flash",
-        architectures=["MiMoV2FlashForCausalLM"], max_position_embeddings=131072,
+        m,
+        model_type="mimo_v2_flash",
+        architectures=["MiMoV2FlashForCausalLM"],
+        max_position_embeddings=131072,
     )
     reason = cli._detect_incompatible_model_config(str(m))
     assert reason is not None and "not recognized" in reason
@@ -224,8 +241,10 @@ def test_detect_glm4_moe_not_blocked(tmp_path):
     # by the unrecognized-arch rule (only glm4_moe_lite is unrecognized).
     m = tmp_path / "glm4moe"
     _write_config(
-        m, model_type="glm4_moe",
-        architectures=["Glm4MoeForCausalLM"], max_position_embeddings=131072,
+        m,
+        model_type="glm4_moe",
+        architectures=["Glm4MoeForCausalLM"],
+        max_position_embeddings=131072,
     )
     assert cli._detect_incompatible_model_config(str(m)) is None
 
@@ -261,7 +280,9 @@ def test_detect_amd_unsupported_arch_not_blocked_off_amd(tmp_path):
 def test_detect_rope_without_maxpos_blocks(tmp_path):
     m = tmp_path / "rope_no_maxpos"
     _write_config(
-        m, model_type="deepseek_v32", rope_scaling={"factor": 4.0},
+        m,
+        model_type="deepseek_v32",
+        rope_scaling={"factor": 4.0},
     )
     reason = cli._detect_incompatible_model_config(str(m))
     assert reason is not None
@@ -411,7 +432,9 @@ def test_detect_non_gemma2_missing_hidden_act_not_blocked(tmp_path):
     # model types that omit hidden_act must not be caught by this gate.
     m = tmp_path / "llama_no_act"
     _write_config(
-        m, model_type="llama", max_position_embeddings=8192,
+        m,
+        model_type="llama",
+        max_position_embeddings=8192,
     )
     assert cli._detect_incompatible_model_config(str(m)) is None
 
@@ -469,7 +492,8 @@ def test_detect_dual_chunk_not_blocked_off_amd(tmp_path):
 def _write_quant_config(model_dir: Path, payload: dict) -> None:
     model_dir.mkdir(parents=True, exist_ok=True)
     (model_dir / "hf_quant_config.json").write_text(
-        json.dumps(payload), encoding="utf-8",
+        json.dumps(payload),
+        encoding="utf-8",
     )
 
 
@@ -477,10 +501,13 @@ def test_detect_modelopt_fp8_blocks_on_amd(tmp_path):
     """ModelOpt FP8 (declared in hf_quant_config.json) has no ROCm loader."""
     m = tmp_path / "modelopt_fp8"
     _write_config(m, model_type="llama", max_position_embeddings=8192)
-    _write_quant_config(m, {
-        "producer": {"name": "modelopt"},
-        "quantization": {"quant_algo": "FP8", "kv_cache_quant_algo": "FP8"},
-    })
+    _write_quant_config(
+        m,
+        {
+            "producer": {"name": "modelopt"},
+            "quantization": {"quant_algo": "FP8", "kv_cache_quant_algo": "FP8"},
+        },
+    )
     reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
     assert reason is not None
     assert "modelopt" in reason.lower() or "FP8" in reason
@@ -489,10 +516,13 @@ def test_detect_modelopt_fp8_blocks_on_amd(tmp_path):
 def test_detect_nvfp4_blocks_on_amd(tmp_path):
     m = tmp_path / "nvfp4"
     _write_config(m, model_type="llama", max_position_embeddings=8192)
-    _write_quant_config(m, {
-        "producer": {"name": "modelopt"},
-        "quantization": {"quant_algo": "NVFP4"},
-    })
+    _write_quant_config(
+        m,
+        {
+            "producer": {"name": "modelopt"},
+            "quantization": {"quant_algo": "NVFP4"},
+        },
+    )
     reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
     assert reason is not None
     assert "NVFP4" in reason or "nvfp4" in reason.lower()
@@ -502,7 +532,9 @@ def test_detect_bitsandbytes_blocks_on_amd(tmp_path):
     """bitsandbytes declared in config.json.quantization_config; CUDA-only kernels."""
     m = tmp_path / "bnb"
     _write_config(
-        m, model_type="llama", max_position_embeddings=8192,
+        m,
+        model_type="llama",
+        max_position_embeddings=8192,
         quantization_config={"quant_method": "bitsandbytes"},
     )
     reason = cli._detect_incompatible_model_config(str(m), gpu_type="mi300x")
@@ -514,10 +546,13 @@ def test_detect_modelopt_fp8_not_blocked_off_amd(tmp_path):
     """The same checkpoint can still run on a vendor (NVIDIA) engine."""
     m = tmp_path / "modelopt_fp8_nv"
     _write_config(m, model_type="llama", max_position_embeddings=8192)
-    _write_quant_config(m, {
-        "producer": {"name": "modelopt"},
-        "quantization": {"quant_algo": "FP8"},
-    })
+    _write_quant_config(
+        m,
+        {
+            "producer": {"name": "modelopt"},
+            "quantization": {"quant_algo": "FP8"},
+        },
+    )
     assert cli._detect_incompatible_model_config(str(m)) is None
 
 
@@ -525,7 +560,9 @@ def test_detect_amd_native_fp8_not_blocked(tmp_path):
     """AMD Quark / compressed-tensors FP8 is ROCm-native; must NOT be blocked."""
     m = tmp_path / "quark_fp8"
     _write_config(
-        m, model_type="llama", max_position_embeddings=8192,
+        m,
+        model_type="llama",
+        max_position_embeddings=8192,
         quantization_config={"quant_method": "fp8"},
     )
     assert cli._detect_incompatible_model_config(str(m), gpu_type="mi300x") is None
@@ -547,18 +584,21 @@ def test_detect_vocab_shape_mismatch_blocks(tmp_path):
         max_position_embeddings=4096,
         vocab_size=152064,
     )
-    _write_safetensors_header(m, {
-        "model.embed_tokens.weight": {
-            "dtype": "BF16",
-            "shape": [151936, 1536],
-            "data_offsets": [0, 0],
+    _write_safetensors_header(
+        m,
+        {
+            "model.embed_tokens.weight": {
+                "dtype": "BF16",
+                "shape": [151936, 1536],
+                "data_offsets": [0, 0],
+            },
+            "lm_head.weight": {
+                "dtype": "BF16",
+                "shape": [151936, 1536],
+                "data_offsets": [0, 0],
+            },
         },
-        "lm_head.weight": {
-            "dtype": "BF16",
-            "shape": [151936, 1536],
-            "data_offsets": [0, 0],
-        },
-    })
+    )
     reason = cli._detect_incompatible_model_config(str(m))
     assert reason is not None
     assert "vocab_size=152064" in reason
@@ -575,11 +615,16 @@ def test_detect_vocab_shape_match_not_blocked(tmp_path):
         max_position_embeddings=4096,
         vocab_size=151936,
     )
-    _write_safetensors_header(m, {
-        "model.embed_tokens.weight": {
-            "dtype": "BF16", "shape": [151936, 1536], "data_offsets": [0, 0],
+    _write_safetensors_header(
+        m,
+        {
+            "model.embed_tokens.weight": {
+                "dtype": "BF16",
+                "shape": [151936, 1536],
+                "data_offsets": [0, 0],
+            },
         },
-    })
+    )
     assert cli._detect_incompatible_model_config(str(m)) is None
 
 
@@ -620,6 +665,7 @@ def test_read_safetensors_header_parses_and_rejects(tmp_path):
 )
 def test_path_looks_like_gemma2(name, expected):
     from inference_optimizer import model_config_utils as mcu
+
     assert mcu._path_looks_like_gemma2(name) is expected
 
 
@@ -627,6 +673,7 @@ def test_model_is_gemma2_falls_back_to_path_on_residual_config(tmp_path):
     # config.json present but empty (no model_type/architectures) -> the path
     # heuristic decides; a gemma-2 path is still detected.
     from inference_optimizer import model_config_utils as mcu
+
     m = tmp_path / "google-gemma-2-9b-it"
     m.mkdir()
     (m / "config.json").write_text("{}", encoding="utf-8")
@@ -636,22 +683,35 @@ def test_model_is_gemma2_falls_back_to_path_on_residual_config(tmp_path):
 def test_model_is_gemma2_trusts_identified_non_gemma_config(tmp_path):
     # config clearly identifies llama; even a gemma-2 path must NOT override it.
     from inference_optimizer import model_config_utils as mcu
+
     m = tmp_path / "gemma-2-distill-llama"
     m.mkdir()
-    (m / "config.json").write_text(json.dumps({
-        "model_type": "llama", "architectures": ["LlamaForCausalLM"],
-    }), encoding="utf-8")
+    (m / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "llama",
+                "architectures": ["LlamaForCausalLM"],
+            }
+        ),
+        encoding="utf-8",
+    )
     assert mcu._model_is_gemma2(str(m)) is False
 
 
 def test_model_is_gemma2_detects_nested_text_config(tmp_path):
     from inference_optimizer import model_config_utils as mcu
+
     m = tmp_path / "wrapper"
     m.mkdir()
-    (m / "config.json").write_text(json.dumps({
-        "model_type": "wrapper",
-        "text_config": {"model_type": "gemma2"},
-    }), encoding="utf-8")
+    (m / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "wrapper",
+                "text_config": {"model_type": "gemma2"},
+            }
+        ),
+        encoding="utf-8",
+    )
     assert mcu._model_is_gemma2(str(m)) is True
 
 
@@ -707,7 +767,8 @@ def test_preflight_passes_for_healthy_model(tmp_path, monkeypatch):
 
 
 def test_preflight_blocks_amd_unsupported_arch_from_args_gpu_type(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     model = tmp_path / "deepseek_v32"
     _write_config(
@@ -720,9 +781,13 @@ def test_preflight_blocks_amd_unsupported_arch_from_args_gpu_type(
     sd = tmp_path / "session_amd_arch"
     _seed_state(sd, monkeypatch)
 
-    assert cli._preflight_model_config_compat(
-        _args(str(model), gpu_type="mi300x"), sd,
-    ) is True
+    assert (
+        cli._preflight_model_config_compat(
+            _args(str(model), gpu_type="mi300x"),
+            sd,
+        )
+        is True
+    )
     final = json.loads((sd / "reports" / "final.json").read_text())
     assert final["stop_reason"] == "model_config_incompatible"
 

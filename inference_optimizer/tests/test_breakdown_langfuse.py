@@ -56,16 +56,22 @@ def test_collect_prefers_receipt_file(tmp_path, monkeypatch):
     receipt = {
         "enabled": True,
         "disabled_reason": None,
-        "config": {"enable_flag": True, "host": "https://lf.test",
-                   "public_key_set": True, "secret_key_set": True,
-                   "sdk_available": True},
-        "trace_id": "deadbeef", "session_id": "claw-abc-123",
+        "config": {
+            "enable_flag": True,
+            "host": "https://lf.test",
+            "public_key_set": True,
+            "secret_key_set": True,
+            "sdk_available": True,
+        },
+        "trace_id": "deadbeef",
+        "session_id": "claw-abc-123",
         "correlated_on": "claw_session_id",
         "counts": {"generations_sent": 7, "scores_sent": 3},
         "counts_final": True,
     }
     (sd / "reports" / "trace" / "langfuse_receipt.json").write_text(
-        json.dumps(receipt), encoding="utf-8",
+        json.dumps(receipt),
+        encoding="utf-8",
     )
     warnings: list[str] = []
     section = collectors.collect_langfuse(sd, {"claw_session_id": "claw-abc-123"}, warnings)
@@ -124,16 +130,24 @@ def test_patch_splices_post_flush_receipt(tmp_path, monkeypatch):
 
     # Now a receipt lands (as flush_session would write it) with final counts.
     receipt = {
-        "enabled": True, "disabled_reason": None,
-        "config": {"enable_flag": True, "host": "https://lf.test",
-                   "public_key_set": True, "secret_key_set": True,
-                   "sdk_available": True},
-        "trace_id": "abc", "session_id": "claw-abc-123",
+        "enabled": True,
+        "disabled_reason": None,
+        "config": {
+            "enable_flag": True,
+            "host": "https://lf.test",
+            "public_key_set": True,
+            "secret_key_set": True,
+            "sdk_available": True,
+        },
+        "trace_id": "abc",
+        "session_id": "claw-abc-123",
         "correlated_on": "claw_session_id",
-        "counts": {"generations_sent": 5}, "counts_final": True,
+        "counts": {"generations_sent": 5},
+        "counts_final": True,
     }
     (sd / "reports" / "trace" / "langfuse_receipt.json").write_text(
-        json.dumps(receipt), encoding="utf-8",
+        json.dumps(receipt),
+        encoding="utf-8",
     )
     patched = patch_breakdown_langfuse(sd)
     assert patched is True

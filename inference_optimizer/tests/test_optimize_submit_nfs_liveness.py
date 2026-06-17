@@ -37,13 +37,7 @@ def _record() -> opt.SubmissionRecord:
 
 
 def _session(tmp_path: Path, rec: opt.SubmissionRecord) -> Path:
-    session = (
-        tmp_path
-        / "users"
-        / rec.safe_user_id
-        / "Qwen3.6-35B-A3B-Instruct"
-        / "20260610T010200Z"
-    )
+    session = tmp_path / "users" / rec.safe_user_id / "Qwen3.6-35B-A3B-Instruct" / "20260610T010200Z"
     session.mkdir(parents=True)
     return session
 

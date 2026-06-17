@@ -66,7 +66,9 @@ def _atomic_write_bytes(target: Path, data: bytes) -> None:
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_str = tempfile.mkstemp(
-        prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent),
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=str(target.parent),
     )
     tmp = Path(tmp_str)
     try:
@@ -95,8 +97,7 @@ def _emit(payload: dict) -> int:
     """
     sys.stdout.write(json.dumps(payload, indent=2) + "\n")
     sys.stdout.flush()
-    return 0 if str(payload.get("status", "")).lower() in ("ok", "restored",
-                                                            "noop_missing_backup") else 1
+    return 0 if str(payload.get("status", "")).lower() in ("ok", "restored", "noop_missing_backup") else 1
 
 
 def _do_apply(a: argparse.Namespace) -> int:
@@ -116,19 +117,15 @@ def _do_apply(a: argparse.Namespace) -> int:
     host = socket.gethostname()
     target = Path(a.target_path)
     if not target.is_file():
-        return _emit({"status": "failed", "host": host,
-                      "error": f"target_path does not exist: {target}"})
+        return _emit({"status": "failed", "host": host, "error": f"target_path does not exist: {target}"})
     bdir = Path(a.backup_dir)
     bdir.mkdir(parents=True, exist_ok=True)
-    backup_path = bdir / (
-        f"{_safe_name(a.kernel_id or target.stem)}_{host}_{int(time.time())}.bak"
-    )
+    backup_path = bdir / (f"{_safe_name(a.kernel_id or target.stem)}_{host}_{int(time.time())}.bak")
     shutil.copy2(target, backup_path)
     try:
         data = base64.b64decode(a.patch_b64.encode("ascii"))
     except Exception as exc:  # noqa: BLE001
-        return _emit({"status": "failed", "host": host,
-                      "error": f"patch_b64 not valid base64: {exc!r}"})
+        return _emit({"status": "failed", "host": host, "error": f"patch_b64 not valid base64: {exc!r}"})
     _atomic_write_bytes(target, data)
     compile_result: dict[str, Any] = {"status": "skipped", "reason": "non-py target"}
     if target.suffix.lower() == ".py":
@@ -137,13 +134,17 @@ def _do_apply(a: argparse.Namespace) -> int:
             compile_result = {"status": "ok"}
         except py_compile.PyCompileError as exc:
             shutil.copy2(backup_path, target)
-            return _emit({"status": "failed", "host": host,
-                          "error": f"py_compile failed (auto-reverted): {exc.msg}"})
-    return _emit({
-        "status": "ok", "host": host, "target_path": str(target),
-        "backup_path": str(backup_path), "wrote_bytes": len(data),
-        "compile": compile_result,
-    })
+            return _emit({"status": "failed", "host": host, "error": f"py_compile failed (auto-reverted): {exc.msg}"})
+    return _emit(
+        {
+            "status": "ok",
+            "host": host,
+            "target_path": str(target),
+            "backup_path": str(backup_path),
+            "wrote_bytes": len(data),
+            "compile": compile_result,
+        }
+    )
 
 
 def _do_revert(a: argparse.Namespace) -> int:
@@ -163,12 +164,12 @@ def _do_revert(a: argparse.Namespace) -> int:
     target = Path(a.target_path)
     backup = Path(a.backup_path)
     if not backup.is_file():
-        return _emit({"status": "noop_missing_backup", "host": host,
-                      "target_path": str(target), "backup_path": str(backup)})
+        return _emit(
+            {"status": "noop_missing_backup", "host": host, "target_path": str(target), "backup_path": str(backup)}
+        )
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(backup, target)
-    return _emit({"status": "restored", "host": host,
-                  "target_path": str(target), "backup_path": str(backup)})
+    return _emit({"status": "restored", "host": host, "target_path": str(target), "backup_path": str(backup)})
 
 
 def _do_bench(a: argparse.Namespace) -> int:
@@ -194,13 +195,13 @@ def _do_bench(a: argparse.Namespace) -> int:
     try:
         files_b64 = json.loads(a.files_b64_json or "{}")
     except json.JSONDecodeError as exc:
-        return _emit({"status": "failed", "host": host,
-                      "error": f"files_b64_json not valid JSON: {exc}"})
+        return _emit({"status": "failed", "host": host, "error": f"files_b64_json not valid JSON: {exc}"})
     staged: list[str] = []
     for rel, b64 in (files_b64 or {}).items():
         if rel.startswith("/") or ".." in Path(rel).parts:
-            return _emit({"status": "failed", "host": host,
-                          "error": f"staging path must be relative + no '..': {rel!r}"})
+            return _emit(
+                {"status": "failed", "host": host, "error": f"staging path must be relative + no '..': {rel!r}"}
+            )
         dst = ws / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(base64.b64decode(b64.encode("ascii")))
@@ -209,8 +210,11 @@ def _do_bench(a: argparse.Namespace) -> int:
     started = time.time()
     try:
         proc = subprocess.run(
-            ["bash", "-lc", a.bench_command], cwd=str(ws),
-            capture_output=True, text=True, timeout=a.timeout_sec,
+            ["bash", "-lc", a.bench_command],
+            cwd=str(ws),
+            capture_output=True,
+            text=True,
+            timeout=a.timeout_sec,
             env={**os.environ, "WORKSPACE_PATH": str(ws)},
         )
         rc = proc.returncode
@@ -229,14 +233,14 @@ def _do_bench(a: argparse.Namespace) -> int:
         except OSError:
             continue
         if size > _MAX_ARTIFACT_BYTES:
-            artifacts.append({"path": str(path), "size_bytes": size,
-                              "content": None, "skipped_reason": "too large"})
+            artifacts.append({"path": str(path), "size_bytes": size, "content": None, "skipped_reason": "too large"})
             continue
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            artifacts.append({"path": str(path), "size_bytes": size,
-                              "content": None, "skipped_reason": f"read failed: {exc!r}"})
+            artifacts.append(
+                {"path": str(path), "size_bytes": size, "content": None, "skipped_reason": f"read failed: {exc!r}"}
+            )
             continue
         try:
             parsed: Any = json.loads(content)
@@ -244,15 +248,20 @@ def _do_bench(a: argparse.Namespace) -> int:
             parsed = content
         artifacts.append({"path": str(path), "size_bytes": size, "content": parsed})
 
-    return _emit({
-        "status": "ok" if rc == 0 else "failed",
-        "host": host, "workspace": str(ws), "staged_files": staged,
-        "bench_command": a.bench_command, "returncode": rc,
-        "elapsed_sec": round(elapsed, 3),
-        "stdout_tail": (out or "")[-_STREAM_TAIL_BYTES:],
-        "stderr_tail": (err or "")[-_STREAM_TAIL_BYTES:],
-        "artifacts": artifacts,
-    })
+    return _emit(
+        {
+            "status": "ok" if rc == 0 else "failed",
+            "host": host,
+            "workspace": str(ws),
+            "staged_files": staged,
+            "bench_command": a.bench_command,
+            "returncode": rc,
+            "elapsed_sec": round(elapsed, 3),
+            "stdout_tail": (out or "")[-_STREAM_TAIL_BYTES:],
+            "stderr_tail": (err or "")[-_STREAM_TAIL_BYTES:],
+            "artifacts": artifacts,
+        }
+    )
 
 
 def main() -> int:

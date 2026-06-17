@@ -310,6 +310,7 @@ def test_safe_client_init_requires_base(monkeypatch):
 
 # ── task_manager: pure helpers ────────────────────────────────────
 
+
 def _make_task_manager(monkeypatch, tmp_path):
     """Construct a TaskManager with an isolated NFS base path."""
     from agent_mcp_server.config import get_settings
@@ -340,8 +341,8 @@ def test_task_manager_default_prompt_and_runtime_config(monkeypatch, tmp_path):
     assert "Optimize" in tm._get_default_prompt()
 
     cfg = tm._get_runtime_config({"cpu": 16, "gpu_count": None})
-    assert cfg["cpu"] == 16          # override applied
-    assert "image" in cfg            # default preserved
+    assert cfg["cpu"] == 16  # override applied
+    assert "image" in cfg  # default preserved
     # None override does not clobber the default.
     assert cfg["gpu_count"] == tm.settings.default_gpu_count
 
@@ -451,28 +452,35 @@ def test_task_manager_summarize_usage_claude_and_codex(monkeypatch, tmp_path):
     # Round 1: Claude-format usage inside message.
     r1 = ws / "trajectory_round_1.jsonl"
     r1.write_text(
-        _json.dumps({
-            "message": {
-                "model": "claude-x",
-                "usage": {
-                    "input_tokens": 10,
-                    "output_tokens": 5,
-                    "cache_creation_input_tokens": 2,
-                    "cache_read_input_tokens": 1,
+        _json.dumps(
+            {
+                "message": {
+                    "model": "claude-x",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "cache_creation_input_tokens": 2,
+                        "cache_read_input_tokens": 1,
+                    },
                 },
-            },
-            "total_cost_usd": 0.5,
-        }) + "\n" + "not-json\n",
+                "total_cost_usd": 0.5,
+            }
+        )
+        + "\n"
+        + "not-json\n",
         encoding="utf-8",
     )
     # Round 2: Codex-format usage on turn.completed.
     r2 = ws / "trajectory_round_2.jsonl"
     r2.write_text(
-        _json.dumps({
-            "type": "turn.completed",
-            "usage": {"input_tokens": 20, "output_tokens": 4},
-            "cost_usd": 1.0,
-        }) + "\n",
+        _json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {"input_tokens": 20, "output_tokens": 4},
+                "cost_usd": 1.0,
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -488,6 +496,7 @@ def test_task_manager_summarize_usage_claude_and_codex(monkeypatch, tmp_path):
 
 
 # ── benchmark_tools: handlers via mocked SaFEClient ───────────────
+
 
 @pytest.mark.asyncio
 async def test_benchmark_handle_requires_key_and_base(monkeypatch):
@@ -546,6 +555,7 @@ async def test_benchmark_submit_status_result_cancel(monkeypatch, tmp_path):
 
 
 # ── task_manager: async lifecycle (db + filesystem, mocked SaFE) ───
+
 
 @pytest.mark.asyncio
 async def test_task_manager_create_get_outputs_lifecycle(monkeypatch, tmp_path):

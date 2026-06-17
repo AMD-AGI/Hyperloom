@@ -14,12 +14,7 @@ from runtime.inbox_parser import (
 
 
 def _build_prompt(*, shared: str, inbox_title: str, inbox_body: str) -> str:
-    return (
-        "=== Shared session state ===\n"
-        f"{shared.rstrip()}\n"
-        f"=== {inbox_title} ===\n"
-        f"{inbox_body.rstrip()}\n"
-    )
+    return f"=== Shared session state ===\n{shared.rstrip()}\n=== {inbox_title} ===\n{inbox_body.rstrip()}\n"
 
 
 def test_parse_minimal_proposal_inbox():
@@ -66,12 +61,7 @@ def test_parse_multiple_topics_only_extracts_proposals():
 
 
 def test_parse_inbox_with_no_messages_returns_empty():
-    text = (
-        "=== Shared session state ===\n"
-        "model=qwen\n"
-        "=== Inbox for critic ===\n"
-        "(no new messages)\n"
-    )
+    text = "=== Shared session state ===\nmodel=qwen\n=== Inbox for critic ===\n(no new messages)\n"
     parsed = parse_inbox_prompt(text)
     assert parsed.agent_name == "critic"
     assert parsed.inbox == []
@@ -82,9 +72,7 @@ def test_unparseable_payload_does_not_emit_proposal_but_keeps_row():
     text = _build_prompt(
         shared="model=qwen",
         inbox_title="Inbox for critic",
-        inbox_body=(
-            "  seq=1 msg_id=zzz from=orchestration topic=proposal payload=NOT_A_DICT_AT_ALL"
-        ),
+        inbox_body=("  seq=1 msg_id=zzz from=orchestration topic=proposal payload=NOT_A_DICT_AT_ALL"),
     )
     parsed = parse_inbox_prompt(text)
     assert len(parsed.inbox) == 1
@@ -97,10 +85,7 @@ def test_malformed_inbox_line_lands_in_extras():
     text = _build_prompt(
         shared="model=qwen",
         inbox_title="Inbox for critic",
-        inbox_body=(
-            "  seq=1 msg_id=ok from=o topic=proposal payload={'action_name':'baseline'}\n"
-            "  totally bogus line"
-        ),
+        inbox_body=("  seq=1 msg_id=ok from=o topic=proposal payload={'action_name':'baseline'}\n  totally bogus line"),
     )
     parsed = parse_inbox_prompt(text)
     assert len(parsed.inbox) == 1
@@ -153,8 +138,7 @@ def test_payload_json_form_also_supported():
         shared="model=qwen",
         inbox_title="Inbox for critic",
         inbox_body=(
-            "  seq=1 msg_id=h1 from=o topic=proposal "
-            'payload={"action_name": "baseline", "predicted_gain_pct": 0}'
+            '  seq=1 msg_id=h1 from=o topic=proposal payload={"action_name": "baseline", "predicted_gain_pct": 0}'
         ),
     )
     parsed = parse_inbox_prompt(text)

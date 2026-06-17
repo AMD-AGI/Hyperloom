@@ -87,10 +87,7 @@ def test_discover_failure_bumps_counter_without_flipping_phase_done(
     assert out is False
     assert stub.shared_state.framework_pr_discover_failures == 1
     assert stub.shared_state.framework_pr_phase_done is False
-    failed = [
-        r for r in stub.shared_state.phase_history
-        if r.get("event") == "framework_pr_discover_failed"
-    ]
+    failed = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_pr_discover_failed"]
     assert len(failed) == 1
     assert failed[0]["attempt"] == 1
     assert failed[0]["limit"] == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
@@ -112,10 +109,7 @@ def test_discover_three_consecutive_failures_reach_retry_limit(
         ok = asyncio.run(_call_discover(stub))
         assert ok is False
 
-    assert (
-        stub.shared_state.framework_pr_discover_failures
-        == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
-    )
+    assert stub.shared_state.framework_pr_discover_failures == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
     assert stub.shared_state.framework_pr_phase_done is False
 
 
@@ -274,10 +268,7 @@ def test_record_framework_pr_phase_done_appends_history_row(tmp_path: Path):
         failure_count=3,
     )
 
-    rows = [
-        r for r in stub.shared_state.phase_history
-        if r.get("event") == "framework_pr_phase_done"
-    ]
+    rows = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_pr_phase_done"]
     assert len(rows) == 1
     assert rows[0]["reason"] == "discover_retries_exhausted"
     assert rows[0]["failure_count"] == 3
@@ -298,10 +289,7 @@ def test_record_framework_pr_phase_done_records_empty_payload_reason(
         failure_count=0,
     )
 
-    rows = [
-        r for r in stub.shared_state.phase_history
-        if r.get("event") == "framework_pr_phase_done"
-    ]
+    rows = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_pr_phase_done"]
     assert len(rows) == 1
     assert rows[0]["reason"] == "discover_empty_payload"
     assert rows[0]["failure_count"] == 0

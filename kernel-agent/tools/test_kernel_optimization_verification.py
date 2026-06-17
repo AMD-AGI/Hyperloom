@@ -35,7 +35,7 @@ def _attempt(report: Path | None = None, artifact: Path | None = None):
     if artifact is not None:
         if not artifact.exists():
             artifact.write_text(
-                "#include <hip/hip_runtime.h>\nextern \"C\" void optimized_kernel() {}\n",
+                '#include <hip/hip_runtime.h>\nextern "C" void optimized_kernel() {}\n',
                 encoding="utf-8",
             )
         paths["partial_latest_optimized"] = str(artifact)
@@ -49,10 +49,7 @@ def _attempt(report: Path | None = None, artifact: Path | None = None):
 
 
 def test_structured_shape_cases_parse_moe_args():
-    shape = (
-        "(15360,8,768) bf16<br>(128,1536,2048) bf16<br>"
-        "(139256,) int<br>(139256,) fp32"
-    )
+    shape = "(15360,8,768) bf16<br>(128,1536,2048) bf16<br>(139256,) int<br>(139256,) fp32"
     candidate = {
         "name": "aiter::ck_moe_stage2",
         "input_shapes": [{"call_num": 48, "shape": shape}],
@@ -98,12 +95,14 @@ def test_structured_shape_cases_prefer_input_shapes():
 def test_structured_shape_cases_tolerates_bad_task_group_duration():
     candidate = {
         "task_group": {
-            "rows": [{
-                "name": "op",
-                "shapes": ["(8,16) fp32"],
-                "call_count": 3,
-                "duration_us": "N/A",
-            }],
+            "rows": [
+                {
+                    "name": "op",
+                    "shapes": ["(8,16) fp32"],
+                    "call_count": 3,
+                    "duration_us": "N/A",
+                }
+            ],
         },
     }
 
@@ -263,12 +262,17 @@ def test_report_correctness_passes_with_machine_marker(tmp_path):
 def _geak_attempt(tmp_path: Path, *, status: str = "complete", speedup: float = 1.3):
     """Build a GEAK-shaped attempt with a final_report.json on disk."""
     final = tmp_path / "geak_final_report.json"
-    final.write_text(json.dumps({
-        "status": status,
-        "best_patch": str(tmp_path / "patch_1.patch"),
-        "best_speedup": speedup,
-        "summary": "import-only harness, no kernel exercised",
-    }), encoding="utf-8")
+    final.write_text(
+        json.dumps(
+            {
+                "status": status,
+                "best_patch": str(tmp_path / "patch_1.patch"),
+                "best_speedup": speedup,
+                "summary": "import-only harness, no kernel exercised",
+            }
+        ),
+        encoding="utf-8",
+    )
     artifact = tmp_path / "worktree" / "moe_op.py"
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_text("import torch\ndef ck_moe_stage1_fwd(*a, **k): pass\n", encoding="utf-8")
@@ -342,8 +346,7 @@ def test_geak_correctness_trust_requires_complete_status(tmp_path):
 def test_report_correctness_passes_with_reference_language(tmp_path):
     report = tmp_path / "optimization_report.md"
     report.write_text(
-        "The optimized implementation matches reference outputs for all test shapes.\n"
-        "Speedup: 1.41x\n",
+        "The optimized implementation matches reference outputs for all test shapes.\nSpeedup: 1.41x\n",
         encoding="utf-8",
     )
     verification = ko.build_verification(
@@ -358,8 +361,7 @@ def test_report_correctness_passes_with_reference_language(tmp_path):
 def test_extracts_complete_source_from_text_artifact(tmp_path):
     artifact = tmp_path / "optimized.txt"
     artifact.write_text(
-        "Final code:\n```hip\n#include <hip/hip_runtime.h>\n"
-        "extern \"C\" void optimized_kernel() {}\n```\n",
+        'Final code:\n```hip\n#include <hip/hip_runtime.h>\nextern "C" void optimized_kernel() {}\n```\n',
         encoding="utf-8",
     )
     report = tmp_path / "optimization_report.md"
@@ -417,8 +419,7 @@ def test_report_correctness_failure_blocks_keep(tmp_path):
 def test_cli_correctness_override(tmp_path):
     artifact = tmp_path / "optimized.hip"
     verification = ko.build_verification(
-        _args(correctness_passed=True, micro_speedup=1.25,
-              e2e_gain_pct=0.5, accuracy_passed=True),
+        _args(correctness_passed=True, micro_speedup=1.25, e2e_gain_pct=0.5, accuracy_passed=True),
         [_attempt(artifact=artifact)],
         benchmark_available=False,
     )
@@ -431,8 +432,7 @@ def test_speedup_just_above_gate_keeps(tmp_path):
     """A 1.07x speedup clears the 1.05x KEEP gate (issue #442: was rejected by the old higher gate)."""
     artifact = tmp_path / "optimized.hip"
     verification = ko.build_verification(
-        _args(correctness_passed=True, micro_speedup=1.07,
-              e2e_gain_pct=0.5, accuracy_passed=True),
+        _args(correctness_passed=True, micro_speedup=1.07, e2e_gain_pct=0.5, accuracy_passed=True),
         [_attempt(artifact=artifact)],
         benchmark_available=False,
     )
@@ -443,8 +443,7 @@ def test_speedup_below_gate_needs_review(tmp_path):
     """A 1.03x speedup (improvement but under the 1.05x gate) routes to NEEDS_REVIEW, not KEEP."""
     artifact = tmp_path / "optimized.hip"
     verification = ko.build_verification(
-        _args(correctness_passed=True, micro_speedup=1.03,
-              e2e_gain_pct=0.5, accuracy_passed=True),
+        _args(correctness_passed=True, micro_speedup=1.03, e2e_gain_pct=0.5, accuracy_passed=True),
         [_attempt(artifact=artifact)],
         benchmark_available=False,
     )
@@ -502,7 +501,9 @@ def test_worktree_source_paths_prefers_repo_relative_join(tmp_path):
     decoy.write_text("def f(): return 'decoy'\n", encoding="utf-8")
 
     paths = ko._worktree_source_paths(
-        worktree, source_file=str(src), kernel_repo=str(repo),
+        worktree,
+        source_file=str(src),
+        kernel_repo=str(repo),
     )
     assert paths
     # Canonical mapping fires first; decoy collected but never primary.
@@ -517,7 +518,9 @@ def test_worktree_source_paths_falls_back_to_basename_when_no_repo(tmp_path):
     hit.write_text("def f(): pass\n", encoding="utf-8")
 
     paths = ko._worktree_source_paths(
-        worktree, source_file="/anywhere/rmsnorm.py", kernel_repo="",
+        worktree,
+        source_file="/anywhere/rmsnorm.py",
+        kernel_repo="",
     )
     assert paths == [hit]
 
@@ -549,7 +552,8 @@ def test_candidate_artifact_paths_prefers_worktree_over_patch(tmp_path):
         },
     }
     paths = ko._candidate_artifact_paths(
-        attempt, ".py",
+        attempt,
+        ".py",
         source_file=str(src),
         kernel_repo=str(repo),
     )
@@ -570,7 +574,8 @@ def test_build_verification_recovers_py_from_worktree(tmp_path):
     wt_file = worktree / "aiter" / "ops" / "rmsnorm.py"
     wt_file.parent.mkdir(parents=True)
     wt_file.write_text(
-        "def rmsnorm2d_fwd():\n    return 'optimized'\n", encoding="utf-8",
+        "def rmsnorm2d_fwd():\n    return 'optimized'\n",
+        encoding="utf-8",
     )
 
     patch = tmp_path / "results" / "round_1" / "parallel_0" / "patch_1.patch"
@@ -662,7 +667,8 @@ def test_geak_prompt_patcher_fails_soft_when_yaml_missing(tmp_path, monkeypatch)
     import geak_prompt_patcher as gpp
 
     monkeypatch.setenv(
-        "HYPERLOOM_GEAK_PROMPT_YAML", str(tmp_path / "does_not_exist.yaml"),
+        "HYPERLOOM_GEAK_PROMPT_YAML",
+        str(tmp_path / "does_not_exist.yaml"),
     )
     ok, msg = gpp.ensure_geak_prompt_patched()
     assert ok is False
@@ -763,7 +769,7 @@ def test_geak_stdout_log_with_fenced_cuda_block_is_extracted(tmp_path):
         "Here is the final optimized kernel:\n"
         "```cuda\n"
         "#include <hip/hip_runtime.h>\n"
-        "extern \"C\" __global__ void optimized_kernel(float* out, const float* in) {\n"
+        'extern "C" __global__ void optimized_kernel(float* out, const float* in) {\n'
         "  int idx = blockIdx.x * blockDim.x + threadIdx.x;\n"
         "  out[idx] = in[idx] * 2.0f;\n"
         "}\n"
@@ -789,7 +795,7 @@ def test_geak_stdout_log_with_fenced_cuda_block_is_extracted(tmp_path):
     assert source == "extracted_code_block"
     assert artifact_path.endswith("_extracted.cu")
     body = Path(artifact_path).read_text(encoding="utf-8")
-    assert "extern \"C\" __global__ void optimized_kernel" in body
+    assert 'extern "C" __global__ void optimized_kernel' in body
     assert "```" not in body
     assert "Here is the final" not in body
 
@@ -851,7 +857,7 @@ def test_optimized_dir_glob_picks_up_both_legacy_and_new_attempt_files(tmp_path)
         "geak-deadbeef_optimized.cu",
         "geak-deadbeef_stdout.log",
     }, (
-        "breakdown/collectors.py uses `glob(f\"{attempt_id}*\")` to discover "
+        'breakdown/collectors.py uses `glob(f"{attempt_id}*")` to discover '
         "per-attempt artefacts — both the legacy `_optimized.<suffix>` and "
         "the post-2026-05 `_stdout.log` names must remain discoverable so "
         "older session dirs and new ones render identically in the breakdown."
@@ -920,7 +926,10 @@ def _prompt_args(target_platform: str):
     ],
 )
 def test_build_prompt_uses_target_platform_hardware_notes(
-    target_platform, expected_name, expected_arch, expected_flag,
+    target_platform,
+    expected_name,
+    expected_arch,
+    expected_flag,
 ):
     prompt = ko.build_prompt(
         {"name": "platform_kernel", "source_type": "hip"},
@@ -1110,10 +1119,12 @@ def test_load_candidates_backfills_current_tracelens_report_path(tmp_path):
     report.write_text("# TraceLens Analysis\n", encoding="utf-8")
     candidates_path = tmp_path / "kernel_candidates.json"
     candidates_path.write_text(
-        json.dumps({
-            "trace_report_path": str(report),
-            "hot_kernels": [{"kernel_id": "k1", "name": "paged_attention"}],
-        }),
+        json.dumps(
+            {
+                "trace_report_path": str(report),
+                "hot_kernels": [{"kernel_id": "k1", "name": "paged_attention"}],
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -1183,15 +1194,17 @@ def test_build_hypothesis_block_returns_empty_when_no_prose_fields():
 
 
 def test_build_hypothesis_block_renders_reasoning_and_resolution():
-    block = ko._build_hypothesis_block({
-        "name": "rms_norm",
-        "reasoning_for_slowdown": "Memory-bound kernel saturating HBM bandwidth.",
-        "resolution": "Fuse RMSNorm with the following GEMM to amortize loads.",
-        "impact_low_ms": 0.0,
-        "impact_low_e2e_pct": 0.0,
-        "impact_high_ms": 0.0,
-        "impact_high_e2e_pct": 0.0,
-    })
+    block = ko._build_hypothesis_block(
+        {
+            "name": "rms_norm",
+            "reasoning_for_slowdown": "Memory-bound kernel saturating HBM bandwidth.",
+            "resolution": "Fuse RMSNorm with the following GEMM to amortize loads.",
+            "impact_low_ms": 0.0,
+            "impact_low_e2e_pct": 0.0,
+            "impact_high_ms": 0.0,
+            "impact_high_e2e_pct": 0.0,
+        }
+    )
     assert "## TraceLens Hypothesis [validate before acting]" in block
     assert "Memory-bound kernel saturating HBM bandwidth." in block
     assert "Fuse RMSNorm with the following GEMM" in block
@@ -1202,15 +1215,17 @@ def test_build_hypothesis_block_renders_reasoning_and_resolution():
 
 
 def test_build_hypothesis_block_renders_impact_range_when_set():
-    block = ko._build_hypothesis_block({
-        "name": "fused_moe",
-        "reasoning_for_slowdown": "",
-        "resolution": "",
-        "impact_low_ms": 12.5,
-        "impact_low_e2e_pct": 3.2,
-        "impact_high_ms": 40.0,
-        "impact_high_e2e_pct": 10.4,
-    })
+    block = ko._build_hypothesis_block(
+        {
+            "name": "fused_moe",
+            "reasoning_for_slowdown": "",
+            "resolution": "",
+            "impact_low_ms": 12.5,
+            "impact_low_e2e_pct": 3.2,
+            "impact_high_ms": 40.0,
+            "impact_high_e2e_pct": 10.4,
+        }
+    )
     assert "Estimated impact range" in block
     assert "12.50 ms" in block
     assert "3.20% E2E" in block
@@ -1224,15 +1239,17 @@ def test_build_hypothesis_block_renders_impact_range_when_set():
 
 def test_build_hypothesis_block_renders_identification_when_present():
     """Identification line carries per-rank context + source metrics-file ref, labelled distinctly from Reasoning."""
-    block = ko._build_hypothesis_block({
-        "name": "rms_norm",
-        "identification": (
-            "Four `aiter::rmsnorm_quant` operations flagged as memory-bound. "
-            "(source: rmsnorm_metrics.json -> operations[].efficiency.efficiency_percent)"
-        ),
-        "reasoning_for_slowdown": "Memory-bound kernel saturating HBM bandwidth.",
-        "resolution": "Fuse RMSNorm with the following GEMM.",
-    })
+    block = ko._build_hypothesis_block(
+        {
+            "name": "rms_norm",
+            "identification": (
+                "Four `aiter::rmsnorm_quant` operations flagged as memory-bound. "
+                "(source: rmsnorm_metrics.json -> operations[].efficiency.efficiency_percent)"
+            ),
+            "reasoning_for_slowdown": "Memory-bound kernel saturating HBM bandwidth.",
+            "resolution": "Fuse RMSNorm with the following GEMM.",
+        }
+    )
     assert "Identification (TraceLens context):" in block
     assert "Four `aiter::rmsnorm_quant`" in block
     assert "rmsnorm_metrics.json" in block
@@ -1244,10 +1261,12 @@ def test_build_hypothesis_block_renders_identification_when_present():
 
 def test_build_hypothesis_block_renders_when_only_identification_present():
     """A P-item with only Identification still produces a block (GEAK needs the source pointer)."""
-    block = ko._build_hypothesis_block({
-        "name": "kernel",
-        "identification": "Three ops flagged. (source: gemm_metrics.json)",
-    })
+    block = ko._build_hypothesis_block(
+        {
+            "name": "kernel",
+            "identification": "Three ops flagged. (source: gemm_metrics.json)",
+        }
+    )
     assert block != ""
     assert "Identification (TraceLens context):" in block
 
@@ -1367,27 +1386,31 @@ def test_build_benchmark_cases_block_returns_empty_without_task_group():
 
 
 def test_build_benchmark_cases_block_renders_single_row():
-    block = ko._build_benchmark_cases_block({
-        "name": "rms_norm",
-        "task_group": {
-            "function_name": "rms_norm",
-            "source_path": "/sgl-workspace/aiter/rmsnorm.py",
-            "definition_line": 42,
-            "ast_resolved": True,
-            "rows": [{
-                "name": "rms_norm",
-                "shapes": ["(8,4096) bf16"],
-                "duration_us": 100_000.0,
-                "call_count": 100,
-                "percent_of_total": 4.2,
-                "flops_per_byte": 0.5,
-                "bound_type": "memory-bound",
-                "efficiency_percent": 30.0,
-                "efficiency_peak_value": 5.3,
-                "efficiency_peak_unit": "TB/s",
-            }],
-        },
-    })
+    block = ko._build_benchmark_cases_block(
+        {
+            "name": "rms_norm",
+            "task_group": {
+                "function_name": "rms_norm",
+                "source_path": "/sgl-workspace/aiter/rmsnorm.py",
+                "definition_line": 42,
+                "ast_resolved": True,
+                "rows": [
+                    {
+                        "name": "rms_norm",
+                        "shapes": ["(8,4096) bf16"],
+                        "duration_us": 100_000.0,
+                        "call_count": 100,
+                        "percent_of_total": 4.2,
+                        "flops_per_byte": 0.5,
+                        "bound_type": "memory-bound",
+                        "efficiency_percent": 30.0,
+                        "efficiency_peak_value": 5.3,
+                        "efficiency_peak_unit": "TB/s",
+                    }
+                ],
+            },
+        }
+    )
     assert "## Benchmark cases" in block
     assert "single TraceLens row" in block
     assert "rms_norm" in block
@@ -1400,30 +1423,32 @@ def test_build_benchmark_cases_block_renders_single_row():
 
 def test_build_benchmark_cases_block_renders_multiple_rows_sorted_by_time():
     """Multi-row groups render rows aggregate-time-descending and say 'optimize once, applies to all'."""
-    block = ko._build_benchmark_cases_block({
-        "name": "rms_norm",
-        "task_group": {
-            "function_name": "rms_norm",
-            "source_path": "/foo/x.py",
-            "definition_line": 10,
-            "rows": [
-                {
-                    "name": "rms_norm_prefill",
-                    "shapes": ["(64,4096) bf16"],
-                    "duration_us": 500_000.0,
-                    "call_count": 8,
-                    "bound_type": "compute-bound",
-                },
-                {
-                    "name": "rms_norm_decode",
-                    "shapes": ["(8,4096) bf16"],
-                    "duration_us": 50_000.0,
-                    "call_count": 100,
-                    "bound_type": "memory-bound",
-                },
-            ],
-        },
-    })
+    block = ko._build_benchmark_cases_block(
+        {
+            "name": "rms_norm",
+            "task_group": {
+                "function_name": "rms_norm",
+                "source_path": "/foo/x.py",
+                "definition_line": 10,
+                "rows": [
+                    {
+                        "name": "rms_norm_prefill",
+                        "shapes": ["(64,4096) bf16"],
+                        "duration_us": 500_000.0,
+                        "call_count": 8,
+                        "bound_type": "compute-bound",
+                    },
+                    {
+                        "name": "rms_norm_decode",
+                        "shapes": ["(8,4096) bf16"],
+                        "duration_us": 50_000.0,
+                        "call_count": 100,
+                        "bound_type": "memory-bound",
+                    },
+                ],
+            },
+        }
+    )
     assert "across 2 TraceLens rows" in block
     assert "Optimize the source function once" in block
     case_1_idx = block.index("Case 1: operation=rms_norm_prefill")
@@ -1441,13 +1466,15 @@ def test_build_prompt_includes_benchmark_cases_when_task_group_present():
                 "function_name": "rms_norm",
                 "source_path": "/foo/x.py",
                 "definition_line": 10,
-                "rows": [{
-                    "name": "rms_norm",
-                    "shapes": ["(8,4096) bf16"],
-                    "duration_us": 100_000.0,
-                    "call_count": 100,
-                    "bound_type": "memory-bound",
-                }],
+                "rows": [
+                    {
+                        "name": "rms_norm",
+                        "shapes": ["(8,4096) bf16"],
+                        "duration_us": 100_000.0,
+                        "call_count": 100,
+                        "bound_type": "memory-bound",
+                    }
+                ],
             },
         },
         _prompt_args("mi300x"),
@@ -1471,10 +1498,12 @@ def test_build_priority_block_empty_when_no_bound_info():
 
 
 def test_build_priority_block_memory_bound_leads_with_memory_traffic():
-    block = ko._build_priority_block({
-        "name": "rms_norm",
-        "bound_type": "memory-bound",
-    })
+    block = ko._build_priority_block(
+        {
+            "name": "rms_norm",
+            "bound_type": "memory-bound",
+        }
+    )
     assert "Optimization priorities" in block
     assert "memory-bound" in block
     lev1 = block.index("1. **Memory traffic reduction**")
@@ -1483,32 +1512,37 @@ def test_build_priority_block_memory_bound_leads_with_memory_traffic():
 
 
 def test_build_priority_block_compute_bound_leads_with_compute_utilization():
-    block = ko._build_priority_block({
-        "name": "gemm_kernel",
-        "bound_type": "compute-bound",
-    })
+    block = ko._build_priority_block(
+        {
+            "name": "gemm_kernel",
+            "bound_type": "compute-bound",
+        }
+    )
     assert "1. **Compute utilization**" in block
     assert "primary lever for compute-bound" in block
 
 
 def test_build_priority_block_unknown_bound_uses_default_order():
-    block = ko._build_priority_block({
-        "name": "kernel",
-        "bound_type": "mixed",
-    })
+    block = ko._build_priority_block(
+        {
+            "name": "kernel",
+            "bound_type": "mixed",
+        }
+    )
     # mixed → unknown bucket → structural simplification first.
     assert "1. **Structural simplification**" in block
 
 
-
 def test_build_priority_block_reads_bound_from_task_group_primary_row():
     """No top-level bound_type → fall back to the first task_group row's bound_type."""
-    block = ko._build_priority_block({
-        "name": "rms_norm",
-        "task_group": {
-            "rows": [{"name": "rms_norm", "bound_type": "memory-bound"}],
-        },
-    })
+    block = ko._build_priority_block(
+        {
+            "name": "rms_norm",
+            "task_group": {
+                "rows": [{"name": "rms_norm", "bound_type": "memory-bound"}],
+            },
+        }
+    )
     assert "1. **Memory traffic reduction**" in block
 
 

@@ -15,12 +15,14 @@ from .errors import RuntimeAdapterError
 
 
 # KB-side ``kind`` enum (kb-critic-integration-contract §2.1).
-KB_KINDS: frozenset[str] = frozenset({
-    "pitfall",
-    "technique",
-    "params_catalog",
-    "model_profile",
-})
+KB_KINDS: frozenset[str] = frozenset(
+    {
+        "pitfall",
+        "technique",
+        "params_catalog",
+        "model_profile",
+    }
+)
 
 
 # Critic categories → KB kinds. Categories without an entry are treated as
@@ -55,14 +57,11 @@ def map_category_to_kind(category: str) -> str:
             catalogue.
     """
     if not isinstance(category, str):
-        raise RuntimeAdapterError(
-            f"category must be str, got {type(category).__name__}"
-        )
+        raise RuntimeAdapterError(f"category must be str, got {type(category).__name__}")
     kind = CATEGORY_TO_KIND.get(category)
     if not kind:
         raise RuntimeAdapterError(
-            f"unsupported Critic category {category!r}; mapping table only "
-            f"covers {sorted(CATEGORY_TO_KIND.keys())!r}"
+            f"unsupported Critic category {category!r}; mapping table only covers {sorted(CATEGORY_TO_KIND.keys())!r}"
         )
     return kind
 

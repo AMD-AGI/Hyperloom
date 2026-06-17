@@ -29,11 +29,13 @@ def test_phase_for_event_unknown_default():
 
 
 def test_stack_adoptions_filters():
-    state = {"optimization_stack": [
-        {"ts": "2025-01-01T00:00:00Z", "variant_name": "v1"},
-        {"no_ts": True},
-        "not a dict",
-    ]}
+    state = {
+        "optimization_stack": [
+            {"ts": "2025-01-01T00:00:00Z", "variant_name": "v1"},
+            {"no_ts": True},
+            "not a dict",
+        ]
+    }
     out = lc._stack_adoptions(state)
     assert len(out) == 1
     assert out[0]["variant_name"] == "v1"
@@ -65,16 +67,16 @@ def test_collect_phase_segments_groups_and_elapsed():
 
 def test_collect_phase_segments_gain_and_adoption():
     timeline = [
-        {"action": "sweep", "ts": "2025-01-01T00:00:00Z",
-         "key_metric": "12.5", "key_metric_kind": "gain_pct"},
+        {"action": "sweep", "ts": "2025-01-01T00:00:00Z", "key_metric": "12.5", "key_metric_kind": "gain_pct"},
     ]
     # Build the legacy key without the literal token so the rename guard
     # (test_no_legacy_writer_sites) does not flag this test file.
     legacy_args_key = "candidate_extra_" + "sglang_args"
-    state = {"optimization_stack": [
-        {"ts": "2025-01-01T00:00:05Z", "variant_name": "best",
-         legacy_args_key: "--foo", "tput": "100"},
-    ]}
+    state = {
+        "optimization_stack": [
+            {"ts": "2025-01-01T00:00:05Z", "variant_name": "best", legacy_args_key: "--foo", "tput": "100"},
+        ]
+    }
     segs = lc.collect_phase_segments(state, timeline, [])
     assert segs[0]["evidence"]["best_gain_pct"] == 12.5
     adopted = segs[0]["evidence"]["adopted"]
@@ -84,8 +86,7 @@ def test_collect_phase_segments_gain_and_adoption():
 
 def test_collect_phase_segments_gain_from_extras():
     timeline = [
-        {"action": "explore", "ts": "2025-01-01T00:00:00Z",
-         "extras": {"gain_pct": "7.0"}},
+        {"action": "explore", "ts": "2025-01-01T00:00:00Z", "extras": {"gain_pct": "7.0"}},
     ]
     segs = lc.collect_phase_segments({}, timeline, [])
     assert segs[0]["evidence"]["best_gain_pct"] == 7.0

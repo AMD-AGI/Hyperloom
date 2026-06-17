@@ -156,14 +156,10 @@ def fetch_pr_audit_material(
     out = Path(out_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     repo_slug = _repo_slug(repo_url)
-    patches_text = pr_patches(
-        repo_slug, pr_number, base_url=primus_cortex_url, timeout_sec=primus_timeout_sec
-    )
+    patches_text = pr_patches(repo_slug, pr_number, base_url=primus_cortex_url, timeout_sec=primus_timeout_sec)
     patches_path = out / "pr.patches"
     patches_path.write_text(patches_text, encoding="utf-8")
-    files_payload = pr_files(
-        repo_slug, pr_number, base_url=primus_cortex_url, timeout_sec=primus_timeout_sec
-    )
+    files_payload = pr_files(repo_slug, pr_number, base_url=primus_cortex_url, timeout_sec=primus_timeout_sec)
     files_path = out / "pr_files.json"
     files_path.write_text(
         json.dumps(
@@ -280,9 +276,7 @@ def evaluate_candidate_outcome(
     ratio = throughput / baseline_throughput
     result["throughput_ratio"] = ratio
     if ratio < min_throughput_ratio:
-        result["reason"] = (
-            f"throughput ratio {ratio:.4f} below required {min_throughput_ratio:.4f}"
-        )
+        result["reason"] = f"throughput ratio {ratio:.4f} below required {min_throughput_ratio:.4f}"
         return result
     if baseline_accuracy is not None:
         if acc_value is None:
@@ -290,9 +284,7 @@ def evaluate_candidate_outcome(
             return result
         drop = baseline_accuracy - acc_value
         if drop > max_accuracy_drop:
-            result["reason"] = (
-                f"accuracy drop {drop:.4f} exceeds max {max_accuracy_drop:.4f}"
-            )
+            result["reason"] = f"accuracy drop {drop:.4f} exceeds max {max_accuracy_drop:.4f}"
             return result
     if completed and "/" in completed:
         left, _, right = completed.partition("/")

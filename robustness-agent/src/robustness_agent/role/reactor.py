@@ -196,7 +196,8 @@ class Reactor:
             await asyncio.to_thread(self._state_store.flush_atomic)
         except Exception:  # noqa: BLE001 — best-effort, never crash tick
             log.exception(
-                "reactor tick=%d state_store flush failed", self._tick_index,
+                "reactor tick=%d state_store flush failed",
+                self._tick_index,
             )
 
     async def _maybe_finalize(self, ctx: ReactorContext) -> None:
@@ -219,11 +220,13 @@ class Reactor:
         self._finalize_fired = True
         try:
             await asyncio.to_thread(
-                self._finalizer.finalize, stop_reason=stop_reason,
+                self._finalizer.finalize,
+                stop_reason=stop_reason,
             )
         except Exception:  # noqa: BLE001 — finalize is best-effort
             log.exception(
-                "reactor tick=%d postmortem finalizer raised", self._tick_index,
+                "reactor tick=%d postmortem finalizer raised",
+                self._tick_index,
             )
 
 

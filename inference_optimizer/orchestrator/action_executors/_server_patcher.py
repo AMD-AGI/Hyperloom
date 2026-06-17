@@ -81,8 +81,9 @@ def _load_sglang_supported_versions_from_manifest(
             raw = manifest.read_text(encoding="utf-8")
         except OSError as e:
             log.warning(
-                "_server_patcher: cannot read SGLang version manifest %s (%s);"
-                " falling back to hardcoded allowlist", manifest, e,
+                "_server_patcher: cannot read SGLang version manifest %s (%s); falling back to hardcoded allowlist",
+                manifest,
+                e,
             )
             return None
         versions: set[str] = set()
@@ -93,14 +94,18 @@ def _load_sglang_supported_versions_from_manifest(
         log.info(
             "_server_patcher: loaded %d SGLang version(s) from TraceLens "
             "manifest %s (PR-D §5: decoupled from Hyperloom hardcoded "
-            "allowlist)", len(versions), manifest,
+            "allowlist)",
+            len(versions),
+            manifest,
         )
         return frozenset(versions)
     return None
 
 
 def _sglang_version_accepted(
-    version: str, *, patches_dir: Path | None = None,
+    version: str,
+    *,
+    patches_dir: Path | None = None,
 ) -> bool:
     """Return True iff ``version`` is in the configured allowlist.
 
@@ -125,14 +130,12 @@ def _sglang_version_accepted(
         allowed_exact = {v.strip() for v in exact.split(",") if v.strip()}
         return text in allowed_exact
     minors_env = os.environ.get(
-        "HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", "",
+        "HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS",
+        "",
     ).strip()
     if minors_env:
         minors = tuple(v.strip() for v in minors_env.split(",") if v.strip())
-        return any(
-            text == minor or text.startswith(f"{minor}.")
-            for minor in minors
-        )
+        return any(text == minor or text.startswith(f"{minor}.") for minor in minors)
     # Vendor manifest, when present, fully replaces the hardcoded default;
     # absent -> fall through to the default below.
     if patches_dir is not None:
@@ -141,10 +144,8 @@ def _sglang_version_accepted(
         )
         if manifest_versions is not None:
             return text in manifest_versions
-    return any(
-        text == minor or text.startswith(f"{minor}.")
-        for minor in _SGLANG_DEFAULT_ALLOWED_MINORS
-    )
+    return any(text == minor or text.startswith(f"{minor}.") for minor in _SGLANG_DEFAULT_ALLOWED_MINORS)
+
 
 # Path within the TraceLens checkout that hosts the patch sets.
 _PATCH_TREE_REL = ("examples", "custom_workflows", "inference_analysis")
@@ -181,7 +182,8 @@ def _versioned_patches_subdir_name(version: str) -> str | None:
 
 
 def _resolve_sglang_patches_dir(
-    patches_root: Path, version: str,
+    patches_root: Path,
+    version: str,
 ) -> Path | None:
     """Locate the SGLang patches dir for the running ``sglang`` version.
 
@@ -208,6 +210,7 @@ def _resolve_sglang_patches_dir(
 # ---------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------
+
 
 def ensure_vllm_patched_for_tracelens(
     tracelens_root: Path | str | None = None,
@@ -260,11 +263,12 @@ def ensure_sglang_patched_for_tracelens(
 @dataclass(frozen=True)
 class _PatchPlan:
     """All information needed to apply (or verify) a patch set."""
+
     framework: str
     version: str
-    apply_root: Path                       # cwd for ``git apply``
-    patches: tuple[Path, ...]              # in apply order
-    sentinel_file: Path                    # file we grep to detect "already patched"
+    apply_root: Path  # cwd for ``git apply``
+    patches: tuple[Path, ...]  # in apply order
+    sentinel_file: Path  # file we grep to detect "already patched"
     # Substrings that must ALL be present in ``sentinel_file`` to count as
     # patched; multi-element tuples lower the false-positive risk.
     sentinel_text: tuple[str, ...]
@@ -329,9 +333,7 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
     """
     tracelens_root = _resolve_tracelens_root(arg)
     if tracelens_root is None:
-        log.info(
-            "_server_patcher: TRACELENS_ROOT (public) unset/missing — skip vLLM patch"
-        )
+        log.info("_server_patcher: TRACELENS_ROOT (public) unset/missing — skip vLLM patch")
         return None
 
     try:
@@ -345,13 +347,12 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
         log.info("_server_patcher: vllm has no __version__; skip patch")
         return None
 
-    patch_file = _patch_tree(tracelens_root, "vllm_patches") / (
-        f"config_vllm_v{version}.patch"
-    )
+    patch_file = _patch_tree(tracelens_root, "vllm_patches") / (f"config_vllm_v{version}.patch")
     if not patch_file.is_file():
         log.info(
-            "_server_patcher: no TraceLens patch for vLLM %s "
-            "(looked for %s); skip", version, patch_file,
+            "_server_patcher: no TraceLens patch for vLLM %s (looked for %s); skip",
+            version,
+            patch_file,
         )
         return None
 
@@ -361,8 +362,8 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
     sentinel = install_root / "vllm" / "config" / "profiler.py"
     if not sentinel.is_file():
         log.info(
-            "_server_patcher: vLLM install layout unexpected "
-            "(no %s); skip patch", sentinel,
+            "_server_patcher: vLLM install layout unexpected (no %s); skip patch",
+            sentinel,
         )
         return None
 
@@ -415,8 +416,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     patches_root = _patch_tree(tracelens_root, "sglang_roofline_patches")
     if not patches_root.is_dir():
         log.warning(
-            "_server_patcher: SGLang patches root missing (%s); skip — "
-            "kernel shape profiling will be unavailable",
+            "_server_patcher: SGLang patches root missing (%s); skip — kernel shape profiling will be unavailable",
             patches_root,
         )
         return None
@@ -442,7 +442,9 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
             "$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS, %s/SUPPORTED_VERSIONS, "
             "then built-in minor allowlist %s); skip — kernel shape profiling "
             "will be unavailable",
-            version, patches_dir, _SGLANG_DEFAULT_ALLOWED_MINORS,
+            version,
+            patches_dir,
+            _SGLANG_DEFAULT_ALLOWED_MINORS,
         )
         return None
     patches = tuple(sorted(patches_dir.glob("*.patch")))
@@ -523,9 +525,9 @@ def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
     if sglang_dir.name == "sglang":
         return sglang_dir, 3
     log.info(
-        "_server_patcher: SGLang install at %s has unexpected layout "
-        "(parent dir name=%r); skip patching",
-        sglang_module, sglang_dir.name,
+        "_server_patcher: SGLang install at %s has unexpected layout (parent dir name=%r); skip patching",
+        sglang_module,
+        sglang_dir.name,
     )
     return None
 
@@ -567,7 +569,8 @@ def _is_patched(plan: _PatchPlan) -> bool:
         if not plan.sentinel_file.exists():
             return False
         content = plan.sentinel_file.read_text(
-            encoding="utf-8", errors="replace",
+            encoding="utf-8",
+            errors="replace",
         )
         if not all(marker in content for marker in plan.sentinel_text):
             return False
@@ -597,8 +600,9 @@ def _file_lock(path: str) -> Iterator[None]:
         fp = open(path, "w")
     except OSError as e:
         log.warning(
-            "_server_patcher: cannot open lock %s (%s); proceeding without "
-            "exclusion", path, e,
+            "_server_patcher: cannot open lock %s (%s); proceeding without exclusion",
+            path,
+            e,
         )
         yield
         return
@@ -651,7 +655,11 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
                 "_server_patcher: %s patch %s did not apply cleanly with "
                 "`git apply --check %s`; falling back to `patch %s --fuzz=2` "
                 "(TraceLens patch may lag deployed %s by a point release)",
-                plan.framework, p.name, strip_arg, strip_arg, plan.framework,
+                plan.framework,
+                p.name,
+                strip_arg,
+                strip_arg,
+                plan.framework,
             )
             apply_modes[p] = "patch"
             continue
@@ -672,19 +680,24 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
                 "_server_patcher: %s patch %s already applied (reverse "
                 "`git apply -R --check %s` is clean); skipping it from the "
                 "transaction so the remaining patches still apply",
-                plan.framework, p.name, strip_arg,
+                plan.framework,
+                p.name,
+                strip_arg,
             )
             apply_modes[p] = "skip"
             continue
         # Symmetric check for patches previously applied via fuzzy `patch`
         # (git reverse may fail on fuzzy-applied hunks).
         if patch_bin and _patch_reverse_dry_run(
-            patch_bin, p, plan.apply_root, plan.apply_strip,
+            patch_bin,
+            p,
+            plan.apply_root,
+            plan.apply_strip,
         ):
             log.info(
-                "_server_patcher: %s patch %s already applied (fuzzy reverse "
-                "dry-run clean); skipping it",
-                plan.framework, p.name,
+                "_server_patcher: %s patch %s already applied (fuzzy reverse dry-run clean); skipping it",
+                plan.framework,
+                p.name,
             )
             apply_modes[p] = "skip"
             continue
@@ -692,7 +705,11 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
             "_server_patcher: `git apply --check %s` AND fuzzy `patch %s "
             "--dry-run` both failed for %s (version %s, patch %s), and it is "
             "not already applied (reverse check failed); fail-soft skip",
-            strip_arg, strip_arg, plan.framework, plan.version, p.name,
+            strip_arg,
+            strip_arg,
+            plan.framework,
+            plan.version,
+            p.name,
         )
         return False
 
@@ -709,7 +726,10 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
             ok = _git(git, ("apply", strip_arg, str(p)), plan.apply_root)
         else:
             ok = _patch_apply(
-                patch_bin, p, plan.apply_root, plan.apply_strip,  # type: ignore[arg-type]
+                patch_bin,
+                p,
+                plan.apply_root,
+                plan.apply_strip,  # type: ignore[arg-type]
             )
         if ok:
             applied.append((p, mode))
@@ -718,7 +738,10 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
             "_server_patcher: %s patch %s failed during apply after "
             "passing precheck (mode=%s); rolling back %d previously-applied "
             "patches",
-            plan.framework, p.name, mode, len(applied),
+            plan.framework,
+            p.name,
+            mode,
+            len(applied),
         )
         _rollback_applied(applied, plan, git, patch_bin, strip_arg)
         return False
@@ -727,8 +750,12 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
     log.info(
         "_server_patcher: applied %d TraceLens patch(es) for %s %s "
         "(strict=%d, fuzzy=%d, already-applied/skipped=%d) (issue #194 §4/§5)",
-        len(applied), plan.framework, plan.version,
-        len(applied) - fuzzy_count, fuzzy_count, skipped,
+        len(applied),
+        plan.framework,
+        plan.version,
+        len(applied) - fuzzy_count,
+        fuzzy_count,
+        skipped,
     )
     # Post-apply sentinel verification: confirm the patched install actually
     # has all sentinel markers present. Catches edge cases where all members
@@ -742,7 +769,11 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
             "sentinel markers are not all present; rolling back %d "
             "applied patch(es) so the framework tree matches the reported "
             "failure (no half-patched fallback)",
-            plan.framework, plan.version, len(applied), skipped, len(applied),
+            plan.framework,
+            plan.version,
+            len(applied),
+            skipped,
+            len(applied),
         )
         _rollback_applied(applied, plan, git, patch_bin, strip_arg)
         return False
@@ -772,21 +803,25 @@ def _rollback_applied(
     for prev, prev_mode in reversed(applied):
         if prev_mode == "git":
             rolled_back = _git(
-                git, ("apply", "-R", strip_arg, str(prev)), plan.apply_root,
+                git,
+                ("apply", "-R", strip_arg, str(prev)),
+                plan.apply_root,
             )
         else:
-            rolled_back = (
-                patch_bin is not None
-                and _patch_apply(
-                    patch_bin, prev, plan.apply_root, plan.apply_strip,
-                    reverse=True,
-                )
+            rolled_back = patch_bin is not None and _patch_apply(
+                patch_bin,
+                prev,
+                plan.apply_root,
+                plan.apply_strip,
+                reverse=True,
             )
         if not rolled_back:
             log.error(
                 "_server_patcher: rollback of %s (mode=%s) also failed — "
                 "install may be in inconsistent state; manual review "
-                "required", prev.name, prev_mode,
+                "required",
+                prev.name,
+                prev_mode,
             )
 
 
@@ -798,7 +833,10 @@ _FUZZ = 2
 
 
 def _patch_dry_run(
-    patch_bin: str, patch_file: Path, cwd: Path, strip: int = 1,
+    patch_bin: str,
+    patch_file: Path,
+    cwd: Path,
+    strip: int = 1,
 ) -> bool:
     """Probe ``patch -p<strip> --fuzz=2 --dry-run`` for a single patch.
 
@@ -827,14 +865,18 @@ def _patch_dry_run(
     except (OSError, subprocess.TimeoutExpired) as e:
         log.warning(
             "_server_patcher: patch --dry-run in %s failed to spawn (%s)",
-            cwd, e,
+            cwd,
+            e,
         )
         return False
     return result.returncode == 0
 
 
 def _patch_reverse_dry_run(
-    patch_bin: str, patch_file: Path, cwd: Path, strip: int = 1,
+    patch_bin: str,
+    patch_file: Path,
+    cwd: Path,
+    strip: int = 1,
 ) -> bool:
     """Probe ``patch -R -p<strip> --fuzz=2 --dry-run`` for a single patch.
 
@@ -863,14 +905,19 @@ def _patch_reverse_dry_run(
     except (OSError, subprocess.TimeoutExpired) as e:
         log.debug(
             "_server_patcher: patch -R --dry-run in %s failed to spawn (%s)",
-            cwd, e,
+            cwd,
+            e,
         )
         return False
     return result.returncode == 0
 
 
 def _patch_apply(
-    patch_bin: str, patch_file: Path, cwd: Path, strip: int = 1, *,
+    patch_bin: str,
+    patch_file: Path,
+    cwd: Path,
+    strip: int = 1,
+    *,
     reverse: bool = False,
 ) -> bool:
     """Real ``patch -p<strip> --fuzz=2`` apply (or reverse). Mirrors
@@ -901,15 +948,18 @@ def _patch_apply(
     except (OSError, subprocess.TimeoutExpired) as e:
         log.warning(
             "_server_patcher: patch%s in %s failed to spawn (%s)",
-            " --reverse" if reverse else "", cwd, e,
+            " --reverse" if reverse else "",
+            cwd,
+            e,
         )
         return False
     if result.returncode != 0:
-        err = result.stderr.decode("utf-8", errors="replace")[:500] \
-            if result.stderr else ""
+        err = result.stderr.decode("utf-8", errors="replace")[:500] if result.stderr else ""
         log.debug(
             "_server_patcher: patch%s rc=%d stderr=%r",
-            " --reverse" if reverse else "", result.returncode, err,
+            " --reverse" if reverse else "",
+            result.returncode,
+            err,
         )
         return False
     return True
@@ -936,15 +986,18 @@ def _git(git: str, args: Sequence[str], cwd: Path) -> bool:
     except (OSError, subprocess.TimeoutExpired) as e:
         log.warning(
             "_server_patcher: git %s in %s failed to spawn (%s)",
-            list(args), cwd, e,
+            list(args),
+            cwd,
+            e,
         )
         return False
     if result.returncode != 0:
-        err = result.stderr.decode("utf-8", errors="replace")[:500] \
-            if result.stderr else ""
+        err = result.stderr.decode("utf-8", errors="replace")[:500] if result.stderr else ""
         log.debug(
             "_server_patcher: git %s rc=%d stderr=%r",
-            list(args), result.returncode, err,
+            list(args),
+            result.returncode,
+            err,
         )
         return False
     return True
