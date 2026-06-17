@@ -21,19 +21,22 @@ from inference_optimizer.orchestrator.sub_agent_runner import RunnerContext
 from inference_optimizer.orchestrator.task_registry import Task
 
 
-def _ctx(tmp_path: Path) -> RunnerContext:
+def _ctx(tmp_path: Path, params: dict | None = None) -> RunnerContext:
     task = Task(
         task_id="t-roofline-cg", kind="roofline", state="running",
-        params={"base_extra_args": "--mem-fraction-static=0.92"},
+        params=params if params is not None
+        else {"base_extra_args": "--mem-fraction-static=0.92"},
         idempotency_key="roofline:t-cg",
         requires_lanes=["profile_lane"],
     )
     return RunnerContext(task=task, lease=None, extra={"session_dir": str(tmp_path)})
 
 
-def _state() -> SharedState:
+def _state(framework: str = "") -> SharedState:
     s = SharedState()
     s.baseline_tput = 100.0
+    if framework:
+        s.framework = framework
     return s
 
 
@@ -48,7 +51,7 @@ def _ta_success() -> dict:
             "trace_health_warnings": []}
 
 
-async def _run(tmp_path, first_result):
+async def _run(tmp_path, first_result, *, state=None, params=None):
     seen: list[dict] = []
     calls = {"n": 0}
 
@@ -67,7 +70,9 @@ async def _run(tmp_path, first_result):
         "inference_optimizer.orchestrator.kernel_request_handlers.trace_analyze_handler",
         new=fake_ta,
     ):
-        await make_roofline_executor(shared_state=_state())(_ctx(tmp_path))
+        await make_roofline_executor(shared_state=state or _state())(
+            _ctx(tmp_path, params=params),
+        )
     return seen
 
 
@@ -93,3 +98,41 @@ async def test_non_capture_failure_does_not_force_eager(tmp_path):
     seen = await _run(tmp_path, other_err)
     assert len(seen) >= 2
     assert "--disable-cuda-graph" not in str(seen[1].get("base_extra_args", ""))
+
+
+_CAPTURE_ERR = {
+    "status": "failed", "error_class": "server_init_dead",
+    "error": (
+        "Capture cuda graph failed: HIP error: operation not permitted "
+        "when stream is capturing (hipErrorStreamCaptureUnsupported)"
+    ),
+}
+
+
+@pytest.mark.asyncio
+async def test_vllm_eager_retry_uses_enforce_eager_from_shared_state(tmp_path):
+    # vLLM rejects sglang's --disable-cuda-graph; the framework comes from
+    # shared_state (the internal roofline task params omit it), so the retry
+    # must inject --enforce-eager.
+    seen = await _run(
+        tmp_path, _CAPTURE_ERR, state=_state(framework="vllm"),
+        params={"base_extra_args": "--gpu-memory-utilization=0.9"},
+    )
+    assert len(seen) >= 2
+    retry_args = str(seen[1].get("base_extra_args", ""))
+    assert "--enforce-eager" in retry_args
+    assert "--disable-cuda-graph" not in retry_args
+
+
+@pytest.mark.asyncio
+async def test_vllm_eager_retry_uses_framework_env(tmp_path, monkeypatch):
+    # When neither params nor shared_state carries it, FRAMEWORK env wins.
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    seen = await _run(
+        tmp_path, _CAPTURE_ERR,
+        params={"base_extra_args": "--gpu-memory-utilization=0.9"},
+    )
+    assert len(seen) >= 2
+    retry_args = str(seen[1].get("base_extra_args", ""))
+    assert "--enforce-eager" in retry_args
+    assert "--disable-cuda-graph" not in retry_args
