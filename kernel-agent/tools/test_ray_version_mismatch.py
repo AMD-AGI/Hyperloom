@@ -105,7 +105,8 @@ def test_quiet_ray_init_propagates_non_mismatch_error(monkeypatch):
 
     restart_calls = []
     monkeypatch.setattr(
-        ray_runtime, "force_restart_local_cluster",
+        ray_runtime,
+        "force_restart_local_cluster",
         lambda **kw: restart_calls.append(kw),
     )
 
@@ -122,7 +123,8 @@ def test_quiet_ray_init_no_mismatch_succeeds_first_try(monkeypatch):
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
     restart_calls = []
     monkeypatch.setattr(
-        ray_runtime, "force_restart_local_cluster",
+        ray_runtime,
+        "force_restart_local_cluster",
         lambda **kw: restart_calls.append(kw),
     )
     ray_runtime.quiet_ray_init()

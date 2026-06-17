@@ -29,33 +29,39 @@ ENVELOPE_SCHEMA_VERSION = "v0.6"
 
 # Intent types the Critic role is allowed to emit ( +
 # ``_CRITIC_INTENTS`` in agent_role.py).
-ALLOWED_CRITIC_INTENTS: frozenset[str] = frozenset({
-    "review_verdict",
-    "send_message",
-    "ask_question",
-    "answer",
-    "alert",
-    "update_persona",
-})
+ALLOWED_CRITIC_INTENTS: frozenset[str] = frozenset(
+    {
+        "review_verdict",
+        "send_message",
+        "ask_question",
+        "answer",
+        "alert",
+        "update_persona",
+    }
+)
 
 
 # Verdict vocabulary from policy.REVIEW_VERDICTS.
-ALLOWED_VERDICTS: frozenset[str] = frozenset({
-    "approve",
-    "reject",
-    "redirect",
-    "advise",
-    "needs_review",
-})
+ALLOWED_VERDICTS: frozenset[str] = frozenset(
+    {
+        "approve",
+        "reject",
+        "redirect",
+        "advise",
+        "needs_review",
+    }
+)
 
 
 # Verdict source vocabulary from references/verdict_schema.md.
-ALLOWED_VERDICT_SOURCES: frozenset[str] = frozenset({
-    "critic",
-    "mock",
-    "timeout",
-    "critic_unavailable",
-})
+ALLOWED_VERDICT_SOURCES: frozenset[str] = frozenset(
+    {
+        "critic",
+        "mock",
+        "timeout",
+        "critic_unavailable",
+    }
+)
 
 
 # Required payload fields per intent type — same set the Coordinator's
@@ -136,32 +142,25 @@ def _validate_payload(intent_type: str, payload: dict[str, Any]) -> None:
     """
     if not isinstance(payload, dict):
         raise IntentEnvelopeValidationError(
-            f"intent {intent_type!r}: payload must be an object, "
-            f"got {type(payload).__name__}"
+            f"intent {intent_type!r}: payload must be an object, got {type(payload).__name__}"
         )
     required = _PAYLOAD_REQUIRED.get(intent_type, ())
     for key in required:
         if key not in payload:
-            raise IntentEnvelopeValidationError(
-                f"intent {intent_type!r}: missing required payload key {key!r}"
-            )
+            raise IntentEnvelopeValidationError(f"intent {intent_type!r}: missing required payload key {key!r}")
     if intent_type == "review_verdict":
         verdict = payload.get("verdict")
         if verdict not in ALLOWED_VERDICTS:
             raise IntentEnvelopeValidationError(
-                f"review_verdict.verdict {verdict!r} not in "
-                f"{sorted(ALLOWED_VERDICTS)!r}"
+                f"review_verdict.verdict {verdict!r} not in {sorted(ALLOWED_VERDICTS)!r}"
             )
         target = payload.get("target_proposal_msg_id")
         if not isinstance(target, str) or not target:
-            raise IntentEnvelopeValidationError(
-                "review_verdict.target_proposal_msg_id must be a non-empty string"
-            )
+            raise IntentEnvelopeValidationError("review_verdict.target_proposal_msg_id must be a non-empty string")
         source = payload.get("source")
         if source is not None and source not in ALLOWED_VERDICT_SOURCES:
             raise IntentEnvelopeValidationError(
-                f"review_verdict.source {source!r} not in "
-                f"{sorted(ALLOWED_VERDICT_SOURCES)!r}"
+                f"review_verdict.source {source!r} not in {sorted(ALLOWED_VERDICT_SOURCES)!r}"
             )
 
 
@@ -184,26 +183,18 @@ def validate_envelope(envelope: dict[str, Any]) -> IntentEnvelope:
             validation.
     """
     if not isinstance(envelope, dict):
-        raise IntentEnvelopeValidationError(
-            f"envelope must be an object, got {type(envelope).__name__}"
-        )
+        raise IntentEnvelopeValidationError(f"envelope must be an object, got {type(envelope).__name__}")
     if "intents" not in envelope:
         raise IntentEnvelopeValidationError("envelope missing 'intents' key")
     items = envelope["intents"]
     if not isinstance(items, list) or not items:
-        raise IntentEnvelopeValidationError(
-            "envelope.intents must be a non-empty list"
-        )
+        raise IntentEnvelopeValidationError("envelope.intents must be a non-empty list")
     out = IntentEnvelope()
     for i, item in enumerate(items):
         if not isinstance(item, dict):
-            raise IntentEnvelopeValidationError(
-                f"envelope.intents[{i}] must be an object"
-            )
+            raise IntentEnvelopeValidationError(f"envelope.intents[{i}] must be an object")
         if "intent_type" not in item or "payload" not in item:
-            raise IntentEnvelopeValidationError(
-                f"envelope.intents[{i}] missing intent_type or payload"
-            )
+            raise IntentEnvelopeValidationError(f"envelope.intents[{i}] missing intent_type or payload")
         intent_type = item["intent_type"]
         if intent_type not in ALLOWED_CRITIC_INTENTS:
             raise IntentEnvelopeValidationError(
@@ -262,17 +253,11 @@ def build_review_verdict_intent(
             the allowed set, or ``target_proposal_msg_id`` is empty.
     """
     if verdict not in ALLOWED_VERDICTS:
-        raise IntentEnvelopeValidationError(
-            f"verdict {verdict!r} not in {sorted(ALLOWED_VERDICTS)!r}"
-        )
+        raise IntentEnvelopeValidationError(f"verdict {verdict!r} not in {sorted(ALLOWED_VERDICTS)!r}")
     if source not in ALLOWED_VERDICT_SOURCES:
-        raise IntentEnvelopeValidationError(
-            f"source {source!r} not in {sorted(ALLOWED_VERDICT_SOURCES)!r}"
-        )
+        raise IntentEnvelopeValidationError(f"source {source!r} not in {sorted(ALLOWED_VERDICT_SOURCES)!r}")
     if not target_proposal_msg_id:
-        raise IntentEnvelopeValidationError(
-            "target_proposal_msg_id is required"
-        )
+        raise IntentEnvelopeValidationError("target_proposal_msg_id is required")
     payload: dict[str, Any] = {
         "target_proposal_msg_id": target_proposal_msg_id,
         "verdict": verdict,

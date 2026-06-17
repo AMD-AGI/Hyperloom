@@ -27,10 +27,7 @@ if str(_TOOL_DIR) not in sys.path:
 import tracelens_analysis as tla  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
 
-_TRITON_MOE_SRC = (
-    "/sgl-workspace/sglang/python/sglang/srt/layers/moe/"
-    "fused_moe_triton/fused_moe.py"
-)
+_TRITON_MOE_SRC = "/sgl-workspace/sglang/python/sglang/srt/layers/moe/fused_moe_triton/fused_moe.py"
 
 
 def _write(path: Path, text: str) -> Path:
@@ -47,11 +44,7 @@ def _ops_summary_csv(rows: str) -> str:
 def test_load_ops_ranking_reads_ops_summary_csv(tmp_path):
     _write(
         tmp_path / "ops_summary.csv",
-        _ops_summary_csv(
-            "fused_moe_kernel,other,6700.0\n"
-            "aten::mm,GEMM,2300.0\n"
-            "rmsnorm,elementwise,1000.0\n"
-        ),
+        _ops_summary_csv("fused_moe_kernel,other,6700.0\naten::mm,GEMM,2300.0\nrmsnorm,elementwise,1000.0\n"),
     )
     ranking = tla.load_ops_ranking(tmp_path)
     by_name = {r["name"]: r for r in ranking}
@@ -73,10 +66,14 @@ def test_load_ops_ranking_reads_unified_perf_summary_in_perf_report_csvs(tmp_pat
 def test_load_ops_ranking_reads_priority_data_json(tmp_path):
     _write(
         tmp_path / "priority_data.json",
-        json.dumps({"findings": [
-            {"name": "fused_moe_kernel", "category": "other", "gpu_pct": 67.0},
-            {"name": "aten::mm", "category": "GEMM", "gpu_pct": 23.0},
-        ]}),
+        json.dumps(
+            {
+                "findings": [
+                    {"name": "fused_moe_kernel", "category": "other", "gpu_pct": 67.0},
+                    {"name": "aten::mm", "category": "GEMM", "gpu_pct": 23.0},
+                ]
+            }
+        ),
     )
     ranking = tla.load_ops_ranking(tmp_path)
     by_name = {r["name"]: r for r in ranking}
@@ -100,13 +97,15 @@ def test_recover_surfaces_high_time_other_bucket_op(tmp_path):
     )
     # analysis.md already surfaced aten::mm; the 67% other-bucket op was dropped.
     recovered = tla.recover_other_bucket_candidates(
-        tmp_path, [{"name": "aten::mm"}], top_k=10,
+        tmp_path,
+        [{"name": "aten::mm"}],
+        top_k=10,
     )
     assert len(recovered) == 1
     cand = recovered[0]
     assert cand["name"] == "fused_moe_kernel"
     assert cand["candidate_source"] == "other_bucket_fallback"
-    assert cand["source_file"] == ""            # resolved later in _finalize
+    assert cand["source_file"] == ""  # resolved later in _finalize
     assert cand["duration_us"] == 6700.0 * 1000.0
     # gpu_pct is over the full ranking total (6700+2300+500 = 9500 ms): ~70.5%.
     assert round(cand["gpu_pct"], 0) == 71.0
@@ -120,11 +119,13 @@ def test_recover_skips_op_already_in_candidates(tmp_path):
     # The op already surfaced in analysis.md (fused_moe_kernel) is NOT duplicated;
     # the broadened gate still recovers the high-time GEMM that was missing.
     recovered = tla.recover_other_bucket_candidates(
-        tmp_path, [{"name": "fused_moe_kernel"}], top_k=10,
+        tmp_path,
+        [{"name": "fused_moe_kernel"}],
+        top_k=10,
     )
     names = {c["name"] for c in recovered}
-    assert "fused_moe_kernel" not in names           # dedup against existing
-    assert names == {"aten::mm"}                      # broadened gate recovers it
+    assert "fused_moe_kernel" not in names  # dedup against existing
+    assert names == {"aten::mm"}  # broadened gate recovers it
 
 
 def test_recover_skips_below_threshold(tmp_path):
@@ -134,7 +135,9 @@ def test_recover_skips_below_threshold(tmp_path):
         _ops_summary_csv("tiny_other,other,500.0\naten::mm,GEMM,9500.0\n"),
     )
     recovered = tla.recover_other_bucket_candidates(
-        tmp_path, [{"name": "aten::mm"}], top_k=10,
+        tmp_path,
+        [{"name": "aten::mm"}],
+        top_k=10,
     )
     assert recovered == []
 
@@ -148,7 +151,9 @@ def test_recover_surfaces_high_time_non_other_category(tmp_path):
         _ops_summary_csv("big_gemm,GEMM,9000.0\nrmsnorm,elementwise,1000.0\n"),
     )
     recovered = tla.recover_other_bucket_candidates(
-        tmp_path, [], top_k=10,
+        tmp_path,
+        [],
+        top_k=10,
     )
     names = {c["name"] for c in recovered}
     assert "big_gemm" in names
@@ -161,7 +166,9 @@ def test_recover_threshold_env_override(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT", "1.0")
     recovered = tla.recover_other_bucket_candidates(
-        tmp_path, [{"name": "aten::mm"}], top_k=10,
+        tmp_path,
+        [{"name": "aten::mm"}],
+        top_k=10,
     )
     assert [c["name"] for c in recovered] == ["tiny_other"]
 
@@ -173,9 +180,13 @@ def test_recover_empty_when_no_sidecar(tmp_path):
 def test_recover_from_priority_data_json(tmp_path):
     _write(
         tmp_path / "priority_data.json",
-        json.dumps({"findings": [
-            {"name": "fused_moe_kernel", "category": "other", "gpu_pct": 67.0},
-        ]}),
+        json.dumps(
+            {
+                "findings": [
+                    {"name": "fused_moe_kernel", "category": "other", "gpu_pct": 67.0},
+                ]
+            }
+        ),
     )
     recovered = tla.recover_other_bucket_candidates(tmp_path, [], top_k=10)
     assert [c["name"] for c in recovered] == ["fused_moe_kernel"]
@@ -222,12 +233,13 @@ def test_synthetic_analysis_md_missing_high_time_op_is_recovered(tmp_path):
         ),
     )
     recovered = tla.recover_other_bucket_candidates(
-        tmp_path, report_cands, top_k=10,
+        tmp_path,
+        report_cands,
+        top_k=10,
     )
     names = {c["name"] for c in recovered}
     assert names == {"fused_moe_kernel"}, (
-        "the dropped high-time other-bucket op must be recovered, and the "
-        "already-surfaced GEMM must not be duplicated"
+        "the dropped high-time other-bucket op must be recovered, and the already-surfaced GEMM must not be duplicated"
     )
 
 
@@ -241,13 +253,19 @@ def test_recovered_other_bucket_kernel_routes_to_geak(tmp_path, monkeypatch):
         _ops_summary_csv("fused_moe_kernel,other,6700.0\naten::mm,GEMM,3300.0\n"),
     )
     monkeypatch.setattr(
-        tla, "_reusable_roots", lambda: ("/sgl-workspace/sglang/",),
+        tla,
+        "_reusable_roots",
+        lambda: ("/sgl-workspace/sglang/",),
     )
     monkeypatch.setattr(
-        tla, "locate_source_via_grep", lambda _name: _TRITON_MOE_SRC,
+        tla,
+        "locate_source_via_grep",
+        lambda _name: _TRITON_MOE_SRC,
     )
     recovered = tla.recover_other_bucket_candidates(
-        tmp_path, [{"name": "aten::mm"}], top_k=10,
+        tmp_path,
+        [{"name": "aten::mm"}],
+        top_k=10,
     )
     finalized = tla._finalize_candidates(recovered, total_dur=None)
     item = finalized[0]
@@ -260,13 +278,17 @@ def test_recovered_other_bucket_kernel_routes_to_geak(tmp_path, monkeypatch):
 
 def test_classify_patchability_marks_triton_sglang_kernel_reusable(monkeypatch):
     monkeypatch.setattr(
-        tla, "_reusable_roots", lambda: ("/sgl-workspace/sglang/",),
+        tla,
+        "_reusable_roots",
+        lambda: ("/sgl-workspace/sglang/",),
     )
-    reusable, reason = tla.classify_patchability({
-        "name": "fused_moe_kernel",
-        "source_file": _TRITON_MOE_SRC,
-        "source_type": "triton",
-    })
+    reusable, reason = tla.classify_patchability(
+        {
+            "name": "fused_moe_kernel",
+            "source_file": _TRITON_MOE_SRC,
+            "source_type": "triton",
+        }
+    )
     assert reusable is True, reason
 
 
@@ -286,27 +308,28 @@ _REAL_OPS_SUMMARY_HEADER = (
 )
 
 # The actual dominant Triton fused-MoE row from the Qwen3-30B-A3B run.
-_REAL_MOE_NAME = (
-    "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427"
-)
+_REAL_MOE_NAME = "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427"
 
 
 def _real_ops_summary_csv() -> str:
-    return "\n".join(
-        [
-            _REAL_OPS_SUMMARY_HEADER,
-            # MoE_fused row: Categories is a python-list-repr string; quote the
-            # call_stack cell because it contains commas/=>.
-            f"{_REAL_MOE_NAME}, nn.Module: FusedMoE ,302875.90625,302875.90625,"
-            "96,302.87590625,96,['MoE_fused'],"
-            f'"{_REAL_MOE_NAME} => nn.Module: FusedMoE_0",'
-            "67.44388342277517,67.44388342277517",
-            # A GEMM row that analysis.md already surfaced as aten::mm.
-            "aten::mm, nn.Module: QKVParallelLinear ,27301.67,27301.67,48,"
-            "27.30167,48,['GEMM'],aten::mm => nn.Module: QKVParallelLinear_0,"
-            "6.0794902,73.523373",
-        ]
-    ) + "\n"
+    return (
+        "\n".join(
+            [
+                _REAL_OPS_SUMMARY_HEADER,
+                # MoE_fused row: Categories is a python-list-repr string; quote the
+                # call_stack cell because it contains commas/=>.
+                f"{_REAL_MOE_NAME}, nn.Module: FusedMoE ,302875.90625,302875.90625,"
+                "96,302.87590625,96,['MoE_fused'],"
+                f'"{_REAL_MOE_NAME} => nn.Module: FusedMoE_0",'
+                "67.44388342277517,67.44388342277517",
+                # A GEMM row that analysis.md already surfaced as aten::mm.
+                "aten::mm, nn.Module: QKVParallelLinear ,27301.67,27301.67,48,"
+                "27.30167,48,['GEMM'],aten::mm => nn.Module: QKVParallelLinear_0,"
+                "6.0794902,73.523373",
+            ]
+        )
+        + "\n"
+    )
 
 
 def test_load_ops_ranking_reads_real_ops_summary_schema(tmp_path):
@@ -337,7 +360,9 @@ def test_recover_moe_fused_real_schema(tmp_path):
     _write(tmp_path / "ops_summary.csv", _real_ops_summary_csv())
     # analysis.md surfaced the GEMM; the 67% MoE_fused kernel had no block.
     recovered = tla.recover_other_bucket_candidates(
-        tmp_path, [{"name": "aten::mm"}], top_k=10,
+        tmp_path,
+        [{"name": "aten::mm"}],
+        top_k=10,
     )
     assert [c["name"] for c in recovered] == [_REAL_MOE_NAME]
     cand = recovered[0]
@@ -358,10 +383,7 @@ def test_compound_subwindow_keywords_extracts_function():
 
 def _make_fake_sglang_tree(root: Path) -> Path:
     """Create a minimal sglang-like source tree with the fused-MoE kernel."""
-    src = (
-        root / "sglang" / "srt" / "layers" / "moe" / "moe_runner"
-        / "triton_utils" / "fused_moe.py"
-    )
+    src = root / "sglang" / "srt" / "layers" / "moe" / "moe_runner" / "triton_utils" / "fused_moe.py"
     src.parent.mkdir(parents=True, exist_ok=True)
     src.write_text(
         "import triton\n"
@@ -396,7 +418,9 @@ def test_recovered_moe_fused_real_schema_routes_to_geak(tmp_path, monkeypatch):
     tla._GREP_CACHE.clear()
 
     recovered = tla.recover_other_bucket_candidates(
-        tmp_path, [{"name": "aten::mm"}], top_k=10,
+        tmp_path,
+        [{"name": "aten::mm"}],
+        top_k=10,
     )
     finalized = tla._finalize_candidates(recovered, total_dur=None)
     item = finalized[0]

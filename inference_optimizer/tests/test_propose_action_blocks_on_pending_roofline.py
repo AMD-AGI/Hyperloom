@@ -79,6 +79,7 @@ def test_roofline_pending_gate_hooks_removed():
             f"wait_for_auto_roofline gate."
         )
     import inference_optimizer.orchestrator.coordinator as coord_mod
+
     assert not hasattr(coord_mod, "_ROOFLINE_GATED_ACTIONS")
 
 
@@ -100,9 +101,6 @@ async def test_propose_action_passes_through_while_roofline_pending(
     await coord._handle_propose_action("orchestration", intent)
 
     topics = [getattr(m, "topic", None) for m in coord.bus.messages]
-    assert "proposal" in topics, (
-        "explore proposal must reach the bus while an analysis task is "
-        "in flight: %r" % topics
-    )
+    assert "proposal" in topics, "explore proposal must reach the bus while an analysis task is in flight: %r" % topics
     assert len(coord.state.pending_proposals) == 1
     assert coord.shared_state.policy_denial_history == []

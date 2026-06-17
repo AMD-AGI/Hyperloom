@@ -74,12 +74,14 @@ def _expected_cid(state: _FakeSharedState, workload: str, hw: str) -> str:
 
 # happy path
 def test_t0_anchor_writes_recipe_row_with_arbor_schema(
-    kb: RecipeKB, session_dir: Path,
+    kb: RecipeKB,
+    session_dir: Path,
 ) -> None:
     """First T0 anchor writes a recipe row whose on-disk JSON matches the arbor schema."""
     state = _FakeSharedState()
     result = run_t0_anchor(
-        kb, state,
+        kb,
+        state,
         workload="DeepSeek-R1",
         hw="MI300X",
         image_digest="img-sha-abc",
@@ -96,28 +98,32 @@ def test_t0_anchor_writes_recipe_row_with_arbor_schema(
     row = kb.get_recipe(canonical_id=cid)
     assert row is not None
     # arbor-shape top-level identity
-    assert row["model"]    == "DeepSeek-R1"
+    assert row["model"] == "DeepSeek-R1"
     assert row["hardware"] == "MI300X"
     # extras splatted at the top level (arbor convention)
-    assert row.get("model_class")          == "moe"
-    assert row.get("image_digest")         == "img-sha-abc"
-    assert row.get("tp")                   == 8
+    assert row.get("model_class") == "moe"
+    assert row.get("image_digest") == "img-sha-abc"
+    assert row.get("tp") == 8
 
 
 def test_t0_anchor_writes_warm_start_snapshot_to_disk(
-    kb: RecipeKB, session_dir: Path,
+    kb: RecipeKB,
+    session_dir: Path,
 ) -> None:
     """``warm_start_recipe`` snapshot lands at ``runtime/cortex/.kb_warm.json``."""
     state = _FakeSharedState()
     run_t0_anchor(
-        kb, state,
-        workload="m", hw="mi300x",
+        kb,
+        state,
+        workload="m",
+        hw="mi300x",
         extra_attrs={"framework": "sglang"},
         session_dir=session_dir,
     )
     warm_path = session_dir / "runtime" / "cortex" / ".kb_warm.json"
     assert warm_path.is_file()
     import json
+
     payload = json.loads(warm_path.read_text())
     # Bare T0 anchor row (identity but no best_config) is present after put_recipe but NOT actionable: classified seed_only/conf 0.0 so warm-replay won't apply an empty config.
     assert payload["tier"] == "seed_only"
@@ -127,22 +133,28 @@ def test_t0_anchor_writes_warm_start_snapshot_to_disk(
 
 # warm-start surfacing pitfalls / lessons embedded in the recipe row
 def test_t0_anchor_surfaces_pitfalls_and_lessons_from_existing_row(
-    kb: RecipeKB, session_dir: Path,
+    kb: RecipeKB,
+    session_dir: Path,
 ) -> None:
     """Pre-seeded pitfalls/lessons must surface on shared_state.warm_start_pitfalls/lessons."""
     state = _FakeSharedState()
     cid = _expected_cid(state, "M", "MI300X")
     kb.put_recipe(
         canonical_id=cid,
-        model="M", hardware="MI300X",
-        framework="sglang", framework_version="0.4.5", precision="fp8",
+        model="M",
+        hardware="MI300X",
+        framework="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
         pitfalls=[{"description": "watch for X"}],
         lessons=[{"statement": "Y is the answer", "measured_impact": "+15%"}],
         provenance={"source": "seed", "generator": "ut"},
     )
     run_t0_anchor(
-        kb, state,
-        workload="M", hw="MI300X",
+        kb,
+        state,
+        workload="M",
+        hw="MI300X",
         extra_attrs={"framework": "sglang"},
         session_dir=session_dir,
     )
@@ -155,23 +167,27 @@ def test_t0_anchor_surfaces_pitfalls_and_lessons_from_existing_row(
 
 
 def test_t0_anchor_no_prior_recipe_means_warm_miss(
-    kb: RecipeKB, session_dir: Path,
+    kb: RecipeKB,
+    session_dir: Path,
 ) -> None:
     """Confirm pitfalls/lessons stay empty when the (self-written) row had none."""
     state = _FakeSharedState()
     run_t0_anchor(
-        kb, state,
-        workload="cold-model", hw="mi300x",
+        kb,
+        state,
+        workload="cold-model",
+        hw="mi300x",
         extra_attrs={"framework": "sglang"},
         session_dir=session_dir,
     )
     assert state.warm_start_pitfalls == []
-    assert state.warm_start_lessons  == []
+    assert state.warm_start_lessons == []
 
 
 # Resume short-circuits
 def test_t0_anchor_short_circuits_when_already_anchored(
-    kb: RecipeKB, session_dir: Path,
+    kb: RecipeKB,
+    session_dir: Path,
 ) -> None:
     """``cortex_session_id`` AND ``warm_start_ts`` set, no resume → anchor short-circuits."""
     state = _FakeSharedState(
@@ -179,8 +195,10 @@ def test_t0_anchor_short_circuits_when_already_anchored(
         warm_start_ts="2026-05-28T00:00:00Z",
     )
     result = run_t0_anchor(
-        kb, state,
-        workload="m", hw="mi300x",
+        kb,
+        state,
+        workload="m",
+        hw="mi300x",
         extra_attrs={"framework": "sglang"},
         session_dir=session_dir,
         resume=False,
@@ -191,7 +209,8 @@ def test_t0_anchor_short_circuits_when_already_anchored(
 
 
 def test_t0_anchor_resume_does_not_short_circuit(
-    kb: RecipeKB, session_dir: Path,
+    kb: RecipeKB,
+    session_dir: Path,
 ) -> None:
     """``resume=True`` bypasses the skipped-already short-circuit so warm-start gets refreshed."""
     state = _FakeSharedState(
@@ -199,8 +218,10 @@ def test_t0_anchor_resume_does_not_short_circuit(
         warm_start_ts="2026-05-28T00:00:00Z",
     )
     result = run_t0_anchor(
-        kb, state,
-        workload="m", hw="mi300x",
+        kb,
+        state,
+        workload="m",
+        hw="mi300x",
         extra_attrs={"framework": "sglang"},
         session_dir=session_dir,
         resume=True,
@@ -211,13 +232,16 @@ def test_t0_anchor_resume_does_not_short_circuit(
 
 
 def test_t0_anchor_uses_existing_cortex_session_id_when_present(
-    kb: RecipeKB, session_dir: Path,
+    kb: RecipeKB,
+    session_dir: Path,
 ) -> None:
     """A pre-existing ``cortex_session_id`` survives the anchor."""
     state = _FakeSharedState(cortex_session_id="prior-sid-from-resume")
     run_t0_anchor(
-        kb, state,
-        workload="m", hw="mi300x",
+        kb,
+        state,
+        workload="m",
+        hw="mi300x",
         extra_attrs={"framework": "sglang"},
         session_dir=session_dir,
     )
@@ -225,13 +249,16 @@ def test_t0_anchor_uses_existing_cortex_session_id_when_present(
 
 
 def test_t0_anchor_falls_back_to_session_dir_basename_for_sid(
-    kb: RecipeKB, session_dir: Path,
+    kb: RecipeKB,
+    session_dir: Path,
 ) -> None:
     """With no cortex_session_id, the anchor uses the session_dir basename as the local sid."""
     state = _FakeSharedState()
     run_t0_anchor(
-        kb, state,
-        workload="m", hw="mi300x",
+        kb,
+        state,
+        workload="m",
+        hw="mi300x",
         extra_attrs={"framework": "sglang"},
         session_dir=session_dir,
     )
@@ -240,54 +267,65 @@ def test_t0_anchor_falls_back_to_session_dir_basename_for_sid(
 
 # Read-modify-write correctness
 def test_t0_anchor_preserves_existing_best_config_on_metadata_stamp(
-    kb: RecipeKB, session_dir: Path,
+    kb: RecipeKB,
+    session_dir: Path,
 ) -> None:
     """T0 only stamps metadata — best_config/best_throughput/sessions from a prior CLOSE survive."""
     state = _FakeSharedState()
     cid = _expected_cid(state, "m", "mi300x")
     kb.put_recipe(
         canonical_id=cid,
-        model="m", hardware="mi300x",
-        framework="sglang", framework_version="0.4.5", precision="fp8",
+        model="m",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
         best_config={"tp": "16", "ep": "8"},
         best_throughput=12345.6,
         sessions=[
-            {"date": "2026-05-25", "throughput_before": 1.0,
-             "throughput_after": 12345.6, "actions_taken": ["tp+ep"]}
+            {"date": "2026-05-25", "throughput_before": 1.0, "throughput_after": 12345.6, "actions_taken": ["tp+ep"]}
         ],
         provenance={"source": "seed", "generator": "ut"},
     )
     run_t0_anchor(
-        kb, state,
-        workload="m", hw="mi300x",
+        kb,
+        state,
+        workload="m",
+        hw="mi300x",
         image_digest="new-img-digest",
         extra_attrs={"framework": "sglang"},
         session_dir=session_dir,
     )
     after = kb.get_recipe(canonical_id=cid)
     assert after is not None
-    assert after["best_config"]     == {"tp": "16", "ep": "8"}
+    assert after["best_config"] == {"tp": "16", "ep": "8"}
     assert after["best_throughput"] == 12345.6
-    assert len(after["sessions"])    == 1
+    assert len(after["sessions"]) == 1
     assert after["sessions"][0]["actions_taken"] == ["tp+ep"]
     assert after.get("image_digest") == "new-img-digest"
 
 
 def test_t0_anchor_increments_version_on_existing_row(
-    kb: RecipeKB, session_dir: Path,
+    kb: RecipeKB,
+    session_dir: Path,
 ) -> None:
     state = _FakeSharedState()
     cid = _expected_cid(state, "m", "mi300x")
     kb.put_recipe(
         canonical_id=cid,
-        model="m", hardware="mi300x",
-        framework="sglang", framework_version="0.4.5", precision="fp8",
+        model="m",
+        hardware="mi300x",
+        framework="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
         provenance={"source": "seed", "generator": "ut"},
     )
     assert kb.get_recipe(canonical_id=cid)["version"] == 1  # type: ignore[index]
     run_t0_anchor(
-        kb, state,
-        workload="m", hw="mi300x",
+        kb,
+        state,
+        workload="m",
+        hw="mi300x",
         extra_attrs={"framework": "sglang"},
         session_dir=session_dir,
     )
@@ -298,12 +336,15 @@ def test_t0_anchor_increments_version_on_existing_row(
 
 # Defensive: anchor never raises on missing optional inputs
 def test_t0_anchor_tolerates_missing_extra_attrs(
-    kb: RecipeKB, session_dir: Path,
+    kb: RecipeKB,
+    session_dir: Path,
 ) -> None:
     state = _FakeSharedState()
     result = run_t0_anchor(
-        kb, state,
-        workload="m", hw="mi300x",
+        kb,
+        state,
+        workload="m",
+        hw="mi300x",
         session_dir=session_dir,
     )
     assert result.status in ("ok", "resumed")

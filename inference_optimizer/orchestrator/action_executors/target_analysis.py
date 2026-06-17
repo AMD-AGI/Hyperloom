@@ -43,8 +43,10 @@ def _env_int(name: str, default: int = 0) -> int:
         return int(raw)
     except ValueError:
         log.warning(
-            "target_analysis_executor: env %s=%r is not an integer; "
-            "falling back to %d", name, raw, default,
+            "target_analysis_executor: env %s=%r is not an integer; falling back to %d",
+            name,
+            raw,
+            default,
         )
         return default
 
@@ -113,6 +115,7 @@ class TargetAnalysisExecutor:
             return self.session_dir
         try:
             from ...paths import session_dir as _sd
+
             sd = _sd()
             return sd if sd.exists() else None
         except Exception:  # noqa: BLE001
@@ -139,24 +142,20 @@ class TargetAnalysisExecutor:
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
             log.warning(
-                "target_analysis_executor: could not resolve session_dir; "
-                "skipping (no artefacts will be written)",
+                "target_analysis_executor: could not resolve session_dir; skipping (no artefacts will be written)",
             )
             return {
                 "status": "succeeded",
-                "kind":   ctx.task.kind,
-                "note":   "skipped: no session_dir",
+                "kind": ctx.task.kind,
+                "note": "skipped: no session_dir",
                 "baseline_status": "skipped",
                 "reason": "no_session_dir",
             }
 
-        compare_against_gpu = str(
-            params.get("compare_against_gpu") or self.compare_against_gpu or ""
-        ).strip()
+        compare_against_gpu = str(params.get("compare_against_gpu") or self.compare_against_gpu or "").strip()
         if not compare_against_gpu:
             log.info(
-                "target_analysis_executor: no compare_against_gpu set; "
-                "writing skipped summary and returning",
+                "target_analysis_executor: no compare_against_gpu set; writing skipped summary and returning",
             )
             try:
                 summary = analyze(
@@ -168,8 +167,8 @@ class TargetAnalysisExecutor:
                 log.exception("target_analysis_executor: analyze() raised: %s", exc)
                 return {
                     "status": "succeeded",
-                    "kind":   ctx.task.kind,
-                    "note":   f"analyzer crashed: {exc}",
+                    "kind": ctx.task.kind,
+                    "note": f"analyzer crashed: {exc}",
                     "baseline_status": "fetch_error",
                     "reason": "analyzer_crash",
                 }
@@ -195,8 +194,8 @@ class TargetAnalysisExecutor:
             log.exception("target_analysis_executor: analyze() raised: %s", exc)
             return {
                 "status": "succeeded",
-                "kind":   ctx.task.kind,
-                "note":   f"analyzer crashed: {exc}",
+                "kind": ctx.task.kind,
+                "note": f"analyzer crashed: {exc}",
                 "baseline_status": "fetch_error",
                 "reason": "analyzer_crash",
             }
@@ -221,17 +220,18 @@ class TargetAnalysisExecutor:
             metrics when available.
         """
         from ...session_paths import target_analysis_report_md, target_baseline_json
+
         json_path = target_baseline_json(session_dir)
         md_path = target_analysis_report_md(session_dir)
         out = {
-            "status":          "succeeded",
-            "kind":            ctx.task.kind,
+            "status": "succeeded",
+            "kind": ctx.task.kind,
             "baseline_status": getattr(summary, "status", "unknown"),
-            "reason":          getattr(summary, "reason", ""),
-            "warning":         getattr(summary, "warning", ""),
-            "row_count":       getattr(summary, "row_count", 0),
-            "json_path":       str(json_path),
-            "md_path":         str(md_path),
+            "reason": getattr(summary, "reason", ""),
+            "warning": getattr(summary, "warning", ""),
+            "row_count": getattr(summary, "row_count", 0),
+            "json_path": str(json_path),
+            "md_path": str(md_path),
         }
         best = getattr(summary, "best", None)
         if best is not None:
@@ -240,8 +240,10 @@ class TargetAnalysisExecutor:
             out["best_decode_tp"] = best.decode_tp
         log.info(
             "target_analysis_executor: status=%s reason=%s rows=%d (%s)",
-            out["baseline_status"], out["reason"] or "-",
-            out["row_count"], out["warning"] or "ok",
+            out["baseline_status"],
+            out["reason"] or "-",
+            out["row_count"],
+            out["warning"] or "ok",
         )
         return out
 

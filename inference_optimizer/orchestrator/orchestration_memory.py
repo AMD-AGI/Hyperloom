@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -24,7 +24,11 @@ DEFAULT_CHECKPOINT_CHAR_BUDGET: int = 400_000
 
 
 _MEMORY_KEYS: tuple[str, ...] = (
-    "current_plan", "hypotheses", "tried_and_why", "pending", "learnings",
+    "current_plan",
+    "hypotheses",
+    "tried_and_why",
+    "pending",
+    "learnings",
 )
 
 

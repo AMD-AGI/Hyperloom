@@ -75,9 +75,7 @@ def test_open_connection_applies_wal_and_schema(tmp_path):
         (mode,) = cur.fetchone()
         assert mode.lower() == "wal"
         # core tables + schema_version exist
-        cur = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        )
+        cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         tables = {row["name"] for row in cur.fetchall()}
         for required in ("leases", "events", "cursors", "tasks", "schema_version"):
             assert required in tables, f"missing table: {required}"
@@ -125,8 +123,7 @@ def test_sqlite_connection_sync_round_trip(tmp_path):
     try:
         with sc.transaction_sync() as cur:
             cur.execute(
-                "INSERT INTO events(msg_id, from_agent, to_agent, topic, "
-                "payload, priority, ts) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO events(msg_id, from_agent, to_agent, topic, payload, priority, ts) VALUES (?,?,?,?,?,?,?)",
                 ("m1", "Orchestration", "Kernel", "request", "{}", 1, "t"),
             )
         rows = sc.fetchall_sync("SELECT msg_id, topic FROM events")
@@ -145,13 +142,11 @@ async def test_sqlite_connection_async_transaction_atomic(tmp_path):
     try:
         async with sc.transaction() as cur:
             cur.execute(
-                "INSERT INTO events(msg_id, from_agent, to_agent, topic, "
-                "payload, priority, ts) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO events(msg_id, from_agent, to_agent, topic, payload, priority, ts) VALUES (?,?,?,?,?,?,?)",
                 ("m-tx", "Critic", "Orchestration", "review_verdict", "{}", 1, "t"),
             )
             cur.execute(
-                "INSERT INTO cursors(agent, last_processed_seq, "
-                "last_processed_msg_id, processed_at) VALUES (?,?,?,?)",
+                "INSERT INTO cursors(agent, last_processed_seq, last_processed_msg_id, processed_at) VALUES (?,?,?,?)",
                 ("Orchestration", 0, "", "t"),
             )
         ev = await sc.fetchall("SELECT msg_id FROM events")

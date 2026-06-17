@@ -19,11 +19,13 @@ from .symptom import Symptom, SymptomSeverity
 
 
 # Agents tracked for stall detection; robustness excludes itself.
-_TRACKED_AGENTS: frozenset[str] = frozenset({
-    "orchestration",
-    "kernel",
-    "critic",
-})
+_TRACKED_AGENTS: frozenset[str] = frozenset(
+    {
+        "orchestration",
+        "kernel",
+        "critic",
+    }
+)
 
 
 @dataclass
@@ -67,19 +69,12 @@ def evaluate_stall_signals(
         idle_s = max(0.0, ctx.now_unix - ts)
         if idle_s < cfg.stall_timeout_s:
             continue
-        severity = (
-            SymptomSeverity.HIGH
-            if idle_s >= cfg.severity_high_after_s
-            else SymptomSeverity.MEDIUM
-        )
+        severity = SymptomSeverity.HIGH if idle_s >= cfg.severity_high_after_s else SymptomSeverity.MEDIUM
         out.append(
             Symptom(
                 name="agent_stall",
                 severity=severity,
-                summary=(
-                    f"agent {agent} silent for {int(idle_s)}s "
-                    f"(threshold={int(cfg.stall_timeout_s)}s)"
-                ),
+                summary=(f"agent {agent} silent for {int(idle_s)}s (threshold={int(cfg.stall_timeout_s)}s)"),
                 evidence={
                     "agent": agent,
                     "idle_seconds": int(idle_s),
@@ -88,10 +83,7 @@ def evaluate_stall_signals(
                 },
                 subject={"agent": agent},
                 source="local" if data.coordinator_events else "inbox",
-                suggestion=(
-                    "force_dispatch the head queued task or escalate"
-                    " strategy if agent remains silent"
-                ),
+                suggestion=("force_dispatch the head queued task or escalate strategy if agent remains silent"),
             )
         )
     return out

@@ -33,50 +33,85 @@ from inference_optimizer.session_paths import conversations_path
 # parse_claude_stream_json_response
 # ---------------------------------------------------------------------------
 def _write_stream_json(path: Path, rows: list[dict]) -> None:
-    path.write_text(
-        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
-    )
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
 
 
 def test_response_prefers_result_row(tmp_path: Path) -> None:
     """The terminal ``result`` row is the authoritative consolidated reply."""
     log = tmp_path / "process.log"
-    _write_stream_json(log, [
-        {"type": "system", "subtype": "init", "session_id": "s"},
-        {"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "text", "text": "partial streamed chunk"},
-        ]}},
-        {"type": "result", "subtype": "success",
-         "result": "FINAL consolidated answer", "usage": {"output_tokens": 5}},
-    ])
+    _write_stream_json(
+        log,
+        [
+            {"type": "system", "subtype": "init", "session_id": "s"},
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "partial streamed chunk"},
+                    ],
+                },
+            },
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": "FINAL consolidated answer",
+                "usage": {"output_tokens": 5},
+            },
+        ],
+    )
     assert parse_claude_stream_json_response(log) == "FINAL consolidated answer"
 
 
 def test_response_falls_back_to_assistant_text(tmp_path: Path) -> None:
     """Without a ``result`` row, concatenate assistant ``text`` blocks in order."""
     log = tmp_path / "process.log"
-    _write_stream_json(log, [
-        {"type": "system", "subtype": "init"},
-        {"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "text", "text": "first"},
-        ]}},
-        {"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "text", "text": "second"},
-        ]}},
-    ])
+    _write_stream_json(
+        log,
+        [
+            {"type": "system", "subtype": "init"},
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "first"},
+                    ],
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "second"},
+                    ],
+                },
+            },
+        ],
+    )
     assert parse_claude_stream_json_response(log) == "first\nsecond"
 
 
 def test_response_skips_thinking_and_tool_use(tmp_path: Path) -> None:
     """Only externally-visible ``text`` blocks count; thinking / tool_use drop."""
     log = tmp_path / "process.log"
-    _write_stream_json(log, [
-        {"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "thinking", "thinking": "secret scratch reasoning"},
-            {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
-            {"type": "text", "text": "visible reply"},
-        ]}},
-    ])
+    _write_stream_json(
+        log,
+        [
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "secret scratch reasoning"},
+                        {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+                        {"type": "text", "text": "visible reply"},
+                    ],
+                },
+            },
+        ],
+    )
     out = parse_claude_stream_json_response(log)
     assert out == "visible reply"
     assert "scratch reasoning" not in out
@@ -90,15 +125,30 @@ def test_response_missing_file_returns_none(tmp_path: Path) -> None:
 def test_response_no_text_returns_none(tmp_path: Path) -> None:
     """A stream that only ran tools (no text, no result) yields None."""
     log = tmp_path / "process.log"
-    _write_stream_json(log, [
-        {"type": "system", "subtype": "init"},
-        {"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
-        ]}},
-        {"type": "user", "message": {"role": "user", "content": [
-            {"type": "tool_result", "content": "ok"},
-        ]}},
-    ])
+    _write_stream_json(
+        log,
+        [
+            {"type": "system", "subtype": "init"},
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "content": "ok"},
+                    ],
+                },
+            },
+        ],
+    )
     assert parse_claude_stream_json_response(log) is None
 
 
@@ -106,9 +156,7 @@ def test_response_tolerates_malformed_lines(tmp_path: Path) -> None:
     """Garbage lines are skipped; valid result still recovered."""
     log = tmp_path / "process.log"
     log.write_text(
-        "not json at all\n"
-        + json.dumps({"type": "result", "result": "recovered"})
-        + "\n{ broken json\n",
+        "not json at all\n" + json.dumps({"type": "result", "result": "recovered"}) + "\n{ broken json\n",
         encoding="utf-8",
     )
     assert parse_claude_stream_json_response(log) == "recovered"
@@ -117,12 +165,21 @@ def test_response_tolerates_malformed_lines(tmp_path: Path) -> None:
 def test_response_blank_result_falls_back(tmp_path: Path) -> None:
     """An empty/whitespace ``result`` does not mask real assistant text."""
     log = tmp_path / "process.log"
-    _write_stream_json(log, [
-        {"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "text", "text": "real reply"},
-        ]}},
-        {"type": "result", "result": "   "},
-    ])
+    _write_stream_json(
+        log,
+        [
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "real reply"},
+                    ],
+                },
+            },
+            {"type": "result", "result": "   "},
+        ],
+    )
     assert parse_claude_stream_json_response(log) == "real reply"
 
 
@@ -131,11 +188,7 @@ def test_response_blank_result_falls_back(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 def _read_rows(session_dir: Path) -> list[dict]:
     path = conversations_path(session_dir)
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def test_specialist_conversation_row_round_trip(tmp_path: Path) -> None:

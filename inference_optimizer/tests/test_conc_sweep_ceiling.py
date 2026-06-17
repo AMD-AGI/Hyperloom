@@ -51,17 +51,12 @@ def _qwen3_30b_a3b_meta() -> ModelMeta:
     num_experts = 128
     experts_per_tok = 8
     dtype_bytes = 2.0
-    expert_bytes_per_layer = int(
-        num_experts * 3 * hidden_size * moe_inter * dtype_bytes
-    )
+    expert_bytes_per_layer = int(num_experts * 3 * hidden_size * moe_inter * dtype_bytes)
     expert_weight_bytes = num_layers * expert_bytes_per_layer
     # ~60GB; large enough that subtracting expert_weight_bytes stays positive.
     weight_bytes = 60 * 1024**3
     non_expert_bytes = weight_bytes - expert_weight_bytes
-    active_weight_bytes = (
-        non_expert_bytes
-        + int((experts_per_tok / num_experts) * expert_weight_bytes)
-    )
+    active_weight_bytes = non_expert_bytes + int((experts_per_tok / num_experts) * expert_weight_bytes)
     return ModelMeta(
         weight_bytes=weight_bytes,
         num_layers=num_layers,
@@ -87,12 +82,8 @@ def stub_meta() -> Any:
 def test_happy_path_moe_qwen3_30b_a3b_mi355x(stub_meta: ModelMeta) -> None:
     state = _make_state()
     concs = [1, 2, 4, 8, 16, 32, 64, 128]
-    baseline_points = [
-        {"conc": c, "output_throughput": float(c) * 100.0} for c in concs
-    ]
-    optimized_points = [
-        {"conc": c, "output_throughput": float(c) * 120.0} for c in concs
-    ]
+    baseline_points = [{"conc": c, "output_throughput": float(c) * 100.0} for c in concs]
+    optimized_points = [{"conc": c, "output_throughput": float(c) * 120.0} for c in concs]
 
     block = _build_roofline_ceiling(
         state,
@@ -155,10 +146,12 @@ def test_mbu_matches_measured_over_t_peak(stub_meta: ModelMeta) -> None:
     for row, base, opt in zip(block["rows"], [800.0, 1500.0], [950.0, 1800.0]):
         peak = row["t_peak_tok_s"]
         assert row["mbu_baseline_pct"] == pytest.approx(
-            round(base / peak * 100.0, 2), rel=1e-6,
+            round(base / peak * 100.0, 2),
+            rel=1e-6,
         )
         assert row["mbu_optimized_pct"] == pytest.approx(
-            round(opt / peak * 100.0, 2), rel=1e-6,
+            round(opt / peak * 100.0, 2),
+            rel=1e-6,
         )
 
 
@@ -187,7 +180,7 @@ def test_mbu_none_on_failed_or_missing_measurement(
     rows = {r["conc"]: r for r in block["rows"]}
     assert rows[1]["mbu_baseline_pct"] is not None
     assert rows[1]["mbu_optimized_pct"] is None  # missing optimized
-    assert rows[2]["mbu_baseline_pct"] is None   # zero throughput
+    assert rows[2]["mbu_baseline_pct"] is None  # zero throughput
     assert rows[2]["mbu_optimized_pct"] is not None
 
 
@@ -220,10 +213,7 @@ def test_dense_fallback_no_moe_fields() -> None:
     assert rows[0]["t_mem_tok_s"] < rows[-1]["t_mem_tok_s"]
     assert all(r["bound_kind"] == "memory" for r in rows)
     # No measurements → all MBU None.
-    assert all(
-        r["mbu_baseline_pct"] is None and r["mbu_optimized_pct"] is None
-        for r in rows
-    )
+    assert all(r["mbu_baseline_pct"] is None and r["mbu_optimized_pct"] is None for r in rows)
 
 
 # Safe degrade

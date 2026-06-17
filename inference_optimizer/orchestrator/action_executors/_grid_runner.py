@@ -77,6 +77,7 @@ def _resolve_magpie_python() -> str:
         str: Path to a Python interpreter that can import Magpie, falling back
         to ``/opt/venv/bin/python``.
     """
+
     def _can_import_magpie(py: str) -> bool:
         """Whether an interpreter can import Magpie and its ``yaml`` dep.
 
@@ -138,6 +139,7 @@ def _resolve_session_dir() -> Path:
         Path: The resolved active session directory.
     """
     from ...paths import session_dir as _sd
+
     return _sd()
 
 
@@ -205,9 +207,7 @@ def _parse_skip_spec(spec: str) -> list[str]:
 
 # Matches ``--cuda-graph-max-bs 64`` and ``--cuda_graph_max_bs=64``; captures
 # the integer value.
-_RE_CUDA_GRAPH_MAX_BS = re.compile(
-    r"--cuda[-_]graph[-_]max[-_]bs[= ]+(\d+)"
-)
+_RE_CUDA_GRAPH_MAX_BS = re.compile(r"--cuda[-_]graph[-_]max[-_]bs[= ]+(\d+)")
 
 
 def annotate_multi_node_cuda_graph_max_bs(
@@ -228,6 +228,7 @@ def annotate_multi_node_cuda_graph_max_bs(
         matching variants; empty outside multi-node mode or on no match.
     """
     from ._multi_node_env import is_multi_node
+
     if not is_multi_node():
         return []
     try:
@@ -240,15 +241,17 @@ def annotate_multi_node_cuda_graph_max_bs(
     for v in grid:
         m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_server_args or "")
         if m and int(m.group(1)) < conc:
-            notes.append({
-                "name": v.name,
-                "source": "multi_node_advisory",
-                "reason": (
-                    f"cuda_graph_max_bs={m.group(1)} < CONC={conc} "
-                    "(multi-node graph-cache miss is a known regression; "
-                    "advisory only, not auto-skipped)"
-                ),
-            })
+            notes.append(
+                {
+                    "name": v.name,
+                    "source": "multi_node_advisory",
+                    "reason": (
+                        f"cuda_graph_max_bs={m.group(1)} < CONC={conc} "
+                        "(multi-node graph-cache miss is a known regression; "
+                        "advisory only, not auto-skipped)"
+                    ),
+                }
+            )
     return notes
 
 
@@ -288,9 +291,7 @@ _MN_BACKENDS_PRIORITY: tuple[str, ...] = (
 )
 
 
-def _mn_priority_index(
-    variant: "GridVariant", priority_tags: "tuple[str, ...] | list[str]"
-) -> int:
+def _mn_priority_index(variant: "GridVariant", priority_tags: "tuple[str, ...] | list[str]") -> int:
     """Return the rank of ``variant`` against ``priority_tags`` (lower = first).
 
     Matches the first ``priority_tags`` entry that is a substring of the
@@ -307,7 +308,7 @@ def _mn_priority_index(
         int: The index of the first matching tag, or ``len(priority_tags)`` when
         none match.
     """
-    haystack = (variant.note or variant.name or "")
+    haystack = variant.note or variant.name or ""
     for idx, tag in enumerate(priority_tags):
         if tag and tag in haystack:
             return idx
@@ -337,6 +338,7 @@ def reorder_grid_for_multi_node(
         sorted copy with higher-priority variants first.
     """
     from ._multi_node_env import is_multi_node
+
     if not is_multi_node():
         return grid
     # ``sorted`` is stable, so ties (same priority index) keep input order.
@@ -367,6 +369,7 @@ def apply_multi_node_invalid_variants(
         multi-node mode.
     """
     from ._multi_node_env import is_multi_node
+
     if not is_multi_node():
         return grid, []
     try:
@@ -378,14 +381,16 @@ def apply_multi_node_invalid_variants(
     for v in grid:
         m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_server_args or "")
         if conc > 0 and m and int(m.group(1)) < conc:
-            dropped.append({
-                "name": v.name,
-                "source": "multi_node_invalid",
-                "reason": (
-                    f"cuda_graph_max_bs={m.group(1)} < CONC={conc} "
-                    "(multi-node graph-cache miss is a known ~50% regression)"
-                ),
-            })
+            dropped.append(
+                {
+                    "name": v.name,
+                    "source": "multi_node_invalid",
+                    "reason": (
+                        f"cuda_graph_max_bs={m.group(1)} < CONC={conc} "
+                        "(multi-node graph-cache miss is a known ~50% regression)"
+                    ),
+                }
+            )
             continue
         kept.append(v)
     return kept, dropped
@@ -397,8 +402,8 @@ def apply_multi_node_invalid_variants(
 # required model class.
 _COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
     ("--enable-flashinfer-mla", "mla"),
-    ("--enable-deepep-moe",      "moe"),
-    ("--enable-ep-moe",          "moe"),
+    ("--enable-deepep-moe", "moe"),
+    ("--enable-ep-moe", "moe"),
 )
 
 
@@ -410,18 +415,20 @@ _HELP_TEXT_CACHE: dict[str, str] = {}
 # ``python3 -c <inline>`` so the probe's 10s timeout covers the import cost.
 _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
     "sglang": (
-        "python3", "-c",
+        "python3",
+        "-c",
         "from sglang.launch_server import parser; parser.print_help()",
     ),
     "vllm": (
-        "python3", "-c",
-        "from vllm.entrypoints.openai.api_server import make_arg_parser; "
-        "make_arg_parser(None).print_help()",
+        "python3",
+        "-c",
+        "from vllm.entrypoints.openai.api_server import make_arg_parser; make_arg_parser(None).print_help()",
     ),
     # atom exposes EngineArgs.add_cli_args on ``atom.model_engine.arg_utils``
     # (mirrors vLLM); populate a throwaway parser and print its help.
     "atom": (
-        "python3", "-c",
+        "python3",
+        "-c",
         "import argparse; from atom.model_engine.arg_utils import EngineArgs; "
         "p = argparse.ArgumentParser(); EngineArgs.add_cli_args(p); "
         "p.print_help()",
@@ -454,7 +461,9 @@ def _probe_server_help_text(framework: str) -> str:
     try:
         proc = subprocess.run(
             list(cmd),
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
     except Exception:  # noqa: BLE001 — best-effort, see docstring
@@ -494,8 +503,15 @@ def _detect_model_class(model_path: str) -> tuple[bool, bool]:
     p = model_path.lower()
     mla_keys = ("glm-5", "glm5", "deepseek", "kimi-k2", "kimi_k2", "kimi")
     moe_keys = (
-        "glm-5", "glm5", "deepseek-v2", "deepseek-v3", "deepseek-r1",
-        "kimi", "qwen3-moe", "qwen3_moe", "mixtral",
+        "glm-5",
+        "glm5",
+        "deepseek-v2",
+        "deepseek-v3",
+        "deepseek-r1",
+        "kimi",
+        "qwen3-moe",
+        "qwen3_moe",
+        "mixtral",
     )
     is_mla = any(k in p for k in mla_keys)
     is_moe = any(k in p for k in moe_keys)
@@ -541,10 +557,7 @@ def apply_compatibility_filter(
             if flag not in args:
                 continue
             # Model-class predicate
-            class_ok = (
-                (required_class == "mla" and is_mla)
-                or (required_class == "moe" and is_moe)
-            )
+            class_ok = (required_class == "mla" and is_mla) or (required_class == "moe" and is_moe)
             if not class_ok:
                 skip_reason = (
                     f"{flag} requires {required_class.upper()} model; "
@@ -554,17 +567,16 @@ def apply_compatibility_filter(
                 break
             # Framework flag-support predicate (only when help is readable).
             if help_available and flag not in help_text:
-                skip_reason = (
-                    f"{flag} not present in `{fw} --help` output; "
-                    f"current {fw} version likely too old"
-                )
+                skip_reason = f"{flag} not present in `{fw} --help` output; current {fw} version likely too old"
                 break
         if skip_reason:
-            dropped.append({
-                "name": v.name,
-                "source": "compatibility_filter",
-                "reason": skip_reason,
-            })
+            dropped.append(
+                {
+                    "name": v.name,
+                    "source": "compatibility_filter",
+                    "reason": skip_reason,
+                }
+            )
         else:
             kept.append(v)
     return kept, dropped
@@ -605,11 +617,13 @@ def apply_user_skip_list(
         if matched_pat is None:
             kept.append(v)
             continue
-        dropped.append({
-            "name": v.name,
-            "source": "user_skip",
-            "reason": f"matched SKIP_VARIANTS pattern '{matched_pat}'",
-        })
+        dropped.append(
+            {
+                "name": v.name,
+                "source": "user_skip",
+                "reason": f"matched SKIP_VARIANTS pattern '{matched_pat}'",
+            }
+        )
     return kept, dropped
 
 
@@ -630,10 +644,10 @@ class GridVariant:
             Defaults to ``""``.
     """
 
-    name: str                                    # human-readable label
-    extra_server_args: str = ""                  # appended via EXTRA_{SGLANG,VLLM,ATOM}_ARGS env
+    name: str  # human-readable label
+    extra_server_args: str = ""  # appended via EXTRA_{SGLANG,VLLM,ATOM}_ARGS env
     extra_envs: dict[str, str] = field(default_factory=dict)
-    note: str = ""                                # optional reason / category
+    note: str = ""  # optional reason / category
 
     def __init__(
         self,
@@ -658,6 +672,7 @@ class GridVariant:
         # routed into the canonical attribute with a DeprecationWarning.
         if extra_sglang_args is not None:
             import warnings as _warnings
+
             _warnings.warn(
                 "GridVariant(extra_sglang_args=...) is a deprecation "
                 "alias for GridVariant(extra_server_args=...) and will "
@@ -831,30 +846,30 @@ class VariantResult:
             ``fingerprint``, keyed by attribute name.
         """
         return {
-            "name":               self.name,
-            "extra_server_args":  self.extra_server_args,
-            "extra_envs":         self.extra_envs,
-            "fingerprint":        self.fingerprint,
-            "status":             self.status,
-            "output_throughput":  self.output_throughput,
+            "name": self.name,
+            "extra_server_args": self.extra_server_args,
+            "extra_envs": self.extra_envs,
+            "fingerprint": self.fingerprint,
+            "status": self.status,
+            "output_throughput": self.output_throughput,
             "request_throughput": self.request_throughput,
             "total_token_throughput": self.total_token_throughput,
             "completed_requests": self.completed_requests,
-            "duration_seconds":   self.duration_seconds,
-            "ttft_mean_ms":       self.ttft_mean_ms,
-            "e2el_mean_ms":       self.e2el_mean_ms,
-            "tpot_mean_ms":       self.tpot_mean_ms,
-            "workspace":          self.workspace,
-            "report_path":        self.report_path,
-            "raw_result_path":    self.raw_result_path,
-            "reported_success":   self.reported_success,
-            "returncode":         self.returncode,
-            "nonfatal_warnings":  self.nonfatal_warnings,
-            "error":              self.error,
-            "error_class":        self.error_class,
-            "note":               self.note,
-            "runtime_sec":        self.runtime_sec,
-            "killed_overtime":    self.killed_overtime,
+            "duration_seconds": self.duration_seconds,
+            "ttft_mean_ms": self.ttft_mean_ms,
+            "e2el_mean_ms": self.e2el_mean_ms,
+            "tpot_mean_ms": self.tpot_mean_ms,
+            "workspace": self.workspace,
+            "report_path": self.report_path,
+            "raw_result_path": self.raw_result_path,
+            "reported_success": self.reported_success,
+            "returncode": self.returncode,
+            "nonfatal_warnings": self.nonfatal_warnings,
+            "error": self.error,
+            "error_class": self.error_class,
+            "note": self.note,
+            "runtime_sec": self.runtime_sec,
+            "killed_overtime": self.killed_overtime,
             "estimated_output_throughput": self.estimated_output_throughput,
         }
 
@@ -986,20 +1001,22 @@ _MULTI_VALUE_FLAGS = (
 # kernel variant appends the same flag via ``extra_server_args``; ``merge_
 # server_args`` keeps BOTH tokens by design. This set lists the single-value
 # flags safe to collapse to last-wins so the variant override survives.
-_VLLM_SINGLE_VALUE_FLAGS = frozenset({
-    "--attention-backend",
-    "--gpu-memory-utilization",
-    "--max-model-len",
-    "--max-num-seqs",
-    "--max-num-batched-tokens",
-    "--block-size",
-    "--kv-cache-dtype",
-    "--quantization",
-    "--dtype",
-    "--swap-space",
-    "--tensor-parallel-size",
-    "--pipeline-parallel-size",
-})
+_VLLM_SINGLE_VALUE_FLAGS = frozenset(
+    {
+        "--attention-backend",
+        "--gpu-memory-utilization",
+        "--max-model-len",
+        "--max-num-seqs",
+        "--max-num-batched-tokens",
+        "--block-size",
+        "--kv-cache-dtype",
+        "--quantization",
+        "--dtype",
+        "--swap-space",
+        "--tensor-parallel-size",
+        "--pipeline-parallel-size",
+    }
+)
 
 
 def dedup_vllm_server_args(
@@ -1172,14 +1189,16 @@ def resolve_sglang_watchdog_timeout() -> int:
     except ValueError:
         log.warning(
             "%s=%r is not an integer; using default %ds.",
-            SGLANG_WATCHDOG_TIMEOUT_ENV, raw,
+            SGLANG_WATCHDOG_TIMEOUT_ENV,
+            raw,
             DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
         )
         return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
     if val <= 0:
         log.warning(
             "%s=%d is not positive; using default %ds.",
-            SGLANG_WATCHDOG_TIMEOUT_ENV, val,
+            SGLANG_WATCHDOG_TIMEOUT_ENV,
+            val,
             DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
         )
         return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
@@ -1187,7 +1206,8 @@ def resolve_sglang_watchdog_timeout() -> int:
 
 
 def inject_sglang_watchdog_timeout(
-    server_args: str | None, framework: str | None,
+    server_args: str | None,
+    framework: str | None,
 ) -> str:
     """Append ``--watchdog-timeout <N>`` to ``server_args`` for sglang runs.
 
@@ -1252,12 +1272,18 @@ def _resolve_nonneg_int_env(name: str, default: int) -> int:
         val = int(raw)
     except ValueError:
         log.warning(
-            "%s=%r is not an integer; using default %d.", name, raw, default,
+            "%s=%r is not an integer; using default %d.",
+            name,
+            raw,
+            default,
         )
         return default
     if val < 0:
         log.warning(
-            "%s=%d is negative; using default %d.", name, val, default,
+            "%s=%d is negative; using default %d.",
+            name,
+            val,
+            default,
         )
         return default
     return val
@@ -1279,10 +1305,12 @@ def resolve_sglang_context_cap(isl: int, osl: int) -> int:
         int: ``max(isl + osl + headroom, floor)``.
     """
     headroom = _resolve_nonneg_int_env(
-        SGLANG_CONTEXT_HEADROOM_ENV, DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
+        SGLANG_CONTEXT_HEADROOM_ENV,
+        DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
     )
     floor = _resolve_nonneg_int_env(
-        SGLANG_CONTEXT_FLOOR_ENV, DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
+        SGLANG_CONTEXT_FLOOR_ENV,
+        DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
     )
     return max(int(isl) + int(osl) + headroom, floor)
 
@@ -1322,13 +1350,15 @@ def inject_sglang_context_length(
         return args
     # Lazy import to avoid a module-level cycle through the heavy cli.py.
     from ...cli import _load_model_max_position_embeddings
+
     max_pos = _load_model_max_position_embeddings(str(model_path or ""))
     if not max_pos:
         return args
     cap = resolve_sglang_context_cap(isl, osl)
     context_length = min(int(max_pos), cap)
     return merge_server_args(
-        args, f"{_SGLANG_CONTEXT_LENGTH_FLAG} {context_length}",
+        args,
+        f"{_SGLANG_CONTEXT_LENGTH_FLAG} {context_length}",
     )
 
 
@@ -1396,17 +1426,18 @@ def inject_sglang_attention_backend(
     if _SGLANG_ATTN_BACKEND_RE.search(args):
         return args
     from ...cli import _model_has_dual_chunk_attention
+
     if not _model_has_dual_chunk_attention(str(model_path or "")):
         return args
     backend = _resolve_dual_chunk_backend(gpu_type)
     if backend != _SGLANG_DUAL_CHUNK_BACKEND:
         log.info(
-            "dual-chunk model on AMD/ROCm: injecting "
-            "--attention-backend %s (dual_chunk_flash_attn needs sm90+).",
+            "dual-chunk model on AMD/ROCm: injecting --attention-backend %s (dual_chunk_flash_attn needs sm90+).",
             backend,
         )
     return merge_server_args(
-        args, f"{_SGLANG_ATTN_BACKEND_FLAG} {backend}",
+        args,
+        f"{_SGLANG_ATTN_BACKEND_FLAG} {backend}",
     )
 
 
@@ -1462,20 +1493,22 @@ def inject_sglang_moe_runner_backend(
     if _SGLANG_MOE_RUNNER_BACKEND_RE.search(args):
         return args
     from ...cli import _model_is_moe, _resolve_amd_gpu_type
+
     if not _resolve_amd_gpu_type(gpu_type):
         return args
     if not _model_is_moe(str(model_path or "")):
         return args
     backend = (
-        os.environ.get(HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV, "").strip()
-        or DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND
+        os.environ.get(HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV, "").strip() or DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND
     )
     log.info(
         "MoE model on AMD/ROCm: injecting --moe-runner-backend %s (aiter CK "
-        "2-stage fused-MoE JIT build is broken in this image).", backend,
+        "2-stage fused-MoE JIT build is broken in this image).",
+        backend,
     )
     return merge_server_args(
-        args, f"{_SGLANG_MOE_RUNNER_BACKEND_FLAG} {backend}",
+        args,
+        f"{_SGLANG_MOE_RUNNER_BACKEND_FLAG} {backend}",
     )
 
 
@@ -1546,10 +1579,7 @@ def apply_runtime_benchmark_overrides(
     else:
         tp_val = int(envs.get("TP", 1) or 1)
         existing_rocr = str(envs.get("ROCR_VISIBLE_DEVICES", "")).strip()
-        existing_count = (
-            len([x for x in existing_rocr.split(",") if x.strip()])
-            if existing_rocr else 0
-        )
+        existing_count = len([x for x in existing_rocr.split(",") if x.strip()]) if existing_rocr else 0
         if tp_val > 1 and existing_count < tp_val:
             envs["ROCR_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(tp_val))
 
@@ -1595,7 +1625,9 @@ def _build_variant_yaml(
         cfg = yaml.safe_load(f)
     bench = cfg.setdefault("benchmark", {})
     envs = apply_runtime_benchmark_overrides(
-        bench, model_path=model_path, gpu_type=gpu_type,
+        bench,
+        model_path=model_path,
+        gpu_type=gpu_type,
         benchmark_script=benchmark_script,
     )
     extra_args_env = server_args_env_name(bench.get("framework"))
@@ -1612,6 +1644,7 @@ def _build_variant_yaml(
 
     if server_lifecycle is not None:
         from ._server_lifecycle import inject_lifecycle
+
         inject_lifecycle(
             bench,
             cleanup=bool(server_lifecycle.get("cleanup", True)),
@@ -1663,6 +1696,7 @@ def _kill_stale_servers() -> None:
         nothing.
     """
     from ._multi_node_env import is_multi_node
+
     if is_multi_node():
         return
 
@@ -1670,9 +1704,16 @@ def _kill_stale_servers() -> None:
     import glob
     import time
 
-    _KILL_PATTERNS = ("VLLM::Worker", "VLLM::EngineCore", "vllm.entrypoints",
-                      "vllm serve", "sglang.srt", "sglang.launch_server",
-                      "atom.entrypoints", "atom.entrypoints.openai_server")
+    _KILL_PATTERNS = (
+        "VLLM::Worker",
+        "VLLM::EngineCore",
+        "vllm.entrypoints",
+        "vllm serve",
+        "sglang.srt",
+        "sglang.launch_server",
+        "atom.entrypoints",
+        "atom.entrypoints.openai_server",
+    )
 
     # atom's ModelRunner workers spawn via ``multiprocessing.spawn`` (generic
     # ``spawn_main ... --multiprocessing-fork`` cmdline, unmatchable by
@@ -1752,8 +1793,7 @@ def _kill_stale_servers() -> None:
                 pass
 
     # Clear /dev/shm segments that prevent re-binding.
-    for pattern in ("/dev/shm/vllm*", "/dev/shm/nccl*", "/dev/shm/cuda*",
-                    "/dev/shm/torch*", "/dev/shm/atom*"):
+    for pattern in ("/dev/shm/vllm*", "/dev/shm/nccl*", "/dev/shm/cuda*", "/dev/shm/torch*", "/dev/shm/atom*"):
         for f in glob.glob(pattern):
             try:
                 os.remove(f)
@@ -1810,6 +1850,7 @@ def _run_magpie(
     # Multi-node: tell Magpie to skip its local-server launch and point
     # benchmark_serving at the head pod's ClusterIP ({} in single-node).
     from ._multi_node_env import magpie_remote_env
+
     env.update(magpie_remote_env())
 
     # #210: pin Magpie's InferenceX resolution to ``$INFERENCEX_PATH`` so it
@@ -1829,16 +1870,26 @@ def _run_magpie(
     env["SERVER_LOG"] = str(output_dir / "server.log")
     env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
     cmd = [
-        magpie_python, "-m", "Magpie", "-v", "benchmark",
-        "--benchmark-config", str(config_path),
-        "--output-dir", str(output_dir),
-        "--run-mode", "local",
+        magpie_python,
+        "-m",
+        "Magpie",
+        "-v",
+        "benchmark",
+        "--benchmark-config",
+        str(config_path),
+        "--output-dir",
+        str(output_dir),
+        "--run-mode",
+        "local",
     ]
     # run_with_session_kill launches Magpie in its own POSIX session and tears
     # down the whole descendant tree on every exit path (bugs.md §B). See
     # ``_subprocess_kill.py``.
     proc = run_with_session_kill(
-        cmd, env=env, cwd=cwd, timeout=timeout_sec,
+        cmd,
+        env=env,
+        cwd=cwd,
+        timeout=timeout_sec,
         soft_deadline_sec=soft_deadline_sec,
         server_log_path=str(output_dir / "server.log"),
     )
@@ -1901,6 +1952,7 @@ async def run_grid(
     if not magpie_python:
         magpie_python = _resolve_magpie_python()
     results: list[VariantResult] = []
+
     # Variant-boundary robustness pulse: a bounded deterministic tick after
     # every variant so a mid-grid leak/crash surfaces between variants instead
     # of after the whole grid. Best-effort; see ``_robustness_pulse.py``.
@@ -1923,7 +1975,10 @@ async def run_grid(
         slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
         try:
             cfg_path = _build_variant_yaml(
-                base_yaml_path, base_extra_args, variant, output_subdir=slot,
+                base_yaml_path,
+                base_extra_args,
+                variant,
+                output_subdir=slot,
                 model_path=model_path,
                 gpu_type=gpu_type,
                 benchmark_script=benchmark_script,
@@ -1932,7 +1987,10 @@ async def run_grid(
         except Exception as exc:  # noqa: BLE001
             log.warning(
                 "grid_runner: variant %d/%d name=%s aborted: yaml_build_error: %r",
-                i + 1, len(grid), variant.name, exc,
+                i + 1,
+                len(grid),
+                variant.name,
+                exc,
             )
             _write_variant_abort_marker(
                 slot,
@@ -1941,26 +1999,35 @@ async def run_grid(
                 error_summary=repr(exc),
                 extra_args=variant.extra_server_args,
             )
-            results.append(VariantResult(
-                name=variant.name, extra_server_args=variant.extra_server_args,
-                extra_envs=dict(variant.extra_envs),
-                status="failed", error=f"yaml_build_error: {exc!r}",
-                error_class="yaml_build_error",
-                note=variant.note,
-            ))
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="failed",
+                    error=f"yaml_build_error: {exc!r}",
+                    error_class="yaml_build_error",
+                    note=variant.note,
+                )
+            )
             await _pulse_after_variant(i)
             if not keep_going_on_failure:
                 break
             continue
 
         from ._multi_node_env import log_mn_banner
+
         log_mn_banner(
-            "grid_runner", log,
-            variant=f"{i+1}/{len(grid)}:{variant.name}",
+            "grid_runner",
+            log,
+            variant=f"{i + 1}/{len(grid)}:{variant.name}",
         )
         log.info(
             "grid_runner: variant %d/%d name=%s args=%s",
-            i + 1, len(grid), variant.name, variant.extra_server_args,
+            i + 1,
+            len(grid),
+            variant.name,
+            variant.extra_server_args,
         )
 
         # Multi-node only: restart sglang/vllm with this variant's flags so
@@ -1970,13 +2037,17 @@ async def run_grid(
             ServerRestartFailed,
             restart_server_for_round,
         )
+
         try:
             # PD knobs auto-resolved from $PD_* env; PD config stays constant
             # across variants within one run.
             await restart_server_for_round(
-                extra_server_args=_shell_safe_dedupe(merge_server_args(
-                    base_extra_args, variant.extra_server_args,
-                )),
+                extra_server_args=_shell_safe_dedupe(
+                    merge_server_args(
+                        base_extra_args,
+                        variant.extra_server_args,
+                    )
+                ),
                 # Per-variant env overrides (e.g. MORI_* MoE-dispatch
                 # tuning) so server-side env knobs proposed by specialists
                 # actually take effect on the restarted sglang. Empty dict
@@ -1987,9 +2058,11 @@ async def run_grid(
             )
         except ServerRestartFailed as exc:
             log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: "
-                "mn_server_restart_failed: %s",
-                i + 1, len(grid), variant.name, exc,
+                "grid_runner: variant %d/%d name=%s aborted: mn_server_restart_failed: %s",
+                i + 1,
+                len(grid),
+                variant.name,
+                exc,
             )
             _write_variant_abort_marker(
                 slot,
@@ -1998,14 +2071,17 @@ async def run_grid(
                 error_summary=str(exc),
                 extra_args=variant.extra_server_args,
             )
-            results.append(VariantResult(
-                name=variant.name, extra_server_args=variant.extra_server_args,
-                extra_envs=dict(variant.extra_envs),
-                status="failed",
-                error=f"mn_server_restart_failed: {exc}",
-                error_class="mn_server_restart_failed",
-                note=variant.note,
-            ))
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="failed",
+                    error=f"mn_server_restart_failed: {exc}",
+                    error_class="mn_server_restart_failed",
+                    note=variant.note,
+                )
+            )
             if not keep_going_on_failure:
                 break
             continue
@@ -2035,9 +2111,12 @@ async def run_grid(
                 subprocess_started_unix=variant_started_unix,
             )
             log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: "
-                "magpie timeout (timeout_sec=%d): %s",
-                i + 1, len(grid), variant.name, variant_timeout_sec, exc,
+                "grid_runner: variant %d/%d name=%s aborted: magpie timeout (timeout_sec=%d): %s",
+                i + 1,
+                len(grid),
+                variant.name,
+                variant_timeout_sec,
+                exc,
             )
             _write_variant_abort_marker(
                 slot,
@@ -2046,20 +2125,22 @@ async def run_grid(
                 error_summary=str(exc),
                 extra_args=variant.extra_server_args,
             )
-            results.append(VariantResult(
-                name=variant.name, extra_server_args=variant.extra_server_args,
-                extra_envs=dict(variant.extra_envs),
-                status="failed", error=f"timeout: {exc}",
-                error_class="magpie_timeout",
-                note=variant.note,
-                runtime_sec=round(
-                    max(0.0, time.time() - variant_started_unix), 2,
-                ),
-                nonfatal_warnings=[
-                    f"harvested_leaked_artifact:{src}"
-                    for src, _ in to_harvested
-                ],
-            ))
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="failed",
+                    error=f"timeout: {exc}",
+                    error_class="magpie_timeout",
+                    note=variant.note,
+                    runtime_sec=round(
+                        max(0.0, time.time() - variant_started_unix),
+                        2,
+                    ),
+                    nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in to_harvested],
+                )
+            )
             await _pulse_after_variant(i)
             if not keep_going_on_failure:
                 break
@@ -2071,7 +2152,8 @@ async def run_grid(
         # this variant and the round proceeds. Harvest the crash server.log.
         if rc == SERVER_DEAD_RETURNCODE:
             variant_runtime_sec = round(
-                max(0.0, time.time() - variant_started_unix), 2,
+                max(0.0, time.time() - variant_started_unix),
+                2,
             )
             sd_candidates = sorted(slot.glob("benchmark_*"))
             sd_destination = sd_candidates[-1] if sd_candidates else slot
@@ -2083,32 +2165,34 @@ async def run_grid(
                 "grid_runner: variant %d/%d name=%s aborted: "
                 "server_init_dead (engine/worker bootstrap failed; parent "
                 "hung) after %.1fs",
-                i + 1, len(grid), variant.name, variant_runtime_sec,
+                i + 1,
+                len(grid),
+                variant.name,
+                variant_runtime_sec,
             )
             _write_variant_abort_marker(
                 slot,
                 variant_name=variant.name,
                 error_class="server_init_dead",
                 error_summary=(
-                    "server engine/worker init failed; parent process hung "
-                    "and was reaped by the liveness watchdog"
+                    "server engine/worker init failed; parent process hung and was reaped by the liveness watchdog"
                 ),
                 extra_args=variant.extra_server_args,
             )
-            results.append(VariantResult(
-                name=variant.name, extra_server_args=variant.extra_server_args,
-                extra_envs=dict(variant.extra_envs),
-                status="failed",
-                returncode=rc,
-                runtime_sec=variant_runtime_sec,
-                error="server_init_dead: engine/worker bootstrap failed",
-                error_class="server_init_dead",
-                note=variant.note,
-                nonfatal_warnings=[
-                    f"harvested_leaked_artifact:{src}"
-                    for src, _ in sd_harvested
-                ],
-            ))
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="failed",
+                    returncode=rc,
+                    runtime_sec=variant_runtime_sec,
+                    error="server_init_dead: engine/worker bootstrap failed",
+                    error_class="server_init_dead",
+                    note=variant.note,
+                    nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in sd_harvested],
+                )
+            )
             await _pulse_after_variant(i)
             if not keep_going_on_failure:
                 break
@@ -2119,7 +2203,8 @@ async def run_grid(
         # Still harvest leaks for post-mortem.
         if rc == OVERTIME_KILL_RETURNCODE:
             variant_runtime_sec = round(
-                max(0.0, time.time() - variant_started_unix), 2,
+                max(0.0, time.time() - variant_started_unix),
+                2,
             )
             ok_candidates = sorted(slot.glob("benchmark_*"))
             ok_destination = ok_candidates[-1] if ok_candidates else slot
@@ -2132,38 +2217,37 @@ async def run_grid(
             # benchmark_report, but the partial decode rate is still useful
             # post-mortem. Informational only — the variant stays failed and
             # this never feeds winner selection.
-            ok_warnings = [
-                f"harvested_leaked_artifact:{src}" for src, _ in ok_harvested
-            ]
+            ok_warnings = [f"harvested_leaked_artifact:{src}" for src, _ in ok_harvested]
             ok_estimate = estimate_killed_variant_throughput(slot)
-            estimated_tput = (
-                ok_estimate.get("output_throughput") if ok_estimate else None
-            )
+            estimated_tput = ok_estimate.get("output_throughput") if ok_estimate else None
             if estimated_tput is not None:
                 ok_warnings.append(
                     "estimated_output_throughput_from_server_log:"
                     f"{estimated_tput:.1f}tok/s"
                     f"(n={ok_estimate.get('num_samples')})"
                 )
-            results.append(VariantResult(
-                name=variant.name, extra_server_args=variant.extra_server_args,
-                extra_envs=dict(variant.extra_envs),
-                status="failed",
-                returncode=rc,
-                killed_overtime=True,
-                runtime_sec=variant_runtime_sec,
-                estimated_output_throughput=estimated_tput,
-                error=(
-                    f"killed_overtime: wall-clock {variant_runtime_sec:.1f}s "
-                    f"exceeded soft_deadline_sec={float(soft_deadline_sec or 0.0):.1f}s"
-                ),
-                note=variant.note,
-                nonfatal_warnings=ok_warnings,
-            ))
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="failed",
+                    returncode=rc,
+                    killed_overtime=True,
+                    runtime_sec=variant_runtime_sec,
+                    estimated_output_throughput=estimated_tput,
+                    error=(
+                        f"killed_overtime: wall-clock {variant_runtime_sec:.1f}s "
+                        f"exceeded soft_deadline_sec={float(soft_deadline_sec or 0.0):.1f}s"
+                    ),
+                    note=variant.note,
+                    nonfatal_warnings=ok_warnings,
+                )
+            )
             log.info(
-                "_grid_runner: variant %s killed_overtime "
-                "(runtime=%.1fs deadline=%.1fs est_output_tput=%s tok/s)",
-                variant.name, variant_runtime_sec,
+                "_grid_runner: variant %s killed_overtime (runtime=%.1fs deadline=%.1fs est_output_tput=%s tok/s)",
+                variant.name,
+                variant_runtime_sec,
                 float(soft_deadline_sec or 0.0),
                 f"{estimated_tput:.1f}" if estimated_tput is not None else "n/a",
             )
@@ -2191,14 +2275,13 @@ async def run_grid(
             )
         if not candidates:
             harvest_tags = [f"harvested_leaked_artifact:{src}" for src, _ in harvested]
-            no_ws_error_summary = (
-                (stderr or stdout)[-2000:]
-                if rc != 0 else "no benchmark_* workspace produced"
-            )
+            no_ws_error_summary = (stderr or stdout)[-2000:] if rc != 0 else "no benchmark_* workspace produced"
             log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: "
-                "no_benchmark_workspace (rc=%s)",
-                i + 1, len(grid), variant.name, rc,
+                "grid_runner: variant %d/%d name=%s aborted: no_benchmark_workspace (rc=%s)",
+                i + 1,
+                len(grid),
+                variant.name,
+                rc,
             )
             _write_variant_abort_marker(
                 slot,
@@ -2207,16 +2290,19 @@ async def run_grid(
                 error_summary=no_ws_error_summary,
                 extra_args=variant.extra_server_args,
             )
-            results.append(VariantResult(
-                name=variant.name, extra_server_args=variant.extra_server_args,
-                extra_envs=dict(variant.extra_envs),
-                status="failed",
-                returncode=rc,
-                error=no_ws_error_summary,
-                error_class="no_benchmark_workspace",
-                nonfatal_warnings=harvest_tags,
-                note=variant.note,
-            ))
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="failed",
+                    returncode=rc,
+                    error=no_ws_error_summary,
+                    error_class="no_benchmark_workspace",
+                    nonfatal_warnings=harvest_tags,
+                    note=variant.note,
+                )
+            )
             await _pulse_after_variant(i)
             if rc != 0 and not keep_going_on_failure:
                 break
@@ -2247,7 +2333,12 @@ async def run_grid(
                 invalid_class = "benchmark_report_invalid_metric"
             log.warning(
                 "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s): %s",
-                i + 1, len(grid), variant.name, invalid_class, rc, error[:200],
+                i + 1,
+                len(grid),
+                variant.name,
+                invalid_class,
+                rc,
+                error[:200],
             )
             _write_variant_abort_marker(
                 slot,
@@ -2256,52 +2347,60 @@ async def run_grid(
                 error_summary=error,
                 extra_args=variant.extra_server_args,
             )
-            results.append(VariantResult(
-                name=variant.name, extra_server_args=variant.extra_server_args,
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="failed",
+                    workspace=str(workspace),
+                    report_path=str(report_path) if report_path.exists() else None,
+                    raw_result_path=measurement.get("raw_result_path"),
+                    reported_success=measurement.get("reported_success"),
+                    returncode=rc,
+                    nonfatal_warnings=warnings,
+                    error=error,
+                    error_class=invalid_class,
+                    note=variant.note,
+                )
+            )
+            await _pulse_after_variant(i)
+            if rc != 0 and not keep_going_on_failure:
+                break
+            continue
+
+        results.append(
+            VariantResult(
+                name=variant.name,
+                extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
-                status="failed",
+                status="succeeded",
+                output_throughput=measurement.get("output_throughput"),
+                request_throughput=measurement.get("request_throughput"),
+                total_token_throughput=measurement.get("total_token_throughput"),
+                completed_requests=measurement.get("completed_requests"),
+                duration_seconds=measurement.get("duration_seconds"),
+                ttft_mean_ms=measurement.get("ttft_mean_ms"),
+                e2el_mean_ms=measurement.get("e2el_mean_ms"),
+                tpot_mean_ms=measurement.get("tpot_mean_ms"),
                 workspace=str(workspace),
                 report_path=str(report_path) if report_path.exists() else None,
                 raw_result_path=measurement.get("raw_result_path"),
                 reported_success=measurement.get("reported_success"),
                 returncode=rc,
                 nonfatal_warnings=warnings,
-                error=error,
-                error_class=invalid_class,
+                error=(stderr or stdout)[-2000:] if rc != 0 else None,
                 note=variant.note,
-            ))
-            await _pulse_after_variant(i)
-            if rc != 0 and not keep_going_on_failure:
-                break
-            continue
-
-        results.append(VariantResult(
-            name=variant.name, extra_server_args=variant.extra_server_args,
-            extra_envs=dict(variant.extra_envs),
-            status="succeeded",
-            output_throughput=measurement.get("output_throughput"),
-            request_throughput=measurement.get("request_throughput"),
-            total_token_throughput=measurement.get("total_token_throughput"),
-            completed_requests=measurement.get("completed_requests"),
-            duration_seconds=measurement.get("duration_seconds"),
-            ttft_mean_ms=measurement.get("ttft_mean_ms"),
-            e2el_mean_ms=measurement.get("e2el_mean_ms"),
-            tpot_mean_ms=measurement.get("tpot_mean_ms"),
-            workspace=str(workspace),
-            report_path=str(report_path) if report_path.exists() else None,
-            raw_result_path=measurement.get("raw_result_path"),
-            reported_success=measurement.get("reported_success"),
-            returncode=rc,
-            nonfatal_warnings=warnings,
-            error=(stderr or stdout)[-2000:] if rc != 0 else None,
-            note=variant.note,
-            runtime_sec=round(
-                max(0.0, time.time() - variant_started_unix), 2,
-            ),
-        ))
+                runtime_sec=round(
+                    max(0.0, time.time() - variant_started_unix),
+                    2,
+                ),
+            )
+        )
         log.info(
             "grid_runner: variant %s tput=%.1f tok/s",
-            variant.name, results[-1].output_throughput or 0.0,
+            variant.name,
+            results[-1].output_throughput or 0.0,
         )
         await _pulse_after_variant(i)
     return results
@@ -2337,17 +2436,15 @@ def pick_winners(
     """
     if keep_threshold_pct is None:
         from ._multi_node_env import is_multi_node
+
         keep_threshold_pct = (
-            MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT
-            if is_multi_node()
-            else SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT
+            MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT if is_multi_node() else SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT
         )
     cutoff = baseline_tput * (1.0 + keep_threshold_pct / 100.0)
     return [
-        r for r in results
-        if r.status == "succeeded"
-        and isinstance(r.output_throughput, (int, float))
-        and r.output_throughput > cutoff
+        r
+        for r in results
+        if r.status == "succeeded" and isinstance(r.output_throughput, (int, float)) and r.output_throughput > cutoff
     ]
 
 
@@ -2395,7 +2492,8 @@ def _write_variant_abort_marker(
             "error": (error_summary or "")[:2000],
             "extra_args": extra_args,
             "aborted_at_utc": time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(),
+                "%Y-%m-%dT%H:%M:%SZ",
+                time.gmtime(),
             ),
         }
         (slot / "abort_reason.json").write_text(
@@ -2405,7 +2503,8 @@ def _write_variant_abort_marker(
     except OSError as exc:
         log.warning(
             "_grid_runner: failed to write abort_reason.json at %s: %s",
-            slot, exc,
+            slot,
+            exc,
         )
 
 

@@ -28,20 +28,20 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     """
     sw = breakdown.get("sweep") or {}
     raw_variants = sw.get("all_variants") or []
-    variants: list[dict[str, Any]] = [
-        v if isinstance(v, dict) else {"raw": str(v)} for v in raw_variants
-    ]
+    variants: list[dict[str, Any]] = [v if isinstance(v, dict) else {"raw": str(v)} for v in raw_variants]
     if not variants:
         return RenderedSection(
             section_id="sweep",
             title="Sweep",
             key_facts=["No sweep run this session."],
             markdown_block="",
-            decisions=[Decision(
-                kind="not_attempted",
-                subject="sweep",
-                rationale="no sweep variants captured",
-            )],
+            decisions=[
+                Decision(
+                    kind="not_attempted",
+                    subject="sweep",
+                    rationale="no sweep variants captured",
+                )
+            ],
             warnings=[],
             skipped=True,
         )
@@ -68,9 +68,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     best = max(successes, key=_ot, default=None)
 
     facts: list[str] = []
-    facts.append(
-        f"Sweep grid={grid_size}, success={len(successes)}, failed={len(failures)}."
-    )
+    facts.append(f"Sweep grid={grid_size}, success={len(successes)}, failed={len(failures)}.")
     if best:
         facts.append(
             f"Best point: conc={best.get('conc')} isl={best.get('isl')} "
@@ -78,23 +76,29 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             f"ttft={best.get('ttft')}ms"
         )
 
-    decisions: list[Decision] = [Decision(
-        kind="kept" if best else "attempted",
-        subject="sweep",
-        rationale=f"{len(successes)}/{grid_size} variants succeeded",
-    )]
+    decisions: list[Decision] = [
+        Decision(
+            kind="kept" if best else "attempted",
+            subject="sweep",
+            rationale=f"{len(successes)}/{grid_size} variants succeeded",
+        )
+    ]
 
     head = variants[:_MAX_ROWS]
     rows = []
     for v in head:
-        rows.append([
-            v.get("conc"), v.get("isl"), v.get("osl"),
-            v.get("status"),
-            v.get("output_throughput"),
-            v.get("ttft"),
-            v.get("e2el"),
-            (v.get("error") or "")[:60],
-        ])
+        rows.append(
+            [
+                v.get("conc"),
+                v.get("isl"),
+                v.get("osl"),
+                v.get("status"),
+                v.get("output_throughput"),
+                v.get("ttft"),
+                v.get("e2el"),
+                (v.get("error") or "")[:60],
+            ]
+        )
     md = md_table(
         ["conc", "isl", "osl", "status", "tput", "ttft", "e2el", "error"],
         rows,

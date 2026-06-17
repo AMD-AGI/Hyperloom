@@ -29,9 +29,7 @@ from tracelens_analysis import (  # noqa: E402
 )
 import kernel_optimization  # noqa: E402
 
-FIXTURE_PATH = (
-    Path(__file__).resolve().parent / "fixtures" / "flydsl_naive_gemm.py"
-)
+FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "flydsl_naive_gemm.py"
 FIXTURE_DIR = str(FIXTURE_PATH.parent) + "/"
 
 
@@ -41,8 +39,7 @@ class TestFlyDSLNaiveGemmEndToEnd(unittest.TestCase):
     def setUp(self) -> None:
         self.assertTrue(
             FIXTURE_PATH.is_file(),
-            f"FlyDSL fixture missing at {FIXTURE_PATH}; CI cannot detect "
-            "FlyDSL-path regressions without it.",
+            f"FlyDSL fixture missing at {FIXTURE_PATH}; CI cannot detect FlyDSL-path regressions without it.",
         )
 
     def _candidate(self) -> dict:
@@ -55,7 +52,8 @@ class TestFlyDSLNaiveGemmEndToEnd(unittest.TestCase):
     def test_source_sniff_recognises_flydsl(self) -> None:
         self.assertTrue(_looks_like_flydsl_source(str(FIXTURE_PATH)))
         self.assertEqual(
-            source_type_for("naive_gemm", str(FIXTURE_PATH)), "flydsl",
+            source_type_for("naive_gemm", str(FIXTURE_PATH)),
+            "flydsl",
         )
 
     def test_kernel_category_is_flydsl(self) -> None:
@@ -65,7 +63,8 @@ class TestFlyDSLNaiveGemmEndToEnd(unittest.TestCase):
     def test_patchability_admits_fixture_via_env_override(self) -> None:
         """$FLYDSL_ROOT/$DSL2_ROOT override admits a fixture outside standard roots."""
         with mock.patch.dict(
-            os.environ, {"FLYDSL_ROOT": FIXTURE_DIR},
+            os.environ,
+            {"FLYDSL_ROOT": FIXTURE_DIR},
         ):
             reusable, skip = classify_patchability(self._candidate())
         self.assertTrue(reusable, msg=skip)
@@ -94,7 +93,8 @@ class TestFlyDSLNaiveGemmEndToEnd(unittest.TestCase):
 
     def test_geak_kernel_type_mapping(self) -> None:
         self.assertEqual(
-            kernel_optimization._GEAK_KERNEL_TYPE["flydsl"], "flydsl",
+            kernel_optimization._GEAK_KERNEL_TYPE["flydsl"],
+            "flydsl",
         )
 
 

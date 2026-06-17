@@ -78,10 +78,17 @@ def test_metadata_no_allowed_modes_field():
 
 
 def test_valid_families_v06():
-    assert VALID_FAMILIES == frozenset({
-        "prep", "analysis", "shallow", "deep_kernel",
-        "long", "creative", "resilience",
-    })
+    assert VALID_FAMILIES == frozenset(
+        {
+            "prep",
+            "analysis",
+            "shallow",
+            "deep_kernel",
+            "long",
+            "creative",
+            "resilience",
+        }
+    )
 
 
 # ActionRegistry — loads shipped P1-1 actions
@@ -139,15 +146,19 @@ def test_registry_validates_filename_matches_yaml_name(tmp_path):
     meta_dir = actions_dir / "_meta"
     meta_dir.mkdir(parents=True)
     bad_path = meta_dir / "bench_runner.yaml"
-    bad_path.write_text(yaml.safe_dump({
-        "name": "wrong_name",  # doesn't match filename
-        "family": "prep",
-        "cost_minutes_p50": 1.0,
-        "cost_minutes_p75": 2.0,
-        "expected_gain_pct": [0.0, 0.0],
-        "accuracy_risk": 0.0,
-        "crash_risk": 0.0,
-    }))
+    bad_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "wrong_name",  # doesn't match filename
+                "family": "prep",
+                "cost_minutes_p50": 1.0,
+                "cost_minutes_p75": 2.0,
+                "expected_gain_pct": [0.0, 0.0],
+                "accuracy_risk": 0.0,
+                "crash_risk": 0.0,
+            }
+        )
+    )
     reg = ActionRegistry(actions_dir=actions_dir)
     with pytest.raises(ActionRegistryError, match="does not match"):
         reg.load()
@@ -160,37 +171,49 @@ def gate_with_registry(registry) -> PolicyGate:
 
 
 def test_gate_delegate_known_action_ok(gate_with_registry):
-    gate_with_registry.validate_intent("orchestration", Intent(
-        type=IntentType.DELEGATE,
-        payload={"action_name": "baseline"},
-    ))
+    gate_with_registry.validate_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.DELEGATE,
+            payload={"action_name": "baseline"},
+        ),
+    )
 
 
 def test_gate_delegate_unknown_action_rejected(gate_with_registry):
     with pytest.raises(PolicyDenied) as exc:
-        gate_with_registry.validate_intent("orchestration", Intent(
-            type=IntentType.DELEGATE,
-            payload={"action_name": "make_coffee"},
-        ))
+        gate_with_registry.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.DELEGATE,
+                payload={"action_name": "make_coffee"},
+            ),
+        )
     assert exc.value.rule == "unknown_action"
 
 
 def test_gate_delegate_kernel_owned_still_kernel_owned_check(gate_with_registry):
     """Even with registry wired, kernel-owned actions get the kernel_owned reject."""
     with pytest.raises(PolicyDenied) as exc:
-        gate_with_registry.validate_intent("orchestration", Intent(
-            type=IntentType.DELEGATE,
-            payload={"action_name": "kernel_opt"},
-        ))
+        gate_with_registry.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.DELEGATE,
+                payload={"action_name": "kernel_opt"},
+            ),
+        )
     assert exc.value.rule == "kernel_owned_by_kernel_agent"
 
 
 def test_gate_propose_action_unknown_rejected(gate_with_registry):
     with pytest.raises(PolicyDenied) as exc:
-        gate_with_registry.validate_intent("orchestration", Intent(
-            type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": "bogus_action", "predicted_gain_pct": 5.0},
-        ))
+        gate_with_registry.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PROPOSE_ACTION,
+                payload={"action_name": "bogus_action", "predicted_gain_pct": 5.0},
+            ),
+        )
     assert exc.value.rule == "unknown_action"
 
 
@@ -199,10 +222,13 @@ def test_gate_propose_action_kernel_owned_rejected(gate_with_registry):
     like delegate (symmetry), so a proposal cannot bypass the kernel REQUEST
     handler by materializing as a kind=<kernel action> task."""
     with pytest.raises(PolicyDenied) as exc:
-        gate_with_registry.validate_intent("orchestration", Intent(
-            type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": "kernel_opt", "predicted_gain_pct": 12.0},
-        ))
+        gate_with_registry.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PROPOSE_ACTION,
+                payload={"action_name": "kernel_opt", "predicted_gain_pct": 12.0},
+            ),
+        )
     assert exc.value.rule == "kernel_owned_by_kernel_agent"
 
 
@@ -224,7 +250,10 @@ def test_gate_allowed_tools_for_action_no_registry_falls_back():
 def test_gate_delegate_unknown_action_no_registry_passes():
     """Without a registry wired, PolicyGate falls back to permissive (P0 path)."""
     g = PolicyGate(role_registry=default_role_registry(), action_registry=None)
-    g.validate_intent("orchestration", Intent(
-        type=IntentType.DELEGATE,
-        payload={"action_name": "anything_goes"},
-    ))
+    g.validate_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.DELEGATE,
+            payload={"action_name": "anything_goes"},
+        ),
+    )

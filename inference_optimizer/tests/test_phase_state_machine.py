@@ -30,7 +30,12 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 # phase_state pure function tests
 def test_phase_names_are_monotonic():
     assert phase_state.PHASE_NAMES == (
-        "PRELUDE", "FRAMEWORK_PR", "EXPLORE", "KERNEL", "SWEEP", "CLOSE",
+        "PRELUDE",
+        "FRAMEWORK_PR",
+        "EXPLORE",
+        "KERNEL",
+        "SWEEP",
+        "CLOSE",
     )
     for i, name in enumerate(phase_state.PHASE_NAMES):
         assert phase_state.phase_index(name) == i
@@ -73,11 +78,7 @@ def test_llm_proposable_set_drops_coordinator_internal_actions():
     for phase in phase_state.PHASE_NAMES:
         allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase]
         proposable = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS[phase]
-        assert proposable == (
-            allowed
-            - COORDINATOR_INTERNAL_ACTIONS
-            - ROBUSTNESS_DELEGATE_ONLY_ACTIONS
-        )
+        assert proposable == (allowed - COORDINATOR_INTERNAL_ACTIONS - ROBUSTNESS_DELEGATE_ONLY_ACTIONS)
         assert proposable.isdisjoint(COORDINATOR_INTERNAL_ACTIONS)
         # recover stays phase-allowed (robustness delegate) but is
         # never LLM-proposable by Orchestration.
@@ -113,27 +114,34 @@ def test_phase_interleave_off_matches_default_proposable_set():
     """With the env flag off, the interleave-aware helpers match the default set."""
     for phase in phase_state.PHASE_NAMES:
         base = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS.get(
-            phase, frozenset(),
+            phase,
+            frozenset(),
         )
         assert (
             phase_state.llm_proposable_actions_for_with_interleave(
-                phase, interleave=False,
+                phase,
+                interleave=False,
             )
             == base
         )
     # And kernel-owned actions are denied in EXPLORE under default mode.
     assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
-        "kernel_opt", "EXPLORE", interleave=False,
+        "kernel_opt",
+        "EXPLORE",
+        interleave=False,
     )
     assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
-        "explore", "KERNEL", interleave=False,
+        "explore",
+        "KERNEL",
+        interleave=False,
     )
 
 
 def test_phase_interleave_on_widens_explore_and_kernel():
     """With interleave=True, EXPLORE gains kernel-owned actions and KERNEL gains explore/specialist/integrate_patch."""
     explore = phase_state.llm_proposable_actions_for_with_interleave(
-        "EXPLORE", interleave=True,
+        "EXPLORE",
+        interleave=True,
     )
     assert "kernel_opt" in explore
     assert "integrate" in explore
@@ -141,7 +149,8 @@ def test_phase_interleave_on_widens_explore_and_kernel():
     assert "explore" in explore  # native EXPLORE actions still present
     assert "specialist" in explore
     kernel = phase_state.llm_proposable_actions_for_with_interleave(
-        "KERNEL", interleave=True,
+        "KERNEL",
+        interleave=True,
     )
     assert "explore" in kernel
     assert "specialist" in kernel
@@ -150,11 +159,13 @@ def test_phase_interleave_on_widens_explore_and_kernel():
     # SWEEP / CLOSE / PRELUDE / FRAMEWORK_PR are unchanged.
     for phase in ("PRELUDE", "FRAMEWORK_PR", "SWEEP", "CLOSE"):
         base = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS.get(
-            phase, frozenset(),
+            phase,
+            frozenset(),
         )
         assert (
             phase_state.llm_proposable_actions_for_with_interleave(
-                phase, interleave=True,
+                phase,
+                interleave=True,
             )
             == base
         )
@@ -166,19 +177,22 @@ def test_phase_interleave_env_flag_is_picked_up(monkeypatch):
     monkeypatch.delenv(phase_state.PHASE_INTERLEAVE_ENV, raising=False)
     assert phase_state.is_phase_interleave_enabled() is False
     assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
-        "kernel_opt", "EXPLORE",
+        "kernel_opt",
+        "EXPLORE",
     )
     # Explicit on values enable interleave.
     monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "1")
     assert phase_state.is_phase_interleave_enabled() is True
     assert phase_state.is_action_llm_proposable_in_phase_with_interleave(
-        "kernel_opt", "EXPLORE",
+        "kernel_opt",
+        "EXPLORE",
     )
     # Explicit off values stay off.
     monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "0")
     assert phase_state.is_phase_interleave_enabled() is False
     assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
-        "kernel_opt", "EXPLORE",
+        "kernel_opt",
+        "EXPLORE",
     )
     monkeypatch.setenv(phase_state.PHASE_INTERLEAVE_ENV, "false")
     assert phase_state.is_phase_interleave_enabled() is False
@@ -188,9 +202,15 @@ def test_phase_interleave_env_flag_is_picked_up(monkeypatch):
 
 def test_phase_exit_reasons_includes_required_vocab():
     for reason in (
-        "prelude_done", "plateau_explore", "plateau_kernel",
-        "sweep_done", "robustness_escalated", "target_reached",
-        "time_exhausted", "user_stop_requested", "cortex_drain_failed",
+        "prelude_done",
+        "plateau_explore",
+        "plateau_kernel",
+        "sweep_done",
+        "robustness_escalated",
+        "target_reached",
+        "time_exhausted",
+        "user_stop_requested",
+        "cortex_drain_failed",
         "no_kernel_skipped",
     ):
         assert phase_state.is_valid_phase_exit_reason(reason), reason
@@ -199,11 +219,18 @@ def test_phase_exit_reasons_includes_required_vocab():
 def test_stop_reason_vocab_includes_v06_and_v08():
     for reason in (
         # v0.6 sentinels
-        "target_reached", "time_exhausted", "max_ticks", "policy_loop",
-        "baseline_failed", "emergency", "coordinator_exception",
+        "target_reached",
+        "time_exhausted",
+        "max_ticks",
+        "policy_loop",
+        "baseline_failed",
+        "emergency",
+        "coordinator_exception",
         # v0.8 additions
-        "crash_threshold_exceeded", "user_stop_requested",
-        "cortex_drain_failed", "plateau_explore",
+        "crash_threshold_exceeded",
+        "user_stop_requested",
+        "cortex_drain_failed",
+        "plateau_explore",
         # #522: fast baseline arg-error stop reason
         "baseline_arg_error",
     ):
@@ -214,6 +241,7 @@ def test_stop_reason_vocab_includes_v06_and_v08():
 def test_set_stop_reason_keeps_baseline_arg_error(tmp_path):
     """#522: baseline_arg_error must survive set_stop_reason (not map to unknown)."""
     from inference_optimizer.orchestrator.shared_state import SharedState
+
     state = SharedState(session_id="t", model_name="m", model_path="m")
     written = state.set_stop_reason("baseline_arg_error")
     assert written == "baseline_arg_error"
@@ -329,9 +357,11 @@ def test_shared_state_phase_fields_default_to_empty():
 def test_record_phase_transition_writes_row_and_updates_phase():
     s = SharedState()
     row = s.record_phase_transition(
-        to_phase="PRELUDE", reason="phase_entered",
+        to_phase="PRELUDE",
+        reason="phase_entered",
         evidence={"trigger": "fresh_session"},
-        ts="2026-05-19T00:00:00+00:00", ts_unix=1747600000.0,
+        ts="2026-05-19T00:00:00+00:00",
+        ts_unix=1747600000.0,
     )
     assert s.phase == "PRELUDE"
     assert s.phase_started_ts == "2026-05-19T00:00:00+00:00"
@@ -340,9 +370,11 @@ def test_record_phase_transition_writes_row_and_updates_phase():
     assert row["from_phase"] == "" and row["to_phase"] == "PRELUDE"
     # Second transition keeps history append-only.
     row2 = s.record_phase_transition(
-        to_phase="EXPLORE", reason="prelude_done",
+        to_phase="EXPLORE",
+        reason="prelude_done",
         evidence={"baseline_tput": 100.0},
-        ts="2026-05-19T00:01:00+00:00", ts_unix=1747600060.0,
+        ts="2026-05-19T00:01:00+00:00",
+        ts_unix=1747600060.0,
     )
     assert s.phase == "EXPLORE"
     assert len(s.phase_history) == 2
@@ -353,8 +385,11 @@ def test_record_phase_transition_writes_row_and_updates_phase():
 # CORE_STATE_FIELDS includes phase fields (Inv-1 single writer)
 def test_core_state_fields_includes_phase_fields():
     for f in (
-        "phase", "phase_started_ts", "phase_started_unix",
-        "phase_history", "phase_budget_pct",
+        "phase",
+        "phase_started_ts",
+        "phase_started_unix",
+        "phase_history",
+        "phase_budget_pct",
     ):
         assert f in CORE_STATE_FIELDS, f
 
@@ -362,14 +397,18 @@ def test_core_state_fields_includes_phase_fields():
 # PolicyGate R1 phase_incompatible
 def _make_role_registry():
     from inference_optimizer.orchestrator.agent_role import default_role_registry
+
     return default_role_registry()
 
 
 def test_policy_gate_phase_strict_denies_kernel_in_prelude():
     state = SharedState()
     state.record_phase_transition(
-        to_phase="PRELUDE", reason="phase_entered", evidence={},
-        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+        to_phase="PRELUDE",
+        reason="phase_entered",
+        evidence={},
+        ts="2026-05-19T00:00:00+00:00",
+        ts_unix=1.0,
     )
     gate = PolicyGate(
         role_registry=_make_role_registry(),
@@ -392,8 +431,11 @@ def test_policy_gate_phase_strict_denies_kernel_in_prelude():
 def test_policy_gate_phase_warn_mode_does_not_raise():
     state = SharedState()
     state.record_phase_transition(
-        to_phase="PRELUDE", reason="phase_entered", evidence={},
-        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+        to_phase="PRELUDE",
+        reason="phase_entered",
+        evidence={},
+        ts="2026-05-19T00:00:00+00:00",
+        ts_unix=1.0,
     )
     gate = PolicyGate(
         role_registry=_make_role_registry(),
@@ -412,8 +454,11 @@ def test_policy_gate_phase_warn_mode_does_not_raise():
 def test_policy_gate_phase_strict_allows_in_phase_action():
     state = SharedState()
     state.record_phase_transition(
-        to_phase="PRELUDE", reason="phase_entered", evidence={},
-        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+        to_phase="PRELUDE",
+        reason="phase_entered",
+        evidence={},
+        ts="2026-05-19T00:00:00+00:00",
+        ts_unix=1.0,
     )
     gate = PolicyGate(
         role_registry=_make_role_registry(),
@@ -430,8 +475,11 @@ def test_policy_gate_phase_strict_allows_in_phase_action():
 def test_policy_gate_phase_strict_blocks_explore_action_in_prelude():
     state = SharedState()
     state.record_phase_transition(
-        to_phase="PRELUDE", reason="phase_entered", evidence={},
-        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+        to_phase="PRELUDE",
+        reason="phase_entered",
+        evidence={},
+        ts="2026-05-19T00:00:00+00:00",
+        ts_unix=1.0,
     )
     gate = PolicyGate(
         role_registry=_make_role_registry(),
@@ -460,8 +508,11 @@ def test_policy_gate_phase_interleave_off_denies_kernel_request_in_explore(
     monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "0")
     state = SharedState()
     state.record_phase_transition(
-        to_phase="EXPLORE", reason="prelude_done", evidence={},
-        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+        to_phase="EXPLORE",
+        reason="prelude_done",
+        evidence={},
+        ts="2026-05-19T00:00:00+00:00",
+        ts_unix=1.0,
     )
     gate = PolicyGate(
         role_registry=_make_role_registry(),
@@ -488,8 +539,11 @@ def test_policy_gate_phase_interleave_on_allows_kernel_request_in_explore(
     monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
     state = SharedState()
     state.record_phase_transition(
-        to_phase="EXPLORE", reason="prelude_done", evidence={},
-        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+        to_phase="EXPLORE",
+        reason="prelude_done",
+        evidence={},
+        ts="2026-05-19T00:00:00+00:00",
+        ts_unix=1.0,
     )
     gate = PolicyGate(
         role_registry=_make_role_registry(),
@@ -514,8 +568,11 @@ def test_policy_gate_phase_interleave_on_allows_explore_propose_in_kernel(
     monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
     state = SharedState()
     state.record_phase_transition(
-        to_phase="KERNEL", reason="plateau_explore", evidence={},
-        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+        to_phase="KERNEL",
+        reason="plateau_explore",
+        evidence={},
+        ts="2026-05-19T00:00:00+00:00",
+        ts_unix=1.0,
     )
     gate = PolicyGate(
         role_registry=_make_role_registry(),
@@ -534,8 +591,11 @@ def test_policy_gate_phase_interleave_does_not_widen_other_phases(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
     state = SharedState()
     state.record_phase_transition(
-        to_phase="SWEEP", reason="plateau_kernel", evidence={},
-        ts="2026-05-19T00:00:00+00:00", ts_unix=1.0,
+        to_phase="SWEEP",
+        reason="plateau_kernel",
+        evidence={},
+        ts="2026-05-19T00:00:00+00:00",
+        ts_unix=1.0,
     )
     gate = PolicyGate(
         role_registry=_make_role_registry(),
@@ -558,19 +618,26 @@ def test_policy_gate_phase_interleave_does_not_widen_other_phases(monkeypatch):
 @pytest.fixture
 def coordinator_with_mocks(session_dir):
     from inference_optimizer.orchestrator.backends import (
-        MockBackend, MockCriticBackend, MockKernelBackend, MockRobustnessBackend,
+        MockBackend,
+        MockCriticBackend,
+        MockKernelBackend,
+        MockRobustnessBackend,
         ScriptedPlan,
     )
     from inference_optimizer.orchestrator.coordinator import Coordinator
-    silent = ScriptedPlan(turns=[], default_intent=Intent(
-        type=IntentType.SEND_MESSAGE,
-        payload={"topic": "heartbeat", "body_md": "ok"},
-    ))
+
+    silent = ScriptedPlan(
+        turns=[],
+        default_intent=Intent(
+            type=IntentType.SEND_MESSAGE,
+            payload={"topic": "heartbeat", "body_md": "ok"},
+        ),
+    )
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel":        MockKernelBackend(),
-        "critic":        MockCriticBackend(),
-        "robustness":    MockRobustnessBackend(),
+        "kernel": MockKernelBackend(),
+        "critic": MockCriticBackend(),
+        "robustness": MockRobustnessBackend(),
     }
     return Coordinator(session_dir, backends=backends)
 
@@ -589,7 +656,8 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
 
 @pytest.mark.asyncio
 async def test_coordinator_advances_to_explore_when_baseline_present(
-    coordinator_with_mocks, session_dir,
+    coordinator_with_mocks,
+    session_dir,
 ):
     c = coordinator_with_mocks
     try:
@@ -612,7 +680,8 @@ async def test_coordinator_advances_to_explore_when_baseline_present(
 
 @pytest.mark.asyncio
 async def test_coordinator_phase_idempotent_within_same_tick(
-    coordinator_with_mocks, session_dir,
+    coordinator_with_mocks,
+    session_dir,
 ):
     c = coordinator_with_mocks
     try:
@@ -631,23 +700,24 @@ async def test_coordinator_phase_idempotent_within_same_tick(
 # breakdown collect_phase_segments
 def test_collect_phase_segments_groups_actions_by_window():
     from inference_optimizer.breakdown.collectors import collect_phase_segments
+
     state = {
         "phase_history": [
             {
                 "from_phase": "",
-                "to_phase":   "PRELUDE",
-                "reason":     "phase_entered",
-                "evidence":   {"trigger": "fresh_session"},
-                "ts":         "2026-05-19T00:00:00+00:00",
-                "ts_unix":    1.0,
+                "to_phase": "PRELUDE",
+                "reason": "phase_entered",
+                "evidence": {"trigger": "fresh_session"},
+                "ts": "2026-05-19T00:00:00+00:00",
+                "ts_unix": 1.0,
             },
             {
                 "from_phase": "PRELUDE",
-                "to_phase":   "EXPLORE",
-                "reason":     "prelude_done",
-                "evidence":   {"baseline_tput": 100.0},
-                "ts":         "2026-05-19T00:05:00+00:00",
-                "ts_unix":    301.0,
+                "to_phase": "EXPLORE",
+                "reason": "prelude_done",
+                "evidence": {"baseline_tput": 100.0},
+                "ts": "2026-05-19T00:05:00+00:00",
+                "ts_unix": 301.0,
             },
         ],
     }
@@ -664,12 +734,13 @@ def test_collect_phase_segments_groups_actions_by_window():
     assert len(prelude["actions"]) == 1
     assert prelude["actions"][0]["action"] == "baseline"
     assert explore["phase"] == "EXPLORE"
-    assert explore["exit_reason"] == ""        # currently active segment
+    assert explore["exit_reason"] == ""  # currently active segment
     assert explore["elapsed_seconds"] is None  # no exit_unix yet
     assert explore["actions"][0]["action"] == "params"
 
 
 def test_collect_phase_segments_empty_when_history_missing():
     from inference_optimizer.breakdown.collectors import collect_phase_segments
+
     assert collect_phase_segments({}, [], warnings=[]) == []
     assert collect_phase_segments({"phase_history": []}, [], warnings=[]) == []

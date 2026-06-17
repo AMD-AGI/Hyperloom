@@ -55,9 +55,7 @@ def test_default_enabled_actions_no_kernel_excludes_all_kernel_actions():
 def test_full_enabled_actions_match_registry_minus_pmc_optional(registry):
     """All enabled actions must be present in the registry."""
     for name in FULL_ENABLED_ACTIONS:
-        assert registry.get(name) is not None, (
-            f"FULL_ENABLED_ACTIONS lists {name!r} but it's not in registry"
-        )
+        assert registry.get(name) is not None, f"FULL_ENABLED_ACTIONS lists {name!r} but it's not in registry"
     for name in NO_KERNEL_ENABLED_ACTIONS:
         assert registry.get(name) is not None
 
@@ -84,10 +82,7 @@ def test_recover_is_robustness_delegate_only_with_real_executor(registry):
 
 # Output structure
 def _section_headers(prompt: str) -> list[str]:
-    return [
-        line.strip() for line in prompt.splitlines()
-        if line.startswith("## ") or line.startswith("### ")
-    ]
+    return [line.strip() for line in prompt.splitlines() if line.startswith("## ") or line.startswith("### ")]
 
 
 def test_full_prompt_has_seven_sections(registry, rules_path):
@@ -151,9 +146,7 @@ def test_full_prompt_has_all_phase_subheaders(registry, rules_path):
     expected_phases = {m.pipeline_phase for m in enabled_metas if m is not None}
     sub_headers = {h for h in _section_headers(text) if h.startswith("### ")}
     for phase in expected_phases:
-        assert f"### {phase}" in sub_headers, (
-            f"expected phase header '### {phase}' in catalogue, got {sub_headers}"
-        )
+        assert f"### {phase}" in sub_headers, f"expected phase header '### {phase}' in catalogue, got {sub_headers}"
         assert phase in _PHASE_HEADERS, (
             f"phase {phase!r} present in registry but missing from "
             f"_PHASE_HEADERS — update prompt_builder._PHASE_HEADERS"
@@ -180,9 +173,7 @@ def test_every_enabled_action_appears_with_description(registry, rules_path):
         meta = registry.get(name)
         assert meta is not None
         assert f"**{name}**" in text, f"action {name!r} missing from catalogue"
-        assert meta.description in text, (
-            f"description for {name!r} missing or truncated"
-        )
+        assert meta.description in text, f"description for {name!r} missing or truncated"
 
 
 def test_kernel_owned_actions_marked_kernel_owned(registry, rules_path):
@@ -197,9 +188,7 @@ def test_kernel_owned_actions_marked_kernel_owned(registry, rules_path):
     )
     for name in KERNEL_OWNED_ACTIONS:
         marker = f"**{name}** (KERNEL-OWNED)"
-        assert marker in text, (
-            f"expected '(KERNEL-OWNED)' tag next to {name!r}"
-        )
+        assert marker in text, f"expected '(KERNEL-OWNED)' tag next to {name!r}"
 
 
 def test_emit_hints_use_request_for_kernel_actions(registry, rules_path):
@@ -281,7 +270,8 @@ def test_explicit_kernel_enabled_override_wins(registry, rules_path):
 
 # Mission / time budget content
 def test_mission_section_emphasises_cumulative_gain_and_stack_rebench(
-    registry, rules_path,
+    registry,
+    rules_path,
 ):
     """Gap-10: the mission emphasises cumulative gain + ``stack rebench`` (validate_stack keyword gone)."""
     text = build_orchestration_prompt(
@@ -312,9 +302,7 @@ def test_time_budget_section_lists_all_enabled_phases(registry, rules_path):
     enabled_metas = [registry.get(n) for n in FULL_ENABLED_ACTIONS]
     expected_phases = {m.pipeline_phase for m in enabled_metas if m is not None}
     for phase in expected_phases:
-        assert f"**{phase}**" in pipeline_block, (
-            f"phase {phase!r} missing from time budget summary"
-        )
+        assert f"**{phase}**" in pipeline_block, f"phase {phase!r} missing from time budget summary"
     assert "Sum of typical phase ETAs" in pipeline_block
     assert "max_minutes=120" in pipeline_block
     # The inlined stack rebench must be documented in the budget section.
@@ -323,7 +311,8 @@ def test_time_budget_section_lists_all_enabled_phases(registry, rules_path):
 
 # #144 last comment Layer 2: orchestrator must NOT pre-pin backends='claude'
 def test_run_optimization_example_does_not_pin_backends_to_claude(
-    registry, rules_path,
+    registry,
+    rules_path,
 ):
     """#144 Layer 2: the ``run_optimization`` example must NOT pin ``backends: 'claude'`` (the LLM would echo it, forcing Claude-only)."""
     text = build_orchestration_prompt(
@@ -343,8 +332,7 @@ def test_run_optimization_example_does_not_pin_backends_to_claude(
     # The example's `params:` block must NOT carry a `backends: 'claude'`
     # (or any other backend) literal.
     assert "backends: 'claude'" not in example_block, (
-        "orchestrator example must not pin backends='claude' — that's the "
-        "#144 last comment Layer 2 regression"
+        "orchestrator example must not pin backends='claude' — that's the #144 last comment Layer 2 regression"
     )
     assert "backends: 'codex'" not in example_block
     assert "backends: 'geak'" not in example_block
@@ -366,9 +354,7 @@ def test_run_optimization_section_documents_auto_pick_rule(registry, rules_path)
     assert "auto-pick" in k2_section.lower() or "auto-picks" in k2_section.lower(), (
         "kernel_opt step must document that backends are auto-picked"
     )
-    assert "choose_backends" in k2_section, (
-        "K2 step must reference the kernel-agent function that does the pick"
-    )
+    assert "choose_backends" in k2_section, "K2 step must reference the kernel-agent function that does the pick"
     # And the historical regression must be called out so the rationale
     # survives a casual prompt-template cleanup.
     assert "#144" in k2_section

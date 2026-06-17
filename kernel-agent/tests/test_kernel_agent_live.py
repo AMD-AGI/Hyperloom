@@ -63,16 +63,20 @@ def load_dotenv(path: Path) -> dict[str, str]:
 
 
 def gpu_available() -> bool:
-    if shutil.which("rocm-smi") and subprocess.run(
-        ["rocm-smi", "--showid"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    ).returncode == 0:
+    if (
+        shutil.which("rocm-smi")
+        and subprocess.run(["rocm-smi", "--showid"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+        == 0
+    ):
         return True
-    if shutil.which("amd-smi") and subprocess.run(
-        ["amd-smi", "list"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    ).returncode == 0:
+    if (
+        shutil.which("amd-smi")
+        and subprocess.run(["amd-smi", "list"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    ):
         return True
     try:
         import torch  # type: ignore
+
         return bool(torch.cuda.is_available())
     except Exception:
         return False
@@ -87,20 +91,14 @@ def run_json(cmd: list[str], *, workspace: Path, env: dict[str, str], timeout: i
         timeout=timeout,
     )
     if proc.returncode != 0:
-        raise AssertionError(
-            "command failed\n"
-            f"cmd={cmd}\n"
-            f"stdout={proc.stdout[-2000:]}\n"
-            f"stderr={proc.stderr[-2000:]}"
-        )
+        raise AssertionError(f"command failed\ncmd={cmd}\nstdout={proc.stdout[-2000:]}\nstderr={proc.stderr[-2000:]}")
     return json.loads(proc.stdout)
 
 
 def write_live_files(workspace: Path) -> tuple[Path, Path, Path]:
     source = workspace / "rmsnorm_kernel.py"
     source.write_text(
-        "def triton_rmsnorm_kernel(x):\n"
-        "    return x\n",
+        "def triton_rmsnorm_kernel(x):\n    return x\n",
         encoding="utf-8",
     )
     harness = workspace / "bench_rmsnorm.py"
@@ -111,19 +109,24 @@ def write_live_files(workspace: Path) -> tuple[Path, Path, Path]:
         encoding="utf-8",
     )
     trace = workspace / "live_trace.json"
-    trace.write_text(json.dumps({
-        "traceEvents": [
+    trace.write_text(
+        json.dumps(
             {
-                "name": "triton_rmsnorm_kernel",
-                "cat": "kernel",
-                "dur": 1000,
-                "args": {
-                    "source_file": str(source),
-                    "shape": {"M": 16, "N": 16},
-                },
+                "traceEvents": [
+                    {
+                        "name": "triton_rmsnorm_kernel",
+                        "cat": "kernel",
+                        "dur": 1000,
+                        "args": {
+                            "source_file": str(source),
+                            "shape": {"M": 16, "N": 16},
+                        },
+                    }
+                ]
             }
-        ]
-    }), encoding="utf-8")
+        ),
+        encoding="utf-8",
+    )
     return trace, source, harness
 
 
@@ -132,10 +135,12 @@ class KernelAgentLiveTests(unittest.TestCase):
     def test_live_gpu_and_backend_attempts_are_recorded(self) -> None:
         self.assertTrue(gpu_available(), "GPU is not available to the live test")
 
-        env_file = Path(os.environ.get(
-            "KERNEL_AGENT_ENV_FILE",
-            "/wekafs/xiaofei/AgentKernelArena/.env",
-        ))
+        env_file = Path(
+            os.environ.get(
+                "KERNEL_AGENT_ENV_FILE",
+                "/wekafs/xiaofei/AgentKernelArena/.env",
+            )
+        )
         env = load_dotenv(env_file)
         env.setdefault("KERNEL_AGENT_LLM_MODEL", "claude4.7")
         backends = os.environ.get("KERNEL_AGENT_LIVE_BACKENDS", "geak,claude,codex,llm")
@@ -143,25 +148,46 @@ class KernelAgentLiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             trace, source, harness = write_live_files(workspace)
-            analysis = run_json([
-                sys.executable, str(TRACE_TOOL),
-                "--trace-input", str(trace),
-                "--session-id", "live",
-                "--model-name", "live-test-model",
-                "--framework", "sglang",
-                "--dry-run",
-            ], workspace=workspace, env=env)
+            analysis = run_json(
+                [
+                    sys.executable,
+                    str(TRACE_TOOL),
+                    "--trace-input",
+                    str(trace),
+                    "--session-id",
+                    "live",
+                    "--model-name",
+                    "live-test-model",
+                    "--framework",
+                    "sglang",
+                    "--dry-run",
+                ],
+                workspace=workspace,
+                env=env,
+            )
             self.assertEqual(analysis["hot_kernels"][0]["kernel_id"], "k001")
 
-            result = run_json([
-                sys.executable, str(OPT_TOOL),
-                "--kernel-id", "k001",
-                "--session-id", "live",
-                "--backends", backends,
-                "--source-file", str(source),
-                "--test-harness-path", str(harness),
-                "--budget-minutes", os.environ.get("KERNEL_AGENT_LIVE_BUDGET_MIN", "0.25"),
-            ], workspace=workspace, env=env, timeout=240)
+            result = run_json(
+                [
+                    sys.executable,
+                    str(OPT_TOOL),
+                    "--kernel-id",
+                    "k001",
+                    "--session-id",
+                    "live",
+                    "--backends",
+                    backends,
+                    "--source-file",
+                    str(source),
+                    "--test-harness-path",
+                    str(harness),
+                    "--budget-minutes",
+                    os.environ.get("KERNEL_AGENT_LIVE_BUDGET_MIN", "0.25"),
+                ],
+                workspace=workspace,
+                env=env,
+                timeout=240,
+            )
 
             self.assertEqual(result["selected_backends"], [b.strip() for b in backends.split(",")])
             self.assertEqual(len(result["attempts"]), len(result["selected_backends"]))

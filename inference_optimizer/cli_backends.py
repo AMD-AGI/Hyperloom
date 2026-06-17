@@ -73,18 +73,13 @@ def _build_backends(
             an ``agent`` choice is missing its required agent root.
     """
     if critic_choice not in ("mock", "agent"):
-        raise ValueError(
-            f"_build_backends: critic_choice={critic_choice!r} not in "
-            "{'mock','agent'}"
-        )
+        raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
 
     if critic_choice == "mock":
         critic_backend: Any = MockCriticBackend()
     else:  # "agent"
         if critic_agent_root is None:
-            raise ValueError(
-                "_build_backends: critic_choice='agent' requires critic_agent_root"
-            )
+            raise ValueError("_build_backends: critic_choice='agent' requires critic_agent_root")
         # Feed the registry-derived per-action verdict policy so the
         # critic-agent runtime sees
         # ``review_constraints.action_verdict_policy[<action_name>]`` and
@@ -94,6 +89,7 @@ def _build_backends(
             from inference_optimizer.orchestrator.action_registry import (
                 ActionRegistry,
             )
+
             _reg = ActionRegistry().load()
             _policy = {a.name: a.verdict_class for a in _reg.all()}
         except Exception:  # noqa: BLE001 — degrade to empty policy
@@ -108,18 +104,12 @@ def _build_backends(
         )
 
     if robustness_choice not in ("mock", "agent"):
-        raise ValueError(
-            f"_build_backends: robustness_choice={robustness_choice!r} not in "
-            "{'mock','agent'}"
-        )
+        raise ValueError(f"_build_backends: robustness_choice={robustness_choice!r} not in {{'mock','agent'}}")
     if robustness_choice == "mock":
         robustness_backend: Any = MockRobustnessBackend()
     else:  # "agent"
         if robustness_agent_root is None:
-            raise ValueError(
-                "_build_backends: robustness_choice='agent' requires "
-                "robustness_agent_root"
-            )
+            raise ValueError("_build_backends: robustness_choice='agent' requires robustness_agent_root")
         robustness_backend = RobustnessAgentBackend(
             robustness_agent_root=robustness_agent_root,
             session_dir=session_dir,
@@ -135,10 +125,12 @@ def _build_backends(
         # ClaudeBackend.__post_init__. kernel / critic / robustness keep
         # the stateless per-tick reactor mode.
         "orchestration": ClaudeBackend(
-            model=claude_model, max_turns_default=4, conversational=True,
+            model=claude_model,
+            max_turns_default=4,
+            conversational=True,
         ),
-        "critic":        critic_backend,
-        "robustness":    robustness_backend,
+        "critic": critic_backend,
+        "robustness": robustness_backend,
     }
     if not no_kernel:
         if kernel_codex:
@@ -177,9 +169,7 @@ def _build_proposal_scorer(
     if raw is None:
         models = tuple(DEFAULT_SCORER_MODELS)
     else:
-        models = tuple(
-            m for m in (s.strip() for s in str(raw).split(",")) if m
-        )
+        models = tuple(m for m in (s.strip() for s in str(raw).split(",")) if m)
     if not models:
         return None
     return ProposalScorer(models=models, session_dir=session_dir)

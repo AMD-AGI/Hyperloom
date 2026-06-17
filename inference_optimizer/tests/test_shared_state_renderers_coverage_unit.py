@@ -19,10 +19,15 @@ def test_format_discovered_flags():
 
 
 def test_format_variant_line():
-    line = SharedState._format_variant_line({
-        "name": "v1", "gain_pct": 5.0, "tput": 120.0,
-        "extra_server_args": "--x", "extra_envs": {"E": "1"},
-    })
+    line = SharedState._format_variant_line(
+        {
+            "name": "v1",
+            "gain_pct": 5.0,
+            "tput": 120.0,
+            "extra_server_args": "--x",
+            "extra_envs": {"E": "1"},
+        }
+    )
     assert "v1" in line
     assert "+5.00%" in line
     assert "tput=120.0" in line
@@ -51,7 +56,9 @@ def test_format_backend_winners_history():
     assert "no explore rounds" in st._format_backend_winners_history()
     st.backend_winners_history = [
         {
-            "round_id": f"r{i}", "action": "explore", "base_tput": 100.0,
+            "round_id": f"r{i}",
+            "action": "explore",
+            "base_tput": 100.0,
             "best": {"name": "w", "gain_pct": 2.0},
             "winners": [{"name": "w", "gain_pct": 2.0, "extra_server_args": "--x"}],
         }
@@ -90,7 +97,8 @@ def test_format_last_trace_analyze():
     st = SharedState()
     assert st._format_last_trace_analyze() == "(none)"
     st.last_trace_analyze = {
-        "trace_input": "t", "candidates_path": "c",
+        "trace_input": "t",
+        "candidates_path": "c",
         "hot_kernels_top15": [{"kernel_id": "k1"}],
         "reusable_native_kernel_ids": ["k1"],
         "trace_health_warnings": [
@@ -106,7 +114,8 @@ def test_format_last_trace_analyze():
 def test_format_trace_analyze_skipped_kernels():
     st = SharedState()
     blob = {
-        "trace_input": "t", "candidates_path": "c",
+        "trace_input": "t",
+        "candidates_path": "c",
         "hot_kernels_top15": [],
         "skipped_kernels_top": [
             {"kernel_id": "s1", "name": "n1", "skip_reason": "tiny"},
@@ -137,8 +146,7 @@ def test_format_last_sweep():
     assert "best=(none)" in st._format_last_sweep()
     st.last_sweep = {
         "grid_size": 4,
-        "best_overall": {"name": "b", "tput": 100.0, "conc": 8,
-                         "isl": 1024, "osl": 512},
+        "best_overall": {"name": "b", "tput": 100.0, "conc": 8, "isl": 1024, "osl": 512},
     }
     out = st._format_last_sweep()
     assert "grid_size=4" in out

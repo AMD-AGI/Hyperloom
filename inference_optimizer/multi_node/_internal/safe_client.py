@@ -157,11 +157,7 @@ class SafeClient:
             raise SafeApiError(resp.status_code, resp.text, endpoint=endpoint)
         data = self._decode(resp, endpoint)
         # Tolerate both the bare {"workloadId": ...} and handle()-wrapped shapes.
-        wid = (
-            data.get("workloadId")
-            or (data.get("data") or {}).get("workloadId")
-            or data.get("workload_id")
-        )
+        wid = data.get("workloadId") or (data.get("data") or {}).get("workloadId") or data.get("workload_id")
         if not wid:
             raise SafeApiError(resp.status_code, resp.text, endpoint=endpoint)
         return wid

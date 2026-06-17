@@ -88,6 +88,7 @@ def resolve_var(value: Any, env: dict | None = None) -> Any:
 
 # ── InferenceX GitHub config parsing ──
 
+
 def fetch_amd_master_yaml(
     repo_url: str,
     config_path: str = ".github/configs/amd-master.yaml",
@@ -109,7 +110,9 @@ def fetch_amd_master_yaml(
     with tempfile.TemporaryDirectory() as tmpdir:
         subprocess.run(
             ["git", "clone", "--depth=1", f"--branch={ref}", repo_url, tmpdir],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
         yaml_path = Path(tmpdir) / config_path
         with open(yaml_path) as f:
@@ -131,7 +134,9 @@ def get_latest_commit(repo_url: str, ref: str = "main") -> str:
     """
     result = subprocess.run(
         ["git", "ls-remote", repo_url, f"refs/heads/{ref}"],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     )
     return result.stdout.split()[0] if result.stdout.strip() else ""
 
@@ -171,10 +176,7 @@ def synthesize_entry_from_ci_config(model_cfg: dict) -> dict:
     return {
         "model": model_cfg.get("model_hf", ""),
         "image": model_cfg.get("image", ""),
-        "model-prefix": (
-            model_cfg.get("key", "").split("-")[0]
-            if model_cfg.get("key") else ""
-        ),
+        "model-prefix": (model_cfg.get("key", "").split("-")[0] if model_cfg.get("key") else ""),
         "runner": model_cfg.get("target_gpu", "mi300x"),
         "precision": model_cfg.get("precision", ""),
         "framework": model_cfg.get("framework", "sglang"),
@@ -184,12 +186,14 @@ def synthesize_entry_from_ci_config(model_cfg: dict) -> dict:
                 {
                     "isl": pair[0],
                     "osl": pair[1],
-                    "search-space": [{
-                        "tp": model_cfg.get("tp", 8),
-                        "ep": model_cfg.get("ep", 1),
-                        "conc-start": 4,
-                        "conc-end": model_cfg.get("conc", 64),
-                    }],
+                    "search-space": [
+                        {
+                            "tp": model_cfg.get("tp", 8),
+                            "ep": model_cfg.get("ep", 1),
+                            "conc-start": 4,
+                            "conc-end": model_cfg.get("conc", 64),
+                        }
+                    ],
                 }
                 for pair in isl_osl
             ],
@@ -210,11 +214,7 @@ def parse_model_entry(entry: dict) -> dict:
         A structured config dict (model name, seq-len pairs, search space).
     """
     # Support both seq-len-configs (old) and scenarios.fixed-seq-len (new).
-    seq_configs = (
-        entry.get("seq-len-configs")
-        or (entry.get("scenarios") or {}).get("fixed-seq-len")
-        or []
-    )
+    seq_configs = entry.get("seq-len-configs") or (entry.get("scenarios") or {}).get("fixed-seq-len") or []
     first_seq = seq_configs[0] if seq_configs else {}
     first_search = (first_seq.get("search-space") or [{}])[0]
 
@@ -239,6 +239,7 @@ def parse_model_entry(entry: dict) -> dict:
 
 
 # ── InferenceX Benchmark API ──
+
 
 def fetch_benchmarks(model_api_name: str, api_url: str | None = None) -> list[dict]:
     """Fetch benchmark data for a model from the InferenceX API.
@@ -301,9 +302,7 @@ def find_benchmark(
     """
     candidates = []
     for b in benchmarks:
-        if (b.get("hardware") == hardware
-                and b.get("isl") == isl
-                and b.get("osl") == osl):
+        if b.get("hardware") == hardware and b.get("isl") == isl and b.get("osl") == osl:
             if precision and b.get("precision") != precision:
                 continue
             candidates.append(b)
@@ -403,7 +402,9 @@ def find_benchmark_script_from_clone(
     with tempfile.TemporaryDirectory() as tmpdir:
         subprocess.run(
             ["git", "clone", "--depth=1", f"--branch={ref}", repo_url, tmpdir],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
         return find_benchmark_script(tmpdir, ifx_key, scripts_path)
 
@@ -436,8 +437,7 @@ def format_benchmark_for_prompt(
         str: A multi-line summary of the selected benchmark, or a single
             "no data" line when nothing matches.
     """
-    target = find_benchmark(benchmarks, target_gpu, isl, osl, precision, image,
-                            tp=tp, conc=conc)
+    target = find_benchmark(benchmarks, target_gpu, isl, osl, precision, image, tp=tp, conc=conc)
     if not target:
         return f"# No InferenceX data for {target_gpu} at ISL={isl}/OSL={osl}/{precision}"
 
@@ -463,6 +463,7 @@ def format_benchmark_for_prompt(
 
 # ── Config merging ──
 
+
 def merge_model_config(
     model_cfg: dict,
     ifx_entry: dict,
@@ -486,11 +487,9 @@ def merge_model_config(
     parsed = parse_model_entry(ifx_entry)
     model_hf = parsed["model_hf"]
 
-    kernel_opt_ws = resolve_var(
-        model_cfg.get("kernel_opt_workspace", defaults.get("kernel_opt_workspace", "")))
+    kernel_opt_ws = resolve_var(model_cfg.get("kernel_opt_workspace", defaults.get("kernel_opt_workspace", "")))
     min_k = model_cfg.get("min_kernels", defaults.get("min_kernels", 5))
-    kern_backends = model_cfg.get(
-        "kernel_opt_backends", defaults.get("kernel_opt_backends", "geak"))
+    kern_backends = model_cfg.get("kernel_opt_backends", defaults.get("kernel_opt_backends", "geak"))
 
     nfs_root = get_nfs_root()
     model_path = model_cfg.get("model_path_override") or f"{nfs_root}/models/{model_hf.replace('/', '-')}"
@@ -527,11 +526,7 @@ def merge_model_config(
         # Per-entry Claw pluginId override; default 4 (legacy Hyperloom plugin).
         # claw_plugin_id: null omits pluginId from the body; other ints switch
         # plugin (same hook as the A/B Test --plugin-id override).
-        "claw_plugin_id": (
-            model_cfg["claw_plugin_id"]
-            if "claw_plugin_id" in model_cfg
-            else 4
-        ),
+        "claw_plugin_id": (model_cfg["claw_plugin_id"] if "claw_plugin_id" in model_cfg else 4),
         # Hyperloom-skill knobs for prompt_template.md: nodes>1 triggers the
         # multinode block; target_gain/max_hours become optimize CLI flags;
         # random_range_ratio is benchmark prompt jitter (InferenceX default 0.8);
@@ -540,7 +535,8 @@ def merge_model_config(
         "target_gain": model_cfg.get("target_gain", defaults.get("target_gain", 10)),
         "max_hours": model_cfg.get("max_hours", defaults.get("max_hours", 2)),
         "random_range_ratio": model_cfg.get(
-            "random_range_ratio", defaults.get("random_range_ratio", 0.8),
+            "random_range_ratio",
+            defaults.get("random_range_ratio", 0.8),
         ),
         "kernel_agent_build_geak_rag_index": model_cfg.get(
             "kernel_agent_build_geak_rag_index",
