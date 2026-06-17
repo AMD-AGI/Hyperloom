@@ -682,6 +682,12 @@ def _row_to_candidate(
     kernel_path = record.get("kernel path", "").strip()
     if kernel_path in {"-", "—"}:
         kernel_path = ""
+    # Device kernel symbol (TraceLens "Kernel Name" column, an appended extra):
+    # the mangled __global__ name used to disambiguate dispatch ops in the
+    # op -> .cu resolver. Placeholders normalize to "".
+    device_kernel_name = record.get("kernel name", "").strip()
+    if device_kernel_name in {"-", "—"}:
+        device_kernel_name = ""
     # Promote a framework-relative launcher path to its absolute on-disk source so the
     # patchability gate passes; verbatim launcher kept on tracelens_launcher_path below.
     resolved_source_file = kernel_path
@@ -712,6 +718,8 @@ def _row_to_candidate(
         "source_file": resolved_source_file,
         # PR-B §1: keep raw Kernel Path verbatim so aggregation's AST resolution survives _finalize_candidates' source_file overwrite.
         "tracelens_launcher_path": kernel_path,
+        # Device kernel symbol for dispatch resolution (op -> .cu); "" when absent.
+        "device_kernel_name": device_kernel_name,
         "source_type": "tracelens_report",
         "shapes": shapes,
         "tracelens_category": category,
