@@ -1052,6 +1052,25 @@ def _apply_fellow_env(env: dict) -> None:
     # bypassPermissions refuses to start under root unless IS_SANDBOX=1.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         env.setdefault("IS_SANDBOX", "1")
+    # claude CLI discovery (RCA root cause 1): the forge-loop child + the claude
+    # subprocess it spawns may inherit a stripped PATH, so resolve claude's
+    # absolute path here and (a) export FORGE_CLAUDE_BIN for the Forge-side
+    # resolver and (b) prepend its dir to the child PATH. Belt-and-suspenders
+    # with the Kernel-Forge _resolve_claude_cli fallback.
+    claude_bin = (env.get("FORGE_CLAUDE_BIN", "").strip()
+                  or shutil.which("claude"))
+    if not claude_bin:
+        for cand in ("/usr/local/bin/claude", "/usr/bin/claude",
+                     str(Path.home() / ".local/bin/claude")):
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                claude_bin = cand
+                break
+    if claude_bin and os.path.isfile(claude_bin):
+        env.setdefault("FORGE_CLAUDE_BIN", claude_bin)
+        bindir = os.path.dirname(claude_bin)
+        cur_path = env.get("PATH", "")
+        if bindir and bindir not in cur_path.split(os.pathsep):
+            env["PATH"] = bindir + os.pathsep + cur_path if cur_path else bindir
     # The AMD SaFE proxy presents an internal/self-signed cert; without skipping
     # TLS the Node CLI handshake fails and the streaming query() hangs.
     env.setdefault("ANTHROPIC_SKIP_TLS_VERIFY", "true")
@@ -1075,6 +1094,27 @@ def _apply_fellow_env(env: dict) -> None:
                 _proxy = ""
         if _proxy:
             env["ANTHROPIC_BASE_URL"] = _proxy
+
+    # Fellow-hung mitigation (RCA root cause 4): a streaming request to the SaFE
+    # proxy can stall with no first token / no keepalive; without a client-side
+    # timeout the SDK awaits until the outer 900s kill. Bound the claude CLI's
+    # own request timeout and cut non-essential traffic / autoupdate that can
+    # also block in headless containers. setdefault keeps operator overrides.
+    env.setdefault("API_TIMEOUT_MS", "300000")
+    env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+    env.setdefault("DISABLE_AUTOUPDATER", "1")
+    # Auth fallback: if no ANTHROPIC_API_KEY is exported, seed it from the claude
+    # CLI's validated config.json primaryApiKey so the streaming transport
+    # authenticates instead of intermittently failing.
+    if not env.get("ANTHROPIC_API_KEY", "").strip():
+        try:
+            import json as _json
+            _cfg = _json.loads((Path.home() / ".claude" / "config.json").read_text())
+            _key = str(_cfg.get("primaryApiKey") or "").strip()
+            if _key:
+                env["ANTHROPIC_API_KEY"] = _key
+        except Exception:
+            pass
 
 
 def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,

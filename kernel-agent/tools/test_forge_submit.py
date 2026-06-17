@@ -8,6 +8,7 @@ Design ref: claw-dev/docs-zh/forge-as-hyperloom-backend-integration.md
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -343,3 +344,28 @@ def test_report_informational_timing_not_kept_does_not_trigger_keep(tmp_path):
     # Critical: extractors must still see no speedup + failed correctness.
     assert ko._extract_speedup_from_report(report) is None
     assert ko._extract_correctness_from_report(report) is False
+
+
+def test_apply_fellow_env_claude_path_and_timeout(tmp_path, monkeypatch):
+    """G3+G4: child env gets FORGE_CLAUDE_BIN + claude dir on PATH, plus the
+    fellow-hung mitigations (API_TIMEOUT_MS / disable flags)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    claude = bindir / "claude"
+    claude.write_text("#!/bin/sh\n")
+    claude.chmod(0o755)
+    # FORGE_CLAUDE_BIN is read from the child env dict the function mutates.
+    env = {"PATH": "/usr/bin", "FORGE_CLAUDE_BIN": str(claude)}
+    forge_submit._apply_fellow_env(env)
+    assert env["FORGE_CLAUDE_BIN"] == str(claude)
+    assert str(bindir) in env["PATH"].split(os.pathsep)
+    assert env["API_TIMEOUT_MS"] == "300000"
+    assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert env["DISABLE_AUTOUPDATER"] == "1"
+
+
+def test_apply_fellow_env_timeout_respects_operator_override(monkeypatch):
+    """setdefault must not clobber an operator-set API_TIMEOUT_MS."""
+    env = {"API_TIMEOUT_MS": "60000"}
+    forge_submit._apply_fellow_env(env)
+    assert env["API_TIMEOUT_MS"] == "60000"
