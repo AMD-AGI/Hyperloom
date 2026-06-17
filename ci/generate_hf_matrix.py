@@ -770,7 +770,11 @@ def collect_entries() -> list[dict | str]:
 
     hf_top = int(os.environ.get("INPUT_HF_TOP") or "5")
     min_params = float(os.environ.get("INPUT_MIN_PARAMS") or "7")
-    hf = HuggingFaceClient(os.environ.get("HF_TOKEN", ""))
+    hf = HuggingFaceClient(
+        os.environ.get("HF_TOKEN", ""),
+        tokens=[os.environ.get("HF_TOKEN_2", "")],
+        seed=os.environ.get("GITHUB_RUN_ID", ""),
+    )
     print(f"fetching HF top-{hf_top} (>={min_params}B)...", file=sys.stderr)
     return _apply_exclusions(hf.top_models(hf_top, min_params_b=min_params))
 
