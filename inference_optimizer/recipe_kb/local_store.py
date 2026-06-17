@@ -354,13 +354,13 @@ class LocalRecipeStore:
     # Path helpers
     # ------------------------------------------------------------------
     def _recipe_dir(self, canonical_id: str) -> Path:
-        """Return the 5-level directory holding one cid's files.
+        """Return the 7-level directory holding one cid's files.
 
         Args:
             canonical_id (str): Canonical recipe identity.
 
         Returns:
-            Path: ``root`` joined with the cid's 5 path components.
+            Path: ``root`` joined with the cid's 7 path components.
         """
         components = cid_to_path_components(canonical_id)
         return self.root.joinpath(*components)
@@ -425,23 +425,14 @@ class LocalRecipeStore:
         return self._recipe_dir(canonical_id) / LOCK_FILENAME
 
     def _walk_recipe_dirs(self) -> Iterable[Path]:
-        """Yield every directory exactly five levels below ``root``
+        """Yield every directory at a valid depth below ``root``
         that contains a live ``recipe.json``.
 
         Used by :meth:`list_recent` / :meth:`search` — both of which
         only care about live recipe rows. Directories that hold
         attempts but no recipe are intentionally excluded.
 
-        Skips:
-        * any malformed depth (operator created an extra subdir or
-          put a recipe.json at the wrong level — we log and skip
-          rather than indexing it);
-        * the ``history`` subdir (six levels deep, the recipe.json
-          presence check naturally rules it out).
-
-        Yields:
-            Each recipe directory at the documented 5-level depth that holds a
-            live ``recipe.json``.
+        Only 7-level directories are accepted.
         """
         if not self.root.is_dir():
             return
@@ -453,16 +444,16 @@ class LocalRecipeStore:
                 rel_parts = recipe_dir.relative_to(self.root).parts
             except ValueError:
                 continue
-            if len(rel_parts) != 5:
+            if len(rel_parts) != 7:
                 log.debug(
-                    "skipping %s: not at the documented 5-level depth",
+                    "skipping %s: not at the required 7-level depth",
                     recipe_dir,
                 )
                 continue
             yield recipe_dir
 
     def _walk_cid_dirs(self) -> Iterable[Path]:
-        """Yield every directory exactly five levels below ``root``
+        """Yield every directory exactly seven levels below ``root``
         that contains EITHER a live ``recipe.json`` OR an
         ``attempts.ndjson``.
 
@@ -487,7 +478,7 @@ class LocalRecipeStore:
                     rel_parts = cid_dir.relative_to(self.root).parts
                 except ValueError:
                     continue
-                if len(rel_parts) != 5:
+                if len(rel_parts) != 7:
                     continue
                 if cid_dir in seen:
                     continue
@@ -501,7 +492,7 @@ class LocalRecipeStore:
         self,
         *,
         canonical_id: str,
-        # 5-tuple identity (also encoded in canonical_id; stamped at
+        # 7-tuple identity (also encoded in canonical_id; stamped at
         # the top level for arbor-compat — arbor's recipe.json has
         # ``model`` / ``hardware`` as top-level fields).
         model: str = "",
@@ -815,8 +806,30 @@ class LocalRecipeStore:
                 ) from exc
 
     # ------------------------------------------------------------------
-    # list_recent / search
+    # list_recent / search / list_all_live_recipes
     # ------------------------------------------------------------------
+    def list_all_live_recipes(self) -> list[dict[str, Any]]:
+        """Return ALL live recipes without the search() 1000-row clamp.
+
+        Used by the mirror ingest CronJob which must iterate the entire
+        corpus. Unlike search(), this bypasses the limit/filter/sort
+        machinery and simply walks every recipe dir.
+        """
+        rows: list[dict[str, Any]] = []
+        for recipe_dir in self._walk_recipe_dirs():
+            try:
+                cid = canonical_id_for_path(
+                    root=self.root, recipe_dir=recipe_dir,
+                )
+            except InvalidCanonicalIdError:
+                continue
+            payload = _read_json(recipe_dir / RECIPE_FILENAME)
+            if not isinstance(payload, dict):
+                continue
+            payload.setdefault("canonical_id", cid)
+            rows.append(payload)
+        return rows
+
     def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
         """Recent live recipes (``updated_at DESC``), no filter.
 
@@ -1134,8 +1147,14 @@ def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> boo
     Recognised label keys map to top-level fields:
 
     * ``model`` / ``hardware`` / ``framework`` /
-      ``framework_version`` / ``precision`` → the 5-tuple identity
-      slots stamped at the top level.
+      ``framework_version`` / ``precision`` / ``model_type`` /
+      ``architectures`` → the 7-tuple identity slots.
+
+    For ``architectures`` the semantics are *contains*: the query's
+    architecture slug(s) must be a subset of the recipe's architectures
+    (matching gbrain_remote_client behaviour). Both slug strings
+    (``"llamaforcausallm"``) and lists (``["LlamaForCausalLM"]``) are
+    accepted and normalized before comparison.
 
     Any other key is matched against the recipe's free-form
     ``extras`` (preserved arbor session-level keys) so a caller
@@ -1151,16 +1170,69 @@ def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> boo
             match. Empty matches everything.
 
     Returns:
-        bool: ``True`` iff every requested label equals the row's
+        bool: ``True`` iff every requested label matches the row's
             corresponding value.
     """
     if not label_match:
         return True
     for key, expected in label_match.items():
-        actual = payload.get(key)
-        if actual != expected:
-            return False
+        if key == "architectures":
+            if not _arch_contains(payload.get("architectures"), expected):
+                return False
+        elif key == "model_type":
+            if not _model_type_matches(payload.get("model_type"), expected):
+                return False
+        else:
+            actual = payload.get(key)
+            if actual != expected:
+                return False
     return True
+
+
+def _arch_contains(recipe_arch: Any, query_arch: Any) -> bool:
+    """True when the recipe's architectures contain all queried architectures.
+
+    Handles slug strings ("llamaforcausallm"), "+" joined multi-arch slugs,
+    and raw lists (["LlamaForCausalLM"]). None / empty / default on either
+    side is a wildcard so legacy recipes without architecture tags match.
+    """
+    from ..recipe_snapshot_constants import DEFAULT_ARCHITECTURES_SLUG
+    query_slug = _normalize_arch_to_slug(query_arch)
+    if not query_slug or query_slug in (DEFAULT_ARCHITECTURES_SLUG, "none"):
+        return True
+    recipe_slug = _normalize_arch_to_slug(recipe_arch)
+    if not recipe_slug or recipe_slug in (DEFAULT_ARCHITECTURES_SLUG, "none"):
+        return True
+    query_parts = set(query_slug.split("+"))
+    recipe_parts = set(recipe_slug.split("+"))
+    return query_parts.issubset(recipe_parts)
+
+
+def _model_type_matches(recipe_mt: Any, query_mt: Any) -> bool:
+    """Compare model_type with slug normalization.
+
+    None / empty / default on either side is treated as a wildcard
+    so legacy recipes without model_type tags are still reachable.
+    """
+    from ..recipe_snapshot_constants import DEFAULT_MODEL_TYPE_SLUG
+    q = str(query_mt or "").strip().lower().replace("/", "_").replace(" ", "_")
+    if not q or q in (DEFAULT_MODEL_TYPE_SLUG, "none"):
+        return True
+    r = str(recipe_mt or "").strip().lower().replace("/", "_").replace(" ", "_")
+    if not r or r in (DEFAULT_MODEL_TYPE_SLUG, "none"):
+        return True
+    return r == q
+
+
+def _normalize_arch_to_slug(value: Any) -> str:
+    """Normalize architectures to a sorted '+'-joined lowercase slug."""
+    if isinstance(value, list):
+        parts = sorted(
+            str(v).strip().lower().replace("/", "_").replace(" ", "_")
+            for v in value if str(v or "").strip()
+        )
+        return "+".join(parts) if parts else ""
+    return str(value or "").strip().lower().replace("/", "_").replace(" ", "_")
 
 
 def _matches_metrics(
