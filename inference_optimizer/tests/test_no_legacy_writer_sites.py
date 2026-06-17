@@ -62,6 +62,9 @@ ALLOWED_FILES: dict[str, str] = {
     # CI transform reads legacy-keyed session_breakdown.json artefacts.
     "ci/transform_to_session_summary_v2.py":
         "legacy session-breakdown JSON reader (operator-side back-compat)",
+    "ci/test_ci_transform_v2.py":
+        "unit tests assert the ci legacy reader migrates extra_sglang_args "
+        "-> extra_server_args",
 
     # Prompt / orientation text that names both keys explicitly so the
     # LLM and any human reader of the prompt knows the alias exists
@@ -146,6 +149,9 @@ _SKIP_DIRECTORIES: tuple[str, ...] = (
     ".git/",
     "node_modules/",
     "__pycache__/",
+    # Local build / venv trees (not source of truth for writer-site policy).
+    "build/",
+    ".venv/",
     # setuptools build metadata (regenerated SOURCES.txt mirrors file
     # names, not source content — not a real writer site).
     "hyperloom_inference_optimizer.egg-info/",

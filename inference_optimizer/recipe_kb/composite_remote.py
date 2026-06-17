@@ -69,7 +69,14 @@ _FETCH_FLOOR = 25
 
 def _richness(row: dict[str, Any]) -> int:
     """Count populated 'rich' fields — a tie-breaker that favours the row
-    carrying actual warm-start payload over a sparse stub."""
+    carrying actual warm-start payload over a sparse stub.
+
+    Args:
+        row: Arbor-shaped recipe row to score.
+
+    Returns:
+        The count of populated 'rich' fields on ``row``.
+    """
     score = 0
     if row.get("best_config"):
         score += 1
@@ -85,7 +92,15 @@ def _richness(row: dict[str, Any]) -> int:
 
 
 def _precedence_key(row: dict[str, Any]) -> tuple[int, float, int, float]:
-    """Higher tuple = preferred base. authority → confidence → richness → tput."""
+    """Higher tuple = preferred base. authority → confidence → richness → tput.
+
+    Args:
+        row: Arbor-shaped recipe row to rank.
+
+    Returns:
+        A precedence tuple ``(authority_rank, confidence, richness,
+        throughput)`` where a higher tuple is preferred.
+    """
     authority = str(row.get("authority") or "")
     try:
         confidence = float(row.get("confidence") or 0.0)
@@ -117,7 +132,14 @@ def _is_empty(value: Any) -> bool:
 
 
 def _dedup_preserve(items: Iterable[Any]) -> list[Any]:
-    """Order-preserving dedup of a small sequence."""
+    """Order-preserving dedup of a small sequence.
+
+    Args:
+        items: Sequence to deduplicate.
+
+    Returns:
+        The deduplicated items, preserving first-seen order.
+    """
     out: list[Any] = []
     for it in items:
         if it not in out:
@@ -135,6 +157,14 @@ def _union_lists(
     is the ordered, de-duplicated list of ``_source`` tags that contributed at
     least one element to the union (for field-level provenance).
 
+    Args:
+        rows: Rows sharing one canonical id, in precedence order.
+        field: Name of the list-valued field to union.
+
+    Returns:
+        A ``(merged_items, contributor_sources)`` tuple where
+        ``contributor_sources`` is the ordered, de-duplicated list of
+        ``_source`` tags that contributed at least one element.
     """
     out: list[Any] = []
     seen: set[str] = set()
@@ -161,6 +191,13 @@ def _merge_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
     surviving value came from — scalar fields map to the single winning/
     back-filling source, list fields to the ordered set of contributors. This
     is what lets the KB-eval layer attribute an outcome to gbrain vs cortex.
+
+    Args:
+        rows: All rows sharing one canonical id.
+
+    Returns:
+        A single merged arbor row with unioned list fields, back-filled
+        scalars, and ``_sources`` / ``_field_sources`` provenance markers.
     """
     ordered = sorted(rows, key=_precedence_key, reverse=True)
     base = dict(ordered[0])
@@ -220,7 +257,11 @@ class CompositeRemoteRecipeClient:
 
     @property
     def enabled(self) -> bool:
-        """Enabled iff at least one sub-remote is enabled."""
+        """Enabled iff at least one sub-remote is enabled.
+
+        Returns:
+            ``True`` when at least one sub-remote reports enabled.
+        """
         return any(getattr(s, "enabled", False) for s in self._sources)
 
     def _active(self) -> list[tuple[str, Any]]:
@@ -237,7 +278,17 @@ class CompositeRemoteRecipeClient:
         ]
 
     def _fan_out_search(self, *, name: str, source: Any, kwargs: dict[str, Any]) -> list[dict[str, Any]]:
-        """Run one source's search, tag + normalize each row. Best-effort."""
+        """Run one source's search, tag + normalize each row. Best-effort.
+
+        Args:
+            name: Display name of the sub-remote (used for tagging and logs).
+            source: The sub-remote client to query.
+            kwargs: Search keyword arguments forwarded to ``source.search``.
+
+        Returns:
+            Arbor-normalized rows tagged with their ``_source``, or an empty
+            list when the source is skipped on error.
+        """
         try:
             rows = source.search(**kwargs)
         except RemoteRecipeClientError as exc:
@@ -324,7 +375,16 @@ class CompositeRemoteRecipeClient:
         canonical_id: str,
         version: int | None = None,
     ) -> dict[str, Any] | None:
-        """Exact-cid read: search every source by the 5-tuple labels, merge top."""
+        """Exact-cid read: search every source by the 5-tuple labels, merge top.
+
+        Args:
+            canonical_id: Canonical recipe id to resolve.
+            version: Optional version (accepted for parity; not used to filter).
+
+        Returns:
+            The merged row matching ``canonical_id``, the top merged row when
+            no exact match is found, or ``None`` when nothing is available.
+        """
         try:
             labels = _labels_from_canonical_id(canonical_id)
         except InvalidCanonicalIdError as exc:
@@ -359,7 +419,11 @@ class CompositeRemoteRecipeClient:
         )[: int(limit)]
 
     def _first_active(self) -> Any | None:
-        """Return the first enabled sub-remote, or ``None`` if none are active."""
+        """Return the first enabled sub-remote, or ``None`` if none are active.
+
+        Returns:
+            The first enabled sub-remote, or ``None`` when none are active.
+        """
         for _name, source in self._active():
             return source
         return None
@@ -404,7 +468,11 @@ class CompositeRemoteRecipeClient:
         return src.session_summary(session_id=session_id) if src else None
 
     def health(self) -> bool:
-        """Healthy iff any active source is healthy."""
+        """Healthy iff any active source is healthy.
+
+        Returns:
+            ``True`` when at least one active source reports healthy.
+        """
         for _name, source in self._active():
             try:
                 if source.health():

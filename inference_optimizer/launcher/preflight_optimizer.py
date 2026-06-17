@@ -24,6 +24,14 @@ STALE_PROCESS_PATTERNS = (
 
 
 def _read_cmdline(pid: str) -> str:
+    """Read and decode the ``/proc/<pid>/cmdline`` for the given pid.
+
+    Args:
+        pid: The process id (as a string) whose command line to read.
+
+    Returns:
+        The space-joined command line, or ``""`` when it cannot be read.
+    """
     try:
         raw = pathlib.Path("/proc", pid, "cmdline").read_bytes()
     except OSError:
@@ -32,6 +40,12 @@ def _read_cmdline(pid: str) -> str:
 
 
 def _print_torch_visibility() -> bool:
+    """Print torch CUDA visibility and report whether a device is usable.
+
+    Returns:
+        ``True`` when torch imports and reports at least one available CUDA
+        device, ``False`` otherwise (including on import failure).
+    """
     try:
         import torch  # type: ignore[import-not-found]
     except Exception as exc:
@@ -46,6 +60,7 @@ def _print_torch_visibility() -> bool:
 
 
 def _print_rocm_snapshot() -> None:
+    """Print a ``rocm-smi`` memory-use snapshot (best-effort, never raises)."""
     rocm_smi = shutil.which("rocm-smi")
     if not rocm_smi:
         print("rocm_smi=missing")
@@ -72,6 +87,12 @@ def _print_rocm_snapshot() -> None:
 
 
 def _find_stale_processes() -> list[tuple[str, str]]:
+    """Scan ``/proc`` for running processes matching known stale patterns.
+
+    Returns:
+        A list of ``(pid, cmdline)`` tuples for processes (other than this one)
+        whose command line matches one of :data:`STALE_PROCESS_PATTERNS`.
+    """
     matches: list[tuple[str, str]] = []
     for pid in filter(str.isdigit, os.listdir("/proc")):
         if int(pid) == os.getpid():
@@ -83,6 +104,14 @@ def _find_stale_processes() -> list[tuple[str, str]]:
 
 
 def main() -> int:
+    """Run launcher preflight checks and return a process exit code.
+
+    Validates the model path, prints torch/ROCm visibility, and reports any
+    stale optimizer/server processes.
+
+    Returns:
+        ``0`` when every check passes, otherwise ``2``.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model_path", help="Model directory to optimize.")
     args = parser.parse_args()
