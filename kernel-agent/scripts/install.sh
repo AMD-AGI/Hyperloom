@@ -250,6 +250,15 @@ CURSOR_DEFAULT_MODEL_VAL="${CURSOR_DEFAULT_MODEL:-claude-opus-4-7-thinking-xhigh
 # not differentiate, just install everything".
 CHECK_ONLY=0
 DRY_RUN=0
+# The PerfSkills/GEAK-e2e optimizer is OPT-IN: it is only used at runtime when a
+# session passes ``--kernel-optimizer=perfskills``. The default runtime optimizer
+# is ``native``, so installing the second GEAK-e2e checkout (extra clone + network
+# + claude-agent-sdk pip) unconditionally would tax every native-only user. Gate
+# it behind ``--with-perfskills`` / ``INSTALL_PERFSKILLS=1``; default off.
+case "${INSTALL_PERFSKILLS:-0}" in
+  1|true|TRUE|yes|YES|on|ON) INSTALL_PERFSKILLS=1 ;;
+  *) INSTALL_PERFSKILLS=0 ;;
+esac
 
 usage() {
   cat <<'EOF'
@@ -264,12 +273,16 @@ Always installs:
 Options:
   --check-only       Verify current environment, do not install
   --dry-run          Print actions without running installs
+  --with-perfskills  Also install the PerfSkills/GEAK-e2e optimizer checkout
+                     (only needed for --kernel-optimizer=perfskills runs).
   -h, --help         Show this help
 
 Environment (optional):
   KERNEL_AGENT_BUILD_GEAK_RAG_INDEX=1   Build the GEAK semantic RAG index in ensure_rag_index (default).
                                         Set 0 to skip — useful for claude-only kernel-opt or CPU-only
                                         sandboxes where BGE-large embedding takes ~1.5h.
+  INSTALL_PERFSKILLS=1                  Install the PerfSkills/GEAK-e2e optimizer checkout (default 0).
+                                        Equivalent to --with-perfskills. Default native users skip it.
 EOF
 }
 
@@ -277,6 +290,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
+    --with-perfskills) INSTALL_PERFSKILLS=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[kernel-agent] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
@@ -1451,7 +1465,14 @@ main() {
 
   # Always install everything; ensure_oob also calls ensure_llm_auth_files.
   ensure_geak
-  ensure_perfskills
+  # PerfSkills/GEAK-e2e is opt-in (see INSTALL_PERFSKILLS / --with-perfskills):
+  # the default runtime optimizer is native, so native-only users skip the
+  # extra GEAK-e2e clone + claude-agent-sdk pip.
+  if [ "$INSTALL_PERFSKILLS" -eq 1 ]; then
+    ensure_perfskills
+  else
+    log "skipping PerfSkills/GEAK-e2e optimizer install (default native; pass --with-perfskills or INSTALL_PERFSKILLS=1 to enable)"
+  fi
   ensure_rag_index
   ensure_oob
   write_env_file

@@ -25,6 +25,48 @@ def _read_json(path: Path) -> dict:
         return {}
 
 
+def _write_benchmark_report(
+    out_dir: Path,
+    *,
+    conc: int,
+    isl: int,
+    osl: int,
+    success: bool,
+    output_throughput_tok_s: float | None,
+    mean_ttft_ms: float | None,
+    mean_tpot_ms: float | None,
+    mean_e2el_ms: float | None,
+    error: str | None = None,
+) -> None:
+    """Write a session-breakdown-compatible ``benchmark_report.json``.
+
+    Field names match what ``breakdown.collectors._benchmark_report_metrics``
+    parses (flat ``output_throughput_tok_s`` / ``mean_ttft_ms`` /
+    ``mean_tpot_ms`` / ``mean_e2el_ms``) and ``success`` drives the per-variant
+    status, so the perfskills sweep points are auditable through the exact same
+    collector path as the native sweep. Best-effort: never raises.
+    """
+    report = {
+        "success": bool(success),
+        "conc": conc,
+        "isl": isl,
+        "osl": osl,
+        "output_throughput_tok_s": output_throughput_tok_s,
+        "mean_ttft_ms": mean_ttft_ms,
+        "mean_tpot_ms": mean_tpot_ms,
+        "mean_e2el_ms": mean_e2el_ms,
+        "source": "perfskills",
+    }
+    if error:
+        report["error"] = error
+    try:
+        (out_dir / "benchmark_report.json").write_text(
+            json.dumps(report, indent=2), encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def _serving_gpus(tp: int) -> str:
     return ",".join(str(i) for i in range(max(tp, 1)))
 
@@ -90,10 +132,18 @@ async def sweep_via_perfskills(
     output_root.mkdir(parents=True, exist_ok=True)
     entries: list[dict[str, Any]] = []
 
+    variant_idx = 0
     for conc in conc_values:
         for spec in isl_osl_configs:
             isl, osl = _parse_isl_osl(spec)
-            out_dir = output_root / f"conc{conc}_isl{isl}_osl{osl}"
+            # Name the per-point dir so the session-breakdown sweep collector's
+            # on-disk scanner (_scan_sweep_variants / _VARIANT_NAME_RE expects
+            # ``variant_<idx>_conc<c>_isl<i>_osl<o>``) discovers it and populates
+            # ``sweep.all_variants`` — without this the perfskills sweep was only
+            # half-auditable (summary present, per-variant detail missing).
+            variant_name = f"variant_{variant_idx}_conc{conc}_isl{isl}_osl{osl}"
+            variant_idx += 1
+            out_dir = output_root / variant_name
             out_dir.mkdir(parents=True, exist_ok=True)
             env = dict(os.environ)
             env.update({
@@ -121,25 +171,46 @@ async def sweep_via_perfskills(
                 )
 
             entry: dict[str, Any] = {"conc": conc, "isl": isl, "osl": osl,
+                                     "variant_name": variant_name,
                                      "workspace": str(out_dir)}
+            ttft = tpot = e2el = None
+            tput = None
+            succeeded = False
+            err: str | None = None
             try:
                 proc = await asyncio.to_thread(_run)
                 summ = _read_json(out_dir / "bench_summary.json")
                 tput = summ.get("output_throughput_tok_s_median")
+                ttft = summ.get("ttft_ms_median")
+                tpot = summ.get("tpot_ms_median")
+                e2el = summ.get("e2el_ms_median")
                 if proc.returncode == 0 and isinstance(tput, (int, float)) and tput > 0:
+                    succeeded = True
                     entry.update({
                         "status": "succeeded",
                         "output_throughput": tput,
-                        "ttft_mean_ms": summ.get("ttft_ms_median"),
-                        "tpot_mean_ms": summ.get("tpot_ms_median"),
+                        "ttft_mean_ms": ttft,
+                        "tpot_mean_ms": tpot,
                     })
                 else:
-                    entry.update({
-                        "status": "failed",
-                        "error": (proc.stderr or "")[-500:] or "no throughput",
-                    })
+                    err = (proc.stderr or "")[-500:] or "no throughput"
+                    entry.update({"status": "failed", "error": err})
             except Exception as exc:  # noqa: BLE001
-                entry.update({"status": "failed", "error": repr(exc)})
+                err = repr(exc)
+                entry.update({"status": "failed", "error": err})
+
+            # Emit a session-breakdown-compatible benchmark_report.json so the
+            # sweep collector parses this point with the SAME 口径 as the native
+            # sweep (output_throughput_tok_s / mean_ttft_ms / mean_tpot_ms /
+            # mean_e2el_ms). bench_summary.json is kept as the raw artifact.
+            _write_benchmark_report(
+                out_dir, conc=conc, isl=isl, osl=osl, success=succeeded,
+                output_throughput_tok_s=tput if isinstance(tput, (int, float)) else None,
+                mean_ttft_ms=ttft if isinstance(ttft, (int, float)) else None,
+                mean_tpot_ms=tpot if isinstance(tpot, (int, float)) else None,
+                mean_e2el_ms=e2el if isinstance(e2el, (int, float)) else None,
+                error=err,
+            )
             entries.append(entry)
 
     front = _pareto_front(entries)

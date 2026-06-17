@@ -54,7 +54,11 @@ benchmark:
     # using the TraceLens magpie skill formulas (issue #194):
     #   max_iters   = min(1024, max(256, OSL * 16 / CONC))
     #   delay_iters = OSL * (RANDOM_RANGE_RATIO + 1) * 3 - max_iters / 2
-    EXTRA_VLLM_ARGS: "--profiler-config.ignore_frontend True"
+    # Kimi-K2.6 int4 known-good serving config (kimi-2.6-vllm.md) + profiler
+    # frontend filter. --max-num-seqs 256 avoids the cudagraph LDS over-alloc.
+    EXTRA_VLLM_ARGS: "--block-size 64 --no-enable-prefix-caching --max-num-seqs 256 --mm-encoder-tp-mode data --profiler-config.ignore_frontend True"
+    # Corrected int4 W4A16 fused-MoE config (BLOCK_SIZE_N capped to 128) for MI300X LDS.
+    VLLM_TUNED_CONFIG_FOLDER: "/wekafs/chaox/test_results/kimi_k2.6_20260617/vllm_tuned_configs"
     # vLLM timeout must be extended during profiling (graph capture is slow)
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
     # --- Profile mode: cap prompts to reduce trace size ---

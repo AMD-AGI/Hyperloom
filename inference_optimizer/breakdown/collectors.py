@@ -3749,6 +3749,12 @@ def _action_family(action: str) -> str:
     # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
     if s == "gemm_tuning":
         return "gemm_tuning"
+    # PerfSkills/GEAK-e2e: whole-pipeline KERNEL-phase optimizer, bucketed apart
+    # from generic ``kernel`` (which is split across geak/oob/forge adopt
+    # entries) so its gain gets a dedicated row instead of vanishing into
+    # ``other`` or being mis-credited to a backend.
+    if s == "perfskills_e2e":
+        return "perfskills"
     return "other"
 
 
@@ -3932,6 +3938,8 @@ def collect_attribution(
         "framework_pr": 0.0,
         # GEMM_TUNING family, kept apart from ``kernel`` (deterministic tuner vs rewrite).
         "gemm_tuning": 0.0,
+        # PerfSkills/GEAK-e2e family: whole-pipeline KERNEL-phase optimizer.
+        "perfskills": 0.0,
     }
     for e in entries:
         if not isinstance(e, dict):
@@ -3993,6 +4001,8 @@ def collect_attribution(
             "framework_pr_pct_of_total": round(family_totals.get("framework_pr", 0.0), 2),
             # GEMM_TUNING row; always emitted (0.0 when non-FP8/skipped/no KEEP).
             "gemm_tuning_pct_of_total": round(family_totals.get("gemm_tuning", 0.0), 2),
+            # PerfSkills/GEAK-e2e row; always emitted (0.0 when native/no e2e win).
+            "perfskills_pct_of_total": round(family_totals.get("perfskills", 0.0), 2),
             # Legacy rows, kept so archived-session reports reconcile (0.0 on current sessions).
             "backends_pct_of_total": round(family_totals.get("backends", 0.0), 2),
             "params_pct_of_total":   round(family_totals.get("params", 0.0), 2),
@@ -6065,6 +6075,116 @@ def _write_decision_trace_jsonl(
         )
 
 
+def collect_perfskills(
+    session_dir: Path,
+    state: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Collect the PerfSkills/GEAK-e2e KERNEL-phase section.
+
+    When the KERNEL phase is delegated to the PerfSkills e2e optimizer
+    (``--kernel-optimizer=perfskills``), the native kernel lifecycle is bypassed
+    and the only structured record is ``state.perfskills_result`` (the normalized
+    ``result.json`` plus runner metadata). This collector maps that into the
+    session-breakdown's data contract so the run is auditable: what the optimizer
+    did (per-kernel / per-head), the accepted config, the validated regimes, the
+    gain attribution, and — on a miss — the normalized failure reason.
+
+    Returns an empty ``{}`` when PerfSkills was never engaged, so native sessions
+    are byte-for-byte unaffected (the dashboard hides the section).
+
+    Args:
+        session_dir (Path): Absolute session root (used to relativize paths).
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        dict[str, Any]: The PerfSkills section, or ``{}`` when not engaged.
+    """
+    optimizer = str(state.get("kernel_optimizer") or "").strip().lower()
+    result = state.get("perfskills_result")
+    engaged = optimizer == "perfskills" or isinstance(result, dict)
+    if not engaged:
+        return {}
+    if not isinstance(result, dict):
+        # Engaged via the optimizer flag but no result recorded yet/at all.
+        return {
+            "engaged": True,
+            "status": "missing",
+            "error_class": "no_result",
+            "error": "kernel_optimizer=perfskills but no perfskills_result recorded",
+            "accepted_kernels": [],
+            "accepted_heads": [],
+        }
+
+    def _rel_if_under(p: Any) -> Any:
+        """Relativize ``p`` against the session dir when it lives under it."""
+        if not p:
+            return p
+        try:
+            pp = Path(str(p))
+            if pp.is_absolute() and str(pp).startswith(str(session_dir)):
+                return _rel(pp, session_dir)
+        except (ValueError, OSError):
+            pass
+        return p
+
+    status = str(result.get("status") or "unknown")
+    base = _to_float(result.get("baseline_throughput_tok_s"))
+    final = _to_float(result.get("final_throughput_tok_s"))
+    speedup = _to_float(result.get("throughput_speedup"))
+    gain_pct: float | None = None
+    if isinstance(base, (int, float)) and base > 0 and isinstance(final, (int, float)):
+        gain_pct = (final - base) / base * 100.0
+    elif isinstance(speedup, (int, float)) and speedup > 0:
+        gain_pct = (speedup - 1.0) * 100.0
+
+    accepted_kernels = result.get("accepted_kernels") or []
+    accepted_heads = result.get("accepted_heads") or []
+    if not isinstance(accepted_kernels, list):
+        accepted_kernels = []
+        warnings.append("perfskills: accepted_kernels was not a list")
+    if not isinstance(accepted_heads, list):
+        accepted_heads = []
+
+    section: dict[str, Any] = {
+        "engaged": True,
+        "status": status,
+        # Failure provenance (None on success) — answers "why did the e2e miss?".
+        "error_class": result.get("error_class"),
+        "error": result.get("error"),
+        "returncode": result.get("returncode"),
+        # Throughput / gain attribution (口径: aggregate output tok/s).
+        "baseline_throughput_tok_s": base,
+        "final_throughput_tok_s": final,
+        "throughput_speedup": speedup,
+        "gain_pct": gain_pct,
+        "metric_basis": result.get("metric_basis"),
+        "bench_client": result.get("bench_client"),
+        # Latency 口径 (median ms), aligned field names with the native sweep.
+        "ttft_mean_ms": _to_float(result.get("ttft_ms")),
+        "tpot_mean_ms": _to_float(result.get("tpot_ms")),
+        "output_parity": result.get("output_parity"),
+        # What the optimizer actually changed (per-kernel / head / config).
+        "accepted_kernels": accepted_kernels,
+        "accepted_heads": accepted_heads,
+        "kernels_optimized": len(accepted_kernels),
+        "accepted_config": dict(result.get("accepted_config") or {}),
+        # Regimes the kernels were validated at (sweep points outside need reparity).
+        "validated_regimes": list(result.get("validated_regimes") or []),
+        # Reusable deliverables + human report (relativized when under the session).
+        "eval_dir": _rel_if_under(result.get("eval_dir")),
+        "report_path": _rel_if_under(result.get("report_path")),
+        "final_launch_script": _rel_if_under(result.get("final_launch_script")),
+        "bench_script": _rel_if_under(result.get("bench_script")),
+        "final_patch": _rel_if_under(result.get("final_patch")),
+        # Budget audit (present when the runner was budget-capped/skipped).
+        "runner_timeout_s": _to_int(result.get("runner_timeout_s")),
+        "kill_timeout_s": _to_int(result.get("kill_timeout_s")),
+    }
+    return section
+
+
 __all__ = [
     "collect_attribution",
     "collect_baseline",
@@ -6077,6 +6197,7 @@ __all__ = [
     "collect_kernel_invocations",
     "collect_kernel_lifecycle",
     "collect_param_search",
+    "collect_perfskills",
     "collect_phase_segments",
     "collect_phase_timeline",
     "collect_session",

@@ -2728,6 +2728,41 @@ class Coordinator:
                 protocol[proto_key] = val
         return protocol
 
+    def _perfskills_timeouts(self) -> tuple[int, int, bool]:
+        """Resolve the PerfSkills e2e timeouts from the live run budget.
+
+        The KERNEL phase-entry hook runs PerfSkills synchronously, so a fixed
+        6h subprocess would (a) ignore ``--max-hours`` / the run deadline and
+        (b) keep the tick loop from reaching the deadline → closing-phase check
+        until it returns. To stay inside the budget we cap the run so it ALWAYS
+        finishes with at least the closing-grace window left, and shrink the
+        runner's own budget by a safety margin on top of that.
+
+        Returns:
+            tuple[int, int, bool]: ``(runner_timeout_s, kill_timeout_s,
+            budget_known)``. ``runner_timeout_s`` is passed to the runner as its
+            own e2e budget; ``kill_timeout_s`` is the hard subprocess kill
+            (always ≤ remaining − closing_grace so the closing report can run).
+            ``budget_known`` is ``False`` only when no run deadline is set
+            (e.g. a unit test invoking the hook directly), where the env default
+            is used verbatim.
+        """
+        env_timeout = int(os.environ.get("PERFSKILLS_E2E_TIMEOUT_S", "21600"))
+        deadline = self._run_deadline
+        if deadline is None:
+            return env_timeout, env_timeout + 600, False
+        remaining = deadline - time.monotonic()
+        grace = effective_closing_grace_sec(
+            float(getattr(self.shared_state, "max_minutes", 0) or 0), None,
+        )
+        margin = float(os.environ.get("PERFSKILLS_BUDGET_MARGIN_S", "300"))
+        # Reserve the closing window: the subprocess (incl. result.json flush)
+        # must be killed with at least ``grace`` left so closing can still run.
+        kill_budget = remaining - grace
+        runner_timeout = int(max(0.0, min(float(env_timeout), kill_budget - margin)))
+        kill_timeout = int(max(0.0, min(float(env_timeout) + 600.0, kill_budget)))
+        return runner_timeout, kill_timeout, True
+
     async def _run_perfskills_kernel_phase(self, *, from_phase: str) -> None:
         """Delegate the KERNEL phase to PerfSkills (one whole-pipeline e2e run).
 
@@ -2784,24 +2819,62 @@ class Coordinator:
 
         from .kernel_request_handlers import _kernel_agent_tool_path
 
+        def _finish_skip(result: dict[str, Any]) -> None:
+            """Record a (failed/skipped) PerfSkills outcome + wind down to SWEEP.
+
+            Always records the normalized outcome into ``perfskills_result``,
+            mirrors the failure reason onto the phase-entry evidence (so the
+            session-breakdown surfaces WHY the e2e run did not land), then sets
+            the ``skip_to_sweep`` hint so the coordinator never deadlocks.
+            """
+            state.perfskills_result = result
+            self._record_phase_entry_evidence(perfskills={
+                "status": result.get("status"),
+                "error_class": result.get("error_class"),
+                "error": (str(result.get("error") or "")[:500] or None),
+            })
+            state.save(self.session_dir)
+            state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+
         try:
             runner = _kernel_agent_tool_path("backends/perfskills_runner.py")
         except Exception as exc:  # noqa: BLE001
             log.exception("PerfSkills runner not resolvable; skipping KERNEL")
-            state.perfskills_result = {"status": "error", "error": repr(exc)}
-            state.save(self.session_dir)
-            state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+            _finish_skip({"status": "error", "error_class": "runner_not_found",
+                          "error": repr(exc)})
             return
 
-        timeout_s = int(os.environ.get("PERFSKILLS_E2E_TIMEOUT_S", "21600"))
+        # Budget-aware timeouts: shrink to the remaining run deadline and always
+        # reserve the closing-grace window (Fix: was a fixed 6h that ignored
+        # --max-hours and blocked the deadline → closing-phase transition).
+        runner_timeout, kill_timeout, budget_known = self._perfskills_timeouts()
+        min_run = int(os.environ.get("PERFSKILLS_MIN_RUN_S", "600"))
+        if budget_known and runner_timeout < min_run:
+            log.warning(
+                "PerfSkills: only %ds budget remains (< min %ds); skipping e2e "
+                "and winding down to SWEEP so the closing report runs in time.",
+                runner_timeout, min_run,
+            )
+            _finish_skip({
+                "status": "skipped",
+                "error_class": "insufficient_budget",
+                "error": (f"only {runner_timeout}s of KERNEL budget remained "
+                          f"(< min {min_run}s); skipped to protect the closing "
+                          f"report window"),
+                "runner_timeout_s": runner_timeout,
+            })
+            return
+
         cmd = ["python3", str(runner), str(handoff_path), str(out_dir),
-               "--timeout-s", str(timeout_s)]
-        log.info("KERNEL entry: delegating to PerfSkills e2e (from=%s) cmd=%s",
-                 from_phase or "<unknown>", " ".join(cmd))
+               "--timeout-s", str(runner_timeout)]
+        log.info("KERNEL entry: delegating to PerfSkills e2e (from=%s) "
+                 "runner_timeout=%ds kill_timeout=%ds budget_known=%s cmd=%s",
+                 from_phase or "<unknown>", runner_timeout, kill_timeout,
+                 budget_known, " ".join(cmd))
 
         def _run() -> subprocess.CompletedProcess:
             return subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout_s + 600,
+                cmd, capture_output=True, text=True, timeout=kill_timeout,
                 env=dict(os.environ),
             )
 
@@ -2810,11 +2883,22 @@ class Coordinator:
             stderr_tail = (proc.stderr or "")[-2000:]
             if proc.returncode != 0:
                 log.warning("PerfSkills runner rc=%s: %s", proc.returncode, stderr_tail)
+        except subprocess.TimeoutExpired:
+            log.warning("PerfSkills runner exceeded kill_timeout=%ds; killed to "
+                        "protect the closing window", kill_timeout)
+            _finish_skip({
+                "status": "error",
+                "error_class": "timeout",
+                "error": (f"PerfSkills e2e killed after {kill_timeout}s "
+                          f"(budget-capped); closing window preserved"),
+                "runner_timeout_s": runner_timeout,
+                "kill_timeout_s": kill_timeout,
+            })
+            return
         except Exception as exc:  # noqa: BLE001
             log.exception("PerfSkills runner crashed")
-            state.perfskills_result = {"status": "error", "error": repr(exc)}
-            state.save(self.session_dir)
-            state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+            _finish_skip({"status": "error", "error_class": "runner_crashed",
+                          "error": repr(exc)})
             return
 
         result: dict[str, Any] = {}
@@ -2824,9 +2908,28 @@ class Coordinator:
                 result = json.loads(result_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 result = {}
-        state.perfskills_result = result or {"status": "error", "error": "no result.json"}
+        if not result:
+            _finish_skip({
+                "status": "error",
+                "error_class": "no_result_json",
+                "error": (f"runner rc={proc.returncode} produced no parseable "
+                          f"result.json at {result_path}"),
+                "stderr_tail": stderr_tail,
+            })
+            return
+        # Carry the actual exit code so the breakdown can audit a nonzero rc.
+        result.setdefault("returncode", proc.returncode)
+        state.perfskills_result = result
 
         self._promote_perfskills_result(result)
+        self._record_phase_entry_evidence(perfskills={
+            "status": result.get("status"),
+            "throughput_speedup": result.get("throughput_speedup"),
+            "final_throughput_tok_s": result.get("final_throughput_tok_s"),
+            "eval_dir": result.get("eval_dir"),
+            "report_path": result.get("report_path"),
+            "runner_timeout_s": runner_timeout,
+        })
         state.save(self.session_dir)
         await self.bus.append_and_seq(Message.new(
             "kernel", "orchestration", "response",
@@ -2843,7 +2946,14 @@ class Coordinator:
         state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
 
     def _promote_perfskills_result(self, result: dict[str, Any]) -> None:
-        """Fold a PerfSkills e2e win into current_best + the validated gain ledger."""
+        """Fold a PerfSkills e2e win into current_best + the validated gain ledger.
+
+        Also appends an ``optimization_stack`` entry and the matching
+        ``gain_per_stack_entry`` so the session-breakdown attribution section
+        credits the e2e gain to a concrete stack entry (carrying the per-kernel
+        / head / config evidence from ``result.json``) instead of leaving the
+        gain unattributed.
+        """
         if not isinstance(result, dict) or result.get("status") not in ("ok",):
             return
         new_tput = float(result.get("final_throughput_tok_s") or 0.0)
@@ -2863,6 +2973,42 @@ class Coordinator:
             "workspace": result.get("eval_dir"),
         })
         self.shared_state.current_best = cb
+
+        # Attribute the e2e gain to a concrete optimization_stack entry so the
+        # breakdown's attribution / optimization_stack sections reflect it (the
+        # native lanes do the same via append_stack_gain_entry).
+        ts = datetime.now(timezone.utc).isoformat()
+        accepted_cfg = result.get("accepted_config") or {}
+        already = any(
+            isinstance(item, dict) and item.get("action") == "perfskills_e2e"
+            for item in (self.shared_state.optimization_stack or [])
+        )
+        if not already:
+            entry = {
+                "action": "perfskills_e2e",
+                "variant_name": "perfskills_e2e",
+                "tput": new_tput,
+                "candidate_extra_server_args": str(accepted_cfg.get("flags") or ""),
+                "extra_envs": (
+                    {"PERFSKILLS_ACCEPTED_ENV": str(accepted_cfg.get("env"))}
+                    if accepted_cfg.get("env") else {}
+                ),
+                "workspace": result.get("eval_dir"),
+                # Per-kernel / head evidence for the attribution + lifecycle view.
+                "accepted_kernels": result.get("accepted_kernels") or [],
+                "accepted_heads": result.get("accepted_heads") or [],
+                "report_path": result.get("report_path"),
+                "source": "perfskills_e2e",
+                "ts": ts,
+            }
+            self.shared_state.optimization_stack.append(entry)
+            self.shared_state.append_stack_gain_entry(
+                action="perfskills_e2e",
+                variant_name="perfskills_e2e",
+                new_tput=new_tput,
+                extra_server_args=str(accepted_cfg.get("flags") or ""),
+                ts=ts,
+            )
         if base > 0:
             gain = (new_tput - base) / base * 100.0
             self.shared_state.cumulative_gain = gain
