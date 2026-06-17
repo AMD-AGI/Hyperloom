@@ -52,12 +52,8 @@ from . import phase_state as _phase_state
 from .optimization_journal import (
     Journal,
     JournalEntry,
-    OUTCOME_KEEP,
-    OUTCOME_NO_PROMOTE,
-    OUTCOME_REVERT,
     classify_change_kind,
     operation_kind_for,
-    summarize_change,
 )
 from ..paths import db_path_for
 from ..storage.connection import SqliteConnection
@@ -8613,7 +8609,7 @@ class Coordinator:
                 if atask in done:
                     try:
                         maybe_result: Any = atask.result()
-                    except BaseException as exc:  # noqa: BLE001 — mirror gather(return_exceptions=True)
+                    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — mirror gather(return_exceptions=True); capture task error + cancellation, never KeyboardInterrupt/SystemExit
                         maybe_result = exc
                     completed.append((task, maybe_result, gpu_lease))
                 else:

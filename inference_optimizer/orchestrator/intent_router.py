@@ -32,16 +32,19 @@ import hashlib
 import json
 import time
 from datetime import datetime, timezone
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
-from ..protocol.intent import Intent, IntentType, NoIntentEmitted
+from ..protocol.intent import Intent, IntentType
 from .message_bus import Message
 from .policy import PolicyDenied
 from .task_registry import Task
 from .kernel_request_handlers import get_handler
 
-if TYPE_CHECKING:
-    from .coordinator import Coordinator
+# NOTE: ``Coordinator`` is intentionally NOT imported (not even under
+# TYPE_CHECKING) to avoid a module-level import cycle with coordinator.py,
+# which imports this module at runtime. The owning coordinator is held as a
+# back-reference; the ``"Coordinator"`` annotation below is a deferred string
+# (``from __future__ import annotations``) that is never evaluated at runtime.
 
 log = __import__("logging").getLogger(__name__)
 
@@ -49,7 +52,7 @@ log = __import__("logging").getLogger(__name__)
 class IntentRouter:
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
 
-    def __init__(self, coordinator: "Coordinator") -> None:
+    def __init__(self, coordinator: "Coordinator") -> None:  # noqa: F821 - deferred ref, not imported to avoid an import cycle (see note above)
         self._coord = coordinator
 
     def __getattr__(self, name: str) -> Any:

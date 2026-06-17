@@ -134,15 +134,11 @@ from .orchestrator.system_prompts.prompt_builder import (
 from .paths import (
     DEFAULT_SESSION_DIR,
     ENV_USER_DATA_PATH,
-    _SESSION_SKELETON,
     asset_system_prompts_dir,
     make_session_dir,
     mn_profile_trace_root,
     session_dir as _session_dir_resolve,
     workspace_root as _workspace_root_resolve,
-)
-from .session_paths import (
-    agent_prompt_snapshot,
 )
 
 

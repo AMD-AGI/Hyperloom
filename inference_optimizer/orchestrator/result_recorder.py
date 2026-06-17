@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from .optimization_journal import (
     JournalEntry,
@@ -40,8 +40,11 @@ from .optimization_journal import (
 )
 from .task_registry import Task
 
-if TYPE_CHECKING:
-    from .coordinator import Coordinator
+# NOTE: ``Coordinator`` is intentionally NOT imported (not even under
+# TYPE_CHECKING) to avoid a module-level import cycle with coordinator.py,
+# which imports this module at runtime. The owning coordinator is held as a
+# back-reference; the ``"Coordinator"`` annotation below is a deferred string
+# (``from __future__ import annotations``) that is never evaluated at runtime.
 
 log = __import__("logging").getLogger(__name__)
 
@@ -49,7 +52,7 @@ log = __import__("logging").getLogger(__name__)
 class ResultRecorder:
     """Synthesizes result records and journal facts on behalf of a Coordinator."""
 
-    def __init__(self, coordinator: "Coordinator") -> None:
+    def __init__(self, coordinator: "Coordinator") -> None:  # noqa: F821 - deferred ref, not imported to avoid an import cycle (see note above)
         self._coord = coordinator
 
     def __getattr__(self, name: str) -> Any:

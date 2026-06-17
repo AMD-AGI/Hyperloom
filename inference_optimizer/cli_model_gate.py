@@ -18,7 +18,6 @@ import json
 import logging
 import os
 import struct
-import subprocess
 import sys
 from pathlib import Path
 
