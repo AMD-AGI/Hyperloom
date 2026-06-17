@@ -36,6 +36,7 @@ from .trace_env import langfuse_credentials
 log = logging.getLogger(__name__)
 
 _TRACE_API_PATH = "/api/public/traces/"
+_OBSERVATIONS_API_PATH = "/api/public/observations"
 
 
 def resolve_trace_id(*, trace_id: str | None = None, seed: str | None = None) -> str | None:
@@ -74,6 +75,31 @@ def _credentials(creds: dict[str, str] | None) -> dict[str, str] | None:
     return {"host": host, "public_key": public_key, "secret_key": secret_key}
 
 
+def _get_json(url: str, creds: dict[str, str], timeout: float) -> Any | None:
+    """GET a Langfuse public-API URL with Basic auth and parse the JSON body.
+
+    Args:
+        url: Fully-qualified request URL.
+        creds: A complete ``{host, public_key, secret_key}`` set.
+        timeout: Per-request timeout in seconds.
+
+    Returns:
+        The parsed JSON (dict/list), or ``None`` on any failure.
+    """
+    token = base64.b64encode(f"{creds['public_key']}:{creds['secret_key']}".encode()).decode()
+    req = urllib.request.Request(url, headers={"Authorization": f"Basic {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (trusted host)
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        log.warning("langfuse_reader: HTTP %s GET %s", exc.code, url)
+    except (urllib.error.URLError, TimeoutError) as exc:
+        log.warning("langfuse_reader: network error GET %s: %s", url, exc)
+    except (ValueError, json.JSONDecodeError) as exc:
+        log.warning("langfuse_reader: unparseable body GET %s: %s", url, exc)
+    return None
+
+
 def fetch_trace(
     trace_id: str,
     *,
@@ -96,21 +122,61 @@ def fetch_trace(
     if creds is None:
         log.warning("langfuse_reader: credentials incomplete; cannot fetch trace %s", trace_id)
         return None
+    result = _get_json(f"{creds['host']}{_TRACE_API_PATH}{trace_id}", creds, timeout)
+    return result if isinstance(result, dict) else None
 
-    url = f"{creds['host']}{_TRACE_API_PATH}{trace_id}"
-    token = base64.b64encode(f"{creds['public_key']}:{creds['secret_key']}".encode()).decode()
-    req = urllib.request.Request(url, headers={"Authorization": f"Basic {token}"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (trusted host)
-            body = resp.read().decode("utf-8")
-        return json.loads(body)
-    except urllib.error.HTTPError as exc:
-        log.warning("langfuse_reader: HTTP %s fetching trace %s", exc.code, trace_id)
-    except (urllib.error.URLError, TimeoutError) as exc:
-        log.warning("langfuse_reader: network error fetching trace %s: %s", trace_id, exc)
-    except (ValueError, json.JSONDecodeError) as exc:
-        log.warning("langfuse_reader: unparseable trace body for %s: %s", trace_id, exc)
-    return None
+
+def fetch_observations(
+    trace_id: str,
+    *,
+    name_prefix: str | None = None,
+    credentials: dict[str, str] | None = None,
+    timeout: float = 30.0,
+    max_pages: int = 20,
+) -> list[dict[str, Any]]:
+    """Fetch a trace's observations (spans/generations) from the public API.
+
+    Paginates ``GET /api/public/observations?traceId=...`` and returns the flat
+    list. The per-event KB granularity (recipe-snapshot reads, per-iter
+    ``kb_assess`` / ``kb_priors``) lives in **observations**, not the trace
+    ``output``, so the KB-timeline langfuse path needs this.
+
+    Args:
+        trace_id: The trace id whose observations to fetch.
+        name_prefix: When set, keep only observations whose ``name`` starts with
+            this prefix (client-side filter, e.g. ``"kb:recipe_snapshot"``).
+        credentials: Optional explicit credentials override.
+        timeout: Per-request timeout in seconds.
+        max_pages: Safety cap on pagination.
+
+    Returns:
+        A list of observation dicts (possibly empty); never raises.
+    """
+    creds = _credentials(credentials)
+    if creds is None:
+        log.warning("langfuse_reader: credentials incomplete; cannot fetch observations for %s", trace_id)
+        return []
+
+    out: list[dict[str, Any]] = []
+    page = 1
+    while page <= max_pages:
+        url = f"{creds['host']}{_OBSERVATIONS_API_PATH}?traceId={trace_id}&page={page}&limit=100"
+        payload = _get_json(url, creds, timeout)
+        if not isinstance(payload, dict):
+            break
+        rows = payload.get("data")
+        if not isinstance(rows, list) or not rows:
+            break
+        out.extend(r for r in rows if isinstance(r, dict))
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        total_pages = meta.get("totalPages")
+        if not isinstance(total_pages, int) or page >= total_pages:
+            break
+        page += 1
+
+    if name_prefix:
+        out = [o for o in out if str(o.get("name") or "").startswith(name_prefix)]
+    return out
 
 
 def _extract_output(trace: dict[str, Any]) -> dict[str, Any] | None:
@@ -172,6 +238,7 @@ def fetch_session_breakdown(
 
 
 __all__ = [
+    "fetch_observations",
     "fetch_session_breakdown",
     "fetch_trace",
     "resolve_trace_id",

@@ -18,6 +18,7 @@ from typing import Any
 
 from . import collectors
 from .agent_timeline import build_agent_timeline
+from .kb_timeline import build_kb_timeline
 from .schema import SCHEMA_VERSION, SCHEMA_VERSION_V3
 
 log = logging.getLogger(__name__)
@@ -531,6 +532,25 @@ def build(
         default={},
     )
 
+    # KB read/use decision timeline (recipe reads + warm-start/replay + critic
+    # KB assess/priors), built locally from the KB sections so the field is
+    # present in every produced breakdown. The Langfuse path
+    # (``enrich_breakdown_with_langfuse_kb_timeline``) can later re-derive it
+    # with full span granularity for a downstream consumer holding only a
+    # trace id.
+    kb_timeline = _safe_collect(
+        "kb_timeline",
+        lambda: build_kb_timeline(
+            {
+                "kb_provenance": kb_provenance,
+                "critic_robustness": critic_robustness,
+            },
+            source="local",
+        ),
+        warnings,
+        default={},
+    )
+
     source_files = collectors.collect_source_files(
         sd,
         baseline.get("benchmark_report_path"),
@@ -606,6 +626,10 @@ def build(
         # timeline, merged onto one ``ts`` axis. Additive optional section;
         # older readers ignore it.
         "agent_timeline": agent_timeline,
+        # KB read/use decision timeline (recipe reads + warm-start/replay +
+        # critic KB assess/priors), merged onto one ``ts`` axis. Additive
+        # optional section; older readers ignore it.
+        "kb_timeline": kb_timeline,
         "warnings": warnings,
         "source_files": source_files,
     }

@@ -21,6 +21,11 @@ from .agent_timeline import (
     build_agent_timeline,
     enrich_breakdown_with_langfuse_timeline,
 )
+from .kb_timeline import (
+    KB_TIMELINE_SCHEMA,
+    build_kb_timeline,
+    enrich_breakdown_with_langfuse_kb_timeline,
+)
 from .exporter import (
     BREAKDOWN_FILENAME,
     EXPORTER_VERSION,
@@ -36,9 +41,12 @@ __all__ = [
     "AGENT_TIMELINE_SCHEMA",
     "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
+    "KB_TIMELINE_SCHEMA",
     "SCHEMA_VERSION",
     "build",
     "build_agent_timeline",
+    "build_kb_timeline",
+    "enrich_breakdown_with_langfuse_kb_timeline",
     "enrich_breakdown_with_langfuse_timeline",
     "package_session_artifacts",
     "patch_breakdown_langfuse",

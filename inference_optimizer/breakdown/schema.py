@@ -1853,6 +1853,71 @@ class AgentTimeline(TypedDict, total=False):
     warnings: list[str]
 
 
+class KBTimelineEvent(TypedDict, total=False):
+    """One chronological event on the knowledge-base decision timeline.
+
+    Normalises a single KB read/use decision (recipe lookup, warm-start,
+    warm-replay, or a critic KB assess/priors read) to a flat shape so the
+    scattered KB decision sources can be merged on one time axis. **Write-side
+    KB activity is intentionally excluded** (it is session-close bookkeeping,
+    not a decision, and is not timestamped anywhere).
+
+    Attributes:
+        ts (str): ISO UTC timestamp (primary sort key).
+        seq (int): Monotonic fallback ordering index, assigned at build time.
+        category (str): ``recipe_read`` / ``warm_start`` / ``warm_replay`` /
+            ``critic_assess`` / ``critic_priors``.
+        title (str): One-line human summary.
+        detail (dict[str, Any]): Category-specific payload (original fields kept
+            verbatim — method/resolution/hit for reads, tier/confidence for
+            warm-start, status/gain for replay, verdict_count/prior_count and
+            ``referenced_in_verdict`` for critic reads).
+        source (dict[str, Any]): Provenance pointer (``{section, index}`` or
+            ``{span, observation_id}``, plus ``trace_id`` on the Langfuse path).
+    """
+
+    ts: str
+    seq: int
+    category: str
+    title: str
+    detail: dict[str, Any]
+    source: dict[str, Any]
+
+
+class KBTimeline(TypedDict, total=False):
+    """Unified, time-ordered timeline of knowledge-base read/use decisions.
+
+    Additive optional top-level section (older readers ignore it). Built by
+    :func:`inference_optimizer.breakdown.kb_timeline.build_kb_timeline` by
+    merging recipe lookups (``kb_provenance.recipe_snapshot_reads`` /
+    ``kb:recipe_snapshot`` spans), warm-start + warm-replay
+    (``kb_provenance``), and the critic's KB assess/priors reads
+    (``critic_robustness.critic_iterations`` / ``kb_assess`` / ``kb_priors``
+    spans) onto one ``ts`` axis. Write-side KB activity is out of scope.
+
+    Attributes:
+        schema (str): Timeline schema id (``hyperloom.kb_timeline.v1``).
+        source (str): ``local`` (built from the breakdown payload) or
+            ``langfuse`` (recovered from a trace's output + observations).
+        trace_id (str): Langfuse trace id (when ``source == "langfuse"``).
+        fetched_at_utc (str): ISO UTC timestamp the timeline was assembled.
+        events (list[KBTimelineEvent]): Events sorted by ``(ts, seq)``.
+        counts (dict[str, int]): Per-category event counts.
+        degraded (bool): True when one or more source sections were missing /
+            empty / unparseable (still emitted, just partial).
+        warnings (list[str]): Non-fatal notes raised while assembling.
+    """
+
+    schema: str
+    source: str
+    trace_id: str
+    fetched_at_utc: str
+    events: list[KBTimelineEvent]
+    counts: dict[str, int]
+    degraded: bool
+    warnings: list[str]
+
+
 class SessionBreakdown(TypedDict, total=False):
     """Top-level wire shape of ``session_breakdown.json``.
 
@@ -1970,6 +2035,11 @@ class SessionBreakdown(TypedDict, total=False):
     # upload path, recovered from the Langfuse trace. Additive optional
     # section; empty {} on sessions that predate it, so older readers ignore it.
     agent_timeline: AgentTimeline
+    # Knowledge-base decision timeline (recipe lookups + warm-start/replay +
+    # critic KB assess/priors reads) merged onto one ``ts`` axis. Write-side KB
+    # activity is intentionally excluded. Built by
+    # ``breakdown.kb_timeline.build_kb_timeline``. Additive optional section.
+    kb_timeline: KBTimeline
 
     warnings: list[str]
     source_files: SourceFiles
@@ -2010,6 +2080,8 @@ __all__ = [
     "Invocation",
     "KBProvenance",
     "KBQueueStats",
+    "KBTimeline",
+    "KBTimelineEvent",
     "LaneTimelineEntry",
     "KernelLifecycle",
     "KernelMetadata",
