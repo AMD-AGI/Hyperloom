@@ -22,18 +22,45 @@ from typing import Any
 
 
 def parts_dir(session_dir: Path | str) -> Path:
+    """Return the breakdown spool directory for ``session_dir``.
+
+    Args:
+        session_dir (Path | str): the session root directory.
+
+    Returns:
+        Path: the breakdown parts (spool) directory under the session.
+    """
     from ...session_paths import breakdown_parts_dir  # local: avoid import cycle
 
     return breakdown_parts_dir(Path(session_dir))
 
 
 def has_parts(session_dir: Path | str) -> bool:
-    """True iff at least one record fragment exists for this session."""
+    """True iff at least one record fragment exists for this session.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``True`` when the spool directory holds at least one ``*.json``
+        fragment.
+    """
     d = parts_dir(session_dir)
     return d.is_dir() and any(d.glob("*.json"))
 
 
 def _load(path: Path, warnings: list[str]) -> dict[str, Any] | None:
+    """Read and parse one fragment file, noting problems into ``warnings``.
+
+    Args:
+        path (Path): the fragment file to read.
+        warnings (list[str]): a list that parse/validation warnings are
+            appended to.
+
+    Returns:
+        dict[str, Any] | None: the parsed fragment record, or ``None`` when it
+            cannot be read or is not a JSON object.
+    """
     try:
         rec = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
@@ -53,6 +80,15 @@ def assemble_parts(
     """Return ``{section: list | dict}`` assembled from the spool directory.
 
     Empty mapping when no fragments exist (caller falls back to collectors).
+
+    Args:
+        session_dir: The session root directory.
+        warnings: Optional list to append parse/validation warnings to; a
+            fresh list is used when not provided.
+
+    Returns:
+        A ``{section: list | dict}`` mapping assembled from the spool
+        directory, or ``{}`` when no fragments exist.
     """
     warns = warnings if warnings is not None else []
     d = parts_dir(session_dir)
@@ -93,7 +129,11 @@ def assemble_parts(
 def _compose_versions(out: dict[str, Any]) -> None:
     """Fold the ``versions`` item substream into a top-level ``{tool: meta}``
     map (last write per tool wins; the substream is already deduped by tool key
-    at record time). No-op when nothing was recorded."""
+    at record time). No-op when nothing was recorded.
+
+    Args:
+        out: The assembled section mapping mutated in place.
+    """
     rows = out.get("versions")
     if not isinstance(rows, list):
         return
@@ -110,7 +150,11 @@ def _compose_critic_robustness(out: dict[str, Any]) -> None:
     """Fold the ``critic_iterations`` / ``robustness_signals`` item substreams
     into the ``critic_robustness`` singleton (shape mirrors
     ``collectors.collect_critic_robustness``). Pops the raw substreams so they
-    don't leak into the breakdown envelope."""
+    don't leak into the breakdown envelope.
+
+    Args:
+        out: The assembled section mapping mutated in place.
+    """
     critic_iters = out.pop("critic_iterations", None)
     rob_signals = out.pop("robustness_signals", None)
     if critic_iters is None and rob_signals is None:
@@ -133,6 +177,9 @@ def _compose_kernel_journey(out: dict[str, Any]) -> None:
     attempts -> e2e), then pop the raw substreams so they don't leak into the
     envelope. No-op (and ``kernel_journey`` stays absent) when no substream was
     recorded, preserving historical breakdowns byte-for-byte.
+
+    Args:
+        out: The assembled section mapping mutated in place.
     """
     discovery = out.pop("kernel_discovery", None)
     dispatch = out.pop("kernel_dispatch", None)
@@ -200,6 +247,15 @@ def _compose_kernel_journey(out: dict[str, Any]) -> None:
         })
 
     def _gpu(k: dict[str, Any]) -> float:
+        """Return a kernel's gpu_pct as a float (``-inf`` when absent/unparseable).
+
+        Args:
+            k: A kernel record mapping.
+
+        Returns:
+            The kernel's ``gpu_pct`` as a float, or ``-inf`` when absent or
+            unparseable.
+        """
         v = k.get("gpu_pct")
         try:
             return float(v) if v is not None else float("-inf")
@@ -219,6 +275,13 @@ def _best_micro_speedup(attempts: list[dict[str, Any]]) -> float | None:
     Surfaces the kernel-level achieved speedup at the journey-entry top level so
     the dashboard can correlate it with ``e2e.e2e_gain_pct`` without digging
     through the attempt ladder.
+
+    Args:
+        attempts: A kernel's backend attempt rows.
+
+    Returns:
+        The maximum ``micro_speedup`` across the attempts, or ``None`` when
+        none is present/parseable.
     """
     best: float | None = None
     for att in attempts:
@@ -240,7 +303,16 @@ def _kernel_outcome(
     e2e: dict[str, Any],
 ) -> str:
     """Coarse per-kernel outcome: adopted / reverted / attempted / dispatched /
-    skipped / discovered (in lifecycle-descending precedence)."""
+    skipped / discovered (in lifecycle-descending precedence).
+
+    Args:
+        dispatch: The kernel's dispatch row.
+        attempts: The kernel's backend attempt rows.
+        e2e: The kernel's end-to-end row.
+
+    Returns:
+        The coarse per-kernel outcome label.
+    """
     if e2e:
         decision = str(e2e.get("decision") or "").upper()
         if e2e.get("integrated") or decision in ("KEEP", "ADOPTED"):
@@ -255,7 +327,14 @@ def _kernel_outcome(
 
 
 def _kb_writes_summary(critic_iters: list[Any]) -> dict[str, Any]:
-    """Count each critic iteration's verdict (mirrors the collector)."""
+    """Count each critic iteration's verdict (mirrors the collector).
+
+    Args:
+        critic_iters: Critic iteration entries to tally by verdict.
+
+    Returns:
+        A summary ``{"total": int, "by_verdict": {verdict: count}}``.
+    """
     by_verdict: dict[str, int] = {}
     total = 0
     for entry in critic_iters:
