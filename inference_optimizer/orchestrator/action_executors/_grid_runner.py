@@ -977,6 +977,89 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
+def compact_json_server_args(
+    server_args: str | None,
+    framework: str | None,
+) -> str:
+    """Strip separator spaces inside JSON-valued vLLM/atom server args.
+
+    Magpie's scripts expand ``vllm serve ... $EXTRA_VLLM_ARGS`` UNQUOTED, so any
+    token with an embedded space is word-split by the shell before vLLM sees it.
+    LLM/specialist explore variants routinely pass JSON-valued flags with the
+    conventional separator spaces, e.g. ``--compilation-config '{"full_cuda_
+    graph": true}'`` or ``--speculative-config '{"method": "eagle"}'``; the
+    space after ``:`` (or ``,``) splits the value into two shell words and the
+    server dies at boot with an argparse/JSON error (observed: ``Value
+    {"method": cannot be converted``). Re-serialising each JSON object/array
+    with compact separators removes the SEPARATOR spaces only — ``json.dumps``
+    deliberately preserves spaces *inside* string values. This mirrors the
+    deliberately space-free ``--hf-overrides`` injection in ``_workload_envs``
+    and is the same round-trip-safe contract the dedup helpers rely on.
+
+    LIMITATION — separator spaces only: the value becomes a single shell word
+    only when the JSON has no space *inside* a string value. A value like
+    ``{"model":"draft model name"}`` still contains a literal space, and under
+    Magpie's unquoted ``$EXTRA_VLLM_ARGS`` expansion that space word-splits no
+    matter what — there is no way to keep a space-bearing token as one word via
+    unquoted expansion. Such flags (string values holding spaces — a free-text
+    name, a path with spaces) are NOT supported: they are left intact rather
+    than corrupted (stripping the inner space would change the value), and the
+    server will still fail to boot. Callers must avoid space-bearing JSON string
+    values for vLLM/atom. See
+    ``test_compact_json_server_args_internal_space_unsupported``.
+
+    No-op for sglang (its Magpie path differs and tolerates the quoting), for
+    empty strings, and for strings with no ``{``/``[``. Any blob that does not
+    parse as JSON is left verbatim (vLLM reports it rather than us mangling it).
+    """
+    args = str(server_args or "").strip()
+    if not args or ("{" not in args and "[" not in args):
+        return args
+    if server_args_env_name(framework) == "EXTRA_SGLANG_ARGS":
+        return args
+    out: list[str] = []
+    i = 0
+    n = len(args)
+    while i < n:
+        ch = args[i]
+        if ch in "{[":
+            # Walk to the balanced close, honouring quoted strings so braces
+            # inside a JSON string value do not throw off the depth count.
+            depth = 0
+            in_str = False
+            esc = False
+            j = i
+            while j < n:
+                c = args[j]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif c == "\\":
+                        esc = True
+                    elif c == '"':
+                        in_str = False
+                elif c == '"':
+                    in_str = True
+                elif c in "{[":
+                    depth += 1
+                elif c in "}]":
+                    depth -= 1
+                    if depth == 0:
+                        j += 1
+                        break
+                j += 1
+            blob = args[i:j]
+            try:
+                out.append(json.dumps(json.loads(blob), separators=(",", ":")))
+            except Exception:
+                out.append(blob)
+            i = j
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 # Flags whose value can contain spaces / JSON; never tokenize-dedupe these
 # because the downstream Magpie scripts expand $EXTRA_*_ARGS unquoted and the
 # value would be word-split anyway. If any is present, the dedup helpers leave

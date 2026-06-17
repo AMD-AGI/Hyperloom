@@ -16,7 +16,6 @@ import os
 import re
 import shlex
 import shutil
-import struct
 import subprocess
 import sys
 import time
@@ -43,13 +42,133 @@ from .cli_backends import (  # noqa: F401 - re-exported for callers/tests
     _build_robustness_options,
     _robustness_server_configured,
 )
-from .manifest import load_manifest, write_manifest
-from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
-    GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
+from .cli_model_gate import (  # noqa: F401 - re-exported for callers/tests
+    _AMD_GPU_TYPES,
+    _AMD_UNSUPPORTED_ARCHITECTURES,
+    _AMD_UNSUPPORTED_MODEL_TYPES,
+    _AMD_UNSUPPORTED_QUANT_ALGOS,
+    _AMD_UNSUPPORTED_QUANT_METHODS,
+    _CONTEXT_HEADROOM_DEFAULT,
+    _CONTEXT_HEADROOM_ENV,
+    _GEMMA2_ARCHITECTURES,
+    _GFX_TO_RUNNER,
+    _MAX_MODEL_LEN_HEADROOM,
+    _MAXPOS_CONFIG_KEYS,
+    _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES,
+    _PHI3_ROPE_TYPES,
+    _ROPE_CONFIG_KEYS,
+    _SAFETENSORS_HEADER_LIMIT,
+    _SUPPORTED_ARCH_MARKERS,
+    _SUPPORTED_MODEL_TYPES,
+    _TEXT_COERCIBLE_MODEL_TYPES,
+    _TEXT_DECODER_CONFIG_KEYS,
+    _TOKENIZER_ARTIFACT_FILES,
+    _UNRECOGNIZED_ARCHITECTURES,
+    _UNRECOGNIZED_MODEL_TYPES,
+    _UNREGISTERED_CUSTOM_CONFIG_TYPES,
+    _UNSUPPORTED_ARCHITECTURES,
+    _UNSUPPORTED_CONFIG_KEYS,
+    _UNSUPPORTED_MODEL_TYPES,
+    _VERDICT_TEXT_COERCIBLE,
+    _VERDICT_VISION_ONLY,
+    _VOCAB_WEIGHT_NAMES,
+    _arch_is_supported_text_generation,
+    _autodetect_gpu_type,
     _config_architectures,
+    _config_declares_text_decoder,
+    _context_headroom_tokens,
+    _detect_amd_unsupported_quant,
+    _detect_gemma2_missing_hidden_act,
+    _detect_incompatible_model_config,
+    _detect_missing_tokenizer_files,
+    _detect_phi3_rope_scaling_incompatible,
+    _detect_unrecognized_architecture,
+    _detect_unsupported_model,
+    _detect_vocab_weight_shape_mismatch,
+    _gpu_runner_type,
+    _load_model_arch,
     _load_model_config_dict,
+    _load_model_config_tags,
+    _load_model_max_position_embeddings,
+    _model_has_dual_chunk_attention,
+    _model_is_moe,
+    _preflight_context_window,
+    _preflight_model_config_compat,
+    _preflight_unsupported_model_arch,
+    _read_safetensors_header,
+    _resolve_amd_gpu_type,
+    _resolve_gpu_type,
+    _resolve_max_model_len,
+)
+from .model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     _model_is_gemma2,
 )
+from .cli_bootstrap import (  # noqa: F401 - re-exported for callers/tests
+    _default_target_summary,
+    _parse_conc_sweep_concs,
+    _print_final_summary,
+    _print_kernel_opt_summary_line,
+    _print_session_skeleton,
+    _read_failure_summary,
+    _reconcile_crash_count,
+    _resolve_reference_recipe,
+    _resolve_session_dir_for_summary,
+    _seed_shared_state,
+    _snapshot_system_prompts,
+)
+from .orchestrator.action_executors._aiter_jit import (
+    AITER_LOCK_STALE_MINUTES,
+    clean_stale_aiter_locks as _clean_stale_aiter_locks_impl,
+)
+
+# Backward-compat re-exports: these helpers were extracted into cli_executors /
+# cli_kb / cli_backends / cli_model_gate / model_config_utils / cli_bootstrap
+# during the CLI decomposition, but callers and tests still import them from
+# ``inference_optimizer.cli`` (e.g. _grid_runner, test_reference_script). Listing
+# them in ``__all__`` keeps the re-export intentional (and silences the unused-
+# import lint for a re-export-only binding).
+__all__ = [
+    # from .cli_executors
+    "_NOOP_KINDS_KERNEL_ONLY", "_REAL_EXECUTORS_FULL", "_build_specialist_executor",
+    "_noop_prep", "_register_executors",
+    # from .cli_kb
+    "_bootstrap_cortex_kb", "_bootstrap_knowledge_plane", "_build_recipe_kb_dispatcher",
+    "_resolve_local_kb_root",
+    # from .cli_backends
+    "_MULTI_NODE_WORKLOAD_UID_ENV_KEYS", "_build_backends", "_build_proposal_scorer",
+    "_build_robustness_options", "_robustness_server_configured",
+    # from .cli_model_gate
+    "_AMD_GPU_TYPES", "_AMD_UNSUPPORTED_ARCHITECTURES", "_AMD_UNSUPPORTED_MODEL_TYPES",
+    "_AMD_UNSUPPORTED_QUANT_ALGOS", "_AMD_UNSUPPORTED_QUANT_METHODS",
+    "_CONTEXT_HEADROOM_DEFAULT", "_CONTEXT_HEADROOM_ENV", "_GEMMA2_ARCHITECTURES",
+    "_GFX_TO_RUNNER", "_MAX_MODEL_LEN_HEADROOM", "_MAXPOS_CONFIG_KEYS",
+    "_NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES", "_PHI3_ROPE_TYPES", "_ROPE_CONFIG_KEYS",
+    "_SAFETENSORS_HEADER_LIMIT", "_SUPPORTED_ARCH_MARKERS", "_SUPPORTED_MODEL_TYPES",
+    "_TEXT_COERCIBLE_MODEL_TYPES", "_TEXT_DECODER_CONFIG_KEYS", "_TOKENIZER_ARTIFACT_FILES",
+    "_UNRECOGNIZED_ARCHITECTURES", "_UNRECOGNIZED_MODEL_TYPES",
+    "_UNREGISTERED_CUSTOM_CONFIG_TYPES", "_UNSUPPORTED_ARCHITECTURES",
+    "_UNSUPPORTED_CONFIG_KEYS", "_UNSUPPORTED_MODEL_TYPES", "_VERDICT_TEXT_COERCIBLE",
+    "_VERDICT_VISION_ONLY", "_VOCAB_WEIGHT_NAMES", "_arch_is_supported_text_generation",
+    "_autodetect_gpu_type", "_config_architectures", "_config_declares_text_decoder",
+    "_context_headroom_tokens", "_detect_amd_unsupported_quant",
+    "_detect_gemma2_missing_hidden_act", "_detect_incompatible_model_config",
+    "_detect_missing_tokenizer_files", "_detect_phi3_rope_scaling_incompatible",
+    "_detect_unrecognized_architecture", "_detect_unsupported_model",
+    "_detect_vocab_weight_shape_mismatch", "_gpu_runner_type", "_load_model_arch",
+    "_load_model_config_dict", "_load_model_config_tags",
+    "_load_model_max_position_embeddings", "_model_has_dual_chunk_attention",
+    "_model_is_moe", "_preflight_context_window", "_preflight_model_config_compat",
+    "_preflight_unsupported_model_arch", "_read_safetensors_header",
+    "_resolve_amd_gpu_type", "_resolve_gpu_type", "_resolve_max_model_len",
+    # from .model_config_utils
+    "_model_is_gemma2",
+    # from .cli_bootstrap
+    "_default_target_summary", "_parse_conc_sweep_concs", "_print_final_summary",
+    "_print_kernel_opt_summary_line", "_print_session_skeleton", "_read_failure_summary",
+    "_reconcile_crash_count", "_resolve_reference_recipe", "_resolve_session_dir_for_summary",
+    "_seed_shared_state", "_snapshot_system_prompts",
+]
+from .manifest import load_manifest, write_manifest
 from .orchestrator.action_registry import ActionRegistry
 from .orchestrator.coordinator import Coordinator
 from .orchestrator.proposal_scorer import DEFAULT_SCORER_MODELS
@@ -63,15 +182,11 @@ from .orchestrator.system_prompts.prompt_builder import (
 from .paths import (
     DEFAULT_SESSION_DIR,
     ENV_USER_DATA_PATH,
-    _SESSION_SKELETON,
     asset_system_prompts_dir,
     make_session_dir,
     mn_profile_trace_root,
     session_dir as _session_dir_resolve,
     workspace_root as _workspace_root_resolve,
-)
-from .session_paths import (
-    agent_prompt_snapshot,
 )
 
 
@@ -237,32 +352,6 @@ _DEFAULT_KERNEL_PROMPT = (
     "If your inbox has no requests, emit one send_message{topic='heartbeat',\n"
     "body_md='ok'}. You may NOT propose, delegate, or initiate REQUESTs."
 )
-
-
-_GFX_TO_RUNNER: dict[str, str] = {
-    # Mirror Magpie/modes/benchmark/image_selector.py:138-140 so we can log resolved value at session start.
-    "gfx942": "mi300x",
-    "gfx950": "mi355x",
-}
-
-
-def _gpu_runner_type(gpu_type: str) -> str:
-    """Return the Magpie runner label for a resolved real GPU type.
-
-    MI308X and MI325X share the gfx942 / CDNA3 die with MI300X and reuse
-    the same Magpie benchmark scripts (sglang_mi300x.sh / vllm_mi300x.sh).
-
-    Args:
-        gpu_type (str): The resolved real GPU type (e.g. ``mi325x``).
-
-    Returns:
-        str: The Magpie runner label (``mi325x`` / ``mi308x`` collapse to
-            ``mi300x``).
-    """
-    normalized = str(gpu_type or "").strip().lower()
-    if normalized in ("mi325x", "mi308x"):
-        return "mi300x"
-    return normalized
 
 
 # Hard model allowlist (_CLAUDE_ALLOWED_MODELS): orchestration MUST resolve to Opus 4-7 (preferred)
@@ -446,34 +535,6 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
 _assert_atom_single_node = _apply_atom_auto_tighten
 
 
-def _resolve_gpu_type(
-    user_specified: str,
-    probed: str,
-) -> tuple[str, list[str]]:
-    """Resolve effective gpu_type from a user hint and a hardware probe; pure for unit testing.
-
-    Probe always wins on disagreement (wrong --gpu-type corrupts baseline+KB rows); user value kept
-    only on probe failure. Returns ``(effective_gpu_type, warnings)``; warnings go to stderr to keep
-    the ``HYPERLOOM_LAUNCH`` stdout sentinel clean.
-
-    Args:
-        user_specified (str): The user-supplied ``--gpu-type`` hint.
-        probed (str): The hardware-probed GPU type.
-
-    Returns:
-        tuple[str, list[str]]: ``(effective_gpu_type, warnings)`` — the probe
-            wins on disagreement; ``warnings`` carries any stderr notes.
-    """
-    warnings: list[str] = []
-    if probed and user_specified and probed != user_specified:
-        warnings.append(
-            f"WARN: --gpu-type={user_specified!r} disagrees with probed "
-            f"{probed!r}; using probed {probed!r}. The probe wins because "
-            f"Magpie runner_type + KB recipe rows must match the actual "
-            f"hardware to keep baseline numbers comparable across sessions."
-        )
-        return probed, warnings
-    return (probed or user_specified), warnings
 
 
 def _emit_launch_info(
@@ -529,162 +590,26 @@ def _emit_launch_info(
 
 def _clean_stale_aiter_locks(
     aiter_jit_dir: Path | None = None,
-    stale_minutes: int = 5,
+    stale_minutes: int = AITER_LOCK_STALE_MINUTES,
 ) -> dict[str, Any]:
-    """Sweep aiter's JIT build dir for stale plain-file locks left by killed runs (else next run hangs).
+    """Startup sweep of stale aiter JIT locks; delegates to the shared helper.
 
-    Only deletes locks with mtime older than ``stale_minutes`` (default 5; above cold-start MoE build
-    time, below the hang-suspicion cliff). Build dir resolution: caller arg → $INFERENCE_OPTIMIZER_AITER_JIT_DIR
-    → dynamic <aiter>/jit/build → legacy fallbacks. Returns a stats dict; never raises (errors counted).
-
-    Args:
-        aiter_jit_dir (Path | None): Explicit JIT build dir; when ``None`` it
-            is resolved from env / installed aiter / legacy fallbacks.
-        stale_minutes (int): Minimum lock age in minutes before deletion
-            (default 5).
-
-    Returns:
-        dict[str, Any]: A stats dict (``dir``, ``scanned``, ``deleted``,
-            ``skipped_fresh``, ``errors``).
+    Thin shim preserving the historical signature / stats-dict contract for the
+    startup call site and tests. The canonical implementation (plus the
+    liveness-gated per-cold-start variant) lives in
+    ``orchestrator/action_executors/_aiter_jit.py``.
     """
-    stats: dict[str, Any] = {
-        "dir": None,
-        "scanned": 0,
-        "deleted": 0,
-        "skipped_fresh": 0,
-        "errors": 0,
-    }
-
-    if aiter_jit_dir is None:
-        candidates: list[str] = []
-        override = os.environ.get(
-            "INFERENCE_OPTIMIZER_AITER_JIT_DIR",
-            "",
-        ).strip()
-        if override:
-            override_path = Path(override)
-            candidates.extend([str(override_path), str(override_path / "build")])
-        try:
-            import importlib.util as _il_util
-
-            spec = _il_util.find_spec("aiter")
-        except (ImportError, ValueError):
-            spec = None
-        if spec is not None and spec.origin:
-            aiter_root = Path(spec.origin).parent
-            candidates.append(str(aiter_root / "jit" / "build"))
-        candidates.extend(
-            [
-                "/sgl-workspace/aiter/aiter/jit/build",
-                "/usr/local/lib/python3.10/dist-packages/aiter/jit/build",
-                "/usr/local/lib/python3.12/dist-packages/aiter/jit/build",
-                "/opt/venv/lib/python3.10/site-packages/aiter/jit/build",
-                "/opt/venv/lib/python3.12/site-packages/aiter/jit/build",
-            ]
-        )
-        chosen: Path | None = None
-        for cand in candidates:
-            p = Path(cand)
-            if p.is_dir():
-                chosen = p
-                break
-        if chosen is None:
-            return stats
-        aiter_jit_dir = chosen
-
-    stats["dir"] = str(aiter_jit_dir)
-
-    threshold_seconds = float(stale_minutes) * 60.0
-    now = time.time()
-    lock_names = {"lock", ".ninja_lock"}
-    try:
-        walker = os.walk(str(aiter_jit_dir))
-    except OSError:
-        stats["errors"] += 1
-        return stats
-
-    for root, _dirs, files in walker:
-        for fname in files:
-            if not (fname in lock_names or fname.startswith("lock_")):
-                continue
-            stats["scanned"] += 1
-            fpath = Path(root) / fname
-            try:
-                age = now - fpath.stat().st_mtime
-            except OSError:
-                stats["errors"] += 1
-                continue
-            if age < threshold_seconds:
-                stats["skipped_fresh"] += 1
-                continue
-            try:
-                fpath.unlink()
-                stats["deleted"] += 1
-            except OSError:
-                stats["errors"] += 1
-
-    return stats
+    return _clean_stale_aiter_locks_impl(
+        aiter_jit_dir, stale_minutes=stale_minutes,
+    )
 
 
-def _autodetect_gpu_type() -> str | None:
-    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort).
-
-    Returns:
-        str | None: The detected GPU type, or ``None`` when undetectable.
-    """
-    import subprocess
-
-    try:
-        out = subprocess.run(
-            ["rocm-smi", "--showproductname"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.upper()
-        for tag in ("MI355X", "MI325X", "MI308X", "MI300X"):
-            if tag in out:
-                return tag.lower()
-    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
-        pass
-    try:
-        import torch
-
-        arch = torch.cuda.get_device_properties(0).gcnArchName
-        gfx = arch.split(":", 1)[0].lower()
-        return _GFX_TO_RUNNER.get(gfx)
-    except Exception:  # noqa: BLE001
-        return None
 
 
 # AMD/ROCm runner types (gfx9). dual_chunk_flash_attn (sm90+) is unsupported
 # here, and some upstream archs (DSA) are not adapted to AMD yet.
-_AMD_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x", "mi355x"})
 
 
-def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
-    """Resolve the current AMD GPU type, or None when not on AMD/unknown.
-
-    Resolution order (most authoritative first): an explicit ``gpu_type``
-    argument, the ``GPU_TYPE`` env, then a best-effort runtime autodetect.
-    Returning the resolved value only when it names a known AMD runner lets
-    callers gate AMD-specific behaviour on real hardware while still honouring
-    a launcher/CI-supplied ``gpu_type`` even if ``rocm-smi``/torch probing is
-    unavailable at the call site.
-
-    Args:
-        explicit (str | None): An explicit GPU-type hint that takes priority
-            over the ``GPU_TYPE`` env and autodetect.
-
-    Returns:
-        str | None: The resolved AMD runner type, or ``None`` when not on a
-            known AMD GPU.
-    """
-    for cand in (explicit, os.environ.get("GPU_TYPE")):
-        norm = str(cand or "").strip().lower()
-        if norm in _AMD_GPU_TYPES:
-            return norm
-    detected = (_autodetect_gpu_type() or "").strip().lower()
-    return detected if detected in _AMD_GPU_TYPES else None
 
 
 def _resume_safe_flag(
@@ -760,75 +685,12 @@ def _resume_safe_numeric(
     return default
 
 
-def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
-    """Best-effort loader for the advisory ``<workspace_root>/model_arch.json`` profile (prompts only).
-
-    Soft-degrades to ``{}`` (never blocks launch) on missing/unreadable/invalid file. Stale-file guard:
-    require ``data["model_name"]`` basename to match launched ``--model`` basename, else WARN + ``{}``.
-
-    Args:
-        workspace_root (Path): Directory containing ``model_arch.json``.
-        model_name (str): The launched model name, used for the stale-file
-            freshness check.
-
-    Returns:
-        dict: The advisory architecture profile, or ``{}`` when missing,
-            unreadable, invalid, or stale.
-    """
-    arch_path = workspace_root / "model_arch.json"
-    try:
-        raw = arch_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return {}
-    except OSError as exc:
-        logging.warning("model_arch_unreadable: %s (%s)", arch_path, exc)
-        return {}
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError) as exc:
-        logging.warning("model_arch_invalid_json: %s (%s)", arch_path, exc)
-        return {}
-    if not isinstance(data, dict):
-        logging.warning("model_arch_not_a_dict: %s (got %s)", arch_path, type(data).__name__)
-        return {}
-    declared = str(data.get("model_name") or "").strip()
-    if not declared:
-        logging.warning("model_arch_missing_model_name: %s (cannot verify freshness)", arch_path)
-        return {}
-    if Path(declared).name != Path(model_name).name:
-        logging.warning(
-            "model_arch_stale_or_mismatch: %s declares model_name=%r but launching %r — ignoring",
-            arch_path,
-            declared,
-            model_name,
-        )
-        return {}
-    return data
 
 
-def _load_model_config_tags(model_path: str) -> dict:
-    """Best-effort loader for KB architecture-identity tags (``architectures`` + ``model_type``) from config.json.
 
-    Soft-degrades to ``{}`` (never blocks launch); normalised fields are omitted when empty so callers can .get().
 
-    Args:
-        model_path (str): The local model directory containing ``config.json``.
 
-    Returns:
-        dict: Architecture-identity tags (``architectures`` / ``model_type``);
-            empty fields are omitted, ``{}`` when the config is unreadable.
-    """
-    data = _load_model_config_dict(model_path)
-    if data is None:
-        return {}
-    out: dict = {}
-    arches = _config_architectures(data)
-    if arches:
-        out["architectures"] = arches
-    model_type = str(data.get("model_type") or "").strip()
-    if model_type:
-        out["model_type"] = model_type
-    return out
+
 
 
 # Unsupported-model (multimodal / vision) preflight gate
@@ -837,117 +699,13 @@ def _load_model_config_tags(model_path: str) -> dict:
 
 # Supported text-generation architecture markers (decoder-only causal LM); ForCausalLM is an infix
 # because some variants append a suffix (e.g. DeepseekV3ForCausalLMNextN / LlamaForCausalLMEagle3).
-_SUPPORTED_ARCH_MARKERS = (
-    "ForCausalLM",
-    "LMHeadModel",
-    "ForCausalLMWithValueHead",
-)
 
 # Explicit allowlist of supported model_type values (fallback when architectures is empty/missing).
-_SUPPORTED_MODEL_TYPES = frozenset(
-    {
-        "llama",
-        "mistral",
-        "mixtral",
-        "qwen2",
-        "qwen2_moe",
-        "qwen3",
-        "qwen3_moe",
-        "gemma",
-        "gemma2",
-        "phi",
-        "phi3",
-        "phimoe",
-        "starcoder2",
-        "codellama",
-        "deepseek_v2",
-        "deepseek_v3",
-        "falcon",
-        "gpt_neox",
-        "gpt2",
-        "opt",
-        "bloom",
-        "internlm",
-        "internlm2",
-        "yi",
-        "baichuan",
-        "chatglm",
-        "glm",
-        "glm4",
-        "command-r",
-        "cohere",
-        "cohere2",
-        "dbrx",
-        "mpt",
-        "olmo",
-        "olmo2",
-        "jamba",
-        "arctic",
-        "exaone",
-        "granite",
-        "granitemoeshared",
-        "stablelm",
-        "persimmon",
-    }
-)
 
 # Explicit multimodal / vision signals that win even if an architecture ends with ForCausalLM (e.g. Phi3VForCausalLM).
-_UNSUPPORTED_MODEL_TYPES = frozenset(
-    {
-        "gemma3",
-        "mllama",
-        "llava",
-        "llava_next",
-        "qwen2_vl",
-        "qwen2_5_vl",
-        "idefics",
-        "idefics2",
-        "idefics3",
-        "paligemma",
-        "pixtral",
-        "internvl_chat",
-        "phi3_v",
-    }
-)
 
-_UNSUPPORTED_ARCHITECTURES = frozenset(
-    {
-        # RWKV6/Qwen2 hybrid linear-attention arch: not in sglang's supported list
-        # (only plain RwkvForCausalLM is), fails ModelConfig validation at boot.
-        "RWKV6Qwen2ForCausalLM",
-        "Gemma3ForConditionalGeneration",
-        "InternVLChatModel",
-        "Phi3VForCausalLM",
-        "LlavaForConditionalGeneration",
-        "LlavaNextForConditionalGeneration",
-        "MllamaForConditionalGeneration",
-        "PaliGemmaForConditionalGeneration",
-        "Qwen2VLForConditionalGeneration",
-        "Qwen2_5_VLForConditionalGeneration",
-        "Idefics2ForConditionalGeneration",
-        "Idefics3ForConditionalGeneration",
-        "PixtralForConditionalGeneration",
-    }
-)
 
-_UNSUPPORTED_CONFIG_KEYS = (
-    "vision_config",
-    "image_token_id",
-    "image_token_index",
-    "mm_config",
-    "multi_modal_config",
-    "vision_tower",
-    "vision_tower_cfg",
-    "image_processor_type",
-    "projector_config",
-    "mm_projector_type",
-)
 
-_TEXT_DECODER_CONFIG_KEYS = (
-    "text_config",
-    "language_config",
-    "llm_config",
-)
 
 
 # Three-way model verdicts returned by ``_detect_unsupported_model``:
@@ -960,437 +718,37 @@ _TEXT_DECODER_CONFIG_KEYS = (
 #   vision_only    — positively-identified VLM with no meaningful text-only path
 #                    (Llava / PaliGemma / Qwen-VL / Phi3V / …) or an
 #                    unclassifiable config. Always fail-fast.
-_VERDICT_TEXT_COERCIBLE = "text_coercible"
-_VERDICT_VISION_ONLY = "vision_only"
 
 # model_type values that ship a vision_config for the VLM checkpoint but whose
 # text MoE path is benchmark-compatible. Used to route a vision-config hit to
 # text_coercible instead of fail-fast. Matched on model_type so a whole family
 # is covered without re-listing every per-checkpoint arch name.
-_TEXT_COERCIBLE_MODEL_TYPES = frozenset(
-    {
-        "kimi_k25",
-        "qwen3_5_moe",
-        # Gemma-4 ships a vision_config (Gemma4ForConditionalGeneration) but its
-        # text decoder (text_config / gemma4_text) is a standard dense causal LM
-        # that vLLM serves text-only (both Gemma4ForCausalLM and
-        # Gemma4ForConditionalGeneration are registered). Text benchmarks never
-        # exercise the vision tower, so route to the degraded text path.
-        "gemma4",
-    }
-)
 
 
-def _arch_is_supported_text_generation(arch: str) -> bool:
-    """True when an architecture class name denotes a supported text-generation
-    (decoder-only causal LM) model.
-
-    Args:
-        arch (str): The architecture class name to test.
-
-    Returns:
-        bool: ``True`` when ``arch`` contains a supported text-generation
-            marker.
-    """
-    a = (arch or "").strip()
-    if not a:
-        return False
-    return any(marker in a for marker in _SUPPORTED_ARCH_MARKERS)
 
 
-def _config_declares_text_decoder(config: dict, architectures: list[str], model_type_l: str) -> bool:
-    """True when config positively identifies a usable text decoder.
-
-    For multimodal wrapper configs the top-level architecture often names the
-    wrapper (``*ForConditionalGeneration``), while the benchmarkable decoder is
-    described under ``text_config`` / ``language_config``. Treat those nested
-    text blocks as capability evidence instead of requiring a per-family
-    allowlist entry.
-
-    Args:
-        config (dict): The decoded model ``config.json`` mapping.
-        architectures (list[str]): The top-level architecture class names.
-        model_type_l (str): The lowercased top-level ``model_type``.
-
-    Returns:
-        bool: ``True`` when the config positively identifies a usable text
-            decoder.
-    """
-    if model_type_l in _TEXT_COERCIBLE_MODEL_TYPES:
-        return True
-    if any(_arch_is_supported_text_generation(a) for a in architectures):
-        return True
-
-    for key in _TEXT_DECODER_CONFIG_KEYS:
-        nested = config.get(key)
-        if not isinstance(nested, dict):
-            continue
-        nested_architectures = _config_architectures(nested)
-        if any(_arch_is_supported_text_generation(a) for a in nested_architectures):
-            return True
-
-        nested_model_type = str(nested.get("model_type") or "").strip().lower()
-        if nested_model_type in _SUPPORTED_MODEL_TYPES or nested_model_type in _TEXT_COERCIBLE_MODEL_TYPES:
-            return True
-
-        # Some multimodal configs (including newer family wrappers) expose a
-        # text_config with decoder dimensions but do not use a model_type that
-        # this package has seen yet. Because the evidence is scoped to an
-        # explicitly named text block, this does not widen fallback for a
-        # top-level mislabeled VLM.
-        has_vocab = isinstance(nested.get("vocab_size"), int) and nested["vocab_size"] > 0
-        has_decoder_shape = any(
-            isinstance(nested.get(field), int) and nested[field] > 0
-            for field in ("hidden_size", "num_hidden_layers", "intermediate_size")
-        )
-        if has_vocab and has_decoder_shape:
-            return True
-
-    return False
 
 
-def _detect_unsupported_model(model_path: str) -> dict | None:
-    """Best-effort classify a model's text-serving viability.
-
-    Returns ``None`` for a plain text-generation model (and for an unreadable
-    config.json — we don't hard-block on a config we cannot read). Otherwise
-    returns ``{"architecture", "model_type", "signal", "verdict"}`` where
-    ``verdict`` is one of:
-
-    * ``"vision_only"`` — positively-identified VLM with no usable text path, or
-      an unclassifiable config. Caller fail-fasts.
-    * ``"text_coercible"`` — multimodal signal present but a text decoder exists
-      (e.g. Kimi-K2.6 / Qwen3.6 MoE, or a generic ``ForCausalLM`` arch that
-      merely carries a ``vision_config``). Caller proceeds on the text path with
-      a degraded-mode warning unless ``--allow-mm-text-fallback`` is off.
-
-    Args:
-        model_path (str): The local model directory containing ``config.json``.
-
-    Returns:
-        dict | None: ``None`` for a plain text-generation model (or an
-            unreadable config), otherwise a dict with ``architecture``,
-            ``model_type``, ``signal``, and ``verdict``
-            (``vision_only`` / ``text_coercible``).
-    """
-    config = _load_model_config_dict(model_path)
-    if config is None:
-        return None
-    architectures = _config_architectures(config)
-    # Wrapper models may nest the real arch under text_config; merge so the
-    # unsupported-arch blocklist still matches (e.g. RWKV6Qwen2ForCausalLM).
-    nested = config.get("text_config")
-    if isinstance(nested, dict):
-        for a in _config_architectures(nested):
-            if a not in architectures:
-                architectures.append(a)
-    model_type = str(config.get("model_type") or "").strip()
-    model_type_l = model_type.lower()
-
-    # Hard denylist wins first: explicit VLM arch / model_type is vision_only
-    # even if it also carries a ForCausalLM marker (e.g. Phi3VForCausalLM).
-    for arch in architectures:
-        if arch in _UNSUPPORTED_ARCHITECTURES:
-            return {
-                "architecture": arch,
-                "model_type": model_type,
-                "signal": f"unsupported architecture '{arch}'",
-                "verdict": _VERDICT_VISION_ONLY,
-            }
-    if model_type_l in _UNSUPPORTED_MODEL_TYPES:
-        return {
-            "architecture": architectures[0] if architectures else "",
-            "model_type": model_type,
-            "signal": f"unsupported model_type '{model_type}'",
-            "verdict": _VERDICT_VISION_ONLY,
-        }
-
-    # A multimodal config key (vision_config, image_token_id, …) is only a
-    # degrade signal, not a hard block: if a text decoder exists we coerce to
-    # the text path with a warning instead of fail-fasting. Routing to
-    # text_coercible requires a *positive* text-decoder signal — either an
-    # explicitly coercible model_type family, a confirmed text-generation
-    # architecture class, or a nested text decoder config. We deliberately do
-    # NOT fall back to top-level ``_SUPPORTED_MODEL_TYPES`` here: that allowlist
-    # is a last-resort match for a bare model_type with no architectures, and a
-    # mislabeled VLM config (e.g. a real vision model carrying model_type="llama"
-    # but no decoder evidence) must fail-fast rather than silently degrade to a
-    # text run.
-    _has_text_decoder = _config_declares_text_decoder(config, architectures, model_type_l)
-    for key in _UNSUPPORTED_CONFIG_KEYS:
-        if key in config:
-            verdict = _VERDICT_TEXT_COERCIBLE if _has_text_decoder else _VERDICT_VISION_ONLY
-            return {
-                "architecture": architectures[0] if architectures else "",
-                "model_type": model_type,
-                "signal": f"multimodal config key '{key}'",
-                "verdict": verdict,
-            }
-
-    if any(_arch_is_supported_text_generation(a) for a in architectures):
-        return None
-
-    if model_type_l in _SUPPORTED_MODEL_TYPES:
-        return None
-
-    if architectures:
-        return {
-            "architecture": architectures[0],
-            "model_type": model_type,
-            "signal": (
-                f"architecture '{architectures[0]}' does not match any "
-                f"supported text-generation pattern "
-                f"({', '.join(_SUPPORTED_ARCH_MARKERS)})"
-            ),
-            "verdict": _VERDICT_VISION_ONLY,
-        }
-
-    if model_type:
-        return {
-            "architecture": "",
-            "model_type": model_type,
-            "signal": (f"model_type '{model_type}' is not in the supported text-generation allowlist"),
-            "verdict": _VERDICT_VISION_ONLY,
-        }
-
-    return {
-        "architecture": "",
-        "model_type": "",
-        "signal": "config.json has neither architectures nor model_type",
-        "verdict": _VERDICT_VISION_ONLY,
-    }
 
 
 # config.json keys carrying max sequence length, priority order (legacy/alt configs use aliases).
-_MAXPOS_CONFIG_KEYS = (
-    "max_position_embeddings",
-    "n_positions",
-    "max_sequence_length",
-    "seq_length",
-    "max_seq_len",
-)
 
 # Safety headroom (tokens) above ISL+OSL: covers BOS/chat-template tokens and dataset length jitter.
-_CONTEXT_HEADROOM_ENV = "HYPERLOOM_CONTEXT_HEADROOM_TOKENS"
-_CONTEXT_HEADROOM_DEFAULT = 512
 
 # Extra context budget on top of ISL+OSL for server-facing MAX_MODEL_LEN; always clamped to native
 # window by _resolve_max_model_len (vllm wires it into --max-model-len, so an unclamped value crashes).
-_MAX_MODEL_LEN_HEADROOM = 4096
 
 
-def _load_model_max_position_embeddings(model_path: str) -> int | None:
-    """Best-effort read of max sequence length from config.json (first positive among known keys, incl. nested ``text_config``), or None.
-
-    Args:
-        model_path (str): The local model directory containing ``config.json``.
-
-    Returns:
-        int | None: The first positive max-sequence-length value found, or
-            ``None`` when unavailable.
-    """
-    if not model_path:
-        return None
-    cfg_path = Path(model_path) / "config.json"
-    try:
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    candidates = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        candidates.append(nested)
-    for cfg in candidates:
-        for key in _MAXPOS_CONFIG_KEYS:
-            val = cfg.get(key)
-            if isinstance(val, bool):
-                continue
-            if isinstance(val, int) and val > 0:
-                return val
-    return None
 
 
-def _model_has_dual_chunk_attention(model_path: str) -> bool:
-    """Best-effort detect a ``dual_chunk_attention_config`` in config.json.
-
-    Qwen 1M long-context models ship this block; sglang then rejects the
-    default aiter attention backend and demands ``dual_chunk_flash_attn``.
-    Checks the top level and a nested ``text_config``. Soft-degrades to
-    False on any missing / unreadable / invalid config.
-
-    Args:
-        model_path (str): The local model directory containing ``config.json``.
-
-    Returns:
-        bool: ``True`` when a ``dual_chunk_attention_config`` block is present.
-    """
-    data = _load_model_config_dict(model_path)
-    if data is None:
-        return False
-    if data.get("dual_chunk_attention_config"):
-        return True
-    nested = data.get("text_config")
-    return isinstance(nested, dict) and bool(nested.get("dual_chunk_attention_config"))
 
 
-def _model_is_moe(model_path: str) -> bool:
-    """Best-effort detect a Mixture-of-Experts model from config.json.
-
-    MoE checkpoints declare an expert count (``num_experts`` /
-    ``num_local_experts`` / ``n_routed_experts``), a ``moe_intermediate_size``,
-    or carry a ``moe`` marker in ``architectures`` / ``model_type`` (e.g.
-    Qwen3MoeForCausalLM / qwen3_moe). On ROCm/aiter, sglang's default
-    ``--moe-runner-backend auto`` routes these through aiter's CK 2-stage
-    fused-MoE kernel, whose first-request JIT build is broken in some images;
-    callers use this to switch to a ROCm-capable MoE runner. Checks the top
-    level and a nested ``text_config``. Soft-degrades to False on any missing
-    / unreadable / invalid config.
-
-    Args:
-        model_path (str): The local model directory containing ``config.json``.
-
-    Returns:
-        bool: ``True`` when the config carries a Mixture-of-Experts signal.
-    """
-    data = _load_model_config_dict(model_path)
-    if data is None:
-        return False
-    candidates = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        candidates.append(nested)
-    expert_keys = ("num_experts", "num_local_experts", "n_routed_experts")
-    for cfg in candidates:
-        for key in expert_keys:
-            val = cfg.get(key)
-            if isinstance(val, bool):
-                continue
-            if isinstance(val, int) and val > 1:
-                return True
-        if cfg.get("moe_intermediate_size"):
-            return True
-        if "moe" in str(cfg.get("model_type") or "").lower():
-            return True
-        if any("moe" in arch.lower() for arch in _config_architectures(cfg)):
-            return True
-    return False
 
 
-def _context_headroom_tokens() -> int:
-    """Resolve the context headroom (tokens); env override, else default.
-
-    Returns:
-        int: The configured context headroom in tokens (falls back to the
-            default for unset / invalid / negative env values).
-    """
-    raw = os.environ.get(_CONTEXT_HEADROOM_ENV, "").strip()
-    if not raw:
-        return _CONTEXT_HEADROOM_DEFAULT
-    try:
-        val = int(raw)
-    except ValueError:
-        return _CONTEXT_HEADROOM_DEFAULT
-    return val if val >= 0 else _CONTEXT_HEADROOM_DEFAULT
 
 
-def _resolve_max_model_len(isl: int, osl: int, model_path: str) -> int:
-    """Resolve ``MAX_MODEL_LEN`` = ISL+OSL+headroom, clamped to ``max_position_embeddings`` (never stretch context).
-
-    Args:
-        isl (int): Input sequence length.
-        osl (int): Output sequence length.
-        model_path (str): The local model directory containing ``config.json``.
-
-    Returns:
-        int: The resolved ``MAX_MODEL_LEN``, clamped to the model's native
-            max-position window when known.
-    """
-    desired = int(isl) + int(osl) + _MAX_MODEL_LEN_HEADROOM
-    maxpos = _load_model_max_position_embeddings(model_path)
-    if maxpos:
-        return min(desired, maxpos)
-    return desired
 
 
-def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bool:
-    """Fail fast when ``max_position_embeddings < ISL+OSL+headroom`` (no --context-length stretch by policy).
-
-    Persists a stop reason and returns True (caller should exit) when the workload does NOT fit; False
-    when it fits or the model's max length is unknown.
-
-    Args:
-        args (argparse.Namespace): The parsed CLI namespace (reads
-            ``isl`` / ``osl`` / ``model``).
-        session_dir (Path): The session root directory for the stop report.
-
-    Returns:
-        bool: ``True`` when the workload does not fit (caller should exit),
-            ``False`` when it fits or the max length is unknown.
-    """
-    isl = int(getattr(args, "isl", 0) or 0)
-    osl = int(getattr(args, "osl", 0) or 0)
-    if isl <= 0 or osl <= 0:
-        return False
-    maxpos = _load_model_max_position_embeddings(str(getattr(args, "model", "") or ""))
-    if not maxpos:
-        return False
-    headroom = _context_headroom_tokens()
-    required = isl + osl + headroom
-    if maxpos >= required:
-        return False
-
-    reason = (
-        f"model max_position_embeddings={maxpos} < required {required} "
-        f"(ISL={isl} + OSL={osl} + headroom={headroom}). The workload exceeds "
-        f"the model context window; every request would 400. Refusing to run "
-        f"(no --context-length override by policy). Lower ISL/OSL for this "
-        f"model, or lower {_CONTEXT_HEADROOM_ENV} if the headroom is too "
-        f"conservative (it is added to `required`, so raising it makes "
-        f"admission stricter, not looser)."
-    )
-    # Persist the stop reason so CI / the robustness monitor read it from state.json instead of the log.
-    try:
-        from .orchestrator.shared_state import SharedState
-        from .orchestrator.action_executors.report import (
-            _build_summary_dict,
-            _format_md,
-        )
-        from .session_paths import reports_dir
-
-        state = SharedState.load_or_init(session_dir)
-        # Validated writer keeps the vocab-closed invariant Inv-8.3 (term registered in STOP_REASON_VOCAB).
-        state.set_stop_reason("model_context_window_too_small")
-        state.closing_phase = True
-        state.save(session_dir)
-        summary = _build_summary_dict(state, {}, [], external_baseline=None)
-        summary["stop_detail"] = reason
-        rdir = reports_dir(session_dir)
-        rdir.mkdir(parents=True, exist_ok=True)
-        (rdir / "final.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
-    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
-        print(
-            f"WARNING: failed to persist context-window stop report: {exc!r}",
-            file=sys.stderr,
-        )
-    # Delivery-artifact parity: emit session_breakdown.json here too since fail-fast exits before
-    # coordinator.run()'s finally, so CI's delivery contract sees a clean skip not "Missing artifacts".
-    try:
-        from .breakdown import write_breakdown_json
-
-        write_breakdown_json(session_dir)
-    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
-        print(
-            f"WARNING: failed to write session_breakdown.json on context fail-fast: {exc!r}",
-            file=sys.stderr,
-        )
-    print(f"ERROR: {reason}", file=sys.stderr)
-    return True
 
 
 # RoPE-config signals: their presence means the model uses extended/scaled
@@ -1398,57 +756,14 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
 # A config that ships these but no max-position key crashes with
 # "'PreTrainedConfig' object has no attribute 'max_position_embeddings'" deep
 # in engine init.
-_ROPE_CONFIG_KEYS = ("rope_scaling", "rope_parameters", "rope_theta")
 
 # Architectures whose runtime path is not adapted to AMD/ROCm yet.
 # Matched case-insensitively against model_type and architectures.
-# minimax_m1: its lightning-attention kernel needs 128KB LDS (Required: 131072)
-# but MI300X's per-CU shared-memory limit is 64KB → "out of resource: shared
-# memory" → engine core init failed. Confirmed from MiniMax-M1-80k server.log.
-_AMD_UNSUPPORTED_MODEL_TYPES = frozenset({"deepseek_v32", "minimax_m1"})
-_AMD_UNSUPPORTED_ARCHITECTURES = frozenset(
-    {
-        "deepseekv32forcausallm",
-        "minimaxm1forcausallm",
-    }
-)
 
 # model_type values that ship a custom AutoConfig (auto_map) but aren't
 # registered in sglang/vLLM's config mapping. sglang falls back to
 # PreTrainedConfig (base class), which lacks max_position_embeddings etc.,
 # causing AttributeError deep in engine init.
-_UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
-
-# Architectures Transformers/sglang's ModelConfig does not recognize at all
-# (hardware-agnostic). The pydantic ModelConfig validation raises
-# "model type `X` but Transformers does not recognize this architecture"
-# → ValidationError in engine init regardless of GPU vendor. Matched
-# case-insensitively against model_type and architectures.
-# glm4_moe_lite: confirmed from zai-org-GLM-4.7-Flash server.log.
-# mimo_v2_flash: confirmed from XiaomiMiMo-MiMo-V2-Flash server.log ("model of
-# type mimo_v2_flash to instantiate a model of type ." + Unknown attention
-# backend TRITON) — the unrecognized arch leaves an empty model type.
-# deepseek_v4: confirmed from DeepSeek-V4-Flash server.log ModelConfig
-# validation failure.
-_UNRECOGNIZED_MODEL_TYPES = frozenset(
-    {
-        "deepseek_v4",
-        "glm4_moe_lite",
-        "mimo_v2_flash",
-    }
-)
-_UNRECOGNIZED_ARCHITECTURES = frozenset(
-    {
-        "deepseekv4forcausallm",
-        "glm4moeliteforcausallm",
-        "mimov2flashforcausallm",
-    }
-)
-# ministral3 only fails inside a Mistral3 multimodal wrapper (Surpem-Supertron2
-# server.log: vLLM registry raises KeyError('ministral3') for text_config.
-# model_type). A bare top-level ministral3 is left to the framework to judge, so
-# this is checked only against the nested text_config scope.
-_NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset({"ministral3"})
 
 # Phi-3 su/longrope rope_scaling: Phi3Config._rope_scaling_validation() requires
 # rope_scaling to be a dict of EXACTLY 3 keys (type/short_factor/long_factor).
@@ -1456,1122 +771,50 @@ _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset({"ministral3"})
 # into the rope_scaling dict during config load, so the validator sees 4 keys
 # and raises ValueError at AutoConfig.from_pretrained() — before SGLang's
 # --json-model-override-args can apply, so the override cannot recover the run.
-_PHI3_ROPE_TYPES = frozenset({"su", "longrope"})
 
 # Gemma2 missing hidden_act: sglang's gemma2 runtime reads config.hidden_act
 # unconditionally. Some checkpoints ship only hidden_activation (the HF field
 # name), so config.hidden_act is absent and the model crashes with
-# AttributeError in engine init. Hardware-agnostic. ``_GEMMA2_ARCHITECTURES`` is
-# imported from model_config_utils (single source of truth) at module top.
+# AttributeError in engine init. Hardware-agnostic.
 
 # Quantization formats with no ROCm/AMD runtime path. NVIDIA ModelOpt FP8/NVFP4
 # use vendor-specific scale packing (no sglang ROCm loader); bitsandbytes ships
 # CUDA-only kernels; NVFP4/FP4 need Blackwell hardware. AMD-native fp8 (Quark /
 # compressed-tensors), gptq, awq are NOT listed so they keep running.
-_AMD_UNSUPPORTED_QUANT_ALGOS = frozenset({"nvfp4", "fp4"})
-_AMD_UNSUPPORTED_QUANT_METHODS = frozenset({"bitsandbytes", "bnb"})
-
-
-def _detect_amd_unsupported_quant(model_path: str) -> str | None:
-    """Return a reason when the model ships a quant format unsupported on ROCm.
-
-    Reads both ``config.json:quantization_config`` (standard HF) and the
-    separate ``hf_quant_config.json`` (NVIDIA ModelOpt). Returns None when the
-    format is ROCm-runnable or absent.
-
-    Args:
-        model_path (str): The local model directory containing the quant
-            config files.
-
-    Returns:
-        str | None: A human-readable reason when the quant format is
-            unsupported on ROCm, else ``None``.
-    """
-    if not model_path:
-        return None
-    cfg = _load_model_config_dict(model_path) or {}
-    qc = cfg.get("quantization_config")
-    if isinstance(qc, dict):
-        method = str(qc.get("quant_method") or "").strip().lower()
-        if method in _AMD_UNSUPPORTED_QUANT_METHODS:
-            return (
-                f"quantization_config.quant_method '{method}' ships CUDA-only "
-                f"kernels with no ROCm equivalent; it crashes in engine init "
-                f"on AMD."
-            )
-    # NVIDIA ModelOpt writes a separate hf_quant_config.json, not config.json.
-    hq_path = Path(model_path) / "hf_quant_config.json"
-    if hq_path.is_file():
-        try:
-            hq = json.loads(hq_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, ValueError):
-            hq = None
-        if isinstance(hq, dict):
-            producer = (
-                str(
-                    (hq.get("producer") or {}).get("name") or "",
-                )
-                .strip()
-                .lower()
-            )
-            algo = (
-                str(
-                    (hq.get("quantization") or {}).get("quant_algo") or "",
-                )
-                .strip()
-                .lower()
-            )
-            if producer == "modelopt" and algo:
-                return (
-                    f"NVIDIA ModelOpt '{algo.upper()}' quantization "
-                    f"(hf_quant_config.json) uses vendor-specific scale packing "
-                    f"with no sglang ROCm loader (e.g. 'modelopt_fp8 ... not "
-                    f"supported in ROCm'); use an AMD-native (Quark) checkpoint."
-                )
-            if algo in _AMD_UNSUPPORTED_QUANT_ALGOS:
-                return (
-                    f"'{algo.upper()}' quantization needs NVIDIA Blackwell hardware; no AMD/ROCm runtime path exists."
-                )
-    return None
-
-
-def _detect_phi3_rope_scaling_incompatible(data: dict) -> str | None:
-    """Return a reason when a Phi-3 su/longrope config crashes Phi3Config validation.
-
-    Phi3Config._rope_scaling_validation() requires rope_scaling to be a 3-key
-    dict, but transformers folds the top-level rope_theta into rope_scaling at
-    load, yielding 4 keys and a ValueError. This is hardware-agnostic and the
-    su/longrope type triggers it; yarn (the non-longrope path) is left alone.
-
-    Args:
-        data (dict): The decoded model ``config.json`` mapping.
-
-    Returns:
-        str | None: A human-readable reason when the Phi-3 rope_scaling config
-            would crash validation, else ``None``.
-    """
-    model_type = str(data.get("model_type") or "").strip().lower()
-    arches = {a.lower() for a in _config_architectures(data)}
-    if model_type != "phi3" and "phi3forcausallm" not in arches:
-        return None
-    rope = data.get("rope_scaling")
-    if not isinstance(rope, dict):
-        return None
-    rope_type = str(rope.get("type") or "").strip().lower()
-    if rope_type not in _PHI3_ROPE_TYPES:
-        return None
-    # The crash only triggers when a top-level rope_theta exists: transformers
-    # folds it into rope_scaling, giving 4 keys instead of the required 3.
-    # Without rope_theta the 3-key dict passes validation fine.
-    if data.get("rope_theta") is None:
-        return None
-    return (
-        f"config.json is a Phi-3 model with rope_scaling.type='{rope_type}' "
-        f"and a top-level rope_theta={data['rope_theta']}; "
-        "Phi3Config._rope_scaling_validation requires a 3-key rope_scaling, but "
-        "transformers folds the top-level rope_theta into it at load, so the "
-        "validator sees 4 keys and raises ValueError at "
-        "AutoConfig.from_pretrained — before --json-model-override-args can "
-        "apply, so the engine crashes in init."
-    )
-
-
-def _detect_gemma2_missing_hidden_act(data: dict) -> str | None:
-    """Return a reason when a Gemma2 config omits hidden_act.
-
-    sglang's gemma2 runtime reads config.hidden_act unconditionally; configs
-    that only ship hidden_activation crash with AttributeError in engine init.
-
-    Args:
-        data (dict): The decoded model ``config.json`` mapping.
-
-    Returns:
-        str | None: A human-readable reason when a Gemma2 config omits
-            ``hidden_act``, else ``None``.
-    """
-    model_type = str(data.get("model_type") or "").strip().lower()
-    arches = {a.lower() for a in _config_architectures(data)}
-    if model_type != "gemma2" and not (arches & _GEMMA2_ARCHITECTURES):
-        return None
-    scopes = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        scopes.append(nested)
-    if any(s.get("hidden_act") for s in scopes):
-        return None
-    return (
-        "config.json is a Gemma2 model but lacks hidden_act (only "
-        "hidden_activation may be present); sglang's gemma2 runtime reads "
-        "config.hidden_act unconditionally and crashes with AttributeError "
-        "in engine init."
-    )
-
-
-# Local tokenizer artifacts sglang/HF need to build a real tokenizer. A
-# checkpoint shipping only weights + config (no tokenizer) loads a degraded
-# fallback whose warmup encodes an empty prompt → empty (M=0) batch → aiter
-# rotary_embedding SIGFPE on MI300X. Confirmed by repro: adding the official
-# Qwen2.5 tokenizer to such a model removes the M:0 crash entirely.
-_TOKENIZER_ARTIFACT_FILES = (
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "tokenizer.model",
-    "vocab.json",
-    "merges.txt",
-    "spiece.model",
-)
-
-
-def _detect_unrecognized_architecture(data: dict) -> str | None:
-    """Return a reason when the architecture is unknown to Transformers/sglang.
-
-    Hardware-agnostic: the ModelConfig pydantic validation rejects the unknown
-    model_type with a ValidationError in engine init on any GPU vendor.
-
-    Args:
-        data (dict): The decoded model ``config.json`` mapping.
-
-    Returns:
-        str | None: A human-readable reason when the architecture is
-            unrecognized by Transformers/sglang/vLLM, else ``None``.
-    """
-    scopes = [(data, False)]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        scopes.append((nested, True))
-    for scope, is_nested in scopes:
-        model_type = str(scope.get("model_type") or "").strip().lower()
-        arches = {a.lower() for a in _config_architectures(scope)}
-        unrecognized_types = _UNRECOGNIZED_MODEL_TYPES
-        if is_nested:
-            unrecognized_types = _UNRECOGNIZED_MODEL_TYPES | _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES
-        if model_type in unrecognized_types or arches & _UNRECOGNIZED_ARCHITECTURES:
-            label = model_type or (next(iter(arches), "") if arches else "?")
-            return (
-                f"model type '{label}' is not recognized by Transformers/"
-                f"sglang/vLLM's ModelConfig or model registry; engine init "
-                f"raises a validation/registry error. Needs a framework "
-                f"upgrade or a registered architecture mapping."
-            )
-    return None
-
-
-_VOCAB_WEIGHT_NAMES = (
-    "embed_tokens.weight",
-    "wte.weight",
-    "word_embeddings.weight",
-    "lm_head.weight",
-)
-_SAFETENSORS_HEADER_LIMIT = 64 * 1024 * 1024
-
-
-def _read_safetensors_header(path: Path) -> dict | None:
-    """Read only the safetensors JSON header; never materialize tensor data.
-
-    Args:
-        path (Path): The ``*.safetensors`` shard to inspect.
-
-    Returns:
-        dict | None: The parsed JSON header, or ``None`` when it cannot be
-            read / parsed within the header size limit.
-    """
-    try:
-        with path.open("rb") as f:
-            raw_len = f.read(8)
-            if len(raw_len) != 8:
-                return None
-            header_len = struct.unpack("<Q", raw_len)[0]
-            if header_len <= 0 or header_len > _SAFETENSORS_HEADER_LIMIT:
-                return None
-            header = json.loads(f.read(header_len))
-    except (OSError, json.JSONDecodeError, ValueError, struct.error):
-        return None
-    return header if isinstance(header, dict) else None
-
-
-def _detect_vocab_weight_shape_mismatch(model_path: str, data: dict) -> str | None:
-    """Return a reason when config vocab_size disagrees with model weights.
-
-    Best-effort and safetensors-only: reads just the JSON header (never tensor
-    data) of ``*.safetensors`` shards. Legacy ``*.bin``/``pytorch_model.bin``
-    checkpoints are not inspected; truncated/corrupt headers are skipped
-    silently (return None) and left to the downstream loader.
-
-    Args:
-        model_path (str): The local model directory holding the safetensors
-            shards.
-        data (dict): The decoded model ``config.json`` mapping (supplies
-            ``vocab_size``).
-
-    Returns:
-        str | None: A human-readable reason when a vocab dimension disagrees
-            with ``config.json``, else ``None``.
-    """
-    expected = data.get("vocab_size")
-    nested = data.get("text_config")
-    if not isinstance(expected, int) and isinstance(nested, dict):
-        expected = nested.get("vocab_size")
-    if isinstance(expected, bool) or not isinstance(expected, int) or expected <= 0:
-        return None
-
-    mdir = Path(model_path)
-    for st_path in sorted(mdir.glob("*.safetensors")):
-        header = _read_safetensors_header(st_path)
-        if not header:
-            continue
-        for name, meta in header.items():
-            if name == "__metadata__" or not isinstance(meta, dict):
-                continue
-            if not any(name.endswith(suffix) for suffix in _VOCAB_WEIGHT_NAMES):
-                continue
-            shape = meta.get("shape")
-            if not (isinstance(shape, list) and shape and isinstance(shape[0], int) and not isinstance(shape[0], bool)):
-                continue
-            actual = shape[0]
-            if actual != expected:
-                return (
-                    f"config.json vocab_size={expected} but {st_path.name}:"
-                    f"{name} has vocab dimension {actual}; sglang asserts "
-                    f"loaded_weight.shape[output_dim] matches org_vocab_size "
-                    f"during weight loading."
-                )
-    return None
-
-
-def _detect_missing_tokenizer_files(model_path: str, data: dict) -> str | None:
-    """Return a reason when a local checkpoint ships no tokenizer artifacts.
-
-    Conservative: only fires when NONE of the known tokenizer files exist AND
-    the config carries no custom AutoTokenizer (auto_map) that could supply one.
-
-    Args:
-        model_path (str): The local model directory to inspect.
-        data (dict): The decoded model ``config.json`` mapping (checked for a
-            custom ``auto_map`` AutoTokenizer).
-
-    Returns:
-        str | None: A human-readable reason when no tokenizer artifacts are
-            present, else ``None``.
-    """
-    auto_map = data.get("auto_map")
-    if isinstance(auto_map, dict) and auto_map.get("AutoTokenizer"):
-        return None
-    mdir = Path(model_path)
-    if any((mdir / f).is_file() for f in _TOKENIZER_ARTIFACT_FILES):
-        return None
-    return (
-        "model directory ships weights + config but no tokenizer artifacts "
-        f"({', '.join(_TOKENIZER_ARTIFACT_FILES)}); sglang loads a degraded "
-        "fallback tokenizer whose warmup encodes an empty prompt, producing an "
-        "empty (M=0) batch that crashes the aiter rotary_embedding kernel with "
-        "SIGFPE on MI300X (Gensyn-Swarm fine-tune class)."
-    )
-
-
-def _detect_incompatible_model_config(
-    model_path: str,
-    gpu_type: str | None = None,
-) -> str | None:
-    """Detect a statically-knowable model-config incompatibility.
-
-    Returns a human-readable reason string when the model's ``config.json``
-    will crash vLLM/transformers at load time, else ``None``. Two cases,
-    both conservative (no false positives on healthy configs):
-
-    * ``config.json`` is present but corrupt / not a JSON object — the loader
-      soft-degrades to ``None``, but a present-yet-unparseable file means the
-      framework will fail at config load, so block early.
-    * the config (top level or ``text_config``) declares a RoPE block but has
-      no max-position key at all — the rope init then dereferences a missing
-      ``max_position_embeddings``.
-
-    A fully absent ``config.json`` is NOT blocked (kept soft-degrade): the
-    upstream submission filter + downstream loader still apply.
-
-    Args:
-        model_path (str): The local model directory containing ``config.json``.
-        gpu_type (str | None): Optional GPU type; AMD-only checks fire when it
-            resolves to a known AMD runner.
-
-    Returns:
-        str | None: A human-readable reason when a statically-knowable config
-            incompatibility is detected, else ``None``.
-    """
-    if not model_path:
-        return None
-    cfg_path = Path(model_path) / "config.json"
-    if not cfg_path.is_file():
-        return None
-    data = _load_model_config_dict(model_path)
-    if data is None:
-        # File exists but did not parse into a dict (corrupt / non-object).
-        return (
-            f"config.json at {cfg_path} is present but unparseable "
-            f"(corrupt JSON or not a JSON object); the framework would crash "
-            f"at config load."
-        )
-    # Reject DSA-like architectures only on AMD/ROCm.
-    # The same model can still run on vendor-supported NVIDIA engines.
-    if _resolve_amd_gpu_type(gpu_type):
-        quant_reason = _detect_amd_unsupported_quant(model_path)
-        if quant_reason is not None:
-            return quant_reason
-        model_type = str(data.get("model_type") or "").strip().lower()
-        arches = {a.lower() for a in _config_architectures(data)}
-        if model_type in _AMD_UNSUPPORTED_MODEL_TYPES or arches & _AMD_UNSUPPORTED_ARCHITECTURES:
-            label = model_type or (next(iter(arches), "") if arches else "?")
-            return (
-                f"model architecture '{label}' has no AMD/ROCm runtime path "
-                f"(needs a vendor engine on NVIDIA Hopper/Blackwell, e.g. "
-                f"DeepSeek Sparse Attention); it crashes in engine init on "
-                f"this hardware."
-            )
-    scopes = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        scopes.append(nested)
-    has_rope = any(s.get(k) for s in scopes for k in _ROPE_CONFIG_KEYS)
-    has_maxpos = any(
-        isinstance(s.get(k), int) and not isinstance(s.get(k), bool) and s.get(k) > 0
-        for s in scopes
-        for k in _MAXPOS_CONFIG_KEYS
-    )
-    if has_rope and not has_maxpos:
-        return (
-            "config.json declares a RoPE block "
-            f"({', '.join(_ROPE_CONFIG_KEYS)}) but no max-position field "
-            f"({', '.join(_MAXPOS_CONFIG_KEYS)}); transformers/vLLM rope "
-            "init dereferences a missing max_position_embeddings and crashes "
-            "in engine init (DeepSeek-V3.2-Exp class)."
-        )
-    # Phi-3 longrope/su rope_scaling with non-canonical keys: hardware-agnostic
-    # (it is a transformers-layer Phi3Config validation, not a ROCm gap).
-    phi3_reason = _detect_phi3_rope_scaling_incompatible(data)
-    if phi3_reason is not None:
-        return phi3_reason
-    # Gemma2 missing hidden_act: also hardware-agnostic.
-    gemma2_reason = _detect_gemma2_missing_hidden_act(data)
-    if gemma2_reason is not None:
-        return gemma2_reason
-    # Unrecognized architecture (e.g. glm4_moe_lite): hardware-agnostic
-    # ModelConfig ValidationError in engine init.
-    unrecognized_reason = _detect_unrecognized_architecture(data)
-    if unrecognized_reason is not None:
-        return unrecognized_reason
-    vocab_shape_reason = _detect_vocab_weight_shape_mismatch(model_path, data)
-    if vocab_shape_reason is not None:
-        return vocab_shape_reason
-    # Missing tokenizer artifacts: hardware-agnostic; the degraded fallback
-    # tokenizer's empty-prompt warmup triggers an aiter M=0 SIGFPE.
-    tokenizer_reason = _detect_missing_tokenizer_files(model_path, data)
-    if tokenizer_reason is not None:
-        return tokenizer_reason
-    # Custom AutoConfig with unregistered model_type: sglang/vLLM fall
-    # back to PreTrainedConfig (no max_position_embeddings attr) → crash.
-    auto_map = data.get("auto_map")
-    model_type = str(data.get("model_type") or "").strip().lower()
-    if isinstance(auto_map, dict) and auto_map.get("AutoConfig") and model_type in _UNREGISTERED_CUSTOM_CONFIG_TYPES:
-        return (
-            f"model_type '{model_type}' ships a custom AutoConfig "
-            f"({auto_map['AutoConfig']}) but is not registered in sglang/"
-            f"vLLM's config mapping; the engine falls back to "
-            f"PreTrainedConfig which lacks key attributes "
-            f"(max_position_embeddings) and crashes in init."
-        )
-    # Dual-chunk attention on AMD/ROCm: sglang hard-requires
-    # dual_chunk_flash_attn (sm90+ only) and rejects all other backends.
-    if _resolve_amd_gpu_type(gpu_type) and _model_has_dual_chunk_attention(model_path):
-        return (
-            "model declares dual_chunk_attention_config but sglang requires "
-            "the dual_chunk_flash_attn backend which only builds on sm90+ "
-            "(NVIDIA Hopper); no compatible backend exists for AMD/ROCm."
-        )
-    return None
-
-
-def _preflight_model_config_compat(
-    args: argparse.Namespace,
-    session_dir: Path,
-) -> bool:
-    """Fail fast when the model config is statically known to be incompatible.
-
-    Catches configs that crash vLLM/transformers at load (corrupt config.json,
-    or a RoPE block without any max-position field) so we persist a clear stop
-    reason instead of booting a server that dies cryptically in engine init.
-
-    Returns True when incompatible (caller should exit); False otherwise.
-
-    Args:
-        args (argparse.Namespace): The parsed CLI namespace (reads ``model``
-            and ``gpu_type``).
-        session_dir (Path): The session root directory for the stop report.
-
-    Returns:
-        bool: ``True`` when the config is incompatible (caller should exit),
-            ``False`` otherwise.
-    """
-    model = str(getattr(args, "model", "") or "")
-    detail = _detect_incompatible_model_config(
-        model,
-        str(getattr(args, "gpu_type", "") or "") or None,
-    )
-    if detail is None:
-        return False
-    name = Path(model).name or model
-    reason = (
-        f"Model '{name}' has an incompatible config: {detail} Refusing to run "
-        f"before the heavy server bring-up. Upgrade the framework/transformers "
-        f"to a version that supports this model, or skip it on this hardware."
-    )
-    try:
-        from .orchestrator.shared_state import SharedState
-        from .orchestrator.action_executors.report import (
-            _build_summary_dict,
-            _format_md,
-        )
-        from .session_paths import reports_dir
-
-        state = SharedState.load_or_init(session_dir)
-        state.set_stop_reason("model_config_incompatible")
-        state.closing_phase = True
-        state.save(session_dir)
-        summary = _build_summary_dict(state, {}, [], external_baseline=None)
-        summary["stop_detail"] = reason
-        rdir = reports_dir(session_dir)
-        rdir.mkdir(parents=True, exist_ok=True)
-        (rdir / "final.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
-    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
-        print(
-            f"WARNING: failed to persist model-config stop report: {exc!r}",
-            file=sys.stderr,
-        )
-    try:
-        from .breakdown import write_breakdown_json
-
-        write_breakdown_json(session_dir)
-    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
-        print(
-            f"WARNING: failed to write session_breakdown.json on config fail-fast: {exc!r}",
-            file=sys.stderr,
-        )
-    print(f"ERROR: {reason}", file=sys.stderr)
-    return True
-
-
-def _preflight_unsupported_model_arch(
-    args: argparse.Namespace,
-    session_dir: Path,
-) -> bool:
-    """Gate multimodal/vision models before expensive bring-up.
-
-    Best-effort (an unreadable config.json is not a hard block). Three outcomes:
-
-    * plain text model → returns False (run proceeds normally).
-    * ``text_coercible`` (multimodal signal but a text decoder exists) →
-      when ``--allow-mm-text-fallback`` is on (default), records a degraded-mode
-      warning on SharedState, emits a loud stderr/log warning, and returns False
-      so the run proceeds on the text path. When the flag is off, falls through
-      to fail-fast.
-    * ``vision_only`` (true VLM / unclassifiable) → persists
-      ``stop_reason=unsupported_model_arch`` and returns True (caller exits).
-
-    Args:
-        args (argparse.Namespace): The parsed CLI namespace (reads ``model``
-            and ``allow_mm_text_fallback``).
-        session_dir (Path): The session root directory for any stop report /
-            degraded-mode marker.
-
-    Returns:
-        bool: ``True`` when the model is vision-only (caller should exit),
-            ``False`` for plain text or coercible-with-fallback models.
-    """
-    model = str(getattr(args, "model", "") or "")
-    hit = _detect_unsupported_model(model)
-    if hit is None:
-        return False
-
-    name = Path(model).name or model
-    arch = hit.get("architecture") or "<unknown>"
-    mt = hit.get("model_type") or "<unknown>"
-    verdict = str(hit.get("verdict") or _VERDICT_VISION_ONLY)
-    allow_fallback = bool(getattr(args, "allow_mm_text_fallback", True))
-
-    if verdict == _VERDICT_TEXT_COERCIBLE and allow_fallback:
-        warning = (
-            f"DEGRADED MODE: model '{name}' carries a multimodal signal "
-            f"({hit.get('signal', 'multimodal config')}; architecture '{arch}', "
-            f"model_type '{mt}') but exposes a text-generation path. Hyperloom "
-            f"is running it on the TEXT path only — any image/audio inputs are "
-            f"ignored, so benchmark numbers reflect the text decoder alone. "
-            f"Pass --no-allow-mm-text-fallback to fail-fast instead."
-        )
-        print(f"WARNING: {warning}", file=sys.stderr)
-        log.warning(warning)
-        try:
-            from .orchestrator.shared_state import SharedState
-
-            state = SharedState.load_or_init(session_dir)
-            state.degraded_mode = True
-            state.model_warnings = list(state.model_warnings or []) + [
-                {
-                    "kind": "multimodal_text_fallback",
-                    "model_name": name,
-                    "architecture": arch,
-                    "model_type": mt,
-                    "signal": str(hit.get("signal") or ""),
-                    "detail": warning,
-                }
-            ]
-            state.save(session_dir)
-        except Exception as exc:  # noqa: BLE001 — never block the run on advisory write
-            print(
-                f"WARNING: failed to persist degraded-mode marker: {exc!r}",
-                file=sys.stderr,
-            )
-        return False
-
-    reason = (
-        f"Unsupported model '{name}': architecture '{arch}' (model_type "
-        f"'{mt}') is not a supported text-generation model. Hyperloom only "
-        f"supports decoder-only causal LM models (architectures containing "
-        f"ForCausalLM or LMHeadModel). Rejected because: "
-        f"{hit.get('signal', 'unknown architecture')}. Submit a "
-        f"text-generation checkpoint instead."
-    )
-    # Persist the stop reason so CI / the robustness monitor read it from state.json instead of the log.
-    try:
-        from .orchestrator.shared_state import SharedState
-        from .orchestrator.action_executors.report import (
-            _build_summary_dict,
-            _format_md,
-        )
-        from .session_paths import reports_dir
-
-        state = SharedState.load_or_init(session_dir)
-        # Validated writer keeps the vocab-closed invariant Inv-8.3 (term registered in STOP_REASON_VOCAB).
-        state.set_stop_reason("unsupported_model_arch")
-        state.closing_phase = True
-        state.save(session_dir)
-        summary = _build_summary_dict(state, {}, [], external_baseline=None)
-        summary["stop_detail"] = reason
-        rdir = reports_dir(session_dir)
-        rdir.mkdir(parents=True, exist_ok=True)
-        (rdir / "final.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
-    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
-        print(
-            f"WARNING: failed to persist unsupported-model stop report: {exc!r}",
-            file=sys.stderr,
-        )
-    # Delivery-artifact parity: emit session_breakdown.json here too since fail-fast exits before
-    # coordinator.run()'s finally, so CI's delivery contract sees a clean skip not "Missing artifacts".
-    try:
-        from .breakdown import write_breakdown_json
-
-        write_breakdown_json(session_dir)
-    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
-        print(
-            f"WARNING: failed to write session_breakdown.json on unsupported-model fail-fast: {exc!r}",
-            file=sys.stderr,
-        )
-    print(f"ERROR: {reason}", file=sys.stderr)
-    return True
-
-
-def _seed_shared_state(
-    session_dir: Path,
-    args: argparse.Namespace,
-    *,
-    session_id: str,
-) -> SharedState:
-    """Construct and persist the initial :class:`SharedState` for a run.
-
-    Seeds the state from parsed CLI args, clamping the research-lane
-    capacity to a safe range to protect quota and the PR-Monitor.
-
-    Args:
-        session_dir: Directory for the new session.
-        args: Parsed CLI arguments.
-        session_id: Identifier assigned to the session.
-
-    Returns:
-        The seeded :class:`SharedState` instance.
-    """
-    # research_lane capacity is locked for the session; clamp to [0, ceiling] (2×GPU) to protect quota/PR-Monitor.
-    from inference_optimizer.orchestrator.policy import (
-        research_lane_ceiling,
-    )
-
-    research_lane_capacity = int(getattr(args, "research_lane_capacity", 1) or 1)
-    research_lane_capacity = max(
-        0,
-        min(research_lane_ceiling(), research_lane_capacity),
-    )
-    gpu_specialist_capacity_raw = getattr(
-        args,
-        "gpu_specialist_capacity",
-        None,
-    )
-    try:
-        gpu_specialist_capacity = max(
-            0,
-            int(gpu_specialist_capacity_raw) if gpu_specialist_capacity_raw is not None else 0,
-        )
-    except (TypeError, ValueError):
-        gpu_specialist_capacity = 0
-    # Collect plateau threshold overrides; absent keys fall through to DEFAULT_PLATEAU_* at compute time.
-    plateau_overrides: dict[str, Any] = {}
-    if getattr(args, "plateau_explore_keep_gain", None) is not None:
-        plateau_overrides["explore_keep_gain_pct"] = float(args.plateau_explore_keep_gain)
-    if getattr(args, "plateau_explore_empty_streak", None) is not None:
-        plateau_overrides["explore_empty_streak"] = int(args.plateau_explore_empty_streak)
-    if getattr(args, "plateau_explore_lookback", None) is not None:
-        plateau_overrides["explore_lookback"] = int(args.plateau_explore_lookback)
-    if getattr(args, "plateau_kernel_revert_streak", None) is not None:
-        plateau_overrides["kernel_revert_streak"] = int(args.plateau_kernel_revert_streak)
-    if getattr(args, "plateau_kernel_keep_gain", None) is not None:
-        plateau_overrides["kernel_keep_gain_pct"] = float(args.plateau_kernel_keep_gain)
-    if getattr(args, "plateau_kernel_lookback", None) is not None:
-        plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
-    # EXPLORE HARD force-exit thresholds; either fires an explore_force_exit_low_budget exit (overrides all).
-    if getattr(args, "explore_force_exit_hours_remaining", None) is not None:
-        plateau_overrides["force_exit_hours_remaining"] = float(args.explore_force_exit_hours_remaining)
-    if getattr(args, "explore_force_exit_budget_pct", None) is not None:
-        plateau_overrides["force_exit_budget_pct"] = float(args.explore_force_exit_budget_pct)
-
-    # Resolve workload metadata from CLI flags then env; parse duplicated here to avoid re-reading manifest.json.
-    def _int_env_or_arg(arg_name: str, env_name: str) -> int:
-        """Resolve an int workload knob from a CLI arg, falling back to env.
-
-        Args:
-            arg_name (str): Attribute name to read off ``args``.
-            env_name (str): Environment variable consulted when the arg is unset/0.
-
-        Returns:
-            int: The resolved value, or 0 when neither source yields a valid int.
-        """
-        val = getattr(args, arg_name, None)
-        if val is None or val == 0:
-            raw = (os.environ.get(env_name, "") or "").strip()
-            return int(raw) if raw.isdigit() else 0
-        try:
-            return int(val)
-        except (TypeError, ValueError):
-            return 0
-
-    def _resolve_framework_version(args_in: Any) -> str:
-        """Resolve ``framework_version`` for the recipe-snapshot canonical id.
-
-        Ladder: explicit CLI/$FRAMEWORK_VERSION → auto-detect package __version__ → "" (canonical_id
-        substitutes unknown_version). Auto-detect runs only when both CLI and env are empty.
-
-        Args:
-            args_in (Any): The parsed CLI namespace (reads ``framework_version``
-                and ``framework``).
-
-        Returns:
-            str: The resolved framework version, or ``""`` when unknown.
-        """
-        explicit = (getattr(args_in, "framework_version", None) or "").strip() or (
-            os.environ.get("FRAMEWORK_VERSION", "") or ""
-        ).strip()
-        if explicit:
-            return explicit
-        framework = (getattr(args_in, "framework", None) or "").strip() or (
-            os.environ.get("FRAMEWORK", "") or ""
-        ).strip()
-        if not framework:
-            return ""
-        from .recipe_snapshot_constants import (
-            DEFAULT_FRAMEWORK_VERSION_SLUG,
-            detect_framework_version,
-        )
-
-        detected = detect_framework_version(framework)
-        # Treat the failure-slug as "no info"; canonical_id redoes the fallback at use time.
-        return "" if detected == DEFAULT_FRAMEWORK_VERSION_SLUG else detected
-
-    # --explore-overtime-kill-ratio: mirror into fresh SharedState for ExploreExecutor; <=0 disables the gate.
-    explore_overtime_kill_ratio_raw = getattr(
-        args,
-        "explore_overtime_kill_ratio",
-        None,
-    )
-    try:
-        explore_overtime_kill_ratio = (
-            float(explore_overtime_kill_ratio_raw) if explore_overtime_kill_ratio_raw is not None else 1.10
-        )
-    except (TypeError, ValueError):
-        explore_overtime_kill_ratio = 1.10
-
-    # --explore-variant-timeout-sec mirror; 0 (default) auto-derives the cap, positive pins it.
-    explore_variant_timeout_raw = getattr(
-        args,
-        "explore_variant_timeout_sec",
-        None,
-    )
-    try:
-        explore_variant_timeout_sec_override = max(
-            0,
-            int(explore_variant_timeout_raw) if explore_variant_timeout_raw is not None else 0,
-        )
-    except (TypeError, ValueError):
-        explore_variant_timeout_sec_override = 0
-
-    # --explore-variant-timeout-safety-margin mirror: auto-derive headroom over the soft kill ratio (neg -> 0).
-    explore_variant_timeout_safety_margin_raw = getattr(
-        args,
-        "explore_variant_timeout_safety_margin",
-        None,
-    )
-    try:
-        explore_variant_timeout_safety_margin = max(
-            0.0,
-            float(explore_variant_timeout_safety_margin_raw)
-            if explore_variant_timeout_safety_margin_raw is not None
-            else 0.5,
-        )
-    except (TypeError, ValueError):
-        explore_variant_timeout_safety_margin = 0.5
-
-    # KB architecture tags from config.json (architectures + model_type); fresh-launch only (resume rehydrates).
-    _cfg_tags = _load_model_config_tags(str(args.model))
-
-    state = SharedState(
-        session_id=session_id,
-        claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
-        sandbox_user_id=(os.environ.get("SANDBOX_USER_ID") or "").strip(),
-        model_name=Path(args.model).name,
-        model_path=str(args.model),
-        model_class=args.model_class or "",
-        # Advisory architecture profile; fresh-launch only (resume rehydrates, must not clobber). Soft-degrade to {}.
-        model_arch=_load_model_arch(_workspace_root_resolve(), Path(args.model).name),
-        # Architecture-identity tags from config.json stamped into recipe-snapshot extras (fine-tune carries base identity).
-        model_architectures=_cfg_tags.get("architectures", []),
-        model_type=_cfg_tags.get("model_type", ""),
-        framework=os.environ.get("FRAMEWORK", "sglang"),
-        gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
-        # Workload metadata mirrored from CLI/env so downstream prompts see real values (else TP defaults to 1).
-        tp=_int_env_or_arg("tp", "TP"),
-        # ``ep`` mirrors EP env so fresh-shell resume recovers it for the KB warm-start same-shape filter.
-        ep=_int_env_or_arg("ep", "EP"),
-        precision=(str(getattr(args, "precision", None) or os.environ.get("PRECISION", "") or "").strip()),
-        framework_version=_resolve_framework_version(args),
-        conc=_int_env_or_arg("conc", "CONC"),
-        isl=_int_env_or_arg("isl", "ISL"),
-        osl=_int_env_or_arg("osl", "OSL"),
-        max_model_len=_int_env_or_arg("max_model_len", "MAX_MODEL_LEN"),
-        kernel_enabled=not getattr(args, "no_kernel", False),
-        continue_kernel_after_gemm=bool(getattr(args, "continue_kernel_after_gemm", True)),
-        target_summary=args.target_summary or _default_target_summary(args),
-        baseline_tput=0.0,
-        cumulative_gain=0.0,
-        max_minutes=int((args.max_hours or 0) * 60),
-        research_lane_capacity=research_lane_capacity,
-        gpu_specialist_capacity=gpu_specialist_capacity,
-        plateau_overrides=plateau_overrides,
-        explore_overtime_kill_ratio=explore_overtime_kill_ratio,
-        enable_roofline=bool(
-            getattr(args, "enable_roofline", True),
-        ),
-        # Standalone FRAMEWORK_PR phase; --no-framework skips it (mirrors --no-kernel/kernel_enabled).
-        framework_phase_enabled=not bool(getattr(args, "no_framework", False)),
-        # --no-explore skips the EXPLORE phase entirely.
-        explore_enabled=not bool(getattr(args, "no_explore", False)),
-        explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
-        explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
-        research_scout_enabled=bool(getattr(args, "research_scout", True)),
-        research_scout_interval=max(1, int(getattr(args, "research_scout_interval", 3) or 3)),
-        target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
-        recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
-        # SWEEP-phase post-sweep concurrency sweep flags (on by default); see orchestrator/conc_sweep.py.
-        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True)),
-        conc_sweep_concs=_parse_conc_sweep_concs(args),
-        conc_sweep_total_budget_sec=int(
-            getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
-        ),
-        conc_sweep_variant_timeout_sec=int(
-            getattr(args, "conc_sweep_timeout_sec", 1800) or 1800,
-        ),
-    )
-    state.save(session_dir)
-    return state
-
-
-def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
-    """Parse ``--conc-sweep-concs '1,2,4,8'`` into a list[int]; non-integers warned+dropped, empty -> 1..128 ladder.
-
-    Args:
-        args (argparse.Namespace): The parsed CLI namespace (reads
-            ``conc_sweep_concs``).
-
-    Returns:
-        list[int]: The parsed concurrency ladder, falling back to the default
-            ``[1, 2, 4, 8, 16, 32, 64, 128]`` when empty.
-    """
-    raw = str(getattr(args, "conc_sweep_concs", "") or "").strip()
-    if not raw:
-        return [1, 2, 4, 8, 16, 32, 64, 128]
-    out: list[int] = []
-    for tok in raw.split(","):
-        t = tok.strip()
-        if not t:
-            continue
-        try:
-            out.append(int(t))
-        except ValueError:
-            log.warning("conc_sweep: ignoring non-integer CONC token %r", t)
-    return out or [1, 2, 4, 8, 16, 32, 64, 128]
-
-
-def _print_session_skeleton(session_dir: Path) -> None:
-    """Echo the freshly-created skeleton so launchers see the exact layout.
-
-    Args:
-        session_dir (Path): The session root directory whose skeleton
-            subdirectories are listed.
-    """
-    print(f"Session layout under {session_dir}:")
-    for sub in _SESSION_SKELETON:
-        marker = "ok" if (session_dir / sub).is_dir() else "MISSING"
-        print(f"  [{marker}] {sub}/")
-    print("  [ok] manifest.json (written first)")
-
-
-def _snapshot_system_prompts(
-    session_dir: Path,
-    *,
-    prompts: dict[str, str],
-) -> None:
-    """Persist each agent's effective system prompt to ``agents/<role>/system_prompt.snapshot.md``.
-
-    Args:
-        session_dir (Path): The session root directory.
-        prompts (dict[str, str]): Mapping of agent role to effective system
-            prompt body.
-    """
-    for role, body in prompts.items():
-        target = agent_prompt_snapshot(session_dir, role)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(body or "(empty)", encoding="utf-8")
-
-
-def _default_target_summary(args: argparse.Namespace) -> str:
-    """Compose a human-readable objective summary from the CLI target flags.
-
-    Used as the fallback ``target_summary`` when the operator did not pass an
-    explicit ``--target-summary``. The phrasing depends on which target flag is
-    set: ``--target-gain`` (percentage), ``--target-tput`` (tok/s/GPU), or
-    neither (open-ended optimization within the time budget).
-
-    Args:
-        args (argparse.Namespace): Parsed ``optimize`` arguments (reads ``model``,
-            ``target_gain``, ``target_tput``, ``max_hours``).
-
-    Returns:
-        str: A one-sentence description of the run's objective.
-    """
-    if args.target_gain:
-        return (
-            f"Establish baseline on {Path(args.model).name} then drive "
-            f"cumulative_gain to >= {args.target_gain}% within "
-            f"{args.max_hours}h."
-        )
-    if args.target_tput:
-        return (
-            f"Establish baseline on {Path(args.model).name} then reach "
-            f"{args.target_tput} tok/s/GPU within {args.max_hours}h."
-        )
-    return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
-
-
-def _read_failure_summary(session_dir: Path) -> dict | None:
-    """Read ``reports/final.json``'s ``failure_summary`` block, if present.
-
-    Best-effort: returns ``None`` when the file is missing/unreadable or the
-    block is absent (e.g. non-failure runs). Used to surface the real terminal
-    root cause in the end-of-run summary on ``baseline_failed`` (#465).
-
-    Args:
-        session_dir (Path): The session root directory holding
-            ``reports/final.json``.
-
-    Returns:
-        dict | None: The ``failure_summary`` block, or ``None`` when missing /
-            unreadable / absent.
-    """
-    try:
-        from .session_paths import reports_dir
-
-        final_json = reports_dir(session_dir) / "final.json"
-        data = json.loads(final_json.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
-        return None
-    fs = data.get("failure_summary") if isinstance(data, dict) else None
-    return fs if isinstance(fs, dict) else None
-
-
-def _print_final_summary(
-    state: SharedState,
-    stop_reason: str,
-    session_dir: Path | None = None,
-) -> None:
-    """Print the end-of-run summary block to stdout.
-
-    Reports the stop reason, session id, model, baseline throughput, the
-    per-round (informational) cumulative gain, the validated cumulative gain
-    (with a staleness warning when the optimization stack grew after the last
-    validation), the current best config, pruned families, and crash count.
-    On ``baseline_failed`` it also surfaces the real terminal root cause from
-    ``reports/final.json`` instead of a benign upstream WARN (#465).
-
-    Args:
-        state (SharedState): The final shared state after the run completes.
-        stop_reason (str): Why the run stopped (e.g. ``"target_reached"``).
-        session_dir (Path | None): Session root, used to read the
-            ``failure_summary`` block on failure runs.
-
-    Returns:
-        None
-    """
-    print()
-    print("================ Final summary ================")
-    print(f"  stop_reason          : {stop_reason}")
-    print(f"  session_id           : {state.session_id}")
-    print(f"  model                : {state.model_name}")
-    print(f"  baseline_tput        : {state.baseline_tput:.1f} tok/s/GPU")
-    if session_dir is not None and stop_reason == "baseline_failed":
-        failure_summary = _read_failure_summary(session_dir)
-        if failure_summary and failure_summary.get("root_cause"):
-            print(
-                f"  root_cause           : "
-                f"[{failure_summary.get('root_cause_type', 'unknown')}] "
-                f"{failure_summary.get('root_cause')}"
-            )
-            if failure_summary.get("server_log"):
-                print(f"  server_log           : {failure_summary.get('server_log')}")
-    print(f"  cumulative_gain      : {state.cumulative_gain:.2f}% (per-round sum — informational)")
-    if state.cumulative_gain_validated_ts:
-        stale = (
-            " ⚠ stack changed since validation"
-            if len(state.optimization_stack) > state.cumulative_gain_validated_stack_len
-            else ""
-        )
-        print(
-            f"  cumulative_gain_val  : {state.cumulative_gain_validated:.2f}% "
-            f"(validated_at_stack_len={state.cumulative_gain_validated_stack_len}, "
-            f"ts={state.cumulative_gain_validated_ts}){stale}"
-        )
-    else:
-        print("  cumulative_gain_val  : 0.00% ⚠ never validated — no `explore` stack-rebench has succeeded yet")
-    print(f"  current_best         : {state.current_best}")
-    print(f"  pruned_families      : {state.pruned_families}")
-    print(f"  crash_count          : {state.crash_count}")
-    _print_kernel_opt_summary_line(state)
-    print("===============================================")
-
-
-def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
-    """Reconcile persisted ``crash_count`` (state.json + final.json) up to the live in-memory value.
-
-    Only ever raises the persisted value (max), never lowers it; best-effort, never fatal.
-
-    Args:
-        state (SharedState): The live state carrying the authoritative
-            in-memory ``crash_count``.
-        session_dir (Path): The session root directory holding ``state.json``
-            and ``reports/final.json``.
-    """
-    live = int(getattr(state, "crash_count", 0) or 0)
-
-    # 1) state.json — reload, bump if stale, atomic re-save.
-    try:
-        disk_state = SharedState.load_or_init(session_dir)
-        if int(disk_state.crash_count or 0) < live:
-            disk_state.crash_count = live
-            disk_state.save(session_dir)
-    except Exception:  # noqa: BLE001
-        log.exception("crash_count reconcile (state.json) failed (non-fatal)")
-
-    # 2) reports/final.json — patch the single field in place if present.
-    try:
-        from .session_paths import reports_dir
-
-        final_json = reports_dir(session_dir) / "final.json"
-        if final_json.exists():
-            data = json.loads(final_json.read_text(encoding="utf-8"))
-            if int(data.get("crash_count") or 0) < live:
-                data["crash_count"] = live
-                final_json.write_text(
-                    json.dumps(data, indent=2, sort_keys=True),
-                    encoding="utf-8",
-                )
-    except Exception:  # noqa: BLE001
-        log.exception("crash_count reconcile (final.json) failed (non-fatal)")
-
-
-def _print_kernel_opt_summary_line(state: SharedState) -> None:
-    """One-line forensic readout of kernel_opt attempts at session end (matches the on-disk report; best-effort).
-
-    Args:
-        state (SharedState): The final shared state used to build the
-            kernel-optimization summary.
-    """
-    try:
-        from .orchestrator.kernel_attempt_summary import (
-            build_kernel_optimization_summary,
-        )
-
-        session_dir = _resolve_session_dir_for_summary(state)
-        if session_dir is None:
-            return
-        summary = build_kernel_optimization_summary(state, session_dir)
-        totals = summary.get("totals") or {}
-        attempted = int(totals.get("attempted") or 0)
-        if attempted == 0 and int(totals.get("unattempted") or 0) == 0:
-            return
-        integrated = int(totals.get("integrated") or 0)
-        rejected = int(totals.get("rejected") or 0)
-        unattempted = int(totals.get("unattempted") or 0)
-        print(
-            f"  kernel_opt           : {attempted} attempted "
-            f"({integrated} integrated, {rejected} rejected), "
-            f"{unattempted} unattempted in top candidates"
-        )
-        takeaways = summary.get("top_takeaways") or []
-        if len(takeaways) >= 2:
-            print(f"  kernel_opt_top_cause : {takeaways[1]}")
-        report_path = Path(session_dir) / "reports" / "kernel_optimization_summary.json"
-        if report_path.is_file():
-            print(f"  kernel_opt_report    : {report_path}")
-    except Exception:  # noqa: BLE001 — stdout print must never fail the run
-        pass
-
-
-def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
-    """Best-effort session_dir lookup ($HYPERLOOM_SESSION_DIR) for the stdout kernel_opt line; ``None`` if unresolved.
-
-    Args:
-        state (SharedState): The final shared state (accepted for call-site
-            parity; resolution is env-based).
-
-    Returns:
-        Path | None: The resolved session directory, or ``None`` when
-            unresolved.
-    """
-    env_sd = os.environ.get("HYPERLOOM_SESSION_DIR", "").strip()
-    if env_sd:
-        p = Path(env_sd).expanduser()
-        if p.is_dir():
-            return p
-    return None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # Legacy local auth-proxy endpoint. The component was removed; any leftover
@@ -5660,21 +3903,29 @@ def _build_parser() -> argparse.ArgumentParser:
             "min(120, max_hours * 60 * 0.02). Pass 0 to disable closing phase."
         ),
     )
+    opt.add_argument("--isl", type=int, default=int(os.environ.get("ISL", "256")),
+                      help="Input sequence length (default $ISL or 256)")
+    opt.add_argument("--osl", type=int, default=int(os.environ.get("OSL", "256")),
+                      help="Output sequence length (default $OSL or 256)")
     opt.add_argument(
-        "--isl", type=int, default=int(os.environ.get("ISL", "256")), help="Input sequence length (default $ISL or 256)"
-    )
-    opt.add_argument(
-        "--osl",
-        type=int,
-        default=int(os.environ.get("OSL", "256")),
-        help="Output sequence length (default $OSL or 256)",
-    )
-    opt.add_argument(
-        "--precision",
+        "--reference-script",
+        dest="reference_script",
         type=str,
-        default=os.environ.get("PRECISION", "bf16"),
-        help="Model precision (default $PRECISION or bf16)",
+        default=None,
+        help=(
+            "Reference launch recipe (.sh path or http(s) URL). Its serve "
+            "flags + whitelisted exports seed the baseline server args at "
+            "lowest priority (EXPLORE can override). Model-gated: ignored if "
+            "the run's model differs from the recipe's. If the given path is "
+            "unreadable / yields no flags, a matching InferenceX single-node "
+            "recipe is auto-discovered (exact filename match only; fuzzy "
+            "matches are logged, not used). When this flag is omitted, no "
+            "discovery runs and the baseline is unchanged."
+        ),
     )
+    opt.add_argument("--precision", type=str,
+                      default=os.environ.get("PRECISION", "bf16"),
+                      help="Model precision (default $PRECISION or bf16)")
     opt.add_argument(
         "--framework-version",
         dest="framework_version",

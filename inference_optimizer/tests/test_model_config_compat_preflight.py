@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from inference_optimizer import cli
+from inference_optimizer import cli_model_gate
 
 
 def _write_config(model_dir: Path, *, with_tokenizer: bool = True, **fields) -> None:
@@ -50,7 +51,10 @@ def _seed_state(session_dir: Path, monkeypatch):
 def _default_non_amd_gpu(monkeypatch):
     """Keep config checks hermetic unless a test passes gpu_type explicitly."""
     monkeypatch.delenv("GPU_TYPE", raising=False)
-    monkeypatch.setattr(cli, "_autodetect_gpu_type", lambda: None)
+    # _detect_incompatible_model_config -> _resolve_amd_gpu_type ->
+    # _autodetect_gpu_type all live in cli_model_gate after the phase-6D fold;
+    # patch the real call site (cli re-exports the same object).
+    monkeypatch.setattr(cli_model_gate, "_autodetect_gpu_type", lambda: None)
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +621,36 @@ def test_detect_vocab_shape_match_not_blocked(tmp_path):
             "model.embed_tokens.weight": {
                 "dtype": "BF16",
                 "shape": [151936, 1536],
+                "data_offsets": [0, 0],
+            },
+        },
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_detect_vocab_shape_padded_not_blocked(tmp_path):
+    # actual > config vocab_size -> commonly a padded embedding (rounded up to
+    # an alignment / TP boundary while config keeps the unpadded value). The
+    # framework handles padding, so preflight must NOT skip such a checkpoint.
+    m = tmp_path / "qwen_vocab_padded"
+    _write_config(
+        m,
+        model_type="qwen2",
+        architectures=["Qwen2ForCausalLM"],
+        max_position_embeddings=4096,
+        vocab_size=151936,
+    )
+    _write_safetensors_header(
+        m,
+        {
+            "model.embed_tokens.weight": {
+                "dtype": "BF16",
+                "shape": [152064, 1536],  # padded up from 151936
+                "data_offsets": [0, 0],
+            },
+            "lm_head.weight": {
+                "dtype": "BF16",
+                "shape": [152064, 1536],
                 "data_offsets": [0, 0],
             },
         },

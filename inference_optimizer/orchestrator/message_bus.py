@@ -14,49 +14,34 @@ from typing import Any
 from ..storage.connection import SqliteConnection
 
 
-TOPIC_ALLOWLIST = frozenset(
-    {
-        # Optimization-loop topics
-        "proposal",
-        "question",
-        "answer",
-        "observation",
-        "event",
-        "decision",
-        "alert",
-        "historical_warning",
-        "reflection_tick",
-        "do_postmortem",
-        "do_strategic_review",
-        "do_emergency_rca",
-        "synthesize_for_kb",
-        "graceful_stop",
-        "heartbeat",
-        "delegated_result",
-        "intent_emitted",
-        "rca_done",
-        # Storage-layer events
-        "lease_expired",
-        "lease_acquire_failed",
-        # Agent-to-agent RPC (REQUEST / RESPONSE intents).
-        "request",
-        "response",
-        # Critic Review Protocol verdict broadcast.
-        "review_verdict",
-        "advice",
-        "strategy_change",
-        # Dynamic-specialist dispatch audit trail (free-form CPU-only
-        # specialist dispatch via dynamic_dispatch_tools). These are
-        # write-only observation-style records the Coordinator emits so the
-        # dispatch / poll / collect lifecycle is visible in the bus; no
-        # consumer keys off them, but they must be allow-listed or
-        # ``append_and_seq`` rejects them with ``unknown topic``.
-        "dynamic_specialist_dispatched",
-        "dynamic_specialist_status",
-        "dynamic_specialist_results",
-        "dynamic_specialist_error",
-    }
-)
+TOPIC_ALLOWLIST = frozenset({
+    # Optimization-loop topics
+    "proposal", "question", "answer",
+    "observation", "event", "decision",
+    "alert",
+    "historical_warning", "reflection_tick",
+    "do_postmortem", "do_strategic_review", "do_emergency_rca",
+    "synthesize_for_kb", "graceful_stop", "heartbeat",
+    "delegated_result", "intent_emitted", "rca_done",
+    # Robustness KILL_TASK audit broadcast (write-only; no consumer keys off
+    # it, but it must be allow-listed or ``append_and_seq`` rejects it as an
+    # unknown topic — siblings prune_branch/force_dispatch ride "event").
+    "kill",
+    # Storage-layer events
+    "lease_expired", "lease_acquire_failed",
+    # Agent-to-agent RPC (REQUEST / RESPONSE intents).
+    "request", "response",
+    # Critic Review Protocol verdict broadcast.
+    "review_verdict", "advice", "strategy_change",
+    # Dynamic-specialist dispatch audit trail (free-form CPU-only
+    # specialist dispatch via dynamic_dispatch_tools). These are
+    # write-only observation-style records the Coordinator emits so the
+    # dispatch / poll / collect lifecycle is visible in the bus; no
+    # consumer keys off them, but they must be allow-listed or
+    # ``append_and_seq`` rejects them with ``unknown topic``.
+    "dynamic_specialist_dispatched", "dynamic_specialist_status",
+    "dynamic_specialist_results", "dynamic_specialist_error",
+})
 
 
 def _now_iso() -> str:
