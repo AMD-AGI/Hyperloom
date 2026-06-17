@@ -807,23 +807,36 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
         if not rows:
             continue
         header_row = [cell.strip().lower() for cell in rows[0]]
-        # Validate first 9 cells against the canonical schema; reject narrower/reordered headers (silent wrong-mapping would corrupt candidates).
+        # Validate by PRESENCE of every canonical column (matched by name anywhere
+        # in the header), not by fixed position. ``_row_to_candidate`` reads cells
+        # name-keyed (``dict(zip(headers, cells))`` -> ``record.get("kernel path")``),
+        # so any column ORDER works as long as every required name is present and
+        # the per-cell names stay aligned. This tolerates a remapped report that
+        # INSERTS or APPENDS extra columns (e.g. a ``Source Path`` column the
+        # path-resolution step adds) — TraceLens's own spec permits appended
+        # columns, and downstream consumers must not break when one is added.
+        # We normalize each header cell to its canonical name when it CONTAINS one
+        # (e.g. "kernel path (resolved)" -> "kernel path") so name-keyed lookup
+        # still hits; unknown extras (e.g. "source path") are kept verbatim.
         if len(header_row) < canonical_width:
             continue
-        header_prefix = header_row[:canonical_width]
-        if header_prefix != headers_canonical:
-            normalized: list[str] = []
-            for cell in header_prefix:
-                match = next(
-                    (canon for canon in headers_canonical if canon in cell),
-                    cell,
-                )
-                normalized.append(match)
-            if normalized != headers_canonical:
-                continue
-            header_prefix = normalized
-        # Splice normalized canonical names back into the full header (extras kept verbatim).
-        header_row = header_prefix + header_row[canonical_width:]
+        normalized_header: list[str] = []
+        for cell in header_row:
+            match = next(
+                (canon for canon in headers_canonical if canon == cell or canon in cell),
+                cell,
+            )
+            normalized_header.append(match)
+        # Accept EXTRA/INSERTED columns (e.g. a ``Source Path`` column the
+        # path-resolution remap appends) but still REJECT genuine REORDERING of the
+        # canonical columns — a swap (e.g. Bound<->Efficiency) is a corrupt report
+        # and must be skipped, not silently mis-read. So: every canonical column
+        # must be present AND the canonical columns must appear in their canonical
+        # relative order (extras may be interleaved anywhere).
+        canonical_in_header = [c for c in normalized_header if c in headers_canonical]
+        if canonical_in_header != headers_canonical:
+            continue
+        header_row = normalized_header
         # P-item meta by 1-based rank (P1 → pitems[0]); a missing entry => category unknown.
         pitem_meta = pitems[rank - 1] if rank - 1 < len(pitems) else {}
         category = pitem_meta.get("category", "")
