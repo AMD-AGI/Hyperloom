@@ -1771,6 +1771,22 @@ def _known_harness_files(name: str, source_file: str) -> list[Path]:
     return out
 
 
+_LIBRARY_TOKENS = ("aiter", "sglang", "vllm", "flashinfer", "sgl-kernel", "sgl_kernel")
+
+
+def _library_token(path: str) -> str:
+    """Return the library a path belongs to (aiter/sglang/...), else "".
+
+    Used to keep kernel↔benchmark pairing within one library. sgl-kernel and
+    sgl_kernel normalize to "sglang" since they are the sglang kernel package.
+    """
+    low = (path or "").lower()
+    for tok in _LIBRARY_TOKENS:
+        if f"/{tok}/" in low or f"/{tok}." in low:
+            return "sglang" if tok in ("sgl-kernel", "sgl_kernel") else tok
+    return ""
+
+
 def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> list[str]:
     """Find test/benchmark files matching a kernel under a repo's subdirs.
 
@@ -1862,7 +1878,16 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
         """
         low = path_str.lower()
         return any(tag in low for tag in ("multigpu", "multi_gpu", "multinode", "/dist/", "_dist_"))
-
+    # Same-library guard (RCA root cause 2): never pair a kernel from one library
+    # with a benchmark from another (e.g. a sglang sgl-kernel .cuh with an aiter
+    # op_test). Editing the kernel then "validating" against an unrelated lib's
+    # op always fails the smoke test -> REVERT. Drop cross-library candidates
+    # when the kernel's library is recognizable.
+    src_lib = _library_token(source_file)
+    if src_lib:
+        same_lib = [s for s in unique if _library_token(s) in (src_lib, "")]
+        if same_lib:
+            unique = same_lib
     unique.sort(key=_is_multigpu)
     return unique[:10]
 

@@ -2237,6 +2237,19 @@ def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
     assert "cpp_itfs host launcher" in reason
 
 
+def test_library_token_pairing():
+    """RCA root cause 2: library detection keeps kernel<->benchmark same-lib."""
+    assert tla._library_token("/sgl-workspace/aiter/op_tests/test_activation.py") == "aiter"
+    # sgl-kernel / sgl_kernel normalize to sglang.
+    assert tla._library_token("/sgl-workspace/sglang/sgl-kernel/include/hip/x.cuh") == "sglang"
+    assert tla._library_token("/sgl-workspace/sglang/python/sglang/srt/x.py") == "sglang"
+    assert tla._library_token("/random/path/foo.py") == ""
+    # A sglang kernel and an aiter test are different libraries -> must not pair.
+    src = "/sgl-workspace/sglang/sgl-kernel/include/hip/hip_act_and_mul.cuh"
+    test = "/sgl-workspace/aiter/op_tests/test_activation.py"
+    assert tla._library_token(src) != tla._library_token(test)
+
+
 def test_classify_patchability_keeps_cpp_itfs_device_source(monkeypatch):
     """The real device source (.cuh) under cpp_itfs stays reusable."""
     src = "/wekafs/aiter/csrc/cpp_itfs/pa/pa_kernels.cuh"
