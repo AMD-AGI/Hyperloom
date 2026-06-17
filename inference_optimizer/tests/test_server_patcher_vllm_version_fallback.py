@@ -29,6 +29,13 @@ def test_same_minor_fallback(tmp_path):
     assert got is not None and got.name == "config_vllm_v0.21.0.patch"
 
 
+def test_same_minor_never_picks_newer_patch(tmp_path):
+    d = _mk_patches(tmp_path, ["0.21.0", "0.21.10"])
+    # 0.21.10 is same-minor but newer than running 0.21.5, so skip it.
+    got = sp._resolve_vllm_patch_file(d, "0.21.5")
+    assert got is not None and got.name == "config_vllm_v0.21.0.patch"
+
+
 def test_nearest_lower_fallback(tmp_path):
     d = _mk_patches(tmp_path, ["0.20.0", "0.21.0"])
     # 0.22.0 -> nearest patch whose version is <= running -> 0.21.0.

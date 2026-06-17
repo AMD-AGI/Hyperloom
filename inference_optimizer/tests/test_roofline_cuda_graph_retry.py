@@ -110,7 +110,7 @@ _CAPTURE_ERR = {
 
 
 @pytest.mark.asyncio
-async def test_vllm_eager_retry_uses_enforce_eager_from_shared_state(tmp_path):
+async def test_vllm_eager_retry_uses_enforce_eager_from_shared_state(tmp_path, caplog):
     # vLLM rejects sglang's --disable-cuda-graph; the framework comes from
     # shared_state (the internal roofline task params omit it), so the retry
     # must inject --enforce-eager.
@@ -122,6 +122,8 @@ async def test_vllm_eager_retry_uses_enforce_eager_from_shared_state(tmp_path):
     retry_args = str(seen[1].get("base_extra_args", ""))
     assert "--enforce-eager" in retry_args
     assert "--disable-cuda-graph" not in retry_args
+    assert "next attempt boots eager (--enforce-eager)" in caplog.text
+    assert "next attempt boots eager (--disable-cuda-graph)" not in caplog.text
 
 
 @pytest.mark.asyncio

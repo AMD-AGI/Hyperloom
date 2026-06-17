@@ -931,6 +931,25 @@ def test_gguf_with_safetensors_not_blocked(tmp_path):
     assert cli._detect_incompatible_model_config(str(m)) is None
 
 
+def test_gguf_with_auxiliary_bin_still_blocks(tmp_path):
+    # An arbitrary .bin next to GGUF is not an HF-loadable weight file.
+    m = tmp_path / "gguf_plus_aux_bin"
+    _write_config(m, model_type="qwen3", max_position_embeddings=32768)
+    (m / "model.gguf").write_text("dummy", encoding="utf-8")
+    (m / "tokenizer_cache.bin").write_text("dummy", encoding="utf-8")
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "GGUF" in reason
+
+
+def test_gguf_with_pytorch_model_bin_not_blocked(tmp_path):
+    # HF PyTorch weights are loadable by the default framework loaders.
+    m = tmp_path / "gguf_plus_hf_bin"
+    _write_config(m, model_type="qwen3", max_position_embeddings=32768)
+    (m / "model.gguf").write_text("dummy", encoding="utf-8")
+    (m / "pytorch_model.bin").write_text("dummy", encoding="utf-8")
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
 def test_declared_standard_quant_with_scales_index_not_blocked(tmp_path):
     # AWQ/GPTQ/compressed-tensors legitimately ship '.scales'/'.biases' tensors;
     # a declared supported quant_method must NOT be misread as MLX (the weight-

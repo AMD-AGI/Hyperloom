@@ -266,7 +266,11 @@ class RooflineExecutor:
         # needs --enforce-eager, sglang --disable-cuda-graph). Internal roofline
         # tasks omit params["framework"], so fall back to env then shared_state.
         framework = self._resolve_framework(ctx)
-        from .baseline import _is_cuda_graph_capture_failure
+        from .baseline import (
+            _disable_cuda_graph_flag,
+            _is_cuda_graph_capture_failure,
+        )
+        eager_flag = _disable_cuda_graph_flag(framework)
         for attempt in range(1, _PROFILE_MAX_ATTEMPTS + 1):
             profile_ctx = self._wrap_profile_ctx(
                 ctx, disable_cuda_graph=disable_cuda_graph,
@@ -287,6 +291,11 @@ class RooflineExecutor:
                     last_error
                 ):
                     disable_cuda_graph = True
+                    log.warning(
+                        "roofline: cuda-graph capture failure detected; next "
+                        "attempt boots eager (%s)",
+                        eager_flag,
+                    )
                 continue
             if not isinstance(profile_result, dict):
                 last_phase = "profile"
@@ -331,7 +340,8 @@ class RooflineExecutor:
                     disable_cuda_graph = True
                     log.warning(
                         "roofline: cuda-graph capture failure detected; next "
-                        "attempt boots eager (--disable-cuda-graph)",
+                        "attempt boots eager (%s)",
+                        eager_flag,
                     )
                 continue
             if not trace_path:

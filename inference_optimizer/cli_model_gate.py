@@ -740,16 +740,21 @@ def _detect_mlx_quant_weights(model_path: str) -> str | None:
 
 
 def _detect_gguf_only_checkpoint(model_path: str) -> str | None:
-    """Detect a GGUF-only checkpoint with no safetensors/bin weights."""
+    """Detect a GGUF-only checkpoint with no HF-loadable weight files."""
     d = Path(model_path)
     if not d.is_dir() or not any(d.glob("*.gguf")):
         return None
-    if any(d.glob("*.safetensors")) or any(d.glob("*.bin")):
+    has_hf_weights = (
+        any(d.glob("model*.safetensors"))
+        or any(d.glob("*.safetensors.index.json"))
+        or any(d.glob("pytorch_model*.bin"))
+    )
+    if has_hf_weights:
         return None
     return (
         "checkpoint ships only GGUF weights (llama.cpp, e.g. TQ3_4S ternary) "
-        "with no safetensors/bin; the default vLLM/sglang loader finds no model "
-        "weights and fails in engine init."
+        "with no HF safetensors/pytorch_model.bin weights; the default "
+        "vLLM/sglang loader finds no model weights and fails in engine init."
     )
 
 

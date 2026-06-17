@@ -336,10 +336,11 @@ def _resolve_vllm_patch_file(patches_dir: Path, version: str) -> Path | None:
     """Pick the TraceLens vLLM patch for ``version`` with graceful fallback.
 
     Order: exact ``config_vllm_v{version}.patch`` > env
-    ``HYPERLOOM_VLLM_PATCH_EXACT_VERSIONS`` pin > highest same-minor patch >
-    nearest patch whose version is <= running (never a newer one). Patches are
-    backward-compatible and ``_apply_atomic``'s ``git apply --check`` still
-    guards a genuinely incompatible pick. Returns None when nothing qualifies.
+    ``HYPERLOOM_VLLM_PATCH_EXACT_VERSIONS`` pin > highest same-minor patch
+    whose version is <= running > nearest patch whose version is <= running
+    (never a newer one). Patches are backward-compatible and ``_apply_atomic``'s
+    ``git apply --check`` still guards a genuinely incompatible pick. Returns
+    None when nothing qualifies.
     """
     exact = patches_dir / f"config_vllm_v{version}.patch"
     if exact.is_file():
@@ -366,7 +367,10 @@ def _resolve_vllm_patch_file(patches_dir: Path, version: str) -> Path | None:
     if running is None:
         return None
     if len(running) >= 2:
-        same_minor = [vt for vt in available if vt[:2] == running[:2]]
+        same_minor = [
+            vt for vt in available
+            if vt[:2] == running[:2] and vt <= running
+        ]
         if same_minor:
             return available[max(same_minor)]
     not_higher = [vt for vt in available if vt <= running]
