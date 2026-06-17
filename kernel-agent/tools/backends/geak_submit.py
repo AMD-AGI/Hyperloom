@@ -417,6 +417,7 @@ def submit(
         from ssh_runtime import ssh_placement_active, run_geak_over_ssh
     except Exception:  # noqa: BLE001 — ssh_runtime optional; never block ray/cli
         ssh_placement_active = lambda: False  # noqa: E731
+        run_geak_over_ssh = None  # bound for the (never-taken) branch below
     if ssh_placement_active():
         return run_geak_over_ssh(
             prompt_file,
