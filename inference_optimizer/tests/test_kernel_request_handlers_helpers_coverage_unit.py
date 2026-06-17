@@ -3,12 +3,12 @@
 """Supplemental coverage for kernel_request_handlers pure helpers: precision /
 budget / timeout resolution, backend order, tool-stdout shaping, rocprof command
 rewrite, roofline name lookup, artifact-path and in-flight scanning."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-import pytest
 
 from inference_optimizer.orchestrator import kernel_request_handlers as krh
 
@@ -130,11 +130,13 @@ def test_kernel_result_rank_non_dict() -> None:
 
 def test_kernel_result_rank_keep_beats_higher_micro_review() -> None:
     keep = {
-        "status": "ok", "proposal": {"decision": "KEEP"},
+        "status": "ok",
+        "proposal": {"decision": "KEEP"},
         "verification": {"micro_speedup": 1.05},
     }
     review = {
-        "status": "ok", "proposal": {"decision": "NEEDS_REVIEW"},
+        "status": "ok",
+        "proposal": {"decision": "NEEDS_REVIEW"},
         "verification": {"micro_speedup": 2.0},
     }
     assert krh._kernel_result_rank(keep) > krh._kernel_result_rank(review)
@@ -217,10 +219,14 @@ def test_lookup_roofline_name_found(tmp_path: Path) -> None:
     reports = tmp_path / "reports"
     reports.mkdir()
     (reports / "kernel_roofline.json").write_text(
-        json.dumps({"kernels": [
-            {"kernel_id": "k1", "name": "fused_moe_kernel"},
-            {"kernel_id": "k2", "matched_kernel_name": "attn"},
-        ]}),
+        json.dumps(
+            {
+                "kernels": [
+                    {"kernel_id": "k1", "name": "fused_moe_kernel"},
+                    {"kernel_id": "k2", "matched_kernel_name": "attn"},
+                ]
+            }
+        ),
         encoding="utf-8",
     )
     assert krh._lookup_kernel_roofline_name(tmp_path, "k1") == "fused_moe_kernel"
@@ -232,7 +238,8 @@ def test_lookup_roofline_name_bad_shape(tmp_path: Path) -> None:
     reports = tmp_path / "reports"
     reports.mkdir()
     (reports / "kernel_roofline.json").write_text(
-        json.dumps({"kernels": "not-a-list"}), encoding="utf-8",
+        json.dumps({"kernels": "not-a-list"}),
+        encoding="utf-8",
     )
     assert krh._lookup_kernel_roofline_name(tmp_path, "k1") == ""
 
@@ -253,11 +260,13 @@ def test_in_flight_kernel_ids_scans_running(tmp_path: Path) -> None:
     )
     # running with top-level kernel_id fallback
     (status_dir / "ko-2.json").write_text(
-        json.dumps({"state": "RUNNING", "kernel_id": "k8"}), encoding="utf-8",
+        json.dumps({"state": "RUNNING", "kernel_id": "k8"}),
+        encoding="utf-8",
     )
     # finished -> ignored
     (status_dir / "ko-3.json").write_text(
-        json.dumps({"state": "done", "kernel_id": "k9"}), encoding="utf-8",
+        json.dumps({"state": "done", "kernel_id": "k9"}),
+        encoding="utf-8",
     )
     # malformed -> skipped
     (status_dir / "ko-4.json").write_text("{bad", encoding="utf-8")

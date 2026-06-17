@@ -31,8 +31,16 @@ def _hermetic_env(monkeypatch):
     monkeypatch.delenv("SGLANG_WATCHDOG_TIMEOUT", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     for key in (
-        "CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "RANDOM_RANGE_RATIO",
-        "ROCR_VISIBLE_DEVICES", "PRECISION", "RUN_EVAL", "FRAMEWORK",
+        "CONC",
+        "ISL",
+        "OSL",
+        "MAX_MODEL_LEN",
+        "TP",
+        "RANDOM_RANGE_RATIO",
+        "ROCR_VISIBLE_DEVICES",
+        "PRECISION",
+        "RUN_EVAL",
+        "FRAMEWORK",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -71,7 +79,8 @@ def _materialize_envs(
     out = tmp_path / "out"
     out.mkdir()
     materialized = materialize_config_with_envs(
-        base, out,
+        base,
+        out,
         extra_server_args=extra_server_args,
         extra_envs=extra_envs,
     )
@@ -100,36 +109,29 @@ def test_resolve_bad_value_falls_back_to_default(monkeypatch, bad):
 # inject_sglang_watchdog_timeout (pure helper)
 def test_inject_appends_default_for_sglang(monkeypatch):
     monkeypatch.delenv("SGLANG_WATCHDOG_TIMEOUT", raising=False)
-    assert (
-        inject_sglang_watchdog_timeout("--foo bar", "sglang")
-        == "--foo bar --watchdog-timeout 1800"
-    )
+    assert inject_sglang_watchdog_timeout("--foo bar", "sglang") == "--foo bar --watchdog-timeout 1800"
 
 
 def test_inject_appends_when_args_empty(monkeypatch):
     monkeypatch.delenv("SGLANG_WATCHDOG_TIMEOUT", raising=False)
-    assert (
-        inject_sglang_watchdog_timeout("", "sglang") == "--watchdog-timeout 1800"
-    )
+    assert inject_sglang_watchdog_timeout("", "sglang") == "--watchdog-timeout 1800"
     # None coerces to empty and is treated identically.
-    assert (
-        inject_sglang_watchdog_timeout(None, "sglang")
-        == "--watchdog-timeout 1800"
-    )
+    assert inject_sglang_watchdog_timeout(None, "sglang") == "--watchdog-timeout 1800"
 
 
 def test_inject_uses_env_override(monkeypatch):
     monkeypatch.setenv("SGLANG_WATCHDOG_TIMEOUT", "900")
-    assert (
-        inject_sglang_watchdog_timeout("", "sglang") == "--watchdog-timeout 900"
-    )
+    assert inject_sglang_watchdog_timeout("", "sglang") == "--watchdog-timeout 900"
 
 
-@pytest.mark.parametrize("existing", [
-    "--watchdog-timeout 600",
-    "--watchdog-timeout=600",
-    "--foo 1 --watchdog-timeout 600 --bar 2",
-])
+@pytest.mark.parametrize(
+    "existing",
+    [
+        "--watchdog-timeout 600",
+        "--watchdog-timeout=600",
+        "--foo 1 --watchdog-timeout 600 --bar 2",
+    ],
+)
 def test_inject_does_not_double_user_value(existing):
     out = inject_sglang_watchdog_timeout(existing, "sglang")
     assert out == existing
@@ -149,7 +151,8 @@ def test_inject_noop_for_non_sglang(framework):
     assert inject_sglang_watchdog_timeout("--foo", framework) == "--foo"
     assert inject_sglang_watchdog_timeout("", framework) == ""
     assert "--watchdog-timeout" not in inject_sglang_watchdog_timeout(
-        "--gpu-memory-utilization 0.9", framework,
+        "--gpu-memory-utilization 0.9",
+        framework,
     )
 
 
@@ -168,7 +171,8 @@ def test_materialize_sglang_respects_env_override(tmp_path, monkeypatch):
 
 def test_materialize_sglang_does_not_double_user_watchdog(tmp_path):
     envs = _materialize_envs(
-        tmp_path, framework="sglang",
+        tmp_path,
+        framework="sglang",
         extra_server_args="--watchdog-timeout 600",
     )
     sglang_args = envs["EXTRA_SGLANG_ARGS"]
@@ -180,7 +184,8 @@ def test_materialize_sglang_does_not_double_user_watchdog(tmp_path):
 def test_materialize_honors_user_watchdog_via_extra_envs(tmp_path):
     """A user pinning the flag into EXTRA_SGLANG_ARGS via extra_envs must not be doubled."""
     envs = _materialize_envs(
-        tmp_path, framework="sglang",
+        tmp_path,
+        framework="sglang",
         extra_envs={"EXTRA_SGLANG_ARGS": "--watchdog-timeout 600"},
     )
     sglang_args = envs["EXTRA_SGLANG_ARGS"]
@@ -191,7 +196,8 @@ def test_materialize_honors_user_watchdog_via_extra_envs(tmp_path):
 def test_materialize_sglang_preserves_existing_args(tmp_path):
     """Injection appends; it must not clobber a user-supplied ``--context-length``."""
     envs = _materialize_envs(
-        tmp_path, framework="sglang",
+        tmp_path,
+        framework="sglang",
         extra_server_args="--context-length 6144",
     )
     sglang_args = envs["EXTRA_SGLANG_ARGS"]

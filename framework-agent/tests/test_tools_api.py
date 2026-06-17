@@ -106,9 +106,7 @@ def test_find_relevant_prs_smart_github_only_when_primus_url_missing(
 # fetch_pr_audit_material -----------------------------------------------
 
 
-def test_fetch_pr_audit_material_writes_two_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fetch_pr_audit_material_writes_two_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """fetch_pr_audit_material writes pr.patches + pr_files.json."""
 
     def fake_patches(repo_slug, number, *, base_url, timeout_sec):  # noqa: ARG001
@@ -178,12 +176,8 @@ def test_evaluate_candidate_outcome_accepts_path(tmp_path: Path) -> None:
     """benchmark/accuracy may be passed as a Path; missing path -> miss-throughput."""
     p = tmp_path / "b.json"
     p.write_text(json.dumps({"throughput": 250.0, "completed": "1/1"}), encoding="utf-8")
-    out = tools_api.evaluate_candidate_outcome(
-        p, None, baseline_throughput=100.0
-    )
+    out = tools_api.evaluate_candidate_outcome(p, None, baseline_throughput=100.0)
     assert out["winner"] is True
-    out_missing = tools_api.evaluate_candidate_outcome(
-        tmp_path / "nope.json", None, baseline_throughput=100.0
-    )
+    out_missing = tools_api.evaluate_candidate_outcome(tmp_path / "nope.json", None, baseline_throughput=100.0)
     assert out_missing["winner"] is False
     assert "missing throughput" in out_missing["reason"]

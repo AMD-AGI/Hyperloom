@@ -59,8 +59,7 @@ async def test_profile_executor_fails_when_no_trace_files(tmp_path, monkeypatch)
         }
 
     monkeypatch.setattr(
-        "inference_optimizer.orchestrator.action_executors.profile."
-        "BaselineExecutor.__call__",
+        "inference_optimizer.orchestrator.action_executors.profile.BaselineExecutor.__call__",
         fake_call,
     )
     # ``profile`` is no longer registered; mirror RooflineExecutor by passing the

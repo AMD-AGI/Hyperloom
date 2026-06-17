@@ -20,7 +20,6 @@ from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
 
 
-
 # Inference-server / benchmark owners whose presence proves VRAM use is legitimate,
 # not leaked. Mirrors ``_DEFAULT_PROCESS_PATTERNS`` in sources.local_probe; the vLLM v1
 # entries close the gap where ``EngineCore-`` child PIDs hold VRAM without ``vllm.entrypoints``.
@@ -180,11 +179,7 @@ class GpuLeakDetector:
             return True
         used = snap.get("vram_used_mb")
         total = snap.get("vram_total_mb")
-        if (
-            isinstance(used, (int, float))
-            and isinstance(total, (int, float))
-            and total > 0
-        ):
+        if isinstance(used, (int, float)) and isinstance(total, (int, float)) and total > 0:
             free_mb = max(0.0, float(total) - float(used))
             if free_mb <= cfg.free_mb_threshold:
                 return True

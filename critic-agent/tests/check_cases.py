@@ -423,7 +423,8 @@ def assert_intent_envelope_output(case_id: str, expected: dict[str, Any], output
         verdict = entry.get("verdict")
         match = next(
             (
-                i for i in intents
+                i
+                for i in intents
                 if i.get("intent_type") == "review_verdict"
                 and i.get("payload", {}).get("target_proposal_msg_id") == target
             ),
@@ -444,9 +445,7 @@ def validate_rejected_candidate(case_id: str, rejected_candidate: Any) -> None:
     require_type(case_id, rejected_candidate, "reason", str)
     if not rejected_candidate["reason"]:
         fail(f"{case_id}: rejected candidate reason must be non-empty")
-    if "source_section" in rejected_candidate and not isinstance(
-        rejected_candidate["source_section"], str
-    ):
+    if "source_section" in rejected_candidate and not isinstance(rejected_candidate["source_section"], str):
         fail(f"{case_id}: rejected candidate source_section must be a string")
 
 

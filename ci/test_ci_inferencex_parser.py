@@ -17,6 +17,7 @@ import inferenceX_parser as ix  # noqa: E402
 
 # ── _unmangle_msys_path / get_nfs_root / resolve_var ──
 
+
 def test_unmangle_msys_path():
     mangled = r"C:/Program Files/Git/wekafs/models/x"
     assert ix._unmangle_msys_path(mangled) == "/wekafs/models/x"
@@ -50,10 +51,19 @@ def test_resolve_var_non_string():
 
 # ── synthesize_entry_from_ci_config / parse_model_entry ──
 
+
 def test_synthesize_and_parse_roundtrip():
-    cfg = {"model_hf": "org/m", "image": "img:1", "framework": "vllm",
-           "precision": "fp8", "conc": 128, "tp": 4, "ep": 2,
-           "isl_osl_configs": [[1024, 2048]], "key": "abc-def"}
+    cfg = {
+        "model_hf": "org/m",
+        "image": "img:1",
+        "framework": "vllm",
+        "precision": "fp8",
+        "conc": 128,
+        "tp": 4,
+        "ep": 2,
+        "isl_osl_configs": [[1024, 2048]],
+        "key": "abc-def",
+    }
     entry = ix.synthesize_entry_from_ci_config(cfg)
     assert entry["model"] == "org/m"
     assert entry["model-prefix"] == "abc"
@@ -71,8 +81,7 @@ def test_synthesize_defaults():
 
 
 def test_parse_model_entry_legacy_seq_len_configs():
-    entry = {"model": "m", "seq-len-configs": [
-        {"isl": 512, "osl": 512, "search-space": [{"tp": 2, "conc-end": 32}]}]}
+    entry = {"model": "m", "seq-len-configs": [{"isl": 512, "osl": 512, "search-space": [{"tp": 2, "conc-end": 32}]}]}
     parsed = ix.parse_model_entry(entry)
     assert parsed["tp"] == 2
     assert parsed["isl_osl_configs"] == [(512, 512)]
@@ -86,9 +95,9 @@ def test_parse_model_entry_empty():
 
 # ── find_benchmark ──
 
+
 def _bench(hw="b200", isl=1024, osl=1024, prec="fp8", out_tput=100, **kw):
-    b = {"hardware": hw, "isl": isl, "osl": osl, "precision": prec,
-         "metrics": {"output_tput_per_gpu": out_tput}}
+    b = {"hardware": hw, "isl": isl, "osl": osl, "precision": prec, "metrics": {"output_tput_per_gpu": out_tput}}
     b.update(kw)
     return b
 
@@ -118,12 +127,12 @@ def test_find_benchmark_image_tp_conc_preference():
 
 
 def test_find_benchmark_tput_per_gpu_fallback():
-    b = {"hardware": "b200", "isl": 1024, "osl": 1024, "precision": "fp8",
-         "metrics": {"tput_per_gpu": 55}}
+    b = {"hardware": "b200", "isl": 1024, "osl": 1024, "precision": "fp8", "metrics": {"tput_per_gpu": 55}}
     assert ix.find_benchmark([b], "b200", 1024, 1024)["metrics"]["tput_per_gpu"] == 55
 
 
 # ── format_benchmark_for_prompt ──
+
 
 def test_format_benchmark_for_prompt_match():
     text = ix.format_benchmark_for_prompt([_bench()], "b200", 1024, 1024, "fp8")
@@ -137,6 +146,7 @@ def test_format_benchmark_for_prompt_no_data():
 
 
 # ── find_benchmark_script ──
+
 
 def test_find_benchmark_script_exact(tmp_path: Path):
     sdir = tmp_path / "benchmarks" / "single_node"
@@ -167,11 +177,19 @@ def test_find_benchmark_script_no_match(tmp_path: Path):
 
 # ── merge_model_config ──
 
+
 def test_merge_model_config(monkeypatch):
     monkeypatch.setenv("NFS_ROOT", "/nfs")
-    ifx_entry = ix.synthesize_entry_from_ci_config({
-        "model_hf": "org/M", "image": "img:1", "framework": "sglang",
-        "precision": "fp8", "conc": 64, "isl_osl_configs": [[1024, 1024]]})
+    ifx_entry = ix.synthesize_entry_from_ci_config(
+        {
+            "model_hf": "org/M",
+            "image": "img:1",
+            "framework": "sglang",
+            "precision": "fp8",
+            "conc": 64,
+            "isl_osl_configs": [[1024, 1024]],
+        }
+    )
     cfg = {"inferenceX_key": "k", "tp": 4}
     merged = ix.merge_model_config(cfg, ifx_entry, {}, "harbor", [])
     assert merged["model_hf"] == "org/M"
@@ -192,9 +210,11 @@ def test_merge_model_config_no_harbor_and_plugin_override(monkeypatch):
 
 # ── network functions (mocked) ──
 
+
 def test_get_latest_commit(monkeypatch):
     def fake_run(cmd, **kw):
         return types.SimpleNamespace(stdout="abc123\trefs/heads/main\n")
+
     monkeypatch.setattr(ix.subprocess, "run", fake_run)
     assert ix.get_latest_commit("url") == "abc123"
 
@@ -212,6 +232,7 @@ def test_fetch_amd_master_yaml(monkeypatch, tmp_path: Path):
         cfgp.parent.mkdir(parents=True, exist_ok=True)
         cfgp.write_text("models:\n  - model: x\n", encoding="utf-8")
         return types.SimpleNamespace(returncode=0)
+
     monkeypatch.setattr(ix.subprocess, "run", fake_run)
     cfg = ix.fetch_amd_master_yaml("url")
     assert cfg == {"models": [{"model": "x"}]}
@@ -224,6 +245,7 @@ def test_find_benchmark_script_from_clone(monkeypatch):
         sdir.mkdir(parents=True, exist_ok=True)
         (sdir / "m_fp8.sh").write_text("x", encoding="utf-8")
         return types.SimpleNamespace(returncode=0)
+
     monkeypatch.setattr(ix.subprocess, "run", fake_run)
     got = ix.find_benchmark_script_from_clone("url", "m-fp8")
     assert got == "benchmarks/single_node/m_fp8.sh"
@@ -236,6 +258,7 @@ def test_fetch_benchmarks_ok(monkeypatch):
 
         def json(self):
             return [{"hardware": "b200"}]
+
     monkeypatch.setattr(ix.requests, "get", lambda *a, **k: FakeResp())
     assert ix.fetch_benchmarks("model") == [{"hardware": "b200"}]
 
@@ -247,5 +270,6 @@ def test_fetch_benchmarks_api_error(monkeypatch):
 
         def json(self):
             return {"error": "nope"}
+
     monkeypatch.setattr(ix.requests, "get", lambda *a, **k: FakeResp())
     assert ix.fetch_benchmarks("model") == []

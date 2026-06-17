@@ -187,7 +187,8 @@ def test_get_history_empty_for_unknown_id(client: RemoteRecipeClient) -> None:
     with respx.mock(base_url=KB_URL) as mock:
         mock.get(format_recipe_path(PATH_RECIPE_HISTORY_TPL, cid)).mock(
             return_value=httpx.Response(
-                200, json={"canonical_id": cid, "history": []},
+                200,
+                json={"canonical_id": cid, "history": []},
             ),
         )
         assert client.get_history(canonical_id=cid) == []
@@ -213,7 +214,8 @@ def test_search_posts_full_body(client: RemoteRecipeClient) -> None:
     with respx.mock(base_url=KB_URL) as mock:
         route = mock.post(PATH_RECIPES_SEARCH).mock(
             return_value=httpx.Response(
-                200, json={"recipes": [{"canonical_id": _cid(), "version": 1}]},
+                200,
+                json={"recipes": [{"canonical_id": _cid(), "version": 1}]},
             ),
         )
         client.search(
@@ -224,11 +226,11 @@ def test_search_posts_full_body(client: RemoteRecipeClient) -> None:
             limit=20,
         )
         sent: dict[str, Any] = json.loads(route.calls.last.request.content)
-        assert sent["label_match"]    == {"hardware": "mi300x"}
+        assert sent["label_match"] == {"hardware": "mi300x"}
         assert sent["metric_filters"] == {"throughput": {"min": 10000}}
-        assert sent["updated_since"]  == "2026-05-01T00:00:00Z"
-        assert sent["order_by"]       == "updated_at DESC"
-        assert sent["limit"]          == 20
+        assert sent["updated_since"] == "2026-05-01T00:00:00Z"
+        assert sent["order_by"] == "updated_at DESC"
+        assert sent["limit"] == 20
 
 
 def test_search_omits_optional_fields_when_unset(
@@ -240,11 +242,11 @@ def test_search_omits_optional_fields_when_unset(
         )
         client.search()
         sent: dict[str, Any] = json.loads(route.calls.last.request.content)
-        assert "label_match"    not in sent
+        assert "label_match" not in sent
         assert "metric_filters" not in sent
-        assert "updated_since"  not in sent
+        assert "updated_since" not in sent
         assert sent["order_by"] == "updated_at DESC"
-        assert sent["limit"]    == 50
+        assert sent["limit"] == 50
 
 
 def test_search_returns_empty_list_when_disabled(env_clean: None) -> None:
@@ -266,10 +268,12 @@ def test_list_attempts_returns_attempts_array(
         ).mock(
             return_value=httpx.Response(
                 200,
-                json={"attempts": [
-                    {"id": 1, "outcome": "kept"},
-                    {"id": 2, "outcome": "reverted"},
-                ]},
+                json={
+                    "attempts": [
+                        {"id": 1, "outcome": "kept"},
+                        {"id": 2, "outcome": "reverted"},
+                    ]
+                },
             ),
         )
         rows = client.list_attempts(canonical_id=cid)
@@ -284,7 +288,8 @@ def test_list_session_attempts_uses_session_path(
             "/recipe-snapshot/sessions/sess-1/attempts",
         ).mock(
             return_value=httpx.Response(
-                200, json={"attempts": [{"id": 7, "outcome": "kept"}]},
+                200,
+                json={"attempts": [{"id": 7, "outcome": "kept"}]},
             ),
         )
         rows = client.list_session_attempts(session_id="sess-1")
@@ -301,7 +306,10 @@ def test_session_summary_returns_dict(client: RemoteRecipeClient) -> None:
                 json={
                     "session_id": "sess-1",
                     "total_attempts": 4,
-                    "kept": 1, "reverted": 2, "failed": 1, "skipped": 0,
+                    "kept": 1,
+                    "reverted": 2,
+                    "failed": 1,
+                    "skipped": 0,
                 },
             ),
         )
@@ -343,13 +351,13 @@ def test_env_overrides_take_precedence_for_timeout_and_retries(
 
 def test_foreground_profile_defaults(env_clean: None) -> None:
     c = RemoteRecipeClient(kb_url=KB_URL, foreground=True)
-    assert c.timeout_sec    == FOREGROUND_HTTP_TIMEOUT_SEC
+    assert c.timeout_sec == FOREGROUND_HTTP_TIMEOUT_SEC
     assert c.retry_attempts == FOREGROUND_RETRY_ATTEMPTS
 
 
 def test_background_profile_defaults(env_clean: None) -> None:
     c = RemoteRecipeClient(kb_url=KB_URL, foreground=False)
-    assert c.timeout_sec    == DEFAULT_HTTP_TIMEOUT_SEC
+    assert c.timeout_sec == DEFAULT_HTTP_TIMEOUT_SEC
     assert c.retry_attempts == DEFAULT_RETRY_ATTEMPTS
 
 
@@ -376,6 +384,5 @@ def test_no_write_methods_present() -> None:
         "_enqueue",
     ):
         assert not hasattr(c, forbidden), (
-            f"RemoteRecipeClient must not expose {forbidden!r} — "
-            "writes go local-only via LocalRecipeStore."
+            f"RemoteRecipeClient must not expose {forbidden!r} — writes go local-only via LocalRecipeStore."
         )

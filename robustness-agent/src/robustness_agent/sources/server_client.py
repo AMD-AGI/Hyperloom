@@ -115,9 +115,7 @@ class RobustnessServerClient:
         except httpx.RequestError as exc:
             raise SourceUnavailable(f"GET {path}: {type(exc).__name__}: {exc}") from exc
         if resp.status_code >= 500:
-            raise SourceUnavailable(
-                f"GET {path}: upstream {resp.status_code}"
-            )
+            raise SourceUnavailable(f"GET {path}: upstream {resp.status_code}")
         if resp.status_code == 404:
             return None
         if resp.status_code >= 400:
@@ -468,6 +466,7 @@ def _to_iso(unix_seconds: int) -> str:
 # Source adapter
 # ---------------------------------------------------------------------------
 
+
 class RobustnessServerSource:
     """Adapter wrapping :class:`RobustnessServerClient` as a :class:`Source`.
 
@@ -594,11 +593,7 @@ class RobustnessServerSource:
 
         cluster_faults: list[dict[str, Any]] = []
         if self._enable_cluster_faults:
-            since = (
-                str(now_unix - self._faults_lookback_s)
-                if now_unix and self._faults_lookback_s
-                else None
-            )
+            since = str(now_unix - self._faults_lookback_s) if now_unix and self._faults_lookback_s else None
             try:
                 cluster_faults = await self._client.list_cluster_faults(
                     since=since,
@@ -610,12 +605,7 @@ class RobustnessServerSource:
                 raise
 
         local_gpu: dict[str, Any] = {}
-        if (
-            self._enable_cluster_pod_metrics
-            and merged_pods
-            and window.start_unix
-            and window.end_unix
-        ):
+        if self._enable_cluster_pod_metrics and merged_pods and window.start_unix and window.end_unix:
             local_gpu = await self._fetch_cluster_pod_metrics(merged_pods, window)
 
         return SourceData(

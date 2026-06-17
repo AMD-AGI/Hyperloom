@@ -54,9 +54,7 @@ def _safe_call(state: Any, method: str, default: Any) -> Any:
 # ``baseline_failed`` headline: they do not correlate with the terminal
 # failure (the model still resolves / runs). Suppression is Hyperloom-side
 # only — the full text still appears in the per-attempt logs. See issue #465.
-_BENIGN_FAILURE_PATTERNS: tuple[str, ...] = (
-    "modeling_cohere2.py",
-)
+_BENIGN_FAILURE_PATTERNS: tuple[str, ...] = ("modeling_cohere2.py",)
 
 
 def _is_benign_failure_text(text: str) -> bool:
@@ -164,8 +162,14 @@ def _pick_failure_headline(text: str) -> str:
     if not lines:
         return ""
     priority = (
-        "out of memory", "fatal", "runtimeerror", "nccl",
-        "engine core", "enginecore", "workerproc", "error:",
+        "out of memory",
+        "fatal",
+        "runtimeerror",
+        "nccl",
+        "engine core",
+        "enginecore",
+        "workerproc",
+        "error:",
     )
     for keyword in priority:
         for ln in lines:
@@ -190,17 +194,11 @@ def _last_failed_baseline_attempt(state: SharedState) -> dict[str, Any] | None:
         is found.
     """
     attempts = getattr(state, "baseline_attempts", None) or []
-    failed = [
-        a for a in attempts
-        if isinstance(a, dict) and str(a.get("status")) == "failed"
-    ]
+    failed = [a for a in attempts if isinstance(a, dict) and str(a.get("status")) == "failed"]
     if failed:
         return failed[-1]
     failures = getattr(state, "last_action_failures", None) or []
-    baseline_failures = [
-        f for f in failures
-        if isinstance(f, dict) and str(f.get("action")) == "baseline"
-    ]
+    baseline_failures = [f for f in failures if isinstance(f, dict) and str(f.get("action")) == "baseline"]
     return baseline_failures[-1] if baseline_failures else None
 
 
@@ -237,7 +235,8 @@ def _resolve_attempt_server_log(attempt: dict[str, Any]) -> Path | None:
 
 
 def _build_failure_summary(
-    state: SharedState, session_dir: Path | None = None,
+    state: SharedState,
+    session_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     """Surface the real terminal error on ``baseline_failed`` (issue #465).
 
@@ -279,6 +278,7 @@ def _build_failure_summary(
         if not error_text and server_log_abs is not None:
             try:
                 from ._subprocess_kill import server_log_death_excerpt
+
                 excerpt = server_log_death_excerpt(str(server_log_abs))
             except Exception:  # noqa: BLE001
                 excerpt = None
@@ -294,9 +294,7 @@ def _build_failure_summary(
         if server_log_abs is not None:
             if session_dir is not None:
                 try:
-                    server_log_rel = server_log_abs.relative_to(
-                        session_dir
-                    ).as_posix()
+                    server_log_rel = server_log_abs.relative_to(session_dir).as_posix()
                 except ValueError:
                     server_log_rel = str(server_log_abs)
             else:
@@ -304,9 +302,7 @@ def _build_failure_summary(
 
         summary: dict[str, Any] = {
             "root_cause": root_cause[:500],
-            "root_cause_type": _classify_root_cause_type(
-                error_class, error_text
-            ),
+            "root_cause_type": _classify_root_cause_type(error_class, error_text),
             "error_class": error_class,
             "last_attempt_id": str(attempt.get("task_id") or ""),
             "server_log": server_log_rel,
@@ -316,7 +312,8 @@ def _build_failure_summary(
         return summary
     except Exception:  # noqa: BLE001 — report must never crash on the summary
         log.warning(
-            "report_executor: failed to build failure_summary", exc_info=True,
+            "report_executor: failed to build failure_summary",
+            exc_info=True,
         )
         return None
 
@@ -345,36 +342,32 @@ def _build_summary_dict(
         including an optional roofline-comparison block.
     """
     summary: dict[str, Any] = {
-        "session_id":       state.session_id,
-        "model_name":       state.model_name,
-        "model_path":       state.model_path,
-        "model_class":      state.model_class,
-        "stop_reason":      state.stop_reason,
-        "baseline_tput":    state.baseline_tput,
+        "session_id": state.session_id,
+        "model_name": state.model_name,
+        "model_path": state.model_path,
+        "model_class": state.model_class,
+        "stop_reason": state.stop_reason,
+        "baseline_tput": state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
         # steward verdict + history (report §9.1 reads the rationale verbatim).
-        "remaining_gaps_assessment": dict(
-            state.last_remaining_gaps_assessment or {}
-        ),
-        "remaining_gaps_assessments_history": list(
-            state.remaining_gaps_assessments or []
-        ),
-        "current_best":     state.current_best,
-        "cumulative_gain":  state.cumulative_gain,
+        "remaining_gaps_assessment": dict(state.last_remaining_gaps_assessment or {}),
+        "remaining_gaps_assessments_history": list(state.remaining_gaps_assessments or []),
+        "current_best": state.current_best,
+        "cumulative_gain": state.cumulative_gain,
         # Per-round-sum gain (back-compat) vs the validated gain (what the
         # run actually delivered).
-        "cumulative_gain_validated":          state.cumulative_gain_validated,
-        "cumulative_gain_validated_ts":       state.cumulative_gain_validated_ts,
+        "cumulative_gain_validated": state.cumulative_gain_validated,
+        "cumulative_gain_validated_ts": state.cumulative_gain_validated_ts,
         "cumulative_gain_validated_stack_len": state.cumulative_gain_validated_stack_len,
-        "optimization_stack_len":             len(state.optimization_stack or []),
+        "optimization_stack_len": len(state.optimization_stack or []),
         # Honesty annotations: surface unfinished/unvalidated work instead of
         # blocking the report; read defensively for partial-state stubs.
-        "has_unvalidated_keeps":              _safe_call(state, "optimization_stack_has_unvalidated_keeps", False),
-        "untried_hot_reusable_kernels":       list(_safe_call(state, "untried_hot_reusable_kernels", []) or []),
-        "pending_keep_kernels":               list(_safe_call(state, "pending_keep_kernel_ids", []) or []),
-        "crash_count":      state.crash_count,
-        "pruned_families":  state.pruned_families,
-        "max_minutes":      state.max_minutes,
+        "has_unvalidated_keeps": _safe_call(state, "optimization_stack_has_unvalidated_keeps", False),
+        "untried_hot_reusable_kernels": list(_safe_call(state, "untried_hot_reusable_kernels", []) or []),
+        "pending_keep_kernels": list(_safe_call(state, "pending_keep_kernel_ids", []) or []),
+        "crash_count": state.crash_count,
+        "pruned_families": state.pruned_families,
+        "max_minutes": state.max_minutes,
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
         "event_counts_by_topic": ev_counts,
         "highlights": highlights,
@@ -389,9 +382,8 @@ def _build_summary_dict(
     # ``state.roofline_snapshots`` (entry[0] baseline, entry[-1] latest);
     # emit only when at least one snapshot exists.
     from ..roofline_snapshot import build_roofline_comparison_from_history
-    cmp = build_roofline_comparison_from_history(
-        getattr(state, "roofline_snapshots", None)
-    )
+
+    cmp = build_roofline_comparison_from_history(getattr(state, "roofline_snapshots", None))
     if cmp:
         summary["roofline_comparison"] = cmp
     # Real terminal root cause on baseline_failed (#465): promote the last
@@ -432,13 +424,10 @@ def _format_md(summary: dict[str, Any]) -> str:
             f"{failure_summary.get('root_cause')}"
         )
         if failure_summary.get("server_log"):
-            lines.append(
-                f"- **Server log**: `{failure_summary.get('server_log')}`"
-            )
+            lines.append(f"- **Server log**: `{failure_summary.get('server_log')}`")
     if summary.get("degraded_mode"):
         lines.append(
-            "- **⚠ Degraded mode**: ran on the TEXT path only "
-            "(multimodal inputs ignored) — see 'Degraded mode' below"
+            "- **⚠ Degraded mode**: ran on the TEXT path only (multimodal inputs ignored) — see 'Degraded mode' below"
         )
     lines.append(f"- **Budget**: {summary['max_minutes']} minutes")
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
@@ -447,13 +436,9 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"- baseline_tput        : `{summary['baseline_tput']:.1f}` tok/s/GPU")
     if cb_tput is not None:
-        lines.append(f"- current_best        : `{cb_tput:.1f}` tok/s/GPU "
-                      f"(action=`{cb.get('action','?')}`)")
+        lines.append(f"- current_best        : `{cb_tput:.1f}` tok/s/GPU (action=`{cb.get('action', '?')}`)")
     # Per-round sum — informational, not end-to-end deliverable.
-    lines.append(
-        f"- cumulative_gain     : `{summary['cumulative_gain']:.2f}%`"
-        f"  *(per-round sum — informational only)*"
-    )
+    lines.append(f"- cumulative_gain     : `{summary['cumulative_gain']:.2f}%`  *(per-round sum — informational only)*")
     # Validated gain — always printed so the report never quotes only the
     # (often inflated) raw sum.
     val_gain = summary.get("cumulative_gain_validated", 0.0) or 0.0
@@ -463,14 +448,10 @@ def _format_md(summary: dict[str, Any]) -> str:
     if val_ts:
         stale = " ⚠ stack changed since validation" if stack_len > val_len else ""
         lines.append(
-            f"- cumulative_gain_val : `{val_gain:.2f}%` "
-            f"(validated_at_stack_len={val_len}, ts={val_ts}){stale}"
+            f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts={val_ts}){stale}"
         )
     else:
-        lines.append(
-            f"- cumulative_gain_val : `0.00%` "
-            f"⚠ never validated — no full-stack rebench ran in this session"
-        )
+        lines.append("- cumulative_gain_val : `0.00%` ⚠ never validated — no full-stack rebench ran in this session")
     if cb.get("ttft_mean_ms") is not None:
         lines.append(f"- ttft_mean      : `{cb.get('ttft_mean_ms'):.1f}` ms")
     if cb.get("e2el_mean_ms") is not None:
@@ -487,8 +468,7 @@ def _format_md(summary: dict[str, Any]) -> str:
     if not summary.get("event_counts_by_topic"):
         lines.append("- (no events recorded)")
     else:
-        for topic, n in sorted(summary["event_counts_by_topic"].items(),
-                                key=lambda kv: (-kv[1], kv[0])):
+        for topic, n in sorted(summary["event_counts_by_topic"].items(), key=lambda kv: (-kv[1], kv[0])):
             lines.append(f"- `{topic}`: {n}")
     lines.append("")
     lines.append("## Highlights")
@@ -497,10 +477,7 @@ def _format_md(summary: dict[str, Any]) -> str:
         lines.append("(no highlight events captured)")
     else:
         for h in summary["highlights"][:50]:
-            lines.append(
-                f"- `{h.get('topic','?')}` from `{h.get('from_agent','?')}`: "
-                f"{h.get('summary','')}"
-            )
+            lines.append(f"- `{h.get('topic', '?')}` from `{h.get('from_agent', '?')}`: {h.get('summary', '')}")
     lines.append("")
 
     lines.extend(_format_degraded_mode_section(summary))
@@ -577,15 +554,9 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
             "yet reflect them (unvalidated)."
         )
     if pending_keeps:
-        lines.append(
-            f"- ⚠ kernel_opt KEEPs awaiting integrate: "
-            f"{', '.join(pending_keeps)}."
-        )
+        lines.append(f"- ⚠ kernel_opt KEEPs awaiting integrate: {', '.join(pending_keeps)}.")
     if untried:
-        lines.append(
-            f"- ⚠ reusable hot kernels with no kernel_opt attempt: "
-            f"{', '.join(untried)}."
-        )
+        lines.append(f"- ⚠ reusable hot kernels with no kernel_opt attempt: {', '.join(untried)}.")
     lines.append("")
     return lines
 
@@ -611,17 +582,11 @@ def _format_steward_section(summary: dict[str, Any]) -> list[str]:
     if assessment:
         rec = assessment.get("recommendation", "")
         ts = assessment.get("ts", "")
-        potential = assessment.get(
-            "remaining_potential_pct_estimate", 0.0
-        ) or 0.0
-        rationale = (
-            assessment.get("rationale", "") or ""
-        ).strip()
+        potential = assessment.get("remaining_potential_pct_estimate", 0.0) or 0.0
+        rationale = (assessment.get("rationale", "") or "").strip()
         next_gap = assessment.get("next_gap_canonical_id", "")
         lines.append(f"- final verdict: `{rec}` at `{ts}`")
-        lines.append(
-            f"- remaining_potential_pct_estimate: `{potential:.2f}%`"
-        )
+        lines.append(f"- remaining_potential_pct_estimate: `{potential:.2f}%`")
         if next_gap:
             lines.append(f"- next_gap_canonical_id: `{next_gap}`")
         if rationale:
@@ -654,6 +619,7 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
         return f"(could not read {analysis_md_path}: {exc})"
     # Strip base64 image data URLs so the report stays compact.
     import re
+
     text = re.sub(
         r"!\[[^\]]*\]\(data:image/[^)]+\)",
         "[image stripped]",
@@ -700,11 +666,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
     latest = cmp.get("latest") or {}
     base_id = baseline.get("snapshot_id")
     latest_id = latest.get("snapshot_id")
-    mode = cmp.get("mode") or (
-        "single_snapshot"
-        if (base_id is not None and base_id == latest_id)
-        else "before_after"
-    )
+    mode = cmp.get("mode") or ("single_snapshot" if (base_id is not None and base_id == latest_id) else "before_after")
 
     if not baseline.get("analysis_md_path"):
         lines.append(
@@ -745,9 +707,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         if baseline.get("ts"):
             lines.append(f"_captured: {baseline.get('ts')}_")
         lines.append("")
-        lines.append(_extract_executive_summary(
-            str(baseline.get("analysis_md_path") or "")
-        ))
+        lines.append(_extract_executive_summary(str(baseline.get("analysis_md_path") or "")))
         lines.append("")
         return lines
 
@@ -779,9 +739,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
     if baseline.get("ts"):
         lines.append(f"_captured: {baseline.get('ts')}_")
     lines.append("")
-    lines.append(_extract_executive_summary(
-        str(baseline.get("analysis_md_path") or "")
-    ))
+    lines.append(_extract_executive_summary(str(baseline.get("analysis_md_path") or "")))
     lines.append("")
     lines.append(f"### Post-optimization snapshot #{latest_id}")
     lines.append("")
@@ -789,9 +747,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
     if latest.get("ts"):
         lines.append(f"_captured: {latest.get('ts')}_")
     lines.append("")
-    lines.append(_extract_executive_summary(
-        str(latest.get("analysis_md_path") or "")
-    ))
+    lines.append(_extract_executive_summary(str(latest.get("analysis_md_path") or "")))
     lines.append("")
     return lines
 
@@ -826,10 +782,7 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
             "reference data point."
         )
         lines.append(f"- Fetched at: {ext.get('fetched_at') or '(unknown)'}")
-        lines.append(
-            f"- Status: `{status}` reason=`{reason}` "
-            f"(rows matched: {ext.get('row_count', 0)})"
-        )
+        lines.append(f"- Status: `{status}` reason=`{reason}` (rows matched: {ext.get('row_count', 0)})")
         lines.append("")
         lines.append(
             "> Advisory only. This block does not feed Objective, scoring, or "
@@ -850,10 +803,7 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
     )
     lines.append(f"- Fetched at: {ext.get('fetched_at') or '(unknown)'}")
     reason_suffix = f" reason=`{reason}`" if reason else ""
-    lines.append(
-        f"- Status: `{status}`{reason_suffix} "
-        f"(rows matched: {ext.get('row_count', 0)})"
-    )
+    lines.append(f"- Status: `{status}`{reason_suffix} (rows matched: {ext.get('row_count', 0)})")
     warning = ext.get("warning") or ""
     if warning:
         lines.append(f"- Warning: {warning}")
@@ -879,10 +829,7 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
             lines.append(f"- Reference run date: {best.get('date')}")
     else:
         lines.append("")
-        lines.append(
-            "- No reference best available — orchestrator was not affected by "
-            "this section."
-        )
+        lines.append("- No reference best available — orchestrator was not affected by this section.")
 
     lines.append("")
     lines.append(
@@ -907,6 +854,7 @@ def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
     """
     try:
         from ...session_paths import target_baseline_json
+
         path = target_baseline_json(session_dir)
         if not path.exists():
             return None
@@ -914,7 +862,8 @@ def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "report_executor: failed to load external baseline from %s: %s",
-            session_dir, exc,
+            session_dir,
+            exc,
         )
         return None
 
@@ -940,6 +889,7 @@ def _write_kernel_opt_summary(
     """
     try:
         from ..kernel_attempt_summary import build_kernel_optimization_summary
+
         summary = build_kernel_optimization_summary(state, session_dir)
         out_path = output_dir / "kernel_optimization_summary.json"
         with out_path.open("w", encoding="utf-8") as f:
@@ -947,8 +897,11 @@ def _write_kernel_opt_summary(
         # Author-time breakdown capture: mirror the summary into the recorder.
         try:
             from ...breakdown.recorder import instrument
+
             instrument.record_singleton_section(
-                session_dir, "kernel_optimization_summary", summary,
+                session_dir,
+                "kernel_optimization_summary",
+                summary,
                 producer="coordinator",
             )
         except Exception:  # noqa: BLE001
@@ -975,6 +928,7 @@ def _read_conc_sweep_pointer(session_dir: Path) -> dict[str, Any] | None:
         conc-sweep summary exists or it is unreadable.
     """
     from ...session_paths import reports_dir as _reports_dir
+
     json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
     if not json_path.exists():
         return None
@@ -982,7 +936,8 @@ def _read_conc_sweep_pointer(session_dir: Path) -> dict[str, Any] | None:
         data = json.loads(json_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         log.warning(
-            "report_executor: cannot read conc_sweep_summary.json: %s", exc,
+            "report_executor: cannot read conc_sweep_summary.json: %s",
+            exc,
         )
         return None
     try:
@@ -990,9 +945,9 @@ def _read_conc_sweep_pointer(session_dir: Path) -> dict[str, Any] | None:
     except ValueError:
         rel = json_path.as_posix()
     return {
-        "report_path":      rel,
-        "status":           data.get("status"),
-        "summary":          data.get("summary", {}),
+        "report_path": rel,
+        "status": data.get("status"),
+        "summary": data.get("summary", {}),
         "budget_exhausted": bool(data.get("budget_exhausted", False)),
         "total_budget_sec": data.get("total_budget_sec"),
     }
@@ -1011,11 +966,7 @@ def _read_ko_summary_totals(path: Path) -> dict[str, int]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         totals = data.get("totals") or {}
-        return {
-            k: int(v)
-            for k, v in totals.items()
-            if isinstance(v, (int, float))
-        }
+        return {k: int(v) for k, v in totals.items() if isinstance(v, (int, float))}
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         return {}
 
@@ -1036,27 +987,22 @@ def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
     if topic == "proposal":
         summary = f"action_name={payload.get('action_name')}"
     elif topic == "review_verdict":
-        summary = (f"verdict={payload.get('verdict')} "
-                   f"reason={(payload.get('reasoning') or '')[:60]}")
+        summary = f"verdict={payload.get('verdict')} reason={(payload.get('reasoning') or '')[:60]}"
     elif topic == "decision":
-        summary = (f"kind={payload.get('kind')} "
-                   f"action={payload.get('action_name')} "
-                   f"task={(payload.get('task_id') or '')[:8]}")
+        summary = (
+            f"kind={payload.get('kind')} action={payload.get('action_name')} task={(payload.get('task_id') or '')[:8]}"
+        )
     elif topic == "delegated_result":
         out_tput = (payload.get("result") or {}).get("output_throughput")
         decision = (payload.get("result") or {}).get("decision")
-        summary = (f"kind={payload.get('kind')} state={payload.get('state')} "
-                   f"tput={out_tput} decision={decision}")
+        summary = f"kind={payload.get('kind')} state={payload.get('state')} tput={out_tput} decision={decision}"
     elif topic == "response":
-        summary = (f"kind={payload.get('kind')} "
-                   f"status={payload.get('status')}")
+        summary = f"kind={payload.get('kind')} status={payload.get('status')}"
     elif topic == "alert":
-        summary = (f"sev={payload.get('severity')} {payload.get('summary','')}")
+        summary = f"sev={payload.get('severity')} {payload.get('summary', '')}"
     else:
-        summary = json.dumps({k: v for k, v in payload.items()
-                                if isinstance(v, (str, int, float, bool))})[:80]
-    return {"topic": topic, "from_agent": from_agent, "summary": summary,
-            "payload": payload}
+        summary = json.dumps({k: v for k, v in payload.items() if isinstance(v, (str, int, float, bool))})[:80]
+    return {"topic": topic, "from_agent": from_agent, "summary": summary, "payload": payload}
 
 
 # ---------------------------------------------------------------------------
@@ -1074,8 +1020,12 @@ class ReportExecutor:
     """
 
     DEFAULT_HIGHLIGHT_TOPICS = (
-        "proposal", "review_verdict", "decision",
-        "delegated_result", "response", "alert",
+        "proposal",
+        "review_verdict",
+        "decision",
+        "delegated_result",
+        "response",
+        "alert",
     )
 
     def __init__(self, *, max_highlights: int = 50):
@@ -1100,24 +1050,20 @@ class ReportExecutor:
         """
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
-            return {"status": "failed",
-                    "error": "report_executor: could not resolve session_dir"}
+            return {"status": "failed", "error": "report_executor: could not resolve session_dir"}
 
         params = ctx.task.params or {}
         from ...session_paths import reports_dir
+
         output_dir = Path(params.get("output_dir") or reports_dir(session_dir))
         output_dir.mkdir(parents=True, exist_ok=True)
         max_highlights = int(params.get("max_highlights", self.max_highlights))
-        highlight_topics = (
-            params.get("highlight_topics") or self.DEFAULT_HIGHLIGHT_TOPICS
-        )
+        highlight_topics = params.get("highlight_topics") or self.DEFAULT_HIGHLIGHT_TOPICS
 
         state = SharedState.load_or_init(session_dir)
         # Only demote benign upstream WARNs from highlights on a baseline
         # failure (#465); other runs keep every highlight untouched.
-        suppress_benign_highlights = (
-            str(getattr(state, "stop_reason", "") or "") == "baseline_failed"
-        )
+        suppress_benign_highlights = str(getattr(state, "stop_reason", "") or "") == "baseline_failed"
 
         # Pull bus stats over a fresh connection (SQLite WAL shares cleanly).
         db = SqliteConnection(db_path_for(session_dir))
@@ -1177,18 +1123,19 @@ class ReportExecutor:
         md_path.write_text(_format_md(summary), encoding="utf-8")
 
         log.info(
-            "report_executor: wrote %s and %s "
-            "(cumulative_gain=%.2f%% per_round_sum / %.2f%% validated)",
-            md_path, json_path,
-            state.cumulative_gain, state.cumulative_gain_validated,
+            "report_executor: wrote %s and %s (cumulative_gain=%.2f%% per_round_sum / %.2f%% validated)",
+            md_path,
+            json_path,
+            state.cumulative_gain,
+            state.cumulative_gain_validated,
         )
         publish_result = self._maybe_publish_results(session_dir, state)
         return {
-            "status":      "succeeded",
-            "session_id":  state.session_id,
-            "json_path":   str(json_path),
-            "md_path":     str(md_path),
-            "summary":     summary,
+            "status": "succeeded",
+            "session_id": state.session_id,
+            "json_path": str(json_path),
+            "md_path": str(md_path),
+            "summary": summary,
             "publish_result": publish_result,
         }
 
@@ -1213,6 +1160,7 @@ class ReportExecutor:
         if params.get("session_dir"):
             return Path(params["session_dir"])
         from ...paths import session_dir as _sd
+
         candidate = _sd()
         if candidate.exists() and (candidate / "state.json").exists():
             return candidate

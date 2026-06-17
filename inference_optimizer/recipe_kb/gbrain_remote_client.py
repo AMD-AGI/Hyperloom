@@ -119,7 +119,9 @@ class _GbrainMcp:
                 JSON-RPC / tool-level errors.
         """
         envelope = {
-            "jsonrpc": "2.0", "id": "1", "method": "tools/call",
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "tools/call",
             "params": {"name": tool, "arguments": arguments},
         }
         req = urllib.request.Request(
@@ -271,13 +273,15 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
     model_type = str(attrs.get("model_type") or "").strip()
     architectures = attrs.get("architectures") or []
     canonical = recipe_canonical_id(
-        model=model, hardware=hardware, framework=framework,
-        model_type=model_type, architectures=architectures,
-        framework_version=framework_version, precision=precision,
+        model=model,
+        hardware=hardware,
+        framework=framework,
+        model_type=model_type,
+        architectures=architectures,
+        framework_version=framework_version,
+        precision=precision,
     )
-    throughput = _as_float(
-        attrs.get("best_throughput") or attrs.get("output_throughput")
-    )
+    throughput = _as_float(attrs.get("best_throughput") or attrs.get("output_throughput"))
     validated_gain_pct = _as_float(attrs.get("validated_gain_pct"))
     return {
         C.F_CANONICAL_ID: canonical,
@@ -289,9 +293,13 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
         # the slugged label converge; we surface the canonical labels so
         # the dispatcher's ``_v2_to_arbor`` reads identity from one place.
         "labels": C.canonical_labels(
-            model=model, hardware=hardware, framework=framework,
-            model_type=model_type, architectures=architectures,
-            framework_version=framework_version, precision=precision,
+            model=model,
+            hardware=hardware,
+            framework=framework,
+            model_type=model_type,
+            architectures=architectures,
+            framework_version=framework_version,
+            precision=precision,
         ),
         "body": {
             "best_config": _best_config_from_attrs(attrs),
@@ -346,33 +354,16 @@ def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> 
     if not isinstance(recipe_labels, Mapping):
         recipe_labels = {}
     want = C.canonical_labels(
-        model=str(
-            label_match.get(C.F_LABEL_MODEL, "")
-            or recipe_labels.get(C.F_LABEL_MODEL, "")
-        ),
-        hardware=str(
-            label_match.get(C.F_LABEL_HARDWARE, "")
-            or recipe_labels.get(C.F_LABEL_HARDWARE, "")
-        ),
-        framework=str(
-            label_match.get(C.F_LABEL_FRAMEWORK, "")
-            or recipe_labels.get(C.F_LABEL_FRAMEWORK, "")
-        ),
+        model=str(label_match.get(C.F_LABEL_MODEL, "") or recipe_labels.get(C.F_LABEL_MODEL, "")),
+        hardware=str(label_match.get(C.F_LABEL_HARDWARE, "") or recipe_labels.get(C.F_LABEL_HARDWARE, "")),
+        framework=str(label_match.get(C.F_LABEL_FRAMEWORK, "") or recipe_labels.get(C.F_LABEL_FRAMEWORK, "")),
         framework_version=str(
-            label_match.get(C.F_LABEL_FRAMEWORK_VERSION, "")
-            or recipe_labels.get(C.F_LABEL_FRAMEWORK_VERSION, "")
+            label_match.get(C.F_LABEL_FRAMEWORK_VERSION, "") or recipe_labels.get(C.F_LABEL_FRAMEWORK_VERSION, "")
         ),
-        precision=str(
-            label_match.get(C.F_LABEL_PRECISION, "")
-            or recipe_labels.get(C.F_LABEL_PRECISION, "")
-        ),
-        model_type=str(
-            label_match.get(C.F_LABEL_MODEL_TYPE, "")
-            or recipe_labels.get(C.F_LABEL_MODEL_TYPE, "")
-        ),
+        precision=str(label_match.get(C.F_LABEL_PRECISION, "") or recipe_labels.get(C.F_LABEL_PRECISION, "")),
+        model_type=str(label_match.get(C.F_LABEL_MODEL_TYPE, "") or recipe_labels.get(C.F_LABEL_MODEL_TYPE, "")),
         architectures=str(
-            label_match.get(C.F_LABEL_ARCHITECTURES, "")
-            or recipe_labels.get(C.F_LABEL_ARCHITECTURES, "")
+            label_match.get(C.F_LABEL_ARCHITECTURES, "") or recipe_labels.get(C.F_LABEL_ARCHITECTURES, "")
         ),
     )
     # Only compare the dimensions the caller actually constrained.
@@ -425,10 +416,7 @@ class GbrainRemoteRecipeClient:
         # Foreground-friendly default: gbrain is a read side-channel, so
         # never block the main loop longer than the recipe_kb foreground
         # budget.
-        self.timeout_sec = (
-            float(timeout_sec) if timeout_sec is not None
-            else C.FOREGROUND_HTTP_TIMEOUT_SEC
-        )
+        self.timeout_sec = float(timeout_sec) if timeout_sec is not None else C.FOREGROUND_HTTP_TIMEOUT_SEC
         self.enabled = bool(enabled and self.base_url and self.token)
         self._mcp = _GbrainMcp(self.base_url, self.token, self.timeout_sec) if self.enabled else None
         self._scan_cache: list[dict[str, Any]] | None = None
@@ -519,7 +507,9 @@ class GbrainRemoteRecipeClient:
         max_pages = max(1, (_RECIPE_SCAN_CAP // _LIST_PAGE_SIZE) + 3)
         while len(out) < cap and pages < max_pages:
             params: dict[str, Any] = {
-                "type": "recipe", "limit": _LIST_PAGE_SIZE, "sort": "updated_asc",
+                "type": "recipe",
+                "limit": _LIST_PAGE_SIZE,
+                "sort": "updated_asc",
             }
             if cursor:
                 params["updated_after"] = cursor
@@ -552,7 +542,10 @@ class GbrainRemoteRecipeClient:
 
     # -- read surface (mirrors RemoteRecipeClient) -------------------------
     def get_recipe(
-        self, *, canonical_id: str, version: int | None = None,
+        self,
+        *,
+        canonical_id: str,
+        version: int | None = None,
     ) -> dict[str, Any] | None:
         """Return the recipe for ``canonical_id`` (top label-match), or None.
 
@@ -578,13 +571,15 @@ class GbrainRemoteRecipeClient:
             return None
         try:
             from .canonical_id import cid_to_path_components
-            model, hardware, framework, model_type, architectures, framework_version, precision = cid_to_path_components(
-                canonical_id
+
+            model, hardware, framework, model_type, architectures, framework_version, precision = (
+                cid_to_path_components(canonical_id)
             )
         except Exception:  # noqa: BLE001 - malformed id -> remote miss
             return None
         label_match = {
-            C.F_LABEL_MODEL: model, C.F_LABEL_HARDWARE: hardware,
+            C.F_LABEL_MODEL: model,
+            C.F_LABEL_HARDWARE: hardware,
             C.F_LABEL_FRAMEWORK: framework,
             C.F_LABEL_FRAMEWORK_VERSION: framework_version,
             C.F_LABEL_PRECISION: precision,
@@ -764,7 +759,10 @@ def build_gbrain_remote_from_env() -> GbrainRemoteRecipeClient | None:
         except ValueError:
             timeout_sec = None
     return GbrainRemoteRecipeClient(
-        base_url=base_url, token=token, enabled=True, timeout_sec=timeout_sec,
+        base_url=base_url,
+        token=token,
+        enabled=True,
+        timeout_sec=timeout_sec,
     )
 
 

@@ -8,7 +8,6 @@ import asyncio
 
 import pytest
 
-from inference_optimizer.orchestrator import proposal_scorer as ps
 from inference_optimizer.orchestrator.proposal_scorer import (
     ProposalScorer,
     _clip,
@@ -54,11 +53,13 @@ def test_normalise_scores_not_dict():
 
 
 def test_normalise_drops_unknown_and_bad_score():
-    parsed = {"scores": {
-        "a": {"score": 5, "reason": "ok"},
-        "ghost": {"score": 3},      # unknown name -> dropped
-        "b": {"score": "x"},        # bad score -> dropped
-    }}
+    parsed = {
+        "scores": {
+            "a": {"score": 5, "reason": "ok"},
+            "ghost": {"score": 3},  # unknown name -> dropped
+            "b": {"score": "x"},  # bad score -> dropped
+        }
+    }
     out = _normalise_model_scores(parsed, proposal_names=["a", "b"])
     assert "a" in out
     assert "ghost" not in out
@@ -116,6 +117,7 @@ class _FakeClient:
     def __init__(self, behaviour):
         class _Chat:
             completions = _FakeCompletions(behaviour)
+
         self.chat = _Chat()
 
 
@@ -153,10 +155,12 @@ async def test_build_prompt_includes_evidence():
     client = _FakeClient({"m": '{"scores": {}}'})
     scorer = ProposalScorer(models=("m",), client_factory=lambda: client)
     gap = {"domain": "d", "gap_evidence": {"e": 1}, "gap_symptom": "s"}
-    prompt = scorer._build_prompt(gap=gap, proposals=[
-        {"name": "p", "extra_args": "--x", "extra_envs": {"E": "1"},
-         "reason": "r", "kb_evidence": ["k"]},
-    ])
+    prompt = scorer._build_prompt(
+        gap=gap,
+        proposals=[
+            {"name": "p", "extra_args": "--x", "extra_envs": {"E": "1"}, "reason": "r", "kb_evidence": ["k"]},
+        ],
+    )
     assert "evidence:" in prompt
     assert "extra_envs:" in prompt
     assert "kb_evidence:" in prompt

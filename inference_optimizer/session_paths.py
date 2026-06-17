@@ -41,27 +41,41 @@ def state_path(session_dir: Path) -> Path:
 # Per-task workspaces under runs/<action>/<task_id>/.
 # Which actions own a runs/ workspace is derived from the ActionRegistry's
 # ``pipeline_phase`` field; these are the phases whose executors write there.
-_RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset({
-    "measure", "analysis", "explore", "deep", "validate", "support",
-})
+_RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset(
+    {
+        "measure",
+        "analysis",
+        "explore",
+        "deep",
+        "validate",
+        "support",
+    }
+)
 
 # Fallback used only when ActionRegistry can't load (broken yaml / early
 # bootstrap). Must stay in sync with the _RUNS_WORKSPACE_PHASES union;
 # tests/test_action_catalogue.py enforces alignment.
-_RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset({
-    "baseline",
-    "replay_warm_recipe",
-    "roofline", "profile",
-    "sweep",
-    "conc_sweep",
-    "explore",
-    "specialist",
-    "integrate_patch",
-    "framework_pr",
-    "integrate", "kernel_opt", "deep_kernel_analysis", "gemm_tuning",
-    "operator_tuning", "vendor_kernel_config",
-    "recover",
-})
+_RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset(
+    {
+        "baseline",
+        "replay_warm_recipe",
+        "roofline",
+        "profile",
+        "sweep",
+        "conc_sweep",
+        "explore",
+        "specialist",
+        "integrate_patch",
+        "framework_pr",
+        "integrate",
+        "kernel_opt",
+        "deep_kernel_analysis",
+        "gemm_tuning",
+        "operator_tuning",
+        "vendor_kernel_config",
+        "recover",
+    }
+)
 
 
 @lru_cache(maxsize=1)
@@ -75,13 +89,11 @@ def _runs_actions() -> frozenset[str]:
     """
     try:
         from .orchestrator.action_registry import ActionRegistry  # local: avoid import-time cycle
+
         registry = ActionRegistry().load()
     except Exception:
         return _RUNS_ACTIONS_FALLBACK
-    return frozenset(
-        a.name for a in registry.all()
-        if a.pipeline_phase in _RUNS_WORKSPACE_PHASES
-    )
+    return frozenset(a.name for a in registry.all() if a.pipeline_phase in _RUNS_WORKSPACE_PHASES)
 
 
 def _validate_action(action: str) -> str:
@@ -101,10 +113,7 @@ def _validate_action(action: str) -> str:
     a = str(action or "").strip()
     valid = _runs_actions()
     if a not in valid:
-        raise ValueError(
-            f"runs_dir: unknown action {action!r}; expected one of "
-            f"{sorted(valid)!r}"
-        )
+        raise ValueError(f"runs_dir: unknown action {action!r}; expected one of {sorted(valid)!r}")
     return a
 
 

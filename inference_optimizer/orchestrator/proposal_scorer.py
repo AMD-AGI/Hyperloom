@@ -135,7 +135,9 @@ def _coerce_score(raw: Any) -> float | None:
 
 
 def _normalise_model_scores(
-    parsed: dict[str, Any], *, proposal_names: list[str],
+    parsed: dict[str, Any],
+    *,
+    proposal_names: list[str],
 ) -> dict[str, dict[str, Any]]:
     """Project parsed ``{"scores": {...}}`` onto known names (drop unknowns, clamp [0,10], truncate reasons).
 
@@ -201,9 +203,7 @@ class ProposalScorer:
         otherwise it is constructed lazily on first use so an
         unconfigured environment degrades per-call rather than at boot.
         """
-        self.models = tuple(
-            m for m in (str(x).strip() for x in (self.models or ())) if m
-        )
+        self.models = tuple(m for m in (str(x).strip() for x in (self.models or ())) if m)
         if self.client_factory is not None:
             self._client = self.client_factory()
             return
@@ -225,17 +225,10 @@ class ProposalScorer:
         try:
             from openai import AsyncOpenAI  # type: ignore[import-not-found]
         except ImportError as exc:  # pragma: no cover
-            raise RuntimeError(
-                "openai SDK not installed; run `pip install openai>=1.50`"
-            ) from exc
-        api_key = (
-            os.environ.get(self.api_key_env)
-            or os.environ.get("OPENAI_API_KEY")
-        )
+            raise RuntimeError("openai SDK not installed; run `pip install openai>=1.50`") from exc
+        api_key = os.environ.get(self.api_key_env) or os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            raise RuntimeError(
-                f"{self.api_key_env} not set in env (ProposalScorer cannot auth)"
-            )
+            raise RuntimeError(f"{self.api_key_env} not set in env (ProposalScorer cannot auth)")
         base_url = (
             os.environ.get(self.base_url_env)
             or os.environ.get("OPENAI_BASE_URL")
@@ -249,7 +242,10 @@ class ProposalScorer:
 
     # ------------------------------------------------------------------
     def _build_prompt(
-        self, *, gap: dict[str, Any], proposals: list[dict[str, Any]],
+        self,
+        *,
+        gap: dict[str, Any],
+        proposals: list[dict[str, Any]],
     ) -> str:
         """Build ONE group-scoring prompt covering every proposal.
 
@@ -262,9 +258,7 @@ class ProposalScorer:
         """
         lines: list[str] = ["=== Gap ==="]
         lines.append(f"domain: {_clip(gap.get('domain'), limit=80)}")
-        lines.append(
-            f"gap_canonical_id: {_clip(gap.get('gap_canonical_id'), limit=160)}"
-        )
+        lines.append(f"gap_canonical_id: {_clip(gap.get('gap_canonical_id'), limit=160)}")
         symptom = gap.get("gap_symptom") or gap.get("summary")
         if symptom:
             lines.append(f"symptom: {_clip(symptom)}")
@@ -280,19 +274,18 @@ class ProposalScorer:
             if p.get("extra_args"):
                 lines.append(f"  extra_args: {_clip(p.get('extra_args'))}")
             if p.get("extra_envs"):
-                lines.append(
-                    f"  extra_envs: {_clip(json.dumps(p.get('extra_envs'), sort_keys=True))}"
-                )
+                lines.append(f"  extra_envs: {_clip(json.dumps(p.get('extra_envs'), sort_keys=True))}")
             if p.get("reason"):
                 lines.append(f"  reason: {_clip(p.get('reason'))}")
             if p.get("kb_evidence"):
-                lines.append(
-                    f"  kb_evidence: {_clip(json.dumps(p.get('kb_evidence'), sort_keys=True))}"
-                )
+                lines.append(f"  kb_evidence: {_clip(json.dumps(p.get('kb_evidence'), sort_keys=True))}")
         return "\n".join(lines)
 
     async def _score_one_model(
-        self, model: str, prompt: str, proposal_names: list[str],
+        self,
+        model: str,
+        prompt: str,
+        proposal_names: list[str],
     ) -> dict[str, dict[str, Any]]:
         """Score every proposal with a single model (raises on failure; caller records the per-model error).
 
@@ -321,21 +314,17 @@ class ProposalScorer:
                 timeout=self.call_timeout_s,
             )
         except asyncio.TimeoutError as exc:
-            raise RuntimeError(
-                f"timed out after {self.call_timeout_s:.0f}s"
-            ) from exc
+            raise RuntimeError(f"timed out after {self.call_timeout_s:.0f}s") from exc
         # Full-trace A6: record this model's token spend before parsing.
         # Best-effort + a no-op when ``session_dir`` is unset (tests).
         self._trace_scorer_llm_call(model, getattr(resp, "usage", None))
-        text = (resp.choices[0].message.content or "")
+        text = resp.choices[0].message.content or ""
         # Full-trace: persist the full (redacted) prompt + reply so the
         # scorer's conversation lines up with its token row.
         self._record_scorer_conversation(model, full_prompt, text)
         parsed = _extract_scores_json(text)
         if parsed is None:
-            raise RuntimeError(
-                f"no parseable scores JSON (reply_chars={len(text)})"
-            )
+            raise RuntimeError(f"no parseable scores JSON (reply_chars={len(text)})")
         return _normalise_model_scores(parsed, proposal_names=proposal_names)
 
     def _trace_scorer_llm_call(self, model: str, usage: Any) -> None:
@@ -365,19 +354,23 @@ class ProposalScorer:
                 session_id=self.session_dir.name,
                 component="proposal_scorer",
                 role="proposal_scorer",  # must match the conversation row's
-                model=str(model),        # role for Langfuse token<->text pairing
+                model=str(model),  # role for Langfuse token<->text pairing
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break scoring
             log.debug(
-                "full-trace: proposal_scorer llm_call append failed for "
-                "model=%s", model, exc_info=True,
+                "full-trace: proposal_scorer llm_call append failed for model=%s",
+                model,
+                exc_info=True,
             )
 
     def _record_scorer_conversation(
-        self, model: str, prompt: str, response: str,
+        self,
+        model: str,
+        prompt: str,
+        response: str,
     ) -> None:
         """Append one ``conversations.jsonl`` row for a proposal-scoring call.
 
@@ -410,12 +403,16 @@ class ProposalScorer:
             append_conversation(session_dir=self.session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break scoring
             log.debug(
-                "full-trace: proposal_scorer conversation append failed for "
-                "model=%s", model, exc_info=True,
+                "full-trace: proposal_scorer conversation append failed for model=%s",
+                model,
+                exc_info=True,
             )
 
     async def score(
-        self, *, gap: dict[str, Any], proposals: list[dict[str, Any]],
+        self,
+        *,
+        gap: dict[str, Any],
+        proposals: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """Score ``proposals`` against ``gap`` with every configured model (per-model failures land in ``errors``, never raised).
 
@@ -432,17 +429,11 @@ class ProposalScorer:
             return {"scale": "0-10", "models": {}, "errors": {}}
         if len(proposals) > _MAX_PROPOSALS_SCORED:
             proposals = proposals[:_MAX_PROPOSALS_SCORED]
-        proposal_names = [
-            str(p.get("name") or f"proposal_{i}")
-            for i, p in enumerate(proposals)
-        ]
+        proposal_names = [str(p.get("name") or f"proposal_{i}") for i, p in enumerate(proposals)]
         prompt = self._build_prompt(gap=gap, proposals=proposals)
 
         results = await asyncio.gather(
-            *(
-                self._score_one_model(m, prompt, proposal_names)
-                for m in self.models
-            ),
+            *(self._score_one_model(m, prompt, proposal_names) for m in self.models),
             return_exceptions=True,
         )
         models_out: dict[str, dict[str, Any]] = {}
@@ -451,7 +442,9 @@ class ProposalScorer:
             if isinstance(res, BaseException):
                 errors[model] = f"{type(res).__name__}: {str(res)[:200]}"
                 log.warning(
-                    "ProposalScorer: model=%s failed: %r", model, res,
+                    "ProposalScorer: model=%s failed: %r",
+                    model,
+                    res,
                 )
                 continue
             if res:

@@ -33,16 +33,22 @@ def _init_git_repo(path: Path) -> None:
     env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
     subprocess.run(
         ["git", "init", "-b", "main", str(path)],
-        check=True, capture_output=True, env=env,
+        check=True,
+        capture_output=True,
+        env=env,
     )
     (path / "src.py").write_text("def f():\n    return 1\n", encoding="utf-8")
     subprocess.run(
         ["git", "-C", str(path), "add", "."],
-        check=True, capture_output=True, env=env,
+        check=True,
+        capture_output=True,
+        env=env,
     )
     subprocess.run(
         ["git", "-C", str(path), "commit", "-m", "init"],
-        check=True, capture_output=True, env=env,
+        check=True,
+        capture_output=True,
+        env=env,
     )
 
 
@@ -113,7 +119,8 @@ def _write_specialist_workspace(
     if done_payload_override:
         payload.update(done_payload_override)
     (workspace / "specialist_done.json").write_text(
-        json.dumps(payload), encoding="utf-8",
+        json.dumps(payload),
+        encoding="utf-8",
     )
     return workspace
 
@@ -145,9 +152,7 @@ def test_resolve_patch_paths_prefers_explicit_param(tmp_path: Path):
 
 def test_resolve_patch_paths_from_done_payload(tmp_path: Path):
     workspace = _write_specialist_workspace(tmp_path, "t-b", patch_contents=[_VALID_PATCH])
-    done_payload = json.loads(
-        (workspace / "specialist_done.json").read_text(encoding="utf-8")
-    )
+    done_payload = json.loads((workspace / "specialist_done.json").read_text(encoding="utf-8"))
     paths = _resolve_patch_paths(
         specialist_workspace=workspace,
         explicit_patches=None,
@@ -159,7 +164,9 @@ def test_resolve_patch_paths_from_done_payload(tmp_path: Path):
 
 def test_resolve_patch_paths_falls_back_to_filesystem_scan(tmp_path: Path):
     workspace = _write_specialist_workspace(
-        tmp_path, "t-c", patch_contents=[_VALID_PATCH],
+        tmp_path,
+        "t-c",
+        patch_contents=[_VALID_PATCH],
     )
     # done_payload=None forces the filesystem scan.
     paths = _resolve_patch_paths(
@@ -173,7 +180,9 @@ def test_resolve_patch_paths_falls_back_to_filesystem_scan(tmp_path: Path):
 def test_resolve_patch_paths_respects_empty_done_list(tmp_path: Path):
     """An explicit empty patches list is respected; no filesystem-scan fallthrough."""
     workspace = _write_specialist_workspace(
-        tmp_path, "t-c-empty", patch_contents=[_VALID_PATCH],
+        tmp_path,
+        "t-c-empty",
+        patch_contents=[_VALID_PATCH],
         done_payload_override={"patches_written": []},
     )
     paths = _resolve_patch_paths(
@@ -281,15 +290,20 @@ async def test_executor_apply_only_succeeds(tmp_path: Path):
     repo = tmp_path / "framework"
     _init_git_repo(repo)
     workspace = _write_specialist_workspace(
-        session_dir, "t-spec-1", patch_contents=[_VALID_PATCH],
+        session_dir,
+        "t-spec-1",
+        patch_contents=[_VALID_PATCH],
     )
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
-    ctx = _make_ctx("t-int-1", {
-        "specialist_task_id": "t-spec-1",
-        "framework_source_root": str(repo),
-        "apply_only": True,
-    })
+    ctx = _make_ctx(
+        "t-int-1",
+        {
+            "specialist_task_id": "t-spec-1",
+            "framework_source_root": str(repo),
+            "apply_only": True,
+        },
+    )
     result = await executor(ctx)
 
     assert result["status"] == "applied_no_bench"
@@ -306,15 +320,20 @@ async def test_executor_apply_failure_rolls_back(tmp_path: Path):
     repo = tmp_path / "framework"
     _init_git_repo(repo)
     workspace = _write_specialist_workspace(
-        session_dir, "t-spec-2", patch_contents=[_BAD_PATCH],
+        session_dir,
+        "t-spec-2",
+        patch_contents=[_BAD_PATCH],
     )
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
-    ctx = _make_ctx("t-int-2", {
-        "specialist_task_id": "t-spec-2",
-        "framework_source_root": str(repo),
-        "apply_only": True,
-    })
+    ctx = _make_ctx(
+        "t-int-2",
+        {
+            "specialist_task_id": "t-spec-2",
+            "framework_source_root": str(repo),
+            "apply_only": True,
+        },
+    )
     result = await executor(ctx)
 
     assert result["status"] == "apply_failed"
@@ -331,14 +350,19 @@ async def test_executor_missing_target_preflight_short_circuits(tmp_path: Path):
     repo = tmp_path / "framework"
     _init_git_repo(repo)
     _write_specialist_workspace(
-        session_dir, "t-spec-miss", patch_contents=[_MISSING_TARGET_PATCH],
+        session_dir,
+        "t-spec-miss",
+        patch_contents=[_MISSING_TARGET_PATCH],
     )
     executor = IntegratePatchExecutor(session_dir=session_dir)
-    ctx = _make_ctx("t-int-miss", {
-        "specialist_task_id": "t-spec-miss",
-        "framework_source_root": str(repo),
-        "apply_only": True,
-    })
+    ctx = _make_ctx(
+        "t-int-miss",
+        {
+            "specialist_task_id": "t-spec-miss",
+            "framework_source_root": str(repo),
+            "apply_only": True,
+        },
+    )
     result = await executor(ctx)
     assert result["status"] == "apply_failed"
     assert result["error_class"] == "patch_target_missing"
@@ -367,15 +391,20 @@ async def test_executor_multi_node_skips_neutrally(tmp_path: Path, monkeypatch):
     repo = tmp_path / "framework"
     _init_git_repo(repo)
     _write_specialist_workspace(
-        session_dir, "t-spec-mn", patch_contents=[_VALID_PATCH],
+        session_dir,
+        "t-spec-mn",
+        patch_contents=[_VALID_PATCH],
     )
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
-    ctx = _make_ctx("t-int-mn", {
-        "specialist_task_id": "t-spec-mn",
-        "framework_source_root": str(repo),
-        "apply_only": True,
-    })
+    ctx = _make_ctx(
+        "t-int-mn",
+        {
+            "specialist_task_id": "t-spec-mn",
+            "framework_source_root": str(repo),
+            "apply_only": True,
+        },
+    )
     result = await executor(ctx)
 
     # Neutral skip — explicitly NOT a failure (no error_class), and NOT a KEEP
@@ -406,15 +435,20 @@ async def test_executor_single_node_guard_not_triggered(tmp_path: Path, monkeypa
     repo = tmp_path / "framework"
     _init_git_repo(repo)
     _write_specialist_workspace(
-        session_dir, "t-spec-sn", patch_contents=[_VALID_PATCH],
+        session_dir,
+        "t-spec-sn",
+        patch_contents=[_VALID_PATCH],
     )
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
-    ctx = _make_ctx("t-int-sn", {
-        "specialist_task_id": "t-spec-sn",
-        "framework_source_root": str(repo),
-        "apply_only": True,
-    })
+    ctx = _make_ctx(
+        "t-int-sn",
+        {
+            "specialist_task_id": "t-spec-sn",
+            "framework_source_root": str(repo),
+            "apply_only": True,
+        },
+    )
     result = await executor(ctx)
 
     # Normal apply path reached (guard skipped); patch applied.
@@ -428,9 +462,12 @@ async def test_executor_missing_specialist_workspace_fails_cleanly(tmp_path: Pat
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     executor = IntegratePatchExecutor(session_dir=session_dir)
-    ctx = _make_ctx("t-int-3", {
-        "specialist_task_id": "nonexistent",
-    })
+    ctx = _make_ctx(
+        "t-int-3",
+        {
+            "specialist_task_id": "nonexistent",
+        },
+    )
     result = await executor(ctx)
     assert result["status"] == "failed"
     assert result["error_class"] == "missing_specialist"
@@ -442,14 +479,18 @@ async def test_executor_no_patches_returns_no_patches(tmp_path: Path):
     session_dir.mkdir()
     workspace = session_dir / "runs" / "specialist" / "t-spec-4"
     workspace.mkdir(parents=True)
-    (workspace / "specialist_done.json").write_text(json.dumps({
-        "gap_canonical_id": "gap.empty",
-        "domain": "serving_specialist",
-        "proposal_set": [],
-        "patches_written": [],
-        "empty": True,
-        "summary": "no proposals or patches",
-    }))
+    (workspace / "specialist_done.json").write_text(
+        json.dumps(
+            {
+                "gap_canonical_id": "gap.empty",
+                "domain": "serving_specialist",
+                "proposal_set": [],
+                "patches_written": [],
+                "empty": True,
+                "summary": "no proposals or patches",
+            }
+        )
+    )
     executor = IntegratePatchExecutor(session_dir=session_dir)
     ctx = _make_ctx("t-int-4", {"specialist_task_id": "t-spec-4"})
     result = await executor(ctx)
@@ -463,20 +504,27 @@ async def test_executor_config_changes_only_no_patches(tmp_path: Path):
     session_dir.mkdir()
     workspace = session_dir / "runs" / "specialist" / "t-spec-5"
     workspace.mkdir(parents=True)
-    (workspace / "specialist_done.json").write_text(json.dumps({
-        "gap_canonical_id": "gap.cfg",
-        "domain": "serving_specialist",
-        "proposal_set": [],
-        "patches_written": [],
-        "empty": False,
-        "summary": "config-only specialist",
-    }))
+    (workspace / "specialist_done.json").write_text(
+        json.dumps(
+            {
+                "gap_canonical_id": "gap.cfg",
+                "domain": "serving_specialist",
+                "proposal_set": [],
+                "patches_written": [],
+                "empty": False,
+                "summary": "config-only specialist",
+            }
+        )
+    )
     executor = IntegratePatchExecutor(session_dir=session_dir)
-    ctx = _make_ctx("t-int-5", {
-        "specialist_task_id": "t-spec-5",
-        "config_changes": {"VLLM_USE_AITER": "1"},
-        "apply_only": True,
-    })
+    ctx = _make_ctx(
+        "t-int-5",
+        {
+            "specialist_task_id": "t-spec-5",
+            "config_changes": {"VLLM_USE_AITER": "1"},
+            "apply_only": True,
+        },
+    )
     result = await executor(ctx)
     assert result["status"] == "applied_no_bench"
     assert result["config_changes_applied"] == {"VLLM_USE_AITER": "1"}
@@ -487,5 +535,6 @@ async def test_executor_config_changes_only_no_patches(tmp_path: Path):
 def test_integrate_patch_executor_imports_clean():
     """The real executor module must import without side effects."""
     from inference_optimizer.orchestrator.action_executors import integrate_patch as ip_mod
+
     assert hasattr(ip_mod, "IntegratePatchExecutor")
     assert callable(ip_mod.IntegratePatchExecutor)

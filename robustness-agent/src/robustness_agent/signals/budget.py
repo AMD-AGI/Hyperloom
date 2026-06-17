@@ -87,9 +87,7 @@ def evaluate_budget_signals(
     # ``productive_gain_pct`` gate. Dedup collapses any overlap below.
     absolute_signals: list[Symptom] = []
     if remaining <= cfg.deadline_hard_cutoff_minutes:
-        absolute_signals.append(
-            _hard_cutoff_symptom(snap, remaining=remaining, cfg=cfg)
-        )
+        absolute_signals.append(_hard_cutoff_symptom(snap, remaining=remaining, cfg=cfg))
     elif remaining <= cfg.deadline_warning_minutes:
         absolute_signals.append(
             _deadline_warning_symptom(
@@ -104,17 +102,11 @@ def evaluate_budget_signals(
     percentage_signal: Symptom | None = None
     if validated < cfg.productive_gain_pct:
         if burn_pct >= cfg.imminent_pct:
-            percentage_signal = _imminent_symptom(
-                snap, burn_pct=burn_pct, cfg=cfg
-            )
+            percentage_signal = _imminent_symptom(snap, burn_pct=burn_pct, cfg=cfg)
         elif burn_pct >= cfg.warn_pct:
-            percentage_signal = _burn_no_gain_symptom(
-                snap, burn_pct=burn_pct, cfg=cfg
-            )
+            percentage_signal = _burn_no_gain_symptom(snap, burn_pct=burn_pct, cfg=cfg)
         elif burn_pct >= cfg.strategy_drift_pct:
-            percentage_signal = _strategy_drift_symptom(
-                snap, burn_pct=burn_pct, cfg=cfg
-            )
+            percentage_signal = _strategy_drift_symptom(snap, burn_pct=burn_pct, cfg=cfg)
 
     out: list[Symptom] = list(absolute_signals)
     if percentage_signal is not None:
@@ -123,7 +115,10 @@ def evaluate_budget_signals(
 
 
 def _imminent_symptom(
-    snap: SharedStateSnapshot, *, burn_pct: float, cfg: BudgetConfig,
+    snap: SharedStateSnapshot,
+    *,
+    burn_pct: float,
+    cfg: BudgetConfig,
 ) -> Symptom:
     """Build the HIGH ``deadline_imminent`` wind-down symptom.
 
@@ -157,14 +152,15 @@ def _imminent_symptom(
         # Session-wide; empty subject collapses the dedup key across ticks.
         subject={},
         source="local",
-        suggestion=(
-            "delegate(report) to finalize at the last validated gain"
-        ),
+        suggestion=("delegate(report) to finalize at the last validated gain"),
     )
 
 
 def _burn_no_gain_symptom(
-    snap: SharedStateSnapshot, *, burn_pct: float, cfg: BudgetConfig,
+    snap: SharedStateSnapshot,
+    *,
+    burn_pct: float,
+    cfg: BudgetConfig,
 ) -> Symptom:
     """Build the MEDIUM ``budget_burn_no_gain`` mid-stage warning symptom.
 
@@ -194,15 +190,15 @@ def _burn_no_gain_symptom(
         },
         subject={},
         source="local",
-        suggestion=(
-            "escalate_strategy_change to switch from exploration to "
-            "validate_stack / report"
-        ),
+        suggestion=("escalate_strategy_change to switch from exploration to validate_stack / report"),
     )
 
 
 def _strategy_drift_symptom(
-    snap: SharedStateSnapshot, *, burn_pct: float, cfg: BudgetConfig,
+    snap: SharedStateSnapshot,
+    *,
+    burn_pct: float,
+    cfg: BudgetConfig,
 ) -> Symptom:
     """H2 early-warning symptom: budget half-burnt with nothing to ship.
 
@@ -235,10 +231,7 @@ def _strategy_drift_symptom(
         },
         subject={},
         source="local",
-        suggestion=(
-            "alert orchestration: consider shrinking scope to "
-            "params/sweep before crossing the warn threshold"
-        ),
+        suggestion=("alert orchestration: consider shrinking scope to params/sweep before crossing the warn threshold"),
     )
 
 
@@ -274,10 +267,7 @@ def _deadline_warning_symptom(
     return Symptom(
         name="deadline_warning",
         severity=severity,
-        summary=(
-            f"only {remaining:.1f}min remain (<= "
-            f"{cfg.deadline_warning_minutes:.0f}min); {tail}"
-        ),
+        summary=(f"only {remaining:.1f}min remain (<= {cfg.deadline_warning_minutes:.0f}min); {tail}"),
         evidence={
             "elapsed_minutes": snap.elapsed_minutes,
             "remaining_minutes": remaining,
@@ -290,15 +280,17 @@ def _deadline_warning_symptom(
         source="local",
         suggestion=(
             "delegate(report) to finalize at the last validated gain"
-            if severity is SymptomSeverity.HIGH else
-            "escalate_strategy_change: do not propose kernel_opt or "
-            "new explore; validate_stack and report only"
+            if severity is SymptomSeverity.HIGH
+            else "escalate_strategy_change: do not propose kernel_opt or new explore; validate_stack and report only"
         ),
     )
 
 
 def _hard_cutoff_symptom(
-    snap: SharedStateSnapshot, *, remaining: float, cfg: BudgetConfig,
+    snap: SharedStateSnapshot,
+    *,
+    remaining: float,
+    cfg: BudgetConfig,
 ) -> Symptom:
     """H1 absolute-time emergency-cutoff symptom (deadline imminent).
 
@@ -328,10 +320,7 @@ def _hard_cutoff_symptom(
         },
         subject={},
         source="local",
-        suggestion=(
-            "delegate(report) immediately; any new task started now "
-            "will be cut by the deadline supervisor"
-        ),
+        suggestion=("delegate(report) immediately; any new task started now will be cut by the deadline supervisor"),
     )
 
 

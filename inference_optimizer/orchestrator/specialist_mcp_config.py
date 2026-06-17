@@ -53,8 +53,7 @@ def write_specialist_mcp_config(
 
     if not servers:
         log.info(
-            "specialist_mcp_config: no MCP servers to wire "
-            "(pr_monitor disabled?); skipping config file generation"
+            "specialist_mcp_config: no MCP servers to wire (pr_monitor disabled?); skipping config file generation"
         )
         return None
 
@@ -68,7 +67,8 @@ def write_specialist_mcp_config(
     )
     log.info(
         "specialist_mcp_config: wrote %s (servers=%s)",
-        cfg_path, sorted(servers.keys()),
+        cfg_path,
+        sorted(servers.keys()),
     )
     return cfg_path
 

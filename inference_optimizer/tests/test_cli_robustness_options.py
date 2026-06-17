@@ -56,6 +56,7 @@ def _ns(**overrides) -> argparse.Namespace:
 
 # _build_robustness_options — multi-node cluster policy
 
+
 def test_single_node_emits_no_multi_node_options():
     """Default 1-node call passes nothing extra into request.options."""
     options = _build_robustness_options(_ns())
@@ -64,11 +65,13 @@ def test_single_node_emits_no_multi_node_options():
 
 def test_single_node_passes_server_url_and_llm_rca():
     """Existing operator-supplied flags still propagate verbatim."""
-    options = _build_robustness_options(_ns(
-        nodes=1,
-        robustness_server_url="http://robustness.svc:8080",
-        robustness_llm_rca=True,
-    ))
+    options = _build_robustness_options(
+        _ns(
+            nodes=1,
+            robustness_server_url="http://robustness.svc:8080",
+            robustness_llm_rca=True,
+        )
+    )
     assert options == {
         "robustness_server_url": "http://robustness.svc:8080",
         "llm_rca_enabled": True,
@@ -152,10 +155,12 @@ def test_multi_node_respects_explicit_opt_out():
 
 def test_multi_node_preserves_operator_flags():
     """Multi-node auto-disable must coexist with explicit operator flags."""
-    options = _build_robustness_options(_ns(
-        nodes=4,
-        robustness_server_url="http://robustness.svc:8080",
-    ))
+    options = _build_robustness_options(
+        _ns(
+            nodes=4,
+            robustness_server_url="http://robustness.svc:8080",
+        )
+    )
     assert options == {
         "robustness_server_url": "http://robustness.svc:8080",
         "nodes": 4,
@@ -211,6 +216,7 @@ def test_nodes_zero_or_none_treated_as_single_node():
 
 
 # _resolve_robustness_choice — multi-node auto-downgrade to mock
+
 
 def test_resolve_choice_single_node_default_keeps_agent():
     """Default path on single-node stays ``"agent"`` to preserve real LocalProbe coverage."""

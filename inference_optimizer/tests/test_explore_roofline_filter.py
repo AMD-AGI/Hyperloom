@@ -31,7 +31,8 @@ def test_categorize_host_overhead_flag():
 
 def test_categorize_torch_compile_is_compute():
     cats = categorize_variant(
-        "--enable-torch-compile --torch-compile-max-bs 128", {},
+        "--enable-torch-compile --torch-compile-max-bs 128",
+        {},
     )
     assert cats == frozenset({"compute"})
 
@@ -43,7 +44,8 @@ def test_categorize_attention_backend_is_multi_direction():
 
 def test_categorize_combo_flags_unions():
     cats = categorize_variant(
-        "--num-continuous-decode-steps 4 --enable-torch-compile", {},
+        "--num-continuous-decode-steps 4 --enable-torch-compile",
+        {},
     )
     assert cats == frozenset({"host_overhead", "compute"})
 
@@ -55,7 +57,8 @@ def test_categorize_unknown_flag_is_empty():
 
 def test_categorize_env_specific_then_prefix():
     cats = categorize_variant(
-        "", {"SGLANG_OPT_USE_MULTI_STREAM_OVERLAP": "1"},
+        "",
+        {"SGLANG_OPT_USE_MULTI_STREAM_OVERLAP": "1"},
     )
     assert cats == frozenset({"host_overhead"})
     cats = categorize_variant("", {"AITER_USE_TILELANG_GEMM": "1"})
@@ -108,37 +111,45 @@ def test_advisory_flips_with_saturated_axis():
         ),
         _FakeVariant(
             name="combo-host-bubble-attack",
-            extra_server_args=(
-                "--num-continuous-decode-steps 4 "
-                "--scheduler-recv-interval 4 "
-                "--cuda-graph-max-bs 128"
-            ),
+            extra_server_args=("--num-continuous-decode-steps 4 --scheduler-recv-interval 4 --cuda-graph-max-bs 128"),
         ),
         _FakeVariant(name="memflag", extra_server_args="--max-running-requests 256"),
     ]
     snapshot_mem_bound = {
-        "compute": 25.0, "memory": 92.0, "host_overhead": 18.0, "comm": 0.0,
+        "compute": 25.0,
+        "memory": 92.0,
+        "host_overhead": 18.0,
+        "comm": 0.0,
     }
     names = {n["name"] for n in compute_saturation_advisory(grid, snapshot_mem_bound)}
     assert names == {"memflag"}
 
     snapshot_host_bound = {
-        "compute": 25.0, "memory": 30.0, "host_overhead": 95.0, "comm": 0.0,
+        "compute": 25.0,
+        "memory": 30.0,
+        "host_overhead": 95.0,
+        "comm": 0.0,
     }
     names = {n["name"] for n in compute_saturation_advisory(grid, snapshot_host_bound)}
     assert names == {
-        "ncds4", "ncds16-cgmaxbs128", "combo-host-bubble-attack",
+        "ncds4",
+        "ncds16-cgmaxbs128",
+        "combo-host-bubble-attack",
     }
 
 
 def test_advisory_threshold_override():
     grid = [
         _FakeVariant(
-            name="ncds4", extra_server_args="--num-continuous-decode-steps 4",
+            name="ncds4",
+            extra_server_args="--num-continuous-decode-steps 4",
         ),
     ]
     snapshot = {
-        "host_overhead": 75.0, "memory": 5.0, "compute": 5.0, "comm": 0.0,
+        "host_overhead": 75.0,
+        "memory": 5.0,
+        "compute": 5.0,
+        "comm": 0.0,
     }
     assert compute_saturation_advisory(grid, snapshot) == []
     advisory = compute_saturation_advisory(grid, snapshot, threshold_pct=70.0)

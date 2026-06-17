@@ -35,10 +35,7 @@ def _make_fake_tracelens(tmp_path: Path) -> Path:
     root = tmp_path / "TraceLens-internal"
     base = root / "examples" / "custom_workflows" / "inference_analysis"
     (base / "vllm_patches").mkdir(parents=True)
-    (
-        base / "sglang_roofline_patches"
-        / _versioned_subdir_for_fake_sglang()
-    ).mkdir(parents=True)
+    (base / "sglang_roofline_patches" / _versioned_subdir_for_fake_sglang()).mkdir(parents=True)
     return root
 
 
@@ -71,18 +68,23 @@ def _make_fake_vllm_install(tmp_path: Path) -> Path:
 
 
 def _write_fake_vllm_patch(
-    tracelens_root: Path, version: str,
+    tracelens_root: Path,
+    version: str,
     sentinels: tuple[str, ...] = (
-        "capture_torch_profiler_dir", "detailed_trace_annotation",
+        "capture_torch_profiler_dir",
+        "detailed_trace_annotation",
     ),
 ) -> Path:
     """Generate a minimal unified diff adding both sentinel markers (PR-D §4) to the fake profiler.py."""
     patch_path = (
         tracelens_root
-        / "examples" / "custom_workflows" / "inference_analysis"
-        / "vllm_patches" / f"config_vllm_v{version}.patch"
+        / "examples"
+        / "custom_workflows"
+        / "inference_analysis"
+        / "vllm_patches"
+        / f"config_vllm_v{version}.patch"
     )
-    new_lines = "\n".join(f"+    {s}: str = \"\"" for s in sentinels)
+    new_lines = "\n".join(f'+    {s}: str = ""' for s in sentinels)
     added_count = len(sentinels)
     patch_path.write_text(
         textwrap.dedent(
@@ -156,12 +158,18 @@ def _make_fake_sglang_install(tmp_path: Path) -> Path:
 
 
 def _write_fake_sglang_patches(
-    tracelens_root: Path, *, count: int = 1, include_new_file: bool = True,
+    tracelens_root: Path,
+    *,
+    count: int = 1,
+    include_new_file: bool = True,
 ) -> list[Path]:
     """Write ``count`` minimal patches into the v0.3.1 per-version subdir (first creates the sentinel file)."""
     base = (
-        tracelens_root / "examples" / "custom_workflows"
-        / "inference_analysis" / "sglang_roofline_patches"
+        tracelens_root
+        / "examples"
+        / "custom_workflows"
+        / "inference_analysis"
+        / "sglang_roofline_patches"
         / _versioned_subdir_for_fake_sglang()
     )
     patches: list[Path] = []
@@ -225,7 +233,8 @@ def _git_available() -> bool:
 
 
 _REQUIRES_GIT = pytest.mark.skipif(
-    not _git_available(), reason="git not available in test environment",
+    not _git_available(),
+    reason="git not available in test environment",
 )
 
 
@@ -259,7 +268,8 @@ def test_vllm_returns_false_without_tracelens_root(monkeypatch):
 
 
 def test_vllm_returns_false_when_vllm_not_importable(
-    fake_vllm_world, monkeypatch,
+    fake_vllm_world,
+    monkeypatch,
 ):
     """An environment without vllm must not crash — discover returns None → False."""
     monkeypatch.delitem(sys.modules, "vllm", raising=False)
@@ -270,13 +280,15 @@ def test_vllm_returns_false_when_vllm_not_importable(
         return _real_import(name, *args, **kwargs)
 
     import builtins
+
     _real_import = builtins.__import__
     monkeypatch.setattr(builtins, "__import__", _blocked_import)
     assert ensure_vllm_patched_for_tracelens() is False
 
 
 def test_vllm_returns_false_when_no_patch_for_version(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """vLLM version with no matching TraceLens patch → fail-soft."""
     tracelens_root = _make_fake_tracelens(tmp_path)
@@ -290,7 +302,8 @@ def test_vllm_returns_false_when_no_patch_for_version(
 
 
 def test_vllm_returns_false_when_install_layout_unexpected(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """A broken vLLM install layout fails soft."""
     tracelens_root = _make_fake_tracelens(tmp_path)
@@ -312,10 +325,7 @@ def test_sglang_first_call_applies_all_patches(fake_sglang_world):
     _, apply_root, _ = fake_sglang_world
     rc = ensure_sglang_patched_for_tracelens()
     assert rc is True
-    sentinel = (
-        apply_root / "python" / "sglang" / "srt" / "utils"
-        / "kernel_shape_profiler.py"
-    )
+    sentinel = apply_root / "python" / "sglang" / "srt" / "utils" / "kernel_shape_profiler.py"
     assert sentinel.exists()
     assert "kernel_shape_profiler" in sentinel.read_text()
 
@@ -324,10 +334,7 @@ def test_sglang_first_call_applies_all_patches(fake_sglang_world):
 def test_sglang_second_call_is_noop(fake_sglang_world):
     _, apply_root, _ = fake_sglang_world
     ensure_sglang_patched_for_tracelens()
-    sentinel = (
-        apply_root / "python" / "sglang" / "srt" / "utils"
-        / "kernel_shape_profiler.py"
-    )
+    sentinel = apply_root / "python" / "sglang" / "srt" / "utils" / "kernel_shape_profiler.py"
     before = sentinel.read_text()
     rc = ensure_sglang_patched_for_tracelens()
     assert rc is True
@@ -347,13 +354,8 @@ def test_sglang_rejects_unsupported_version(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "sglang", fake_mod)
     monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
     assert ensure_sglang_patched_for_tracelens() is False
-    sentinel = (
-        apply_root / "python" / "sglang" / "srt" / "utils"
-        / "kernel_shape_profiler.py"
-    )
-    assert not sentinel.exists(), (
-        "patcher must NOT have written to disk for unsupported version"
-    )
+    sentinel = apply_root / "python" / "sglang" / "srt" / "utils" / "kernel_shape_profiler.py"
+    assert not sentinel.exists(), "patcher must NOT have written to disk for unsupported version"
 
 
 def test_sglang_rejects_unknown_install_layout(tmp_path, monkeypatch):
@@ -381,9 +383,13 @@ def test_sglang_precheck_failure_skips_all(tmp_path, monkeypatch):
     apply_root = _make_fake_sglang_install(tmp_path)
     _write_fake_sglang_patches(tracelens_root, count=1)
     bad = (
-        tracelens_root / "examples" / "custom_workflows"
-        / "inference_analysis" / "sglang_roofline_patches"
-        / _versioned_subdir_for_fake_sglang() / "zzz_bad.patch"
+        tracelens_root
+        / "examples"
+        / "custom_workflows"
+        / "inference_analysis"
+        / "sglang_roofline_patches"
+        / _versioned_subdir_for_fake_sglang()
+        / "zzz_bad.patch"
     )
     bad.write_text(
         textwrap.dedent(
@@ -406,13 +412,8 @@ def test_sglang_precheck_failure_skips_all(tmp_path, monkeypatch):
     monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
 
     assert ensure_sglang_patched_for_tracelens() is False
-    sentinel = (
-        apply_root / "python" / "sglang" / "srt" / "utils"
-        / "kernel_shape_profiler.py"
-    )
-    assert not sentinel.exists(), (
-        "patcher partial-applied even though --check predicted failure"
-    )
+    sentinel = apply_root / "python" / "sglang" / "srt" / "utils" / "kernel_shape_profiler.py"
+    assert not sentinel.exists(), "patcher partial-applied even though --check predicted failure"
 
 
 # Concurrency: threads racing the same fake install converge.
@@ -482,7 +483,8 @@ def test_apply_atomic_fuzzy_fallback_when_git_strict_check_fails(fake_vllm_world
 
 @_REQUIRES_GIT
 def test_apply_atomic_returns_false_when_strict_and_fuzzy_both_fail(
-    fake_vllm_world, monkeypatch,
+    fake_vllm_world,
+    monkeypatch,
 ):
     """When strict AND fuzzy both reject, the patcher returns False without touching the install."""
     _, install_root, _ = fake_vllm_world
@@ -512,7 +514,9 @@ def test_patch_dry_run_returns_false_when_patch_binary_missing(tmp_path):
     fake_diff = tmp_path / "fake.patch"
     fake_diff.write_text("--- a/x\n+++ b/x\n", encoding="utf-8")
     rc = _server_patcher._patch_dry_run(
-        "/nonexistent/patch", fake_diff, tmp_path,
+        "/nonexistent/patch",
+        fake_diff,
+        tmp_path,
     )
     assert rc is False
 
@@ -556,8 +560,7 @@ def test_fuzz_fallback_rejects_multi_line_context_mismatch(fake_vllm_world):
     )
     text = target.read_text(encoding="utf-8")
     assert "capture_torch_profiler_dir" not in text, (
-        "fuzz=2 must not have mutated the install when context "
-        "mismatch exceeded _FUZZ tolerance"
+        "fuzz=2 must not have mutated the install when context mismatch exceeded _FUZZ tolerance"
     )
     assert "detailed_trace_annotation" not in text
 
@@ -699,9 +702,7 @@ def test_sglang_wheel_install_patches_via_p3_strip(tmp_path, monkeypatch):
 
     rc = ensure_sglang_patched_for_tracelens()
     assert rc is True
-    sentinel_real = (
-        site_packages / "sglang" / "srt" / "utils" / "kernel_shape_profiler.py"
-    )
+    sentinel_real = site_packages / "sglang" / "srt" / "utils" / "kernel_shape_profiler.py"
     assert sentinel_real.exists(), (
         "wheel install's sglang/srt/utils/kernel_shape_profiler.py must exist "
         "after patching — the -p3 path should have modified the wheel directly"
@@ -725,9 +726,7 @@ def test_sglang_wheel_install_is_idempotent(tmp_path, monkeypatch):
     monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
 
     assert ensure_sglang_patched_for_tracelens() is True
-    sentinel_real = (
-        site_packages / "sglang" / "srt" / "utils" / "kernel_shape_profiler.py"
-    )
+    sentinel_real = site_packages / "sglang" / "srt" / "utils" / "kernel_shape_profiler.py"
     snapshot = sentinel_real.read_text(encoding="utf-8")
     assert ensure_sglang_patched_for_tracelens() is True
     assert sentinel_real.read_text(encoding="utf-8") == snapshot
@@ -783,9 +782,7 @@ def test_is_patched_requires_all_substrings_in_tuple(tmp_path):
         sentinel_file=sentinel,
         sentinel_text=("capture_torch_profiler_dir", "detailed_trace_annotation"),
     )
-    assert _server_patcher._is_patched(plan) is False, (
-        "_is_patched must require BOTH markers; one alone is not enough"
-    )
+    assert _server_patcher._is_patched(plan) is False, "_is_patched must require BOTH markers; one alone is not enough"
     sentinel.write_text(
         "class ProfilerConfig:\n"
         "    capture_torch_profiler_dir: str = ''\n"
@@ -799,7 +796,8 @@ def test_is_patched_handles_single_element_tuple(tmp_path):
     """Single-element tuple sentinel (SGLang): presence of the lone marker counts as patched."""
     sentinel = tmp_path / "fake_kernel_shape_profiler.py"
     sentinel.write_text(
-        "# kernel_shape_profiler module stub\n", encoding="utf-8",
+        "# kernel_shape_profiler module stub\n",
+        encoding="utf-8",
     )
     plan = _server_patcher._PatchPlan(
         framework="sglang",
@@ -829,7 +827,8 @@ def test_vllm_plan_uses_two_marker_sentinel(tmp_path, monkeypatch):
     assert plan is not None
     assert isinstance(plan.sentinel_text, tuple)
     assert set(plan.sentinel_text) == {
-        "capture_torch_profiler_dir", "detailed_trace_annotation",
+        "capture_torch_profiler_dir",
+        "detailed_trace_annotation",
     }, plan.sentinel_text
 
 
@@ -845,15 +844,16 @@ def test_sglang_plan_keeps_single_marker_sentinel(fake_sglang_world):
 # PR-D §5: a TraceLens-shipped SUPPORTED_VERSIONS manifest takes precedence
 # over the hardcoded minor allowlist (auto-adapts without a code change).
 def _write_sglang_versions_manifest(
-    tracelens_root: Path, body: str, *,
+    tracelens_root: Path,
+    body: str,
+    *,
     version: str = _FAKE_SGLANG_VERSION,
     filename: str = "SUPPORTED_VERSIONS.txt",
 ) -> Path:
     """Write a TraceLens-style version manifest into the per-version SGLang patches subdir."""
     subdir = _server_patcher._versioned_patches_subdir_name(version) or ""
     patches_dir = (
-        tracelens_root / "examples" / "custom_workflows"
-        / "inference_analysis" / "sglang_roofline_patches" / subdir
+        tracelens_root / "examples" / "custom_workflows" / "inference_analysis" / "sglang_roofline_patches" / subdir
     )
     patches_dir.mkdir(parents=True, exist_ok=True)
     manifest = patches_dir / filename
@@ -865,9 +865,12 @@ def test_load_sglang_manifest_returns_none_when_absent(tmp_path):
     """No manifest → the loader returns None so the caller falls back to the PR-C.2 minor allowlist."""
     patches_dir = tmp_path / "sglang_roofline_patches"
     patches_dir.mkdir()
-    assert _server_patcher._load_sglang_supported_versions_from_manifest(
-        patches_dir,
-    ) is None
+    assert (
+        _server_patcher._load_sglang_supported_versions_from_manifest(
+            patches_dir,
+        )
+        is None
+    )
 
 
 def test_load_sglang_manifest_parses_versions_skipping_comments(tmp_path):
@@ -894,13 +897,15 @@ def test_load_sglang_manifest_empty_returns_empty_frozenset(tmp_path):
     patches_dir = tmp_path / "sglang_roofline_patches"
     patches_dir.mkdir()
     (patches_dir / "SUPPORTED_VERSIONS.txt").write_text(
-        "# Intentionally empty — no versions supported.\n"
-        "\n",
+        "# Intentionally empty — no versions supported.\n\n",
         encoding="utf-8",
     )
-    assert _server_patcher._load_sglang_supported_versions_from_manifest(
-        patches_dir,
-    ) == frozenset()
+    assert (
+        _server_patcher._load_sglang_supported_versions_from_manifest(
+            patches_dir,
+        )
+        == frozenset()
+    )
 
 
 def test_load_sglang_manifest_prefers_dot_txt_over_no_extension(tmp_path):
@@ -908,10 +913,12 @@ def test_load_sglang_manifest_prefers_dot_txt_over_no_extension(tmp_path):
     patches_dir = tmp_path / "sglang_roofline_patches"
     patches_dir.mkdir()
     (patches_dir / "SUPPORTED_VERSIONS.txt").write_text(
-        "from_dot_txt\n", encoding="utf-8",
+        "from_dot_txt\n",
+        encoding="utf-8",
     )
     (patches_dir / "SUPPORTED_VERSIONS").write_text(
-        "from_no_extension\n", encoding="utf-8",
+        "from_no_extension\n",
+        encoding="utf-8",
     )
     assert _server_patcher._load_sglang_supported_versions_from_manifest(
         patches_dir,
@@ -923,7 +930,8 @@ def test_load_sglang_manifest_falls_back_to_no_extension(tmp_path):
     patches_dir = tmp_path / "sglang_roofline_patches"
     patches_dir.mkdir()
     (patches_dir / "SUPPORTED_VERSIONS").write_text(
-        "0.5.9\n", encoding="utf-8",
+        "0.5.9\n",
+        encoding="utf-8",
     )
     assert _server_patcher._load_sglang_supported_versions_from_manifest(
         patches_dir,
@@ -931,7 +939,8 @@ def test_load_sglang_manifest_falls_back_to_no_extension(tmp_path):
 
 
 def test_sglang_version_accepted_consults_manifest_when_present(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """A shipped manifest is the source of truth, overriding the hardcoded ``0.5.x`` default both ways."""
     monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
@@ -939,18 +948,28 @@ def test_sglang_version_accepted_consults_manifest_when_present(
     patches_dir = tmp_path / "sglang_roofline_patches"
     patches_dir.mkdir()
     (patches_dir / "SUPPORTED_VERSIONS.txt").write_text(
-        "0.6.0\n0.7.0\n", encoding="utf-8",
+        "0.6.0\n0.7.0\n",
+        encoding="utf-8",
     )
-    assert _server_patcher._sglang_version_accepted(
-        "0.5.9", patches_dir=patches_dir,
-    ) is False
-    assert _server_patcher._sglang_version_accepted(
-        "0.7.0", patches_dir=patches_dir,
-    ) is True
+    assert (
+        _server_patcher._sglang_version_accepted(
+            "0.5.9",
+            patches_dir=patches_dir,
+        )
+        is False
+    )
+    assert (
+        _server_patcher._sglang_version_accepted(
+            "0.7.0",
+            patches_dir=patches_dir,
+        )
+        is True
+    )
 
 
 def test_sglang_version_accepted_empty_manifest_rejects_all(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """An explicit empty manifest beats the hardcoded default → all versions rejected."""
     monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
@@ -958,57 +977,83 @@ def test_sglang_version_accepted_empty_manifest_rejects_all(
     patches_dir = tmp_path / "sglang_roofline_patches"
     patches_dir.mkdir()
     (patches_dir / "SUPPORTED_VERSIONS.txt").write_text(
-        "# all entries commented out → empty manifest\n", encoding="utf-8",
+        "# all entries commented out → empty manifest\n",
+        encoding="utf-8",
     )
-    assert _server_patcher._sglang_version_accepted(
-        "0.5.9", patches_dir=patches_dir,
-    ) is False, (
-        "empty manifest must reject every version — not silently fall through "
-        "to the hardcoded default"
-    )
+    assert (
+        _server_patcher._sglang_version_accepted(
+            "0.5.9",
+            patches_dir=patches_dir,
+        )
+        is False
+    ), "empty manifest must reject every version — not silently fall through to the hardcoded default"
 
 
 def test_sglang_version_accepted_no_manifest_falls_back_to_default(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """With no manifest the helper falls back to ``_SGLANG_DEFAULT_ALLOWED_MINORS = ("0.5",)``."""
     monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
     monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
     patches_dir = tmp_path / "sglang_roofline_patches"
     patches_dir.mkdir()  # No manifest written.
-    assert _server_patcher._sglang_version_accepted(
-        "0.5.9", patches_dir=patches_dir,
-    ) is True
-    assert _server_patcher._sglang_version_accepted(
-        "0.5.99", patches_dir=patches_dir,
-    ) is True
-    assert _server_patcher._sglang_version_accepted(
-        "0.6.0", patches_dir=patches_dir,
-    ) is False
+    assert (
+        _server_patcher._sglang_version_accepted(
+            "0.5.9",
+            patches_dir=patches_dir,
+        )
+        is True
+    )
+    assert (
+        _server_patcher._sglang_version_accepted(
+            "0.5.99",
+            patches_dir=patches_dir,
+        )
+        is True
+    )
+    assert (
+        _server_patcher._sglang_version_accepted(
+            "0.6.0",
+            patches_dir=patches_dir,
+        )
+        is False
+    )
 
 
 def test_sglang_version_accepted_operator_env_vars_beat_manifest(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """An operator's exact pin takes precedence over a shipped manifest."""
     patches_dir = tmp_path / "sglang_roofline_patches"
     patches_dir.mkdir()
     (patches_dir / "SUPPORTED_VERSIONS.txt").write_text(
-        "0.5.9\n", encoding="utf-8",
+        "0.5.9\n",
+        encoding="utf-8",
     )
     monkeypatch.setenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", "0.7.0")
     monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
-    assert _server_patcher._sglang_version_accepted(
-        "0.7.0", patches_dir=patches_dir,
-    ) is True
-    assert _server_patcher._sglang_version_accepted(
-        "0.5.9", patches_dir=patches_dir,
-    ) is False
+    assert (
+        _server_patcher._sglang_version_accepted(
+            "0.7.0",
+            patches_dir=patches_dir,
+        )
+        is True
+    )
+    assert (
+        _server_patcher._sglang_version_accepted(
+            "0.5.9",
+            patches_dir=patches_dir,
+        )
+        is False
+    )
 
 
 @_REQUIRES_GIT
 def test_sglang_e2e_manifest_admits_version_outside_default_allowlist(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Full integration: a shipped manifest admits SGLang 0.7.0 even though the default 0.5.x allowlist would reject."""
     monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
@@ -1027,10 +1072,7 @@ def test_sglang_e2e_manifest_admits_version_outside_default_allowlist(
     monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
 
     assert ensure_sglang_patched_for_tracelens() is True
-    sentinel = (
-        apply_root / "python" / "sglang" / "srt" / "utils"
-        / "kernel_shape_profiler.py"
-    )
+    sentinel = apply_root / "python" / "sglang" / "srt" / "utils" / "kernel_shape_profiler.py"
     assert sentinel.exists(), (
         "0.7.0 should have been patched because the manifest admits it — "
         "the default 0.5.x allowlist alone would have rejected"
@@ -1040,13 +1082,13 @@ def test_sglang_e2e_manifest_admits_version_outside_default_allowlist(
 # TraceLens v0.3.1: per-version patch subdirs (sglang_0_5_9/, ...) are the only
 # supported layout; the flat v0.3 layout has been retired.
 def _write_versioned_sglang_patches(
-    tracelens_root: Path, subdir: str, *, count: int = 1,
+    tracelens_root: Path,
+    subdir: str,
+    *,
+    count: int = 1,
 ) -> list[Path]:
     """Write minimal v0.3.1-style patches into a per-version subdir."""
-    base = (
-        tracelens_root / "examples" / "custom_workflows"
-        / "inference_analysis" / "sglang_roofline_patches" / subdir
-    )
+    base = tracelens_root / "examples" / "custom_workflows" / "inference_analysis" / "sglang_roofline_patches" / subdir
     base.mkdir(parents=True, exist_ok=True)
     patches: list[Path] = []
     p1 = base / "kernel_shape_profiler.patch"
@@ -1107,9 +1149,7 @@ def test_resolve_sglang_patches_dir_returns_versioned_subdir(tmp_path):
     subdir = root / "sglang_0_5_11"
     subdir.mkdir()
     (subdir / "kernel_shape_profiler.patch").write_text("p\n", encoding="utf-8")
-    assert (
-        _server_patcher._resolve_sglang_patches_dir(root, "0.5.11") == subdir
-    )
+    assert _server_patcher._resolve_sglang_patches_dir(root, "0.5.11") == subdir
 
 
 def test_resolve_sglang_patches_dir_returns_none_when_subdir_missing(tmp_path):
@@ -1144,13 +1184,8 @@ def test_sglang_e2e_versioned_layout_applies_from_subdir(tmp_path, monkeypatch):
     monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
 
     assert ensure_sglang_patched_for_tracelens() is True
-    sentinel = (
-        apply_root / "python" / "sglang" / "srt" / "utils"
-        / "kernel_shape_profiler.py"
-    )
-    assert sentinel.exists(), (
-        "0.5.11 should pick sglang_0_5_11/ subdir and apply its patches"
-    )
+    sentinel = apply_root / "python" / "sglang" / "srt" / "utils" / "kernel_shape_profiler.py"
+    assert sentinel.exists(), "0.5.11 should pick sglang_0_5_11/ subdir and apply its patches"
 
 
 def test_discover_sglang_plan_marks_versioned_layout(tmp_path, monkeypatch):
@@ -1170,9 +1205,7 @@ def test_discover_sglang_plan_marks_versioned_layout(tmp_path, monkeypatch):
     plan = _server_patcher._discover_sglang_plan(None)
     assert plan is not None
     for p in plan.patches:
-        assert "sglang_0_5_11" in p.parts, (
-            f"versioned layout should be selected, got patch path {p}"
-        )
+        assert "sglang_0_5_11" in p.parts, f"versioned layout should be selected, got patch path {p}"
 
 
 # Issue #505: a "new file" member patch whose target is ALREADY pre-baked into
@@ -1183,7 +1216,8 @@ def test_discover_sglang_plan_marks_versioned_layout(tmp_path, monkeypatch):
 # kernel-opt/GEAK never dispatched for the whole run).
 @_REQUIRES_GIT
 def test_sglang_0511_already_applied_member_is_skipped_not_failsoft(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS", raising=False)
     monkeypatch.delenv("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", raising=False)
@@ -1291,13 +1325,12 @@ def test_apply_atomic_skips_already_applied_member(tmp_path, monkeypatch):
     )
     assert _server_patcher._apply_atomic(plan) is True
     assert (apply_root / "pending.py").exists()
-    assert (apply_root / "already.py").read_text(encoding="utf-8") == (
-        "# already applied\n"
-    )
+    assert (apply_root / "already.py").read_text(encoding="utf-8") == ("# already applied\n")
 
 
 def test_apply_atomic_rolls_back_when_post_apply_sentinel_fails(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Transaction integrity: when patches apply cleanly to disk but the
     post-apply sentinel check fails, ``_apply_atomic`` must roll back the

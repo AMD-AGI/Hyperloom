@@ -125,18 +125,18 @@ def publish(
     for attempt in range(1, max_retries + 1):
         try:
             resp = requests.post(
-                endpoint, headers=headers, json=body, timeout=timeout,
+                endpoint,
+                headers=headers,
+                json=body,
+                timeout=timeout,
             )
             # Only retry 5xx; 4xx means our payload is wrong and retrying won't help.
             if 500 <= resp.status_code < 600:
                 snippet = (resp.text or "")[:200].replace("\n", " ")
-                err = RuntimeError(
-                    f"HTTP {resp.status_code} from {endpoint}: {snippet}"
-                )
+                err = RuntimeError(f"HTTP {resp.status_code} from {endpoint}: {snippet}")
                 last_err = err
                 print(
-                    f"publish attempt {attempt}/{max_retries} failed: {err} "
-                    f"(retrying after {backoff:.0f}s)",
+                    f"publish attempt {attempt}/{max_retries} failed: {err} (retrying after {backoff:.0f}s)",
                     flush=True,
                 )
             else:
@@ -145,8 +145,7 @@ def publish(
         except requests.RequestException as e:
             last_err = e
             print(
-                f"publish attempt {attempt}/{max_retries} network error: "
-                f"{e!r} (retrying after {backoff:.0f}s)",
+                f"publish attempt {attempt}/{max_retries} network error: {e!r} (retrying after {backoff:.0f}s)",
                 flush=True,
             )
 
@@ -154,9 +153,7 @@ def publish(
             time.sleep(backoff)
             backoff = min(backoff * 2, 60.0)
 
-    raise RuntimeError(
-        f"publish failed after {max_retries} retries: {last_err!r}"
-    )
+    raise RuntimeError(f"publish failed after {max_retries} retries: {last_err!r}")
 
 
 def main() -> int:

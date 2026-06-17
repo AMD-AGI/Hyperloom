@@ -44,13 +44,17 @@ def parse_call_timeout_env(env_name: str, *, default: float) -> float:
     except ValueError:
         log.warning(
             "%s=%r is not a float; using default %.1fs",
-            env_name, raw, default,
+            env_name,
+            raw,
+            default,
         )
         return default
     if value <= 0 or not math.isfinite(value):
         log.warning(
             "%s=%r is not a positive finite number; using default %.1fs",
-            env_name, raw, default,
+            env_name,
+            raw,
+            default,
         )
         return default
     return value
@@ -79,7 +83,8 @@ class RetryPolicy:
 
     @classmethod
     def from_env(
-        cls, prefix: str = "INFERENCE_OPTIMIZER_LLM_RETRY",
+        cls,
+        prefix: str = "INFERENCE_OPTIMIZER_LLM_RETRY",
     ) -> "RetryPolicy":
         """Build a policy from ``<prefix>_{ATTEMPTS,BASE_S,MAX_S,MULT,JITTER_S}``.
 
@@ -190,7 +195,10 @@ async def retry_with_backoff(
                     pass
             log.warning(
                 "LLM call failed (attempt %d/%d: %r); retrying in %.2fs",
-                attempt, policy.max_attempts, exc, delay,
+                attempt,
+                policy.max_attempts,
+                exc,
+                delay,
             )
             await sleep(delay)
 

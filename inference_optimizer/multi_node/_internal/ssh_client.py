@@ -38,14 +38,22 @@ DEFAULT_SSH_PORT = 2222
 # short-lived pod IPs. Host keys change per pod recreate, so we deliberately
 # skip known_hosts (StrictHostKeyChecking=no + UserKnownHostsFile=/dev/null).
 _SSH_COMMON_OPTS = [
-    "-o", "StrictHostKeyChecking=no",
-    "-o", "UserKnownHostsFile=/dev/null",
-    "-o", "PasswordAuthentication=no",
-    "-o", "BatchMode=yes",
-    "-o", "ConnectTimeout=15",
-    "-o", "ServerAliveInterval=30",
-    "-o", "ServerAliveCountMax=3",
-    "-o", "LogLevel=ERROR",
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "PasswordAuthentication=no",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=15",
+    "-o",
+    "ServerAliveInterval=30",
+    "-o",
+    "ServerAliveCountMax=3",
+    "-o",
+    "LogLevel=ERROR",
 ]
 
 
@@ -78,16 +86,23 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
             pass
     proc = subprocess.run(
         [
-            "ssh-keygen", "-t", "ed25519", "-N", "", "-q",
-            "-C", "hyperloom-mn-dynamo",
-            "-f", str(priv),
+            "ssh-keygen",
+            "-t",
+            "ed25519",
+            "-N",
+            "",
+            "-q",
+            "-C",
+            "hyperloom-mn-dynamo",
+            "-f",
+            str(priv),
         ],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"ssh-keygen failed rc={proc.returncode}: {proc.stderr.strip()}"
-        )
+        raise RuntimeError(f"ssh-keygen failed rc={proc.returncode}: {proc.stderr.strip()}")
     priv.chmod(0o600)
     pub_str = pub.read_text(encoding="utf-8").strip()
     info(f"generated session SSH keypair at {priv}")
@@ -123,10 +138,14 @@ def ssh_run(
     argv = [
         "ssh",
         *_SSH_COMMON_OPTS,
-        "-i", str(key_path),
-        "-p", str(port),
+        "-i",
+        str(key_path),
+        "-p",
+        str(port),
         f"{user}@{host}",
-        "bash", "-lc", shlex.quote(command),
+        "bash",
+        "-lc",
+        shlex.quote(command),
     ]
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
 
@@ -175,15 +194,18 @@ def ssh_run_script(
     enc = base64.b64encode(script_text.encode("utf-8")).decode("ascii")
     env_prefix = ""
     if env:
-        env_prefix = "".join(
-            f"{k}={shlex.quote(str(v))} " for k, v in env.items()
-        )
+        env_prefix = "".join(f"{k}={shlex.quote(str(v))} " for k, v in env.items())
     remote_cmd = (
         f"echo {enc} | base64 -d > {shlex.quote(remote_path)} && "
         f"{env_prefix}{interpreter} {shlex.quote(remote_path)} {script_args}"
     )
     return ssh_run(
-        host, remote_cmd, key_path=key_path, port=port, user=user, timeout=timeout,
+        host,
+        remote_cmd,
+        key_path=key_path,
+        port=port,
+        user=user,
+        timeout=timeout,
     )
 
 
@@ -216,16 +238,25 @@ def ssh_run_bash_with_env(
     Returns:
         The completed SSH subprocess.
     """
-    prologue = "\n".join(
-        f"export {k}={shlex.quote(str(v))}" for k, v in (env or {}).items()
-    )
+    prologue = "\n".join(f"export {k}={shlex.quote(str(v))}" for k, v in (env or {}).items())
     full = f"set -uo pipefail\n{prologue}\n{script_text}\n"
     argv = [
-        "ssh", *_SSH_COMMON_OPTS, "-i", str(key_path), "-p", str(port),
-        f"{user}@{host}", "bash", "-s",
+        "ssh",
+        *_SSH_COMMON_OPTS,
+        "-i",
+        str(key_path),
+        "-p",
+        str(port),
+        f"{user}@{host}",
+        "bash",
+        "-s",
     ]
     return subprocess.run(
-        argv, input=full, capture_output=True, text=True, timeout=timeout,
+        argv,
+        input=full,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
 
 
@@ -251,15 +282,11 @@ def probe_ssh(
         accepted), ``False`` otherwise (including on timeout).
     """
     try:
-        cp = ssh_run(host, "echo mn_ssh_ok", key_path=key_path, port=port,
-                     user=user, timeout=timeout)
+        cp = ssh_run(host, "echo mn_ssh_ok", key_path=key_path, port=port, user=user, timeout=timeout)
     except subprocess.TimeoutExpired:
         warn(f"ssh probe to {host}:{port} timed out")
         return False
     ok = cp.returncode == 0 and "mn_ssh_ok" in (cp.stdout or "")
     if not ok:
-        warn(
-            f"ssh probe to {host}:{port} failed rc={cp.returncode} "
-            f"stderr={(cp.stderr or '').strip()[:200]}"
-        )
+        warn(f"ssh probe to {host}:{port} failed rc={cp.returncode} stderr={(cp.stderr or '').strip()[:200]}")
     return ok

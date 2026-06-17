@@ -11,15 +11,19 @@ from pathlib import Path
 import pytest
 
 
-
 # Helpers
 async def _build_coord_with_capacity(
-    tmp_path: Path, *, capacity: int, gpu_specialist_capacity: int = 0,
+    tmp_path: Path,
+    *,
+    capacity: int,
+    gpu_specialist_capacity: int = 0,
 ):
     """Build a minimal Coordinator with the requested research_lane capacity."""
     from inference_optimizer.orchestrator.agent_role import default_role_registry
     from inference_optimizer.orchestrator.backends.mock_backend import (
-        MockBackend, MockTurn, ScriptedPlan,
+        MockBackend,
+        MockTurn,
+        ScriptedPlan,
     )
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.orchestrator.shared_state import SharedState
@@ -33,9 +37,9 @@ async def _build_coord_with_capacity(
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle_plan),
-        "kernel":        MockBackend(idle_plan),
-        "critic":        MockBackend(idle_plan),
-        "robustness":    MockBackend(idle_plan),
+        "kernel": MockBackend(idle_plan),
+        "critic": MockBackend(idle_plan),
+        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=tmp_path,
@@ -61,9 +65,7 @@ class _ConcurrencyProbe:
     async def __call__(self, ctx) -> dict:
         async with self._lock:
             self.entries.append((ctx.task.task_id, time.monotonic()))
-            self.gpu_ids_by_task[ctx.task.task_id] = list(
-                (ctx.extra or {}).get("gpu_ids") or []
-            )
+            self.gpu_ids_by_task[ctx.task.task_id] = list((ctx.extra or {}).get("gpu_ids") or [])
         await asyncio.sleep(self.sleep_seconds)
         async with self._lock:
             self.exits.append((ctx.task.task_id, time.monotonic()))
@@ -92,8 +94,7 @@ class _ConcurrencyProbe:
         }
 
 
-def _max_concurrent(entries: list[tuple[str, float]],
-                    exits: list[tuple[str, float]]) -> int:
+def _max_concurrent(entries: list[tuple[str, float]], exits: list[tuple[str, float]]) -> int:
     """Compute peak concurrency from entry/exit timestamps."""
     events: list[tuple[float, int]] = []
     for _, t in entries:
@@ -135,16 +136,13 @@ async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path):
 
     # Serial would take ≥1.2s; parallel ~0.3s. Generous budget for CI flakiness.
     assert elapsed < 1.0, (
-        f"4 specialists serialised (elapsed={elapsed:.3f}s); expected "
-        f"parallel dispatch with elapsed < 1.0s"
+        f"4 specialists serialised (elapsed={elapsed:.3f}s); expected parallel dispatch with elapsed < 1.0s"
     )
     assert len(probe.entries) == 4
     assert len(probe.exits) == 4
 
     peak = _max_concurrent(probe.entries, probe.exits)
-    assert peak == 4, (
-        f"expected peak concurrency 4 (capacity=4 with 4 queued), got {peak}"
-    )
+    assert peak == 4, f"expected peak concurrency 4 (capacity=4 with 4 queued), got {peak}"
 
 
 @pytest.mark.asyncio
@@ -177,9 +175,7 @@ async def test_dispatcher_caps_concurrency_at_capacity_when_more_queued(
     assert len(probe.exits) == 4
     # ... but never more than `capacity` at once.
     peak = _max_concurrent(probe.entries, probe.exits)
-    assert peak == 2, (
-        f"expected peak concurrency 2 (capacity=2), got {peak}"
-    )
+    assert peak == 2, f"expected peak concurrency 2 (capacity=2), got {peak}"
     assert not await coord.tasks.queued()
 
 
@@ -219,7 +215,9 @@ async def test_gpu_specialist_pool_limits_concurrency_even_when_research_lane_fr
     research_lane has headroom; both tasks drain serially, reusing GPU id 0.
     """
     coord = await _build_coord_with_capacity(
-        tmp_path, capacity=2, gpu_specialist_capacity=1,
+        tmp_path,
+        capacity=2,
+        gpu_specialist_capacity=1,
     )
     probe = _ConcurrencyProbe(sleep_seconds=0.1)
     coord.sub.register_executor("specialist", probe)
@@ -251,11 +249,14 @@ async def test_gpu_specialist_pool_limits_concurrency_even_when_research_lane_fr
 
 @pytest.mark.asyncio
 async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS", "10")
     coord = await _build_coord_with_capacity(
-        tmp_path, capacity=1, gpu_specialist_capacity=1,
+        tmp_path,
+        capacity=1,
+        gpu_specialist_capacity=1,
     )
     probe = _ConcurrencyProbe(sleep_seconds=0.01)
     coord.sub.register_executor("specialist", probe)

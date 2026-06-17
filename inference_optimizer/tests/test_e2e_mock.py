@@ -26,13 +26,13 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     sd = make_session_dir()
     from .conftest import seed_target_analysis_marker
+
     seed_target_analysis_marker(sd)
     return sd
 
 
 def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE,
-                  payload={"topic": "heartbeat", "body_md": "ok"})
+    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 
 
 # Mock Kernel adapter unit tests
@@ -81,17 +81,20 @@ async def test_mock_kernel_heartbeat_when_no_request():
 @pytest.mark.asyncio
 async def test_e2e_propose_approve_dispatch_with_mock_executor(session_dir):
     """Orchestration → Critic (mock) → dispatcher → succeeded."""
-    propose = Intent(type=IntentType.PROPOSE_ACTION, payload={
-        "action_name": "baseline", "predicted_gain_pct": 0.0,
-    })
+    propose = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={
+            "action_name": "baseline",
+            "predicted_gain_pct": 0.0,
+        },
+    )
     backends = {
         "orchestration": MockBackend(
-            ScriptedPlan(turns=[MockTurn(intents=[propose])],
-                         default_intent=_heartbeat()),
+            ScriptedPlan(turns=[MockTurn(intents=[propose])], default_intent=_heartbeat()),
             name="orchestration",
         ),
-        "kernel":     MockKernelBackend(),
-        "critic":     MockCriticBackend(),
+        "kernel": MockKernelBackend(),
+        "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
     c = Coordinator(session_dir, backends=backends)
@@ -109,9 +112,7 @@ async def test_e2e_propose_approve_dispatch_with_mock_executor(session_dir):
         assert any(v.payload.get("verdict") == "approve" for v in verdicts)
         assert any(d.payload.get("kind") == "approved_proposal" for d in decisions)
         assert any(
-            r.payload.get("state") == "succeeded"
-            and r.payload.get("result", {}).get("tput") == 1840
-            for r in results
+            r.payload.get("state") == "succeeded" and r.payload.get("result", {}).get("tput") == 1840 for r in results
         )
     finally:
         await c.stop()
@@ -124,19 +125,21 @@ async def _async_value(v):
 @pytest.mark.asyncio
 async def test_e2e_request_response_round_trip(session_dir):
     """Plan A: orchestration REQUEST → kernel mock RESPONSE → routed back."""
-    req = Intent(type=IntentType.REQUEST, payload={
-        "target_agent": "kernel",
-        "kind": "explore_options",
-        "params": {"top_k": 5},
-    })
+    req = Intent(
+        type=IntentType.REQUEST,
+        payload={
+            "target_agent": "kernel",
+            "kind": "explore_options",
+            "params": {"top_k": 5},
+        },
+    )
     backends = {
         "orchestration": MockBackend(
-            ScriptedPlan(turns=[MockTurn(intents=[req])],
-                         default_intent=_heartbeat()),
+            ScriptedPlan(turns=[MockTurn(intents=[req])], default_intent=_heartbeat()),
             name="orchestration",
         ),
-        "kernel":     MockKernelBackend(),
-        "critic":     MockCriticBackend(),
+        "kernel": MockKernelBackend(),
+        "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
     c = Coordinator(session_dir, backends=backends)
@@ -161,10 +164,9 @@ async def test_e2e_request_response_round_trip(session_dir):
 @pytest.mark.asyncio
 async def test_e2e_robustness_heartbeats_throughout(session_dir):
     backends = {
-        "orchestration": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()),
-                                      name="orchestration"),
-        "kernel":     MockKernelBackend(),
-        "critic":     MockCriticBackend(),
+        "orchestration": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="orchestration"),
+        "kernel": MockKernelBackend(),
+        "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
     c = Coordinator(session_dir, backends=backends)

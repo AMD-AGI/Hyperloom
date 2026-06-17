@@ -199,9 +199,7 @@ class SqliteConnection:
             self._conn.execute(sql, params)
             self._conn.commit()
 
-    async def fetchall(
-        self, sql: str, params: Sequence[Any] = ()
-    ) -> list[sqlite3.Row]:
+    async def fetchall(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
         """Run a query asynchronously and return all rows.
 
         Args:
@@ -214,9 +212,7 @@ class SqliteConnection:
         async with self._async_lock:
             return await asyncio.to_thread(self.fetchall_sync, sql, params)
 
-    async def fetchone(
-        self, sql: str, params: Sequence[Any] = ()
-    ) -> sqlite3.Row | None:
+    async def fetchone(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:
         """Run a query asynchronously and return the first row.
 
         Args:
