@@ -520,10 +520,10 @@ TEST_COMMAND = {test_command!r}
 WORKTREE = {worktree!r}
 
 
-def _run_harness():
+def _run_harness(command=None):
     env = dict(os.environ)
     env["PYTHONPATH"] = WORKTREE + os.pathsep + env.get("PYTHONPATH", "")
-    p = subprocess.run(TEST_COMMAND, shell=True, cwd=WORKTREE, env=env,
+    p = subprocess.run(command or TEST_COMMAND, shell=True, cwd=WORKTREE, env=env,
                        capture_output=True, text=True)
     return p.returncode, (p.stdout or "") + "\\n" + (p.stderr or "")
 
@@ -536,10 +536,22 @@ def main():
     ap.add_argument("--iters", type=int, default=30)
     ap.add_argument("--bench-mode", action="store_true")
     a, _ = ap.parse_known_args()
-    rc, out = _run_harness()
 
     if a.bench_mode:
-        m = re.search(r"(?:median_ms|wall_ms)\\s*[:=]\\s*([0-9.]+)", out)
+        # The harness's --correctness mode prints no timing, so a bench that
+        # reuses the correctness command can never measure latency (RCA root
+        # cause 3). Run the harness's --benchmark mode instead (it emits
+        # GEAK_RESULT_LATENCY_MS); fall back to the verbatim command if the
+        # harness has no --correctness flag to rewrite.
+        bench_command = TEST_COMMAND
+        if "--correctness" in TEST_COMMAND:
+            bench_command = TEST_COMMAND.replace("--correctness", "--benchmark")
+        elif "--benchmark" not in TEST_COMMAND:
+            bench_command = TEST_COMMAND + " --benchmark"
+        rc, out = _run_harness(bench_command)
+        m = re.search(r"GEAK_RESULT_LATENCY_MS\\s*[:=]\\s*([0-9.]+)", out)
+        if not m:
+            m = re.search(r"(?:median_ms|wall_ms)\\s*[:=]\\s*([0-9.]+)", out)
         if not m:
             ms = re.findall(r"([0-9]+\\.[0-9]+)\\s*ms\\b", out)
             if ms:
@@ -547,6 +559,8 @@ def main():
         else:
             print(f"wall_ms: {{m.group(1)}}")
         sys.exit(0 if rc == 0 else 1)
+
+    rc, out = _run_harness()
 
     low = out.lower()
     if rc != 0:
@@ -934,6 +948,15 @@ def _write_report(output_dir: Path, baseline_ms: float | None, best_ms: float | 
     else:
         lines.append("micro_speedup: N/A (no validated improvement kept)")
         lines.append("[correctness] fail")
+        # Decouple the measured number from the KEEP decision: when we DID
+        # measure both baseline and best but didn't keep, record the observed
+        # timing informationally. Deliberately avoid the word "speedup" and the
+        # "Nx" form so _SPEEDUP_PATTERNS / _extract_speedup_from_report never
+        # pick this up as a KEEP-worthy figure. Aids post-mortem vs the old bare
+        # "N/A" that hid whether bench even ran (RCA root cause 3).
+        if baseline_ms and best_ms and best_ms > 0:
+            lines.append(f"# observed timing (not kept): baseline_ms={baseline_ms:.4f} "
+                         f"best_ms={best_ms:.4f} ratio={baseline_ms / best_ms:.4f}")
     report = output_dir / "optimization_report.md"
     report.write_text("\n".join(lines) + "\n")
     return report

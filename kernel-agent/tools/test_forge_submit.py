@@ -311,3 +311,35 @@ def test_apply_fellow_env_does_not_mutate_os_environ(monkeypatch):
     assert env["ANTHROPIC_BASE_URL"] == "https://host/api/v1/llm-proxy"
     # ...but the process-global env is untouched (no leak to claude/codex).
     assert _os.environ["ANTHROPIC_BASE_URL"] == "https://host/llm-gateway"
+
+
+def test_adapter_bench_mode_rewrites_correctness_to_benchmark(tmp_path):
+    """Bench mode must run the harness's --benchmark path (which emits timing),
+    not reuse --correctness which prints no latency (RCA root cause 3)."""
+    # Fake harness: prints latency only under --benchmark, nothing under
+    # --correctness, so the adapter must rewrite the flag to measure anything.
+    harness = tmp_path / "fake_harness.py"
+    harness.write_text(
+        "import sys\n"
+        "if '--benchmark' in sys.argv:\n"
+        "    print('GEAK_RESULT_LATENCY_MS=4.2000')\n"
+        "elif '--correctness' in sys.argv:\n"
+        "    print('correctness passed')\n"
+    )
+    test_command = f"{sys.executable} {harness} --correctness"
+    driver = forge_submit._build_driver_adapter(test_command, str(tmp_path), tmp_path)
+    import subprocess as _sp
+    out = _sp.run([sys.executable, driver, "--bench-mode"],
+                  capture_output=True, text=True)
+    assert "wall_ms: 4.2000" in out.stdout, out.stdout + out.stderr
+
+
+def test_report_informational_timing_not_kept_does_not_trigger_keep(tmp_path):
+    """When not kept, the report records observed timing for post-mortem but must
+    NOT be parsed as a KEEP-worthy speedup (no false KEEP)."""
+    report = forge_submit._write_report(tmp_path, 7.5778, 4.0310, improved=False)
+    text = report.read_text()
+    assert "ratio=" in text and "best_ms=4.0310" in text
+    # Critical: extractors must still see no speedup + failed correctness.
+    assert ko._extract_speedup_from_report(report) is None
+    assert ko._extract_correctness_from_report(report) is False
