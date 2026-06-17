@@ -110,9 +110,16 @@ _DEFAULT_KERNEL_OPT_MAX_FAILURES = 1
 # genuine gate REVERT (measured gain below threshold / accuracy regression). A
 # fault means the patch was never fairly measured, so it must not burn the
 # ``max_attempts`` REVERT quota; it gets its own small retry budget instead.
-# ``integrate_handler`` stamps these via ``error_class`` (it also tags fault
-# results with ``decision:"REVERT"`` for backward-compat, so error_class is the
-# only reliable fault signal).
+#
+# The reliable discriminator is ``status``: a genuine gate verdict (KEEP /
+# REVERT / NEEDS_REVIEW on a real measurement) is always emitted by
+# ``integrate_handler`` with ``status:"ok"``; every unmeasured path returns
+# ``status:"failed"`` (several also stamp ``decision:"REVERT"`` for backward
+# compat, which is exactly why ``decision`` alone is *not* trustworthy). See
+# :meth:`_is_integrate_fault`. The error-class set below is a secondary,
+# belt-and-suspenders signal — it stays meaningful even if a future caller
+# emits a fault with a drifted ``status`` — but it is no longer the only thing
+# standing between an environment crash and a discarded patch.
 _INTEGRATE_FAULT_ERROR_CLASSES = frozenset({
     "missing_integration_inputs",
     "patch_not_applied",
@@ -126,10 +133,12 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset({
     "handler_exception",
     "subprocess_timeout",
 })
-# Independent bounded retry budget for integration faults (separate from the
-# REVERT ``max_attempts`` quota). Total retries are still capped globally by the
+# Independent bounded budget for integration-fault *attempts* (separate from the
+# REVERT ``max_attempts`` quota). NOTE: this counts total fault attempts, not
+# retries-after-the-first — a value of 2 means "one initial fault plus one
+# retry, then reject". Total attempts are still capped globally by the
 # crash-rate emergency stop in the coordinator.
-_MAX_INTEGRATE_FAULT_RETRIES = 2
+_MAX_INTEGRATE_FAULT_ATTEMPTS = 2
 
 # Hot-kernel report gate: reusable hot kernels >= this GPU share need a kernel_opt attempt/rejection before ``report``.
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 3.0
@@ -1658,21 +1667,28 @@ class SharedState:
         """True when an integrate result is an integration *fault*, not a verdict.
 
         A fault is an environment/apply/bench crash that prevented the patch
-        from being fairly measured (``error_class`` in
-        :data:`_INTEGRATE_FAULT_ERROR_CLASSES`). ``integrate_handler`` also
-        stamps these with ``decision:"REVERT"`` for backward-compat, so the
-        ``error_class`` is the only reliable fault discriminator. A genuine
-        gate REVERT (gain below threshold / accuracy regression) carries no
-        fault ``error_class`` and so returns ``False`` here.
+        from being fairly measured. It must not burn the REVERT quota.
+
+        The discriminator is ``status``, not ``decision`` or ``error_class``:
+        ``integrate_handler`` only ever reaches a genuine gate verdict (KEEP /
+        REVERT / NEEDS_REVIEW) on a real measurement, and always stamps those
+        with ``status:"ok"``. Every unmeasured path returns ``status:"failed"``
+        — and several of those *also* carry ``decision:"REVERT"`` for backward
+        compat (e.g. apply-failed, "re-baseline did not succeed"), so keying on
+        ``decision`` alone misclassifies them as terminal reverts and discards
+        the patch on the first environment hiccup. Keying on ``status="failed"``
+        catches them all, including fault paths that forget a top-level
+        ``error_class``.
+
+        The :data:`_INTEGRATE_FAULT_ERROR_CLASSES` membership test is a
+        secondary signal kept for robustness if a future caller emits a fault
+        with a non-``failed`` status.
         """
-        err_class = str(result.get("error_class") or "").strip()
-        if err_class in _INTEGRATE_FAULT_ERROR_CLASSES:
-            return True
-        # Defensive: a status-failed result with no decision and no recognised
-        # error_class is still an unmeasured fault, never a gate verdict.
         status = str(result.get("status") or "").strip().lower()
-        decision = str(result.get("decision") or "").strip().upper()
-        return status == "failed" and decision not in {"KEEP", "REVERT"}
+        if status == "failed":
+            return True
+        err_class = str(result.get("error_class") or "").strip()
+        return err_class in _INTEGRATE_FAULT_ERROR_CLASSES
 
     def record_kernel_integrate_result(
         self,
@@ -1680,7 +1696,7 @@ class SharedState:
         *,
         max_attempts: int = 3,
         keep_threshold_pct: float = 1.0,
-        max_fault_retries: int = _MAX_INTEGRATE_FAULT_RETRIES,
+        max_fault_attempts: int = _MAX_INTEGRATE_FAULT_ATTEMPTS,
     ) -> dict[str, Any] | None:
         """Persist one integrate E2E result and reject exhausted patch attempts.
 
@@ -1694,7 +1710,7 @@ class SharedState:
         * **Integration fault** — an environment/apply/bench crash (see
           :meth:`_is_integrate_fault`) that never fairly measured the patch.
           Faults do *not* consume the REVERT quota; they get an independent
-          ``max_fault_retries`` budget and are marked ``retryable`` so the
+          ``max_fault_attempts`` budget and are marked ``retryable`` so the
           pending-integrate driver re-enqueues them, only being rejected once
           that fault budget is exhausted.
 
@@ -1704,9 +1720,9 @@ class SharedState:
                 non-KEEP patch (default 3).
             keep_threshold_pct (float): The gain threshold recorded on the
                 rejection row for context (default 1.0).
-            max_fault_retries (int): Independent retry budget for integration
-                faults before they are rejected as
-                ``fault_retries_exhausted``.
+            max_fault_attempts (int): Independent budget for total integration-
+                fault attempts (initial + retries) before they are rejected as
+                ``fault_attempts_exhausted`` (default 2 = one retry).
 
         Returns:
             dict[str, Any] | None: The updated attempts entry (carrying a
@@ -1799,11 +1815,11 @@ class SharedState:
         # — retry on its own budget and let the pending-integrate driver pick it
         # back up, only rejecting once the fault budget is exhausted.
         if is_fault:
-            if fault_count < max_fault_retries:
+            if fault_count < max_fault_attempts:
                 entry["retryable"] = True
                 self.kernel_integrate_attempts[key] = entry
                 return entry
-            reason = f"fault_retries_exhausted_{max_fault_retries}"
+            reason = f"fault_attempts_exhausted_{max_fault_attempts}"
         else:
             # Gate verdict path: a genuine REVERT, or too many non-fault attempts
             # without a KEEP. Faults never count toward this quota.
