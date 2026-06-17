@@ -12,7 +12,10 @@ name: Tests with Coverage
 # UTs; if absent, install is skipped (``importorskip`` in OOB tests).
 # Two matrix legs (Python 3.10 + 3.11).
 on:
+  # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
+  # PR does not double-trigger (one run per event class).
   push:
+    branches: [main]
     paths-ignore:
       - "**/*.md"
       - "docs/**"
@@ -28,6 +31,11 @@ on:
       - "COPYRIGHT"
       - "CODEOWNERS"
       - ".gitattributes"
+
+# Cancel superseded runs for the same ref (newest push/PR sync wins).
+concurrency:
+  group: tests-coverage-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
