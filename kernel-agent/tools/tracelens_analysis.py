@@ -2159,6 +2159,56 @@ def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any
     return entries
 
 
+# Recognized dtype tokens that appear as the suffix on a TraceLens ``Args`` /
+# metrics shape entry (e.g. ``(64,5120) bf16``). Permissive: anything after the
+# shape paren is treated as the dtype; this list is only used to recognise a
+# trailing dtype on a paren-less entry.
+_KNOWN_DTYPE_TOKENS = frozenset({
+    "bf16", "fp16", "fp32", "f32", "fp8", "f8", "fp8_e4m3", "fp8_e5m2",
+    "e4m3", "e5m2", "int8", "int4", "int32", "int64", "int", "uint8",
+    "bool", "float", "double", "half",
+})
+
+
+def _split_shape_dtype(entry: Any) -> tuple[str, str]:
+    """Split a TraceLens shape entry ``"(64,5120) bf16"`` into ``("(64,5120)", "bf16")``.
+
+    TraceLens records each kernel arg as ``<shape> [dtype]`` in the analysis.md
+    ``Args`` column (and category metrics ``args``); the dtype is inline. This
+    separates them so the per-arg dtype can be surfaced as a clean, positionally
+    aligned ``input_dtypes`` list (the field that was always defaulted to ``[]``).
+    Non-string / dict entries return ``(str(value), "")``. Empty scalar ``()`` is
+    preserved with an empty dtype so arity stays aligned with the call signature.
+    """
+    if isinstance(entry, dict):
+        entry = entry.get("shape", "")
+    s = str(entry).strip()
+    if not s:
+        return "", ""
+    if s.startswith("("):
+        close = s.find(")")
+        if close != -1:
+            return s[: close + 1].strip(), s[close + 1 :].strip()
+        return s, ""
+    parts = s.rsplit(" ", 1)
+    if len(parts) == 2 and parts[1].lower() in _KNOWN_DTYPE_TOKENS:
+        return parts[0].strip(), parts[1].strip()
+    return s, ""
+
+
+def _dtypes_from_shapes(shapes: Any) -> list[str]:
+    """Ordered per-arg dtype list parsed from a candidate's ``shapes`` strings.
+
+    Positionally aligned with the shapes (one entry per arg, ``""`` when no dtype
+    was captured). Returns ``[]`` when no dtype is present on any entry, so callers
+    keep the existing empty-default behaviour when TraceLens captured none.
+    """
+    if not isinstance(shapes, list):
+        return []
+    dtypes = [_split_shape_dtype(s)[1] for s in shapes]
+    return dtypes if any(dtypes) else []
+
+
 def derive_kernel_category(candidate: dict[str, Any]) -> str:
     """Map a candidate to its GEAK-facing kernel category (#125).
 
@@ -4360,7 +4410,14 @@ def enrich_candidates_with_runtime_metadata(
             )
             item["_input_shapes_synthetic"] = True
         item.setdefault("output_shapes", [])
-        item.setdefault("input_dtypes", item.get("dtypes", []) or [])
+        # Per-arg dtypes: TraceLens records them INLINE in each ``shapes`` string
+        # ("(64,5120) bf16"); surface them as a clean, positionally-aligned list so
+        # the GEAK harness allocates the correct-dtype tensors (fp8 weight vs bf16
+        # activation). Falls back to any explicit ``dtypes`` field, then ``[]``.
+        existing_dtypes = item.get("input_dtypes") or item.get("dtypes") or []
+        if not existing_dtypes:
+            existing_dtypes = _dtypes_from_shapes(item.get("shapes", []) or [])
+        item["input_dtypes"] = existing_dtypes
         item.setdefault("output_dtypes", [])
         item.setdefault("runtime_args", {})
         item.setdefault("env_vars", {})
