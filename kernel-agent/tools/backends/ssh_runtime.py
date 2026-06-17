@@ -56,12 +56,20 @@ def ssh_placement_active() -> bool:
     """True only when the orchestrator opted this run into SSH GPU placement.
 
     The single switch that isolates the Dynamo SSH path from every other run.
+
+    Returns:
+        ``True`` when ``KERNEL_AGENT_GPU_PLACEMENT`` is set to ``ssh``.
     """
     return os.environ.get("KERNEL_AGENT_GPU_PLACEMENT", "").strip().lower() == "ssh"
 
 
 def ssh_target() -> tuple[str, int, str]:
-    """Resolve (host, port, key_path) for the GPU pod from MN_SSH_* env."""
+    """Resolve (host, port, key_path) for the GPU pod from MN_SSH_* env.
+
+    Returns:
+        A ``(host, port, key_path)`` tuple read from ``MN_SSH_HOST`` /
+        ``MN_SSH_PORT`` / ``MN_SSH_KEY``.
+    """
     host = os.environ.get("MN_SSH_HOST", "").strip()
     port = int(os.environ.get("MN_SSH_PORT", str(DEFAULT_SSH_PORT)) or DEFAULT_SSH_PORT)
     key = os.environ.get("MN_SSH_KEY", "").strip()
@@ -73,6 +81,10 @@ def _env_prologue() -> str:
 
     Values are shell-quoted; nothing reaches argv. Mirrors
     ``safe_runtime_env``'s allowlist + credential aliasing.
+
+    Returns:
+        Newline-joined ``export K=V`` lines for the allowlisted GEAK env,
+        including a ``PATH`` export leading with ``/opt/venv/bin``.
     """
     env = safe_runtime_env().get("env_vars", {})
     lines = [
@@ -161,7 +173,15 @@ except subprocess.TimeoutExpired:
 
 
 def _extract_last_json(text: str) -> dict | None:
-    """Parse the last top-level JSON object from the pod's stdout."""
+    """Parse the last top-level JSON object from the pod's stdout.
+
+    Args:
+        text: The pod's stdout to scan.
+
+    Returns:
+        The last top-level JSON object as a dict, or ``None`` when none is
+        found or it fails to parse.
+    """
     if not text:
         return None
     s = text.rstrip()
@@ -184,7 +204,11 @@ def _extract_last_json(text: str) -> dict | None:
 
 
 def _ssh_unconfigured() -> dict | None:
-    """Return an error dict if MN_SSH_HOST/KEY are missing, else None."""
+    """Return an error dict if MN_SSH_HOST/KEY are missing, else None.
+
+    Returns:
+        A result-shaped error dict when SSH is unconfigured, else ``None``.
+    """
     host, _port, key = ssh_target()
     if not host or not key:
         return {
@@ -203,6 +227,16 @@ def _run_pod_runner_over_ssh(
 
     Env (creds) is piped via SSH stdin (never argv/disk). Returns
     ``(parsed_json_or_None, completed_proc_or_None, host)``.
+
+    Args:
+        runner_name: Short name for the runner (used in temp paths / heredoc).
+        runner_py: The self-contained pod runner Python source.
+        runner_args: CLI args passed to the pod runner.
+        timeout_s: Runner budget in seconds (SSH timeout adds a buffer).
+
+    Returns:
+        A ``(parsed_json_or_None, completed_proc_or_None, host)`` tuple; the
+        proc is ``None`` when the SSH call itself timed out.
     """
     host, port, key = ssh_target()
     quoted_args = " ".join(shlex.quote(x) for x in runner_args)
@@ -233,6 +267,20 @@ def run_geak_over_ssh(
 ) -> dict:
     """Run GEAK on a Dynamo GPU pod over SSH (no Ray). Returns the same dict
     shape as ``run_via_cli`` / ``run_via_ray`` so callers are placement-blind.
+
+    Args:
+        prompt_file: Path to the GEAK prompt (on the shared mount).
+        output_dir: Output directory for GEAK artifacts (shared mount).
+        kernel_path: Optional kernel source path passed to GEAK.
+        cost_limit: Optional cost cap forwarded to GEAK.
+        num_gpus: Number of GPUs to expose to the pod runner.
+        timeout_s: GEAK budget in seconds.
+        kernel_repo: Optional kernel repo path passed to GEAK.
+        test_command: Optional test command passed to GEAK.
+
+    Returns:
+        The GEAK result dict (``returncode`` / ``stdout_tail`` /
+        ``stderr_tail`` / ``gpu_ids`` / ``elapsed_s`` / ``cmd``).
     """
     unconfigured = _ssh_unconfigured()
     if unconfigured is not None:
@@ -346,6 +394,22 @@ def run_oob_over_ssh(
     Returns the same dict shape as oob_submit.run_via_ray, INCLUDING the full
     ``stdout`` (read back from the shared-FS log the pod runner wrote) so the
     caller's ``_parse_oob_init`` recovers the workspace.
+
+    Args:
+        agent: OOB agent name (e.g. ``claude`` / ``codex`` / ``cursor``).
+        prompt_file: Path to the prompt file (shared mount).
+        output_dir: Output directory for the run (shared mount).
+        source_file: Optional source file passed to the agent.
+        max_turns: Maximum agent turns.
+        num_gpus: Number of GPUs to expose to the pod runner.
+        timeout_s: Agent budget in seconds.
+        extra_files: Optional extra files passed to the agent.
+        kernel_repo: Optional kernel repo path (accepted for parity).
+        system_prompt_text: Optional system prompt written to a shared-FS file.
+
+    Returns:
+        The OOB result dict, including the full ``stdout`` recovered from the
+        shared-FS log.
     """
     unconfigured = _ssh_unconfigured()
     if unconfigured is not None:

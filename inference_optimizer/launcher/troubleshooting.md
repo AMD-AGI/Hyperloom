@@ -72,7 +72,7 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 |---|---|
 | `--critic-agent selected but critic-agent runtime not found` | `export CRITIC_AGENT_ROOT=/path/to/critic-agent`, or `git -C "$REPO_ROOT" submodule update --init critic-agent`. |
 | `runtime.cli prepare-review/commit-review exited rc=2` | Schema/validation bug (per `critic-agent/AGENTS.md` §Exit codes). Inspect workdir payload; retry with `--critic-mock` while fixing. |
-| `runtime.cli ... timed out after 30s` | KB stuck. If `CRITIC_KB_CLIENT_MODE=live`, drop to `inmemory`. Reproducing in `inmemory` is a bug — that path must not block on I/O. |
+| `runtime.cli ... timed out after 30s` | Critic runtime or optional KB enrichment is stuck. If `CRITIC_KB_CLIENT_MODE=live`, drop to the default `inmemory` mode; if `CORTEX_KB_URL` is set, unset it to skip `/v2/reasoning/assess` while debugging. A default local-only run should not block on remote I/O. |
 | All verdicts `('needs_review','critic_unavailable')` + `kb_skipped=missing_critical_context` | Static context load failed. Check `manifest.json` has non-empty `model_name`/`framework`; grep `logs/cli.log` for `critic_agent_backend static_context`. |
 
 ### Run-time signals
