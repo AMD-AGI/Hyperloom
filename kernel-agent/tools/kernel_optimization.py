@@ -1281,6 +1281,11 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
         "source_promoted_from_launcher": bool(
             candidate.get("source_promoted_from_launcher"),
         ),
+        # Dict-first resolution attribution: the device kernel symbol that
+        # disambiguated dispatch, and the full .cu set this op spans (sibling
+        # context; each .cu is optimized in its own fanned-out GEAK run).
+        "device_kernel_name": str(candidate.get("device_kernel_name", "") or ""),
+        "kernel_sources": list[Any](candidate.get("kernel_sources") or []),
     }
 
 
@@ -1380,6 +1385,23 @@ def build_prompt(
             "   patches that drop required host entry functions or that submit a\n"
             "   standalone `PYBIND11_MODULE` / `TORCH_LIBRARY` block absent from the\n"
             "   target file.\n"
+        )
+    # Device-symbol focus: when the op was resolved to its .cu via the curated
+    # op_to_source dictionary (esp. dispatch/composite), name the exact device
+    # kernel symbol so the rewrite targets the right __global__ in a multi-kernel file.
+    device_symbol_block = ""
+    device_kernel_name = str(candidate.get("device_kernel_name", "") or "").strip()
+    if (
+        candidate.get("source_resolution_method") == "op_to_source"
+        and device_kernel_name
+    ):
+        device_symbol_block = (
+            "\n>>> DEVICE KERNEL FOCUS <<<\n"
+            f"This op (`{kernel_name}`) dispatches to the device kernel symbol:\n"
+            f"  {device_kernel_name}\n"
+            f"resolved to the editable source: {source_file}\n"
+            "If the file defines multiple `__global__` kernels, focus your rewrite on\n"
+            "the one matching the symbol above; preserve all other kernels verbatim.\n"
         )
     # Quote the per-backend wall-clock so GEAK's task-mode parser infers the right mode (>=120min→full).
     if backend == "geak":
@@ -1606,6 +1628,7 @@ def build_prompt(
         f"GPU percent: {candidate.get('gpu_pct', 'unknown')}",
         f"Shapes: {json.dumps(candidate.get('shapes', []), sort_keys=True)}",
         promotion_block,
+        device_symbol_block,
         "",
         "Kernel runtime metadata (structured context for GEAK; unknown fields are null, empty arrays, or empty objects):",
         "```json",
