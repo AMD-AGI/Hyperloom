@@ -966,6 +966,9 @@ def collect_baseline(
         "benchmark_report_path":    _rel(report_path, session_dir) if report_path else None,
         "attempts_history":         history,
         "failure_streak":           int(state.get("baseline_failure_streak") or 0),
+        # Combined backstop (P5): ALL baseline failures regardless of error_class;
+        # surfaces the fast-fail trigger that per-class streaks alone can hide.
+        "total_failures":           int(state.get("baseline_total_failures") or 0),
         "invocation":               invocation,
         # Standalone baseline-arm roofline ceiling backup (state.json#baseline_roofline_ceiling);
         # frontend ceiling fallback when the roofline step failed. {} when absent.

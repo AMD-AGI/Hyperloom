@@ -113,6 +113,23 @@ class TestCollectBaselinePassthrough:
         assert rc["theoretical_peak_tok_per_sec"] > 0
         assert rc["ceiling_arm"] == "baseline"
 
+    def test_collect_baseline_surfaces_total_failures(self, tmp_path):
+        warnings: list[str] = []
+        out = collectors.collect_baseline(
+            tmp_path,
+            {"baseline_tput": 0.0, "baseline_failure_streak": 2,
+             "baseline_total_failures": 3},
+            warnings,
+        )
+        # Combined backstop count is surfaced alongside the per-class streak.
+        assert out["failure_streak"] == 2
+        assert out["total_failures"] == 3
+
+    def test_collect_baseline_total_failures_defaults_zero(self, tmp_path):
+        warnings: list[str] = []
+        out = collectors.collect_baseline(tmp_path, {"baseline_tput": 100.0}, warnings)
+        assert out["total_failures"] == 0
+
     def test_collect_baseline_empty_ceiling_when_absent(self, tmp_path):
         warnings: list[str] = []
         out = collectors.collect_baseline(tmp_path, {"baseline_tput": 100.0}, warnings)

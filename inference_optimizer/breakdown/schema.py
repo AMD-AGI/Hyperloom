@@ -175,6 +175,9 @@ class Baseline(TypedDict, total=False):
         benchmark_report_path (str | None): Path to the benchmark report, or None.
         attempts_history (list[BaselineAttemptSummary]): Recorded baseline attempts.
         failure_streak (int): Consecutive baseline failures.
+        total_failures (int): Combined backstop count of ALL baseline failures
+            (any error_class); fast-fails when per-class streaks each stay below
+            threshold but the total reaches it.
         invocation (BenchmarkInvocation): Replayable launch record.
         roofline_ceiling (dict[str, Any]): Standalone baseline-arm roofline
             ceiling backup (theoretical peak + mem/cmp + perfmodel breakdown);
@@ -189,6 +192,7 @@ class Baseline(TypedDict, total=False):
     benchmark_report_path: str | None
     attempts_history: list[BaselineAttemptSummary]
     failure_streak: int
+    total_failures: int
     invocation: BenchmarkInvocation
     roofline_ceiling: dict[str, Any]
 
