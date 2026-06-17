@@ -72,6 +72,22 @@ ANALYSIS_ROUTE_AGENT = "agent"
 _VALID_ANALYSIS_ROUTES = {ANALYSIS_ROUTE_DETERMINISTIC, ANALYSIS_ROUTE_AGENT}
 
 
+def _resolve_tracelens_model() -> str:
+    """Resolve ``ANTHROPIC_MODEL`` to the gateway's dash-form id (#574).
+
+    The runtime image may export the dot form (``Claude-Opus-4.7``) that strict
+    gateways (core42/SAFE) reject; map it to the dash form (``claude-opus-4-7``)
+    the rest of Hyperloom already uses. Empty env yields ``""`` (SDK default).
+
+    Returns:
+        The normalized dash-form model id, or ``""`` when unset.
+    """
+    raw = os.environ.get("ANTHROPIC_MODEL", "").strip()
+    if not raw:
+        return ""
+    return raw.lower().replace(".", "-")
+
+
 def _resolve_idle_pct_threshold() -> float:
     """Return the idle-percent gate threshold (default 80.0%).
 
@@ -4752,7 +4768,7 @@ def main() -> int:
                         analysis_mode=args.analysis_mode,
                         capture_folder=capture_folder,
                         budget_minutes=args.budget_minutes,
-                        model=os.environ.get("ANTHROPIC_MODEL", ""),
+                        model=_resolve_tracelens_model(),
                         log=lambda msg: append_log(log_path, msg),
                     ))
                     artifacts.update(skill_result.artifact_paths)
