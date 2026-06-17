@@ -1179,4 +1179,3 @@ def _preflight_unsupported_model_arch(
         )
     print(f"ERROR: {reason}", file=sys.stderr)
     return True
-

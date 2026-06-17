@@ -541,4 +541,3 @@ def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
         if p.is_dir():
             return p
     return None
-

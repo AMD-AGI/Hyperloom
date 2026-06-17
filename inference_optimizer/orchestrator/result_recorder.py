@@ -1074,4 +1074,3 @@ class ResultRecorder:
             "research-scout harvested: hints_added=%d seen_pr_ids=%d",
             added, len(self.shared_state.research_scout_seen_pr_ids or []),
         )
-
