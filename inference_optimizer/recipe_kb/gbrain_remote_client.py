@@ -270,10 +270,14 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
     framework = str(attrs.get("framework") or "").strip()
     framework_version = str(attrs.get("framework_version") or "").strip()
     precision = str(attrs.get("precision") or "").strip()
+    model_type = str(attrs.get("model_type") or "").strip()
+    architectures = attrs.get("architectures") or []
     canonical = recipe_canonical_id(
         model=model,
         hardware=hardware,
         framework=framework,
+        model_type=model_type,
+        architectures=architectures,
         framework_version=framework_version,
         precision=precision,
     )
@@ -284,7 +288,7 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
         C.F_VERSION: 1,
         "created_at": str(frontmatter.get("created_at") or ""),
         "updated_at": str(frontmatter.get("updated_at") or ""),
-        # Slug-clean 5-tuple identity. ``_labels_match`` runs both sides
+        # Slug-clean 7-tuple identity. ``_labels_match`` runs both sides
         # through ``canonical_labels`` so the raw page model string and
         # the slugged label converge; we surface the canonical labels so
         # the dispatcher's ``_v2_to_arbor`` reads identity from one place.
@@ -292,6 +296,8 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
             model=model,
             hardware=hardware,
             framework=framework,
+            model_type=model_type,
+            architectures=architectures,
             framework_version=framework_version,
             precision=precision,
         ),
@@ -321,7 +327,12 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> bool:
-    """True when every provided label equals the recipe's slugged value.
+    """True when every provided label matches the recipe's value.
+
+    For scalar labels (model, hardware, framework, framework_version,
+    precision, model_type) equality is required. For ``architectures``
+    the semantics are *contains*: the recipe's architectures list must
+    include all queried architecture(s).
 
     The recipe carries already-slugged identity under ``labels`` (set by
     :func:`_page_to_recipe`); the caller's ``label_match`` may be a raw or
@@ -350,10 +361,25 @@ def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> 
             label_match.get(C.F_LABEL_FRAMEWORK_VERSION, "") or recipe_labels.get(C.F_LABEL_FRAMEWORK_VERSION, "")
         ),
         precision=str(label_match.get(C.F_LABEL_PRECISION, "") or recipe_labels.get(C.F_LABEL_PRECISION, "")),
+        model_type=str(label_match.get(C.F_LABEL_MODEL_TYPE, "") or recipe_labels.get(C.F_LABEL_MODEL_TYPE, "")),
+        architectures=str(
+            label_match.get(C.F_LABEL_ARCHITECTURES, "") or recipe_labels.get(C.F_LABEL_ARCHITECTURES, "")
+        ),
     )
     # Only compare the dimensions the caller actually constrained.
     for key in label_match:
-        if key in recipe_labels and recipe_labels[key] != want.get(key):
+        if key == C.F_LABEL_ARCHITECTURES:
+            # Contains semantics: recipe architectures must include all
+            # queried architecture slugs.
+            recipe_arch = str(recipe_labels.get(key, "")).lower()
+            query_arch = str(want.get(key, "")).lower()
+            if query_arch and query_arch not in ("unknown_arch", ""):
+                # architectures slug uses "+" join; split and check containment
+                query_parts = set(query_arch.split("+"))
+                recipe_parts = set(recipe_arch.split("+"))
+                if not query_parts.issubset(recipe_parts):
+                    return False
+        elif key in recipe_labels and recipe_labels[key] != want.get(key):
             return False
     return True
 
@@ -546,7 +572,9 @@ class GbrainRemoteRecipeClient:
         try:
             from .canonical_id import cid_to_path_components
 
-            model, hardware, framework, framework_version, precision = cid_to_path_components(canonical_id)
+            model, hardware, framework, model_type, architectures, framework_version, precision = (
+                cid_to_path_components(canonical_id)
+            )
         except Exception:  # noqa: BLE001 - malformed id -> remote miss
             return None
         label_match = {
@@ -555,9 +583,11 @@ class GbrainRemoteRecipeClient:
             C.F_LABEL_FRAMEWORK: framework,
             C.F_LABEL_FRAMEWORK_VERSION: framework_version,
             C.F_LABEL_PRECISION: precision,
+            C.F_LABEL_MODEL_TYPE: model_type,
+            C.F_LABEL_ARCHITECTURES: architectures,
         }
         # Fast path: gbrain recipe slugs are the canonical id with ':' as path
-        # separators, so exact 5-tuple reads do not need a full corpus scan.
+        # separators, so exact 7-tuple reads do not need a full corpus scan.
         direct = self._get_page_recipe("recipe-snapshot/" + canonical_id.replace(":", "/"))
         if direct is not None and direct.get(C.F_CANONICAL_ID) == canonical_id:
             return direct

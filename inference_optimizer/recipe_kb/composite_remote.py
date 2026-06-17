@@ -349,7 +349,7 @@ class CompositeRemoteRecipeClient:
         """Search all active sources and return merged, ranked rows.
 
         Args:
-            label_match: Exact label filters (the 5-tuple identity labels).
+            label_match: Exact label filters (the 7-tuple identity labels).
             metric_filters: ``{metric: {min, max}}`` filters.
             updated_since: Lower bound on ``updated_at``.
             order_by: Ordering directive forwarded to sub-remotes.
@@ -380,16 +380,39 @@ class CompositeRemoteRecipeClient:
         canonical_id: str,
         version: int | None = None,
     ) -> dict[str, Any] | None:
-        """Exact-cid read: search every source by the 5-tuple labels, merge top.
+        """Exact-cid read: fast-path each source's get_recipe, then merge.
 
-        Args:
-            canonical_id: Canonical recipe id to resolve.
-            version: Optional version (accepted for parity; not used to filter).
-
-        Returns:
-            The merged row matching ``canonical_id``, the top merged row when
-            no exact match is found, or ``None`` when nothing is available.
+        Prefers per-source ``get_recipe`` (which uses slug-based direct
+        lookup on gbrain) over the expensive ``search`` scan. Falls back
+        to label-match search only when all fast-paths miss.
         """
+        # Fast path: per-source get_recipe (slug-based, O(1) on gbrain).
+        hits: list[dict[str, Any]] = []
+        for name, source in self._active():
+            try:
+                row = source.get_recipe(canonical_id=canonical_id, version=version)
+            except (RemoteRecipeClientError, Exception) as exc:  # noqa: BLE001
+                log.debug("composite get_recipe fast-path %s failed: %s", name, exc)
+                continue
+            if row is not None and isinstance(row, dict):
+                arbor = _v2_to_arbor(row)
+                if arbor:
+                    arbor["_source"] = name
+                    hits.append(arbor)
+        if hits:
+            if len(hits) == 1:
+                return hits[0]
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for h in hits:
+                grouped.setdefault(h.get("canonical_id") or "", []).append(h)
+            merged = [_merge_group(rows) for rows in grouped.values()]
+            merged.sort(key=_precedence_key, reverse=True)
+            for row in merged:
+                if row.get("canonical_id") == canonical_id:
+                    return row
+            return merged[0] if merged else None
+        # Slow fallback: label-match search (covers cortex kb-service which
+        # does not expose a direct get_recipe by slug).
         try:
             labels = _labels_from_canonical_id(canonical_id)
         except InvalidCanonicalIdError as exc:

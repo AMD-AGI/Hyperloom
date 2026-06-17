@@ -88,10 +88,10 @@ _REMOTE_LABELS: dict[str, str] = {
 
 
 def _labels_from_canonical_id(canonical_id: str) -> dict[str, str]:
-    """Decode a canonical_id into the 5-key ``label_match`` dict the
-    central ``/recipes/search`` route expects.
+    """Decode a canonical_id into the 7-key ``label_match`` dict the
+    ``/recipes/search`` route expects.
 
-    The five cid segments are already slug-clean (produced by
+    The seven cid segments are already slug-clean (produced by
     ``recipe_canonical_id``), so they map 1:1 to the label values the
     server matches on.
 
@@ -99,19 +99,23 @@ def _labels_from_canonical_id(canonical_id: str) -> dict[str, str]:
         canonical_id (str): Canonical recipe identity to decode.
 
     Returns:
-        dict[str, str]: The 5-key ``label_match`` dict (``model`` /
+        dict[str, str]: The 7-key ``label_match`` dict (``model`` /
             ``hardware`` / ``framework`` / ``framework_version`` /
-            ``precision``).
+            ``precision`` / ``model_type`` / ``architectures``).
 
     Raises:
         InvalidCanonicalIdError: If ``canonical_id`` is malformed; the
             caller falls back to a local read.
     """
-    model, hardware, framework, framework_version, precision = cid_to_path_components(canonical_id)
+    model, hardware, framework, model_type, architectures, framework_version, precision = cid_to_path_components(
+        canonical_id
+    )
     return {
         "model": model,
         "hardware": hardware,
         "framework": framework,
+        "model_type": model_type,
+        "architectures": architectures,
         "framework_version": framework_version,
         "precision": precision,
     }
@@ -201,8 +205,15 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
         "framework": str(labels.get("framework") or ""),
         "framework_version": str(labels.get("framework_version") or ""),
         "precision": str(labels.get("precision") or ""),
-        # arbor payload pulled out of body / metrics
-        "best_config": dict(body.get("best_config") or {}),
+        # arbor payload pulled out of body / metrics.
+        # kb-extract recipes store optimized args directly in body.extra_sglang_args
+        # rather than body.best_config; synthesize best_config when absent.
+        "best_config": dict(body.get("best_config") or {})
+        or (
+            {"extra_server_args": str(body.get("extra_sglang_args") or body.get("extra_server_args") or "").strip()}
+            if (body.get("extra_sglang_args") or body.get("extra_server_args"))
+            else {}
+        ),
         "best_throughput": float(body.get("best_throughput") or metrics.get("throughput") or 0.0),
         "what_worked": list(v2_payload.get("findings") or []),
         "what_failed": list(v2_payload.get("failures") or []),
@@ -239,7 +250,7 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Client-side rerank by ``prefer`` similarity
 # ---------------------------------------------------------------------------
-# The ``required`` filter (5-tuple ``label_match``) decides reusability;
+# The ``required`` filter (7-tuple ``label_match``) decides reusability;
 # ``prefer`` decides similarity. Neither the cortex kb-service nor the
 # gbrain page store rank by ``prefer`` server-side, so the dispatcher does
 # a stable client-side rerank over the already-arbor rows: higher
@@ -685,7 +696,7 @@ class RecipeKB:
     ) -> dict[str, Any] | None:
         """Read a recipe row.
 
-        Remote uses the SINGLE ``/recipes/search`` route: the 5-tuple
+        Remote uses the SINGLE ``/recipes/search`` route: the 7-tuple
         decoded from ``canonical_id`` is passed as ``label_match`` and
         the central kb-service decides exact-vs-relative match +
         ranking. We deliberately do NOT hit ``GET /recipes/{cid}``;
@@ -694,7 +705,7 @@ class RecipeKB:
         ``prefer`` (workload-similarity hints — ``tp`` / ``ep`` / ``pp``
         / ``conc`` / ``isl`` / ``osl`` / ``max_model_len`` /
         ``framework_version`` / ``quant_scheme`` / ``workload_mode``)
-        does NOT change the ``required`` (5-tuple) filter; it only
+        does NOT change the ``required`` (7-tuple) filter; it only
         reranks the candidate rows so the closest-workload recipe is
         returned first. When ``prefer`` is set we ask the remote for a
         small candidate window instead of a single row, rerank
@@ -719,10 +730,32 @@ class RecipeKB:
         resolution = "local"
         if version is None and self._remote_active():
             try:
+                # Fast path: delegate to the remote's get_recipe (slug-based
+                # O(1) on gbrain/composite) rather than the expensive search
+                # scan that chokes on large legacy page corpora.
+                try:
+                    direct = self.remote.get_recipe(  # type: ignore[union-attr]
+                        canonical_id=canonical_id,
+                        version=version,
+                    )
+                except (RemoteRecipeClientError, Exception):  # noqa: BLE001
+                    direct = None
+                if direct is not None and isinstance(direct, dict) and direct:
+                    normalized = self._normalize_remote_row(direct)
+                    if normalized and normalized.get("canonical_id"):
+                        self._emit_audit(
+                            self._read_audit_event(
+                                method="get_recipe",
+                                resolution="remote",
+                                row=normalized,
+                                canonical_id=canonical_id,
+                                prefer=prefer,
+                                candidates=1,
+                            )
+                        )
+                        return normalized
+                # Fast path miss — try label-match search with prefer rerank.
                 labels = _labels_from_canonical_id(canonical_id)
-                # With prefer hints we pull a candidate window so the
-                # client-side rerank has rows to reorder; otherwise the
-                # single top (server-ranked) row is enough.
                 candidate_limit = 25 if prefer else 1
                 rows = self.remote.search(  # type: ignore[union-attr]
                     label_match=labels,
@@ -730,8 +763,8 @@ class RecipeKB:
                     prefer=prefer,
                 )
                 if rows:
-                    normalized = [self._normalize_remote_row(r) for r in rows]
-                    ranked = _rerank_by_prefer(normalized, prefer)
+                    normalized_rows = [self._normalize_remote_row(r) for r in rows]
+                    ranked = _rerank_by_prefer(normalized_rows, prefer)
                     self._emit_audit(
                         self._read_audit_event(
                             method="get_recipe",
@@ -749,8 +782,6 @@ class RecipeKB:
                 self._note_failure("get_recipe", exc)
                 resolution = "remote_error"
             except InvalidCanonicalIdError as exc:
-                # Can't build label_match from a malformed cid; the
-                # local store applies the same parse, so just degrade.
                 log.warning("get_recipe: %s; local-only read", exc)
                 resolution = "remote_error"
         local_row = self.local.get_recipe(

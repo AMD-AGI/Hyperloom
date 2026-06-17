@@ -254,7 +254,7 @@ def test_get_recipe_returns_none_when_neither_has_it(
 
 
 def test_get_recipe_remote_sends_5tuple_label_match(kb: RecipeKB) -> None:
-    """The remote read calls /recipes/search ONCE with the full 5-tuple as label_match."""
+    """The remote read calls /recipes/search ONCE with the full 7-tuple as label_match."""
     import json as _json
 
     cid = _cid()
@@ -274,6 +274,8 @@ def test_get_recipe_remote_sends_5tuple_label_match(kb: RecipeKB) -> None:
         "framework",
         "framework_version",
         "precision",
+        "model_type",
+        "architectures",
     }
     assert all(label_match.values()), "all 5 cid segments must be present"
 

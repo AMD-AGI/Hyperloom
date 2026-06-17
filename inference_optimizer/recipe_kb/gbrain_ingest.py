@@ -257,6 +257,8 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
         "framework": framework,
         "framework_version": str(recipe.get("framework_version") or ""),
         "precision": str(recipe.get("precision") or ""),
+        "model_type": str(recipe.get("model_type") or ""),
+        "architectures": list(recipe.get("architectures") or []),
         "best_config_args": args,
         "best_config_envs": envs,
         "best_throughput": float(recipe.get("best_throughput") or 0.0),
@@ -281,12 +283,22 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     _stack_fp = recipe.get("stack_fingerprint")
     if isinstance(_stack_fp, Mapping) and _stack_fp:
         attrs["stack_fingerprint"] = {str(k): str(v) for k, v in _stack_fp.items()}
+    _model_type = str(recipe.get("model_type") or "")
+    _architectures_raw = recipe.get("architectures") or []
+    if isinstance(_architectures_raw, list):
+        _arch_str = "+".join(sorted(str(a).strip().lower() for a in _architectures_raw if str(a or "").strip()))
+    else:
+        _arch_str = str(_architectures_raw).strip().lower()
     tags = [
         "kind:recipe",
         f"model:{_tag_value(model)}",
         f"gpu:{_tag_value(hardware)}",
         f"framework:{_tag_value(framework)}",
     ]
+    if _model_type:
+        tags.append(f"model_type:{_tag_value(_model_type)}")
+    if _arch_str:
+        tags.append(f"architectures:{_arch_str}")
     frontmatter: dict[str, Any] = {
         "type": "recipe",
         "tags": tags,
@@ -296,7 +308,7 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
         "confidence": float(recipe.get("confidence") or 0.85),
         "attrs": attrs,
     }
-    # Stable slug from the 5-tuple canonical (colons -> path levels).
+    # Stable slug from the 7-tuple canonical (colons -> path levels).
     slug = "recipe-snapshot/" + canonical.replace(":", "/")
     body_lines = [
         f"# Recipe {canonical}",
@@ -489,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
     from .local_store import LocalRecipeStore
 
     store = LocalRecipeStore(root=Path(args.local_kb_root))
-    recipes = store.list_recent(limit=args.limit or 100000)
+    recipes = store.list_all_live_recipes()
     dry = not args.write
     mcp = None
     if not dry:

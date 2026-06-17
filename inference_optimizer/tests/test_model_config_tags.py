@@ -133,6 +133,8 @@ def _cid(state: _FakeSharedState, workload: str, hw: str) -> str:
         framework=state.framework,
         framework_version=state.framework_version,
         precision=state.precision,
+        model_type=str(getattr(state, "model_type", "") or ""),
+        architectures=getattr(state, "model_architectures", None) or [],
     )
 
 

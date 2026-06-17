@@ -60,8 +60,8 @@ def test_item1_canonical_id_is_5tuple_with_inference_prefix() -> None:
         framework_version="0.4.5",
         precision="fp8",
     )
-    assert cid == "inference:deepseek-r1:mi300x:sglang:0.4.5:fp8"
-    assert len(cid.split(":")) == 6  # prefix + 5 dimensions
+    assert cid == "inference:deepseek-r1:mi300x:sglang:unknown_model_type:unknown_arch:0.4.5:fp8"
+    assert len(cid.split(":")) == 8  # prefix + 7 dimensions
 
 
 def test_item1_canonical_id_keyword_only_no_positional_drift() -> None:
@@ -289,7 +289,7 @@ def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
 
 
 def test_item6_path_levels_match_5_dimensions(tmp_path: Path) -> None:
-    """The on-disk path is exactly 5 levels below the store root, one per identity dimension."""
+    """The on-disk path is exactly 7 levels below the store root, one per identity dimension."""
     store = LocalRecipeStore(root=tmp_path)
     cid = recipe_canonical_id(
         model="m",
@@ -306,7 +306,7 @@ def test_item6_path_levels_match_5_dimensions(tmp_path: Path) -> None:
         framework_version="ver",
         precision="prec",
     )
-    expected = tmp_path / "m" / "hw" / "fw" / "ver" / "prec" / "recipe.json"
+    expected = tmp_path / "m" / "hw" / "fw" / "unknown_model_type" / "unknown_arch" / "ver" / "prec" / "recipe.json"
     assert expected.is_file()
 
 
@@ -322,7 +322,7 @@ def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
         precision="bf16",
     )
     # Slug rule: basename + lowercase + space → underscore.
-    assert cid == ("inference:qwen-qwen3-30b-a3b-base:mi355x:sglang:0.4.5:bf16")
+    assert cid == ("inference:qwen-qwen3-30b-a3b-base:mi355x:sglang:unknown_model_type:unknown_arch:0.4.5:bf16")
     store.put_recipe(
         canonical_id=cid,
         model="/hyperloom/models/Qwen-Qwen3-30B-A3B-Base",
@@ -332,8 +332,18 @@ def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
         precision="bf16",
         best_throughput=42.0,
     )
-    # Recipe lives at exactly 5 levels below root; model component is the basename only.
-    expected = tmp_path / "qwen-qwen3-30b-a3b-base" / "mi355x" / "sglang" / "0.4.5" / "bf16" / "recipe.json"
+    # Recipe lives at exactly 7 levels below root; model component is the basename only.
+    expected = (
+        tmp_path
+        / "qwen-qwen3-30b-a3b-base"
+        / "mi355x"
+        / "sglang"
+        / "unknown_model_type"
+        / "unknown_arch"
+        / "0.4.5"
+        / "bf16"
+        / "recipe.json"
+    )
     assert expected.is_file()
 
 
@@ -356,7 +366,7 @@ def test_item7_model_with_double_slash_normalises(tmp_path: Path) -> None:
         framework_version="v",
         precision="p",
     )
-    expected = tmp_path / "mymodel" / "hw" / "fw" / "v" / "p" / "recipe.json"
+    expected = tmp_path / "mymodel" / "hw" / "fw" / "unknown_model_type" / "unknown_arch" / "v" / "p" / "recipe.json"
     assert expected.is_file()
 
 
@@ -491,7 +501,11 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
             {"date": "2026-05-28", "throughput_before": 1.0, "throughput_after": 42.0, "actions_taken": ["tp+ep"]},
         ],
     )
-    on_disk = json.loads((tmp_path / "m" / "hw" / "fw" / "v" / "p" / "recipe.json").read_text(encoding="utf-8"))
+    on_disk = json.loads(
+        (tmp_path / "m" / "hw" / "fw" / "unknown_model_type" / "unknown_arch" / "v" / "p" / "recipe.json").read_text(
+            encoding="utf-8"
+        )
+    )
 
     # Arbor field names present at the top level.
     assert "best_config" in on_disk
