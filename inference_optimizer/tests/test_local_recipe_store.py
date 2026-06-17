@@ -54,10 +54,10 @@ def test_cid_to_path_components_rejects_legacy_4_segment_id() -> None:
         cid_to_path_components("inference:m:fw:hw")
 
 
-def test_cid_to_path_components_accepts_legacy_6_segment() -> None:
-    """Legacy 5-tuple (6-segment) ids are padded with defaults."""
-    parts = cid_to_path_components("inference:model:hw:fw:ver:prec")
-    assert parts == ("model", "hw", "fw", "unknown_model_type", "unknown_arch", "ver", "prec")
+def test_cid_to_path_components_rejects_legacy_6_segment() -> None:
+    """Legacy 5-tuple (6-segment) ids are no longer accepted."""
+    with pytest.raises(InvalidCanonicalIdError):
+        cid_to_path_components("inference:model:hw:fw:ver:prec")
 
 
 def test_cid_to_path_components_rejects_wrong_prefix() -> None:

@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from ..recipe_kb import RecipeKB, recipe_canonical_id
-from ..recipe_kb.canonical_id import cid_to_path_components, InvalidCanonicalIdError
 from ..recipe_snapshot_constants import detect_framework_version
 
 
@@ -588,27 +587,13 @@ def run_t0_anchor(
     from ..recipe_snapshot_constants import _architectures_slug
     _arch_slug = _architectures_slug(_architectures_val)
 
-    def _cid_matches(row_cid: str, target_cid: str) -> bool:
-        """Compare canonical ids, normalizing legacy 5-tuple → 7-tuple."""
-        if row_cid == target_cid:
-            return True
-        try:
-            return recipe_canonical_id(
-                **dict(zip(
-                    ("model", "hardware", "framework", "model_type", "architectures", "framework_version", "precision"),
-                    cid_to_path_components(row_cid),
-                ))
-            ) == target_cid
-        except InvalidCanonicalIdError:
-            return False
-
     # L1: full 7-tuple exact
     try:
         row = kb.get_recipe(canonical_id=cid, prefer=warm_prefer or None)
     except Exception as exc:  # noqa: BLE001
         log.info("warm-start L1 get_recipe non-fatal failure: %s", exc)
         row = None
-    if isinstance(row, dict) and row and _cid_matches(str(row.get("canonical_id") or ""), cid):
+    if isinstance(row, dict) and row and str(row.get("canonical_id") or "") == cid:
         warm_point = row
         warm_tier = "exact"
         warm_conf = 1.0

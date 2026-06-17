@@ -300,7 +300,7 @@ def test_miss_parity(tmp_path) -> None:
     kb_g = _gbrain_dispatcher(local)
     kb_c = _cortex_dispatcher(local)
 
-    unknown = "inference:does-not-exist:mi325x:trtllm:9.9.9:int4"
+    unknown = "inference:does-not-exist:mi325x:trtllm:unknown_model_type:unknown_arch:9.9.9:int4"
     assert kb_g.get_recipe(canonical_id=unknown) is None
     assert kb_c.get_recipe(canonical_id=unknown) is None
 

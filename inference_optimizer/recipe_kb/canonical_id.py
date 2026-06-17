@@ -16,13 +16,12 @@ Adds two local-store-specific helpers:
   framework_version / precision / model_type / architectures``). The
   local store maps each slug to a directory level, so the round-trip
   ``recipe_canonical_id`` → ``cid_to_path_components`` →
-  ``Path(*components)`` must be lossless. Legacy 5-tuple ids are
-  accepted and padded with default slugs.
+  ``Path(*components)`` must be lossless.
 * :func:`canonical_id_for_path` — given a path under the store root,
   derive the canonical id of the recipe that lives there. Used by
   :meth:`LocalRecipeStore.list_recent` / ``search`` so a tree-walk
   result can produce the same cid string the caller would have built
-  from a 7-tuple. Legacy 5-level directories are accepted.
+  from a 7-tuple.
 """
 
 from __future__ import annotations
@@ -110,12 +109,6 @@ def cid_to_path_components(
     if not raw:
         raise InvalidCanonicalIdError(raw, "empty string")
     parts = raw.split(":")
-    # Accept both legacy 6-segment (5-tuple) and new 8-segment (7-tuple).
-    if len(parts) == 6:
-        # Legacy 5-tuple: inference:model:hw:fw:fwv:prec
-        # Insert model_type and architectures at positions 4,5 (after fw).
-        legacy_prefix, model, hw, fw, fwv, prec = parts
-        parts = [legacy_prefix, model, hw, fw, DEFAULT_MODEL_TYPE_SLUG, DEFAULT_ARCHITECTURES_SLUG, fwv, prec]
     if len(parts) != 1 + CANONICAL_ID_DIMENSIONS:
         raise InvalidCanonicalIdError(
             raw,
@@ -171,8 +164,7 @@ def canonical_id_for_path(*, root: Path, recipe_dir: Path) -> str:
     """Build the canonical id for the recipe directory at ``recipe_dir``.
 
     ``recipe_dir`` MUST be exactly seven levels below ``root`` —
-    one level per dimension. Legacy 5-level directories are also
-    accepted and padded with default slugs for backward compat.
+    one level per dimension.
 
     The directory names ARE the canonical_id slugs (no extra slugging
     is applied — they were already slug-clean when
@@ -197,9 +189,6 @@ def canonical_id_for_path(*, root: Path, recipe_dir: Path) -> str:
             f"path is not under store root {root!r}: {exc}",
         ) from exc
     parts = rel.parts
-    if len(parts) == 5:
-        # Legacy 5-level directory (model/hw/fw/fwv/prec): insert defaults at pos 3,4.
-        parts = (parts[0], parts[1], parts[2], DEFAULT_MODEL_TYPE_SLUG, DEFAULT_ARCHITECTURES_SLUG, parts[3], parts[4])
     if len(parts) != CANONICAL_ID_DIMENSIONS:
         raise InvalidCanonicalIdError(
             str(recipe_dir),

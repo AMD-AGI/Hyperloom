@@ -444,16 +444,16 @@ class LocalRecipeStore:
                 rel_parts = recipe_dir.relative_to(self.root).parts
             except ValueError:
                 continue
-            if len(rel_parts) not in (5, 7):
+            if len(rel_parts) != 7:
                 log.debug(
-                    "skipping %s: not at documented 5 or 7-level depth",
+                    "skipping %s: not at the required 7-level depth",
                     recipe_dir,
                 )
                 continue
             yield recipe_dir
 
     def _walk_cid_dirs(self) -> Iterable[Path]:
-        """Yield every directory exactly five levels below ``root``
+        """Yield every directory exactly seven levels below ``root``
         that contains EITHER a live ``recipe.json`` OR an
         ``attempts.ndjson``.
 
@@ -478,7 +478,7 @@ class LocalRecipeStore:
                     rel_parts = cid_dir.relative_to(self.root).parts
                 except ValueError:
                     continue
-                if len(rel_parts) not in (5, 7):
+                if len(rel_parts) != 7:
                     continue
                 if cid_dir in seen:
                     continue
