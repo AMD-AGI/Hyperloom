@@ -2,11 +2,25 @@
 
 name: CodeQL
 
+# PR/push on all branches: skip when all changes match paths-ignore (same as Tests
+# with Coverage). Weekly schedule still runs on default branch for full analysis.
 on:
   push:
-    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE*"
+      - "COPYRIGHT"
+      - "CODEOWNERS"
+      - ".gitattributes"
   pull_request:
-    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE*"
+      - "COPYRIGHT"
+      - "CODEOWNERS"
+      - ".gitattributes"
   schedule:
     - cron: '0 6 * * 1'
 
