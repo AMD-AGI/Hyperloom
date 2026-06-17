@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import importlib.util
 import json
 import logging
 import os
@@ -35,6 +34,12 @@ from ...paths import asset_root
 from ...session_paths import runs_dir
 from ..sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
+from ._aiter_jit import (
+    AITER_JIT_PROBE_PATHS,
+    COLD_START_KERNEL_THRESHOLD,
+    _resolve_aiter_jit_dir_dynamic,
+    sweep_stale_aiter_locks_if_dead,
+)
 from ._grid_runner import (
     _kill_stale_servers,
     sanitize_result_dir,
@@ -227,28 +232,64 @@ BASELINE_DEFAULT_CONFIG = asset_root() / "scripts" / "configs" / "baseline_sglan
 BASELINE_DEFAULT_TIMEOUT_SEC = (
     7800  # WARM-start cap, 130 min (raised for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 ~82 min workload)
 )
-BASELINE_COLD_START_TIMEOUT_SEC = 9000  # COLD-start cap, 150 min (includes ~20 min cuda graph capture)
-COLD_START_KERNEL_THRESHOLD = 20  # < N .so files under aiter jit/build/ ⇒ COLD
-
-# Legacy fallback probe order for aiter's JIT cache dir, used only when
-# find_spec("aiter") can't resolve aiter dynamically. First existing path
-# wins. Override via env `INFERENCE_OPTIMIZER_AITER_JIT_DIR` (tried first).
-AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
-    "/sgl-workspace/aiter/aiter/jit",
-    "/sgl-workspace/aiter/aiter/jit/build",
-    "/usr/local/lib/python3.10/dist-packages/aiter/jit",
-    "/usr/local/lib/python3.12/dist-packages/aiter/jit",
-    "/usr/local/lib/python3.10/site-packages/aiter/jit",
-    "/usr/local/lib/python3.12/site-packages/aiter/jit",
-    "/opt/venv/lib/python3.10/site-packages/aiter/jit",
-    "/opt/venv/lib/python3.12/site-packages/aiter/jit",
-)
+BASELINE_DEFAULT_TIMEOUT_SEC = 7800           # WARM-start cap, 130 min (raised for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 ~82 min workload)
+BASELINE_COLD_START_TIMEOUT_SEC = 9000        # COLD-start cap, 150 min (includes ~20 min cuda graph capture)
+# COLD_START_KERNEL_THRESHOLD and AITER_JIT_PROBE_PATHS now live in
+# ``_aiter_jit`` (shared with cli.py's startup sweep); re-exported below for
+# callers/tests that import them from this module.
 
 
 # Underscore-prefixed aliases re-exported for callers/tests; canonical
 # names live in `_workload_envs`.
 _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
+
+
+def _resolve_reference_base(
+    session_dir: Path, *, model_path: str,
+) -> tuple[str, dict[str, str]]:
+    """Read the model-gated reference base server args/envs from SharedState.
+
+    Baseline is the single choke point every run funnels through (initial /
+    restart / stack-rebaseline), so reading the reference here makes it seed
+    EVERY baseline — including resume restarts (the reference is a persisted
+    fact-layer field). Model-gated: a recipe captured for a different model is
+    skipped (a near-name mismatch could apply flags that break this model).
+
+    Returns ``("", {})`` on any failure or when no reference is set — the
+    caller then materializes exactly as before (0 degrade).
+    """
+    try:
+        from ..shared_state import SharedState
+        from ...reference_script import models_compatible
+        # The baseline executor is a module-level singleton instantiated at
+        # import time — before $INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR is
+        # pinned — so its cached session_dir can resolve to the workspace root
+        # instead of the live session dir whose state.json carries the
+        # reference_* fields. Prefer the live pin when present; otherwise honor
+        # the caller-supplied path (direct-instantiation tests, explicit calls).
+        from ...paths import ENV_CURRENT_SESSION_DIR
+        _pinned = os.environ.get(ENV_CURRENT_SESSION_DIR)
+        if _pinned:
+            session_dir = Path(_pinned)
+        state = SharedState.load_or_init(session_dir)
+        ref_args = str(getattr(state, "reference_server_args", "") or "").strip()
+        ref_envs = dict(getattr(state, "reference_envs", {}) or {})
+        if not ref_args and not ref_envs:
+            return ("", {})
+        ref_model = str(getattr(state, "reference_model", "") or "").strip()
+        # Same normalized, version-aware gate discovery uses (no drift).
+        if not models_compatible(ref_model, str(model_path or "")):
+            log.warning(
+                "reference recipe is for model %r but run model is %r; "
+                "skipping reference base (flags may not apply).",
+                ref_model, Path(str(model_path or "")).name,
+            )
+            return ("", {})
+        return (ref_args, ref_envs)
+    except Exception as exc:  # noqa: BLE001 — fail-soft, never block baseline
+        log.warning("reference base lookup failed: %s", exc)
+        return ("", {})
 
 
 # #523: filesystem types that can be revoked / unmounted mid-run (e.g. a
@@ -507,31 +548,6 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     return str(dest)
 
 
-def _resolve_aiter_jit_dir_dynamic() -> list[str]:
-    """Locate aiter's ``jit/`` dir via Python's import machinery.
-
-    Counting at ``<aiter>/jit/`` reflects a warm wheel install (~80
-    pre-built ``.so``); the legacy fixed ``jit/build`` list mis-reports
-    every wheel install as COLD. Returns an ordered candidate list
-    (``jit`` preferred over ``jit/build``); empty if aiter not found.
-
-    Returns:
-        An ordered list of candidate aiter ``jit/`` directory paths, or an
-        empty list when aiter cannot be located.
-    """
-    try:
-        spec = importlib.util.find_spec("aiter")
-    except (ImportError, ValueError):  # noqa: BLE001 — aiter not importable
-        return []
-    if spec is None or not spec.origin:
-        return []
-    aiter_root = Path(spec.origin).parent
-    return [
-        str(aiter_root / "jit"),
-        str(aiter_root / "jit" / "build"),
-    ]
-
-
 def _probe_aiter_jit_cache() -> dict[str, Any]:
     """Inspect aiter's ``jit/`` dir to decide cold vs warm start.
 
@@ -764,6 +780,27 @@ class BaselineExecutor:
             )
         )
         if cache["probe_status"] == "found" and cache["is_cold"]:
+            # Before paying the cold-start compile, reap aiter JIT locks left
+            # by a killed hipcc (else this build spins forever in FileBaton's
+            # untimed wait). Gated on "no live compiler" so a concurrent
+            # benchmark's in-flight compile on the node-global jit dir is never
+            # disturbed; ninja resumes incrementally from any surviving .o.
+            sweep = sweep_stale_aiter_locks_if_dead()
+            if sweep.get("skipped_live"):
+                log.info(
+                    "baseline_executor: aiter lock sweep skipped — live "
+                    "compiler process present (jit dir node-shared).",
+                )
+            elif sweep.get("deleted"):
+                log.warning(
+                    "baseline_executor: reaped %d stale aiter JIT lock(s) "
+                    "under %s (compiler_alive=%s) before cold start.",
+                    sweep["deleted"], sweep.get("dir"),
+                    sweep.get("compiler_alive"),
+                )
+                # Locks gone — re-probe so the log line below reflects reality.
+                cache = _probe_aiter_jit_cache()
+        if cache["probe_status"] == "found" and cache["is_cold"]:
             log.warning(
                 "baseline_executor: COLD_START detected — aiter jit/build/ "
                 "at %s has %d .so (< %d threshold), %d MB. Bumping timeout "
@@ -915,6 +952,15 @@ class BaselineExecutor:
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
+        # Reference recipe base (lowest priority): seeds every baseline incl.
+        # resume restarts. Task params may also pass it through explicitly;
+        # prefer the explicit param, else read the model-gated SharedState value.
+        ref_args = str(params.get("reference_server_args") or "").strip()
+        ref_envs = dict(params.get("reference_envs") or {})
+        if not ref_args and not ref_envs:
+            ref_args, ref_envs = _resolve_reference_base(
+                self.session_dir, model_path=resolved_model,
+            )
         try:
             config_path = materialize_config_with_envs(
                 config_path,
@@ -925,6 +971,8 @@ class BaselineExecutor:
                 gpu_type=resolved_gpu,
                 inferencex_path=effective_inferencex_path,
                 benchmark_script=override_script,
+                reference_server_args=ref_args,
+                reference_envs=ref_envs,
             )
         except FrameworkScriptMismatchError as exc:
             # Cross-framework script override (e.g. sglang_*.sh on a vllm run):
@@ -1354,11 +1402,34 @@ class BaselineExecutor:
         ctx_extra = getattr(ctx, "extra", None) or {}
         if not ctx_extra.get("mn_round_restarted"):
             try:
+                # Merge the reference base UNDER the per-task args (lowest
+                # priority, last-wins) so a multi-node per-round restart carries
+                # the same reference flags the single-node materialized YAML
+                # does — else exotic-arch models re-fail on every MN round.
+                # Resolve here (separate method from __call__): prefer explicit
+                # params, else the model-gated SharedState value.
+                from ._grid_runner import merge_server_args
+                _mn_ref_args = str(params.get("reference_server_args") or "").strip()
+                _mn_ref_envs = dict(params.get("reference_envs") or {})
+                if not _mn_ref_args and not _mn_ref_envs:
+                    _mn_ref_args, _mn_ref_envs = _resolve_reference_base(
+                        self.session_dir, model_path=resolved_model,
+                    )
+                # Base on effective_extra_server_args (carries the one-shot
+                # cuda-graph eager-fallback flag when armed) rather than raw
+                # params, so the MN per-round restart keeps that fallback too.
+                _mn_task_args = effective_extra_server_args
+                _mn_server_args = (
+                    merge_server_args(_mn_ref_args, _mn_task_args)
+                    if _mn_ref_args else _mn_task_args
+                )
+                _mn_env = {str(k): str(v) for k, v in _mn_ref_envs.items()}
                 # PD knobs auto-resolved by the helper from $PD_* env (set
                 # by cli.py), falling back to state.json — call site is
                 # identical between colocated and disaggregated runs.
                 await restart_server_for_round(
-                    extra_server_args=effective_extra_server_args,
+                    extra_server_args=_mn_server_args,
+                    extra_env=_mn_env or None,
                     framework=os.environ.get("FRAMEWORK") or None,
                     model_path=resolved_model or None,
                     tp=int(os.environ.get("TP") or 0) or None,
