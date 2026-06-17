@@ -48,6 +48,13 @@ def _gpu_runner_type(gpu_type: str) -> str:
 
     MI308X and MI325X share the gfx942 / CDNA3 die with MI300X and reuse
     the same Magpie benchmark scripts (sglang_mi300x.sh / vllm_mi300x.sh).
+
+    Args:
+        gpu_type (str): The resolved real GPU type (e.g. ``mi325x``).
+
+    Returns:
+        str: The Magpie runner label (``mi325x`` / ``mi308x`` collapse to
+            ``mi300x``).
     """
     normalized = str(gpu_type or "").strip().lower()
     if normalized in ("mi325x", "mi308x"):
@@ -63,6 +70,14 @@ def _resolve_gpu_type(
     Probe always wins on disagreement (wrong --gpu-type corrupts baseline+KB rows); user value kept
     only on probe failure. Returns ``(effective_gpu_type, warnings)``; warnings go to stderr to keep
     the ``HYPERLOOM_LAUNCH`` stdout sentinel clean.
+
+    Args:
+        user_specified (str): The user-supplied ``--gpu-type`` hint.
+        probed (str): The hardware-probed GPU type.
+
+    Returns:
+        tuple[str, list[str]]: ``(effective_gpu_type, warnings)`` — the probe
+            wins on disagreement; ``warnings`` carries any stderr notes.
     """
     warnings: list[str] = []
     if probed and user_specified and probed != user_specified:
@@ -76,7 +91,11 @@ def _resolve_gpu_type(
     return (probed or user_specified), warnings
 
 def _autodetect_gpu_type() -> str | None:
-    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort)."""
+    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable (rocm-smi then torch gcnArchName, best-effort).
+
+    Returns:
+        str | None: The detected GPU type, or ``None`` when undetectable.
+    """
     import subprocess
     try:
         out = subprocess.run(
@@ -105,6 +124,14 @@ def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
     callers gate AMD-specific behaviour on real hardware while still honouring
     a launcher/CI-supplied ``gpu_type`` even if ``rocm-smi``/torch probing is
     unavailable at the call site.
+
+    Args:
+        explicit (str | None): An explicit GPU-type hint that takes priority
+            over the ``GPU_TYPE`` env and autodetect.
+
+    Returns:
+        str | None: The resolved AMD runner type, or ``None`` when not on a
+            known AMD GPU.
     """
     for cand in (explicit, os.environ.get("GPU_TYPE")):
         norm = str(cand or "").strip().lower()
@@ -259,6 +286,15 @@ def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
 
     Soft-degrades to ``{}`` (never blocks launch) on missing/unreadable/invalid file. Stale-file guard:
     require ``data["model_name"]`` basename to match launched ``--model`` basename, else WARN + ``{}``.
+
+    Args:
+        workspace_root (Path): Directory containing ``model_arch.json``.
+        model_name (str): The launched model name, used for the stale-file
+            freshness check.
+
+    Returns:
+        dict: The advisory architecture profile, or ``{}`` when missing,
+            unreadable, invalid, or stale.
     """
     arch_path = workspace_root / "model_arch.json"
     try:
@@ -299,6 +335,13 @@ def _load_model_config_tags(model_path: str) -> dict:
     """Best-effort loader for KB architecture-identity tags (``architectures`` + ``model_type``) from config.json.
 
     Soft-degrades to ``{}`` (never blocks launch); normalised fields are omitted when empty so callers can .get().
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        dict: Architecture-identity tags (``architectures`` / ``model_type``);
+            empty fields are omitted, ``{}`` when the config is unreadable.
     """
     data = _load_model_config_dict(model_path)
     if data is None:
@@ -314,7 +357,15 @@ def _load_model_config_tags(model_path: str) -> dict:
 
 def _arch_is_supported_text_generation(arch: str) -> bool:
     """True when an architecture class name denotes a supported text-generation
-    (decoder-only causal LM) model."""
+    (decoder-only causal LM) model.
+
+    Args:
+        arch (str): The architecture class name to test.
+
+    Returns:
+        bool: ``True`` when ``arch`` contains a supported text-generation
+            marker.
+    """
     a = (arch or "").strip()
     if not a:
         return False
@@ -328,6 +379,15 @@ def _config_declares_text_decoder(config: dict, architectures: list[str], model_
     described under ``text_config`` / ``language_config``. Treat those nested
     text blocks as capability evidence instead of requiring a per-family
     allowlist entry.
+
+    Args:
+        config (dict): The decoded model ``config.json`` mapping.
+        architectures (list[str]): The top-level architecture class names.
+        model_type_l (str): The lowercased top-level ``model_type``.
+
+    Returns:
+        bool: ``True`` when the config positively identifies a usable text
+            decoder.
     """
     if model_type_l in _TEXT_COERCIBLE_MODEL_TYPES:
         return True
@@ -378,6 +438,15 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
       (e.g. Kimi-K2.6 / Qwen3.6 MoE, or a generic ``ForCausalLM`` arch that
       merely carries a ``vision_config``). Caller proceeds on the text path with
       a degraded-mode warning unless ``--allow-mm-text-fallback`` is off.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        dict | None: ``None`` for a plain text-generation model (or an
+            unreadable config), otherwise a dict with ``architecture``,
+            ``model_type``, ``signal``, and ``verdict``
+            (``vision_only`` / ``text_coercible``).
     """
     config = _load_model_config_dict(model_path)
     if config is None:
@@ -473,7 +542,15 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     }
 
 def _load_model_max_position_embeddings(model_path: str) -> int | None:
-    """Best-effort read of max sequence length from config.json (first positive among known keys, incl. nested ``text_config``), or None."""
+    """Best-effort read of max sequence length from config.json (first positive among known keys, incl. nested ``text_config``), or None.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        int | None: The first positive max-sequence-length value found, or
+            ``None`` when unavailable.
+    """
     if not model_path:
         return None
     cfg_path = Path(model_path) / "config.json"
@@ -503,6 +580,12 @@ def _model_has_dual_chunk_attention(model_path: str) -> bool:
     default aiter attention backend and demands ``dual_chunk_flash_attn``.
     Checks the top level and a nested ``text_config``. Soft-degrades to
     False on any missing / unreadable / invalid config.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        bool: ``True`` when a ``dual_chunk_attention_config`` block is present.
     """
     data = _load_model_config_dict(model_path)
     if data is None:
@@ -526,6 +609,12 @@ def _model_is_moe(model_path: str) -> bool:
     callers use this to switch to a ROCm-capable MoE runner. Checks the top
     level and a nested ``text_config``. Soft-degrades to False on any missing
     / unreadable / invalid config.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        bool: ``True`` when the config carries a Mixture-of-Experts signal.
     """
     data = _load_model_config_dict(model_path)
     if data is None:
@@ -556,6 +645,14 @@ def _detect_amd_unsupported_quant(model_path: str) -> str | None:
     Reads both ``config.json:quantization_config`` (standard HF) and the
     separate ``hf_quant_config.json`` (NVIDIA ModelOpt). Returns None when the
     format is ROCm-runnable or absent.
+
+    Args:
+        model_path (str): The local model directory containing the quant
+            config files.
+
+    Returns:
+        str | None: A human-readable reason when the quant format is
+            unsupported on ROCm, else ``None``.
     """
     if not model_path:
         return None
@@ -604,6 +701,13 @@ def _detect_phi3_rope_scaling_incompatible(data: dict) -> str | None:
     dict, but transformers folds the top-level rope_theta into rope_scaling at
     load, yielding 4 keys and a ValueError. This is hardware-agnostic and the
     su/longrope type triggers it; yarn (the non-longrope path) is left alone.
+
+    Args:
+        data (dict): The decoded model ``config.json`` mapping.
+
+    Returns:
+        str | None: A human-readable reason when the Phi-3 rope_scaling config
+            would crash validation, else ``None``.
     """
     model_type = str(data.get("model_type") or "").strip().lower()
     arches = {a.lower() for a in _config_architectures(data)}
@@ -635,6 +739,13 @@ def _detect_gemma2_missing_hidden_act(data: dict) -> str | None:
 
     sglang's gemma2 runtime reads config.hidden_act unconditionally; configs
     that only ship hidden_activation crash with AttributeError in engine init.
+
+    Args:
+        data (dict): The decoded model ``config.json`` mapping.
+
+    Returns:
+        str | None: A human-readable reason when a Gemma2 config omits
+            ``hidden_act``, else ``None``.
     """
     model_type = str(data.get("model_type") or "").strip().lower()
     arches = {a.lower() for a in _config_architectures(data)}
@@ -673,6 +784,13 @@ def _detect_unrecognized_architecture(data: dict) -> str | None:
 
     Hardware-agnostic: the ModelConfig pydantic validation rejects the unknown
     model_type with a ValidationError in engine init on any GPU vendor.
+
+    Args:
+        data (dict): The decoded model ``config.json`` mapping.
+
+    Returns:
+        str | None: A human-readable reason when the architecture is
+            unrecognized by Transformers/sglang/vLLM, else ``None``.
     """
     scopes = [(data, False)]
     nested = data.get("text_config")
@@ -710,7 +828,15 @@ _SAFETENSORS_HEADER_LIMIT = 64 * 1024 * 1024
 
 
 def _read_safetensors_header(path: Path) -> dict | None:
-    """Read only the safetensors JSON header; never materialize tensor data."""
+    """Read only the safetensors JSON header; never materialize tensor data.
+
+    Args:
+        path (Path): The ``*.safetensors`` shard to inspect.
+
+    Returns:
+        dict | None: The parsed JSON header, or ``None`` when it cannot be
+            read / parsed within the header size limit.
+    """
     try:
         with path.open("rb") as f:
             raw_len = f.read(8)
@@ -732,6 +858,16 @@ def _detect_vocab_weight_shape_mismatch(model_path: str, data: dict) -> str | No
     data) of ``*.safetensors`` shards. Legacy ``*.bin``/``pytorch_model.bin``
     checkpoints are not inspected; truncated/corrupt headers are skipped
     silently (return None) and left to the downstream loader.
+
+    Args:
+        model_path (str): The local model directory holding the safetensors
+            shards.
+        data (dict): The decoded model ``config.json`` mapping (supplies
+            ``vocab_size``).
+
+    Returns:
+        str | None: A human-readable reason when a vocab dimension disagrees
+            with ``config.json``, else ``None``.
     """
     expected = data.get("vocab_size")
     nested = data.get("text_config")
@@ -774,6 +910,15 @@ def _detect_missing_tokenizer_files(model_path: str, data: dict) -> str | None:
 
     Conservative: only fires when NONE of the known tokenizer files exist AND
     the config carries no custom AutoTokenizer (auto_map) that could supply one.
+
+    Args:
+        model_path (str): The local model directory to inspect.
+        data (dict): The decoded model ``config.json`` mapping (checked for a
+            custom ``auto_map`` AutoTokenizer).
+
+    Returns:
+        str | None: A human-readable reason when no tokenizer artifacts are
+            present, else ``None``.
     """
     auto_map = data.get("auto_map")
     if isinstance(auto_map, dict) and auto_map.get("AutoTokenizer"):
@@ -808,6 +953,15 @@ def _detect_incompatible_model_config(
 
     A fully absent ``config.json`` is NOT blocked (kept soft-degrade): the
     upstream submission filter + downstream loader still apply.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+        gpu_type (str | None): Optional GPU type; AMD-only checks fire when it
+            resolves to a known AMD runner.
+
+    Returns:
+        str | None: A human-readable reason when a statically-knowable config
+            incompatibility is detected, else ``None``.
     """
     if not model_path:
         return None
@@ -926,7 +1080,12 @@ _CONTEXT_HEADROOM_DEFAULT = 512
 _MAX_MODEL_LEN_HEADROOM = 4096
 
 def _context_headroom_tokens() -> int:
-    """Resolve the context headroom (tokens); env override, else default."""
+    """Resolve the context headroom (tokens); env override, else default.
+
+    Returns:
+        int: The configured context headroom in tokens (falls back to the
+            default for unset / invalid / negative env values).
+    """
     raw = os.environ.get(_CONTEXT_HEADROOM_ENV, "").strip()
     if not raw:
         return _CONTEXT_HEADROOM_DEFAULT
@@ -937,7 +1096,17 @@ def _context_headroom_tokens() -> int:
     return val if val >= 0 else _CONTEXT_HEADROOM_DEFAULT
 
 def _resolve_max_model_len(isl: int, osl: int, model_path: str) -> int:
-    """Resolve ``MAX_MODEL_LEN`` = ISL+OSL+headroom, clamped to ``max_position_embeddings`` (never stretch context)."""
+    """Resolve ``MAX_MODEL_LEN`` = ISL+OSL+headroom, clamped to ``max_position_embeddings`` (never stretch context).
+
+    Args:
+        isl (int): Input sequence length.
+        osl (int): Output sequence length.
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        int: The resolved ``MAX_MODEL_LEN``, clamped to the model's native
+            max-position window when known.
+    """
     desired = int(isl) + int(osl) + _MAX_MODEL_LEN_HEADROOM
     maxpos = _load_model_max_position_embeddings(model_path)
     if maxpos:
@@ -949,6 +1118,15 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
 
     Persists a stop reason and returns True (caller should exit) when the workload does NOT fit; False
     when it fits or the model's max length is unknown.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``isl`` / ``osl`` / ``model``).
+        session_dir (Path): The session root directory for the stop report.
+
+    Returns:
+        bool: ``True`` when the workload does not fit (caller should exit),
+            ``False`` when it fits or the max length is unknown.
     """
     isl = int(getattr(args, "isl", 0) or 0)
     osl = int(getattr(args, "osl", 0) or 0)
@@ -1022,6 +1200,15 @@ def _preflight_model_config_compat(
     reason instead of booting a server that dies cryptically in engine init.
 
     Returns True when incompatible (caller should exit); False otherwise.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads ``model``
+            and ``gpu_type``).
+        session_dir (Path): The session root directory for the stop report.
+
+    Returns:
+        bool: ``True`` when the config is incompatible (caller should exit),
+            ``False`` otherwise.
     """
     model = str(getattr(args, "model", "") or "")
     detail = _detect_incompatible_model_config(
@@ -1087,6 +1274,16 @@ def _preflight_unsupported_model_arch(
       to fail-fast.
     * ``vision_only`` (true VLM / unclassifiable) → persists
       ``stop_reason=unsupported_model_arch`` and returns True (caller exits).
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads ``model``
+            and ``allow_mm_text_fallback``).
+        session_dir (Path): The session root directory for any stop report /
+            degraded-mode marker.
+
+    Returns:
+        bool: ``True`` when the model is vision-only (caller should exit),
+            ``False`` for plain text or coercible-with-fallback models.
     """
     model = str(getattr(args, "model", "") or "")
     hit = _detect_unsupported_model(model)

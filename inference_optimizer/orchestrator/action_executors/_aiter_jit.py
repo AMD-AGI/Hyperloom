@@ -82,6 +82,10 @@ def _resolve_aiter_jit_dir_dynamic() -> list[str]:
     pre-built ``.so``); the legacy fixed ``jit/build`` list mis-reports
     every wheel install as COLD. Returns an ordered candidate list
     (``jit`` preferred over ``jit/build``); empty if aiter not found.
+
+    Returns:
+        An ordered list of candidate aiter ``jit/`` directory paths, or an
+        empty list when aiter cannot be located.
     """
     try:
         spec = importlib.util.find_spec("aiter")
@@ -183,6 +187,16 @@ def clean_stale_aiter_locks(
     resolution: caller arg → $INFERENCE_OPTIMIZER_AITER_JIT_DIR → dynamic
     <aiter>/jit/build → legacy fallbacks. Returns a stats dict; never raises
     (errors counted).
+
+    Args:
+        aiter_jit_dir (Path | None): Explicit JIT build dir; when ``None`` it
+            is resolved from env / installed aiter / legacy fallbacks.
+        stale_minutes (int): Minimum lock age in minutes before deletion
+            (default 5).
+
+    Returns:
+        dict[str, Any]: A stats dict (``dir``, ``scanned``, ``deleted``,
+            ``skipped_fresh``, ``errors``).
     """
     stats: dict[str, Any] = {
         "dir": None,

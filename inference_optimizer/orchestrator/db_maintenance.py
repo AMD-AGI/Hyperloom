@@ -44,6 +44,11 @@ class RetentionResult:
 
     @property
     def total(self) -> int:
+        """Total rows deleted across the events and tasks retention passes.
+
+        Returns:
+            The sum of ``events_deleted`` and ``tasks_deleted``.
+        """
         return self.events_deleted + self.tasks_deleted
 
 
@@ -51,7 +56,15 @@ async def _min_processed_seq(cursors: CursorStore) -> int | None:
     """Lowest ``last_processed_seq`` across all agent cursors.
 
     ``None`` when no cursor exists yet (nothing is safe to prune — every event
-    may still need replay)."""
+    may still need replay).
+
+    Args:
+        cursors: Cursor store holding each agent's processing watermark.
+
+    Returns:
+        The minimum ``last_processed_seq`` across all cursors, or ``None`` when
+        no cursor exists yet.
+    """
     states = await cursors.all()
     if not states:
         return None
@@ -108,6 +121,15 @@ async def prune_events(
     """Delete fully-processed events below the resume anchor + recent margin.
 
     Returns the number of rows deleted.
+
+    Args:
+        db: Open SQLite connection to prune the ``events`` table on.
+        cursors: Cursor store used to compute the resume anchor watermark.
+        keep_recent: Minimum number of most-recent events to retain regardless
+            of the cursor watermark.
+
+    Returns:
+        The number of event rows deleted.
     """
     min_cursor = await _min_processed_seq(cursors)
     if min_cursor is None or min_cursor <= 0:
@@ -146,6 +168,13 @@ async def prune_tasks(
 
     Never touches queued/running/failed/needs_manual_review rows. Returns the
     number of rows deleted.
+
+    Args:
+        db: Open SQLite connection to prune the ``tasks`` table on.
+        keep_done: Minimum number of most-recent done tasks to retain.
+
+    Returns:
+        The number of task rows deleted.
     """
     keep_done = max(0, int(keep_done))
     placeholders = ",".join("?" * len(_PRUNABLE_TASK_STATES))
@@ -169,7 +198,17 @@ async def run_db_retention(
     events_keep_recent: int = DEFAULT_EVENTS_KEEP_RECENT,
     tasks_keep_done: int = DEFAULT_TASKS_KEEP_DONE,
 ) -> RetentionResult:
-    """Run all DB retention passes; safe to call periodically from the reaper."""
+    """Run all DB retention passes; safe to call periodically from the reaper.
+
+    Args:
+        db: Open SQLite connection to run retention on.
+        cursors: Cursor store used to compute the event prune watermark.
+        events_keep_recent: Minimum number of most-recent events to retain.
+        tasks_keep_done: Minimum number of most-recent done tasks to retain.
+
+    Returns:
+        A :class:`RetentionResult` with the per-table deletion counts.
+    """
     events_deleted = await prune_events(
         db, cursors, keep_recent=events_keep_recent,
     )

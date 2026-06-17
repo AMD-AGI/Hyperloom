@@ -108,6 +108,8 @@ def _nested_row(
             "framework": framework,
             "framework_version": framework_version,
             "precision": precision,
+            "model_type": "unknown_model_type",
+            "architectures": "unknown_arch",
         },
         "body": body,
         "metrics": {"throughput": throughput},

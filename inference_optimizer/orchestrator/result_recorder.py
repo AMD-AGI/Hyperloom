@@ -62,7 +62,14 @@ class ResultRecorder:
         done_payload: dict[str, Any],
         source: str,
     ) -> None:
-        """Common bookkeeping for any specialist task termination (dispatcher loop + intent routing); idempotent on round_id, failures logged not raised."""
+        """Common bookkeeping for any specialist task termination (dispatcher loop + intent routing); idempotent on round_id, failures logged not raised.
+
+        Args:
+            task: The terminated specialist task.
+            done_payload: The specialist's done payload (proposal_set, domain,
+                summary, etc.).
+            source: The emitting agent string (``specialist:<task_id>``).
+        """
         domain = str(done_payload.get("domain") or "").strip()
         proposals = done_payload.get("proposal_set") or []
         if not isinstance(proposals, list):
@@ -256,7 +263,12 @@ class ResultRecorder:
     def _record_intervention_for_task(
         self, task: "Task", result: Any,
     ) -> None:
-        """PR-A8: log a completed task's change_type into SharedState.intervention_mix (explore → config; integrate_patch → code_patch_attempt or code_patch when kept). Best-effort."""
+        """PR-A8: log a completed task's change_type into SharedState.intervention_mix (explore → config; integrate_patch → code_patch_attempt or code_patch when kept). Best-effort.
+
+        Args:
+            task: The completed task whose kind selects the intervention class.
+            result: The task result dict; non-dict results are ignored.
+        """
         if not isinstance(result, dict):
             return
         kind = (task.kind or "").strip()
@@ -310,7 +322,16 @@ class ResultRecorder:
         result_dict: dict[str, Any],
         kept: bool,
     ) -> None:
-        """Per-task fact write — one journal row + maybe one KB fact (source_session_id is hyperloom-local)."""
+        """Per-task fact write — one journal row + maybe one KB fact (source_session_id is hyperloom-local).
+
+        Args:
+            task: The completed task being recorded.
+            source_session_id: The hyperloom-local session id stamped on the
+                fact provenance.
+            result_dict: The task result dict.
+            kept: Whether the result was KEEP-promoted (KEEP → lesson, else
+                pitfall/REVERT).
+        """
         journal = self._ensure_journal()
         gain_raw = result_dict.get("gain_pct")
         try:
@@ -367,12 +388,23 @@ class ResultRecorder:
                 stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
                 measured_at=now_iso,
             )
+            live = self._read_local_recipe_row()
+            best_config_candidate = self._extract_kept_best_config(
+                task=task,
+                result_dict=result_dict,
+            )
+            recipe_overrides = self._kb_best_config_overrides_for_keep(
+                live=live,
+                best_config_candidate=best_config_candidate,
+                throughput_after=throughput_after,
+            )
             # v2: append onto the recipe's lessons[] (no cross-recipe dedup).
             self._kb_amend_recipe(
                 append_lesson={
                     "statement":       statement,
                     "measured_impact": impact,
                 },
+                recipe_overrides=recipe_overrides or None,
                 provenance_details={
                     "source_session_id": source_session_id,
                     "source_task_id":    task.task_id,
@@ -413,7 +445,15 @@ class ResultRecorder:
         source_session_id: str,
         variant_outcome: dict[str, Any],
     ) -> None:
-        """Per-variant fact write — mirror of _record_fact_per_task for explore per-variant decisions."""
+        """Per-variant fact write — mirror of _record_fact_per_task for explore per-variant decisions.
+
+        Args:
+            task: The completed explore task.
+            source_session_id: The hyperloom-local session id stamped on the
+                fact provenance.
+            variant_outcome: One per-variant outcome row (name, outcome,
+                metrics).
+        """
         journal = self._ensure_journal()
         outcome_raw = str(variant_outcome.get("outcome") or "")
         if outcome_raw == "KEEP":
@@ -508,6 +548,16 @@ class ResultRecorder:
                 stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
                 measured_at=now_iso,
             )
+            live = self._read_local_recipe_row()
+            best_config_candidate = self._extract_kept_best_config(
+                task=task,
+                variant_attrs=change_attrs,
+            )
+            recipe_overrides = self._kb_best_config_overrides_for_keep(
+                live=live,
+                best_config_candidate=best_config_candidate,
+                throughput_after=throughput_after,
+            )
             # v2: per-variant lesson append onto recipe.lessons[]
             # (no cross-recipe dedup, see _record_fact_per_task).
             self._kb_amend_recipe(
@@ -515,6 +565,7 @@ class ResultRecorder:
                     "statement":       statement,
                     "measured_impact": impact,
                 },
+                recipe_overrides=recipe_overrides or None,
                 provenance_details={
                     "source_session_id":   source_session_id,
                     "source_task_id":      task.task_id,
@@ -562,7 +613,19 @@ class ResultRecorder:
         gain_pct: float | None = None,  # kept for backward call-signature compat
         severity: str | None = None,
     ) -> str:
-        """Build the lesson statement / pitfall description hashed into the KB canonical_id; MUST exclude volatile fields (e.g. gain_pct) so N sessions merge instead of producing N rows. Identity = framework + change + model/hw."""
+        """Build the lesson statement / pitfall description hashed into the KB canonical_id; MUST exclude volatile fields (e.g. gain_pct) so N sessions merge instead of producing N rows. Identity = framework + change + model/hw.
+
+        Args:
+            change: The summarized change description.
+            kind: ``"lesson"`` or ``"pitfall"`` — selects the rendered form.
+            gain_pct: Kept for backward call-signature compat; intentionally not
+                included in the statement.
+            severity: The pitfall severity, rendered only when ``kind`` is
+                ``"pitfall"``.
+
+        Returns:
+            The identity-stable statement / description string.
+        """
         framework = str(getattr(self.shared_state, "framework", "") or "").strip()
         fw_tag = f"[{framework or '?'}] "
         model = self.shared_state.model_name or "?"
@@ -582,7 +645,18 @@ class ResultRecorder:
         measured_at: str,
         throughput_before: float | None = None,
     ) -> dict[str, Any]:
-        """GAP 3 — structured ``measured_impact`` payload (dict not legacy string so consumers parse without regex); stack_depth = stack length before this lesson lands."""
+        """GAP 3 — structured ``measured_impact`` payload (dict not legacy string so consumers parse without regex); stack_depth = stack length before this lesson lands.
+
+        Args:
+            gain_pct: The measured gain percent, or ``None``.
+            throughput_after: Throughput after the change, or ``None``.
+            stack_depth: Optimization-stack length before this lesson lands.
+            measured_at: ISO timestamp of the measurement.
+            throughput_before: Throughput before the change, or ``None``.
+
+        Returns:
+            A compact ``measured_impact`` dict with ``None`` fields stripped.
+        """
         out: dict[str, Any] = {
             "gain_pct": float(gain_pct) if gain_pct is not None else None,
             "stack_depth_at_apply": int(stack_depth),
@@ -596,7 +670,13 @@ class ResultRecorder:
         return {k: v for k, v in out.items() if v is not None}
 
     def _collect_workload_tags(self) -> dict[str, Any]:
-        """Return the workload-shape KB tag dict for the current session (GAP 5); shared by recipe attrs + lesson/pitfall writes so the warm-start reader filters symmetrically."""
+        """Return the workload-shape KB tag dict for the current session (GAP 5); shared by recipe attrs + lesson/pitfall writes so the warm-start reader filters symmetrically.
+
+        Returns:
+            A dict of workload-shape KB tags (framework, model, parallelism,
+            runtime versions, baseline workload extras) with empty values
+            omitted.
+        """
         ss = self.shared_state
         out: dict[str, Any] = {}
         framework = str(getattr(ss, "framework", "") or "").strip()
@@ -673,7 +753,12 @@ class ResultRecorder:
         return out
 
     def _build_kernel_optimizations_from_state(self) -> list[dict[str, Any]]:
-        """Collect KEEP'd kernel optimizations + their E2E verdict by joining kernel_opt_attempts (micro) and kernel_integrate_attempts (E2E) on kernel_id; non-integrated KEEPs surface integrated=False. Returns KernelOptimization-shaped dicts."""
+        """Collect KEEP'd kernel optimizations + their E2E verdict by joining kernel_opt_attempts (micro) and kernel_integrate_attempts (E2E) on kernel_id; non-integrated KEEPs surface integrated=False. Returns KernelOptimization-shaped dicts.
+
+        Returns:
+            A list of KernelOptimization-shaped dicts for each KEEP'd kernel,
+            joined with its E2E integrate verdict where available.
+        """
         ss = self.shared_state
         opt_attempts = getattr(ss, "kernel_opt_attempts", {}) or {}
         integ_attempts = getattr(ss, "kernel_integrate_attempts", {}) or {}
@@ -739,7 +824,13 @@ class ResultRecorder:
         return out
 
     def _build_recipe_attrs_from_state(self) -> dict[str, Any]:
-        """Materialise the recipe-shaped view of :class:`SharedState` (kg-usage-guide §7.4; defensive getattr)."""
+        """Materialise the recipe-shaped view of :class:`SharedState` (kg-usage-guide §7.4; defensive getattr).
+
+        Returns:
+            A recipe-shaped attrs dict (best_config, what_worked, what_failed,
+            kernel_optimizations, workload tags, session row) for KB recipe
+            writes.
+        """
         ss = self.shared_state
         current_best = getattr(ss, "current_best", {}) or {}
         opt_stack = getattr(ss, "optimization_stack", []) or []
@@ -1031,7 +1122,12 @@ class ResultRecorder:
             )
 
     def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
-        """Persist scout output (hints, competitor target, gap seeds, dedup); all steps fail-soft."""
+        """Persist scout output (hints, competitor target, gap seeds, dedup); all steps fail-soft.
+
+        Args:
+            done_payload: The completed research-scout task payload; its
+                ``research`` block carries hints, competitor target and PR ids.
+        """
         from . import research_hints as _research_hints
 
         block = done_payload.get("research")

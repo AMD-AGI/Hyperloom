@@ -152,6 +152,14 @@ def _section_phase_semantics(
     ``--no-framework`` keep their row in the 6-phase chain but are annotated
     ``(DISABLED: --no-xxx — phase skipped)`` so Orchestration plans against the
     phases the run will actually enter.
+
+    Args:
+        kernel_enabled: Whether kernel-owned actions are enabled.
+        explore_enabled: Whether the EXPLORE phase is enabled.
+        framework_phase_enabled: Whether the FRAMEWORK_PR phase is enabled.
+
+    Returns:
+        Markdown lines for the phase-contract section.
     """
     from ..phase_state import (
         PHASE_NAMES,
@@ -270,7 +278,15 @@ def _filter_actions(
 
 
 def _phase_eta_summary(actions: list[ActionMetadata]) -> list[tuple[str, float, list[str]]]:
-    """Group actions by phase in _PHASE_ORDER; return (phase, eta_min_sum, names)."""
+    """Group actions by phase in _PHASE_ORDER; return (phase, eta_min_sum, names).
+
+    Args:
+        actions: The enabled actions to group by pipeline phase.
+
+    Returns:
+        A list of ``(phase, eta_min_sum, names)`` tuples ordered by
+        ``_PHASE_ORDER`` with unknown phases appended last.
+    """
     bucket: dict[str, list[ActionMetadata]] = {}
     for a in actions:
         bucket.setdefault(a.pipeline_phase, []).append(a)
@@ -409,7 +425,15 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
 
 
 def _format_grid_injection_hint(name: str) -> str | None:
-    """Return a per-action one-liner showing how to override grid, or None."""
+    """Return a per-action one-liner showing how to override grid, or None.
+
+    Args:
+        name: The action name to render a grid-injection hint for.
+
+    Returns:
+        The grid-injection hint string for ``explore`` / ``sweep``, or ``None``
+        for any other action.
+    """
     if name == "explore":
         return (
             "GRID INPUT (v0.8 M3, REQUIRED): emit "
@@ -820,20 +844,29 @@ def build_orchestration_prompt(
 ) -> str:
     """Compose the Orchestration system prompt (deterministic for given inputs).
 
-    Parameters
-    ----------
-    action_registry: pre-loaded ``ActionRegistry`` (caller calls ``.load()``).
-    enabled_actions: enabled action names; final ordering is by pipeline_phase.
-    framework: ``sglang`` / ``vllm`` — printed in SESSION CONTEXT.
-    kernel_enabled: explicit override; ``None`` derives from KERNEL_OWNED actions.
-    explore_enabled: when False (``--no-explore``) the EXPLORE phase is skipped;
-        the prompt annotates it as DISABLED so Orchestration's plan matches the
-        real phase chain.
-    framework_phase_enabled: when False (``--no-framework``) the FRAMEWORK_PR
-        phase is skipped; annotated DISABLED in the prompt.
-    objective_kind / objective_value: :mod:`objective` strings, printed verbatim.
-    max_minutes: wall-clock budget for the run.
-    rules_fragment_path: path to ``orchestration.md``; placeholder if unreadable.
+    Args:
+        action_registry: pre-loaded ``ActionRegistry`` (caller calls
+            ``.load()``).
+        enabled_actions: enabled action names; final ordering is by
+            pipeline_phase.
+        framework: ``sglang`` / ``vllm`` — printed in SESSION CONTEXT.
+        kernel_enabled: explicit override; ``None`` derives from KERNEL_OWNED
+            actions.
+        explore_enabled: when False (``--no-explore``) the EXPLORE phase is
+            skipped; the prompt annotates it as DISABLED so Orchestration's plan
+            matches the real phase chain.
+        framework_phase_enabled: when False (``--no-framework``) the
+            FRAMEWORK_PR phase is skipped; annotated DISABLED in the prompt.
+        objective_kind: :mod:`objective` kind string, printed verbatim.
+        objective_value: :mod:`objective` target value, printed verbatim.
+        max_minutes: wall-clock budget for the run.
+        rules_fragment_path: path to ``orchestration.md``; placeholder if
+            unreadable.
+        framework_source_roots: optional framework source roots passed through
+            to the session-context section.
+
+    Returns:
+        The composed Orchestration system prompt text.
     """
     actions = _filter_actions(action_registry, enabled_actions)
     if kernel_enabled is None:

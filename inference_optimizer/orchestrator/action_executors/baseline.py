@@ -126,6 +126,13 @@ def _is_cuda_graph_capture_failure(*texts: str) -> bool:
     carry neither OOM nor a compile/lowering error, both unrecoverable by
     disabling cuda-graph. Strong wins on a line that also matches weak, so the
     compile/OOM whole-blob gate never demotes a genuine stream-capture failure.
+
+    Args:
+        *texts: Log / stdout / stderr blobs to scan for cuda-graph markers.
+
+    Returns:
+        ``True`` when a cuda-graph capture failure recoverable by disabling
+        cuda-graph capture is detected, else ``False``.
     """
     lines = "\n".join(t for t in texts if t).splitlines()
     lowered = [ln.lower() for ln in lines]
@@ -157,7 +164,16 @@ _DISABLE_CUDA_GRAPH_FLAGS = {
 
 
 def _disable_cuda_graph_flag(framework: str) -> str:
-    """Return the framework-correct flag that disables cuda-graph capture."""
+    """Return the framework-correct flag that disables cuda-graph capture.
+
+    Args:
+        framework: Framework name (e.g. ``"sglang"`` or ``"vllm"``); matched
+            case-insensitively.
+
+    Returns:
+        The disable-cuda-graph flag for ``framework``, defaulting to
+        ``--disable-cuda-graph`` for unknown frameworks.
+    """
     return _DISABLE_CUDA_GRAPH_FLAGS.get(
         (framework or "").strip().lower(), "--disable-cuda-graph",
     )
@@ -168,6 +184,14 @@ def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
 
     Token-level dedup so a longer flag (e.g. ``--disable-cuda-graph-extra``)
     is not mistaken for an existing ``--disable-cuda-graph``.
+
+    Args:
+        extra_server_args: Existing extra server args string (may be empty).
+        framework: Framework name used to pick the correct disable flag.
+
+    Returns:
+        ``extra_server_args`` with the framework-correct disable-cuda-graph
+        flag appended once; unchanged when the flag is already present.
     """
     flag = _disable_cuda_graph_flag(framework)
     if flag in (extra_server_args or "").split():
@@ -179,7 +203,16 @@ def _classify_subprocess_error(
     elapsed_sec: float, stderr_tail: str,
 ) -> str:
     """Return 'fast_exit_arg_error' when the subprocess died fast on an arg
-    validation error, else 'subprocess_nonzero'."""
+    validation error, else 'subprocess_nonzero'.
+
+    Args:
+        elapsed_sec: Subprocess wall-clock runtime in seconds.
+        stderr_tail: Tail of the subprocess stderr used for marker matching.
+
+    Returns:
+        ``"fast_exit_arg_error"`` for a fast exit caused by argument
+        validation, else ``"subprocess_nonzero"``.
+    """
     if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
         return "subprocess_nonzero"
     tail = stderr_tail.lower()
@@ -282,6 +315,13 @@ def _path_fstype(path: str) -> str:
     Picks the longest mountpoint that is a prefix of the resolved path.
     Returns ``""`` when it cannot be determined (non-Linux, unreadable
     ``/proc/mounts``, ...), which callers treat as "assume local".
+
+    Args:
+        path: Filesystem path whose backing mount type is resolved.
+
+    Returns:
+        The filesystem type backing ``path``, or ``""`` when it cannot be
+        determined.
     """
     try:
         rp = os.path.realpath(path)
@@ -315,7 +355,14 @@ def _path_fstype(path: str) -> str:
 
 
 def _is_network_fs(path: str) -> bool:
-    """True when ``path`` is backed by a revocable network filesystem."""
+    """True when ``path`` is backed by a revocable network filesystem.
+
+    Args:
+        path: Filesystem path to classify.
+
+    Returns:
+        ``True`` when ``path`` lives on a known network filesystem type.
+    """
     return _path_fstype(path).lower() in _NETWORK_FS_TYPES
 
 
@@ -331,6 +378,13 @@ def _mirror_lock(lock_path: str) -> Iterator[None]:
     wait for the winner and then overwrite a consistent tree. Degrades to no
     exclusion when ``fcntl`` is unavailable (non-Linux) or the lock file
     cannot be opened — the unique staging dir still prevents torn copies.
+
+    Args:
+        lock_path: Path to the lock file used for cross-process exclusion.
+
+    Yields:
+        None: Control is yielded to the caller while the lock is held (or
+        immediately, when no exclusion could be acquired).
     """
     try:
         import fcntl
@@ -381,6 +435,15 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     materialized YAML first) patches the LOCAL mirror in place — the mirror
     therefore ends up carrying the NUM_PROMPTS / PROFILE_EXTRA_BODY patches,
     and Magpie ``cd``-s into the patched local copy.
+
+    Args:
+        src: Source InferenceX checkout path (typically on a network mount).
+        mirror_key: Optional key isolating concurrent tasks that share the
+            same source checkout; folded into the mirror destination name.
+
+    Returns:
+        A local-disk mirror path when relocation succeeds, otherwise ``src``
+        unchanged (relocation disabled, already local, or copy failed).
     """
     src = str(src)
     if os.environ.get(
@@ -585,6 +648,13 @@ class BaselineExecutor:
 
         Order: ``task.params['output_dir']`` → ``ctx.extra['workspace']``
         → ``runs_dir(...)`` (direct-instantiation fallback for tests).
+
+        Args:
+            ctx: Runner context carrying ``task.params`` and ``extra``.
+            action: Action name used when falling back to ``runs_dir(...)``.
+
+        Returns:
+            The resolved per-task workspace directory.
         """
         params = ctx.task.params or {}
         if params.get("output_dir"):
@@ -600,6 +670,13 @@ class BaselineExecutor:
         Used to keep the flag armed when the framework is unknown (cannot pick
         a safe disable-cuda-graph flag), so the one-shot is not wasted.
         Best-effort: missing/unreadable state reads as not armed.
+
+        Args:
+            shared_state: Optional live SharedState; falls back to
+                ``self.shared_state`` and then a loaded session state.
+
+        Returns:
+            ``True`` when the one-shot eager-fallback flag is currently armed.
         """
         try:
             state = shared_state or self.shared_state
@@ -619,6 +696,14 @@ class BaselineExecutor:
 
         Returns True (and clears the flag) when a prior baseline armed it.
         Best-effort: missing/unreadable state reads as no fallback.
+
+        Args:
+            shared_state: Optional live SharedState; falls back to
+                ``self.shared_state`` and then a loaded session state.
+
+        Returns:
+            ``True`` when the flag was armed (and is now cleared), else
+            ``False``.
         """
         try:
             state = shared_state or self.shared_state
@@ -644,6 +729,13 @@ class BaselineExecutor:
         when the aiter jit probe reports COLD (env-overridable via
         ``INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC``) → warm default.
         Every path emits one log line for greppability.
+
+        Args:
+            params: Task params; an explicit ``timeout_sec`` overrides the
+                probe-based selection.
+
+        Returns:
+            The subprocess timeout in seconds for this baseline launch.
         """
         explicit = params.get("timeout_sec")
         if explicit:
@@ -715,6 +807,14 @@ class BaselineExecutor:
 
         ProfileExecutor uses this to patch/validate the InferenceX checkout
         named by the rendered YAML. No-op default keeps baseline unchanged.
+
+        Args:
+            config_path: The materialized Magpie YAML config path.
+            output_dir: The per-task workspace directory.
+
+        Returns:
+            An early-return result dict to short-circuit the launch, or
+            ``None`` to proceed with the baseline run.
         """
         return None
 
@@ -1012,7 +1112,15 @@ class BaselineExecutor:
     def _resolve_lifecycle_params(
         self, materialized_config_path: Path,
     ) -> dict[str, Any]:
-        """Inspect the materialized YAML for server_lifecycle eligibility."""
+        """Inspect the materialized YAML for server_lifecycle eligibility.
+
+        Args:
+            materialized_config_path: The materialized Magpie YAML config path.
+
+        Returns:
+            Lifecycle params including eligibility, framework, port and the
+            reason a run is ineligible.
+        """
         return _lifecycle.resolve_lifecycle_params(materialized_config_path)
 
     def _write_lifecycle_config(
@@ -1028,6 +1136,17 @@ class BaselineExecutor:
 
         Both rounds share ``pid_dir`` + ``port`` so round 2 re-attaches;
         only ``cleanup`` differs (round 1 persists, round 2 tears down).
+
+        Args:
+            base_config_path: Source materialized YAML to clone and patch.
+            dest_dir: Directory the per-round YAML is written into.
+            cleanup: Whether the server should be torn down after the round.
+            pid_dir: Shared pid/metadata directory keying the persistent
+                server across both rounds.
+            port: Server port shared across both rounds.
+
+        Returns:
+            Path to the written per-round lifecycle YAML.
         """
         with Path(base_config_path).open(encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
@@ -1043,7 +1162,16 @@ class BaselineExecutor:
 
     @staticmethod
     def _port_healthy(port: int, timeout: float = 3.0) -> bool:
-        """Return True when localhost:{port}/health responds HTTP 200."""
+        """Return True when localhost:{port}/health responds HTTP 200.
+
+        Args:
+            port: Local server port to probe.
+            timeout: Per-request timeout in seconds.
+
+        Returns:
+            ``True`` when the health endpoint responds HTTP 200, else
+            ``False``.
+        """
         import urllib.request
         try:
             r = urllib.request.urlopen(
@@ -1064,6 +1192,11 @@ class BaselineExecutor:
         calls _kill_stale_servers() to reap the orphan listener. Stale
         pid/json files are always unlinked (without sending signals to
         potentially-recycled PIDs). Never raises.
+
+        Args:
+            pid_dir: Directory holding the server pid/metadata files.
+            framework: Framework name used to build the server tag.
+            port: Server port used to build the server tag.
         """
         base = Path(pid_dir)
         tag = f"{framework}_{port}"
@@ -1107,6 +1240,11 @@ class BaselineExecutor:
     ) -> None:
         """Best-effort teardown of a persistent server left by the
         double-run rounds. Idempotent and never raises (safe in finally).
+
+        Args:
+            pid_dir: Directory holding the server pid/metadata files.
+            framework: Framework name used to build the server tag.
+            port: Server port used to build the server tag.
         """
         _lifecycle.teardown_lifecycle_server(
             pid_dir=pid_dir, framework=framework, port=port,
@@ -1130,6 +1268,28 @@ class BaselineExecutor:
 
         Single-round core extracted from ``__call__`` so the cold-start
         guard can invoke it twice. ``output_dir`` is the per-round slot.
+
+        Args:
+            config_path: The materialized Magpie YAML config for this round.
+            output_dir: The per-round workspace slot.
+            timeout_sec: Subprocess timeout in seconds.
+            override_result_dir: Optional ``$RESULT_DIR`` override for the
+                benchmark wrapper.
+            resolved_model: Resolved model path for the run.
+            materialized_config_path: The canonical materialized YAML, echoed
+                into the result for downstream reuse.
+            inferencex_path: Task-local InferenceX checkout path pinned via
+                ``MAGPIE_INFERENCEX_PATH``.
+            effective_extra_server_args: Extra server args passed to the
+                multi-node restart helper.
+            params: Task params for this launch.
+            ctx: Runner context carrying ``extra`` (e.g. multi-node round
+                state).
+
+        Returns:
+            A result dict: ``status="succeeded"`` with measurements on
+            success, or ``status="failed"`` with an ``error_class`` on
+            failure.
         """
         cmd = [
             self.magpie_python, "-m", "Magpie", "-v", "benchmark",

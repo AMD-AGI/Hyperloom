@@ -202,7 +202,11 @@ class _RetiredFlag(argparse.Action):
 
 
 def _orchestration_rules_fragment_path() -> Path:
-    """Path to the rules-only ``orchestration.md`` fragment consumed by ``prompt_builder``."""
+    """Path to the rules-only ``orchestration.md`` fragment consumed by ``prompt_builder``.
+
+    Returns:
+        Path: The path to the bundled ``orchestration.md`` fragment.
+    """
     return asset_system_prompts_dir() / "orchestration.md"
 
 
@@ -241,7 +245,21 @@ def _build_orchestration_prompt(
     no_framework: bool = False,
     action_registry: ActionRegistry | None = None,
 ) -> str:
-    """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
+    """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
+
+    Args:
+        no_kernel (bool): When ``True`` the kernel actions are disabled.
+        framework (str): The serving framework name (e.g. ``sglang``).
+        objective (Objective): The run objective summarised into the prompt.
+        max_minutes (int): The wall-clock budget in minutes.
+        no_explore (bool): When ``True`` the EXPLORE phase is disabled.
+        no_framework (bool): When ``True`` the FRAMEWORK_PR phase is disabled.
+        action_registry (ActionRegistry | None): The action registry to use;
+            a fresh loaded registry is built when ``None``.
+
+    Returns:
+        str: The composed Orchestration system prompt.
+    """
     registry = action_registry or ActionRegistry().load()
     enabled = default_enabled_actions(no_kernel=no_kernel, no_explore=no_explore)
     kind, value = _objective_summary_for_prompt(objective)
@@ -315,7 +333,12 @@ _CRITIC_AGENT_ROOT_ENV = "CRITIC_AGENT_ROOT"
 
 
 def _resolve_critic_agent_root() -> Path | None:
-    """Return the critic-agent skill root (``$CRITIC_AGENT_ROOT`` else sibling ``critic-agent/``), or ``None``."""
+    """Return the critic-agent skill root (``$CRITIC_AGENT_ROOT`` else sibling ``critic-agent/``), or ``None``.
+
+    Returns:
+        Path | None: The validated critic-agent root, or ``None`` when no
+            candidate contains ``runtime/cli.py``.
+    """
     override = os.environ.get(_CRITIC_AGENT_ROOT_ENV, "").strip()
     if override:
         p = Path(override).expanduser()
@@ -326,7 +349,15 @@ def _resolve_critic_agent_root() -> Path | None:
 
 
 def _validate_critic_agent_runtime(root: Path) -> None:
-    """Fail fast (SystemExit) if ``python -m runtime.cli --help`` doesn't work."""
+    """Fail fast (SystemExit) if ``python -m runtime.cli --help`` doesn't work.
+
+    Args:
+        root (Path): The critic-agent skill root to validate.
+
+    Raises:
+        SystemExit: With code 2 when the runtime cannot start or exits
+            non-zero.
+    """
     cmd = [sys.executable, "-m", "runtime.cli", "--help"]
     try:
         proc = subprocess.run(
@@ -362,7 +393,12 @@ _ROBUSTNESS_AGENT_ROOT_ENV = "ROBUSTNESS_AGENT_ROOT"
 
 
 def _resolve_robustness_agent_root() -> Path | None:
-    """Return robustness-agent skill root (``$ROBUSTNESS_AGENT_ROOT`` else sibling), or ``None``."""
+    """Return robustness-agent skill root (``$ROBUSTNESS_AGENT_ROOT`` else sibling), or ``None``.
+
+    Returns:
+        Path | None: The validated robustness-agent root, or ``None`` when no
+            candidate contains the expected ``runtime/cli.py`` module.
+    """
     override = os.environ.get(_ROBUSTNESS_AGENT_ROOT_ENV, "").strip()
     if override:
         p = Path(override).expanduser()
@@ -425,6 +461,15 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
 
     No auto-tightening is applied; kernel/framework/profile all work on atom. Multi-node TP wiring
     is unimplemented so ``--nodes>=2`` exits 2. Returns the list of auto-disabled flags (always empty).
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads ``nodes``).
+
+    Returns:
+        list[str]: The auto-disabled flags (always empty).
+
+    Raises:
+        SystemExit: With code 2 when ``--nodes >= 2`` (unsupported on atom).
     """
     auto_disabled: list[str] = []
     if int(getattr(args, "nodes", 1) or 1) >= 2:
@@ -463,6 +508,21 @@ def _emit_launch_info(
     """Print the machine-readable HYPERLOOM_LAUNCH stdout line; optionally JSON-dump to ``launch_info_file``.
 
     Returns the launch_info dict for callers/tests.
+
+    Args:
+        pid (int): The launched process id.
+        session_dir (Path): The session root directory.
+        session_id (str): The session identifier.
+        run_log (str): The run-log path string.
+        gpu_type (str): The resolved GPU type.
+        framework (str): The serving framework name.
+        model (str): The model name / path.
+        launch_info_file (str | None): Optional path to JSON-dump the launch
+            info; skipped when ``None``.
+
+    Returns:
+        dict[str, Any]: The launch-info dict that was printed (and optionally
+            written).
     """
     launch_info: dict[str, Any] = {
         "event": "launch",
@@ -524,6 +584,19 @@ def _resume_safe_flag(
 
     ``invert=True`` handles the ``--no-*`` pattern (args.no_X True == disable; manifest stores positive form).
     Lets robustness_monitor.sh resume preserve original intent without re-passing the flag.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace.
+        arg_name (str): The attribute name to read from ``args``.
+        manifest (dict | None): The resume manifest, or ``None``.
+        manifest_key (str): The manifest key holding the persisted value.
+        default (bool): The fallback value when neither arg nor manifest
+            supplies one.
+        invert (bool): When ``True`` apply the ``--no-*`` inversion to the
+            explicit arg.
+
+    Returns:
+        bool: The resolved boolean flag value.
     """
     raw_arg = getattr(args, arg_name, None)
     if isinstance(raw_arg, bool) and raw_arg:
@@ -543,7 +616,18 @@ def _resume_safe_numeric(
     *,
     default: float,
 ) -> float:
-    """Float-valued analog of :func:`_resume_safe_flag`: explicit non-default arg → manifest → default."""
+    """Float-valued analog of :func:`_resume_safe_flag`: explicit non-default arg → manifest → default.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace.
+        arg_name (str): The attribute name to read from ``args``.
+        manifest (dict | None): The resume manifest, or ``None``.
+        manifest_key (str): The manifest key holding the persisted value.
+        default (float): The fallback value when neither source supplies one.
+
+    Returns:
+        float: The resolved numeric value.
+    """
     raw_arg = getattr(args, arg_name, None)
     if raw_arg is not None:
         try:
@@ -699,7 +783,14 @@ _STALE_PROXY_HOSTPORT = "127.0.0.1:4002"
 
 
 def _is_stale_proxy_url(url: str | None) -> bool:
-    """Return True for a leftover legacy auth-proxy URL (``127.0.0.1:4002``)."""
+    """Return True for a leftover legacy auth-proxy URL (``127.0.0.1:4002``).
+
+    Args:
+        url (str | None): The URL to test.
+
+    Returns:
+        bool: ``True`` when the URL pins the stale legacy proxy host:port.
+    """
     return _STALE_PROXY_HOSTPORT in str(url or "")
 
 
@@ -723,6 +814,13 @@ def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
     Best-effort: returns ``False`` (never raises) when the path is empty, the
     file is missing/unreadable/unwritable, it has no ``base_url:`` line, or it
     is already in sync. Returns ``True`` only when a rewrite was applied.
+
+    Args:
+        geak_config_path (str): Path to the GEAK litellm yaml config.
+        base_url (str): The endpoint to write into the ``base_url:`` line.
+
+    Returns:
+        bool: ``True`` when a rewrite was applied, ``False`` otherwise.
     """
     if not geak_config_path or not base_url:
         return False
@@ -752,7 +850,14 @@ def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
 
 
 def _derive_anthropic_base_url(openai_base_url: str) -> str:
-    """Derive ``ANTHROPIC_BASE_URL`` from ``OPENAI_BASE_URL`` by stripping a trailing ``/v1`` (SDK re-appends it)."""
+    """Derive ``ANTHROPIC_BASE_URL`` from ``OPENAI_BASE_URL`` by stripping a trailing ``/v1`` (SDK re-appends it).
+
+    Args:
+        openai_base_url (str): The ``OPENAI_BASE_URL`` value.
+
+    Returns:
+        str: The derived Anthropic base URL with a trailing ``/v1`` removed.
+    """
     from urllib.parse import urlparse, urlunparse
 
     parsed = urlparse(openai_base_url)
@@ -765,7 +870,13 @@ def _derive_anthropic_base_url(openai_base_url: str) -> str:
 def _reset_claude_config_to_upstream(
     safe_key: str, anthropic_base_url: str
 ) -> None:
-    """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway (stale 127.0.0.1:4002 would fail)."""
+    """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway (stale 127.0.0.1:4002 would fail).
+
+    Args:
+        safe_key (str): The primary API key to write; blank leaves any
+            existing key untouched.
+        anthropic_base_url (str): The upstream gateway URL; blank is a no-op.
+    """
     import json as _json
 
     if not anthropic_base_url:
@@ -832,7 +943,15 @@ def _validate_credentials() -> None:
 
 
 def _is_placeholder_tracelens_path(value: str) -> bool:
-    """Treat .env.template's bare ``\\`` and whitespace-only values as unset."""
+    """Treat .env.template's bare ``\\`` and whitespace-only values as unset.
+
+    Args:
+        value (str): The candidate TraceLens path value.
+
+    Returns:
+        bool: ``True`` when the value is blank or the bare backslash
+            placeholder.
+    """
     stripped = value.strip()
     return stripped in ("", "\\")
 
@@ -960,6 +1079,12 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
 
     Avoids first-tick BackendError after baseline burns wall time; same-interpreter install avoids
     cross-interpreter install failures.
+
+    Args:
+        python_exe (str): The interpreter that will import the SDKs (and run
+            the probe / install).
+        pip_extra (list[str]): Extra arguments threaded into the ``pip
+            install`` invocation (e.g. index flags).
     """
     candidates = (
         ("claude_agent_sdk", "claude-agent-sdk>=0.1.65"),
@@ -1131,7 +1256,15 @@ def _emit_preflight_diagnostics(
     anthropic_base_url: str | None,
     args: argparse.Namespace | None = None,
 ) -> None:
-    """One canonical, grep-friendly diagnostics block at the end of preflight."""
+    """One canonical, grep-friendly diagnostics block at the end of preflight.
+
+    Args:
+        magpie_python (str): The Magpie interpreter path to report.
+        anthropic_base_url (str | None): The resolved Anthropic base URL, or
+            ``None`` when unset.
+        args (argparse.Namespace | None): Parsed CLI args; when present, KB /
+            PR-monitor status lines are added.
+    """
     from .orchestrator.action_executors.baseline import (
         BASELINE_COLD_START_TIMEOUT_SEC,
         BASELINE_DEFAULT_TIMEOUT_SEC,
@@ -1220,7 +1353,12 @@ def _emit_preflight_diagnostics(
 
 
 def _print_cortex_kb_queue_status() -> None:
-    """Emit a one-line summary of the Cortex KB offline NDJSON queue (dead-letter = permanent-reject signal)."""
+    """Emit a one-line summary of the Cortex KB offline NDJSON queue (dead-letter = permanent-reject signal).
+
+    Note:
+        Side-effecting: writes the queue status summary to stdout and returns
+        nothing.
+    """
     from .session_paths import (
         cortex_dead_letter_ndjson,
         cortex_flushed_ndjson,
@@ -1272,6 +1410,15 @@ def _probe_llm_catalog(
     """Probe ``<base_url>/models`` with retry (gateway flakes); return set of model ids or None.
 
     TLS verification is on by default; ``INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1`` skips it (warns).
+
+    Args:
+        base_url (str): The gateway base URL; ``""`` returns ``None``.
+        api_key (str): Optional bearer key sent in the ``Authorization``
+            header.
+
+    Returns:
+        set[str] | None: The set of model ids from ``<base_url>/models``, or
+            ``None`` when the probe is skipped or exhausts its retries.
     """
     import time
 
@@ -1371,6 +1518,20 @@ def _validate_and_resolve_claude_model(
 
     Probes the gateway catalog (retries); falls back 4-7→4-6 with a WARN, else sys.exit(2). Returns the
     catalog id set on success (reused by the codex smoke-test).
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace; ``claude_model``
+            may be mutated to the fallback model.
+        resolved_urls (tuple[str, str] | None): Optional
+            ``(anthropic_base_url, openai_base_url)`` used to resolve the probe
+            base URL when env is unset.
+
+    Returns:
+        set[str] | None: The gateway catalog id set on success.
+
+    Raises:
+        SystemExit: With code 2 when the model is disallowed, the catalog is
+            unreachable, or no acceptable model is present.
     """
     chosen = (args.claude_model or "").strip()
     # #340: non-AMD deployments (Vultr / TensorWave / self-hosted gateways)
@@ -1465,7 +1626,15 @@ def _smoke_test_codex_model(
     args: argparse.Namespace,
     catalog_ids: set[str] | None,
 ) -> None:
-    """WARN-only catalog check for ``--codex-model`` (no hard gate); flags typos before Coordinator starts."""
+    """WARN-only catalog check for ``--codex-model`` (no hard gate); flags typos before Coordinator starts.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``codex_model`` / ``critic_backend`` / ``kernel_codex`` /
+            ``no_kernel``).
+        catalog_ids (set[str] | None): The gateway catalog id set; ``None``
+            skips the check.
+    """
     if catalog_ids is None:
         return
     # Codex is needed by the Kernel agent (kernel-codex on) and the critic-agent review path.
@@ -1501,6 +1670,13 @@ def _inferencex_checkout_ok(path: Path | str) -> bool:
     ``git init`` that then failed to fetch/checkout. Magpie sources
     ``benchmarks/benchmark_lib.sh`` at runtime, so require that file to
     exist — a complete checkout always has it, a stub never does.
+
+    Args:
+        path (Path | str): The candidate InferenceX checkout directory.
+
+    Returns:
+        bool: ``True`` when the checkout contains
+            ``benchmarks/benchmark_lib.sh``.
     """
     return (Path(path) / "benchmarks" / "benchmark_lib.sh").is_file()
 
@@ -1516,6 +1692,13 @@ def _clone_inferencex(dest: Path) -> str | None:
     On any failure the partial ``dest`` (e.g. a bare ``git init`` with no
     fetched tree) is removed so a later preflight's detection does not
     mistake the stub for a valid checkout and skip re-cloning.
+
+    Args:
+        dest (Path): The writable destination directory for the checkout.
+
+    Returns:
+        str | None: The checkout path string on success, or ``None`` on
+            failure.
     """
     repo = os.environ.get("INFERENCEX_REPO") or _INFERENCEX_REPO_DEFAULT
     ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
@@ -1557,6 +1740,14 @@ def _preflight(
     Credentials fallback → auth aliases → SDK install → ANTHROPIC_BASE_URL resolve + ~/.claude reset →
     ROCm hygiene → ray/Magpie/InferenceX install → CLI presence checks → diagnostics. Returns
     ``(anthropic_base_url, openai_base_url)`` or ``None`` when ``OPENAI_BASE_URL`` is missing.
+
+    Args:
+        args (argparse.Namespace | None): Parsed CLI args, used for the
+            diagnostics block; optional.
+
+    Returns:
+        tuple[str, str] | None: ``(anthropic_base_url, openai_base_url)``, or
+            ``None`` when ``OPENAI_BASE_URL`` is missing.
     """
     _load_dotenv_fallback()
     _load_kernel_agent_env_fallback()
@@ -1803,6 +1994,10 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
 
     Mutates args: ``cortex_enabled``/``pr_monitor_enabled`` plus
     ``kb_degraded_reason``/``pr_degraded_reason`` (None|"explicit_flag"|"ir3_auto").
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace; mutated in place
+            with the resolved KB / PR-monitor enable flags and reasons.
     """
     explicit_kb = bool(getattr(args, "degraded_kb", False))
     explicit_pr = bool(getattr(args, "degraded_pr", False))
@@ -1879,7 +2074,18 @@ _VALID_CRITIC_BACKENDS = ("mock", "agent")
 
 
 def _resolve_critic_choice(args: argparse.Namespace) -> str:
-    """Resolve the active critic backend choice (arg → DEFAULT_CRITIC_BACKEND); hard-fails on invalid."""
+    """Resolve the active critic backend choice (arg → DEFAULT_CRITIC_BACKEND); hard-fails on invalid.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``critic_backend``).
+
+    Returns:
+        str: The resolved critic backend (one of ``_VALID_CRITIC_BACKENDS``).
+
+    Raises:
+        SystemExit: With code 2 when the chosen backend is invalid.
+    """
     chosen = args.critic_backend
     if chosen is None:
         chosen = DEFAULT_CRITIC_BACKEND
@@ -1907,6 +2113,17 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     Multi-node policy: on ``nodes>=2`` the agent's LocalProbe targets sandbox-local resources that live in
     separate pods (HIGH false positives). Keep ``agent`` only when a robustness-server is configured; else
     auto-downgrade to ``mock`` (explicit --robustness-agent gets a WARN).
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``robustness_backend`` / ``nodes`` and server config).
+
+    Returns:
+        str: The resolved robustness backend (one of
+            ``_VALID_ROBUSTNESS_BACKENDS``).
+
+    Raises:
+        SystemExit: With code 2 when the chosen backend is invalid.
     """
     chosen = getattr(args, "robustness_backend", None)
     explicit = chosen is not None
@@ -1943,7 +2160,11 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
 
 
 def _reset_state_file(session_dir: Path) -> None:
-    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Cortex KB untouched)."""
+    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Cortex KB untouched).
+
+    Args:
+        session_dir (Path): The session root directory holding ``state.json``.
+    """
     state_path = session_dir / "state.json"
     if not state_path.exists():
         return
@@ -1975,6 +2196,13 @@ def _gc_old_profile_traces(
 
     Never blocks startup (errors swallowed). Env knobs: HYPERLOOM_MN_TRACE_RETENTION_DAYS,
     HYPERLOOM_MN_TRACE_GC_DISABLE.
+
+    Args:
+        root (str | None): The trace-root directory to scan; defaults to the
+            multi-node profile-trace root.
+        retention_days (int): Age threshold in days before a trace dir is
+            removed (env-overridable).
+        keep (str | None): A directory name to always preserve (name-matched).
     """
     if os.environ.get("HYPERLOOM_MN_TRACE_GC_DISABLE", "").strip() in (
         "1", "true", "yes",
@@ -2026,7 +2254,18 @@ def _gc_old_profile_traces(
 
 
 def _resolve_mn_backend(args: argparse.Namespace) -> str:
-    """Multi-node backend selector: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob."""
+    """Multi-node backend selector: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``mn_backend``).
+
+    Returns:
+        str: The resolved multi-node backend (``rayjob`` or ``dynamo``).
+
+    Raises:
+        SystemExit: With code 2 when the resolved backend is invalid.
+    """
     backend = (
         (getattr(args, "mn_backend", None) or "").strip()
         or os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip()
@@ -2051,6 +2290,13 @@ def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
     to launch ``dynamo.sglang``/``dynamo.vllm``. Benchmarks target the Dynamo
     frontend (:8000) via ``state.service_url`` — picked up automatically by
     ``_multi_node_env.benchmark_env_for_subprocess``.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads ``nodes``,
+            ``rayjob_image``, ``rayjob_gpus_per_node``, and PD flags).
+
+    Raises:
+        SystemExit: With code 2 when a required Dynamo image is not resolvable.
     """
     nodes = max(1, int(args.nodes))
     from .multi_node.cli import cmd_create_dynamo, _load_state
@@ -2280,6 +2526,10 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
     """Replay every applied kernel-agent patch (manifest status=applied + multinode block) onto RayJob pods.
 
     Idempotent ``apply-patch`` fan-out, run only when ``--nodes>=2``. Best-effort: per-patch failures warn.
+
+    Args:
+        args: Parsed CLI arguments; reads ``nodes`` and resolves the session
+            workspace to locate applied-patch manifests.
     """
     nodes = max(1, int(getattr(args, "nodes", 1) or 1))
     if nodes < 2:
@@ -2381,6 +2631,11 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         The skip is made **detectable** so a launcher / UI never mistakes the
         run for quantized: a ``QUANTIZATION_SKIPPED:`` marker line on stdout
         plus the ``$HYPERLOOM_QUANTIZATION_SKIPPED`` env var (set to the reason).
+
+    Args:
+        args: Parsed CLI arguments; reads ``quantize`` / ``quantize_scheme`` /
+            ``gpu_type`` / ``resume`` and rewrites ``args.model`` in place to
+            the exported quantized model path on success.
     """
     # Free-text --quantize wins; otherwise resolve the structured
     # --quantize-scheme enum (the UI/backend path) to a prompt.
@@ -2473,7 +2728,17 @@ def _export_workload_envs_for_optimize(
     ep_resolved: int,
     argv: list[str] | None = None,
 ) -> None:
-    """Mirror explicit workload CLI flags (--tp/--conc/--ep) into env so executors' Magpie YAMLs honor them."""
+    """Mirror explicit workload CLI flags (--tp/--conc/--ep) into env so executors' Magpie YAMLs honor them.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads ``conc``).
+        nodes_resolved (int): The resolved node count; ``>= 2`` forces export
+            of all three knobs regardless of whether they were passed.
+        tp_resolved (int): The resolved tensor-parallel size to export as ``TP``.
+        ep_resolved (int): The resolved expert-parallel size to export as ``EP``.
+        argv (list[str] | None): The argument vector to inspect for explicit
+            flags; defaults to ``sys.argv[1:]`` when ``None``.
+    """
     argv = list(sys.argv[1:] if argv is None else argv)
     if nodes_resolved >= 2 or _argv_has_option(argv, "--tp"):
         os.environ["TP"] = str(tp_resolved)
@@ -3387,7 +3652,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
 
 def _default_research_lane_capacity() -> int:
-    """Default ``--research-lane-capacity``: $INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY else the GPU ceiling (2×GPU)."""
+    """Default ``--research-lane-capacity``: $INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY else the GPU ceiling (2×GPU).
+
+    Returns:
+        int: The resolved research-lane capacity (env value when set and
+            parseable, otherwise the policy GPU ceiling).
+    """
     env = os.environ.get("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY")
     if env:
         try:
@@ -4665,6 +4935,14 @@ def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
     Pure read of state.json / session_breakdown.json / langfuse_receipt.json.
     Returns flags used by :func:`_run_recover_session` to decide whether the
     session still needs a (re)build + Langfuse push.
+
+    Args:
+        session_dir (Path): The session directory to inspect.
+
+    Returns:
+        dict[str, Any]: A status mapping with ``close_done``,
+            ``breakdown_exists``, ``breakdown_recorded``, ``counts_final``,
+            and ``looks_complete`` flags.
     """
     import json
 
@@ -4704,6 +4982,14 @@ def _run_recover_session(args: argparse.Namespace) -> int:
     receipt into the breakdown, and attaches the full breakdown JSON to the
     session's trace. Idempotent across processes (guarded by the persisted
     Langfuse receipt), so re-running is safe.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads
+            ``session_dir``, ``force``, and ``backfill_trace``).
+
+    Returns:
+        int: The process exit code (``0`` on success, ``2`` when the session
+            dir is missing, ``1`` on breakdown rebuild failure).
     """
     session_dir = args.session_dir.resolve()
     if not session_dir.is_dir():

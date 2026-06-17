@@ -193,7 +193,13 @@ class IntentRouter:
         self.state.pending_proposals[msg.msg_id] = pending
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
-        """Apply a Critic ``review_verdict`` to its target proposal; legacy verdict_map collapsed (approve > reject > needs_review)."""
+        """Apply a Critic ``review_verdict`` to its target proposal; legacy verdict_map collapsed (approve > reject > needs_review).
+
+        Args:
+            source: The agent (Critic) emitting the verdict.
+            intent: The REVIEW_VERDICT intent; payload carries
+                ``target_proposal_msg_id`` and ``verdict``/``verdict_map``.
+        """
         target = intent.payload["target_proposal_msg_id"]
         pending = self.state.pending_proposals.get(target)
         verdict_map = intent.payload.get("verdict_map")
@@ -235,7 +241,14 @@ class IntentRouter:
         verdict: str,
         reasoning: str,
     ) -> None:
-        """Legacy v0.6 single-verdict handler (approve materialises proposal as-is); mirrors integrate_patch/specialist verdicts onto specialist_patch_verdicts for PolicyGate."""
+        """Legacy v0.6 single-verdict handler (approve materialises proposal as-is); mirrors integrate_patch/specialist verdicts onto specialist_patch_verdicts for PolicyGate.
+
+        Args:
+            source: The agent emitting the verdict.
+            pending: The pending proposal the verdict targets.
+            verdict: The collapsed verdict (approve / reject / needs_review).
+            reasoning: Free-text reasoning recorded with the verdict.
+        """
         pending.decided = True
         pending.verdict = verdict
         await self.bus.append_and_seq(Message.new(
@@ -429,7 +442,12 @@ class IntentRouter:
     async def _handle_specialist_done(
         self, source: str, intent: Intent,
     ) -> None:
-        """Handle a ``specialist_done`` intent (source ``specialist:<task_id>`` per Inv-5.3 / R3); bookkeeping in _record_specialist_result."""
+        """Handle a ``specialist_done`` intent (source ``specialist:<task_id>`` per Inv-5.3 / R3); bookkeeping in _record_specialist_result.
+
+        Args:
+            source: The emitting agent, expected as ``specialist:<task_id>``.
+            intent: The SPECIALIST_DONE intent carrying the done payload.
+        """
         payload = dict(intent.payload or {})
         task_id = self._task_id_from_specialist_source(source)
         task: Task | None = None
@@ -775,7 +793,13 @@ class IntentRouter:
         ))
 
     async def _handle_escalate_strategy_change(self, source: str, intent: Intent) -> None:
-        """Process ``escalate_strategy_change`` (KB_design §3.8 §7.3 + §3.13 M7 §5.3); broadcasts strategy_change, acts on closed-vocab hints, drops unknown (Inv-8.2)."""
+        """Process ``escalate_strategy_change`` (KB_design §3.8 §7.3 + §3.13 M7 §5.3); broadcasts strategy_change, acts on closed-vocab hints, drops unknown (Inv-8.2).
+
+        Args:
+            source: The agent issuing the escalation.
+            intent: The ESCALATE_STRATEGY_CHANGE intent; ``payload`` may carry a
+                closed-vocab ``next_action_hint``.
+        """
         payload = dict(intent.payload or {})
         # Always emit the broadcast first (back-compat with legacy contract tests).
         await self.bus.append_and_seq(Message.new(
