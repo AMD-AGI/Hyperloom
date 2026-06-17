@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import fnmatch
 import functools
 import gzip
 import json
@@ -21,7 +22,9 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +57,303 @@ from tracelens_skill_runner import (
 
 # Standalone-tool workspace-root resolver (cannot import inference_optimizer.paths; see _paths.py).
 from _paths import workspace_root
+
+
+# ---------------------------------------------------------------------------
+# Dict-first op -> .cu resolver (ground-truth ``op_to_source.json``).
+#
+# TraceLens emits only a CPU op name, a ``.py`` launcher, and (assumed) a device
+# ``Kernel Name`` column. Hyperloom owns the op -> editable ``.cu`` mapping via a
+# curated JSON that is the ground truth (it may be edited over time). This block
+# is the single reader of that JSON.
+#
+# Resolution by ``kind``:
+#   * ``single``    -> one (or, defensively, several) editable ``.cu``.
+#   * ``dispatch``  -> exactly one of N routes runs; the route is chosen by
+#                      fnmatch-ing the device ``Kernel Name`` against
+#                      ``routes[].match``.
+#   * ``composite`` -> several sub-kernels that all run; every ``resolved`` /
+#                      ``patchable`` route is a separate optimization target
+#                      (fan-out -> one GEAK run each).
+#
+# Paths are taken straight from the JSON's absolute path fields (``abs_path`` or
+# ``abs_path_sglang`` / ``abs_path_vllm``), selected by the candidate's
+# framework. ``rel_path`` is intentionally ignored.
+# ---------------------------------------------------------------------------
+
+# Vendored ground-truth dictionary (committed under tools/data/).
+_OP_TO_SOURCE_JSON = Path(__file__).resolve().parent / "data" / "op_to_source.json"
+
+# Statuses that mean "we have an editable device source to optimize".
+_ROUTABLE_STATUS = "resolved"
+
+
+@dataclass
+class OpResolution:
+    """One op's resolution against the ground-truth dictionary.
+
+    Attributes:
+        op_name: The CPU op name that was looked up.
+        kind: ``single`` / ``dispatch`` / ``composite``.
+        status: ``resolved`` / ``non_rewritable`` / ``no_kernel`` / ``unresolved``.
+        patchable: The curated patchability verdict (may be ``None``).
+        framework: Framework that owns the source (``aiter``/``vllm``/...).
+        sources: Absolute editable ``.cu`` path(s) this resolution owns;
+            empty when there is no editable source.
+        reason: Skip reason (``triton``/``aten``/...) or the entry ``label``.
+        matched_route: For ``dispatch``, the ``match`` glob that fired.
+        fanout: For ``composite``, one sub-resolution per route that all run.
+        resolution_method: Always ``op_to_source`` (stamped onto candidates).
+        target_index: Which of ``sources`` this (possibly fanned-out) leaf
+            optimizes; see :meth:`leaf_resolutions`.
+    """
+
+    op_name: str
+    kind: str
+    status: str
+    patchable: bool | None
+    framework: str | None
+    sources: list[str] = field(default_factory=list)
+    reason: str = ""
+    matched_route: str | None = None
+    fanout: list["OpResolution"] = field(default_factory=list)
+    resolution_method: str = "op_to_source"
+    target_index: int = 0
+
+    @property
+    def primary_source(self) -> str:
+        """The editable ``.cu`` this leaf optimizes (the GEAK ``--kernel-path``), or ``""``."""
+        if 0 <= self.target_index < len(self.sources):
+            return self.sources[self.target_index]
+        return self.sources[0] if self.sources else ""
+
+    @property
+    def is_routable(self) -> bool:
+        """True when there is a resolved, patchable, editable source to optimize."""
+        return (
+            self.status == _ROUTABLE_STATUS
+            and bool(self.patchable)
+            and bool(self.sources)
+        )
+
+    def leaf_resolutions(self) -> list["OpResolution"]:
+        """Expand into one routable leaf per editable ``.cu`` to optimize.
+
+        ``composite`` flattens its routable sub-routes; a routable
+        ``single``/``dispatch`` with N ``sources`` yields N leaves (one per
+        ``.cu``); a non-routable resolution yields none. Each leaf routes to its
+        own GEAK run via :attr:`primary_source`.
+        """
+        if self.kind == "composite" and self.fanout:
+            return [
+                leaf
+                for sub in self.fanout
+                if sub.is_routable
+                for leaf in sub.leaf_resolutions()
+            ]
+        if not self.is_routable:
+            return []
+        return [replace(self, target_index=i) for i in range(len(self.sources))]
+
+    def stamp_onto(self, item: dict[str, Any]) -> None:
+        """Record this verdict on a candidate (audit + classify_patchability)."""
+        item["source_resolution_method"] = self.resolution_method
+        item["op_to_source_status"] = self.status
+        item["op_to_source_kind"] = self.kind
+        item["op_to_source_patchable"] = self.patchable
+        item["op_to_source_reason"] = self.reason
+        if self.matched_route:
+            item["op_to_source_matched_route"] = self.matched_route
+
+    def apply_to(self, item: dict[str, Any]) -> None:
+        """Override an item's source with this leaf's editable ``.cu`` (ground truth).
+
+        Promotes the prior ``.py`` launcher to ``launcher_source_file`` and stamps
+        the op's full ``.cu`` set on ``kernel_sources`` (sibling context).
+        """
+        launcher = item.get("source_file") or item.get("tracelens_launcher_path") or ""
+        item["source_file"] = self.primary_source
+        item["kernel_sources"] = list(self.sources)
+        if launcher and launcher != self.primary_source:
+            item["launcher_source_file"] = launcher
+            item["source_promoted_from_launcher"] = True
+        self.stamp_onto(item)
+
+
+@lru_cache(maxsize=1)
+def load_mapping() -> dict[str, Any]:
+    """Load and cache the vendored ground-truth ``data/op_to_source.json``.
+
+    Returns:
+        The parsed mapping (op name -> entry), or ``{}`` if unreadable.
+    """
+    try:
+        with open(_OP_TO_SOURCE_JSON, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _as_path_list(value: Any) -> list[str]:
+    """Normalize a path field (str | list | null) to a list of non-empty strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [p for p in value if isinstance(p, str) and p.strip()]
+    return []
+
+
+class OpResolver:
+    """Reads the ground-truth dictionary and resolves a CPU op to its ``.cu``.
+
+    Resolution by ``kind``: ``single`` -> the entry's editable source(s);
+    ``dispatch`` -> the one route whose ``match`` glob fits the device kernel
+    name (else the ``default``); ``composite`` -> a fan-out of per-route
+    sub-resolutions that all run. Paths come straight from the JSON's
+    ``abs_path`` / ``abs_path_sglang`` / ``abs_path_vllm`` fields; ``rel_path``
+    is never used.
+    """
+
+    def __init__(self, mapping: dict[str, Any]):
+        self.mapping = mapping
+
+    def resolve_op_source(
+        self,
+        op_name: str,
+        framework: str | None = None,
+        device_kernel_name: str | None = None,
+    ) -> OpResolution | None:
+        """Resolve ``op_name`` to an :class:`OpResolution`, or ``None`` on a dict miss."""
+        entry = self.mapping.get(op_name)
+        if entry is None:
+            return None
+        # ``framework`` selects the container path (sglang/vllm); the entry's own
+        # ``framework`` field (the kernel owner) flows into OpResolution.framework
+        # via ``_node`` but must not override the container selector.
+        kind = str(entry.get("kind") or "single")
+        if kind == "dispatch":
+            return self._dispatch(op_name, entry, framework, device_kernel_name)
+        if kind == "composite":
+            return self._composite(op_name, entry, framework)
+        return self._node(op_name, entry, framework, kind="single")
+
+    def _select_paths(self, node: dict[str, Any], framework: str | None) -> list[str]:
+        """Pick the absolute editable path(s) for ``node``.
+
+        For a split per-container entry (``abs_path_sglang`` / ``abs_path_vllm``),
+        route to whichever container's source is installed on disk. Only when both
+        or neither are present do we fall back to the ``framework`` hint, then to
+        sglang. Single ``abs_path`` entries resolve regardless.
+        """
+        def present(path: str) -> bool:
+            try:
+                return bool(path) and os.path.exists(path)
+            except OSError:
+                return False
+
+        fw = (framework or "").strip().lower()
+        sgl = _as_path_list(node.get("abs_path_sglang"))
+        vll = _as_path_list(node.get("abs_path_vllm"))
+        if sgl or vll:
+            sgl_present = any(present(p) for p in sgl)
+            vll_present = any(present(p) for p in vll)
+            if sgl_present and not vll_present:
+                return sgl
+            if vll_present and not sgl_present:
+                return vll
+            if fw == "vllm" and vll:
+                return vll
+            if fw == "sglang" and sgl:
+                return sgl
+            return sgl or vll
+        return _as_path_list(node.get("abs_path"))
+
+    def _node(
+        self,
+        op_name: str,
+        node: dict[str, Any],
+        framework: str | None,
+        *,
+        kind: str,
+        matched_route: str | None = None,
+    ) -> OpResolution:
+        """Build an :class:`OpResolution` from a single entry or route node."""
+        status = str(node.get("status") or "unresolved")
+        sources = self._select_paths(node, framework) if status == _ROUTABLE_STATUS else []
+        return OpResolution(
+            op_name=op_name,
+            kind=kind,
+            status=status,
+            patchable=node.get("patchable"),
+            framework=node.get("framework") or framework,
+            sources=sources,
+            reason=str(node.get("reason") or node.get("label") or ""),
+            matched_route=matched_route,
+        )
+
+    def _dispatch(
+        self,
+        op_name: str,
+        entry: dict[str, Any],
+        framework: str | None,
+        device_kernel_name: str | None,
+    ) -> OpResolution:
+        """Resolve a ``dispatch`` entry by matching the device kernel name to a route."""
+        name = (device_kernel_name or "").strip()
+        if name:
+            for route in entry.get("routes") or []:
+                pattern = str(route.get("match") or "")
+                if pattern and fnmatch.fnmatch(name, pattern):
+                    return self._node(
+                        op_name, route, framework,
+                        kind="dispatch", matched_route=pattern,
+                    )
+        default = entry.get("default") or {"status": "unresolved"}
+        return self._node(op_name, default, framework, kind="dispatch")
+
+    def _composite(
+        self, op_name: str, entry: dict[str, Any], framework: str | None,
+    ) -> OpResolution:
+        """Resolve a ``composite`` entry into a fan-out of per-route resolutions."""
+        fanout = [
+            self._node(
+                op_name, route, framework, kind="composite",
+                matched_route=str(route.get("match") or "") or None,
+            )
+            for route in entry.get("routes") or []
+        ]
+        routable = [r for r in fanout if r.is_routable]
+        return OpResolution(
+            op_name=op_name,
+            kind="composite",
+            status=_ROUTABLE_STATUS if routable else "non_rewritable",
+            patchable=bool(routable),
+            framework=framework,
+            sources=[],
+            reason="" if routable else "composite: no rewritable routes",
+            fanout=fanout,
+        )
+
+
+def resolve_op_source(
+    op_name: str,
+    framework: str | None = None,
+    device_kernel_name: str | None = None,
+    *,
+    mapping: dict[str, Any] | None = None,
+) -> OpResolution | None:
+    """Resolve a CPU op to its editable ``.cu`` via the ground-truth dictionary.
+
+    Thin wrapper over :class:`OpResolver`; returns ``None`` on a dictionary miss
+    (the caller then falls back to trusting the TraceLens ``.py`` launcher).
+    """
+    table = mapping if mapping is not None else load_mapping()
+    return OpResolver(table).resolve_op_source(
+        op_name, framework=framework, device_kernel_name=device_kernel_name,
+    )
 
 
 HIGH_IDLE_PCT_THRESHOLD_DEFAULT = 80.0
@@ -946,6 +1246,21 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
     source_file = str(candidate.get("source_file") or "")
     name = str(candidate.get("name") or "")
     lower_name = name.lower()
+    # Dict-first: honor the curated op_to_source verdict when present. A routable
+    # entry (patchable + editable .cu) is ground truth and bypasses the legacy
+    # marker/library/root heuristics; a non-rewritable verdict reports its reason.
+    # A None verdict (unresolved/miss) falls through to the heuristics below.
+    if candidate.get("source_resolution_method") == "op_to_source":
+        patchable = candidate.get("op_to_source_patchable")
+        if patchable is True and source_file:
+            return True, ""
+        if patchable is False:
+            reason = (
+                str(candidate.get("op_to_source_reason") or "").strip()
+                or str(candidate.get("op_to_source_status") or "").strip()
+                or "non-rewritable"
+            )
+            return False, f"op_to_source: {reason}"
     if not source_file:
         return False, "source file not resolved"
     if candidate.get("source_type") == "vendor_binary":
@@ -1832,6 +2147,48 @@ def load_op_category_map(
     return out
 
 
+def _expand_op_fanout(top: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Resolve each op against the dictionary and fan out one candidate per ``.cu``.
+
+    A routable op with N editable sources -- composite sub-kernels, or a
+    ``single``/``dispatch`` entry with several ``.cu`` -- becomes N candidates,
+    each routed to its own GEAK run; the op's ``duration_us`` is split evenly so
+    ``gpu_pct`` is not inflated. Non-routable ops and dictionary misses pass
+    through unchanged, with their :class:`OpResolution` cached on
+    ``_op_resolution`` for the finalize loop.
+
+    Framework comes from ``HYPERLOOM_FRAMEWORK`` (an explicit override for the
+    rare/offline case where both or neither container source is on disk); in a
+    real container ``OpResolver._select_paths`` picks the installed path.
+    """
+    framework = os.environ.get("HYPERLOOM_FRAMEWORK", "").strip().lower() or None
+    expanded: list[dict[str, Any]] = []
+    for item in top:
+        res = resolve_op_source(
+            str(item.get("name") or ""), framework=framework,
+            device_kernel_name=str(item.get("device_kernel_name") or "") or None,
+        )
+        if res is None:
+            item["_op_resolution"] = None
+            expanded.append(item)
+            continue
+        leaves = res.leaf_resolutions()
+        if len(leaves) <= 1:
+            # 1 leaf -> attach it; 0 leaves (non-routable/miss) -> keep res for stamping.
+            item["_op_resolution"] = leaves[0] if leaves else res
+            expanded.append(item)
+            continue
+        orig_dur = item.get("duration_us", 0.0) or 0.0
+        for idx, leaf in enumerate(leaves):
+            clone = dict(item)
+            clone["_op_resolution"] = leaf
+            clone["op_fanout_index"] = idx
+            clone["op_fanout_total"] = len(leaves)
+            clone["duration_us"] = orig_dur / len(leaves)
+            expanded.append(clone)
+    return expanded
+
+
 def _finalize_candidates(
     top: list[dict[str, Any]], *, total_dur: float | None = None,
     perf_report_csv_dir: Path | str | None = None,
@@ -1844,6 +2201,9 @@ def _finalize_candidates(
         load_op_category_map(perf_report_csv_dir)
         if perf_report_csv_dir is not None else {}
     )
+    # Dict-first: resolve each op to its editable .cu (ground truth) and expand
+    # composite fan-out into one candidate per sub-kernel before finalizing.
+    top = _expand_op_fanout(top)
     sum_dur = total_dur if total_dur is not None else sum(it.get("duration_us", 0.0) for it in top)
     sum_dur = sum_dur or 1.0
     for idx, item in enumerate(top, 1):
@@ -1858,6 +2218,37 @@ def _finalize_candidates(
         if not item.get("gpu_pct"):
             item["gpu_pct"] = round(item["duration_us"] / sum_dur * 100.0, 3)
         item["duration_us"] = round(item["duration_us"], 3)
+        # Dict-first source resolution. A routable verdict overrides source_file
+        # with the curated .cu and skips the legacy launcher/grep/pybind chain;
+        # a definitive non-rewritable verdict is stamped for classify_patchability;
+        # a miss or unresolved route leaves the .py-launcher pipeline below intact.
+        res = item.pop("_op_resolution", None)
+        if res is not None and res.is_routable:
+            res.apply_to(item)
+            item["kernel_repo"] = find_repo_root(item.get("source_file", ""))
+            item["source_type"] = source_type_for(item["name"], item.get("source_file", ""))
+            item["runtime_generated_kernel"] = False
+            reusable, skip_reason = classify_patchability(item)
+            item["reusable_native_kernel"] = reusable
+            item["skip_reason"] = skip_reason
+            item["benchmark_files"] = find_benchmark_files(
+                item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
+            )
+            item["is_multigpu"] = is_multigpu_kernel(item["name"], item.get("source_file", ""))
+            item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
+            item["recommended_backends"] = recommend_backends(item)
+            item["optimization_notes"] = build_notes(item)
+            if op_cat_map and not str(item.get("tracelens_category") or "").strip():
+                csv_cat = op_cat_map.get(str(item.get("name") or ""))
+                if csv_cat:
+                    item["tracelens_category"] = csv_cat
+            item["kernel_category"] = derive_kernel_category(item)
+            item.setdefault("source_path", item.get("source_file", ""))
+            continue
+        if res is not None and res.status in {"non_rewritable", "no_kernel"}:
+            # Curated verdict: not rewritable. Keep the .py launcher as context but
+            # let classify_patchability honor the dictionary's reason.
+            res.stamp_onto(item)
         if not item.get("source_file"):
             item["source_file"] = locate_source_via_grep(item["name"])
         # Promote a tiny pybind shim TU to the real device code.
