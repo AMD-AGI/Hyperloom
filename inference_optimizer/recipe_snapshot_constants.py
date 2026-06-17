@@ -64,6 +64,8 @@ F_LABEL_HARDWARE:          Final[str] = "hardware"
 F_LABEL_FRAMEWORK:         Final[str] = "framework"
 F_LABEL_FRAMEWORK_VERSION: Final[str] = "framework_version"
 F_LABEL_PRECISION:         Final[str] = "precision"
+F_LABEL_MODEL_TYPE:        Final[str] = "model_type"
+F_LABEL_ARCHITECTURES:     Final[str] = "architectures"
 
 # PUT response fields
 F_CANONICAL_ID:  Final[str] = "canonical_id"
@@ -182,6 +184,8 @@ DEFAULT_HARDWARE_SLUG:          Final[str] = "unknown_hw"
 DEFAULT_FRAMEWORK_SLUG:         Final[str] = "unknown_framework"
 DEFAULT_FRAMEWORK_VERSION_SLUG: Final[str] = "unknown_version"
 DEFAULT_PRECISION_SLUG:         Final[str] = "unknown_precision"
+DEFAULT_MODEL_TYPE_SLUG:        Final[str] = "unknown_model_type"
+DEFAULT_ARCHITECTURES_SLUG:     Final[str] = "unknown_arch"
 
 
 def _slug(value: str, default: str) -> str:
@@ -209,37 +213,42 @@ def _slug(value: str, default: str) -> str:
     return cleaned or default
 
 
+def _architectures_slug(value: "str | list[str]") -> str:
+    """Serialize an architectures value into a stable slug for canonical_id.
+
+    Accepts a list (from config.json) or a pre-slugged string. Lists are
+    sorted for determinism and joined with ``+``.
+    """
+    if isinstance(value, list):
+        parts = sorted(_slug(v, "") for v in value if (v or "").strip())
+        return "+".join(parts) if parts else DEFAULT_ARCHITECTURES_SLUG
+    return _slug(str(value), DEFAULT_ARCHITECTURES_SLUG)
+
+
 def recipe_canonical_id(
     *,
     model: str,
     hardware: str,
     framework: str,
+    model_type: str = "",
+    architectures: "str | list[str]" = "",
     framework_version: str,
     precision: str,
 ) -> str:
     """Build the recipe ``canonical_id``:
-    ``inference:{model}:{hardware}:{framework}:{framework_version}:{precision}``.
+    ``inference:{model}:{hardware}:{framework}:{model_type}:{architectures}:{framework_version}:{precision}``.
 
-    Identity-strength order (strongest -> weakest) so prefix queries are
-    useful before all components are known. Keyword-only to prevent
-    positional re-ordering; missing components fall back to ``DEFAULT_*_SLUG``
-    so the id is always well-formed (6 colon-separated segments).
-
-    Args:
-        model: The model identifier.
-        hardware: The hardware/GPU identifier.
-        framework: The serving framework name.
-        framework_version: The framework version.
-        precision: The precision/quantization scheme.
-
-    Returns:
-        The six-segment colon-separated canonical id.
+    8 colon-separated segments: 1 prefix + 7 identity dimensions.
+    Dimension order reflects fallback priority: model is dropped first
+    (cross-model same-architecture reuse), then framework_version.
     """
     return (
         f"inference:"
         f"{_slug(model,             DEFAULT_MODEL_SLUG)}:"
         f"{_slug(hardware,          DEFAULT_HARDWARE_SLUG)}:"
         f"{_slug(framework,         DEFAULT_FRAMEWORK_SLUG)}:"
+        f"{_slug(model_type,        DEFAULT_MODEL_TYPE_SLUG)}:"
+        f"{_architectures_slug(architectures)}:"
         f"{_slug(framework_version, DEFAULT_FRAMEWORK_VERSION_SLUG)}:"
         f"{_slug(precision,         DEFAULT_PRECISION_SLUG)}"
     )
@@ -250,10 +259,12 @@ def canonical_labels(
     model: str,
     hardware: str,
     framework: str,
+    model_type: str = "",
+    architectures: "str | list[str]" = "",
     framework_version: str,
     precision: str,
 ) -> dict[str, str]:
-    """Return the five-key ``labels`` dict mirroring the canonical id, so
+    """Return the 7-key ``labels`` dict mirroring the canonical id, so
     ``/recipes/search`` can ``label_match`` by individual dimension. Slug
     values match :func:`recipe_canonical_id`.
 
@@ -271,6 +282,8 @@ def canonical_labels(
         F_LABEL_MODEL:             _slug(model,             DEFAULT_MODEL_SLUG),
         F_LABEL_HARDWARE:          _slug(hardware,          DEFAULT_HARDWARE_SLUG),
         F_LABEL_FRAMEWORK:         _slug(framework,         DEFAULT_FRAMEWORK_SLUG),
+        F_LABEL_MODEL_TYPE:        _slug(model_type,        DEFAULT_MODEL_TYPE_SLUG),
+        F_LABEL_ARCHITECTURES:     _architectures_slug(architectures),
         F_LABEL_FRAMEWORK_VERSION: _slug(framework_version, DEFAULT_FRAMEWORK_VERSION_SLUG),
         F_LABEL_PRECISION:         _slug(precision,         DEFAULT_PRECISION_SLUG),
     }

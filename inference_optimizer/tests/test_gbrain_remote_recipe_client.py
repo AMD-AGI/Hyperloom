@@ -71,7 +71,7 @@ def test_page_to_recipe_maps_identity_and_config() -> None:
     assert r is not None
     # Unified nested KB-interface envelope: identity under ``labels``,
     # champion under ``body.best_config``, throughput under ``metrics``.
-    assert r["canonical_id"] == "inference:qwen3-32b:mi300x:sglang:unknown_version:fp8"
+    assert r["canonical_id"] == "inference:qwen3-32b:mi300x:sglang:unknown_model_type:unknown_arch:unknown_version:fp8"
     assert r["labels"]["model"] == "qwen3-32b"
     assert r["labels"]["hardware"] == "mi300x"
     best_config = r["body"]["best_config"]
@@ -93,20 +93,20 @@ def test_get_recipe_roundtrip() -> None:
     c = _client({
         "cortex/recipe/qwen3-32b/mi300x": _recipe_page("Qwen3-32B", "mi300x", "sglang", "fp8"),
     })
-    cid = "inference:qwen3-32b:mi300x:sglang:unknown_version:fp8"
+    cid = "inference:qwen3-32b:mi300x:sglang:unknown_model_type:unknown_arch:unknown_version:fp8"
     r = c.get_recipe(canonical_id=cid)
     assert r is not None and r["canonical_id"] == cid
 
 
 def test_get_recipe_uses_direct_slug_fast_path() -> None:
-    slug = "recipe-snapshot/inference/qwen3-32b/mi300x/sglang/unknown_version/fp8"
+    slug = "recipe-snapshot/inference/qwen3-32b/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8"
     c = _client({
         slug: _recipe_page("Qwen3-32B", "mi300x", "sglang", "fp8"),
-        "recipe-snapshot/inference/other/mi300x/sglang/unknown_version/fp8": (
+        "recipe-snapshot/inference/other/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/fp8": (
             _recipe_page("Other", "mi300x", "sglang", "fp8")
         ),
     })
-    cid = "inference:qwen3-32b:mi300x:sglang:unknown_version:fp8"
+    cid = "inference:qwen3-32b:mi300x:sglang:unknown_model_type:unknown_arch:unknown_version:fp8"
 
     r = c.get_recipe(canonical_id=cid)
 
