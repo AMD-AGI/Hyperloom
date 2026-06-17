@@ -298,7 +298,7 @@ def _hash_for(family: str, event: dict[str, Any]) -> str | None:
 
 
 def _normalise_extra_server_args_key(payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalise the legacy ``extra_sglang_args`` key to the canonical one.
+    """Normalise the legacy SGLang extra-args key to the canonical one.
 
     Returns a shallow copy with ``params.extra_server_args`` populated from
     the compat helper (originals not mutated). No-op when no extra-args key
