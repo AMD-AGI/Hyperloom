@@ -89,6 +89,10 @@ DEFAULT_MAX_HOURS = 12.0
 DEFAULT_TARGET_GAIN = 100.0
 DEFAULT_RESULTS_PATH = "$RESULT_DIR"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16
+# Models whose config.json ``max_position_embeddings`` is at or below this are
+# skipped outright: their context window is too small to be worth a sandbox slot
+# (independent of the per-workload ``context_too_short`` check).
+MIN_MAX_POSITION_EMBEDDINGS = 2048
 
 # Hardware facts from AMD Instinct datasheets. tp_thresholds_b is CI policy:
 # MI300X baseline (32/128/256B) scaled by per-GPU HBM capacity.
@@ -500,6 +504,9 @@ class DetectedConfig:
     image: str
     params_b: float
     max_context_tokens: int
+    # Raw ``config.json`` ``max_position_embeddings`` (0 when absent); used for
+    # the absolute small-context skip floor (``MIN_MAX_POSITION_EMBEDDINGS``).
+    max_position_embeddings: int = 0
 
 
 def _quant_type(config: dict) -> str:
@@ -770,6 +777,8 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str, gpu_type: str | None = None
     precision = detect_precision(config)
     params_b = detect_param_count(info, config)
     max_context_tokens = detect_max_context_tokens(config)
+    mpe_raw = config.get("max_position_embeddings")
+    max_position_embeddings = int(mpe_raw) if isinstance(mpe_raw, (int, float)) and mpe_raw > 0 else 0
     tp = detect_tp(params_b, precision, gpu_type)
     conc = detect_concurrency(tp, framework)
     image = detect_image(framework, repo_id)
@@ -783,6 +792,7 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str, gpu_type: str | None = None
         image=image,
         params_b=params_b,
         max_context_tokens=max_context_tokens,
+        max_position_embeddings=max_position_embeddings,
     )
     log.info(
         "[%s] arch=%s params=%.1fB context=%d framework=%s precision=%s gpu=%s tp=%d conc=%d",
@@ -1591,6 +1601,19 @@ def process_model(
     if detected:
         rec.detected = asdict(detected)
         rec.category = _category_from_arch(rec.detected.get("arch", ""))
+        # Absolute small-context floor: skip models whose config.json
+        # max_position_embeddings is present and <= MIN_MAX_POSITION_EMBEDDINGS,
+        # regardless of the requested isl/osl. (A missing config.json already
+        # fails auto_detect above and is skipped there.)
+        mpe = int(rec.detected.get("max_position_embeddings") or 0)
+        if mpe and mpe <= MIN_MAX_POSITION_EMBEDDINGS:
+            rec.status = "skipped"
+            rec.error = (
+                "context_too_short: "
+                f"max_position_embeddings={mpe} <= {MIN_MAX_POSITION_EMBEDDINGS}"
+            )
+            log.warning("[%s] skipping: %s", repo_id, rec.error)
+            return rec
         max_context = int(rec.detected.get("max_context_tokens") or 0)
         if context_too_short(max_context, isl, osl):
             required = isl + osl + DEFAULT_CONTEXT_RESERVE_TOKENS
