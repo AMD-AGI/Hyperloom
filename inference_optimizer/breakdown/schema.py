@@ -176,6 +176,9 @@ class Baseline(TypedDict, total=False):
         attempts_history (list[BaselineAttemptSummary]): Recorded baseline attempts.
         failure_streak (int): Consecutive baseline failures.
         invocation (BenchmarkInvocation): Replayable launch record.
+        roofline_ceiling (dict[str, Any]): Standalone baseline-arm roofline
+            ceiling backup (theoretical peak + mem/cmp + perfmodel breakdown);
+            frontend ceiling fallback when the roofline step failed. {} when absent.
     """
     throughput_tok_s_per_gpu: float
     accuracy: float
@@ -187,6 +190,7 @@ class Baseline(TypedDict, total=False):
     attempts_history: list[BaselineAttemptSummary]
     failure_streak: int
     invocation: BenchmarkInvocation
+    roofline_ceiling: dict[str, Any]
 
 
 # §4 Final state — SaFE contract core

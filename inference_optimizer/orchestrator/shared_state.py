@@ -355,6 +355,10 @@ class SharedState:
     # ``baseline_tput`` carries the only measured number.
     baseline_hot_tput: float = 0.0
     baseline_accuracy: float = 0.0
+    # Standalone baseline-arm roofline ceiling computed right after baseline
+    # lands; backs up snapshot ceiling so the frontend has data even when the
+    # roofline (profile + trace_analyze) step fails. Empty until baseline runs.
+    baseline_roofline_ceiling: dict[str, Any] = field(default_factory=dict)
     baseline_failure_streak: int = 0
     baseline_arg_error_streak: int = 0
     # Combined backstop: ANY baseline failure (regardless of error_class) counts
@@ -2199,6 +2203,120 @@ class SharedState:
             if isinstance(val, (int, float)) and val > 0:
                 return float(val)
         return 0.0
+
+    def record_baseline_roofline_ceiling(self) -> dict[str, Any]:
+        """Compute a standalone baseline-arm roofline ceiling and cache it.
+
+        Runs purely off the baseline materialized yaml + model config (no
+        profile trace), so it succeeds whenever baseline ran. Stamps the same
+        ceiling/perfmodel fields a snapshot carries (trace-only fields stay
+        absent) into ``baseline_roofline_ceiling`` as a frontend backup for
+        when the roofline (profile + trace_analyze) step fails. Best-effort;
+        returns ``{}`` and leaves the field empty on any failure.
+        """
+        try:
+            from .roofline_ceiling import (
+                RooflineBreakdown,
+                apply_runtime_dtype,
+                compute_roofline_breakdown_from_state,
+                compute_roofline_from_perfmodel,
+                load_model_meta,
+                resolve_runtime_dtype,
+                resolve_runtime_workload,
+            )
+            from .roofline_snapshot import build_roofline_snapshot
+        except Exception:  # noqa: BLE001 — import guard, best-effort
+            return {}
+
+        achieved = self._resolve_baseline_achieved_tput()
+        breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
+        try:
+            breakdown = compute_roofline_breakdown_from_state(
+                self, arm="baseline",
+            )
+        except Exception:  # noqa: BLE001 — ceiling is best-effort
+            pass
+        peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
+        if peak_tput <= 0:
+            return {}
+
+        ts_iso = _now_iso()
+        ceiling = build_roofline_snapshot(
+            snapshot_id=None,
+            ts=ts_iso,
+            analysis_md_path="",
+            theoretical_peak_tok_per_sec=peak_tput,
+            achieved_tok_per_sec=achieved,
+            mem_ceiling_tok_per_sec=float(breakdown.mem_tok_per_sec or 0.0),
+            cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
+            bound_kind=breakdown.bound_kind,
+        )
+        # Mark provenance: this is the baseline-arm ceiling backup, not a
+        # trace-derived snapshot.
+        ceiling["ceiling_arm"] = "baseline"
+
+        # Per-op PerfModel breakdown + provenance (mirrors record_trace_analyze).
+        try:
+            runtime = resolve_runtime_workload(self, arm="baseline")
+            meta = load_model_meta(
+                runtime.model_path,
+                precision_hint=runtime.precision,
+            )
+            if meta is not None:
+                rt = resolve_runtime_dtype(self, meta, arm="baseline")
+                meta = apply_runtime_dtype(meta, rt)
+                pm_bd = compute_roofline_from_perfmodel(
+                    meta=meta,
+                    gpu_type=runtime.gpu_type,
+                    concurrency=runtime.concurrency,
+                    isl=runtime.isl,
+                    osl=runtime.osl,
+                    num_gpus=runtime.tp,
+                    precision_tag=rt.compute_precision_tag
+                    or runtime.precision
+                    or "bf16",
+                )
+                ceiling["roofline_provenance"] = {
+                    "formula": "perfmodel" if pm_bd is not None else "legacy",
+                    "runtime_weight_dtype": rt.weight_dtype_tag,
+                    "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
+                    "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,
+                    "quantization": rt.quantization,
+                    "dtype_source": rt.source,
+                    "effective_concurrency": runtime.concurrency,
+                    "runtime_tp": runtime.tp,
+                    "runtime_isl": runtime.isl,
+                    "runtime_osl": runtime.osl,
+                    "runtime_precision": runtime.precision,
+                    "runtime_framework": runtime.framework,
+                }
+                if pm_bd is not None:
+                    ceiling["perfmodel_breakdown"] = {
+                        "decode_tok_per_s": pm_bd.decode_tok_per_s,
+                        "prefill_tok_per_s": pm_bd.prefill_tok_per_s,
+                        "decode_mem_tok_per_s": pm_bd.decode_mem_tok_per_s,
+                        "decode_cmp_tok_per_s": pm_bd.decode_cmp_tok_per_s,
+                        "bound_kind": pm_bd.bound_kind,
+                        "hbm_bw_gbps": pm_bd.hbm_bw_gbps,
+                        "peak_achievable_tflops": pm_bd.peak_achievable_tflops,
+                        "ops": [
+                            {
+                                "name": op.name,
+                                "flops": op.flops,
+                                "bytes_moved": op.bytes_moved,
+                                "ai": op.ai,
+                                "time_s": op.time_s,
+                                "bound": op.bound,
+                                "pct_time": op.pct_time,
+                            }
+                            for op in pm_bd.ops
+                        ],
+                    }
+        except Exception:  # noqa: BLE001 — PerfModel serialization is best-effort
+            pass
+
+        self.baseline_roofline_ceiling = ceiling
+        return ceiling
 
     def record_trace_analyze(
         self,

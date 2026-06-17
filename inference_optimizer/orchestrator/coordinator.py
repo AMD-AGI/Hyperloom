@@ -10049,6 +10049,16 @@ class Coordinator:
             }
             # seed the gaps[] ledger from baseline (best-effort).
             await self._refresh_gaps(reason="baseline_done")
+            # Standalone baseline-arm roofline ceiling (pure CPU, no GPU/trace):
+            # backs up the snapshot ceiling so the frontend still has data when
+            # the roofline (profile + trace_analyze) step later fails.
+            if isinstance(tput, (int, float)) and tput > 0:
+                try:
+                    self.shared_state.record_baseline_roofline_ceiling()
+                except Exception as exc:  # noqa: BLE001 — best-effort backup
+                    log.warning(
+                        "baseline roofline-ceiling backup failed: %r", exc,
+                    )
             # PRELUDE bootstrap (post-baseline), ordering mandatory: (1) inject warm-recipe history, (2) warm-replay, (3) auto-analysis (deferred while replay in_flight, same GPU/port), (4) research scout.
             if (
                 isinstance(tput, (int, float)) and tput > 0

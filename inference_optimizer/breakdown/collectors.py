@@ -967,6 +967,9 @@ def collect_baseline(
         "attempts_history":         history,
         "failure_streak":           int(state.get("baseline_failure_streak") or 0),
         "invocation":               invocation,
+        # Standalone baseline-arm roofline ceiling backup (state.json#baseline_roofline_ceiling);
+        # frontend ceiling fallback when the roofline step failed. {} when absent.
+        "roofline_ceiling":         state.get("baseline_roofline_ceiling") or {},
     }
 
 
