@@ -395,6 +395,65 @@ async def test_integrate_handler_revert_decision(session_dir, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
+    session_dir, tmp_path,
+):
+    """A failed re-baseline must route through the fault retry budget.
+
+    Exercises the *real* handler envelope (not a hand-built dict): an invalid
+    re-baseline yields ``status=failed`` + ``decision=REVERT``. The handler now
+    stamps a top-level fault ``error_class``, and ``record_kernel_integrate_result``
+    must mark it retryable rather than discarding it as a genuine REVERT. This
+    is the regression that bare-envelope unit tests could not catch.
+    """
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    def _fake_run(cmd, *args, **kwargs):
+        # Produce a workspace with zero throughput -> is_valid_measurement False.
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=0.0)
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="ok", stderr="",
+        )
+
+    payload = {
+        "base_tput": 800.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k_fault",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+    }
+    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    # Real handler envelope: failed re-baseline, REVERT for backward-compat,
+    # now also carrying a top-level fault error_class propagated from the
+    # re-baseline (here ``invalid_measurement``, which is deliberately NOT in
+    # the static fault whitelist — proving the status-based check, not the
+    # whitelist, is what saves the patch).
+    assert res["status"] == "failed"
+    assert res["decision"] == "REVERT"
+    assert res["error"] == "re-baseline did not succeed"
+    assert isinstance(res["error_class"], str) and res["error_class"]
+    from inference_optimizer.orchestrator import shared_state as _ss
+    assert res["error_class"] not in _ss._INTEGRATE_FAULT_ERROR_CLASSES
+
+    # The envelope must be treated as a retryable fault, not a terminal REVERT.
+    state = SharedState()
+    entry = state.record_kernel_integrate_result(res)
+    assert entry is not None
+    assert entry["last_was_fault"] is True
+    assert entry.get("retryable") is True
+    assert "rejected" not in entry
+    assert "k_fault" not in state.rejected_kernel_ids
+
+
+@pytest.mark.asyncio
 async def test_integrate_handler_reverts_applied_source_on_non_keep(
     session_dir, tmp_path,
 ):
