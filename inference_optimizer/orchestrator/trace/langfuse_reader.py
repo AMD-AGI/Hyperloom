@@ -157,10 +157,15 @@ def fetch_observations(
         log.warning("langfuse_reader: credentials incomplete; cannot fetch observations for %s", trace_id)
         return []
 
+    limit = 100
     out: list[dict[str, Any]] = []
     page = 1
-    while page <= max_pages:
-        url = f"{creds['host']}{_OBSERVATIONS_API_PATH}?traceId={trace_id}&page={page}&limit=100"
+    truncated = False
+    while True:
+        if page > max_pages:
+            truncated = True
+            break
+        url = f"{creds['host']}{_OBSERVATIONS_API_PATH}?traceId={trace_id}&page={page}&limit={limit}"
         payload = _get_json(url, creds, timeout)
         if not isinstance(payload, dict):
             break
@@ -170,36 +175,104 @@ def fetch_observations(
         out.extend(r for r in rows if isinstance(r, dict))
         meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
         total_pages = meta.get("totalPages")
-        if not isinstance(total_pages, int) or page >= total_pages:
+        if isinstance(total_pages, int):
+            if page >= total_pages:
+                break
+        elif len(rows) < limit:
+            # No usable totalPages: a short page means we've reached the end.
             break
         page += 1
+
+    if truncated:
+        log.warning(
+            "langfuse_reader: observation pagination for %s hit max_pages=%d (>%d rows); "
+            "results may be truncated",
+            trace_id,
+            max_pages,
+            max_pages * limit,
+        )
 
     if name_prefix:
         out = [o for o in out if str(o.get("name") or "").startswith(name_prefix)]
     return out
 
 
-def _extract_output(trace: dict[str, Any]) -> dict[str, Any] | None:
-    """Pull the breakdown dict out of a fetched trace's ``output``.
-
-    The Langfuse SDK / API can store ``output`` either as a dict or as a
-    JSON-encoded string; both are handled.
+def _coerce_output(output: Any) -> dict[str, Any] | None:
+    """Coerce an ``output`` value (dict or JSON-encoded string) to a dict.
 
     Args:
-        trace: A fetched trace JSON dict.
+        output: The raw ``output`` value from a trace or observation.
 
     Returns:
-        The breakdown dict, or ``None`` when ``output`` is absent / not an object.
+        The dict form, or ``None`` when absent / not an object.
     """
-    output = trace.get("output")
     if isinstance(output, str):
         try:
             output = json.loads(output)
         except (ValueError, json.JSONDecodeError):
             return None
-    if isinstance(output, dict):
-        return output
+    return output if isinstance(output, dict) else None
+
+
+def _breakdown_from_observations(observations: list[Any]) -> dict[str, Any] | None:
+    """Find the ``session_breakdown`` observation and return its ``output``.
+
+    ``record_session_breakdown`` attaches the full breakdown as the ``output``
+    of a ``session_breakdown`` span observation (not the trace root output), so
+    that is the authoritative place to recover it from.
+
+    Args:
+        observations: A list of observation dicts.
+
+    Returns:
+        The breakdown dict, or ``None`` when no usable observation is found.
+    """
+    for obs in observations:
+        if isinstance(obs, dict) and obs.get("name") == "session_breakdown":
+            bd = _coerce_output(obs.get("output"))
+            if bd is not None:
+                return bd
     return None
+
+
+def _extract_breakdown(
+    trace: dict[str, Any],
+    trace_id: str,
+    *,
+    credentials: dict[str, str] | None,
+    timeout: float,
+) -> dict[str, Any] | None:
+    """Recover the breakdown from a fetched trace, trying every known location.
+
+    Order: the ``session_breakdown`` span among the trace's embedded
+    ``observations`` (where the writer puts it) -> the trace root ``output``
+    (fast path, in case a future writer sets it) -> a dedicated observations
+    fetch for the ``session_breakdown`` span.
+
+    Args:
+        trace: The fetched trace JSON dict.
+        trace_id: The trace id (for the fallback observations fetch).
+        credentials: Optional explicit credentials override.
+        timeout: Per-request timeout in seconds.
+
+    Returns:
+        The breakdown dict, or ``None`` when not recoverable.
+    """
+    embedded = trace.get("observations")
+    if isinstance(embedded, list):
+        bd = _breakdown_from_observations(embedded)
+        if bd is not None:
+            return bd
+
+    bd = _coerce_output(trace.get("output"))
+    if bd is not None:
+        return bd
+
+    # Embedded observations were absent or only IDs: fetch them explicitly.
+    obs = fetch_observations(
+        trace_id, name_prefix="session_breakdown", credentials=credentials, timeout=timeout
+    )
+    return _breakdown_from_observations(obs)
 
 
 def fetch_session_breakdown(
@@ -231,9 +304,9 @@ def fetch_session_breakdown(
     trace = fetch_trace(resolved, credentials=credentials, timeout=timeout)
     if trace is None:
         return None
-    breakdown = _extract_output(trace)
+    breakdown = _extract_breakdown(trace, resolved, credentials=credentials, timeout=timeout)
     if breakdown is None:
-        log.warning("langfuse_reader: trace %s has no usable output (breakdown)", resolved)
+        log.warning("langfuse_reader: trace %s has no recoverable session_breakdown", resolved)
     return breakdown
 
 

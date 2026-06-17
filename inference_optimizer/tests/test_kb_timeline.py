@@ -111,7 +111,9 @@ def test_critic_kb_use_flag_in_title():
     assert "not used" in priors["title"]       # referenced_in_verdict False
 
 
-def test_observations_path_preferred_for_reads():
+def test_observations_path_preferred_when_spans_cover_all_categories():
+    # When the spans cover recipe + both critic categories, the breakdown
+    # tail / critic_iterations are NOT used (spans are authoritative).
     observations = [
         {
             "id": "o1",
@@ -125,16 +127,78 @@ def test_observations_path_preferred_for_reads():
             "startTime": "2026-06-17T07:45:00Z",
             "metadata": {"iter": 7, "verdict_count": 2, "referenced_in_verdict": True},
         },
-        {"id": "o3", "name": "kernel", "startTime": "2026-06-17T07:50:00Z", "metadata": {}},
+        {
+            "id": "o3",
+            "name": "kb_priors:iter_7",
+            "startTime": "2026-06-17T07:45:01Z",
+            "metadata": {"iter": 7, "prior_count": 4, "referenced_in_verdict": False},
+        },
+        {"id": "o4", "name": "kernel", "startTime": "2026-06-17T07:50:00Z", "metadata": {}},
     ]
     tl = build_kb_timeline(_breakdown(), observations=observations, source="langfuse", trace_id="t1")
     cats = sorted(e["category"] for e in tl["events"])
-    # warm_start + warm_replay (from kbp) + recipe_read + critic_assess (from spans);
-    # the breakdown tail/critic_iterations are NOT used when observations given.
-    assert cats == ["critic_assess", "recipe_read", "warm_replay", "warm_start"]
+    assert cats == ["critic_assess", "critic_priors", "recipe_read", "warm_replay", "warm_start"]
     read = next(e for e in tl["events"] if e["category"] == "recipe_read")
     assert read["source"] == {"span": "kb:recipe_snapshot:search", "observation_id": "o1", "trace_id": "t1"}
+    # critic_priors came from the span (iter 7), not the breakdown (iter 5).
+    priors = next(e for e in tl["events"] if e["category"] == "critic_priors")
+    assert priors["source"]["observation_id"] == "o3"
     assert tl["trace_id"] == "t1"
+
+
+def test_observations_without_kb_spans_fall_back_to_breakdown():
+    # A trace with only LLM spans (no KB spans) must NOT skip the breakdown's
+    # recipe_snapshot_reads.tail / critic_iterations sources.
+    observations = [
+        {"id": "k1", "name": "kernel", "startTime": "2026-06-17T07:40:00Z", "metadata": {}},
+        {"id": "o1", "name": "orchestration", "startTime": "2026-06-17T07:41:00Z", "metadata": {}},
+    ]
+    tl = build_kb_timeline(_breakdown(), observations=observations, source="langfuse", trace_id="t1")
+    # recipe_read (from tail) and critic_assess/priors (from critic_iterations) recovered
+    assert tl["counts"]["recipe_read"] == 1
+    assert tl["counts"]["critic_assess"] == 1
+    assert tl["counts"]["critic_priors"] == 1
+    read = next(e for e in tl["events"] if e["category"] == "recipe_read")
+    assert read["source"]["section"] == "kb_provenance.recipe_snapshot_reads.tail"
+
+
+def test_only_assess_span_still_recovers_priors_from_breakdown():
+    # A trace with only a kb_assess span must still recover kb_priors from the
+    # breakdown critic_iterations (independent per-category fallback).
+    observations = [
+        {
+            "id": "a1",
+            "name": "kb_assess:iter_7",
+            "startTime": "2026-06-17T07:45:00Z",
+            "metadata": {"iter": 7, "verdict_count": 1, "referenced_in_verdict": True},
+        }
+    ]
+    tl = build_kb_timeline(_breakdown(), observations=observations, source="langfuse", trace_id="t1")
+    assert tl["counts"]["critic_assess"] == 1   # from span (iter 7)
+    assert tl["counts"]["critic_priors"] == 1   # recovered from breakdown (iter 5)
+    assert tl["counts"]["recipe_read"] == 1     # no recipe span -> breakdown tail
+    priors = next(e for e in tl["events"] if e["category"] == "critic_priors")
+    assert priors["source"]["section"] == "critic_robustness.critic_iterations"
+
+
+def test_fetch_observations_stops_on_short_page_without_meta(monkeypatch):
+    monkeypatch.setattr(
+        langfuse_reader, "_get_json", lambda url, creds, timeout: {"data": [{"id": "x", "name": "kernel"}]}
+    )
+    creds = {"host": "https://h", "public_key": "pk", "secret_key": "sk"}
+    obs = langfuse_reader.fetch_observations("t1", credentials=creds)
+    assert [o["id"] for o in obs] == ["x"]
+
+
+def test_enrich_keeps_populated_local_kb_timeline_on_fetch_failure(monkeypatch):
+    local = build_kb_timeline(_breakdown(), source="local")
+    target = {"session": {"claw_session_id": "claw-xyz"}, "kb_timeline": local}
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.trace.langfuse_reader.fetch_session_breakdown",
+        lambda **kw: None,
+    )
+    out = enrich_breakdown_with_langfuse_kb_timeline(target)
+    assert out["kb_timeline"] is local
 
 
 def test_missing_sections_degrade():

@@ -169,16 +169,25 @@ def _recipe_read_event(row: dict[str, Any], idx: int) -> dict[str, Any]:
     }
 
 
-def _critic_kb_events(iterations: list[Any], warnings: list[str]) -> list[dict[str, Any]]:
+def _critic_kb_events(
+    iterations: list[Any],
+    warnings: list[str],
+    *,
+    categories: set[str] | None = None,
+) -> list[dict[str, Any]]:
     """Project ``critic_iterations[].kb_assess`` / ``kb_priors`` into events.
 
     Args:
         iterations: The ``critic_robustness.critic_iterations`` list.
         warnings: Mutable list to append non-fatal notes to.
+        categories: When given, only emit events for these categories
+            (``critic_assess`` / ``critic_priors``); ``None`` emits both.
 
     Returns:
         Partial ``critic_assess`` / ``critic_priors`` events (``seq`` unset).
     """
+    want_assess = categories is None or "critic_assess" in categories
+    want_priors = categories is None or "critic_priors" in categories
     events: list[dict[str, Any]] = []
     for idx, it in enumerate(iterations):
         if not isinstance(it, dict):
@@ -186,7 +195,7 @@ def _critic_kb_events(iterations: list[Any], warnings: list[str]) -> list[dict[s
         ts = it.get("ts")
         itr = it.get("iter")
         assess = it.get("kb_assess") if isinstance(it.get("kb_assess"), dict) else None
-        if assess and assess.get("configured"):
+        if want_assess and assess and assess.get("configured"):
             ref = assess.get("referenced_in_verdict")
             events.append(
                 {
@@ -204,7 +213,7 @@ def _critic_kb_events(iterations: list[Any], warnings: list[str]) -> list[dict[s
                 }
             )
         priors = it.get("kb_priors") if isinstance(it.get("kb_priors"), dict) else None
-        if priors and priors.get("configured"):
+        if want_priors and priors and priors.get("configured"):
             ref = priors.get("referenced_in_verdict")
             events.append(
                 {
@@ -301,6 +310,48 @@ def _events_from_observations(observations: list[Any], warnings: list[str]) -> l
     return events
 
 
+def _recipe_reads_from_breakdown(kbp: dict[str, Any], warnings: list[str]) -> list[dict[str, Any]]:
+    """Project ``kb_provenance.recipe_snapshot_reads.tail`` into recipe events.
+
+    Args:
+        kbp: The ``kb_provenance`` section dict.
+        warnings: Mutable list to append non-fatal notes to.
+
+    Returns:
+        Partial ``recipe_read`` events (``seq`` not yet set).
+    """
+    reads = (kbp.get("recipe_snapshot_reads") or {}).get("tail") if isinstance(kbp, dict) else None
+    if isinstance(reads, list):
+        return [_recipe_read_event(r, i) for i, r in enumerate(reads) if isinstance(r, dict)]
+    warnings.append("kb_provenance.recipe_snapshot_reads.tail missing")
+    return []
+
+
+def _critic_from_breakdown(
+    breakdown: dict[str, Any],
+    warnings: list[str],
+    *,
+    categories: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Project ``critic_robustness.critic_iterations`` KB reads into events.
+
+    Args:
+        breakdown: The full breakdown dict.
+        warnings: Mutable list to append non-fatal notes to.
+        categories: Restrict to these categories (``critic_assess`` /
+            ``critic_priors``); ``None`` emits both.
+
+    Returns:
+        Partial ``critic_assess`` / ``critic_priors`` events (``seq`` unset).
+    """
+    critic = breakdown.get("critic_robustness")
+    iterations = critic.get("critic_iterations") if isinstance(critic, dict) else None
+    if isinstance(iterations, list):
+        return _critic_kb_events(iterations, warnings, categories=categories)
+    warnings.append("critic_robustness.critic_iterations missing")
+    return []
+
+
 _CATEGORIES = ("recipe_read", "warm_start", "warm_replay", "critic_assess", "critic_priors")
 
 
@@ -341,23 +392,25 @@ def build_kb_timeline(
         kbp = {}
 
     if observations:
-        # Span path: recipe reads + critic assess/priors come from spans (full).
-        # An empty/None list falls through to the breakdown sections so a
-        # transient observation-fetch miss doesn't drop data that's in output.
-        raw.extend(_events_from_observations(observations, warnings))
+        # Span path: prefer KB spans (full history vs the capped audit tail).
+        # But the observation list is the trace's *full* span set and may carry
+        # only LLM spans with no KB spans, so fall back to the breakdown
+        # sections per-category when that category has no spans (and an
+        # empty/None list falls through entirely below).
+        span_events = _events_from_observations(observations, warnings)
+        raw.extend(span_events)
+        span_cats = {e["category"] for e in span_events}
+        if "recipe_read" not in span_cats:
+            raw.extend(_recipe_reads_from_breakdown(kbp, warnings))
+        # Gate the two critic categories independently: a trace with only
+        # kb_assess spans must still recover kb_priors from the breakdown.
+        missing_critic = {"critic_assess", "critic_priors"} - span_cats
+        if missing_critic:
+            raw.extend(_critic_from_breakdown(breakdown, warnings, categories=missing_critic))
     else:
-        # Breakdown path: recipe reads from the (capped) audit tail.
-        reads = (kbp.get("recipe_snapshot_reads") or {}).get("tail") if isinstance(kbp, dict) else None
-        if isinstance(reads, list):
-            raw.extend(_recipe_read_event(r, i) for i, r in enumerate(reads) if isinstance(r, dict))
-        else:
-            warnings.append("kb_provenance.recipe_snapshot_reads.tail missing")
-        critic = breakdown.get("critic_robustness")
-        iterations = critic.get("critic_iterations") if isinstance(critic, dict) else None
-        if isinstance(iterations, list):
-            raw.extend(_critic_kb_events(iterations, warnings))
-        else:
-            warnings.append("critic_robustness.critic_iterations missing")
+        # Breakdown path: recipe reads from the (capped) audit tail + critic.
+        raw.extend(_recipe_reads_from_breakdown(kbp, warnings))
+        raw.extend(_critic_from_breakdown(breakdown, warnings))
 
     indexed = list(enumerate(raw))
     indexed.sort(key=lambda pair: (_parse_ts(pair[1].get("ts")) or _TS_MAX, pair[0]))
@@ -438,7 +491,14 @@ def enrich_breakdown_with_langfuse_kb_timeline(
         fetch_session_breakdown,
         resolve_trace_id,
     )
-    from .agent_timeline import _trace_seed_from_breakdown
+    from .agent_timeline import _has_populated_timeline, _trace_seed_from_breakdown
+
+    # Fill-if-missing: the exporter already builds a local ``kb_timeline``
+    # consistent with this file's own KB sections, so never overwrite a
+    # populated one (a Langfuse re-derive could be stale or empty). Only
+    # (re)derive when the section is absent or has no events.
+    if _has_populated_timeline(breakdown, "kb_timeline"):
+        return breakdown
 
     bd_trace_id, bd_seed = _trace_seed_from_breakdown(breakdown)
     resolved = resolve_trace_id(trace_id=trace_id or bd_trace_id, seed=seed or bd_seed)

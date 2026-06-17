@@ -155,17 +155,49 @@ def test_empty_timeline_is_well_formed():
     assert tl["warnings"] == ["boom"]
 
 
+def test_trace_seed_falls_back_to_session_dir_basename():
+    from inference_optimizer.breakdown.agent_timeline import _trace_seed_from_breakdown
+
+    # No claw/session id -> match the writer's correlation_seed fallback
+    # (the session-dir basename).
+    bd = {"session": {"session_dir": "/data/model/20260617_073000/"}}
+    tid, seed = _trace_seed_from_breakdown(bd)
+    assert tid is None
+    assert seed == "20260617_073000"
+
+
 def test_resolve_trace_id_prefers_explicit_then_seed():
     assert langfuse_reader.resolve_trace_id(trace_id="  fixed  ") == "fixed"
     assert langfuse_reader.resolve_trace_id(seed="claw-xyz") == derive_trace_id("claw-xyz")
     assert langfuse_reader.resolve_trace_id() is None
 
 
-def test_extract_output_handles_dict_and_json_string():
-    assert langfuse_reader._extract_output({"output": {"a": 1}}) == {"a": 1}
-    assert langfuse_reader._extract_output({"output": json.dumps({"a": 1})}) == {"a": 1}
-    assert langfuse_reader._extract_output({"output": "not json"}) is None
-    assert langfuse_reader._extract_output({}) is None
+def test_coerce_output_handles_dict_and_json_string():
+    assert langfuse_reader._coerce_output({"a": 1}) == {"a": 1}
+    assert langfuse_reader._coerce_output(json.dumps({"a": 1})) == {"a": 1}
+    assert langfuse_reader._coerce_output("not json") is None
+    assert langfuse_reader._coerce_output(None) is None
+
+
+def test_breakdown_recovered_from_session_breakdown_observation():
+    # The writer attaches the breakdown as a `session_breakdown` span output,
+    # not the trace root output, so recovery must look there.
+    obs = [
+        {"name": "kernel", "output": {"unrelated": 1}},
+        {"name": "session_breakdown", "output": {"schema_version": "v3", "ok": True}},
+    ]
+    assert langfuse_reader._breakdown_from_observations(obs) == {"schema_version": "v3", "ok": True}
+    assert langfuse_reader._breakdown_from_observations([{"name": "kernel"}]) is None
+
+
+def test_fetch_session_breakdown_reads_embedded_observation(monkeypatch):
+    trace = {
+        "output": None,
+        "observations": [{"name": "session_breakdown", "output": {"schema_version": "v3"}}],
+    }
+    monkeypatch.setattr(langfuse_reader, "fetch_trace", lambda *a, **kw: trace)
+    bd = langfuse_reader.fetch_session_breakdown(trace_id="t1")
+    assert bd == {"schema_version": "v3"}
 
 
 def test_enrich_injects_built_timeline_when_fetch_succeeds(monkeypatch):
@@ -200,3 +232,30 @@ def test_enrich_injects_degraded_timeline_when_fetch_fails(monkeypatch):
 def test_enrich_handles_no_trace_seed():
     out = enrich_breakdown_with_langfuse_timeline({})
     assert out["agent_timeline"]["degraded"] is True
+
+
+def test_enrich_keeps_populated_local_timeline_on_fetch_failure(monkeypatch):
+    # A failed Langfuse re-derive must not clobber an already-populated
+    # (locally built) timeline with a degraded empty one.
+    local = build_agent_timeline(_full_breakdown(), source="local")
+    target = {"session": {"claw_session_id": "claw-xyz"}, "agent_timeline": local}
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.trace.langfuse_reader.fetch_session_breakdown",
+        lambda **kw: None,
+    )
+    out = enrich_breakdown_with_langfuse_timeline(target)
+    assert out["agent_timeline"] is local
+    assert out["agent_timeline"]["counts"] == {"orchestrator": 1, "specialist": 1, "critic": 1}
+
+
+def test_enrich_success_does_not_downgrade_populated_local_timeline(monkeypatch):
+    # Successful fetch but the recovered breakdown has no decision sources ->
+    # the built langfuse timeline is empty; keep the populated local one.
+    local = build_agent_timeline(_full_breakdown(), source="local")
+    target = {"session": {"claw_session_id": "claw-xyz"}, "agent_timeline": local}
+    monkeypatch.setattr(
+        "inference_optimizer.orchestrator.trace.langfuse_reader.fetch_session_breakdown",
+        lambda **kw: {},  # recovered, but empty -> no events
+    )
+    out = enrich_breakdown_with_langfuse_timeline(target)
+    assert out["agent_timeline"] is local

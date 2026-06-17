@@ -27,6 +27,7 @@ The same builder serves both paths:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Any
 
 #: Wire-shape version of the ``agent_timeline`` section.
@@ -311,8 +312,10 @@ def _trace_seed_from_breakdown(breakdown: dict[str, Any]) -> tuple[str | None, s
     """Extract an explicit trace id and a correlation seed from a breakdown.
 
     Prefers the trace id recorded in the ``langfuse`` push receipt; otherwise
-    falls back to ``session.claw_session_id`` (then ``session.session_id``) as
-    the seed the writer hashed into the trace id.
+    falls back to the same seed chain the writer hashed into the trace id —
+    ``session.claw_session_id`` -> ``session.session_id`` -> the
+    ``session.session_dir`` basename (the writer's ``correlation_seed``
+    final fallback is the session-dir name).
 
     Args:
         breakdown: A ``session_breakdown.json`` dict.
@@ -324,7 +327,28 @@ def _trace_seed_from_breakdown(breakdown: dict[str, Any]) -> tuple[str | None, s
     trace_id = lf.get("trace_id") if isinstance(lf, dict) else None
     session = breakdown.get("session") if isinstance(breakdown.get("session"), dict) else {}
     seed = _first(session, "claw_session_id", "session_id")
+    if not seed:
+        session_dir = session.get("session_dir")
+        if session_dir:
+            seed = PurePosixPath(str(session_dir).rstrip("/")).name or None
     return (str(trace_id).strip() if trace_id else None), (str(seed).strip() if seed else None)
+
+
+def _has_populated_timeline(breakdown: dict[str, Any], key: str) -> bool:
+    """Whether ``breakdown[key]`` already holds a timeline with events.
+
+    Guards the upload-time enrich path from clobbering a good locally-built
+    timeline with a ``degraded`` empty one when Langfuse recovery fails.
+
+    Args:
+        breakdown: The breakdown dict.
+        key: Timeline section key (e.g. ``"agent_timeline"``).
+
+    Returns:
+        True when a non-empty events list is already present.
+    """
+    existing = breakdown.get(key)
+    return isinstance(existing, dict) and bool(existing.get("events"))
 
 
 def empty_timeline(*, source: str = "langfuse", reason: str = "") -> dict[str, Any]:
@@ -382,6 +406,15 @@ def enrich_breakdown_with_langfuse_timeline(
     # (and avoids any import cycle at module load).
     from ..orchestrator.trace.langfuse_reader import fetch_session_breakdown, resolve_trace_id
 
+    # Fill-if-missing. The exporter already builds a local ``agent_timeline``
+    # that is consistent with *this file's own* decision sections, so never
+    # overwrite a populated one — a Langfuse re-derive could be stale (the
+    # trace snapshot predates a later on-disk refresh) or empty. Only
+    # (re)derive from Langfuse when the section is absent or has no events
+    # (e.g. an older breakdown produced before local population existed).
+    if _has_populated_timeline(breakdown, "agent_timeline"):
+        return breakdown
+
     bd_trace_id, bd_seed = _trace_seed_from_breakdown(breakdown)
     resolved = resolve_trace_id(trace_id=trace_id or bd_trace_id, seed=seed or bd_seed)
     if not resolved:
@@ -392,9 +425,7 @@ def enrich_breakdown_with_langfuse_timeline(
         trace_id=resolved, credentials=credentials, timeout=timeout
     )
     if source_breakdown is None:
-        breakdown["agent_timeline"] = empty_timeline(
-            reason=f"could not fetch trace {resolved} from langfuse"
-        )
+        breakdown["agent_timeline"] = empty_timeline(reason=f"could not fetch trace {resolved} from langfuse")
         return breakdown
 
     breakdown["agent_timeline"] = build_agent_timeline(
