@@ -1150,7 +1150,6 @@ def _apply_fellow_env(env: dict) -> None:
                 _proxy = ""
         if _proxy:
             env["ANTHROPIC_BASE_URL"] = _proxy
-
     # Fellow-hung mitigation (RCA root cause 4): a streaming request to the SaFE
     # proxy can stall with no first token / no keepalive; without a client-side
     # timeout the SDK awaits until the outer 900s kill. Bound the claude CLI's
