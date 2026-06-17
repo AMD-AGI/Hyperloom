@@ -26,6 +26,16 @@ from ..specialist_domains import (
 _NONE_PLACEHOLDER = "(none)"
 
 
+# Forbids global process cleanup that could kill the optimizer's serving /
+# benchmark process. Shared by bash-enabled specialist and leaf prompts.
+BASH_KILL_SAFETY_PREAMBLE = (
+    "Do NOT run global process cleanup. Never run `ps aux | grep ... | xargs "
+    "kill`, `pgrep -f ... | xargs kill`, or `killall` — these can kill the "
+    "optimizer's serving / benchmark process. Only manage processes you "
+    "started yourself, by their own PID."
+)
+
+
 # Soft cap on ``proposal_set`` size; re-exported from ``policy.py`` so the
 # prompt-side cap and the runner-side hard truncate stay aligned.
 from inference_optimizer.orchestrator.policy import (
@@ -592,6 +602,13 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "(Section 8) carrying ``proposal_set`` + ``patches_written``. The hard",
         "capability boundary is fixed by Section 9 Iron Rules; everything inside",
         "it is yours.",
+        "",
+        "Fan-out: to parallelize independent single-shot sub-tasks (e.g. bench "
+        "N candidates of one lever at once, or read several subsystems), you "
+        "MAY ``Task(subagent_type=\"hyperloom-leaf\")``. Leaves are single-turn, "
+        "inherit your VISIBLE_DEVICES (so they share your GPU and cannot "
+        "oversubscribe), and cannot fan out further. Use leaves for breadth; do "
+        "multi-round depth (e.g. coordinate-descent autotune) yourself.",
     ]
     # Per-domain expertise + focus blocks.
     rendered_focus_keys: set[str] = set()
@@ -1364,6 +1381,19 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "for that file and treats its appearance as the run's exit",
         "signal. After writing it, stop — do not call any further tools.",
         "",
+        "**Incremental checkpoint (do this throughout the run):** every time",
+        "you reach a new finding or finish a candidate, rewrite your",
+        "best-so-far payload to",
+        f"``{workspace}/specialist_done.partial.json`` (write to",
+        f"``{workspace}/specialist_done.partial.json.tmp`` first, then rename",
+        "over the partial so a reader never sees a half-written file). This",
+        "partial uses the **same payload schema** as the final file but does",
+        "**NOT** end the run — keep working. There is a wall-clock budget; if",
+        "you are stopped before finishing, whatever is in the partial is",
+        "preserved as your result, so keep it current. Write the final",
+        "``specialist_done.json`` (which ends the run) only once, as your",
+        "absolute last action.",
+        "",
         "Payload schema (identical for both channels):",
         "",
         "```json",
@@ -1509,6 +1539,7 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "7. If you hit a tool error or run out of useful actions, emit",
         "   ``specialist_done{empty=true, summary='<why>'}`` rather than",
         "   stalling.",
+        f"8. {BASH_KILL_SAFETY_PREAMBLE}",
     ]
 
 

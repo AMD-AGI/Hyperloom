@@ -263,6 +263,11 @@ _FREEFORM_REDLINE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r">\s*/dev/sd[a-z]"),
     re.compile(r":\(\)\s*\{.*\};\s*:"),  # fork bomb
     re.compile(r"\bshutdown\b|\breboot\b", re.IGNORECASE),
+    # Global process cleanup can kill the optimizer's serving / benchmark
+    # process; ban pipe-to-kill and killall.
+    re.compile(r"\bps\s+(?:aux|-ef|-e)\b.*\|.*\bkill\b", re.IGNORECASE),
+    re.compile(r"\bpgrep\b.*\|.*\bkill\b", re.IGNORECASE),
+    re.compile(r"\bkillall\b", re.IGNORECASE),
 )
 
 # Prefix the SubAgentRunner stamps on specialist emit-intents (``from_agent='specialist:<task_id>'``).

@@ -68,6 +68,9 @@ class SpecialistSubprocessConfig:
     extra_claude_args: tuple[str, ...] = ()
     """Operator escape hatch — appended verbatim to the claude command."""
 
+    leaf_agents_json: str | None = None
+    """``--agents`` JSON declaring leaf sub-agent types. None = built-in leaf."""
+
     per_turn_max_seconds: float = 600.0
     """Wall-clock cap PER LLM turn; multiplied by ``max_turns`` to get the
     per-task hard timeout."""
@@ -454,6 +457,11 @@ class SpecialistSubprocessDispatcher:
         tools_filtered = [t for t in allowed_tools if t != "emit_intent"]
         if tools_filtered:
             cmd.extend(["--allowedTools", ",".join(tools_filtered)])
+        # Declare leaf sub-agent types when the specialist may fan out via Task.
+        if "Task" in tools_filtered:
+            from .specialist_leaf import build_leaf_agents_json
+
+            cmd.extend(["--agents", cfg.leaf_agents_json or build_leaf_agents_json()])
         if cfg.mcp_config_path:
             cmd.extend(["--mcp-config", cfg.mcp_config_path])
         # --add-dir order: worktree first (where writes go), workspace

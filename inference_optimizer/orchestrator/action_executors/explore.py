@@ -64,6 +64,7 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
+from ._stack_rebench import measure_stack_rebench
 from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
@@ -1122,8 +1123,6 @@ class ExploreExecutor:
                             # comparable; otherwise a fresh cold boot. No
                             # ``soft_deadline_sec`` (parity with the legacy
                             # rebench).
-                            rebench_slot = slot / "stack_rebench"
-                            rebench_slot.mkdir(parents=True, exist_ok=True)
                             rebench_variant = GridVariant(
                                 name=f"{gv.name}__stack_rebench",
                                 extra_server_args=gv.extra_server_args,
@@ -1139,11 +1138,13 @@ class ExploreExecutor:
                                 if lifecycle_eligible
                                 else None
                             )
-                            rebench_results = await run_grid(
-                                base_yaml_path=config_path,
+                            rebench = await measure_stack_rebench(
+                                config_path=config_path,
                                 base_extra_args=stack_extra_args,
-                                grid=[rebench_variant],
-                                output_root=rebench_slot,
+                                variant=rebench_variant,
+                                base_tput=base_tput,
+                                stable_threshold_pct=stack_stable_threshold_pct,
+                                output_slot=slot / "stack_rebench",
                                 variant_timeout_sec=timeout_sec,
                                 model_path=resolved_model,
                                 gpu_type=resolved_gpu,
@@ -1151,21 +1152,13 @@ class ExploreExecutor:
                                 result_dir=override_result_dir,
                                 server_lifecycle=round2_lifecycle,
                             )
-                            rb = rebench_results[0] if rebench_results else None
-
-                            if rb is not None and rb.status == "succeeded":
-                                stack_rebench_tput = rb.output_throughput
-                                stack_rebench_workspace = rb.workspace
-                                stack_rebench_warnings = list(rb.nonfatal_warnings)
-                            elif rb is not None:
-                                stack_rebench_warnings.append(f"stack_rebench_failed:{(rb.error or '')[-120:]}")
-                            else:
-                                stack_rebench_warnings.append("stack_rebench_no_result")
-
-                            stable_floor = base_tput * (1.0 + stack_stable_threshold_pct / 100.0)
+                            stack_rebench_tput = rebench.tput
+                            stack_rebench_workspace = rebench.workspace
+                            stack_rebench_warnings = rebench.warnings
+                            stable_floor = rebench.stable_floor
                             # KEEP_UNSTABLE: rebench missed the stability floor —
                             # evict the KEEP and treat as REVERT.
-                            if stack_rebench_tput is None or stack_rebench_tput < stable_floor:
+                            if not rebench.stable:
                                 log.warning(
                                     "explore: variant %s KEEP -> KEEP_UNSTABLE "
                                     "(stack_rebench_tput=%s vs stable_floor=%.2f "

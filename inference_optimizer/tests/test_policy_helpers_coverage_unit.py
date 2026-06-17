@@ -159,3 +159,25 @@ def test_freeform_description_valid() -> None:
         "Investigate the MoE kernel launch overhead and propose tuning.",
         where="task[0]",
     )
+
+
+@pytest.mark.parametrize(
+    "desc",
+    [
+        "ps aux | grep sglang | xargs kill -9",
+        "pgrep -f bench_serving | xargs kill",
+        "killall -9 python",
+    ],
+)
+def test_freeform_description_kill_redline(desc: str) -> None:
+    with pytest.raises(PolicyDenied) as exc:
+        PolicyGate._check_freeform_task_description(desc, where="task[0]")
+    assert exc.value.rule == "specialist_freeform_redline"
+
+
+def test_freeform_description_kill_not_overmatched() -> None:
+    # benign mentions of killing/process words must not trip the gate
+    PolicyGate._check_freeform_task_description(
+        "Measure the kernel launch latency; do not kill the serving process.",
+        where="task[0]",
+    )
