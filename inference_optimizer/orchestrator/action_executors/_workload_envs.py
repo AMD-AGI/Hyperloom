@@ -29,6 +29,7 @@ import yaml
 
 from ...paths import asset_root
 from ._grid_runner import (
+    compact_json_server_args,
     dedup_vllm_server_args,
     inject_sglang_attention_backend,
     inject_sglang_context_length,
@@ -151,6 +152,8 @@ def materialize_config_with_envs(
     gpu_type: str | None = None,
     inferencex_path: str | None = None,
     benchmark_script: str | None = None,
+    reference_server_args: str = "",
+    reference_envs: dict[str, Any] | None = None,
     out_name: str = "baseline_config.with_envs.yaml",
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
@@ -166,6 +169,9 @@ def materialize_config_with_envs(
     ``benchmark.inferencex_path`` for one task (falling back to
     ``$INFERENCEX_PATH`` for existing callers). ``extra_server_args`` routes
     into the framework env; ``extra_envs`` overrides any of the above.
+    ``reference_server_args`` / ``reference_envs`` seed a lowest-priority base
+    from a reference recipe (below the YAML base and extra_server_args; empty =
+    no-op, byte-for-byte identical to omitting them).
 
     Args:
         config_path: Path to the source Magpie YAML to render.
@@ -453,6 +459,21 @@ def materialize_config_with_envs(
             envs["NUM_PROMPTS"] = max(conc_val * factor, conc_val)
     if "NUM_WARMUPS" not in envs:
         envs["NUM_WARMUPS"] = min(conc_val, 8)
+    # ── reference-script base (lowest priority) ────────────────────────────
+    # Seed the framework server-args env + envs from a reference recipe BELOW
+    # the YAML base and any per-task extra_server_args. Reference flags are
+    # leftmost so merge_server_args' last-wins lets the YAML / extra args / the
+    # per-model workarounds below override them; the final dedup collapses dups.
+    ref_args = (reference_server_args or "").strip()
+    if ref_args:
+        from ._grid_runner import merge_server_args
+        _ref_fw_env = server_args_env_name(bench.get("framework"))
+        _ref_existing = str(envs.get(_ref_fw_env, "")).strip()
+        envs[_ref_fw_env] = (
+            merge_server_args(ref_args, _ref_existing) if _ref_existing else ref_args
+        )
+    for _rk, _rv in (reference_envs or {}).items():
+        envs.setdefault(str(_rk), str(_rv))  # never clobber YAML/CLI envs
     if server_args:
         # Merge into (not overwrite) the framework env so the profile path's
         # upstream-injected graph-capture flags aren't dropped when the caller
@@ -613,6 +634,17 @@ def materialize_config_with_envs(
     resolved_server_args = dedup_vllm_server_args(
         resolved_server_args,
         bench.get("framework"),
+    )
+    # 6. JSON-valued flags (--speculative-config / --compilation-config /
+    #    --hf-overrides ...): Magpie expands $EXTRA_VLLM_ARGS UNQUOTED, so a JSON
+    #    value with the conventional separator spaces ('{"k": v}') is word-split
+    #    by the shell and the server dies at boot. Compact each JSON blob to be
+    #    space-free (string-internal spaces preserved) so it survives as one
+    #    shell word — otherwise spec-decode / compilation-config explore variants
+    #    can never be evaluated. No-op for sglang and for arg strings with no
+    #    JSON.
+    resolved_server_args = compact_json_server_args(
+        resolved_server_args, bench.get("framework"),
     )
     if resolved_server_args:
         envs[framework_env] = resolved_server_args

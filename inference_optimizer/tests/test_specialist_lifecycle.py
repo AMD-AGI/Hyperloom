@@ -623,8 +623,13 @@ def test_handle_intent_dispatch_table_has_specialist_done_branch():
     """Gap-03 regression: the dispatch table routes SPECIALIST_DONE to ``_handle_specialist_done``."""
     import inspect
 
-    from inference_optimizer.orchestrator.coordinator import Coordinator
+    from inference_optimizer.orchestrator.intent_router import IntentRouter
 
-    src = inspect.getsource(Coordinator._handle_intent)
-    assert "IntentType.SPECIALIST_DONE" in src, "_handle_intent must dispatch SPECIALIST_DONE (KB_gaps/Gap-03)"
-    assert "_handle_specialist_done" in src, "_handle_intent must route SPECIALIST_DONE to _handle_specialist_done"
+    src = inspect.getsource(IntentRouter._handle_intent)
+    assert "IntentType.SPECIALIST_DONE" in src, (
+        "_handle_intent must dispatch SPECIALIST_DONE (KB_gaps/Gap-03)"
+    )
+    assert "_handle_specialist_done" in src, (
+        "_handle_intent must route SPECIALIST_DONE to "
+        "_handle_specialist_done"
+    )

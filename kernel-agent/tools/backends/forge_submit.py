@@ -240,7 +240,6 @@ def _editable_roots() -> list[str]:
         list[str]: the sorted absolute filesystem roots that editable-finder
             installs map into.
     """
-    import re
     import site
 
     roots: set[str] = set()
@@ -289,7 +288,8 @@ def _editable_roots() -> list[str]:
                 continue
             fpath = os.path.join(d, n)
             try:
-                txt = open(fpath, errors="replace").read()
+                with open(fpath, errors="replace") as _fh:
+                    txt = _fh.read()
             except OSError:
                 continue
             # Layout 1: quoted absolute paths directly in the file.
@@ -303,7 +303,8 @@ def _editable_roots() -> list[str]:
                 if fm:
                     finder_file = os.path.join(d, fm.group(1) + ".py")
                     try:
-                        ftxt = open(finder_file, errors="replace").read()
+                        with open(finder_file, errors="replace") as _ffh:
+                            ftxt = _ffh.read()
                     except OSError:
                         continue
                     for m in re.findall(r"['\"](/[^'\"]+)['\"]", ftxt):
