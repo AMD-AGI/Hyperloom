@@ -856,12 +856,19 @@ def _read_safetensors_header(path: Path) -> dict | None:
 
 
 def _detect_vocab_weight_shape_mismatch(model_path: str, data: dict) -> str | None:
-    """Return a reason when config vocab_size disagrees with model weights.
+    """Return a reason when the checkpoint has FEWER vocab rows than config.
 
     Best-effort and safetensors-only: reads just the JSON header (never tensor
     data) of ``*.safetensors`` shards. Legacy ``*.bin``/``pytorch_model.bin``
     checkpoints are not inspected; truncated/corrupt headers are skipped
     silently (return None) and left to the downstream loader.
+
+    Only ``actual < config.vocab_size`` is flagged (a genuinely broken /
+    truncated checkpoint that cannot serve the full vocab). ``actual >
+    config.vocab_size`` is left to the framework: it is commonly a padded
+    embedding (rounded up to an alignment / TP boundary while config and
+    tokenizer keep the unpadded size), so blocking it here would be a
+    false-positive skip of a runnable model.
 
     Args:
         model_path (str): The local model directory holding the safetensors
@@ -870,8 +877,8 @@ def _detect_vocab_weight_shape_mismatch(model_path: str, data: dict) -> str | No
             ``vocab_size``).
 
     Returns:
-        str | None: A human-readable reason when a vocab dimension disagrees
-            with ``config.json``, else ``None``.
+        str | None: A human-readable reason when the on-disk vocab dimension is
+            smaller than ``config.json`` ``vocab_size``, else ``None``.
     """
     expected = data.get("vocab_size")
     nested = data.get("text_config")
@@ -899,12 +906,20 @@ def _detect_vocab_weight_shape_mismatch(model_path: str, data: dict) -> str | No
             ):
                 continue
             actual = shape[0]
-            if actual != expected:
+            # Only block when the checkpoint has FEWER vocab rows than the
+            # config declares — that is an unambiguously broken/wrong checkpoint
+            # (not enough embeddings for the tokenizer). A larger on-disk
+            # dimension (actual > expected) is commonly a padded embedding
+            # (rounded up to an alignment / TP boundary while config + tokenizer
+            # keep the unpadded value); the framework handles that, so do not
+            # pre-empt it here and risk a false-positive skip of a runnable
+            # model.
+            if actual < expected:
                 return (
                     f"config.json vocab_size={expected} but {st_path.name}:"
-                    f"{name} has vocab dimension {actual}; sglang asserts "
-                    f"loaded_weight.shape[output_dim] matches org_vocab_size "
-                    f"during weight loading."
+                    f"{name} has only {actual} vocab rows ({expected - actual} "
+                    f"short); the checkpoint cannot serve the full vocab and "
+                    f"weight loading will fail."
                 )
     return None
 

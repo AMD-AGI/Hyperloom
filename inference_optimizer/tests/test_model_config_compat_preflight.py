@@ -628,6 +628,36 @@ def test_detect_vocab_shape_match_not_blocked(tmp_path):
     assert cli._detect_incompatible_model_config(str(m)) is None
 
 
+def test_detect_vocab_shape_padded_not_blocked(tmp_path):
+    # actual > config vocab_size -> commonly a padded embedding (rounded up to
+    # an alignment / TP boundary while config keeps the unpadded value). The
+    # framework handles padding, so preflight must NOT skip such a checkpoint.
+    m = tmp_path / "qwen_vocab_padded"
+    _write_config(
+        m,
+        model_type="qwen2",
+        architectures=["Qwen2ForCausalLM"],
+        max_position_embeddings=4096,
+        vocab_size=151936,
+    )
+    _write_safetensors_header(
+        m,
+        {
+            "model.embed_tokens.weight": {
+                "dtype": "BF16",
+                "shape": [152064, 1536],  # padded up from 151936
+                "data_offsets": [0, 0],
+            },
+            "lm_head.weight": {
+                "dtype": "BF16",
+                "shape": [152064, 1536],
+                "data_offsets": [0, 0],
+            },
+        },
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
 def test_read_safetensors_header_parses_and_rejects(tmp_path):
     # Valid header round-trips; truncated / oversized headers return None.
     good = tmp_path / "model.safetensors"
