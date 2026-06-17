@@ -28,28 +28,50 @@ def tl_module():
     return mod
 
 
-def test_dot_form_opus_normalized_to_dash(tl_module, monkeypatch):
+@pytest.fixture(autouse=True)
+def _clear_gateway_env(monkeypatch):
+    # Isolate from the runner's own env so each test sets its own gateway.
+    for k in ("ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "SAFE_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+
+
+def _use_safe_gateway(monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1")
+
+
+def test_dot_form_opus_normalized_on_safe(tl_module, monkeypatch):
     # The exact in-loop failure: image default dot form rejected by core42.
+    _use_safe_gateway(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
     assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
 
 
-def test_already_dash_is_unchanged(tl_module, monkeypatch):
+def test_safe_detected_via_safe_api_key(tl_module, monkeypatch):
+    monkeypatch.setenv("SAFE_API_KEY", "ak-test")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
+    assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
+
+
+def test_already_dash_is_unchanged_on_safe(tl_module, monkeypatch):
+    _use_safe_gateway(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_MODEL", "claude-opus-4-7")
     assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
 
 
-def test_sonnet_dot_form_normalized(tl_module, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Sonnet-4.6")
-    assert tl_module._resolve_tracelens_model() == "claude-sonnet-4-6"
+def test_non_safe_gateway_leaves_dot_form_untouched(tl_module, monkeypatch):
+    # Direct Anthropic / other backends must not have their model id mangled.
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
+    assert tl_module._resolve_tracelens_model() == "Claude-Opus-4.7"
 
 
 def test_empty_env_yields_empty(tl_module, monkeypatch):
     # Empty env must keep the prior behavior (runner/SDK default applies).
-    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    _use_safe_gateway(monkeypatch)
     assert tl_module._resolve_tracelens_model() == ""
 
 
 def test_whitespace_only_yields_empty(tl_module, monkeypatch):
+    _use_safe_gateway(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_MODEL", "   ")
     assert tl_module._resolve_tracelens_model() == ""

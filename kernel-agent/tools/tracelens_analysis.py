@@ -72,19 +72,35 @@ ANALYSIS_ROUTE_AGENT = "agent"
 _VALID_ANALYSIS_ROUTES = {ANALYSIS_ROUTE_DETERMINISTIC, ANALYSIS_ROUTE_AGENT}
 
 
+def _is_safe_litellm_gateway() -> bool:
+    """True when the Claude SDK targets the AMD SAFE/LiteLLM gateway (#574).
+
+    Detected via the SDK's ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL`` host or
+    the codebase-wide ``SAFE_API_KEY`` signal; other backends are left alone.
+    """
+    base_url = (
+        os.environ.get("ANTHROPIC_BASE_URL", "")
+        or os.environ.get("OPENAI_BASE_URL", "")
+    ).lower()
+    markers = ("primus-safe", "core42", "litellm", "llm-proxy")
+    return bool(os.environ.get("SAFE_API_KEY")) or any(m in base_url for m in markers)
+
+
 def _resolve_tracelens_model() -> str:
     """Resolve ``ANTHROPIC_MODEL`` to the gateway's dash-form id (#574).
 
-    The runtime image may export the dot form (``Claude-Opus-4.7``) that strict
-    gateways (core42/SAFE) reject; map it to the dash form (``claude-opus-4-7``)
-    the rest of Hyperloom already uses. Empty env yields ``""`` (SDK default).
+    Only the strict SAFE/LiteLLM gateway rejects the image's dot form
+    (``Claude-Opus-4.7``); for it, map to dash (``claude-opus-4-7``). Other
+    backends keep the raw id; empty env yields ``""`` (SDK default).
 
     Returns:
-        The normalized dash-form model id, or ``""`` when unset.
+        The model id to pass to the SDK, normalized only for SAFE/LiteLLM.
     """
     raw = os.environ.get("ANTHROPIC_MODEL", "").strip()
     if not raw:
         return ""
+    if not _is_safe_litellm_gateway():
+        return raw
     return raw.lower().replace(".", "-")
 
 
