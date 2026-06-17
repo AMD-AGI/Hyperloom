@@ -1273,6 +1273,89 @@ def _detect_amd_unsupported_quant(model_path: str) -> str | None:
     return None
 
 
+# Quant methods with a real vLLM/sglang loader. Anything else declared in
+# config.json is a private/third-party format (e.g. paroquant) that fails in
+# engine init. bitsandbytes/bnb are listed here but separately gated on AMD.
+_SUPPORTED_QUANT_METHODS = frozenset({
+    "fp8", "mxfp8", "mxfp4", "nvfp4", "blockwise_int8", "modelopt",
+    "modelopt_fp8", "modelopt_fp4", "modelopt_mixed", "w8a8_int8", "w8a8_fp8",
+    "w4afp8", "awq", "awq_marlin", "gptq", "gptq_marlin", "moe_wna16",
+    "compressed-tensors", "compressed_tensors", "qoq", "petit_nvfp4",
+    "fbgemm_fp8", "quark", "quark_int4fp8_moe", "auto-round", "modelslim",
+    "bitsandbytes", "bnb", "gguf", "torchao",
+})
+# MLX mx.quantize uses a ``mode: affine/mlx`` block and emits per-tensor
+# ``.biases`` / ``.scales`` weights (plural — distinct from a standard ``.bias``).
+_MLX_QUANT_MODES = frozenset({"affine", "mlx"})
+
+
+def _detect_mlx_quant_weights(model_path: str) -> str | None:
+    """Detect MLX (mx.quantize) checkpoints by their ``.biases``/``.scales``
+    weight tensors in the safetensors index — JANG/MLX often declares no
+    quantization_config, so this is the reliable static tell."""
+    idx = Path(model_path) / "model.safetensors.index.json"
+    if not idx.is_file():
+        return None
+    try:
+        wm = (json.loads(idx.read_text(encoding="utf-8")) or {}).get(
+            "weight_map"
+        ) or {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if any(k.endswith(".biases") or k.endswith(".scales") for k in wm):
+        return (
+            "checkpoint ships MLX mx.quantize weights (per-tensor '.biases'/"
+            "'.scales'); no vLLM/sglang loader handles this private format, so "
+            "weights fail to map in engine init (JANG/MTPLX class)."
+        )
+    return None
+
+
+def _detect_gguf_only_checkpoint(model_path: str) -> str | None:
+    """Detect a GGUF-only (llama.cpp, e.g. TQ3) checkpoint with no safetensors/
+    bin; the default vLLM/sglang loader then finds no weights and crashes."""
+    d = Path(model_path)
+    if not d.is_dir() or not any(d.glob("*.gguf")):
+        return None
+    if any(d.glob("*.safetensors")) or any(d.glob("*.bin")):
+        return None
+    return (
+        "checkpoint ships only GGUF weights (llama.cpp, e.g. TQ3_4S ternary) "
+        "with no safetensors/bin; the default vLLM/sglang loader finds no model "
+        "weights and fails in engine init."
+    )
+
+
+def _detect_private_quant(model_path: str, data: dict) -> str | None:
+    """Reject private/third-party quantization with no vLLM/sglang loader
+    (paroquant, MLX mx.quantize incl. JANG/MTPLX, mxtq, GGUF). Hardware-agnostic
+    and conservative — declared standard quant methods keep passing."""
+    qc = data.get("quantization_config")
+    if isinstance(qc, dict):
+        method = str(qc.get("quant_method") or "").strip().lower()
+        if method and method not in _SUPPORTED_QUANT_METHODS:
+            return (
+                f"quantization_config.quant_method '{method}' is a private/"
+                f"third-party format with no vLLM/sglang loader; it fails in "
+                f"engine init (e.g. 'Unknown quantization method')."
+            )
+        wfmt = str(qc.get("weight_format") or "").strip().lower()
+        if "mxtq" in wfmt or "mxtq" in str(qc.get("method") or "").lower():
+            return (
+                "quantization_config 'mxtq' weight format (MLX/JANGTQ) has no "
+                "vLLM/sglang loader; weights fail to map in engine init."
+            )
+        if str(qc.get("mode") or "").strip().lower() in _MLX_QUANT_MODES and not method:
+            return (
+                "quantization_config 'mode: affine/mlx' with no quant_method is "
+                "an MLX (mx.quantize) checkpoint with no vLLM/sglang loader."
+            )
+    mlx_reason = _detect_mlx_quant_weights(model_path)
+    if mlx_reason is not None:
+        return mlx_reason
+    return _detect_gguf_only_checkpoint(model_path)
+
+
 def _detect_phi3_rope_scaling_incompatible(data: dict) -> str | None:
     """Return a reason when a Phi-3 su/longrope config crashes Phi3Config validation.
 
@@ -1553,6 +1636,11 @@ def _detect_incompatible_model_config(
     unrecognized_reason = _detect_unrecognized_architecture(data)
     if unrecognized_reason is not None:
         return unrecognized_reason
+    # Private/third-party quantization (paroquant, MLX, mxtq, GGUF): no loader
+    # exists on any backend; hardware-agnostic engine-init failure.
+    private_quant_reason = _detect_private_quant(model_path, data)
+    if private_quant_reason is not None:
+        return private_quant_reason
     vocab_shape_reason = _detect_vocab_weight_shape_mismatch(model_path, data)
     if vocab_shape_reason is not None:
         return vocab_shape_reason

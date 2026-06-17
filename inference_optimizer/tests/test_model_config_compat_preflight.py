@@ -743,3 +743,90 @@ def test_preflight_persists_under_strict_env(tmp_path, monkeypatch):
     assert cli._preflight_model_config_compat(_args(str(model)), sd) is True
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "model_config_incompatible"
+
+
+# ---------------------------------------------------------------------------
+# Private / third-party quantization formats (paroquant, MLX, mxtq, GGUF)
+# ---------------------------------------------------------------------------
+def test_private_quant_paroquant_blocks(tmp_path):
+    m = tmp_path / "paro"
+    _write_config(
+        m, model_type="qwen3_5", max_position_embeddings=32768,
+        quantization_config={"quant_method": "paroquant", "bits": 4,
+                             "group_size": 128, "krot": 8},
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "paroquant" in reason
+
+
+def test_private_quant_mlx_affine_blocks(tmp_path):
+    # MTPLX / MLX 8-bit affine: mode set, no quant_method.
+    m = tmp_path / "mlx_affine"
+    _write_config(
+        m, model_type="qwen3_5", max_position_embeddings=32768,
+        quantization_config={"bits": 8, "group_size": 64, "mode": "affine"},
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "MLX" in reason
+
+
+def test_private_quant_mxtq_blocks(tmp_path):
+    m = tmp_path / "mxtq"
+    _write_config(
+        m, model_type="qwen3_5_moe", max_position_embeddings=32768,
+        quantization_config={"weight_format": "mxtq", "method": "affine",
+                             "group_size": 64},
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "mxtq" in reason
+
+
+def test_private_quant_mlx_weights_index_blocks(tmp_path):
+    # JANG/MLX often declares no quant config; the tell is '.biases'/'.scales'.
+    m = tmp_path / "mlx_weights"
+    _write_config(m, model_type="qwen3_5", max_position_embeddings=32768)
+    (m / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {
+            "lm_head.biases": "model-00001.safetensors",
+            "lm_head.scales": "model-00001.safetensors",
+            "model.embed_tokens.weight": "model-00001.safetensors",
+        }}), encoding="utf-8",
+    )
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "MLX" in reason
+
+
+def test_private_quant_gguf_only_blocks(tmp_path):
+    m = tmp_path / "gguf_only"
+    _write_config(m, model_type="qwen3_5_moe", max_position_embeddings=32768)
+    (m / "model-TQ3_4S.gguf").write_text("dummy", encoding="utf-8")
+    reason = cli._detect_incompatible_model_config(str(m))
+    assert reason is not None and "GGUF" in reason
+
+
+def test_standard_quant_fp8_not_blocked(tmp_path):
+    m = tmp_path / "fp8"
+    _write_config(
+        m, model_type="qwen3", max_position_embeddings=32768,
+        quantization_config={"quant_method": "fp8"},
+    )
+    assert cli._detect_incompatible_model_config(str(m)) is None
+
+
+def test_standard_quant_awq_gptq_not_blocked(tmp_path):
+    for method in ("awq", "gptq", "compressed-tensors"):
+        m = tmp_path / f"std_{method.replace('-', '_')}"
+        _write_config(
+            m, model_type="qwen3", max_position_embeddings=32768,
+            quantization_config={"quant_method": method},
+        )
+        assert cli._detect_incompatible_model_config(str(m)) is None, method
+
+
+def test_gguf_with_safetensors_not_blocked(tmp_path):
+    # A normal safetensors model that merely also ships a .gguf must still pass.
+    m = tmp_path / "gguf_plus_st"
+    _write_config(m, model_type="qwen3", max_position_embeddings=32768)
+    (m / "model.gguf").write_text("dummy", encoding="utf-8")
+    (m / "model.safetensors").write_text("dummy", encoding="utf-8")
+    assert cli._detect_incompatible_model_config(str(m)) is None
