@@ -119,7 +119,9 @@ class _GbrainMcp:
                 JSON-RPC / tool-level errors.
         """
         envelope = {
-            "jsonrpc": "2.0", "id": "1", "method": "tools/call",
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "tools/call",
             "params": {"name": tool, "arguments": arguments},
         }
         req = urllib.request.Request(
@@ -191,6 +193,12 @@ def _json_list(value: Any) -> list[Any]:
     only renders scalar lists. Tolerates an already-decoded list (in case
     a future page stores them natively) and degrades to ``[]`` on absence
     or malformed content so a bad page never breaks warm-start.
+
+    Args:
+        value: A list, a JSON-encoded list string, or anything else.
+
+    Returns:
+        The decoded list, or ``[]`` when the value is absent or malformed.
     """
     if isinstance(value, list):
         return value
@@ -216,6 +224,13 @@ def _best_config_from_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
     be invisible to the consumer's nested ``best_config["extra_envs"]``
     read and the high-confidence warm recipe would be skipped as
     ``best_config_empty``.
+
+    Args:
+        attrs: The flat gbrain recipe page attrs mapping.
+
+    Returns:
+        The canonical ``best_config`` dict with launch args under the
+        canonical key and the env map nested under ``extra_envs``.
     """
     out: dict[str, Any] = {}
     args = str(attrs.get("best_config_args") or "").strip()
@@ -239,6 +254,13 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
 
     Returns ``None`` when the page lacks the minimum identity (model /
     hardware) needed to build a canonical id.
+
+    Args:
+        frontmatter: The gbrain recipe page frontmatter mapping.
+
+    Returns:
+        The nested KB-interface recipe envelope, or ``None`` when the page
+        lacks the model/hardware identity needed for a canonical id.
     """
     attrs = frontmatter.get("attrs") if isinstance(frontmatter.get("attrs"), Mapping) else {}
     model = str(attrs.get("model") or "").strip()
@@ -248,26 +270,36 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
     framework = str(attrs.get("framework") or "").strip()
     framework_version = str(attrs.get("framework_version") or "").strip()
     precision = str(attrs.get("precision") or "").strip()
+    model_type = str(attrs.get("model_type") or "").strip()
+    architectures = attrs.get("architectures") or []
     canonical = recipe_canonical_id(
-        model=model, hardware=hardware, framework=framework,
-        framework_version=framework_version, precision=precision,
+        model=model,
+        hardware=hardware,
+        framework=framework,
+        model_type=model_type,
+        architectures=architectures,
+        framework_version=framework_version,
+        precision=precision,
     )
-    throughput = _as_float(
-        attrs.get("best_throughput") or attrs.get("output_throughput")
-    )
+    throughput = _as_float(attrs.get("best_throughput") or attrs.get("output_throughput"))
     validated_gain_pct = _as_float(attrs.get("validated_gain_pct"))
     return {
         C.F_CANONICAL_ID: canonical,
         C.F_VERSION: 1,
         "created_at": str(frontmatter.get("created_at") or ""),
         "updated_at": str(frontmatter.get("updated_at") or ""),
-        # Slug-clean 5-tuple identity. ``_labels_match`` runs both sides
+        # Slug-clean 7-tuple identity. ``_labels_match`` runs both sides
         # through ``canonical_labels`` so the raw page model string and
         # the slugged label converge; we surface the canonical labels so
         # the dispatcher's ``_v2_to_arbor`` reads identity from one place.
         "labels": C.canonical_labels(
-            model=model, hardware=hardware, framework=framework,
-            framework_version=framework_version, precision=precision,
+            model=model,
+            hardware=hardware,
+            framework=framework,
+            model_type=model_type,
+            architectures=architectures,
+            framework_version=framework_version,
+            precision=precision,
         ),
         "body": {
             "best_config": _best_config_from_attrs(attrs),
@@ -295,12 +327,26 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> bool:
-    """True when every provided label equals the recipe's slugged value.
+    """True when every provided label matches the recipe's value.
+
+    For scalar labels (model, hardware, framework, framework_version,
+    precision, model_type) equality is required. For ``architectures``
+    the semantics are *contains*: the recipe's architectures list must
+    include all queried architecture(s).
 
     The recipe carries already-slugged identity under ``labels`` (set by
     :func:`_page_to_recipe`); the caller's ``label_match`` may be a raw or
     slugged value, so we re-run it through ``canonical_labels`` to make
     the comparison slug-normalized (``Qwen/Qwen3`` vs ``qwen3`` converge).
+
+    Args:
+        recipe: The candidate recipe carrying slugged ``labels``.
+        label_match: The constraining labels (raw or slugged); empty matches
+            everything.
+
+    Returns:
+        ``True`` when every constrained label equals the recipe's slugged
+        value.
     """
     if not label_match:
         return True
@@ -308,30 +354,32 @@ def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> 
     if not isinstance(recipe_labels, Mapping):
         recipe_labels = {}
     want = C.canonical_labels(
-        model=str(
-            label_match.get(C.F_LABEL_MODEL, "")
-            or recipe_labels.get(C.F_LABEL_MODEL, "")
-        ),
-        hardware=str(
-            label_match.get(C.F_LABEL_HARDWARE, "")
-            or recipe_labels.get(C.F_LABEL_HARDWARE, "")
-        ),
-        framework=str(
-            label_match.get(C.F_LABEL_FRAMEWORK, "")
-            or recipe_labels.get(C.F_LABEL_FRAMEWORK, "")
-        ),
+        model=str(label_match.get(C.F_LABEL_MODEL, "") or recipe_labels.get(C.F_LABEL_MODEL, "")),
+        hardware=str(label_match.get(C.F_LABEL_HARDWARE, "") or recipe_labels.get(C.F_LABEL_HARDWARE, "")),
+        framework=str(label_match.get(C.F_LABEL_FRAMEWORK, "") or recipe_labels.get(C.F_LABEL_FRAMEWORK, "")),
         framework_version=str(
-            label_match.get(C.F_LABEL_FRAMEWORK_VERSION, "")
-            or recipe_labels.get(C.F_LABEL_FRAMEWORK_VERSION, "")
+            label_match.get(C.F_LABEL_FRAMEWORK_VERSION, "") or recipe_labels.get(C.F_LABEL_FRAMEWORK_VERSION, "")
         ),
-        precision=str(
-            label_match.get(C.F_LABEL_PRECISION, "")
-            or recipe_labels.get(C.F_LABEL_PRECISION, "")
+        precision=str(label_match.get(C.F_LABEL_PRECISION, "") or recipe_labels.get(C.F_LABEL_PRECISION, "")),
+        model_type=str(label_match.get(C.F_LABEL_MODEL_TYPE, "") or recipe_labels.get(C.F_LABEL_MODEL_TYPE, "")),
+        architectures=str(
+            label_match.get(C.F_LABEL_ARCHITECTURES, "") or recipe_labels.get(C.F_LABEL_ARCHITECTURES, "")
         ),
     )
     # Only compare the dimensions the caller actually constrained.
     for key in label_match:
-        if key in recipe_labels and recipe_labels[key] != want.get(key):
+        if key == C.F_LABEL_ARCHITECTURES:
+            # Contains semantics: recipe architectures must include all
+            # queried architecture slugs.
+            recipe_arch = str(recipe_labels.get(key, "")).lower()
+            query_arch = str(want.get(key, "")).lower()
+            if query_arch and query_arch not in ("unknown_arch", ""):
+                # architectures slug uses "+" join; split and check containment
+                query_parts = set(query_arch.split("+"))
+                recipe_parts = set(recipe_arch.split("+"))
+                if not query_parts.issubset(recipe_parts):
+                    return False
+        elif key in recipe_labels and recipe_labels[key] != want.get(key):
             return False
     return True
 
@@ -368,10 +416,7 @@ class GbrainRemoteRecipeClient:
         # Foreground-friendly default: gbrain is a read side-channel, so
         # never block the main loop longer than the recipe_kb foreground
         # budget.
-        self.timeout_sec = (
-            float(timeout_sec) if timeout_sec is not None
-            else C.FOREGROUND_HTTP_TIMEOUT_SEC
-        )
+        self.timeout_sec = float(timeout_sec) if timeout_sec is not None else C.FOREGROUND_HTTP_TIMEOUT_SEC
         self.enabled = bool(enabled and self.base_url and self.token)
         self._mcp = _GbrainMcp(self.base_url, self.token, self.timeout_sec) if self.enabled else None
         self._scan_cache: list[dict[str, Any]] | None = None
@@ -415,7 +460,15 @@ class GbrainRemoteRecipeClient:
         return _SCAN_CACHE_TTL_SEC
 
     def _get_page_recipe(self, slug: str) -> dict[str, Any] | None:
-        """Fetch one gbrain recipe page by slug and project it."""
+        """Fetch one gbrain recipe page by slug and project it.
+
+        Args:
+            slug: The gbrain page slug to fetch.
+
+        Returns:
+            The projected recipe envelope, or ``None`` when disabled, missing,
+            or lacking frontmatter.
+        """
         if not self.enabled or self._mcp is None:
             return None
         page = self._mcp.call("get_page", {"slug": slug})
@@ -432,6 +485,13 @@ class GbrainRemoteRecipeClient:
         early when many pages share the same ``updated_at``, hiding older
         recipes from client-side search. Dedup by slug across page boundaries
         and return newest-first to preserve the previous caller contract.
+
+        Args:
+            limit: Maximum number of recipes to return (capped at the internal
+                scan cap).
+
+        Returns:
+            Newest-first projected recipe dicts, or ``[]`` when disabled.
         """
         if not self.enabled or self._mcp is None:
             return []
@@ -447,7 +507,9 @@ class GbrainRemoteRecipeClient:
         max_pages = max(1, (_RECIPE_SCAN_CAP // _LIST_PAGE_SIZE) + 3)
         while len(out) < cap and pages < max_pages:
             params: dict[str, Any] = {
-                "type": "recipe", "limit": _LIST_PAGE_SIZE, "sort": "updated_asc",
+                "type": "recipe",
+                "limit": _LIST_PAGE_SIZE,
+                "sort": "updated_asc",
             }
             if cursor:
                 params["updated_after"] = cursor
@@ -480,12 +542,26 @@ class GbrainRemoteRecipeClient:
 
     # -- read surface (mirrors RemoteRecipeClient) -------------------------
     def get_recipe(
-        self, *, canonical_id: str, version: int | None = None,
+        self,
+        *,
+        canonical_id: str,
+        version: int | None = None,
     ) -> dict[str, Any] | None:
         """Return the recipe for ``canonical_id`` (top label-match), or None.
 
         gbrain keeps no per-version archive, so ``version`` is accepted
         for interface parity but only ``version in (None, 1)`` can match.
+
+        Args:
+            canonical_id: The canonical recipe id to look up.
+            version: Optional version; only ``None`` or ``1`` can match.
+
+        Returns:
+            The matching recipe envelope, or ``None`` on miss / disabled /
+            non-matching version.
+
+        Raises:
+            ValueError: If ``canonical_id`` is empty.
         """
         if not self.enabled:
             return None
@@ -495,19 +571,23 @@ class GbrainRemoteRecipeClient:
             return None
         try:
             from .canonical_id import cid_to_path_components
-            model, hardware, framework, framework_version, precision = cid_to_path_components(
-                canonical_id
+
+            model, hardware, framework, model_type, architectures, framework_version, precision = (
+                cid_to_path_components(canonical_id)
             )
         except Exception:  # noqa: BLE001 - malformed id -> remote miss
             return None
         label_match = {
-            C.F_LABEL_MODEL: model, C.F_LABEL_HARDWARE: hardware,
+            C.F_LABEL_MODEL: model,
+            C.F_LABEL_HARDWARE: hardware,
             C.F_LABEL_FRAMEWORK: framework,
             C.F_LABEL_FRAMEWORK_VERSION: framework_version,
             C.F_LABEL_PRECISION: precision,
+            C.F_LABEL_MODEL_TYPE: model_type,
+            C.F_LABEL_ARCHITECTURES: architectures,
         }
         # Fast path: gbrain recipe slugs are the canonical id with ':' as path
-        # separators, so exact 5-tuple reads do not need a full corpus scan.
+        # separators, so exact 7-tuple reads do not need a full corpus scan.
         direct = self._get_page_recipe("recipe-snapshot/" + canonical_id.replace(":", "/"))
         if direct is not None and direct.get(C.F_CANONICAL_ID) == canonical_id:
             return direct
@@ -557,6 +637,19 @@ class GbrainRemoteRecipeClient:
         unified KB-interface signature; the dispatcher applies the
         client-side rerank over the normalized rows, so this adapter
         only honours the ``required`` (``label_match`` / metric) filter.
+
+        Args:
+            label_match: Identity labels to filter on (empty matches all).
+            metric_filters: ``{metric: {min, max}}`` bounds to apply.
+            updated_since: Keep only rows with ``updated_at`` at or after this.
+            order_by: Ordering key; ASC variants reverse the default newest-
+                first order.
+            limit: Maximum number of rows to return.
+            prefer: Accepted for signature parity; ignored here (rerank lives
+                in the dispatcher).
+
+        Returns:
+            The filtered, ordered recipe rows, or ``[]`` when disabled.
         """
         del prefer  # client-side rerank lives in RecipeKB
         if not self.enabled:
@@ -617,6 +710,13 @@ def _passes_metric_filters(recipe: Mapping[str, Any], metric_filters: Mapping[st
     The recipe is the nested KB-interface envelope, so throughput lives
     under ``metrics.throughput`` / ``body.best_throughput``. We accept
     both the ``throughput`` and the ``best_throughput`` filter aliases.
+
+    Args:
+        recipe: The nested KB-interface recipe envelope.
+        metric_filters: ``{metric: {min, max}}`` bounds to apply.
+
+    Returns:
+        ``True`` when the recipe satisfies every metric bound.
     """
     metrics = recipe.get("metrics") if isinstance(recipe.get("metrics"), Mapping) else {}
     body = recipe.get("body") if isinstance(recipe.get("body"), Mapping) else {}
@@ -642,6 +742,10 @@ def build_gbrain_remote_from_env() -> GbrainRemoteRecipeClient | None:
 
     Returns ``None`` when the env is not configured so the caller can
     fall back to local-only or the cortex remote.
+
+    Returns:
+        A configured :class:`GbrainRemoteRecipeClient`, or ``None`` when the
+        base URL / token env vars are not set.
     """
     base_url = (os.environ.get("GBRAIN_BASE_URL", "") or "").strip()
     token = (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
@@ -655,7 +759,10 @@ def build_gbrain_remote_from_env() -> GbrainRemoteRecipeClient | None:
         except ValueError:
             timeout_sec = None
     return GbrainRemoteRecipeClient(
-        base_url=base_url, token=token, enabled=True, timeout_sec=timeout_sec,
+        base_url=base_url,
+        token=token,
+        enabled=True,
+        timeout_sec=timeout_sec,
     )
 
 

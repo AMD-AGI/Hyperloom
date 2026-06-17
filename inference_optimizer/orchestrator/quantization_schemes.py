@@ -49,6 +49,12 @@ def supported_schemes(gpu_type: str | None) -> list[str]:
 
     MI355X gets the full set; every other (DCGPU) target drops the
     ``mxfp4`` / ``mxfp4_fp8`` MI355X-only schemes.
+
+    Args:
+        gpu_type: The target GPU type, or ``None``/empty for non-MI355X.
+
+    Returns:
+        The list of schemes selectable on the given GPU type.
     """
     if (gpu_type or "").strip().lower() == "mi355x":
         return list(SUPPORTED_SCHEMES)
@@ -64,14 +70,20 @@ def validate_scheme(scheme: str | None, gpu_type: str | None) -> None:
     (the real GPU is resolved later via the rocm-smi probe) the hardware
     constraint is not enforced here — the constraint check needs a concrete
     target to act on.
+
+    Args:
+        scheme: The requested quantization scheme, or the ``none`` sentinel.
+        gpu_type: The target GPU type used to enforce hardware constraints.
+
+    Raises:
+        ValueError: If ``scheme`` is not a known supported scheme.
+        SchemeNotSupportedError: If an MI355X-only scheme is requested on a
+            known non-MI355X target.
     """
     if not scheme or scheme == NO_QUANTIZATION:
         return
     if scheme not in SUPPORTED_SCHEMES:
-        raise ValueError(
-            f"unknown quantization scheme {scheme!r}; "
-            f"choose one of {list(SUPPORTED_SCHEMES)}"
-        )
+        raise ValueError(f"unknown quantization scheme {scheme!r}; choose one of {list(SUPPORTED_SCHEMES)}")
     gpu = (gpu_type or "").strip().lower()
     if scheme in MI355X_ONLY and gpu and gpu != "mi355x":
         raise SchemeNotSupportedError(
@@ -106,7 +118,14 @@ class QuantizationConfig:
 
 
 def _join_clauses(items: Sequence[str]) -> str:
-    """Join clauses as ``a``, ``a and b``, or ``a, b and c``."""
+    """Join clauses as ``a``, ``a and b``, or ``a, b and c``.
+
+    Args:
+        items: The clause strings to join.
+
+    Returns:
+        The natural-language conjunction, or ``""`` when ``items`` is empty.
+    """
     items = list(items)
     if not items:
         return ""
@@ -127,18 +146,12 @@ def _strategy_paragraph(cfg: QuantizationConfig) -> str:
     """
     sentences = [f"Apply {cfg.global_scheme} as the global quantization scheme."]
     if cfg.layer_overrides:
-        clauses = [
-            f"the {layer} layers with {scheme}"
-            for layer, scheme in cfg.layer_overrides.items()
-        ]
+        clauses = [f"the {layer} layers with {scheme}" for layer, scheme in cfg.layer_overrides.items()]
         sentences.append(f"Override {_join_clauses(clauses)}.")
     if cfg.kv_cache:
         sentences.append(f"Quantize the kv_cache with {cfg.kv_cache}.")
     if cfg.exclude_layers:
-        sentences.append(
-            f"Additionally exclude {_join_clauses(list(cfg.exclude_layers))} "
-            f"from quantization."
-        )
+        sentences.append(f"Additionally exclude {_join_clauses(list(cfg.exclude_layers))} from quantization.")
     if cfg.output_dir:
         sentences.append(f"Write the quantized model to {cfg.output_dir}.")
     return "Quantization strategy:\n" + " ".join(sentences)
@@ -181,10 +194,7 @@ def _evaluation_paragraph(cfg: QuantizationConfig) -> str | None:
     if cfg.acceptable_eval_gap is None:
         return None
     pct = f"{cfg.acceptable_eval_gap * 100:g}"
-    return (
-        "Evaluation:\n"
-        f"Keep the quantized model's accuracy within {pct}% of the bf16 baseline."
-    )
+    return f"Evaluation:\nKeep the quantized model's accuracy within {pct}% of the bf16 baseline."
 
 
 def build_quantization_prompt(
@@ -202,15 +212,22 @@ def build_quantization_prompt(
     (no hard-coded defaults). ``model_path`` / ``skill_path`` / ``gpu_type``
     populate the intro line; the inference_optimizer prelude leaves them unset
     because its adapter folds the source model + export dir into the prompt.
+
+    Args:
+        cfg: The structured quantization config to render.
+        model_path: Optional source model path for the intro line.
+        gpu_type: Optional target GPU type for the intro line.
+        skill_path: Optional skill path referenced in the intro line.
+
+    Returns:
+        The composed natural-language quantization prompt.
     """
     paragraphs: list[str] = []
 
     if model_path:
         target = f" on an {gpu_type.upper()} target" if gpu_type else ""
         if skill_path:
-            paragraphs.append(
-                f"Use the skill at {skill_path} to quantize {model_path}{target}."
-            )
+            paragraphs.append(f"Use the skill at {skill_path} to quantize {model_path}{target}.")
         else:
             paragraphs.append(f"Quantize {model_path}{target}.")
 
@@ -232,14 +249,21 @@ def resolve_scheme_prompt(scheme: str | None) -> str | None:
     Quark's intake + plan skill supplies those. Per-layer overrides and the
     other §4 knobs travel through :func:`build_quantization_prompt` with a fully
     populated :class:`QuantizationConfig` (the structured UI path).
+
+    Args:
+        scheme: The global scheme enum, or the ``none`` sentinel.
+
+    Returns:
+        The rendered ``--quantize`` prompt, or ``None`` when ``scheme`` is
+        falsy or ``"none"``.
+
+    Raises:
+        ValueError: If ``scheme`` is a non-empty unknown scheme.
     """
     if not scheme or scheme == NO_QUANTIZATION:
         return None
     if scheme not in SUPPORTED_SCHEMES:
-        raise ValueError(
-            f"unknown quantization scheme {scheme!r}; "
-            f"choose one of {list(SUPPORTED_SCHEMES)}"
-        )
+        raise ValueError(f"unknown quantization scheme {scheme!r}; choose one of {list(SUPPORTED_SCHEMES)}")
     return build_quantization_prompt(QuantizationConfig(global_scheme=scheme))
 
 

@@ -415,14 +415,16 @@ canonical upstream path returned in `analysis_report_path` from
 User-specified backends win, subject to feasibility checks. If user does not
 specify backends:
 
-- **Default ladder (all rewritable kernels)**: `geak,claude,codex,cursor` —
-  GEAK first because every kernel Claude/Codex/Cursor can rewrite, GEAK can
-  rewrite too. Claude/Codex stay on as fallbacks if GEAK times out or
-  rejects; `cursor` is appended when `$CURSOR_API_KEY` is provisioned (auto-
-  dropped otherwise to avoid wasted 401 attempts). The kernel type
-  (Triton / HIP-C++ / FlyDSL / Python / unknown) does NOT change the ladder;
-  the capability differences are GEAK-side, not Hyperloom-side, so we let
-  GEAK decide what to handle.
+- **Default ladder (all rewritable kernels)**: `forge,geak` — Forge first
+  (Kernel-Forge autonomous loop), falling through to GEAK when Forge skips a
+  non-Triton candidate or misses a KEEP. `claude`, `codex`, and `cursor` are
+  **NOT** in the default ladder anymore; they are opt-in only, enabled via
+  `--backends` or the `KERNEL_OPT_BACKEND_ORDER` / `KERNEL_OPT_BACKENDS` env
+  (they remain in the `allowed` whitelist so the env override still works).
+  `cursor` is additionally key-gated (dropped when `$CURSOR_API_KEY` is unset
+  to avoid wasted 401 attempts). The kernel type (Triton / HIP-C++ / FlyDSL /
+  Python / unknown) does NOT change the ladder; capability differences are
+  backend-side, not Hyperloom-side, so we let the backend decide what to handle.
 - **No-benchmark case**: still attempt GEAK but flag
   `geak_without_benchmark: true` so the KEEP gate downstream knows
   verification confidence is reduced (matches the existing user-specified

@@ -106,12 +106,8 @@ def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
     rows = _parse_executive_table(text)
     out["compute_pct"] = _parse_pct(rows.get("Compute %"))
     out["idle_pct"] = _parse_pct(rows.get("Idle %"))
-    out["comm_pct"] = _parse_pct(
-        rows.get("Exposed Communication %") or rows.get("Communication %")
-    )
-    out["top_bottleneck"] = _parse_top_bottleneck(
-        rows.get("Top Bottleneck Category")
-    )
+    out["comm_pct"] = _parse_pct(rows.get("Exposed Communication %") or rows.get("Communication %"))
+    out["top_bottleneck"] = _parse_top_bottleneck(rows.get("Top Bottleneck Category"))
     return out
 
 
@@ -176,9 +172,7 @@ def extract_top_kernel(analysis_md_path: str | Path) -> dict[str, Any] | None:
                 "name": str(op.get("name") or ""),
                 "gpu_pct": round(pct, 2),
                 "efficiency_pct": _parse_pct(
-                    str(eff.get("efficiency_percent"))
-                    if eff.get("efficiency_percent") is not None
-                    else None
+                    str(eff.get("efficiency_percent")) if eff.get("efficiency_percent") is not None else None
                 ),
                 "bound_type": str(eff.get("bound_type") or op.get("bound_type") or ""),
                 "category": category,
@@ -193,7 +187,16 @@ def _compute_within_and_gap(
     peak: float,
     achieved: float,
 ) -> tuple[float | None, float | None]:
-    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both ``None`` when either input is non-positive."""
+    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both ``None`` when either input is non-positive.
+
+    Args:
+        peak: The theoretical peak throughput (tok/s).
+        achieved: The achieved throughput (tok/s).
+
+    Returns:
+        A ``(within_roofline_pct, gap_to_roofline_pct)`` tuple, both ``None``
+        when either input is non-positive.
+    """
     if peak <= 0 or achieved <= 0:
         return None, None
     within = round(achieved / peak * 100.0, 2)
@@ -214,6 +217,22 @@ def build_roofline_snapshot(
     """Materialise one side (baseline or latest) of the comparison.
 
     ``theoretical_peak_tok_per_sec`` is the primary decode roofline ceiling (from ``roofline_ceiling.compute_roofline_breakdown_from_state``); mem/cmp sides + ``roofline_bound_kind`` persist which side dominated, and ``achieved_tok_per_sec`` is the snapshot-time ``output_throughput``. All default to 0/"unknown" so legacy callers yield ``None`` in derived pct fields.
+
+    Args:
+        snapshot_id: The snapshot identifier, or ``None``.
+        ts: The capture timestamp string.
+        analysis_md_path: Path to the TraceLens ``analysis.md``; when empty the
+            workload/top-kernel fields are left unset.
+        theoretical_peak_tok_per_sec: Primary decode roofline ceiling (tok/s).
+        achieved_tok_per_sec: Snapshot-time ``output_throughput`` (tok/s).
+        mem_ceiling_tok_per_sec: Memory-side roofline ceiling (tok/s).
+        cmp_ceiling_tok_per_sec: Compute-side roofline ceiling (tok/s).
+        bound_kind: Which side dominated (e.g. ``memory`` / ``compute``).
+
+    Returns:
+        A snapshot dict with the ceiling, achieved throughput, derived
+        within/gap percentages, and workload/top-kernel fields parsed from the
+        analysis.md when available.
     """
     within, gap = _compute_within_and_gap(
         peak=theoretical_peak_tok_per_sec,
@@ -231,24 +250,12 @@ def build_roofline_snapshot(
         "top_kernel": None,
         # Primary decode roofline ceiling plus its memory/compute sides; all None when the ceiling is unavailable.
         "theoretical_peak_tok_per_sec": (
-            float(theoretical_peak_tok_per_sec)
-            if theoretical_peak_tok_per_sec > 0 else None
+            float(theoretical_peak_tok_per_sec) if theoretical_peak_tok_per_sec > 0 else None
         ),
-        "roofline_mem_ceiling_tok_per_sec": (
-            float(mem_ceiling_tok_per_sec)
-            if mem_ceiling_tok_per_sec > 0 else None
-        ),
-        "roofline_cmp_ceiling_tok_per_sec": (
-            float(cmp_ceiling_tok_per_sec)
-            if cmp_ceiling_tok_per_sec > 0 else None
-        ),
-        "roofline_bound_kind": (
-            str(bound_kind) if bound_kind else "unknown"
-        ),
-        "achieved_tok_per_sec": (
-            float(achieved_tok_per_sec)
-            if achieved_tok_per_sec > 0 else None
-        ),
+        "roofline_mem_ceiling_tok_per_sec": (float(mem_ceiling_tok_per_sec) if mem_ceiling_tok_per_sec > 0 else None),
+        "roofline_cmp_ceiling_tok_per_sec": (float(cmp_ceiling_tok_per_sec) if cmp_ceiling_tok_per_sec > 0 else None),
+        "roofline_bound_kind": (str(bound_kind) if bound_kind else "unknown"),
+        "achieved_tok_per_sec": (float(achieved_tok_per_sec) if achieved_tok_per_sec > 0 else None),
         "within_roofline_pct": within,
         "gap_to_roofline_pct": gap,
     }
@@ -309,6 +316,14 @@ def build_roofline_comparison_from_history(
 
     Append-only: ``snapshots[0]`` is baseline, ``snapshots[-1]`` the latest refresh.
     Same snapshot_id → single_snapshot mode; distinct ids → before_after with ``delta``. ``None`` when history empty.
+
+    Args:
+        snapshots: The append-only snapshot history, or ``None``.
+
+    Returns:
+        The ``roofline_comparison`` block (``mode`` / ``baseline`` / ``latest``
+        and, in before_after mode, a ``delta``), or ``None`` when the history
+        is empty.
     """
     snapshots = list(snapshots or [])
     if not snapshots:
@@ -317,11 +332,7 @@ def build_roofline_comparison_from_history(
     latest = dict(snapshots[-1])
     base_id = baseline.get("snapshot_id")
     latest_id = latest.get("snapshot_id")
-    same_snapshot = (
-        isinstance(base_id, int)
-        and isinstance(latest_id, int)
-        and base_id == latest_id
-    )
+    same_snapshot = isinstance(base_id, int) and isinstance(latest_id, int) and base_id == latest_id
     mode = "single_snapshot" if same_snapshot else "before_after"
     out: dict[str, Any] = {
         "mode": mode,
@@ -333,13 +344,16 @@ def build_roofline_comparison_from_history(
         lat_eff = (latest.get("top_kernel") or {}).get("efficiency_pct")
         out["delta"] = {
             "compute_pct": _num_delta(
-                latest.get("compute_pct"), baseline.get("compute_pct"),
+                latest.get("compute_pct"),
+                baseline.get("compute_pct"),
             ),
             "idle_pct": _num_delta(
-                latest.get("idle_pct"), baseline.get("idle_pct"),
+                latest.get("idle_pct"),
+                baseline.get("idle_pct"),
             ),
             "comm_pct": _num_delta(
-                latest.get("comm_pct"), baseline.get("comm_pct"),
+                latest.get("comm_pct"),
+                baseline.get("comm_pct"),
             ),
             "top_kernel_efficiency_pct": _num_delta(lat_eff, base_eff),
             "within_roofline_pct": _num_delta(
@@ -399,7 +413,16 @@ def _fmt_pct_cell(v: float | None) -> str:
 
 
 def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
-    """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns)."""
+    """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns).
+
+    Args:
+        cmp: The roofline-comparison dict built by
+            :func:`build_roofline_comparison_from_history`.
+
+    Returns:
+        The markdown table lines; ``single_snapshot`` mode renders a single
+        Metric/Value table while ``before_after`` renders Base/Opt/Δ columns.
+    """
 
     def cell(v: float | None) -> str:
         """Format a percentage value for a table cell.
@@ -433,48 +456,42 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
     lines: list[str] = list(ceiling_lines)
     if mode == "single_snapshot":
         snap = baseline
-        lines.extend([
-            "| Metric | Value |",
-            "|--------|-------|",
-            f"| Compute % | {cell(snap.get('compute_pct'))} |",
-            f"| Idle % | {cell(snap.get('idle_pct'))} |",
-            f"| Comm % | {cell(snap.get('comm_pct'))} |",
-            f"| Top bottleneck | {snap.get('top_bottleneck') or '—'} |",
-        ])
+        lines.extend(
+            [
+                "| Metric | Value |",
+                "|--------|-------|",
+                f"| Compute % | {cell(snap.get('compute_pct'))} |",
+                f"| Idle % | {cell(snap.get('idle_pct'))} |",
+                f"| Comm % | {cell(snap.get('comm_pct'))} |",
+                f"| Top bottleneck | {snap.get('top_bottleneck') or '—'} |",
+            ]
+        )
         tk = snap.get("top_kernel") or {}
         lines.append(f"| Top kernel efficiency | {cell(tk.get('efficiency_pct'))} |")
         if tk.get("name"):
             lines.append(f"| Top kernel | `{tk.get('name')}` |")
-        lines.append(
-            f"| Achieved output_throughput | "
-            f"{_fmt_tput(snap.get('achieved_tok_per_sec'))} |"
-        )
-        lines.append(
-            f"| Within roofline % | "
-            f"{_fmt_pct_cell(snap.get('within_roofline_pct'))} |"
-        )
-        lines.append(
-            f"| Gap to roofline % | "
-            f"{_fmt_pct_cell(snap.get('gap_to_roofline_pct'))} |"
-        )
+        lines.append(f"| Achieved output_throughput | {_fmt_tput(snap.get('achieved_tok_per_sec'))} |")
+        lines.append(f"| Within roofline % | {_fmt_pct_cell(snap.get('within_roofline_pct'))} |")
+        lines.append(f"| Gap to roofline % | {_fmt_pct_cell(snap.get('gap_to_roofline_pct'))} |")
         lines.append("")
         return lines
 
-    lines.extend([
-        "| Metric | Base | Opt | Δ |",
-        "|--------|------|-----|---|",
-        f"| Compute % | {cell(baseline.get('compute_pct'))} | "
-        f"{cell(latest.get('compute_pct'))} | "
-        f"{_fmt_delta(delta.get('compute_pct'))} |",
-        f"| Idle % | {cell(baseline.get('idle_pct'))} | "
-        f"{cell(latest.get('idle_pct'))} | "
-        f"{_fmt_delta(delta.get('idle_pct'))} |",
-        f"| Comm % | {cell(baseline.get('comm_pct'))} | "
-        f"{cell(latest.get('comm_pct'))} | "
-        f"{_fmt_delta(delta.get('comm_pct'))} |",
-        f"| Top bottleneck | {baseline.get('top_bottleneck') or '—'} | "
-        f"{latest.get('top_bottleneck') or '—'} | — |",
-    ])
+    lines.extend(
+        [
+            "| Metric | Base | Opt | Δ |",
+            "|--------|------|-----|---|",
+            f"| Compute % | {cell(baseline.get('compute_pct'))} | "
+            f"{cell(latest.get('compute_pct'))} | "
+            f"{_fmt_delta(delta.get('compute_pct'))} |",
+            f"| Idle % | {cell(baseline.get('idle_pct'))} | "
+            f"{cell(latest.get('idle_pct'))} | "
+            f"{_fmt_delta(delta.get('idle_pct'))} |",
+            f"| Comm % | {cell(baseline.get('comm_pct'))} | "
+            f"{cell(latest.get('comm_pct'))} | "
+            f"{_fmt_delta(delta.get('comm_pct'))} |",
+            f"| Top bottleneck | {baseline.get('top_bottleneck') or '—'} | {latest.get('top_bottleneck') or '—'} | — |",
+        ]
+    )
     btk = baseline.get("top_kernel") or {}
     ltk = latest.get("top_kernel") or {}
     lines.append(
@@ -483,10 +500,7 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
         f"{_fmt_delta(delta.get('top_kernel_efficiency_pct'))} |"
     )
     if btk.get("name") or ltk.get("name"):
-        lines.append(
-            f"| Top kernel | `{btk.get('name') or '—'}` | "
-            f"`{ltk.get('name') or '—'}` | — |"
-        )
+        lines.append(f"| Top kernel | `{btk.get('name') or '—'}` | `{ltk.get('name') or '—'}` | — |")
     lines.append(
         f"| Achieved output_throughput | "
         f"{_fmt_tput(baseline.get('achieved_tok_per_sec'))} | "
@@ -525,6 +539,13 @@ def dominant_direction(snapshot: dict[str, Any] | None) -> tuple[str, float]:
 
     Reads compute/idle/comm percentages and folds a ``memory`` bound kind in as
     a tie-breaker; returns ``("", 0.0)`` when no usable numbers are present.
+
+    Args:
+        snapshot: A single roofline snapshot dict, or ``None``.
+
+    Returns:
+        A ``(direction, pct)`` tuple for the most-saturated direction, or
+        ``("", 0.0)`` when no usable numbers are present.
     """
     if not isinstance(snapshot, dict):
         return "", 0.0
@@ -558,6 +579,16 @@ def build_profiler_digest(
     previous snapshot, the hottest kernels, a suggested specialist lever for the
     dominant direction, and the reusable native kernel ids. Returns ``""`` when
     no profiler data is available; never raises.
+
+    Args:
+        snapshots: The roofline snapshot history, or ``None``.
+        trace_analyze: The latest ``trace_analyze`` payload (hot kernels +
+            reusable kernel ids), or ``None``.
+        top_n: Maximum number of hot kernels to surface.
+
+    Returns:
+        The rendered profiler block, or ``""`` when no profiler data is
+        available.
     """
     try:
         snaps = [s for s in (snapshots or []) if isinstance(s, dict)]
@@ -567,6 +598,14 @@ def build_profiler_digest(
         latest = snaps[-1] if snaps else {}
 
         def _pct(v: Any) -> str:
+            """Format a value as a one-decimal percentage, or ``—`` when not numeric.
+
+            Args:
+                v (Any): The candidate percentage value.
+
+            Returns:
+                str: The formatted percentage, or ``"—"`` when not numeric.
+            """
             return f"{float(v):.1f}%" if isinstance(v, (int, float)) else "—"
 
         bound_kind = str(latest.get("roofline_bound_kind") or "").strip() or "unknown"
@@ -612,16 +651,11 @@ def build_profiler_digest(
         direction, _pct_val = dominant_direction(latest)
         lever = BOTTLENECK_DOMAIN_HINTS.get(direction)
         if lever:
-            lines.append(
-                f"suggested_lever (dominant={direction}): {lever[0]}"
-            )
+            lines.append(f"suggested_lever (dominant={direction}): {lever[0]}")
 
         reusable = ta.get("reusable_native_kernel_ids") or []
         if isinstance(reusable, list) and reusable:
-            lines.append(
-                "reusable_native_kernel_ids="
-                f"{[str(r) for r in reusable[:12]]}"
-            )
+            lines.append(f"reusable_native_kernel_ids={[str(r) for r in reusable[:12]]}")
 
         return "\n".join(lines)
     except Exception:  # noqa: BLE001 — prompt enrichment must never crash

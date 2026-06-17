@@ -87,7 +87,10 @@ def _env_gate_allows_gpureset() -> bool:
         bool: ``True`` only when the env gate is explicitly enabled.
     """
     return os.getenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "").strip().lower() in {
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 
@@ -141,9 +144,14 @@ def _is_multi_node_sandbox() -> bool:
 
     Single-node (``is_multi_node() == False``) is unaffected — the sandbox
     IS the GPU pod, so local rocm-smi / gpureset are meaningful.
+
+    Returns:
+        ``True`` when running in multi-node mode (nodes >= 2); ``False`` for
+        single-node or when the mode cannot be determined.
     """
     try:
         from ._multi_node_env import is_multi_node
+
         return is_multi_node()
     except Exception:  # noqa: BLE001 - never block recovery on import error
         return False
@@ -191,7 +199,9 @@ class RecoverExecutor:
 
         log.info(
             "recover_executor: start reason=%r force=%s allow_reset_env=%s",
-            reason, force_cleanup, allow_reset,
+            reason,
+            force_cleanup,
+            allow_reset,
         )
 
         # Dynamo CPU-only sandbox: no local GPUs to reclaim (they live on remote
@@ -232,9 +242,7 @@ class RecoverExecutor:
         if force_cleanup:
             killed = await asyncio.to_thread(self._kill_stale_owners)
         else:
-            log.info(
-                "recover_executor: force_gpu_cleanup=false; skipping kill stage"
-            )
+            log.info("recover_executor: force_gpu_cleanup=false; skipping kill stage")
 
         # 3) Probe after kills.
         mid = await asyncio.to_thread(self._probe_gpu_free_mb)
@@ -244,14 +252,11 @@ class RecoverExecutor:
         gpu_ids = _session_gpu_ids()
         gpureset_result: dict[str, Any] | None = None
         gpureset_skipped_reason: str | None = None
-        if (
-            force_cleanup
-            and allow_reset
-            and not self._all_recovered(mid)
-        ):
+        if force_cleanup and allow_reset and not self._all_recovered(mid):
             if gpu_ids:
                 gpureset_result = await asyncio.to_thread(
-                    self._try_rocm_smi_gpureset, gpu_ids,
+                    self._try_rocm_smi_gpureset,
+                    gpu_ids,
                 )
             else:
                 gpureset_skipped_reason = "no_session_gpu_scope"
@@ -266,11 +271,7 @@ class RecoverExecutor:
             gpureset_skipped_reason = "gpureset_disabled"
 
         # 5) Final probe (only matters if we attempted gpureset).
-        post = (
-            await asyncio.to_thread(self._probe_gpu_free_mb)
-            if gpureset_result is not None
-            else mid
-        )
+        post = await asyncio.to_thread(self._probe_gpu_free_mb) if gpureset_result is not None else mid
 
         succeeded = self._all_recovered(post)
         result: dict[str, Any] = {
@@ -289,9 +290,7 @@ class RecoverExecutor:
         }
         if not succeeded:
             result["error_class"] = (
-                "gpu_unhealthy_after_gpureset"
-                if gpureset_result is not None
-                else "gpu_unhealthy_after_soft_cleanup"
+                "gpu_unhealthy_after_gpureset" if gpureset_result is not None else "gpu_unhealthy_after_soft_cleanup"
             )
 
         if workspace is not None:
@@ -347,7 +346,8 @@ class RecoverExecutor:
         except OSError as exc:
             log.warning(
                 "recover_executor: failed to write result.json to %s: %s",
-                workspace, exc,
+                workspace,
+                exc,
             )
 
     # GPU probe (rocm-smi --showmeminfo vram --csv)
@@ -380,7 +380,8 @@ class RecoverExecutor:
         if proc.returncode != 0:
             log.warning(
                 "recover_executor: rocm-smi exit=%d stderr=%s",
-                proc.returncode, proc.stderr.strip()[:200],
+                proc.returncode,
+                proc.stderr.strip()[:200],
             )
             return []
         return self._parse_rocm_smi_vram_csv(proc.stdout)
@@ -456,9 +457,7 @@ class RecoverExecutor:
             # No probe → can't claim recovery; treat as unhealthy.
             return False
         return all(
-            isinstance(snap.get("free_mb"), (int, float))
-            and snap["free_mb"] >= self.FREE_MB_HEALTHY
-            for snap in gpus
+            isinstance(snap.get("free_mb"), (int, float)) and snap["free_mb"] >= self.FREE_MB_HEALTHY for snap in gpus
         )
 
     # soft cleanup — pgrep + kill loop
@@ -467,6 +466,9 @@ class RecoverExecutor:
 
         Returns one record per signalled PID (cmdline at discovery + final
         signal name ``"TERM"`` / ``"KILL"``).
+
+        Returns:
+            One record per signalled PID, or ``[]`` when none were stale.
         """
         candidates = self._discover_stale_pids()
         if not candidates:
@@ -489,7 +491,12 @@ class RecoverExecutor:
 
     def _discover_stale_pids(self) -> list[dict[str, Any]]:
         """Run ``pgrep -a -f -- <pattern>`` per owner pattern (matches the
-        full cmdline) and return unique PID records, excluding our own PID."""
+        full cmdline) and return unique PID records, excluding our own PID.
+
+        Returns:
+            Unique PID records matching the owner patterns, or ``[]`` when
+            ``pgrep`` is unavailable or nothing matched.
+        """
         if not shutil.which("pgrep"):
             log.warning("recover_executor: pgrep not on PATH; skipping kill stage")
             return []
@@ -505,9 +512,7 @@ class RecoverExecutor:
                     timeout=3.0,
                 )
             except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-                log.warning(
-                    "recover_executor: pgrep(%r) failed: %s", pattern, exc
-                )
+                log.warning("recover_executor: pgrep(%r) failed: %s", pattern, exc)
                 continue
             if proc.returncode not in (0, 1):  # 1 = no matches
                 continue
@@ -551,7 +556,9 @@ class RecoverExecutor:
         except PermissionError as exc:
             log.warning(
                 "recover_executor: cannot signal pid=%d sig=%s: %s",
-                pid, sig.name, exc,
+                pid,
+                sig.name,
+                exc,
             )
             return False
 
@@ -593,7 +600,8 @@ class RecoverExecutor:
         log.warning(
             "recover_executor: HYPERLOOM_RECOVER_ALLOW_GPU_RESET enabled; "
             "attempting `rocm-smi --gpureset --gpu=%s` (session-scoped, best "
-            "effort, typically requires root)", gpu_arg,
+            "effort, typically requires root)",
+            gpu_arg,
         )
         try:
             proc = subprocess.run(

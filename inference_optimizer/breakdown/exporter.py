@@ -31,6 +31,12 @@ def _phase_event_key(ev: dict[str, Any]) -> tuple[str, str, str]:
     ``(action, ts-to-second, change|task_id)`` with the timestamp canonicalised
     to ``...Z`` so a recorder fragment row and the collector's audit-list row
     for the same attempt collapse to one event.
+
+    Args:
+        ev: A phase-timeline event dict.
+
+    Returns:
+        The ``(action, ts-to-second, change|task_id)`` dedupe key.
     """
     return (
         str(ev.get("action") or ""),
@@ -40,7 +46,8 @@ def _phase_event_key(ev: dict[str, Any]) -> tuple[str, str, str]:
 
 
 def _merge_phase_timeline(
-    fragment: Any, collector_value: Any,
+    fragment: Any,
+    collector_value: Any,
 ) -> list[dict[str, Any]]:
     """Union the recorder ``phase_timeline`` fragment with the collector result.
 
@@ -51,10 +58,17 @@ def _merge_phase_timeline(
     the base and only append fragment rows whose dedupe key is missing (the
     crash-survivable audit rows the on-disk state may have lost). Result stays
     sorted by ``ts`` like the collector's own output.
+
+    Args:
+        fragment: The recorder ``phase_timeline`` fragment (may be any type).
+        collector_value: The collector-computed phase timeline used as the
+            base.
+
+    Returns:
+        The merged timeline (collector base plus missing fragment rows),
+        sorted by ``ts``.
     """
-    base: list[dict[str, Any]] = (
-        list(collector_value) if isinstance(collector_value, list) else []
-    )
+    base: list[dict[str, Any]] = list(collector_value) if isinstance(collector_value, list) else []
     if not isinstance(fragment, list) or not fragment:
         return base
     seen = {_phase_event_key(ev) for ev in base if isinstance(ev, dict)}
@@ -76,7 +90,16 @@ def _merge_phase_timeline(
 
 
 def _load_state(session_dir: Path, warnings: list[str]) -> dict[str, Any]:
-    """Read ``state.json`` as a plain dict; empty dict + warning when missing."""
+    """Read ``state.json`` as a plain dict; empty dict + warning when missing.
+
+    Args:
+        session_dir: The hyperloom session directory.
+        warnings: Accumulator appended to when the file is missing or
+            unparseable.
+
+    Returns:
+        The parsed ``state.json`` contents, or an empty dict on any failure.
+    """
     state_path = session_dir / "state.json"
     if not state_path.exists():
         warnings.append(f"state.json missing at {state_path}")
@@ -130,9 +153,14 @@ def _attach_kernel_roofline(
     surfaced empty (roofline enrichment happens after discovery records). Pure
     best-effort: a missing/empty roofline table or kernel just leaves the
     journey untouched.
+
+    Args:
+        kernel_journey: The kernel-journey view mutated in place.
+        kernel_roofline: The per-kernel roofline table to merge from.
     """
     if not isinstance(kernel_journey, dict) or not isinstance(
-        kernel_roofline, dict,
+        kernel_roofline,
+        dict,
     ):
         return
     kernels = kernel_journey.get("kernels")
@@ -171,7 +199,9 @@ def _attach_kernel_roofline(
             disc["bound_type"] = rk.get("bound_type")
         for field in _ROOFLINE_NUMERIC_FIELDS:
             if disc.get(field) in (None, 0, 0.0) and rk.get(field) not in (
-                None, 0, 0.0,
+                None,
+                0,
+                0.0,
             ):
                 disc[field] = rk.get(field)
 
@@ -196,11 +226,10 @@ def build(
     sd = Path(session_dir).resolve()
     warnings: list[str] = []
     if include_transcripts is None:
-        include_transcripts = (
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS", "",
-            ).strip().lower() in ("1", "true", "yes")
-        )
+        include_transcripts = os.environ.get(
+            "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS",
+            "",
+        ).strip().lower() in ("1", "true", "yes")
 
     state = _load_state(sd, warnings)
     manifest = _load_manifest(sd, warnings)
@@ -217,7 +246,17 @@ def build(
     schema_version = SCHEMA_VERSION_V3 if assembled else SCHEMA_VERSION
 
     def _pick(section: str, collector_value: Any) -> Any:
-        """Fragment value if recorded and non-empty, else the collector value."""
+        """Fragment value if recorded and non-empty, else the collector value.
+
+        Args:
+            section: The breakdown section name to look up in the recorder
+                fragments.
+            collector_value: The fallback collector-computed value.
+
+        Returns:
+            The recorder fragment value when present and non-empty, else
+            ``collector_value``.
+        """
         frag = assembled.get(section)
         if isinstance(frag, list) and frag:
             return frag
@@ -226,163 +265,235 @@ def build(
         return collector_value
 
     from datetime import datetime, timezone
+
     exported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     # Section collectors (each catches its own errors via warnings).
-    session_meta      = _pick("session", _safe_collect("session",
-                                       lambda: collectors.collect_session(sd, state, manifest, warnings),
-                                       warnings))
-    workload          = _pick("workload", _safe_collect("workload",
-                                       lambda: collectors.collect_workload(state, manifest, warnings),
-                                       warnings))
-    baseline          = _pick("baseline", _safe_collect("baseline",
-                                       lambda: collectors.collect_baseline(sd, state, warnings),
-                                       warnings))
-    final             = _pick("final", _safe_collect("final",
-                                       lambda: collectors.collect_final(sd, state, warnings),
-                                       warnings))
+    session_meta = _pick(
+        "session", _safe_collect("session", lambda: collectors.collect_session(sd, state, manifest, warnings), warnings)
+    )
+    workload = _pick(
+        "workload", _safe_collect("workload", lambda: collectors.collect_workload(state, manifest, warnings), warnings)
+    )
+    baseline = _pick(
+        "baseline", _safe_collect("baseline", lambda: collectors.collect_baseline(sd, state, warnings), warnings)
+    )
+    final = _pick("final", _safe_collect("final", lambda: collectors.collect_final(sd, state, warnings), warnings))
     # Merge (not _pick replace): the recorder fragment only carries audit-action
     # attempts, while the collector also folds in optimization_journal KEEP/REVERT
     # and the kernel_opt/integrate lanes. Fragment-wins would drop those (and
     # cascade into action_timeline / phase_segments / token_usage which all
     # derive from this), so union + dedupe instead.
-    phase_timeline    = _merge_phase_timeline(
+    phase_timeline = _merge_phase_timeline(
         assembled.get("phase_timeline"),
-        _safe_collect("phase_timeline",
-                      lambda: collectors.collect_phase_timeline(sd, state, warnings),
-                      warnings),
+        _safe_collect("phase_timeline", lambda: collectors.collect_phase_timeline(sd, state, warnings), warnings),
     )
     # Derived from the resolved (fragment-or-collector) phase_timeline.
-    phase_segments    = _safe_collect("phase_segments",
-                                       lambda: collectors.collect_phase_segments(
-                                           state, phase_timeline, warnings,
-                                       ),
-                                       warnings,
-                                       default=[])
-    geak_c, oob_c = _safe_collect(
+    phase_segments = _safe_collect(
+        "phase_segments",
+        lambda: collectors.collect_phase_segments(
+            state,
+            phase_timeline,
+            warnings,
+        ),
+        warnings,
+        default=[],
+    )
+    geak_c, oob_c, forge_c = _safe_collect(
         "invocations",
         lambda: collectors.collect_kernel_invocations(sd, warnings),
         warnings,
-        default=([], []),
+        default=([], [], []),
     )
     geak_invocations = _pick("geak_invocations", geak_c)
     oob_invocations = _pick("oob_invocations", oob_c)
-    capability_summary = _safe_collect("capability_summary",
-                                        lambda: collectors.collect_capability_summary(
-                                            state, geak_invocations, oob_invocations, warnings,
-                                        ),
-                                        warnings)
-    kernel_lifecycle   = _safe_collect("kernel_lifecycle",
-                                        lambda: collectors.collect_kernel_lifecycle(
-                                            sd, state, geak_invocations, oob_invocations, warnings,
-                                        ),
-                                        warnings)
-    explore_search     = _pick("explore_search", _safe_collect("explore_search",
-                                        lambda: collectors.collect_explore_search(state, warnings),
-                                        warnings))
-    sweep              = _pick("sweep", _safe_collect("sweep",
-                                        lambda: collectors.collect_sweep(sd, state, warnings),
-                                        warnings))
-    critic_robustness  = _pick("critic_robustness", _safe_collect("critic_robustness",
-                                        lambda: collectors.collect_critic_robustness(sd, warnings),
-                                        warnings))
-    telemetry          = _pick("telemetry", _safe_collect("telemetry",
-                                        lambda: collectors.collect_telemetry(sd, state, warnings),
-                                        warnings))
-    attribution        = _safe_collect("attribution",
-                                        lambda: collectors.collect_attribution(
-                                            state, geak_invocations, oob_invocations,
-                                            kernel_lifecycle.get("adopted") or [],
-                                            warnings,
-                                        ),
-                                        warnings)
-    kb_provenance      = _pick("kb_provenance", _safe_collect("kb_provenance",
-                                        lambda: collectors.collect_kb_provenance(
-                                            session_dir, state, manifest, warnings,
-                                        ),
-                                        warnings))
+    forge_invocations = _pick("forge_invocations", forge_c)
+    capability_summary = _safe_collect(
+        "capability_summary",
+        lambda: collectors.collect_capability_summary(
+            state,
+            geak_invocations,
+            oob_invocations,
+            warnings,
+            forge_invocations,
+        ),
+        warnings,
+    )
+    kernel_lifecycle = _safe_collect(
+        "kernel_lifecycle",
+        lambda: collectors.collect_kernel_lifecycle(
+            sd,
+            state,
+            geak_invocations,
+            oob_invocations,
+            warnings,
+            forge_invocations,
+        ),
+        warnings,
+    )
+    explore_search = _pick(
+        "explore_search",
+        _safe_collect("explore_search", lambda: collectors.collect_explore_search(state, warnings), warnings),
+    )
+    sweep = _pick("sweep", _safe_collect("sweep", lambda: collectors.collect_sweep(sd, state, warnings), warnings))
+    critic_robustness = _pick(
+        "critic_robustness",
+        _safe_collect("critic_robustness", lambda: collectors.collect_critic_robustness(sd, warnings), warnings),
+    )
+    telemetry = _pick(
+        "telemetry", _safe_collect("telemetry", lambda: collectors.collect_telemetry(sd, state, warnings), warnings)
+    )
+    attribution = _safe_collect(
+        "attribution",
+        lambda: collectors.collect_attribution(
+            state,
+            geak_invocations,
+            oob_invocations,
+            kernel_lifecycle.get("adopted") or [],
+            warnings,
+            forge_invocations,
+        ),
+        warnings,
+    )
+    kb_provenance = _pick(
+        "kb_provenance",
+        _safe_collect(
+            "kb_provenance",
+            lambda: collectors.collect_kb_provenance(
+                session_dir,
+                state,
+                manifest,
+                warnings,
+            ),
+            warnings,
+        ),
+    )
     # specialist sub-agent dispatch records (single source: state + on-disk transcripts).
-    specialist_runs    = _pick("specialist_runs", _safe_collect("specialist_runs",
-                                        lambda: collectors.collect_specialist_runs(
-                                            sd, state, warnings,
-                                            include_transcripts=include_transcripts,
-                                        ),
-                                        warnings,
-                                        default=[]))
+    specialist_runs = _pick(
+        "specialist_runs",
+        _safe_collect(
+            "specialist_runs",
+            lambda: collectors.collect_specialist_runs(
+                sd,
+                state,
+                warnings,
+                include_transcripts=include_transcripts,
+            ),
+            warnings,
+            default=[],
+        ),
+    )
     # Raw ``state.optimization_stack[]`` passthrough (full per-entry evidence; never raises).
-    optimization_stack = _pick("optimization_stack", _safe_collect("optimization_stack",
-                                        lambda: collectors.collect_optimization_stack(state),
-                                        warnings,
-                                        default=[]))
+    optimization_stack = _pick(
+        "optimization_stack",
+        _safe_collect("optimization_stack", lambda: collectors.collect_optimization_stack(state), warnings, default=[]),
+    )
     # Hot-kernel roofline table (Dashboard §1) from ``<sd>/reports/kernel_roofline.json``.
-    kernel_roofline    = _pick("kernel_roofline", _safe_collect("kernel_roofline",
-                                        lambda: collectors.collect_kernel_roofline(
-                                            sd, warnings,
-                                        ),
-                                        warnings,
-                                        default={}))
+    kernel_roofline = _pick(
+        "kernel_roofline",
+        _safe_collect(
+            "kernel_roofline",
+            lambda: collectors.collect_kernel_roofline(
+                sd,
+                warnings,
+            ),
+            warnings,
+            default={},
+        ),
+    )
     # Kernel-agent attempt outcome summary (Breakdown panel integration spec §A1);
     # mirrors ``reports/kernel_optimization_summary.json``, empty → dashboard hides Block 1.
-    kernel_optimization_summary = _pick("kernel_optimization_summary", _safe_collect(
+    kernel_optimization_summary = _pick(
         "kernel_optimization_summary",
-        lambda: collectors.collect_kernel_optimization_summary(sd, warnings),
-        warnings,
-        default={}))
+        _safe_collect(
+            "kernel_optimization_summary",
+            lambda: collectors.collect_kernel_optimization_summary(sd, warnings),
+            warnings,
+            default={},
+        ),
+    )
     # Post-optimization concurrency sweep (Breakdown panel integration spec §A2);
     # mirrors ``reports/conc_sweep_summary.json``, empty → dashboard hides Block 2.
-    conc_sweep_summary = _pick("conc_sweep_summary", _safe_collect(
+    conc_sweep_summary = _pick(
         "conc_sweep_summary",
-        lambda: collectors.collect_conc_sweep_summary(sd, warnings),
-        warnings,
-        default={}))
+        _safe_collect(
+            "conc_sweep_summary", lambda: collectors.collect_conc_sweep_summary(sd, warnings), warnings, default={}
+        ),
+    )
     # Per-snapshot roofline comparison list (markdown ``## Roofline`` source) from ``state.roofline_snapshots``.
-    roofline           = _pick("roofline", _safe_collect("roofline",
-                                        lambda: collectors.collect_roofline(
-                                            state, warnings,
-                                        ),
-                                        warnings,
-                                        default=[]))
+    roofline = _pick(
+        "roofline",
+        _safe_collect(
+            "roofline",
+            lambda: collectors.collect_roofline(
+                state,
+                warnings,
+            ),
+            warnings,
+            default=[],
+        ),
+    )
     # Optimization-progress curve (Dashboard §2): stack ledger + ceiling/target
     # lines from state.json. Renamed from ``roofline`` to avoid clashing with the
     # list-shaped section above.
-    roofline_progress  = _pick("roofline_progress", _safe_collect("roofline_progress",
-                                        lambda: collectors.collect_roofline_progress(
-                                            sd, state, manifest, warnings,
-                                        ),
-                                        warnings,
-                                        default={}))
+    roofline_progress = _pick(
+        "roofline_progress",
+        _safe_collect(
+            "roofline_progress",
+            lambda: collectors.collect_roofline_progress(
+                sd,
+                state,
+                manifest,
+                warnings,
+            ),
+            warnings,
+            default={},
+        ),
+    )
     # Full-trace: unified token + decision timeline. Joins the per-call
     # token ledger (reports/trace/llm_calls.jsonl + ext/*.jsonl) with the
     # KEEP/REVERT journal + dynamic_action dispatch history. Empty (zeroed
     # rollup) on sessions that predate the trace subsystem. Also writes
     # reports/trace/decision_trace.jsonl as a side effect.
-    decision_trace     = _safe_collect("decision_trace",
-                                        lambda: collectors.collect_decision_trace(
-                                            sd, state, warnings,
-                                        ),
-                                        warnings,
-                                        default={})
+    decision_trace = _safe_collect(
+        "decision_trace",
+        lambda: collectors.collect_decision_trace(
+            sd,
+            state,
+            warnings,
+        ),
+        warnings,
+        default={},
+    )
     # Promoted, discoverable token-spend rollup. Pure/derived from
     # decision_trace's already-computed token_rollup (no second ledger read)
     # plus an action_timeline correlation on task_id. Surfaces the full
     # session total + by component/phase + decision attribution at top level
     # so callers don't have to dig into decision_trace.token_rollup.
-    token_usage        = _safe_collect("token_usage",
-                                        lambda: collectors.collect_token_usage(
-                                            decision_trace, phase_timeline, warnings,
-                                        ),
-                                        warnings,
-                                        default={})
+    token_usage = _safe_collect(
+        "token_usage",
+        lambda: collectors.collect_token_usage(
+            decision_trace,
+            phase_timeline,
+            warnings,
+        ),
+        warnings,
+        default={},
+    )
     # Live-Langfuse push receipt (opt-in second sink): enabled? / redacted
     # config / counts. Prefers the post-flush ``langfuse_receipt.json``;
     # falls back to a live emitter read. The local trace jsonl is always
     # written regardless of this section.
-    langfuse           = _safe_collect("langfuse",
-                                        lambda: collectors.collect_langfuse(
-                                            sd, manifest, warnings,
-                                        ),
-                                        warnings,
-                                        default={})
+    langfuse = _safe_collect(
+        "langfuse",
+        lambda: collectors.collect_langfuse(
+            sd,
+            manifest,
+            warnings,
+        ),
+        warnings,
+        default={},
+    )
     # Kernel-major lifecycle view (discovery -> dispatch -> backend attempts ->
     # e2e), composed by the recorder assembler from its four item substreams.
     # Pure recorder section (no collector fallback): empty {} on sessions that
@@ -390,8 +501,8 @@ def build(
     # it and historical breakdowns stay byte-for-byte identical.
     # Authoritative external-tool versions, folded into a {tool: meta} map by
     # the recorder assembler. Pure recorder section (no collector fallback).
-    versions           = _pick("versions", {})
-    kernel_journey     = _pick("kernel_journey", {})
+    versions = _pick("versions", {})
+    kernel_journey = _pick("kernel_journey", {})
     # Attach a copy of the per-kernel roofline metrics onto each journey entry
     # and backfill discovery numeric fields that discovery couldn't surface
     # (arithmetic_intensity / bound_type / efficiency) since roofline is
@@ -402,77 +513,75 @@ def build(
         sd,
         baseline.get("benchmark_report_path"),
         telemetry.get("profile_report_paths") or [],
-        [p.get("benchmark_report_path") for p in (sweep.get("all_variants") or [])
-         if p.get("benchmark_report_path")],
+        [p.get("benchmark_report_path") for p in (sweep.get("all_variants") or []) if p.get("benchmark_report_path")],
     )
 
     return {
-        "schema_version":      schema_version,
-        "exported_at_utc":     exported_at,
-        "exporter_version":    EXPORTER_VERSION,
-
-        "session":             session_meta,
-        "workload":            workload,
-        "baseline":            baseline,
-        "final":               final,
-        "phase_timeline":      phase_timeline,
+        "schema_version": schema_version,
+        "exported_at_utc": exported_at,
+        "exporter_version": EXPORTER_VERSION,
+        "session": session_meta,
+        "workload": workload,
+        "baseline": baseline,
+        "final": final,
+        "phase_timeline": phase_timeline,
         # Additive: v1 readers use flat ``phase_timeline``, v2 prefer ``phase_segments``.
-        "phase_segments":      phase_segments,
+        "phase_segments": phase_segments,
         # v1-reader alias mirroring the flat per-action timeline.
-        "action_timeline":     phase_timeline,
-        "capability_summary":  capability_summary,
-        "geak_invocations":    geak_invocations,
-        "oob_invocations":     oob_invocations,
-        "kernel_lifecycle":    kernel_lifecycle,
-        "param_search":        explore_search,
+        "action_timeline": phase_timeline,
+        "capability_summary": capability_summary,
+        "geak_invocations": geak_invocations,
+        "oob_invocations": oob_invocations,
+        "forge_invocations": forge_invocations,
+        "kernel_lifecycle": kernel_lifecycle,
+        "param_search": explore_search,
         # v2-native name for the merged ledger; mirrors ``param_search``.
-        "explore_search":      explore_search,
-        "sweep":               sweep,
-        "critic_robustness":   critic_robustness,
-        "telemetry":           telemetry,
-        "attribution":         attribution,
+        "explore_search": explore_search,
+        "sweep": sweep,
+        "critic_robustness": critic_robustness,
+        "telemetry": telemetry,
+        "attribution": attribution,
         # Cortex KB integration audit; optional, so no schema_version bump.
-        "kb_provenance":       kb_provenance,
-        "specialist_runs":     specialist_runs,
+        "kb_provenance": kb_provenance,
+        "specialist_runs": specialist_runs,
         # Raw KEEP ledger passthrough mirroring ``state.optimization_stack[]``.
-        "optimization_stack":  optimization_stack,
+        "optimization_stack": optimization_stack,
         # Hot-kernel roofline table (spec §1); empty → dashboard hides it.
-        "kernel_roofline":     kernel_roofline,
+        "kernel_roofline": kernel_roofline,
         # Kernel-agent attempt outcome summary (spec §A1); empty → hides Block 1.
         "kernel_optimization_summary": kernel_optimization_summary,
         # Post-optimization concurrency sweep (spec §A2); empty → hides Block 2.
-        "conc_sweep_summary":  conc_sweep_summary,
+        "conc_sweep_summary": conc_sweep_summary,
         # Per-snapshot roofline comparison list (markdown source).
-        "roofline":            roofline,
+        "roofline": roofline,
         # Optimization-progress curve (spec §2); ``ceiling_available`` False
         # when the watermark roofline pipeline never ran.
-        "roofline_progress":   roofline_progress,
+        "roofline_progress": roofline_progress,
         # Full-trace token + decision timeline (FULL_TRACE_DESIGN §6).
         # ``decision_trace`` is the per-decision join (phase/tick/decision
         # + token rollup); ``token_rollup`` is the by_phase / by_component
         # / session_total summary. New optional section — v1 readers ignore
         # it. Empty on pre-trace sessions.
-        "decision_trace":      decision_trace,
+        "decision_trace": decision_trace,
         # Promoted token-spend summary (full total + by component/phase +
         # decision attribution + action_timeline correlation). Derived from
         # decision_trace.token_rollup; additive, v1 readers ignore it.
-        "token_usage":         token_usage,
+        "token_usage": token_usage,
         # Live-Langfuse push receipt; ``enabled`` False (with a
         # ``disabled_reason``) on the default path. Local jsonl ledger is
         # always written regardless.
-        "langfuse":            langfuse,
+        "langfuse": langfuse,
         # Kernel-major lifecycle view (discovery -> dispatch -> backend
         # attempts -> e2e), composed from the recorder substreams. Additive,
         # optional; empty {} on sessions that predate the substreams.
-        "kernel_journey":      kernel_journey,
+        "kernel_journey": kernel_journey,
         # Authoritative external-tool versions, one object per tool
         # (geak / tracelens / claude / codex / ...), keyed by tool name. Each
         # carries ``{tool, root_dir, commit, version}``. Empty {} on sessions
         # that predate the recorder.
-        "versions":            versions,
-
-        "warnings":            warnings,
-        "source_files":        source_files,
+        "versions": versions,
+        "warnings": warnings,
+        "source_files": source_files,
     }
 
 
@@ -482,9 +591,19 @@ def _load_assembled(
 ) -> dict[str, Any]:
     """Assemble recorder fragments into ``{section: value}`` (empty on opt-out
     or when no fragments exist). Never raises — a recorder bug must not poison
-    the export; it just falls back to collectors."""
+    the export; it just falls back to collectors.
+
+    Args:
+        session_dir: The hyperloom session directory.
+        warnings: Accumulator appended to when assembly fails.
+
+    Returns:
+        The assembled ``{section: value}`` mapping, or an empty dict when the
+        recorder is disabled, no fragments exist, or assembly fails.
+    """
     disabled = os.environ.get(
-        "INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER", "",
+        "INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER",
+        "",
     ).strip().lower() in ("1", "true", "yes")
     if disabled:
         return {}
@@ -508,7 +627,17 @@ def _safe_collect(
     *,
     default: Any = None,
 ):
-    """Run a collector with broad exception catching; failure → warning + ``default`` (a bug in one collector must not poison the export)."""
+    """Run a collector with broad exception catching; failure → warning + ``default`` (a bug in one collector must not poison the export).
+
+    Args:
+        name: Collector name used in the warning message.
+        fn: Zero-argument callable that runs the collector.
+        warnings: Accumulator appended to when the collector raises.
+        default: Value returned on failure; an empty dict when ``None``.
+
+    Returns:
+        The collector result, or ``default`` (or an empty dict) on failure.
+    """
     try:
         return fn()
     except Exception as exc:  # noqa: BLE001
@@ -529,6 +658,16 @@ def write_breakdown_json(
 
     ``output_path`` defaults to ``<session_dir>/session_breakdown.json``;
     ``include_transcripts`` is as in :func:`build`.
+
+    Args:
+        session_dir: The hyperloom session directory to build from.
+        output_path: Destination file; defaults to
+            ``<session_dir>/session_breakdown.json``.
+        include_transcripts: Whether to embed transcripts, as in
+            :func:`build`.
+
+    Returns:
+        The absolute path of the written breakdown file.
     """
     sd = Path(session_dir).resolve()
     target = Path(output_path).resolve() if output_path else sd / BREAKDOWN_FILENAME
@@ -570,6 +709,12 @@ def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
     Best-effort and self-skipping: returns False (no-op) when no breakdown or
     no receipt exists yet, when live push was disabled, or on any error. Never
     raises -- it must not mask the session's stop_reason at shutdown.
+
+    Args:
+        session_dir: The hyperloom session directory holding the breakdown.
+
+    Returns:
+        ``True`` when the langfuse section was refreshed, ``False`` otherwise.
     """
     from ..orchestrator.trace.langfuse_emitter import read_receipt
 
@@ -588,7 +733,9 @@ def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
         breakdown["langfuse"] = receipt
         payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
         fd, tmp = tempfile.mkstemp(
-            prefix=f".{BREAKDOWN_FILENAME}.", suffix=".tmp", dir=str(target.parent),
+            prefix=f".{BREAKDOWN_FILENAME}.",
+            suffix=".tmp",
+            dir=str(target.parent),
         )
         os.close(fd)
         tmp_path = Path(tmp)
@@ -637,16 +784,20 @@ def write_minimal_final_report(
 
     Stays minimal (one SharedState read) so it never raises or blocks
     shutdown. Idempotent: never overwrites an existing ``reports/final.md``.
+
+    Args:
+        session_dir: The hyperloom session directory.
+        output_path: Destination file; defaults to
+            ``<session_dir>/reports/final.md``.
+
+    Returns:
+        The path of the (existing or newly written) ``final.md`` file.
     """
     from ..orchestrator.shared_state import SharedState
     from ..session_paths import reports_dir
 
     sd = Path(session_dir).resolve()
-    target = (
-        Path(output_path).resolve()
-        if output_path
-        else reports_dir(sd) / "final.md"
-    )
+    target = Path(output_path).resolve() if output_path else reports_dir(sd) / "final.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and target.stat().st_size > 0:
         return target
@@ -678,19 +829,13 @@ def write_minimal_final_report(
     current_best = state.current_best or {}
     cb_action = current_best.get("action") or "-"
     cb_tput = current_best.get("tput")
-    cb_tput_s = (
-        f"{cb_tput:.2f}" if isinstance(cb_tput, (int, float)) else "-"
-    )
+    cb_tput_s = f"{cb_tput:.2f}" if isinstance(cb_tput, (int, float)) else "-"
     last_sweep = state.last_sweep or {}
     if last_sweep:
         sw_grid = last_sweep.get("grid_size", 0)
         sw_best = last_sweep.get("best_overall") or {}
         sw_tput = sw_best.get("output_throughput")
-        sw_line = (
-            f"grid_size={sw_grid} "
-            f"best_tput="
-            f"{(f'{sw_tput:.2f}' if isinstance(sw_tput, (int, float)) else '-')}"
-        )
+        sw_line = f"grid_size={sw_grid} best_tput={(f'{sw_tput:.2f}' if isinstance(sw_tput, (int, float)) else '-')}"
     else:
         sw_line = "(none)"
 
@@ -711,8 +856,7 @@ def write_minimal_final_report(
         f"- stop_reason    : `{state.stop_reason or '-'}`",
         f"- baseline_tput  : `{state.baseline_tput:.2f}`",
         f"- current_best   : `{cb_action}` @ `{cb_tput_s}` tok/s",
-        f"- cumul_gain     : `{state.cumulative_gain:.2f}%` "
-        f"(validated `{state.cumulative_gain_validated:.2f}%`)",
+        f"- cumul_gain     : `{state.cumulative_gain:.2f}%` (validated `{state.cumulative_gain_validated:.2f}%`)",
         f"- stack_entries  : `{len(state.optimization_stack or [])}`",
         f"- sweep summary  : {sw_line}",
         "",
@@ -732,7 +876,9 @@ def write_minimal_final_report(
     ]
 
     fd, tmp = tempfile.mkstemp(
-        prefix=".final.md.", suffix=".tmp", dir=str(target.parent),
+        prefix=".final.md.",
+        suffix=".tmp",
+        dir=str(target.parent),
     )
     os.close(fd)
     tmp_path = Path(tmp)

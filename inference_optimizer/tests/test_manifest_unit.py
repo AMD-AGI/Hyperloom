@@ -2,10 +2,10 @@
 
 """Unit tests for the session manifest writer (provenance helpers, image
 detection, objective derivation, and the atomic write/load round-trip)."""
+
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,8 +48,16 @@ def test_read_first_line_oserror(tmp_path):
 
 def test_detect_stack_fingerprint_package_imports(monkeypatch):
     import sys
-    for var in ("SGLANG_VERSION", "SGL_VERSION", "VLLM_VERSION",
-                "AITER_COMMIT", "AITER_VERSION", "ROCM_VERSION", "HIP_VERSION"):
+
+    for var in (
+        "SGLANG_VERSION",
+        "SGL_VERSION",
+        "VLLM_VERSION",
+        "AITER_COMMIT",
+        "AITER_VERSION",
+        "ROCM_VERSION",
+        "HIP_VERSION",
+    ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(mf, "_read_first_line", lambda p: "")
     monkeypatch.setitem(sys.modules, "sglang", SimpleNamespace(__version__="0.5"))
@@ -72,8 +80,7 @@ def test_detect_stack_fingerprint_env_and_marker(monkeypatch, tmp_path):
     # rocm marker file read
     marker = tmp_path / "version"
     marker.write_text("6.2.0\n", encoding="utf-8")
-    monkeypatch.setattr(mf, "_read_first_line",
-                        lambda p: "6.2.0" if "version" in str(p) else "")
+    monkeypatch.setattr(mf, "_read_first_line", lambda p: "6.2.0" if "version" in str(p) else "")
     out = mf._detect_stack_fingerprint()
     assert out["sglang"] == "0.4.1"
     assert out["vllm"] == "0.6.0"
@@ -83,8 +90,7 @@ def test_detect_stack_fingerprint_env_and_marker(monkeypatch, tmp_path):
 
 # ---- git helpers ----------------------------------------------------------
 def test_git_revision_at_success(monkeypatch):
-    monkeypatch.setattr(mf.subprocess, "run",
-                        lambda *a, **k: _Proc(0, "abc1234\n"))
+    monkeypatch.setattr(mf.subprocess, "run", lambda *a, **k: _Proc(0, "abc1234\n"))
     assert mf._git_revision_at(Path("/repo")) == "abc1234"
     assert mf._git_revision() == "abc1234"
 
@@ -101,8 +107,7 @@ def test_git_revision_at_nonzero_and_error(monkeypatch):
 
 
 def test_git_remote_at(monkeypatch):
-    monkeypatch.setattr(mf.subprocess, "run",
-                        lambda *a, **k: _Proc(0, "git@github.com:x/y.git\n"))
+    monkeypatch.setattr(mf.subprocess, "run", lambda *a, **k: _Proc(0, "git@github.com:x/y.git\n"))
     assert mf._git_remote_at(Path("/repo")) == "git@github.com:x/y.git"
     monkeypatch.setattr(mf.subprocess, "run", lambda *a, **k: _Proc(2, ""))
     assert mf._git_remote_at(Path("/repo")) == ""
@@ -200,6 +205,7 @@ def test_detect_image_cgroup(monkeypatch):
     for v in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
         monkeypatch.delenv(v, raising=False)
     import inference_optimizer.manifest as mod
+
     cgroup_text = "12:devices:/docker/0123456789abcdef0123\n7:cpu:/other\n"
 
     class _Cgroup:
@@ -251,6 +257,7 @@ def test_detect_image_none(monkeypatch):
     for v in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
         monkeypatch.delenv(v, raising=False)
     import inference_optimizer.manifest as mod
+
     real_path = mod.Path
 
     class _Missing:
@@ -269,14 +276,15 @@ def test_detect_image_none(monkeypatch):
 # ---- _objective_summary ---------------------------------------------------
 def test_objective_summary_variants():
     assert mf._objective_summary(SimpleNamespace(target_gain=10))["kind"] == "gain_pct"
-    assert mf._objective_summary(
-        SimpleNamespace(target_gain=None, target_tput=900))["kind"] == "tput"
-    assert mf._objective_summary(SimpleNamespace(
-        target_gain=None, target_tput=None,
-        target_baseline_dir="/b"))["kind"] == "baseline"
-    assert mf._objective_summary(SimpleNamespace(
-        target_gain=None, target_tput=None,
-        target_baseline_dir=None))["kind"] == "time_only"
+    assert mf._objective_summary(SimpleNamespace(target_gain=None, target_tput=900))["kind"] == "tput"
+    assert (
+        mf._objective_summary(SimpleNamespace(target_gain=None, target_tput=None, target_baseline_dir="/b"))["kind"]
+        == "baseline"
+    )
+    assert (
+        mf._objective_summary(SimpleNamespace(target_gain=None, target_tput=None, target_baseline_dir=None))["kind"]
+        == "time_only"
+    )
 
 
 # ---- build / write / load -------------------------------------------------
@@ -300,12 +308,22 @@ def test_build_manifest_with_args(monkeypatch):
     for v in ("ISL", "OSL", "CONC", "TP", "MAX_MODEL_LEN"):
         monkeypatch.delenv(v, raising=False)
     args = argparse.Namespace(
-        model="/models/llama", framework="vllm", gpu_type="mi300x",
-        isl=128, osl=256, precision="fp8", target_gain=5.0,
-        target_tput=None, target_baseline_dir=None, max_hours=2,
-        research_lane_capacity=3, gpu_specialist_capacity=2,
-        kb_degraded_reason=None, pr_degraded_reason=None,
-        no_warm_replay=True, warm_replay_min_confidence=0.6,
+        model="/models/llama",
+        framework="vllm",
+        gpu_type="mi300x",
+        isl=128,
+        osl=256,
+        precision="fp8",
+        target_gain=5.0,
+        target_tput=None,
+        target_baseline_dir=None,
+        max_hours=2,
+        research_lane_capacity=3,
+        gpu_specialist_capacity=2,
+        kb_degraded_reason=None,
+        pr_degraded_reason=None,
+        no_warm_replay=True,
+        warm_replay_min_confidence=0.6,
         warm_replay_min_reproduce_pct=0.9,
     )
     m = mf.build_manifest(Path("/tmp/sd"), args=args, session_id="sid-1")

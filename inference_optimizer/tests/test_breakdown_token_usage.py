@@ -87,13 +87,30 @@ def _decision_trace_fixture():
 
 def _timeline_fixture():
     return [
-        {"action": "specialist", "change": "specialist", "decision": "KEEP",
-         "phase": "EXPLORE", "task_id": "spec-1", "ts": "2026-06-10T16:41:06Z"},
-        {"action": "sglang-use-aiter-global", "change": "sglang-use-aiter-global",
-         "decision": "REVERT", "phase": "EXPLORE", "task_id": "explore-99",
-         "ts": "2026-06-10T16:51:58Z"},
-        {"action": "baseline", "change": "baseline", "decision": "KEEP",
-         "phase": "PRELUDE", "task_id": None, "ts": "2026-06-10T16:03:18Z"},
+        {
+            "action": "specialist",
+            "change": "specialist",
+            "decision": "KEEP",
+            "phase": "EXPLORE",
+            "task_id": "spec-1",
+            "ts": "2026-06-10T16:41:06Z",
+        },
+        {
+            "action": "sglang-use-aiter-global",
+            "change": "sglang-use-aiter-global",
+            "decision": "REVERT",
+            "phase": "EXPLORE",
+            "task_id": "explore-99",
+            "ts": "2026-06-10T16:51:58Z",
+        },
+        {
+            "action": "baseline",
+            "change": "baseline",
+            "decision": "KEEP",
+            "phase": "PRELUDE",
+            "task_id": None,
+            "ts": "2026-06-10T16:03:18Z",
+        },
     ]
 
 
@@ -104,9 +121,7 @@ class TestTokenConvenience:
         assert out["grand_total"] == 330
 
     def test_combined_cache_bucket(self):
-        out = col._token_convenience(
-            {"total_in": 10, "total_out": 150, "total_cache": 16, "calls": 1}
-        )
+        out = col._token_convenience({"total_in": 10, "total_out": 150, "total_cache": 16, "calls": 1})
         assert out["total_in_out"] == 160
         assert out["grand_total"] == 176
 
@@ -121,8 +136,8 @@ class TestCollectTokenUsage:
         out = col.collect_token_usage(_decision_trace_fixture(), _timeline_fixture(), [])
         st = out["session_total"]
         assert st["calls"] == 3
-        assert st["total_in_out"] == 300            # 100 + 200
-        assert st["grand_total"] == 330             # + 10 + 20
+        assert st["total_in_out"] == 300  # 100 + 200
+        assert st["grand_total"] == 330  # + 10 + 20
 
     def test_by_component_and_by_phase_passthrough(self):
         out = col.collect_token_usage(_decision_trace_fixture(), _timeline_fixture(), [])
@@ -159,7 +174,8 @@ class TestCollectTokenUsage:
     def test_zero_call_decision_not_in_timeline_tokens(self):
         # The noop-1 decision has calls=0, so even if a timeline row referenced
         # it, it must stay tokens=null (no zero-bucket injection).
-        tl = [{"action": "noop", "change": "noop", "decision": "KEEP",
-               "phase": "EXPLORE", "task_id": "noop-1", "ts": "x"}]
+        tl = [
+            {"action": "noop", "change": "noop", "decision": "KEEP", "phase": "EXPLORE", "task_id": "noop-1", "ts": "x"}
+        ]
         out = col.collect_token_usage(_decision_trace_fixture(), tl, [])
         assert out["timeline"][0]["tokens"] is None

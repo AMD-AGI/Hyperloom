@@ -51,7 +51,11 @@ _DOMAIN_REPOS_FILENAME: str = "_domain_repos.yaml"
 
 
 def _domain_repos_path() -> Path:
-    """Where ``_domain_repos.yaml`` lives (centralised for test monkeypatching)."""
+    """Where ``_domain_repos.yaml`` lives (centralised for test monkeypatching).
+
+    Returns:
+        The path to the ``_domain_repos.yaml`` config file.
+    """
     return asset_actions_dir() / "_meta" / _DOMAIN_REPOS_FILENAME
 
 
@@ -60,6 +64,14 @@ def load_domain_repos(path: Path | None = None) -> dict[str, DomainRepos]:
 
     Returns ``{domain_key: DomainRepos}``; missing/malformed yaml returns an
     empty dict + warning log ("no PR feed for any domain").
+
+    Args:
+        path: Optional explicit config path; defaults to
+            :func:`_domain_repos_path`.
+
+    Returns:
+        A ``{domain_key: DomainRepos}`` mapping, or ``{}`` when the config is
+        missing or unparseable.
     """
     target = path or _domain_repos_path()
     if not target.exists():
@@ -80,7 +92,7 @@ def load_domain_repos(path: Path | None = None) -> dict[str, DomainRepos]:
         log.warning("domain_repos: failed to parse %s: %s", target, exc)
         return {}
     out: dict[str, DomainRepos] = {}
-    for domain_key, entry in (raw.items() if isinstance(raw, dict) else []):
+    for domain_key, entry in raw.items() if isinstance(raw, dict) else []:
         if not isinstance(entry, dict):
             continue
         if domain_key not in SPECIALIST_DOMAIN_KEYS:
@@ -96,18 +108,12 @@ def load_domain_repos(path: Path | None = None) -> dict[str, DomainRepos]:
             repos = ()
             is_wildcard = True
         elif isinstance(repos_field, list):
-            repos = tuple(
-                str(r).strip() for r in repos_field
-                if isinstance(r, str) and r.strip()
-            )
+            repos = tuple(str(r).strip() for r in repos_field if isinstance(r, str) and r.strip())
         else:
             repos = ()
         kw_raw = entry.get("default_keywords") or []
         if isinstance(kw_raw, list):
-            keywords = tuple(
-                str(k).strip() for k in kw_raw
-                if isinstance(k, str) and k.strip()
-            )
+            keywords = tuple(str(k).strip() for k in kw_raw if isinstance(k, str) and k.strip())
         else:
             keywords = ()
         out[str(domain_key)] = DomainRepos(
@@ -215,6 +221,9 @@ class KnowledgePlane:
 
         Returns ``""`` when PR Monitor is disabled so the runner can elide
         the ``mcp__pr_monitor__*`` tool block.
+
+        Returns:
+            The PR Monitor MCP URL, or ``""`` when PR Monitor is disabled.
         """
         if not self.pr_monitor_enabled:
             return ""
@@ -232,6 +241,16 @@ class KnowledgePlane:
         Called once per EXPLORE phase entry (KB_design §3.6 §5.2). Returns a
         ``{domain: (prs, warnings)}`` map; aggregated warnings stashed on
         :attr:`last_warnings`. Fail-soft.
+
+        Args:
+            window_days: PR lookback window override, or ``None`` for the
+                configured default.
+            per_repo_limit: Max PRs per repo override, or ``None`` for the
+                configured default.
+            total_budget_sec: Total wall-clock budget for the batch warm.
+
+        Returns:
+            A ``{domain: (prs, warnings)}`` map across every known domain.
         """
         out: dict[str, tuple[list[PRSummary], list[str]]] = {}
         all_warnings: list[str] = []
@@ -267,6 +286,19 @@ class KnowledgePlane:
         Failure semantics: disabled → ``["pr_monitor:disabled"]``; unknown
         domain → ``["pr_monitor:unknown_domain:<d>"]``; per-repo failures
         fold into ``warnings`` while reachable repos still surface.
+
+        Args:
+            domain: The specialist domain key to warm.
+            extra_keywords: Additional keywords appended to the domain
+                defaults.
+            window_days: PR lookback window override, or ``None`` for the
+                configured default.
+            per_repo_limit: Max PRs per repo override, or ``None`` for the
+                configured default.
+            total_budget_sec: Total wall-clock budget for the warm.
+
+        Returns:
+            A ``(prs, warnings)`` tuple for the domain.
         """
         warnings: list[str] = []
         if not self.pr_monitor_enabled:
@@ -306,6 +338,7 @@ class KnowledgePlane:
         warnings.extend(fetch_warnings)
         self.last_warnings = warnings
         return prs, warnings
+
 
 __all__ = [
     "DOMAIN_REPOS_WILDCARD",

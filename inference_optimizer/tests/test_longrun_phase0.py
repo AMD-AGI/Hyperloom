@@ -114,9 +114,7 @@ async def test_prune_events_respects_min_cursor_and_recent_window(conn):
     bus = MessageBus(conn)
     cursors = CursorStore(conn)
     for i in range(100):
-        await bus.append_and_seq(
-            Message.new("orchestration", "*", "heartbeat", {"i": i})
-        )
+        await bus.append_and_seq(Message.new("orchestration", "*", "heartbeat", {"i": i}))
     # No cursor yet => nothing is safe to prune.
     assert await dbm.prune_events(conn, cursors, keep_recent=0) == 0
 
@@ -146,6 +144,83 @@ async def test_prune_events_never_crosses_resume_anchor(conn):
     # Resume replay for the laggard still sees all its unprocessed events.
     replay = await bus.replay_for("kernel", after_seq=20)
     assert len(replay) == 30
+
+
+# --------------------------------------------------------------------------
+# Issue 3 — pruning must not delete a still-pending proposal
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_prune_events_protects_pending_proposal(conn):
+    """A processed-but-undecided proposal survives pruning; once a verdict
+    targets it, it becomes prunable."""
+    bus = MessageBus(conn)
+    cursors = CursorStore(conn)
+    # A proposal with no verdict yet (semantically pending).
+    prop = Message.new("orchestration", "*", "proposal", {"action_name": "x"})
+    await bus.append_and_seq(prop)
+    # Filler so the proposal is well below the recent window.
+    for i in range(50):
+        await bus.append_and_seq(Message.new("orchestration", "*", "heartbeat", {"i": i}))
+    # Advance all cursors past everything; small keep_recent.
+    await cursors.advance("orchestration", seq=100, msg_id="z")
+
+    # Pending proposal must survive even though it's processed + old.
+    await dbm.prune_events(conn, cursors, keep_recent=0)
+    rows = await conn.fetchall(
+        "SELECT msg_id FROM events WHERE topic='proposal'"
+    )
+    assert [r["msg_id"] for r in rows] == [prop.msg_id]
+
+    # Now a verdict decides it → it becomes prunable.
+    await bus.append_and_seq(Message.new(
+        "critic", "*", "review_verdict",
+        {"target_proposal_msg_id": prop.msg_id, "verdict": "approve"},
+    ))
+    await cursors.advance("orchestration", seq=200, msg_id="z2")
+    await dbm.prune_events(conn, cursors, keep_recent=0)
+    rows = await conn.fetchall(
+        "SELECT msg_id FROM events WHERE topic='proposal'"
+    )
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_pending_proposal_seqs_matches_reconstruct_logic(conn):
+    """The pruning guard's pending set must agree with the resume reconstruct
+    logic: a proposal is decided iff a verdict has a NON-EMPTY target equal to
+    its msg_id (empty/missing targets do not decide anything)."""
+    bus = MessageBus(conn)
+    p_pending = Message.new("orchestration", "*", "proposal", {"action_name": "a"})
+    p_decided = Message.new("orchestration", "*", "proposal", {"action_name": "b"})
+    await bus.append_and_seq(p_pending)
+    await bus.append_and_seq(p_decided)
+    # Decided one gets a real verdict.
+    await bus.append_and_seq(Message.new(
+        "critic", "*", "review_verdict",
+        {"target_proposal_msg_id": p_decided.msg_id, "verdict": "reject"},
+    ))
+    # An empty-target verdict must NOT decide any proposal (NULL-trap guard).
+    await bus.append_and_seq(Message.new(
+        "critic", "*", "review_verdict",
+        {"target_proposal_msg_id": "", "verdict": "approve"},
+    ))
+
+    pending = await dbm.pending_proposal_seqs(conn)
+
+    # Cross-check against the same join replay_for_resume uses.
+    proposals = await bus.tail(topic="proposal", n=1000)
+    verdicts = await bus.tail(topic="review_verdict", n=1000)
+    decided = {
+        v.payload.get("target_proposal_msg_id")
+        for v in verdicts
+        if v.payload.get("target_proposal_msg_id")
+    }
+    expected_pending_seqs = {
+        p.seq for p in proposals if p.msg_id not in decided
+    }
+    assert pending == expected_pending_seqs
+    # Concretely: only the undecided proposal is protected.
+    assert pending == {p_pending.seq}
 
 
 @pytest.mark.asyncio
@@ -282,8 +357,11 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
     from inference_optimizer.paths import make_session_dir
     from inference_optimizer.orchestrator.coordinator import Coordinator
     from inference_optimizer.orchestrator.backends import (
-        MockBackend, MockCriticBackend, MockKernelBackend,
-        MockRobustnessBackend, ScriptedPlan,
+        MockBackend,
+        MockCriticBackend,
+        MockKernelBackend,
+        MockRobustnessBackend,
+        ScriptedPlan,
     )
     from .conftest import seed_target_analysis_marker
 
@@ -302,14 +380,11 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
         await c.db.execute(
             "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, "
             "expires_at, heartbeat_at) VALUES (?,?,?,?,?,?)",
-            (0, "h", "t", _iso(now - timedelta(hours=2)),
-             _iso(now - timedelta(hours=1)), _iso(now)),
+            (0, "h", "t", _iso(now - timedelta(hours=2)), _iso(now - timedelta(hours=1)), _iso(now)),
         )
         c.gpu_specialist_pool = SpecialistGpuPool(c.db, gpu_ids=[0, 1])
         for i in range(30):
-            await c.bus.append_and_seq(
-                Message.new("orchestration", "*", "heartbeat", {"i": i})
-            )
+            await c.bus.append_and_seq(Message.new("orchestration", "*", "heartbeat", {"i": i}))
         await c.cursors.advance("orchestration", seq=30, msg_id="m")
 
         # Off-cadence ticks are a no-op.
@@ -368,10 +443,10 @@ async def test_claude_backend_retries_transient_then_succeeds():
                 raise asyncio.TimeoutError("proxy stall")
             block = ToolUseBlock(
                 EMIT_INTENT_TOOL_QUALIFIED,
-                {"intent_type": "send_message",
-                 "payload": {"topic": "heartbeat", "body_md": "ok"}},
+                {"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}},
             )
             yield _Msg(content=[block])
+
         return _gen()
 
     backend = ClaudeBackend(

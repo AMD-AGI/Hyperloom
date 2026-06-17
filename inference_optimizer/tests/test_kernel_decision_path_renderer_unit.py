@@ -11,6 +11,7 @@ from inference_optimizer.breakdown.reporters._renderers import (
 
 # ---- _fmt_duration ----
 
+
 def test_fmt_duration_none():
     assert kdp._fmt_duration(None) == "—"
 
@@ -28,6 +29,7 @@ def test_fmt_duration_minutes():
 
 
 # ---- render ----
+
 
 def test_render_absent_field_skipped():
     sec = kdp.render({})
@@ -53,11 +55,23 @@ def test_render_with_entries():
                     "total_duration_seconds": 90,
                 },
                 "steps": [
-                    {"ts": "t0", "step": "kernel_opt", "backend": "geak",
-                     "outcome": "ok", "gain_pct": 5.0, "duration_seconds": 10,
-                     "decision_note": "good"},
-                    {"ts": "t1", "step": "integrate", "backend": "geak",
-                     "outcome": "kept", "gain_pct": 3.0, "duration_seconds": 20},
+                    {
+                        "ts": "t0",
+                        "step": "kernel_opt",
+                        "backend": "geak",
+                        "outcome": "ok",
+                        "gain_pct": 5.0,
+                        "duration_seconds": 10,
+                        "decision_note": "good",
+                    },
+                    {
+                        "ts": "t1",
+                        "step": "integrate",
+                        "backend": "geak",
+                        "outcome": "kept",
+                        "gain_pct": 3.0,
+                        "duration_seconds": 20,
+                    },
                 ],
             },
         ]
@@ -74,12 +88,15 @@ def test_render_with_entries():
 def test_render_truncates_steps_and_kids():
     entries = []
     for i in range(10):  # more than _MAX_KIDS (8)
-        entries.append({
-            "kid": f"k{i}",
-            "steps": [
-                {"step": "kernel_opt", "ts": f"s{j}"} for j in range(15)  # > _MAX_STEPS_PER_KID
-            ],
-        })
+        entries.append(
+            {
+                "kid": f"k{i}",
+                "steps": [
+                    {"step": "kernel_opt", "ts": f"s{j}"}
+                    for j in range(15)  # > _MAX_STEPS_PER_KID
+                ],
+            }
+        )
     sec = kdp.render({"kernel_decision_path": entries})
     assert "Showing first 8 of 10 kernel(s)" in sec.markdown_block
     assert "Showing first 12 of 15 step(s)" in sec.markdown_block

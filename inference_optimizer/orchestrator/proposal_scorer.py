@@ -71,7 +71,14 @@ _BARE_JSON_RE = re.compile(r"(\{.*?\"scores\".*\})", re.DOTALL)
 
 
 def _extract_scores_json(text: str) -> dict[str, Any] | None:
-    """Pull the first valid ``{"scores": {...}}`` object out of a reply."""
+    """Pull the first valid ``{"scores": {...}}`` object out of a reply.
+
+    Args:
+        text: Raw model reply that may contain a fenced or bare JSON object.
+
+    Returns:
+        The parsed ``{"scores": {...}}`` dict, or ``None`` if none was found.
+    """
     if not text:
         return None
     for m in _FENCED_JSON_RE.finditer(text):
@@ -109,7 +116,15 @@ def _clip(value: Any, *, limit: int = _MAX_FIELD_CHARS) -> str:
 
 
 def _coerce_score(raw: Any) -> float | None:
-    """Coerce a model-emitted score into a clamped [0, 10] float."""
+    """Coerce a model-emitted score into a clamped [0, 10] float.
+
+    Args:
+        raw: Raw score value emitted by a model.
+
+    Returns:
+        The score clamped to ``[0, 10]``, or ``None`` if it could not be
+        coerced to a finite number.
+    """
     try:
         val = float(raw)
     except (TypeError, ValueError):
@@ -120,9 +135,20 @@ def _coerce_score(raw: Any) -> float | None:
 
 
 def _normalise_model_scores(
-    parsed: dict[str, Any], *, proposal_names: list[str],
+    parsed: dict[str, Any],
+    *,
+    proposal_names: list[str],
 ) -> dict[str, dict[str, Any]]:
-    """Project parsed ``{"scores": {...}}`` onto known names (drop unknowns, clamp [0,10], truncate reasons)."""
+    """Project parsed ``{"scores": {...}}`` onto known names (drop unknowns, clamp [0,10], truncate reasons).
+
+    Args:
+        parsed: A parsed ``{"scores": {...}}`` dict from a model reply.
+        proposal_names: Names of the proposals that were actually scored;
+            scores for any other name are discarded.
+
+    Returns:
+        A mapping of proposal name to its clamped score and truncated reason.
+    """
     out: dict[str, dict[str, Any]] = {}
     scores = parsed.get("scores")
     if not isinstance(scores, dict):
@@ -177,9 +203,7 @@ class ProposalScorer:
         otherwise it is constructed lazily on first use so an
         unconfigured environment degrades per-call rather than at boot.
         """
-        self.models = tuple(
-            m for m in (str(x).strip() for x in (self.models or ())) if m
-        )
+        self.models = tuple(m for m in (str(x).strip() for x in (self.models or ())) if m)
         if self.client_factory is not None:
             self._client = self.client_factory()
             return
@@ -201,17 +225,10 @@ class ProposalScorer:
         try:
             from openai import AsyncOpenAI  # type: ignore[import-not-found]
         except ImportError as exc:  # pragma: no cover
-            raise RuntimeError(
-                "openai SDK not installed; run `pip install openai>=1.50`"
-            ) from exc
-        api_key = (
-            os.environ.get(self.api_key_env)
-            or os.environ.get("OPENAI_API_KEY")
-        )
+            raise RuntimeError("openai SDK not installed; run `pip install openai>=1.50`") from exc
+        api_key = os.environ.get(self.api_key_env) or os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            raise RuntimeError(
-                f"{self.api_key_env} not set in env (ProposalScorer cannot auth)"
-            )
+            raise RuntimeError(f"{self.api_key_env} not set in env (ProposalScorer cannot auth)")
         base_url = (
             os.environ.get(self.base_url_env)
             or os.environ.get("OPENAI_BASE_URL")
@@ -225,14 +242,23 @@ class ProposalScorer:
 
     # ------------------------------------------------------------------
     def _build_prompt(
-        self, *, gap: dict[str, Any], proposals: list[dict[str, Any]],
+        self,
+        *,
+        gap: dict[str, Any],
+        proposals: list[dict[str, Any]],
     ) -> str:
-        """Build ONE group-scoring prompt covering every proposal."""
+        """Build ONE group-scoring prompt covering every proposal.
+
+        Args:
+            gap: The gap being addressed (domain, symptom, evidence, etc.).
+            proposals: Candidate variants to embed in the prompt.
+
+        Returns:
+            The assembled prompt text describing the gap and proposals.
+        """
         lines: list[str] = ["=== Gap ==="]
         lines.append(f"domain: {_clip(gap.get('domain'), limit=80)}")
-        lines.append(
-            f"gap_canonical_id: {_clip(gap.get('gap_canonical_id'), limit=160)}"
-        )
+        lines.append(f"gap_canonical_id: {_clip(gap.get('gap_canonical_id'), limit=160)}")
         symptom = gap.get("gap_symptom") or gap.get("summary")
         if symptom:
             lines.append(f"symptom: {_clip(symptom)}")
@@ -248,21 +274,33 @@ class ProposalScorer:
             if p.get("extra_args"):
                 lines.append(f"  extra_args: {_clip(p.get('extra_args'))}")
             if p.get("extra_envs"):
-                lines.append(
-                    f"  extra_envs: {_clip(json.dumps(p.get('extra_envs'), sort_keys=True))}"
-                )
+                lines.append(f"  extra_envs: {_clip(json.dumps(p.get('extra_envs'), sort_keys=True))}")
             if p.get("reason"):
                 lines.append(f"  reason: {_clip(p.get('reason'))}")
             if p.get("kb_evidence"):
-                lines.append(
-                    f"  kb_evidence: {_clip(json.dumps(p.get('kb_evidence'), sort_keys=True))}"
-                )
+                lines.append(f"  kb_evidence: {_clip(json.dumps(p.get('kb_evidence'), sort_keys=True))}")
         return "\n".join(lines)
 
     async def _score_one_model(
-        self, model: str, prompt: str, proposal_names: list[str],
+        self,
+        model: str,
+        prompt: str,
+        proposal_names: list[str],
     ) -> dict[str, dict[str, Any]]:
-        """Score every proposal with a single model (raises on failure; caller records the per-model error)."""
+        """Score every proposal with a single model (raises on failure; caller records the per-model error).
+
+        Args:
+            model: The model slug to score with.
+            prompt: The base scoring prompt (instructions are appended).
+            proposal_names: Names of the proposals being scored.
+
+        Returns:
+            A mapping of proposal name to its normalised score and reason.
+
+        Raises:
+            RuntimeError: If the call times out or the reply has no
+                parseable scores JSON.
+        """
         client = self._ensure_client()
         full_prompt = f"{prompt}\n\n{_SCORING_INSTRUCTIONS}"
         messages = [{"role": "user", "content": full_prompt}]
@@ -276,21 +314,17 @@ class ProposalScorer:
                 timeout=self.call_timeout_s,
             )
         except asyncio.TimeoutError as exc:
-            raise RuntimeError(
-                f"timed out after {self.call_timeout_s:.0f}s"
-            ) from exc
+            raise RuntimeError(f"timed out after {self.call_timeout_s:.0f}s") from exc
         # Full-trace A6: record this model's token spend before parsing.
         # Best-effort + a no-op when ``session_dir`` is unset (tests).
         self._trace_scorer_llm_call(model, getattr(resp, "usage", None))
-        text = (resp.choices[0].message.content or "")
+        text = resp.choices[0].message.content or ""
         # Full-trace: persist the full (redacted) prompt + reply so the
         # scorer's conversation lines up with its token row.
         self._record_scorer_conversation(model, full_prompt, text)
         parsed = _extract_scores_json(text)
         if parsed is None:
-            raise RuntimeError(
-                f"no parseable scores JSON (reply_chars={len(text)})"
-            )
+            raise RuntimeError(f"no parseable scores JSON (reply_chars={len(text)})")
         return _normalise_model_scores(parsed, proposal_names=proposal_names)
 
     def _trace_scorer_llm_call(self, model: str, usage: Any) -> None:
@@ -301,6 +335,10 @@ class ProposalScorer:
         phase are unknown here (the scorer runs off the dispatch path) — the
         collector backfills phase from the ts window. Best-effort: never
         raises into the scoring path.
+
+        Args:
+            model: The model slug whose usage is being recorded.
+            usage: The OpenAI usage object from the response, or ``None``.
         """
         if self.session_dir is None:
             return
@@ -316,19 +354,23 @@ class ProposalScorer:
                 session_id=self.session_dir.name,
                 component="proposal_scorer",
                 role="proposal_scorer",  # must match the conversation row's
-                model=str(model),        # role for Langfuse token<->text pairing
+                model=str(model),  # role for Langfuse token<->text pairing
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break scoring
             log.debug(
-                "full-trace: proposal_scorer llm_call append failed for "
-                "model=%s", model, exc_info=True,
+                "full-trace: proposal_scorer llm_call append failed for model=%s",
+                model,
+                exc_info=True,
             )
 
     def _record_scorer_conversation(
-        self, model: str, prompt: str, response: str,
+        self,
+        model: str,
+        prompt: str,
+        response: str,
     ) -> None:
         """Append one ``conversations.jsonl`` row for a proposal-scoring call.
 
@@ -339,6 +381,11 @@ class ProposalScorer:
         unknown here (the scorer runs off the dispatch path); the collector
         backfills phase from the ts window. Best-effort: never raises into
         the scoring path.
+
+        Args:
+            model: The model slug whose conversation is being recorded.
+            prompt: The full (redacted) scoring prompt sent to the model.
+            response: The model's reply text.
         """
         if self.session_dir is None:
             return
@@ -356,30 +403,37 @@ class ProposalScorer:
             append_conversation(session_dir=self.session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break scoring
             log.debug(
-                "full-trace: proposal_scorer conversation append failed for "
-                "model=%s", model, exc_info=True,
+                "full-trace: proposal_scorer conversation append failed for model=%s",
+                model,
+                exc_info=True,
             )
 
     async def score(
-        self, *, gap: dict[str, Any], proposals: list[dict[str, Any]],
+        self,
+        *,
+        gap: dict[str, Any],
+        proposals: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Score ``proposals`` against ``gap`` with every configured model (per-model failures land in ``errors``, never raised)."""
+        """Score ``proposals`` against ``gap`` with every configured model (per-model failures land in ``errors``, never raised).
+
+        Args:
+            gap: The gap the proposals are meant to address.
+            proposals: Candidate variants to score (non-dict entries ignored).
+
+        Returns:
+            A dict with the scoring ``scale``, per-model ``models`` scores,
+            and per-model ``errors``.
+        """
         proposals = [p for p in (proposals or []) if isinstance(p, dict)]
         if not proposals or not self.models:
             return {"scale": "0-10", "models": {}, "errors": {}}
         if len(proposals) > _MAX_PROPOSALS_SCORED:
             proposals = proposals[:_MAX_PROPOSALS_SCORED]
-        proposal_names = [
-            str(p.get("name") or f"proposal_{i}")
-            for i, p in enumerate(proposals)
-        ]
+        proposal_names = [str(p.get("name") or f"proposal_{i}") for i, p in enumerate(proposals)]
         prompt = self._build_prompt(gap=gap, proposals=proposals)
 
         results = await asyncio.gather(
-            *(
-                self._score_one_model(m, prompt, proposal_names)
-                for m in self.models
-            ),
+            *(self._score_one_model(m, prompt, proposal_names) for m in self.models),
             return_exceptions=True,
         )
         models_out: dict[str, dict[str, Any]] = {}
@@ -388,7 +442,9 @@ class ProposalScorer:
             if isinstance(res, BaseException):
                 errors[model] = f"{type(res).__name__}: {str(res)[:200]}"
                 log.warning(
-                    "ProposalScorer: model=%s failed: %r", model, res,
+                    "ProposalScorer: model=%s failed: %r",
+                    model,
+                    res,
                 )
                 continue
             if res:

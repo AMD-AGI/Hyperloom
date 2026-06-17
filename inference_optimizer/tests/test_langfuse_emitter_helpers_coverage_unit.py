@@ -3,6 +3,7 @@
 """Coverage for langfuse_emitter SDK-version-tolerant helpers: ns conversion,
 observation start/end shims, OTEL attribute coercion, trace-attr fallback, and
 JSON/JSONL loaders."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -188,7 +189,9 @@ class _SpanV4:
 def test_set_trace_attrs_v4_falls_back_to_otel_attributes() -> None:
     span = _SpanV4()
     lfe._set_trace_attrs(
-        span, name="n", session_id="s",
+        span,
+        name="n",
+        session_id="s",
         metadata={"good": "v", "skip_none": None, "obj": {"x": 1}},
     )
     attrs = span._otel_span.attrs
@@ -217,7 +220,8 @@ def test_load_jsonl_missing_file(tmp_path: Path) -> None:
 def test_load_jsonl_skips_blank_and_malformed(tmp_path: Path) -> None:
     p = tmp_path / "x.jsonl"
     p.write_text(
-        '{"a": 1}\n\n  \nnot-json\n[1,2,3]\n{"b": 2}\n', encoding="utf-8",
+        '{"a": 1}\n\n  \nnot-json\n[1,2,3]\n{"b": 2}\n',
+        encoding="utf-8",
     )
     # blank lines skipped, malformed skipped, non-dict ([1,2,3]) skipped
     assert lfe._load_jsonl(p) == [{"a": 1}, {"b": 2}]

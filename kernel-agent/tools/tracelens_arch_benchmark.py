@@ -41,7 +41,11 @@ check_gpu_idle = None  # type: ignore[assignment,misc]
 
 
 def _get_collect_arch_jsons():
-    """Return TraceLens' arch-JSON collector, importing lazily post-install."""
+    """Return TraceLens' arch-JSON collector, importing lazily post-install.
+
+    Returns:
+        The collector callable, or ``None`` when TraceLens is not installed.
+    """
     global _collect_arch_jsons
     if _collect_arch_jsons is None:
         try:
@@ -55,7 +59,12 @@ def _get_collect_arch_jsons():
 
 
 def _get_check_gpu_idle():
-    """Return TraceLens' check_gpu_idle, importing lazily post-install."""
+    """Return TraceLens' ``check_gpu_idle``, importing lazily post-install.
+
+    Returns:
+        The ``check_gpu_idle`` callable, or ``None`` when TraceLens is not
+        installed.
+    """
     global check_gpu_idle
     if check_gpu_idle is None:
         try:
@@ -66,6 +75,7 @@ def _get_check_gpu_idle():
             return None
         check_gpu_idle = _fn
     return check_gpu_idle
+
 
 MICROBENCH_WARMUP = 20
 MICROBENCH_REP = 50
@@ -90,7 +100,12 @@ def normalize_platform(platform: str) -> str:
 
 
 def list_candidate_physical_gpus() -> list[int]:
-    """Return physical GPU ids currently visible to this process."""
+    """List the physical GPU ids currently visible to this process.
+
+    Returns:
+        Physical GPU ids derived from ``*_VISIBLE_DEVICES`` or torch, or an
+        empty list when none are visible.
+    """
     for var in _VISIBLE_DEVICE_VARS:
         val = os.environ.get(var, "").strip()
         if not val:
@@ -114,10 +129,16 @@ def list_candidate_physical_gpus() -> list[int]:
     return []
 
 
-def single_physical_gpu_env(
-    physical_id: int, *, base_env: dict[str, str] | None = None
-) -> dict[str, str]:
-    """Return a subprocess env that exposes exactly one physical GPU."""
+def single_physical_gpu_env(physical_id: int, *, base_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Build a subprocess env that exposes exactly one physical GPU.
+
+    Args:
+        physical_id: The physical GPU id to expose.
+        base_env: Base environment to copy; defaults to ``os.environ``.
+
+    Returns:
+        An environment dict with the visibility vars pinned to ``physical_id``.
+    """
     env = dict(base_env if base_env is not None else os.environ)
     value = str(physical_id)
     for var in _VISIBLE_DEVICE_VARS:
@@ -125,19 +146,27 @@ def single_physical_gpu_env(
     return env
 
 
-def select_idle_gpu(
-    *, log: Callable[[str], None] | None = None, util_threshold: int = 5
-) -> int:
-    """Pick an unoccupied GPU for the arch microbenchmark subprocess."""
+def select_idle_gpu(*, log: Callable[[str], None] | None = None, util_threshold: int = 5) -> int:
+    """Pick an unoccupied GPU for the arch microbenchmark subprocess.
+
+    Args:
+        log: Optional logging callable for selection diagnostics.
+        util_threshold: Max utilization percent to consider a GPU idle.
+
+    Returns:
+        The physical id of the selected idle GPU.
+
+    Raises:
+        RuntimeError: If TraceLens is missing, no GPUs are found, or none are
+            idle.
+    """
     check_idle = _get_check_gpu_idle()
     if check_idle is None:
         raise RuntimeError("TraceLens is not installed; cannot check GPU idle state")
 
     candidates = list_candidate_physical_gpus()
     if not candidates:
-        raise RuntimeError(
-            "gpu_arch_benchmark found no GPUs; cannot run arch microbenchmark"
-        )
+        raise RuntimeError("gpu_arch_benchmark found no GPUs; cannot run arch microbenchmark")
 
     busy_reports: list[str] = []
     for logical_idx, physical_id in enumerate(candidates):
@@ -147,21 +176,22 @@ def select_idle_gpu(
                 if len(candidates) == 1:
                     log(f"gpu_arch_json: using idle GPU {physical_id} ({msg})")
                 else:
-                    log(
-                        "gpu_arch_json: selected idle GPU "
-                        f"{physical_id} from candidates {candidates} ({msg})"
-                    )
+                    log(f"gpu_arch_json: selected idle GPU {physical_id} from candidates {candidates} ({msg})")
             return physical_id
         busy_reports.append(f"GPU {physical_id}: {msg}")
 
-    raise RuntimeError(
-        "gpu_arch_benchmark found no unoccupied GPU among "
-        f"{candidates}. {'; '.join(busy_reports)}"
-    )
+    raise RuntimeError(f"gpu_arch_benchmark found no unoccupied GPU among {candidates}. {'; '.join(busy_reports)}")
 
 
 def resolve_arch_json_path(platform: str) -> Path | None:
-    """Return the bundled arch JSON path for ``platform``, if present."""
+    """Resolve the bundled arch JSON path for a platform.
+
+    Args:
+        platform: Platform/architecture name.
+
+    Returns:
+        The bundled arch JSON path, or ``None`` when none matches.
+    """
     collect = _get_collect_arch_jsons()
     if collect is None:
         return None
@@ -186,11 +216,7 @@ def default_arch_output_path(tracelens_root: Path, platform: str) -> Path:
         The conventional ``.../arch/<PLATFORM>.json`` path.
     """
     canonical = normalize_platform(platform)
-    return (
-        tracelens_root
-        / "TraceLens/Agent/Analysis/utils/arch"
-        / f"{canonical}.json"
-    )
+    return tracelens_root / "TraceLens/Agent/Analysis/utils/arch" / f"{canonical}.json"
 
 
 def _sanitize_measured_arch_spec(
@@ -206,10 +232,21 @@ def _sanitize_measured_arch_spec(
     (FP8/INT8/MX unsupported on the stack, or a bench that was skipped) and a
     ``0`` bandwidth when the HBM sweep failed. Roofline consumes
     ``max_achievable_tflops[<spec>]`` as a divisor and ``mem_bw_gbps`` as the
-    memory ceiling, so a ``0`` would divide-by-zero or yield garbage. Keep only
+    memory ceiling, so a     ``0`` would divide-by-zero or yield garbage. Keep only
     positive MAF values (roofline's lookup then returns ``None`` and skips that
-    dtype) and hard-fail when the spec is unusable. Returns True if ``payload``
-    was modified (caller persists it).
+    dtype) and hard-fail when the spec is unusable.
+
+    Args:
+        payload: The measured arch spec dict (mutated in place).
+        platform: Platform/architecture name for logging.
+        out_path: Path the spec will be written to (used in error messages).
+        log: Logging callable for diagnostics.
+
+    Returns:
+        ``True`` if ``payload`` was modified (the caller persists it).
+
+    Raises:
+        RuntimeError: If the spec has no usable MAF values or bandwidth.
     """
     maf = payload.get("max_achievable_tflops")
     if not isinstance(maf, dict) or not maf:
@@ -280,6 +317,22 @@ def populate_gpu_arch_json(
       returned and the internal extension supplies MAF at report time.
     - When it is False (open-source path) a bundled spec short-circuits, and
       a missing spec triggers the TraceLens microbenchmark on an idle GPU.
+
+    Args:
+        tracelens_root: Root of the TraceLens checkout.
+        platform: Target platform/architecture name.
+        internal_extension_enabled: Whether the internal extension backfills
+            MAF (skips the microbenchmark when ``True``).
+        log: Logging callable for diagnostics.
+        run_command: Callable that runs the microbenchmark subprocess.
+        timeout_s: Microbenchmark timeout in seconds.
+        device: Logical device index for the microbenchmark.
+
+    Returns:
+        The arch JSON path, or ``None`` when MAF is supplied at report time.
+
+    Raises:
+        RuntimeError: If the platform is empty or the microbenchmark fails.
     """
     if internal_extension_enabled:
         existing = resolve_arch_json_path(platform)
@@ -289,10 +342,7 @@ def populate_gpu_arch_json(
                 f"{existing} (MAF backfilled by extension)"
             )
             return existing
-        log(
-            "gpu_arch_json: internal extension enabled; MAF backfilled by "
-            "extension, skipping microbenchmark"
-        )
+        log("gpu_arch_json: internal extension enabled; MAF backfilled by extension, skipping microbenchmark")
         return None
 
     existing = resolve_arch_json_path(platform)
@@ -302,9 +352,7 @@ def populate_gpu_arch_json(
 
     canonical = normalize_platform(platform)
     if not canonical:
-        raise RuntimeError(
-            "target platform is empty; cannot resolve or generate gpu arch JSON"
-        )
+        raise RuntimeError("target platform is empty; cannot resolve or generate gpu arch JSON")
 
     out_path = default_arch_output_path(tracelens_root, canonical)
     log(
@@ -334,13 +382,9 @@ def populate_gpu_arch_json(
         env=single_physical_gpu_env(physical_id),
     )
     if rc != 0:
-        raise RuntimeError(
-            f"gpu arch microbenchmark failed with exit code {rc}; see log for details"
-        )
+        raise RuntimeError(f"gpu arch microbenchmark failed with exit code {rc}; see log for details")
     if not out_path.is_file():
-        raise RuntimeError(
-            f"gpu arch microbenchmark finished but output is missing: {out_path}"
-        )
+        raise RuntimeError(f"gpu arch microbenchmark finished but output is missing: {out_path}")
 
     payload = json.loads(out_path.read_text(encoding="utf-8"))
     changed = False
@@ -351,9 +395,7 @@ def populate_gpu_arch_json(
 
     # Reject / sanitize a spec with 0 (unmeasured) MAF or bandwidth before
     # roofline consumes it as a divisor (#390).
-    changed = _sanitize_measured_arch_spec(
-        payload, platform=canonical, out_path=out_path, log=log
-    ) or changed
+    changed = _sanitize_measured_arch_spec(payload, platform=canonical, out_path=out_path, log=log) or changed
 
     if changed:
         out_path.write_text(json.dumps(payload, indent=4) + "\n", encoding="utf-8")

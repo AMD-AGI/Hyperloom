@@ -3,6 +3,7 @@
 """Coverage for ``framework_agent_client``: fa binary resolution, the sync
 subprocess wrapper (success / not-found / timeout), the async phase runner
 error branches, and the ``phase_discover`` request shaping."""
+
 from __future__ import annotations
 
 import subprocess
@@ -87,7 +88,9 @@ async def test_invoke_fa_phase_no_binary(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(fac, "_resolve_fa_binary", lambda: None)
     with pytest.raises(RuntimeError, match="fa binary not found"):
         await fac._invoke_fa_phase(
-            subcommand="phase-discover", request={}, session_dir=tmp_path,
+            subcommand="phase-discover",
+            request={},
+            session_dir=tmp_path,
         )
 
 
@@ -95,12 +98,15 @@ async def test_invoke_fa_phase_no_binary(tmp_path, monkeypatch) -> None:
 async def test_invoke_fa_phase_nonzero_rc(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(fac, "_resolve_fa_binary", lambda: "fa")
     monkeypatch.setattr(
-        fac, "_run_fa_subcommand_sync",
+        fac,
+        "_run_fa_subcommand_sync",
         lambda *a, **k: (3, "", "boom"),
     )
     with pytest.raises(RuntimeError, match="exited rc=3"):
         await fac._invoke_fa_phase(
-            subcommand="phase-discover", request={"a": 1}, session_dir=tmp_path,
+            subcommand="phase-discover",
+            request={"a": 1},
+            session_dir=tmp_path,
         )
     # temp request file is cleaned up
     assert not list((tmp_path / ".fa-tmp").glob("phase-*.json"))
@@ -110,12 +116,15 @@ async def test_invoke_fa_phase_nonzero_rc(tmp_path, monkeypatch) -> None:
 async def test_invoke_fa_phase_invalid_json(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(fac, "_resolve_fa_binary", lambda: "fa")
     monkeypatch.setattr(
-        fac, "_run_fa_subcommand_sync",
+        fac,
+        "_run_fa_subcommand_sync",
         lambda *a, **k: (0, "not json", ""),
     )
     with pytest.raises(RuntimeError, match="invalid JSON"):
         await fac._invoke_fa_phase(
-            subcommand="phase-discover", request={}, session_dir=tmp_path,
+            subcommand="phase-discover",
+            request={},
+            session_dir=tmp_path,
         )
 
 
@@ -123,11 +132,14 @@ async def test_invoke_fa_phase_invalid_json(tmp_path, monkeypatch) -> None:
 async def test_invoke_fa_phase_happy_path(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(fac, "_resolve_fa_binary", lambda: "fa")
     monkeypatch.setattr(
-        fac, "_run_fa_subcommand_sync",
+        fac,
+        "_run_fa_subcommand_sync",
         lambda *a, **k: (0, '{"candidates": []}', ""),
     )
     out = await fac._invoke_fa_phase(
-        subcommand="phase-discover", request={}, session_dir=tmp_path,
+        subcommand="phase-discover",
+        request={},
+        session_dir=tmp_path,
     )
     assert out == {"candidates": []}
 
@@ -144,9 +156,14 @@ async def test_phase_discover_shapes_request_and_dedups_keywords(tmp_path, monke
 
     monkeypatch.setattr(fac, "_invoke_fa_phase", _fake_invoke)
     out = await fac.phase_discover(
-        model="m", framework="SGLang", gpu_type="mi300x",
-        gaps=[{"area": "moe"}], session_dir=tmp_path,
-        keywords=["Fused", "fused", " MoE ", ""], max_candidates=3, batch_id="b1",
+        model="m",
+        framework="SGLang",
+        gpu_type="mi300x",
+        gaps=[{"area": "moe"}],
+        session_dir=tmp_path,
+        keywords=["Fused", "fused", " MoE ", ""],
+        max_candidates=3,
+        batch_id="b1",
     )
     assert out["batch_id"] == "b1"
     req = captured["request"]

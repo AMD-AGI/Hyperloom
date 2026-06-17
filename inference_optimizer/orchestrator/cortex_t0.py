@@ -49,7 +49,12 @@ def _default_status_emitter(line: str) -> None:
 # closer-workload recipe is reranked first (the dispatcher does the actual
 # rerank; the 5-tuple ``required`` filter is unchanged).
 _PREFER_NUMERIC_ATTRS: tuple[str, ...] = (
-    "tp", "ep", "conc", "isl", "osl", "max_model_len",
+    "tp",
+    "ep",
+    "conc",
+    "isl",
+    "osl",
+    "max_model_len",
 )
 
 
@@ -59,6 +64,13 @@ def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, A
     Only non-empty values are included; the dispatcher skips absent
     fields. ``quant_scheme`` / ``workload_mode`` ride on the per-baseline
     ``baseline_workload_extra`` map when present.
+
+    Args:
+        shared_state: The live SharedState carrying workload knobs.
+        framework_version: The resolved framework version, included when set.
+
+    Returns:
+        The ``prefer`` similarity-hint dict (non-empty fields only).
     """
     prefer: dict[str, Any] = {}
     for attr in _PREFER_NUMERIC_ATTRS:
@@ -84,6 +96,12 @@ def _remote_is_gbrain(kb: Any) -> bool:
     adapter; otherwise the source is the cortex kb-service (or local-only
     fallback, which we still label ``cortex-kb`` since that is the
     configured remote contract).
+
+    Args:
+        kb: The recipe-KB dispatcher whose active remote is inspected.
+
+    Returns:
+        ``True`` when the active remote is the gbrain adapter.
     """
     remote = getattr(kb, "remote", None)
     return type(remote).__name__ == "GbrainRemoteRecipeClient"
@@ -96,6 +114,13 @@ def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
     tags but no champion / experiential lists) is NOT actionable: treating
     it as a confident hit would let warm-replay apply an empty config and
     starve the specialist prompt of real priors.
+
+    Args:
+        row: A warm recipe row to inspect.
+
+    Returns:
+        ``True`` when the row carries a usable config, positive throughput, or
+        any experiential list worth replaying.
     """
     if not isinstance(row, Mapping):
         return False
@@ -117,6 +142,116 @@ def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
     return False
 
 
+def _config_replay_args_envs(row: Mapping[str, Any]) -> tuple[str, dict[str, str]]:
+    """Extract a replayable ``(args, envs)`` pair from a row's best_config.
+
+    Reads the canonical ``extra_server_args`` first, then the legacy
+    ``extra_sglang_args`` / ``args`` aliases, and the nested env map under
+    ``extra_envs`` / ``envs``. Returns empty values when nothing replayable
+    is present.
+    """
+    best_config = row.get("best_config") if isinstance(row.get("best_config"), Mapping) else {}
+    args = str(
+        best_config.get("extra_server_args") or best_config.get("extra_sglang_args") or best_config.get("args") or ""
+    ).strip()
+    envs = best_config.get("extra_envs") or best_config.get("envs") or {}
+    if not isinstance(envs, Mapping):
+        envs = {}
+    return args, {str(k): str(v) for k, v in envs.items()}
+
+
+def _has_replayable_config(row: Mapping[str, Any]) -> bool:
+    """True when ``row`` carries a non-empty champion config (args OR envs)."""
+    if not isinstance(row, Mapping):
+        return False
+    args, envs = _config_replay_args_envs(row)
+    return bool(args or envs)
+
+
+def _max_session_gain(row: Mapping[str, Any]) -> float:
+    """Return the MAX ``gain_pct`` across a row's sessions (fallback flat gain_pct)."""
+    best = 0.0
+    sessions = row.get("sessions")
+    if isinstance(sessions, list):
+        for s in sessions:
+            if not isinstance(s, Mapping):
+                continue
+            try:
+                g = float(s.get("gain_pct") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            best = max(best, g)
+    if best <= 0:
+        try:
+            best = max(best, float(row.get("validated_gain_pct") or row.get("gain_pct") or 0.0))
+        except (TypeError, ValueError):
+            pass  # non-numeric gain field; fall through with best=0.0
+    return best
+
+
+def _find_config_donor(
+    kb: Any,
+    *,
+    cid: str,
+    hardware: str,
+    framework: str,
+    model_type: str,
+    arch_slug: str,
+    framework_version: str,
+    precision: str,
+) -> tuple[Mapping[str, Any] | None, str, float]:
+    """Borrow a replayable champion config from the nearest same-arch sibling.
+
+    Used when the exact (L1) identity match has no replayable best_config:
+    the identity row still supplies priors, but the active warm-replay needs
+    a champion config to apply. Searches L2 (same arch class, cross-model,
+    conf 0.95) then L3 (same arch, any framework version, conf 0.5).
+
+    Only same ``hw+framework+model_type+arch(+precision)(+fwv)`` siblings are
+    considered, so the borrowed config is stack-compatible. Returns
+    ``(donor_row, donor_tier, donor_confidence)`` or ``(None, "", 0.0)``.
+    """
+    if not (model_type or arch_slug):
+        return None, "", 0.0
+    cascade = (
+        (
+            "same_arch_class",
+            0.95,
+            {
+                "hardware": hardware,
+                "framework": framework or "",
+                "model_type": model_type,
+                "architectures": arch_slug,
+                "framework_version": framework_version or "",
+                "precision": precision or "",
+            },
+        ),
+        (
+            "same_arch_any_version",
+            0.5,
+            {
+                "hardware": hardware,
+                "framework": framework or "",
+                "model_type": model_type,
+                "architectures": arch_slug,
+                "precision": precision or "",
+            },
+        ),
+    )
+    for tier, conf, labels in cascade:
+        labels = {k: v for k, v in labels.items() if v and v not in ("unknown_model_type", "unknown_arch")}
+        try:
+            rows = kb.search(label_match=labels, limit=10)
+        except Exception:  # noqa: BLE001 — donor search is best-effort/advisory
+            rows = []
+        for r in rows or []:
+            if str(r.get("canonical_id") or "") == cid:
+                continue
+            if _has_replayable_config(r):
+                return r, tier, conf
+    return None, "", 0.0
+
+
 def _build_warm_start_context(
     *,
     status: str,
@@ -125,6 +260,9 @@ def _build_warm_start_context(
     canonical_id: str,
     source: str,
     recipe: Mapping[str, Any] | None,
+    config_donor: Mapping[str, Any] | None = None,
+    config_donor_tier: str = "",
+    config_donor_confidence: float = 0.0,
 ) -> dict[str, Any]:
     """Build the model-facing WarmStartContext from a KB recipe row.
 
@@ -133,6 +271,14 @@ def _build_warm_start_context(
     ready-to-replay champion plus the experiential lists, so consumers
     (warm-replay / specialist prompt / ledger) never parse the raw
     recipe shape.
+
+    Config-donor decoupling: the experiential lists (priors) always come
+    from the identity match ``recipe`` (even when its own best_config is
+    empty), while ``recommended_replay`` is sourced from ``config_donor`` —
+    which may be the identity row itself (``config_tier="self"``) or a
+    borrowed same-architecture sibling. The donor's transfer confidence
+    (``config_confidence``) governs the downstream replay gate, NOT the
+    identity-match confidence.
     """
     ctx: dict[str, Any] = {
         "status": status,
@@ -148,31 +294,46 @@ def _build_warm_start_context(
         "lessons": [],
         "pitfalls": [],
     }
-    if status not in ("hit",) or not isinstance(recipe, Mapping):
-        return ctx
-    best_config = recipe.get("best_config") if isinstance(recipe.get("best_config"), Mapping) else {}
-    args = str(best_config.get("extra_server_args") or best_config.get("args") or "").strip()
-    envs = best_config.get("extra_envs") or best_config.get("envs") or {}
-    if not isinstance(envs, Mapping):
-        envs = {}
-    try:
-        best_tput = float(recipe.get("best_throughput") or 0.0)
-    except (TypeError, ValueError):
-        best_tput = 0.0
-    try:
-        expected_gain = float(recipe.get("validated_gain_pct") or 0.0)
-    except (TypeError, ValueError):
-        expected_gain = 0.0
-    ctx["recommended_replay"] = {
-        "extra_server_args": args,
-        "extra_envs": {str(k): str(v) for k, v in envs.items()},
-        "expected_gain_pct": expected_gain,
-        "best_throughput": best_tput,
-    }
-    ctx["proven_prior"] = list(recipe.get("what_worked") or [])
-    ctx["do_not_repeat"] = list(recipe.get("what_failed") or [])
-    ctx["lessons"] = list(recipe.get("lessons") or [])
-    ctx["pitfalls"] = list(recipe.get("pitfalls") or [])
+    # Priors ride the identity match regardless of whether it carries a
+    # replayable config (seed-only / empty-config anchors still anchor priors).
+    if isinstance(recipe, Mapping):
+        ctx["proven_prior"] = list(recipe.get("what_worked") or [])
+        ctx["do_not_repeat"] = list(recipe.get("what_failed") or [])
+        ctx["lessons"] = list(recipe.get("lessons") or [])
+        ctx["pitfalls"] = list(recipe.get("pitfalls") or [])
+    # Replay config comes from the donor (self or borrowed sibling). When no
+    # explicit donor is supplied (legacy callers / direct unit use), fall back
+    # to the identity recipe itself as a self-donor if it owns a replayable
+    # config — preserving the original "hit recipe replays its own config"
+    # contract.
+    donor = config_donor if isinstance(config_donor, Mapping) else None
+    if donor is None and isinstance(recipe, Mapping) and _has_replayable_config(recipe):
+        donor = recipe
+        config_donor_tier = config_donor_tier or "self"
+        config_donor_confidence = config_donor_confidence or confidence
+    if donor is not None:
+        args, envs = _config_replay_args_envs(donor)
+        if args or envs:
+            try:
+                best_tput = float(donor.get("best_throughput") or 0.0)
+            except (TypeError, ValueError):
+                best_tput = 0.0
+            try:
+                expected_gain = float(donor.get("validated_gain_pct") or 0.0)
+            except (TypeError, ValueError):
+                expected_gain = 0.0
+            if expected_gain <= 0:
+                expected_gain = _max_session_gain(donor)
+            ctx["recommended_replay"] = {
+                "extra_server_args": args,
+                "extra_envs": envs,
+                "expected_gain_pct": expected_gain,
+                "best_throughput": best_tput,
+                # Provenance: where the borrowed champion config came from.
+                "config_source": str(donor.get("canonical_id") or ""),
+                "config_tier": config_donor_tier or "self",
+                "config_confidence": float(config_donor_confidence or confidence),
+            }
     return ctx
 
 
@@ -195,6 +356,28 @@ def run_t0_anchor(
 
     Mutates ``shared_state`` in place (warm_start_* fields) and persists when
     ``save_state=True``. ``session_dir`` is required. Returns a :class:`T0Result`.
+
+    Args:
+        kb: The recipe-KB dispatcher used for the read-modify-write anchor.
+        shared_state: The live SharedState, mutated in place with warm-start
+            results.
+        workload: The model/workload identifier.
+        hw: The hardware/GPU identifier.
+        image_digest: Optional container image digest stamped as a trace tag.
+        stack_fingerprint: Optional stack-version fingerprint mapping.
+        extra_attrs: Optional extra identity/trace attributes (model_class,
+            framework, session ids).
+        resume: When ``True``, re-anchor even if already anchored.
+        fail_fast: Reserved flag for fail-fast behavior.
+        on_status: Optional status-line callback; defaults to INFO logging.
+        session_dir: The session directory (required).
+        save_state: When ``True``, persist the mutated SharedState.
+
+    Returns:
+        A :class:`T0Result` describing the anchor outcome.
+
+    Raises:
+        ValueError: If ``session_dir`` is ``None``.
     """
     emit = on_status or _default_status_emitter
     if session_dir is None:
@@ -210,11 +393,7 @@ def run_t0_anchor(
     hw = (hw or "").strip() or "unknown_gpu"
 
     # Short-circuit when already anchored (via ``warm_start_ts``); resume=True bypasses.
-    if (
-        sid
-        and not resume
-        and (getattr(shared_state, "warm_start_ts", "") or "").strip()
-    ):
+    if sid and not resume and (getattr(shared_state, "warm_start_ts", "") or "").strip():
         shared_state.cortex_session_id = sid
         emit(f"Cortex KB        : already anchored session_id={sid}")
         return T0Result(
@@ -238,15 +417,11 @@ def run_t0_anchor(
         )
 
     # Backfill operator-tracing metadata; T0 only stamps metadata (best_config preserved, rewritten at CLOSE).
-    _extra: Mapping[str, Any] = (
-        extra_attrs if isinstance(extra_attrs, Mapping) else {}
-    )
+    _extra: Mapping[str, Any] = extra_attrs if isinstance(extra_attrs, Mapping) else {}
     _model_class = str(_extra.get("model_class") or "").strip()
-    _framework   = str(_extra.get("framework")   or "").strip()
-    _precision   = str(getattr(shared_state, "precision", "") or "").strip()
-    fp: Mapping[str, Any] = (
-        stack_fingerprint if isinstance(stack_fingerprint, Mapping) else {}
-    )
+    _framework = str(_extra.get("framework") or "").strip()
+    _precision = str(getattr(shared_state, "precision", "") or "").strip()
+    fp: Mapping[str, Any] = stack_fingerprint if isinstance(stack_fingerprint, Mapping) else {}
     # framework_version: SharedState > stack_fingerprint > importlib auto-detect.
     _fw_version = str(getattr(shared_state, "framework_version", "") or "").strip()
     if not _fw_version and _framework in ("sglang", "vllm"):
@@ -282,11 +457,11 @@ def run_t0_anchor(
         if v:
             _extras[src_key] = v
     for src_attr, dst_key in (
-        ("tp",            "tp"),
-        ("ep",            "ep"),
-        ("conc",          "conc"),
-        ("isl",           "isl"),
-        ("osl",           "osl"),
+        ("tp", "tp"),
+        ("ep", "ep"),
+        ("conc", "conc"),
+        ("isl", "isl"),
+        ("osl", "osl"),
         ("max_model_len", "max_model_len"),
     ):
         v = getattr(shared_state, src_attr, None)
@@ -308,12 +483,17 @@ def run_t0_anchor(
     if pp_n > 0:
         _extras["pp"] = pp_n
 
-    # Build canonical_id from the resolved 5-tuple (precision is a strong identity dim).
+    # Build canonical_id from the resolved 7-tuple.
+    _model_type_val = str(getattr(shared_state, "model_type", "") or "").strip()
+    _architectures_val = getattr(shared_state, "model_architectures", None) or []
     cid = recipe_canonical_id(
-        model=workload, hardware=hw,
+        model=workload,
+        hardware=hw,
         framework=_framework or "",
         framework_version=_fw_version or "",
         precision=_precision or "",
+        model_type=_model_type_val,
+        architectures=_architectures_val,
     )
 
     # Persist framework + framework_version onto SharedState so CLOSE/KEEP derives an identical cid.
@@ -332,16 +512,34 @@ def run_t0_anchor(
     # Merge prior extras; new values win.
     merged_extras: dict[str, Any] = {}
     prior_extras = {
-        k: v for k, v in (live or {}).items()
-        if k not in {
-            "canonical_id", "version", "created_at", "updated_at",
-            "model", "hardware", "framework", "framework_version",
+        k: v
+        for k, v in (live or {}).items()
+        if k
+        not in {
+            "canonical_id",
+            "version",
+            "created_at",
+            "updated_at",
+            "model",
+            "hardware",
+            "framework",
+            "framework_version",
             "precision",
-            "best_config", "best_throughput",
-            "what_worked", "what_failed", "remaining_gaps",
-            "prs_tested", "pitfalls", "lessons",
-            "last_profiled", "stack_fingerprint", "sessions",
-            "authority", "confidence", "evidence_refs", "provenance",
+            "best_config",
+            "best_throughput",
+            "what_worked",
+            "what_failed",
+            "remaining_gaps",
+            "prs_tested",
+            "pitfalls",
+            "lessons",
+            "last_profiled",
+            "stack_fingerprint",
+            "sessions",
+            "authority",
+            "confidence",
+            "evidence_refs",
+            "provenance",
         }
     }
     merged_extras.update(prior_extras)
@@ -358,8 +556,10 @@ def run_t0_anchor(
     try:
         kb.put_recipe(
             canonical_id=cid,
-            model=workload, hardware=hw,
-            framework=_framework or "", framework_version=_fw_version or "",
+            model=workload,
+            hardware=hw,
+            framework=_framework or "",
+            framework_version=_fw_version or "",
             precision=_precision or "",
             best_config=dict(live.get("best_config") or {}),
             best_throughput=float(live.get("best_throughput") or 0.0),
@@ -374,47 +574,136 @@ def run_t0_anchor(
             sessions=list(live.get("sessions") or []),
             extras=merged_extras,
             provenance={
-                "source":       "hyperloom-inference-optimizer",
-                "generator":    "t0_anchor",
+                "source": "hyperloom-inference-optimizer",
+                "generator": "t0_anchor",
                 "generated_at": datetime.now(timezone.utc).isoformat(
                     timespec="microseconds",
                 ),
-                "details":      {"sid": sid},
+                "details": {"sid": sid},
             },
         )
     except Exception:  # noqa: BLE001 — defensive
         log.exception("T0 anchor put_recipe raised unexpectedly")
 
-    # warm_start_recipe — one dispatcher call; equal canonical_id => exact, else relative.
+    # warm_start_recipe — 4-level cascading fallback:
+    #   L1: 7-tuple exact (model+hw+fw+model_type+arch+fwv+prec) → conf=1.0, replay
+    #   L2: drop model → (hw+fw+model_type+arch+fwv+prec) → conf=0.95, replay
+    #       "same architecture class, cross-model" — empirically +21~37%
+    #   L3: drop model+fwv → (hw+fw+model_type+arch+prec) → conf=0.5, advisory_only
+    #       "same arch class, any fw version" — cross-version risk, lessons only
+    #   L4: existing tier fallback (relative) → conf=0.3, advisory_only
     warm_point: dict[str, Any] = {}
     warm_tier: str = "miss"
     warm_conf: float = 0.0
-    # Workload-similarity hints (``prefer``) reorder candidate rows so the
-    # closest workload surfaces first; they NEVER change the 5-tuple
-    # ``required`` filter. Built from SharedState; absent values are
-    # skipped by the dispatcher's rerank.
     warm_prefer = _build_warm_prefer(shared_state, _fw_version)
+
+    # Pre-compute architectures slug once for L2/L3 reuse.
+    from ..recipe_snapshot_constants import _architectures_slug
+
+    _arch_slug = _architectures_slug(_architectures_val)
+
+    # L1: full 7-tuple exact
     try:
         row = kb.get_recipe(canonical_id=cid, prefer=warm_prefer or None)
-    except Exception as exc:  # noqa: BLE001 — dispatcher absorbs RemoteRecipeClientError
-        log.info("warm-start get_recipe non-fatal failure: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        log.info("warm-start L1 get_recipe non-fatal failure: %s", exc)
         row = None
-    if isinstance(row, dict) and row:
+    if isinstance(row, dict) and row and str(row.get("canonical_id") or "") == cid:
         warm_point = row
-        if str(row.get("canonical_id") or "") == cid:
-            warm_tier = "exact"
-            warm_conf = 1.0
-        else:
-            # Neighbouring 5-tuple fallback; confidence 0.7 (verified-before-applied).
+        warm_tier = "exact"
+        warm_conf = 1.0
+    else:
+        # L2: drop model — same (hw+fw+model_type+arch+fwv+prec)
+        if _model_type_val or _architectures_val:
+            l2_labels = {
+                "hardware": hw,
+                "framework": _framework or "",
+                "model_type": _model_type_val,
+                "architectures": _arch_slug,
+                "framework_version": _fw_version or "",
+                "precision": _precision or "",
+            }
+            l2_labels = {k: v for k, v in l2_labels.items() if v and v not in ("unknown_model_type", "unknown_arch")}
+            try:
+                l2_rows = kb.search(label_match=l2_labels, limit=5)
+            except Exception:  # noqa: BLE001
+                l2_rows = []
+            for r in l2_rows or []:
+                if str(r.get("canonical_id") or "") == cid:
+                    continue
+                if _recipe_is_actionable(r):
+                    warm_point = r
+                    warm_tier = "same_arch_class"
+                    warm_conf = 0.95
+                    break
+
+        # L3: drop model + framework_version → (hw+fw+model_type+arch+prec)
+        if not warm_point and (_model_type_val or _architectures_val):
+            l3_labels = {
+                "hardware": hw,
+                "framework": _framework or "",
+                "model_type": _model_type_val,
+                "architectures": _arch_slug,
+                "precision": _precision or "",
+            }
+            l3_labels = {k: v for k, v in l3_labels.items() if v and v not in ("unknown_model_type", "unknown_arch")}
+            try:
+                l3_rows = kb.search(label_match=l3_labels, limit=5)
+            except Exception:  # noqa: BLE001
+                l3_rows = []
+            for r in l3_rows or []:
+                if str(r.get("canonical_id") or "") == cid:
+                    continue
+                if _recipe_is_actionable(r):
+                    warm_point = r
+                    warm_tier = "same_arch_any_version"
+                    warm_conf = 0.5
+                    break
+
+        # L4: if L1 returned a non-exact row (dispatcher relative match)
+        if not warm_point and isinstance(row, dict) and row:
+            warm_point = row
             warm_tier = "relative"
-            warm_conf = 0.7
-        # Bare T0 anchor (identity + tracing tags, no best_config) would mis-report as a confident exact hit; demote to seed_only so warm-replay won't apply an empty config.
-        if not _recipe_is_actionable(row):
-            warm_tier = "seed_only"
-            warm_conf = 0.0
+            warm_conf = 0.3
+
+    # Bare T0 anchor (identity + tracing tags, no best_config) demotes to seed_only.
+    if warm_point and not _recipe_is_actionable(warm_point):
+        warm_tier = "seed_only"
+        warm_conf = 0.0
+
+    # Config-donor decoupling: the identity match (warm_point) supplies priors
+    # and the 7-tuple anchor; if it carries no replayable champion config
+    # (the ~47% empty-best_config / seed-only rows), borrow one from the
+    # nearest same-architecture sibling so the active warm-replay can still
+    # fire. The donor's cross-model transfer confidence — not the identity
+    # match's confidence — governs the downstream replay gate.
+    config_donor: Mapping[str, Any] | None = None
+    config_donor_tier = ""
+    config_donor_conf = 0.0
+    if warm_point and _has_replayable_config(warm_point):
+        config_donor = warm_point
+        config_donor_tier = "self"
+        config_donor_conf = warm_conf
+    elif warm_point:
+        donor, dtier, dconf = _find_config_donor(
+            kb,
+            cid=cid,
+            hardware=hw,
+            framework=_framework or "",
+            model_type=_model_type_val,
+            arch_slug=_arch_slug,
+            framework_version=_fw_version or "",
+            precision=_precision or "",
+        )
+        if donor is not None:
+            config_donor = donor
+            config_donor_tier = dtier
+            config_donor_conf = dconf
+
     # Keep warm.json envelope shape stable for existing readers (kb_explorer, breakdown); new readers prefer shared_state.warm_start_recipe.
     warm_text = json.dumps(
-        {"points": [warm_point] if warm_point else []}, sort_keys=True,
+        {"points": [warm_point] if warm_point else []},
+        sort_keys=True,
     )
     try:
         warm_path = sd / "runtime" / "cortex" / ".kb_warm.json"
@@ -422,18 +711,24 @@ def run_t0_anchor(
         warm_path.write_text(
             json.dumps(
                 {
-                    "workload": workload, "hw": hw,
-                    "tier": warm_tier, "confidence": warm_conf,
-                    "recipe": warm_point, "raw": warm_text,
+                    "workload": workload,
+                    "hw": hw,
+                    "tier": warm_tier,
+                    "confidence": warm_conf,
+                    "recipe": warm_point,
+                    "raw": warm_text,
                 },
                 indent=2,
             ),
             encoding="utf-8",
         )
         shared_state.warm_start_recipe = {
-            "workload": workload, "hw": hw,
-            "tier": warm_tier, "confidence": warm_conf,
-            "recipe": warm_point, "raw": warm_text,
+            "workload": workload,
+            "hw": hw,
+            "tier": warm_tier,
+            "confidence": warm_conf,
+            "recipe": warm_point,
+            "raw": warm_text,
         }
     except OSError as exc:
         log.warning("warm_start snapshot write failed: %s", exc)
@@ -448,6 +743,9 @@ def run_t0_anchor(
     warm_source = "gbrain" if _remote_is_gbrain(kb) else "cortex-kb"
     try:
         shared_state.warm_start_context = _build_warm_start_context(
+            config_donor=config_donor,
+            config_donor_tier=config_donor_tier,
+            config_donor_confidence=config_donor_conf,
             status=wsc_status,
             tier=warm_tier,
             confidence=warm_conf,
@@ -460,17 +758,17 @@ def run_t0_anchor(
 
     # warm_start_pitfalls / warm_start_lessons are embedded recipe-row fields (exact-5-tuple-only); read from warm_point.
     pitfalls_list: list[dict[str, Any]] = list(warm_point.get("pitfalls") or [])
-    lessons_list:  list[dict[str, Any]] = list(warm_point.get("lessons") or [])
+    lessons_list: list[dict[str, Any]] = list(warm_point.get("lessons") or [])
     try:
         pit_path = sd / "runtime" / "cortex" / ".kb_pitfalls.json"
         pit_path.parent.mkdir(parents=True, exist_ok=True)
         pit_path.write_text(
             json.dumps(
                 {
-                    "workload":  workload,
-                    "hw":        hw,
+                    "workload": workload,
+                    "hw": hw,
                     "framework": _framework or "",
-                    "pitfalls":  pitfalls_list,
+                    "pitfalls": pitfalls_list,
                 },
                 indent=2,
             ),
@@ -486,10 +784,10 @@ def run_t0_anchor(
         les_path.write_text(
             json.dumps(
                 {
-                    "workload":  workload,
-                    "hw":        hw,
+                    "workload": workload,
+                    "hw": hw,
                     "framework": _framework or "",
-                    "lessons":   lessons_list,
+                    "lessons": lessons_list,
                 },
                 indent=2,
             ),
@@ -506,7 +804,8 @@ def run_t0_anchor(
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
                 "Cortex T0: SharedState.save failed (sid=%s, workload=%s)",
-                sid, workload,
+                sid,
+                workload,
             )
 
     # warm_present = usable record (tier != "miss" and confidence > 0).
@@ -514,11 +813,7 @@ def run_t0_anchor(
     pitfalls_present = bool(pitfalls_list)
     lessons_present = bool(lessons_list)
     if began_now:
-        warm_label = (
-            f"hit:{warm_tier}@{warm_conf:.2f}" if warm_present else
-            "seed_only" if warm_point else
-            "empty"
-        )
+        warm_label = f"hit:{warm_tier}@{warm_conf:.2f}" if warm_present else "seed_only" if warm_point else "empty"
         emit(
             f"Recipe KB        : session_id={sid} "
             f"workload={cid} "

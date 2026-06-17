@@ -139,6 +139,12 @@ def _pick_worktree_base(roots: tuple[str, ...]) -> Path | None:
 
     Falls back to None when none exist — the runner then runs the
     specialist without an isolated worktree.
+
+    Args:
+        roots: Candidate root paths to probe for a ``.git`` marker.
+
+    Returns:
+        The first git-checkout root, or ``None`` when none qualify.
     """
     for r in roots:
         p = Path(r)
@@ -152,13 +158,24 @@ def _pick_worktree_base(roots: tuple[str, ...]) -> Path | None:
 
 
 def _setup_worktree(
-    base: Path, worktree_path: Path, branch: str,
+    base: Path,
+    worktree_path: Path,
+    branch: str,
 ) -> tuple[Path | None, str]:
     """Create a fresh git worktree at ``worktree_path`` branched off
     ``base``'s HEAD.
 
     Best-effort: on git error returns ``(None, err)`` so the caller can
     proceed without isolation (PR-A2 default) or hard-fail.
+
+    Args:
+        base: Git checkout the worktree is branched off of.
+        worktree_path: Destination path for the new worktree.
+        branch: Branch name to create for the worktree.
+
+    Returns:
+        A ``(worktree_path, "")`` tuple on success, or ``(None, error)`` on
+        git failure.
     """
     if worktree_path.exists():
         # Resume / retry: reuse an existing worktree (stale ones are rare).
@@ -169,20 +186,27 @@ def _setup_worktree(
         return worktree_path, ""
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "git", "-C", str(base), "worktree", "add",
-        "-b", branch, str(worktree_path),
+        "git",
+        "-C",
+        str(base),
+        "worktree",
+        "add",
+        "-b",
+        branch,
+        str(worktree_path),
     ]
     try:
         cp = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=60.0, check=False,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+            check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return None, f"git worktree add failed to spawn: {exc!r}"
     if cp.returncode != 0:
-        return None, (
-            f"git worktree add rc={cp.returncode}: "
-            f"stderr={cp.stderr.strip()[:400]!r}"
-        )
+        return None, (f"git worktree add rc={cp.returncode}: stderr={cp.stderr.strip()[:400]!r}")
     return worktree_path, ""
 
 
@@ -191,15 +215,21 @@ def _teardown_worktree(base: Path | None, worktree_path: Path) -> None:
 
     Called only on the REVERT / synth-empty path; the KEEP path leaves the
     worktree in place so ``integrate_patch`` can pull patches out of it.
+
+    Args:
+        base: Git checkout the worktree was created from, or ``None``.
+        worktree_path: Path of the worktree to remove.
     """
     if not worktree_path.exists():
         return
     if base is not None and (base / ".git").exists():
         try:
             subprocess.run(
-                ["git", "-C", str(base), "worktree", "remove", "--force",
-                 str(worktree_path)],
-                capture_output=True, text=True, timeout=30.0, check=False,
+                ["git", "-C", str(base), "worktree", "remove", "--force", str(worktree_path)],
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+                check=False,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
@@ -279,12 +309,7 @@ class SpecialistSubprocessDispatcher:
 
         # Write the prompt file (system + user collapsed into one
         # --system-prompt-file; -p carries the kickoff).
-        combined = (
-            "<!-- system_prompt -->\n"
-            + system_prompt
-            + "\n<!-- user_prompt -->\n"
-            + user_prompt
-        )
+        combined = "<!-- system_prompt -->\n" + system_prompt + "\n<!-- user_prompt -->\n" + user_prompt
         prompt_file.write_text(combined, encoding="utf-8")
 
         cmd = self._build_claude_cmd(
@@ -304,8 +329,7 @@ class SpecialistSubprocessDispatcher:
             env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = visible
         else:
             # CPU specialists must not inherit serving GPU visibility.
-            for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES",
-                        "ROCR_VISIBLE_DEVICES"):
+            for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
                 env.pop(var, None)
 
         proc_started = time.monotonic()
@@ -383,7 +407,8 @@ class SpecialistSubprocessDispatcher:
 
     # Internals
     def _build_claude_cmd(
-        self, *,
+        self,
+        *,
         prompt_file: Path,
         workspace: Path,
         worktree: Path | None,
@@ -411,10 +436,13 @@ class SpecialistSubprocessDispatcher:
         cmd: list[str] = [
             cfg.claude_executable,
             "--print",
-            "--output-format", cfg.output_format,
+            "--output-format",
+            cfg.output_format,
             "--verbose",
-            "--permission-mode", cfg.permission_mode,
-            "--system-prompt-file", str(prompt_file),
+            "--permission-mode",
+            cfg.permission_mode,
+            "--system-prompt-file",
+            str(prompt_file),
             "-p",
             "Execute the task in your system prompt. Work autonomously. "
             + "Write specialist_done.json as your absolute last action.",
@@ -546,10 +574,7 @@ class SpecialistSubprocessDispatcher:
             # Hard wall-clock cap.
             if elapsed > max_seconds:
                 outcome["timed_out"] = True
-                outcome["error"] = (
-                    f"specialist subprocess exceeded "
-                    f"{max_seconds:.0f}s wall-clock cap"
-                )
+                outcome["error"] = f"specialist subprocess exceeded {max_seconds:.0f}s wall-clock cap"
                 self._kill(proc)
                 outcome["exit_code"] = proc.poll()
                 outcome["elapsed"] = time.monotonic() - started
@@ -594,7 +619,8 @@ class SpecialistSubprocessDispatcher:
 
     @staticmethod
     def _collect_patches(
-        worktree: Path | None, workspace: Path,
+        worktree: Path | None,
+        workspace: Path,
     ) -> list[str]:
         """Discover patch files written by the specialist.
 
@@ -643,19 +669,19 @@ class SpecialistSubprocessDispatcher:
             data = json.loads(done_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             log.warning(
-                "specialist_done.json parse failed at %s: %r", done_file, exc,
+                "specialist_done.json parse failed at %s: %r",
+                done_file,
+                exc,
             )
             return None
         if not isinstance(data, dict):
             log.warning(
                 "specialist_done.json at %s is not a dict (%r); ignoring",
-                done_file, type(data).__name__,
+                done_file,
+                type(data).__name__,
             )
             return None
-        if (
-            str(data.get("intent_type") or "") == "specialist_done"
-            and isinstance(data.get("payload"), dict)
-        ):
+        if str(data.get("intent_type") or "") == "specialist_done" and isinstance(data.get("payload"), dict):
             inner = data["payload"]
             merged: dict[str, Any] = {}
             for k, v in data.items():
@@ -665,11 +691,9 @@ class SpecialistSubprocessDispatcher:
             for k, v in inner.items():
                 merged[k] = v
             log.info(
-                "_read_done: unwrapped specialist_done intent envelope at %s "
-                "(proposal_set_len=%d, empty=%s)",
+                "_read_done: unwrapped specialist_done intent envelope at %s (proposal_set_len=%d, empty=%s)",
                 done_file,
-                len(inner.get("proposal_set") or [])
-                if isinstance(inner.get("proposal_set"), list) else 0,
+                len(inner.get("proposal_set") or []) if isinstance(inner.get("proposal_set"), list) else 0,
                 inner.get("empty"),
             )
             return merged

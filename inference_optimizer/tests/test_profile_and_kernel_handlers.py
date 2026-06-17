@@ -35,7 +35,8 @@ from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.protocol.intent import Intent, IntentType
 from inference_optimizer.orchestrator.task_registry import TaskRegistry
 from inference_optimizer.orchestrator.resource_lock import (
-    ResourceLockManager, SqliteLeaseBackend,
+    ResourceLockManager,
+    SqliteLeaseBackend,
 )
 from inference_optimizer.orchestrator.sub_agent_runner import (
     SubAgentRunner,
@@ -55,14 +56,12 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 
 
 def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE,
-                  payload={"topic": "heartbeat", "body_md": "ok"})
+    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {n: MockBackend(silent, name=n)
-            for n in ("orchestration", "kernel", "critic", "robustness")}
+    return {n: MockBackend(silent, name=n) for n in ("orchestration", "kernel", "critic", "robustness")}
 
 
 def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch):
@@ -84,7 +83,9 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     assert optimizer_cli._GFX_TO_RUNNER.get("gfx1100") is None
     manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
     state = optimizer_cli._seed_shared_state(
-        tmp_path, args, session_id="mi325x-session",
+        tmp_path,
+        args,
+        session_id="mi325x-session",
     )
 
     assert manifest["gpu_type"] == "mi325x"
@@ -111,7 +112,9 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     assert optimizer_cli._gpu_runner_type("mi308x") == "mi300x"
     manifest = build_manifest(tmp_path, args=args, session_id="mi308x-session")
     state = optimizer_cli._seed_shared_state(
-        tmp_path, args, session_id="mi308x-session",
+        tmp_path,
+        args,
+        session_id="mi308x-session",
     )
 
     assert manifest["gpu_type"] == "mi308x"
@@ -122,9 +125,15 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
 
 def test_cli_parser_accepts_mi308x():
     parser = optimizer_cli._build_parser()
-    args = parser.parse_args([
-        "optimize", "--model", "/tmp/model", "--gpu-type", "mi308x",
-    ])
+    args = parser.parse_args(
+        [
+            "optimize",
+            "--model",
+            "/tmp/model",
+            "--gpu-type",
+            "mi308x",
+        ]
+    )
     assert args.gpu_type == "mi308x"
 
 
@@ -138,13 +147,13 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
 # ProfileExecutor
 def test_profile_default_config_path_is_in_assets():
     assert "profile_sglang.yaml" in str(PROFILE_DEFAULT_CONFIG)
-    assert PROFILE_DEFAULT_CONFIG.exists(), \
-        "profile YAML must ship as a package asset"
+    assert PROFILE_DEFAULT_CONFIG.exists(), "profile YAML must ship as a package asset"
 
 
 def test_profile_yaml_has_torch_profiler_enabled():
     """The whole point of the profile config is profiler ON."""
     import yaml
+
     with PROFILE_DEFAULT_CONFIG.open() as f:
         cfg = yaml.safe_load(f)
     assert cfg["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
@@ -154,6 +163,7 @@ def test_profile_yaml_has_torch_profiler_enabled():
 def test_materialize_config_injects_model_path(tmp_path):
     """Default YAML's hardcoded Qwen3-8B must be overridden when caller passes ``model_path``."""
     import yaml
+
     out = _materialize_config_with_envs(
         PROFILE_DEFAULT_CONFIG,
         tmp_path,
@@ -167,6 +177,7 @@ def test_materialize_config_injects_model_path(tmp_path):
 def test_materialize_config_leaves_model_alone_without_override(tmp_path, monkeypatch):
     """When no model_path is passed, the materialized YAML keeps the source model field."""
     import yaml
+
     # Clear ISL/OSL/MAX_MODEL_LEN env so they don't inject
     for k in ("ISL", "OSL", "MAX_MODEL_LEN", "PRECISION"):
         monkeypatch.delenv(k, raising=False)
@@ -179,6 +190,7 @@ def test_materialize_config_leaves_model_alone_without_override(tmp_path, monkey
 def test_materialize_config_injects_model_with_other_overrides(tmp_path):
     """model_path + extra_envs should both land in the materialized YAML."""
     import yaml
+
     out = _materialize_config_with_envs(
         PROFILE_DEFAULT_CONFIG,
         tmp_path,
@@ -195,6 +207,7 @@ def test_materialize_config_injects_model_with_other_overrides(tmp_path):
 def test_materialize_config_injects_runner_type(tmp_path):
     """gpu_type kwarg must land in benchmark.runner_type as-is."""
     import yaml
+
     out = _materialize_config_with_envs(
         PROFILE_DEFAULT_CONFIG,
         tmp_path,
@@ -208,24 +221,32 @@ def test_materialize_config_injects_runner_type(tmp_path):
 def test_materialize_config_forces_generic_benchmark_script(tmp_path):
     """`gpu_type` pins `benchmark_script` to the generic `{framework}_{gpu_type}.sh` (Magpie priority 1)."""
     import yaml
+
     src_yaml = tmp_path / "src.yaml"
-    src_yaml.write_text(yaml.safe_dump({
-        "benchmark": {
-            "framework": "sglang",
-            "model": "/m",
-            "benchmark_script": "sglang_mi300x.sh",  # legacy field
-        },
-    }))
+    src_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": "/m",
+                    "benchmark_script": "sglang_mi300x.sh",  # legacy field
+                },
+            }
+        )
+    )
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     out = _materialize_config_with_envs(
-        src_yaml, out_dir, gpu_type="mi355x",
+        src_yaml,
+        out_dir,
+        gpu_type="mi355x",
     )
     with out.open() as f:
         rendered = yaml.safe_load(f)
     assert rendered["benchmark"]["runner_type"] == "mi355x"
-    assert rendered["benchmark"]["benchmark_script"] == "sglang_mi355x.sh", \
+    assert rendered["benchmark"]["benchmark_script"] == "sglang_mi355x.sh", (
         "gpu_type must pin the generic {framework}_{gpu_type}.sh"
+    )
 
 
 def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
@@ -233,18 +254,25 @@ def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
 ):
     """Even with no source `benchmark_script`, the renderer must write one explicitly."""
     import yaml
+
     src_yaml = tmp_path / "src.yaml"
-    src_yaml.write_text(yaml.safe_dump({
-        "benchmark": {
-            "framework": "vllm",
-            "model": "/m",
-            # No benchmark_script field at all.
-        },
-    }))
+    src_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "model": "/m",
+                    # No benchmark_script field at all.
+                },
+            }
+        )
+    )
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     out = _materialize_config_with_envs(
-        src_yaml, out_dir, gpu_type="mi300x",
+        src_yaml,
+        out_dir,
+        gpu_type="mi300x",
     )
     with out.open() as f:
         rendered = yaml.safe_load(f)
@@ -255,6 +283,7 @@ def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
 def test_materialize_config_tp_env_overrides_yaml_hardcode(tmp_path, monkeypatch):
     """TP env var must override yaml hardcode (was 1, becomes 8)."""
     import yaml
+
     monkeypatch.setenv("TP", "8")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
@@ -267,6 +296,7 @@ def test_materialize_config_tp_env_overrides_yaml_hardcode(tmp_path, monkeypatch
 def test_materialize_config_conc_env_overrides_yaml_hardcode(tmp_path, monkeypatch):
     """CONC env var must override yaml hardcode."""
     import yaml
+
     monkeypatch.setenv("CONC", "64")
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -275,11 +305,13 @@ def test_materialize_config_conc_env_overrides_yaml_hardcode(tmp_path, monkeypat
 
 
 def test_materialize_config_rocr_visible_devices_auto_expands_when_tp_overridden(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """When TP=8 is set via env but ROCR_VISIBLE_DEVICES isn't explicit,
     expand the GPU list to 0..TP-1 so vllm/sglang sees enough devices."""
     import yaml
+
     monkeypatch.setenv("TP", "8")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
@@ -292,10 +324,12 @@ def test_materialize_config_rocr_visible_devices_auto_expands_when_tp_overridden
 
 
 def test_materialize_config_rocr_visible_devices_explicit_env_wins_when_enough(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Explicit ROCR_VISIBLE_DEVICES wins when it has at least TP devices."""
     import yaml
+
     monkeypatch.setenv("TP", "4")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
     out = _materialize_config_with_envs(PROFILE_DEFAULT_CONFIG, tmp_path)
@@ -305,10 +339,12 @@ def test_materialize_config_rocr_visible_devices_explicit_env_wins_when_enough(
 
 
 def test_materialize_config_rocr_visible_devices_expands_when_under_tp(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """When explicit ROCR_VISIBLE_DEVICES has fewer devices than TP requires, `_workload_envs` auto-expands to 0..TP-1."""
     import yaml
+
     monkeypatch.setenv("TP", "8")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
@@ -321,20 +357,25 @@ def test_materialize_config_rocr_visible_devices_expands_when_under_tp(
 def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
     """When TP=1 (default), don't auto-touch ROCR_VISIBLE_DEVICES."""
     import yaml
+
     src_yaml = tmp_path / "src.yaml"
-    src_yaml.write_text(yaml.safe_dump({
-        "benchmark": {
-            "framework": "sglang",
-            "model": "/m",
-            "envs": {
-                "TP": 1,
-                "CONC": 8,
-                "ISL": 256,
-                "OSL": 256,
-                "ROCR_VISIBLE_DEVICES": "1",
-            },
-        },
-    }))
+    src_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": "/m",
+                    "envs": {
+                        "TP": 1,
+                        "CONC": 8,
+                        "ISL": 256,
+                        "OSL": 256,
+                        "ROCR_VISIBLE_DEVICES": "1",
+                    },
+                },
+            }
+        )
+    )
     for k in ("TP", "ROCR_VISIBLE_DEVICES"):
         monkeypatch.delenv(k, raising=False)
     out = _materialize_config_with_envs(src_yaml, tmp_path)
@@ -348,32 +389,45 @@ def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
 def _profile_yaml(tmp_path, framework: str, envs: dict) -> Path:
     """Synthesize a minimal profile YAML the materializer recognises as PROFILE=1 + torch_profiler.enabled=True."""
     import yaml as _yaml
+
     src = tmp_path / f"src_{framework}.yaml"
-    src.write_text(_yaml.safe_dump({
-        "benchmark": {
-            "framework": framework,
-            "model": "/m",
-            "envs": {"PROFILE": "1", **envs},
-            "profiler": {"torch_profiler": {"enabled": True}},
-        },
-    }))
+    src.write_text(
+        _yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": framework,
+                    "model": "/m",
+                    "envs": {"PROFILE": "1", **envs},
+                    "profiler": {"torch_profiler": {"enabled": True}},
+                },
+            }
+        )
+    )
     return src
 
 
 def _clear_workload_env(monkeypatch):
     for k in (
-        "CONC", "ISL", "OSL", "TP", "MAX_MODEL_LEN",
-        "RANDOM_RANGE_RATIO", "ROCR_VISIBLE_DEVICES", "FRAMEWORK",
+        "CONC",
+        "ISL",
+        "OSL",
+        "TP",
+        "MAX_MODEL_LEN",
+        "RANDOM_RANGE_RATIO",
+        "ROCR_VISIBLE_DEVICES",
+        "FRAMEWORK",
         "INFERENCEX_PATH",
     ):
         monkeypatch.delenv(k, raising=False)
 
 
 def test_materialize_profile_window_vllm_skill_formula_default_R(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """vLLM: OSL=1024, CONC=32, R unset → max=512, delay=5888 per skill."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = _materialize_config_with_envs(src, tmp_path)
@@ -384,10 +438,12 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
 
 
 def test_materialize_profile_window_vllm_skill_formula_explicit_R(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """vLLM: explicit R=0.5 must shrink delay (skill: 3*OSL*(R+1) term)."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     monkeypatch.setenv("RANDOM_RANGE_RATIO", "0.5")
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
@@ -403,11 +459,13 @@ def test_materialize_profile_window_vllm_skill_formula_explicit_R(
 
 
 def test_materialize_profile_window_sglang_skill_formula(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """SGLang path writes the same window into PROFILE_EXTRA_BODY."""
     import json
     import yaml
+
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = _materialize_config_with_envs(src, tmp_path)
@@ -418,10 +476,12 @@ def test_materialize_profile_window_sglang_skill_formula(
 
 
 def test_materialize_persists_inferencex_path_for_magpie(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """$INFERENCEX_PATH must be written into benchmark.inferencex_path so Magpie uses the patched checkout."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     monkeypatch.setenv("INFERENCEX_PATH", "/wekafs/InferenceX")
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
@@ -431,10 +491,12 @@ def test_materialize_persists_inferencex_path_for_magpie(
 
 
 def test_materialize_profile_window_clamps_to_skill_floor(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Skill: max_iters floors at 256 (OSL=256, CONC=64 ⇒ 16*OSL/CONC=64, so the floor kicks in)."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 64, "ISL": 256, "OSL": 256})
     out = _materialize_config_with_envs(src, tmp_path)
@@ -445,10 +507,12 @@ def test_materialize_profile_window_clamps_to_skill_floor(
 
 # Regression #194 §2: NUM_PROMPTS must be sized to cover the steady-state window (profile mode force-overrides any caller-supplied value).
 def test_materialize_profile_num_prompts_covers_steady_state_window(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """OSL=1024 / CONC=32 / R=1 → delay+max = 6400 iters ⇒ NUM_PROMPTS=400."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = _materialize_config_with_envs(src, tmp_path)
@@ -458,10 +522,12 @@ def test_materialize_profile_num_prompts_covers_steady_state_window(
 
 
 def test_materialize_profile_num_prompts_floors_at_conc_for_tiny_osl(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Tiny OSL with skill floor max_iters=256 still produces a sane NUM_PROMPTS."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 64, "OSL": 64})
     out = _materialize_config_with_envs(src, tmp_path)
@@ -471,15 +537,18 @@ def test_materialize_profile_num_prompts_floors_at_conc_for_tiny_osl(
 
 
 def test_materialize_profile_force_overrides_user_num_prompts(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Profile mode must IGNORE caller-supplied NUM_PROMPTS — an
     under-sized value (skill default `max_concurrency * 1`) would
     silently empty the trace."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(
-        tmp_path, "vllm",
+        tmp_path,
+        "vllm",
         # Caller deliberately under-sizes to trip the regression.
         {"CONC": 32, "ISL": 256, "OSL": 1024, "NUM_PROMPTS": 32},
     )
@@ -490,20 +559,26 @@ def test_materialize_profile_force_overrides_user_num_prompts(
 
 
 def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """The §2 override is profile-only; baseline / sweep paths keep the seq_cost-based NUM_PROMPTS."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     src = tmp_path / "baseline.yaml"
-    src.write_text(yaml.safe_dump({
-        "benchmark": {
-            "framework": "vllm",
-            "model": "/m",
-            "envs": {"CONC": 32, "ISL": 256, "OSL": 1024},
-            # No profiler.torch_profiler.enabled, no PROFILE=1.
-        },
-    }))
+    src.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "model": "/m",
+                    "envs": {"CONC": 32, "ISL": 256, "OSL": 1024},
+                    # No profiler.torch_profiler.enabled, no PROFILE=1.
+                },
+            }
+        )
+    )
     out = _materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     # seq_cost=1280 → factor=5 → CONC*5 = 160 (legacy baseline path).
@@ -514,6 +589,7 @@ def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
 def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
     """Replace the two patcher symbols on `_workload_envs` with stubs that record invocation counts for per-framework dispatch asserts."""
     from inference_optimizer.orchestrator.action_executors import _workload_envs
+
     counts = {"vllm": 0, "sglang": 0}
 
     def _vllm_stub() -> bool:
@@ -525,19 +601,25 @@ def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
         return sglang
 
     monkeypatch.setattr(
-        _workload_envs, "ensure_vllm_patched_for_tracelens", _vllm_stub,
+        _workload_envs,
+        "ensure_vllm_patched_for_tracelens",
+        _vllm_stub,
     )
     monkeypatch.setattr(
-        _workload_envs, "ensure_sglang_patched_for_tracelens", _sglang_stub,
+        _workload_envs,
+        "ensure_sglang_patched_for_tracelens",
+        _sglang_stub,
     )
     return counts
 
 
 def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Patcher True for vLLM ⇒ EXTRA_VLLM_ARGS gains capture_torch_profiler_dir + detailed_trace_annotation on top of §1 iterations."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     counts = _mock_patchers(monkeypatch, vllm=True, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
@@ -552,10 +634,12 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
 
 
 def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Patcher False ⇒ EXTRA_VLLM_ARGS keeps only the §1 safe set (else unpatched vLLM crashes on unknown JSON key)."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=False)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
@@ -567,17 +651,20 @@ def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
 
 
 def test_materialize_profile_sglang_injects_shape_discovery_when_patched(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Patcher returns True for SGLang ⇒ EXTRA_SGLANG_ARGS gains
     --enable-shape-discovery-for-cuda-graph-profile."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     counts = _mock_patchers(monkeypatch, vllm=False, sglang=True)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = _materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
-        "EXTRA_SGLANG_ARGS", "",
+        "EXTRA_SGLANG_ARGS",
+        "",
     )
     assert "--enable-shape-discovery-for-cuda-graph-profile" in extra, extra
     # Per-framework dispatch in reverse: the vLLM patcher must NOT be
@@ -586,26 +673,31 @@ def test_materialize_profile_sglang_injects_shape_discovery_when_patched(
 
 
 def test_materialize_profile_sglang_omits_shape_discovery_when_patch_fails(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Patcher returns False ⇒ no shape-discovery flag (otherwise
     SGLang argparse errors on the unknown flag)."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=False)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = _materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
-        "EXTRA_SGLANG_ARGS", "",
+        "EXTRA_SGLANG_ARGS",
+        "",
     )
     assert "shape-discovery" not in extra, extra
 
 
 def test_materialize_profile_kill_switch_skips_patcher_entirely(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """HYPERLOOM_ENABLE_PATCH=0 short-circuits the patcher entirely; no TraceLens-only flags land in the YAML."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
     counts = _mock_patchers(monkeypatch, vllm=True, sglang=True)
@@ -622,7 +714,8 @@ def test_materialize_profile_kill_switch_skips_patcher_entirely(
 
 
 def test_materialize_profile_kill_switch_default_is_on(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Unset HYPERLOOM_ENABLE_PATCH == default-on; the patcher must be invoked."""
     _clear_workload_env(monkeypatch)
@@ -634,20 +727,22 @@ def test_materialize_profile_kill_switch_default_is_on(
 
 
 def test_materialize_profile_sglang_does_not_duplicate_shape_discovery(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """If EXTRA_SGLANG_ARGS already has --enable-shape-discovery-for-cuda-graph-profile, the materializer must NOT duplicate it."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=True)
     src = _profile_yaml(
-        tmp_path, "sglang",
+        tmp_path,
+        "sglang",
         {
-            "CONC": 32, "ISL": 256, "OSL": 1024,
-            "EXTRA_SGLANG_ARGS": (
-                "--enable-profile-cuda-graph "
-                "--enable-shape-discovery-for-cuda-graph-profile"
-            ),
+            "CONC": 32,
+            "ISL": 256,
+            "OSL": 1024,
+            "EXTRA_SGLANG_ARGS": ("--enable-profile-cuda-graph --enable-shape-discovery-for-cuda-graph-profile"),
         },
     )
     out = _materialize_config_with_envs(src, tmp_path)
@@ -658,33 +753,49 @@ def test_materialize_profile_sglang_does_not_duplicate_shape_discovery(
 def _profile_yaml_model(tmp_path, framework: str, model: str, envs: dict) -> Path:
     """Like _profile_yaml but with an explicit model path (for Gemma2 gating)."""
     import yaml as _yaml
+
     src = tmp_path / f"src_{framework}_model.yaml"
-    src.write_text(_yaml.safe_dump({
-        "benchmark": {
-            "framework": framework,
-            "model": model,
-            "envs": {"PROFILE": "1", **envs},
-            "profiler": {"torch_profiler": {"enabled": True}},
-        },
-    }))
+    src.write_text(
+        _yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": framework,
+                    "model": model,
+                    "envs": {"PROFILE": "1", **envs},
+                    "profiler": {"torch_profiler": {"enabled": True}},
+                },
+            }
+        )
+    )
     return src
 
 
 def test_materialize_profile_sglang_skips_shape_discovery_for_gemma2(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Gemma2 + patched SGLang must NOT inject shape-discovery (it crashes
     CUDA-graph capture); --enable-profile-cuda-graph still applies."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=True)
     model = tmp_path / "gemma2_model"
     model.mkdir()
-    (model / "config.json").write_text(json.dumps({
-        "model_type": "gemma2", "architectures": ["Gemma2ForCausalLM"],
-    }), encoding="utf-8")
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "gemma2",
+                "architectures": ["Gemma2ForCausalLM"],
+            }
+        ),
+        encoding="utf-8",
+    )
     src = _profile_yaml_model(
-        tmp_path, "sglang", str(model), {"CONC": 32, "ISL": 256, "OSL": 1024},
+        tmp_path,
+        "sglang",
+        str(model),
+        {"CONC": 32, "ISL": 256, "OSL": 1024},
     )
     out = _materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
@@ -693,39 +804,56 @@ def test_materialize_profile_sglang_skips_shape_discovery_for_gemma2(
 
 
 def test_materialize_profile_sglang_keeps_shape_discovery_for_non_gemma2(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """A non-Gemma2 model still gets shape-discovery when patched."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     _mock_patchers(monkeypatch, vllm=False, sglang=True)
     model = tmp_path / "llama_model"
     model.mkdir()
-    (model / "config.json").write_text(json.dumps({
-        "model_type": "llama", "architectures": ["LlamaForCausalLM"],
-    }), encoding="utf-8")
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "llama",
+                "architectures": ["LlamaForCausalLM"],
+            }
+        ),
+        encoding="utf-8",
+    )
     src = _profile_yaml_model(
-        tmp_path, "sglang", str(model), {"CONC": 32, "ISL": 256, "OSL": 1024},
+        tmp_path,
+        "sglang",
+        str(model),
+        {"CONC": 32, "ISL": 256, "OSL": 1024},
     )
     out = _materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
-        "EXTRA_SGLANG_ARGS", "",
+        "EXTRA_SGLANG_ARGS",
+        "",
     )
     assert "--enable-shape-discovery-for-cuda-graph-profile" in extra, extra
 
 
 def test_materialize_profile_sglang_skips_shape_discovery_gemma2_by_path(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """No config.json but a gemma-2 path -> heuristic skips shape-discovery."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
     _mock_patchers(monkeypatch, vllm=False, sglang=True)
     # Path looks like Gemma2 but ships no config.json (not-yet-materialized).
     model = "/wekafs/models/google-gemma-2-9b-it"
     src = _profile_yaml_model(
-        tmp_path, "sglang", model, {"CONC": 32, "ISL": 256, "OSL": 1024},
+        tmp_path,
+        "sglang",
+        model,
+        {"CONC": 32, "ISL": 256, "OSL": 1024},
     )
     out = _materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
@@ -734,40 +862,56 @@ def test_materialize_profile_sglang_skips_shape_discovery_gemma2_by_path(
 
 
 def test_materialize_profile_sglang_no_config_non_gemma_keeps_shape_discovery(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """No config.json and a non-Gemma2 path -> shape-discovery stays on."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
     _mock_patchers(monkeypatch, vllm=False, sglang=True)
     model = "/wekafs/models/meta-llama-3-8b-instruct"
     src = _profile_yaml_model(
-        tmp_path, "sglang", model, {"CONC": 32, "ISL": 256, "OSL": 1024},
+        tmp_path,
+        "sglang",
+        model,
+        {"CONC": 32, "ISL": 256, "OSL": 1024},
     )
     out = _materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"].get(
-        "EXTRA_SGLANG_ARGS", "",
+        "EXTRA_SGLANG_ARGS",
+        "",
     )
     assert "--enable-shape-discovery-for-cuda-graph-profile" in extra, extra
 
 
 def test_materialize_profile_sglang_skips_shape_discovery_nested_gemma2(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Gemma2 declared only in text_config still trips the shape-discovery gate."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
     _mock_patchers(monkeypatch, vllm=False, sglang=True)
     model = tmp_path / "wrapper_model"
     model.mkdir()
-    (model / "config.json").write_text(json.dumps({
-        "model_type": "wrapper",
-        "text_config": {"model_type": "gemma2"},
-    }), encoding="utf-8")
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "wrapper",
+                "text_config": {"model_type": "gemma2"},
+            }
+        ),
+        encoding="utf-8",
+    )
     src = _profile_yaml_model(
-        tmp_path, "sglang", str(model), {"CONC": 32, "ISL": 256, "OSL": 1024},
+        tmp_path,
+        "sglang",
+        str(model),
+        {"CONC": 32, "ISL": 256, "OSL": 1024},
     )
     out = _materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
@@ -776,10 +920,12 @@ def test_materialize_profile_sglang_skips_shape_discovery_nested_gemma2(
 
 
 def test_materialize_profile_sglang_residual_config_gemma2_path(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Empty config.json + gemma-2 path -> heuristic still skips shape-discovery."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
     _mock_patchers(monkeypatch, vllm=False, sglang=True)
@@ -787,7 +933,10 @@ def test_materialize_profile_sglang_residual_config_gemma2_path(
     model.mkdir()
     (model / "config.json").write_text("{}", encoding="utf-8")
     src = _profile_yaml_model(
-        tmp_path, "sglang", str(model), {"CONC": 32, "ISL": 256, "OSL": 1024},
+        tmp_path,
+        "sglang",
+        str(model),
+        {"CONC": 32, "ISL": 256, "OSL": 1024},
     )
     out = _materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
@@ -796,26 +945,38 @@ def test_materialize_profile_sglang_residual_config_gemma2_path(
 
 
 def test_materialize_profile_sglang_force_overrides_gemma2_gate(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 keeps shape-discovery on for
     Gemma2 (escape hatch for debugging the TraceLens root-cause fix)."""
     import yaml
+
     _clear_workload_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", "1")
     _mock_patchers(monkeypatch, vllm=False, sglang=True)
     model = tmp_path / "gemma2_model"
     model.mkdir()
-    (model / "config.json").write_text(json.dumps({
-        "model_type": "gemma2", "architectures": ["Gemma2ForCausalLM"],
-    }), encoding="utf-8")
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "gemma2",
+                "architectures": ["Gemma2ForCausalLM"],
+            }
+        ),
+        encoding="utf-8",
+    )
     src = _profile_yaml_model(
-        tmp_path, "sglang", str(model), {"CONC": 32, "ISL": 256, "OSL": 1024},
+        tmp_path,
+        "sglang",
+        str(model),
+        {"CONC": 32, "ISL": 256, "OSL": 1024},
     )
     out = _materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     assert "--enable-shape-discovery-for-cuda-graph-profile" in envs.get(
-        "EXTRA_SGLANG_ARGS", "",
+        "EXTRA_SGLANG_ARGS",
+        "",
     ), envs
     assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is True
 
@@ -823,11 +984,13 @@ def test_materialize_profile_sglang_force_overrides_gemma2_gate(
 def test_profile_executor_calls_benchmark_lib_patcher():
     """ProfileExecutor must patch the materialized InferenceX checkout before launching Magpie (else the computed profile window is stomped and the trace is empty)."""
     import inference_optimizer.orchestrator.action_executors.profile as profile_mod
+
     # The symbols must be re-exportable for monkey-patching.
     assert profile_mod.ensure_benchmark_lib_patched is not None
     assert profile_mod.ensure_benchmark_serving_patched is not None
     # The hook source must reference both patchers (regression guard against silent removal).
     import inspect
+
     src = inspect.getsource(profile_mod.ProfileExecutor._after_materialize_config)
     assert "ensure_benchmark_lib_patched" in src, (
         "ProfileExecutor._after_materialize_config must invoke "
@@ -842,10 +1005,7 @@ def test_profile_executor_calls_benchmark_lib_patcher():
 
 
 def test_profile_server_args_sanitizer_drops_torch_compile_flags():
-    raw = (
-        "--enable-torch-compile --torch-compile-max-bs 32 "
-        "--quantization fp8 --foo=bar --torch-compile-max-bs=64"
-    )
+    raw = "--enable-torch-compile --torch-compile-max-bs 32 --quantization fp8 --foo=bar --torch-compile-max-bs=64"
 
     sanitized = _sanitize_profile_server_args(raw)
 
@@ -853,6 +1013,20 @@ def test_profile_server_args_sanitizer_drops_torch_compile_flags():
     assert "--torch-compile-max-bs" not in sanitized
     assert "--quantization fp8" in sanitized
     assert "--foo=bar" in sanitized
+
+
+def test_profile_server_args_sanitizer_preserves_json_value_quotes():
+    """Regression: embedded JSON values (e.g. --speculative-config) must keep
+    their inner double-quotes. POSIX shlex.split would strip them, yielding the
+    unparseable {method:...} and failing every profile/roofline server boot."""
+    spec = '--speculative-config {"method":"deepseek_mtp","num_speculative_tokens":1}'
+    assert _sanitize_profile_server_args(spec) == spec
+
+    mixed = spec + " --enable-torch-compile --torch-compile-max-bs 8"
+    sanitized = _sanitize_profile_server_args(mixed)
+    assert '{"method":"deepseek_mtp","num_speculative_tokens":1}' in sanitized
+    assert "--enable-torch-compile" not in sanitized
+    assert "--torch-compile-max-bs" not in sanitized
 
 
 # Regression: $FRAMEWORK env switches the default yaml between sglang/vllm without an explicit config_path (entry-layer fix for vLLM support).
@@ -883,6 +1057,7 @@ def test_server_args_env_name_atom():
     from inference_optimizer.orchestrator.action_executors._grid_runner import (
         server_args_env_name,
     )
+
     assert server_args_env_name("atom") == "EXTRA_ATOM_ARGS"
     assert server_args_env_name("ATOM") == "EXTRA_ATOM_ARGS"
     # Regression: sglang/vllm still resolve correctly after the new branch.
@@ -891,10 +1066,12 @@ def test_server_args_env_name_atom():
 
 
 def test_materialize_config_atom_profile_skips_tracelens_flags(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """B1: PROFILE=1 + framework=atom must NOT inject sglang/vllm profiler CLI flags into EXTRA_ATOM_ARGS (atom's argparse rejects them)."""
     import yaml
+
     monkeypatch.setenv("FRAMEWORK", "atom")
     monkeypatch.setenv("PROFILE", "1")
     src = _default_baseline_config()  # baseline_atom.yaml
@@ -902,13 +1079,9 @@ def test_materialize_config_atom_profile_skips_tracelens_flags(
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
     extra = str(envs.get("EXTRA_ATOM_ARGS", ""))
-    assert "--profiler-config" not in extra, (
-        f"atom EXTRA_ATOM_ARGS leaked sglang/vllm profiler flag: {extra!r}"
-    )
+    assert "--profiler-config" not in extra, f"atom EXTRA_ATOM_ARGS leaked sglang/vllm profiler flag: {extra!r}"
     # --trust-remote-code from the baseline YAML must survive untouched.
-    assert "--trust-remote-code" in extra, (
-        f"atom EXTRA_ATOM_ARGS lost base --trust-remote-code: {extra!r}"
-    )
+    assert "--trust-remote-code" in extra, f"atom EXTRA_ATOM_ARGS lost base --trust-remote-code: {extra!r}"
 
 
 def test_default_profile_config_tracks_framework(monkeypatch):
@@ -979,10 +1152,7 @@ def test_profile_executor_sanitizes_current_best_args(monkeypatch, tmp_path):
 
     task = SimpleNamespace(
         params={
-            "base_extra_args": (
-                "--enable-torch-compile --torch-compile-max-bs 32 "
-                "--quantization fp8"
-            ),
+            "base_extra_args": ("--enable-torch-compile --torch-compile-max-bs 32 --quantization fp8"),
         },
         task_id="t-profile-sanitize",
     )
@@ -1012,10 +1182,7 @@ def test_profile_executor_sanitizes_canonical_extra_server_args(monkeypatch, tmp
     task = SimpleNamespace(
         params={
             "base_extra_args": "--attention-backend AITER",
-            "extra_server_args": (
-                "--enable-torch-compile --torch-compile-max-bs 32 "
-                "--quantization fp8"
-            ),
+            "extra_server_args": ("--enable-torch-compile --torch-compile-max-bs 32 --quantization fp8"),
             "extra_sglang_args": "--enable-torch-compile",
         },
         task_id="t-profile-canonical-sanitize",
@@ -1079,22 +1246,29 @@ async def test_baseline_executor_keeps_valid_measurement_with_wrapper_failure(tm
     output_dir = tmp_path / "out"
     workspace = output_dir / "benchmark_sglang_20260501_001122"
     workspace.mkdir(parents=True)
-    (workspace / "benchmark_report.json").write_text(json.dumps({
-        "success": False,
-        "framework": "sglang",
-        "model": "/wekafs/models/Qwen-Qwen3-8B",
-        "throughput": {
-            "request_throughput": 1.8,
-            "output_throughput": 1872.0,
-            "total_token_throughput": 3744.0,
-            "completed_requests": 320,
-            "duration_seconds": 177.0,
-        },
-        "latency": {"ttft": {"mean_ms": 140}, "e2el": {"mean_ms": 2500}},
-    }))
+    (workspace / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "success": False,
+                "framework": "sglang",
+                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "throughput": {
+                    "request_throughput": 1.8,
+                    "output_throughput": 1872.0,
+                    "total_token_throughput": 3744.0,
+                    "completed_requests": 320,
+                    "duration_seconds": 177.0,
+                },
+                "latency": {"ttft": {"mean_ms": 140}, "e2el": {"mean_ms": 2500}},
+            }
+        )
+    )
 
     fake_completed = subprocess.CompletedProcess(
-        args=[], returncode=1, stdout="", stderr="cleanup failed",
+        args=[],
+        returncode=1,
+        stdout="",
+        stderr="cleanup failed",
     )
 
     task = await tr.create(
@@ -1103,7 +1277,9 @@ async def test_baseline_executor_keeps_valid_measurement_with_wrapper_failure(tm
         idempotency_key="baseline-valid-warning",
     )
     sub.register_executor("baseline", BaselineExecutor(session_dir=tmp_path))
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", return_value=fake_completed):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", return_value=fake_completed
+    ):
         res = await sub.run_task(task)
 
     assert res.state == "succeeded"
@@ -1147,18 +1323,23 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     output_dir = tmp_path / "out"
     workspace = output_dir / "benchmark_sglang_20260501_001122"
     workspace.mkdir(parents=True)
-    (workspace / "benchmark_report.json").write_text(json.dumps({
-        "success": True,
-        "framework": "sglang",
-        "model": "/wekafs/models/Qwen-Qwen3-8B",
-        "throughput": {
-            "request_throughput": 3.2, "output_throughput": 800.0,
-            "total_token_throughput": 1600.0, "completed_requests": 80,
-            "duration_seconds": 25.0,
-        },
-        "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158},
-                    "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
-    }))
+    (workspace / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "framework": "sglang",
+                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "throughput": {
+                    "request_throughput": 3.2,
+                    "output_throughput": 800.0,
+                    "total_token_throughput": 1600.0,
+                    "completed_requests": 80,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
+            }
+        )
+    )
     trace_dir = workspace / "torch_trace"
     trace_dir.mkdir()
     (trace_dir / "177-TP-0-DECODE.trace.json.gz").write_bytes(b"fake-trace")
@@ -1167,8 +1348,12 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
 
     # Stub subprocess.run so we don't actually launch sglang.
     fake_completed = subprocess.CompletedProcess(
-        args=[], returncode=0, stdout="ok", stderr="",
+        args=[],
+        returncode=0,
+        stdout="ok",
+        stderr="",
     )
+
     def _fake_run(*args, **kwargs):
         return fake_completed
 
@@ -1179,7 +1364,9 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
         idempotency_key="prof-1",
     )
     sub.register_executor("profile", pe)
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
         res = await sub.run_task(task)
     assert res.state == "succeeded"
     assert res.result["framework"] == "sglang"
@@ -1192,7 +1379,8 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
 
 @pytest.mark.asyncio
 async def test_profile_executor_patches_configured_inferencex_path(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """ProfileExecutor must patch the InferenceX checkout Magpie will use (Qwen3-32B regression: empty benchmark.inferencex_path lost NUM_PROMPTS)."""
     fake_ix = tmp_path / "InferenceX"
@@ -1216,21 +1404,29 @@ async def test_profile_executor_patches_configured_inferencex_path(
     output_dir = tmp_path / "out"
     workspace = output_dir / "benchmark_sglang_20260501_001122"
     workspace.mkdir(parents=True)
-    (workspace / "benchmark_report.json").write_text(json.dumps({
-        "success": True,
-        "framework": "sglang",
-        "model": "/wekafs/models/Qwen-Qwen3-8B",
-        "throughput": {
-            "request_throughput": 3.2, "output_throughput": 800.0,
-            "total_token_throughput": 1600.0, "completed_requests": 80,
-            "duration_seconds": 25.0,
-        },
-        "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158},
-                    "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
-    }))
+    (workspace / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "framework": "sglang",
+                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "throughput": {
+                    "request_throughput": 3.2,
+                    "output_throughput": 800.0,
+                    "total_token_throughput": 1600.0,
+                    "completed_requests": 80,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
+            }
+        )
+    )
 
     fake_completed = subprocess.CompletedProcess(
-        args=[], returncode=0, stdout="ok", stderr="",
+        args=[],
+        returncode=0,
+        stdout="ok",
+        stderr="",
     )
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
     task = await tr.create(
@@ -1239,12 +1435,15 @@ async def test_profile_executor_patches_configured_inferencex_path(
         idempotency_key="prof-inferencex-path",
     )
     sub.register_executor("profile", pe)
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", return_value=fake_completed):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", return_value=fake_completed
+    ):
         res = await sub.run_task(task)
 
     assert res.state == "succeeded"
     materialized = Path(res.result["materialized_config"])
     import yaml
+
     rendered = yaml.safe_load(materialized.read_text())
     assert rendered["benchmark"]["inferencex_path"] == str(fake_ix)
     db.close()
@@ -1262,25 +1461,33 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
     output_dir = tmp_path / "out"
     workspace = output_dir / "benchmark_vllm_20260501_001122"
     workspace.mkdir(parents=True)
-    (workspace / "benchmark_report.json").write_text(json.dumps({
-        "success": True,
-        "framework": "vllm",
-        "model": "/wekafs/models/Qwen-Qwen3-8B",
-        "throughput": {
-            "request_throughput": 3.2, "output_throughput": 800.0,
-            "total_token_throughput": 1600.0, "completed_requests": 80,
-            "duration_seconds": 25.0,
-        },
-        "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158},
-                    "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
-    }))
+    (workspace / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "framework": "vllm",
+                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "throughput": {
+                    "request_throughput": 3.2,
+                    "output_throughput": 800.0,
+                    "total_token_throughput": 1600.0,
+                    "completed_requests": 80,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
+            }
+        )
+    )
     capture_dir = output_dir / "capture_traces"
     capture_dir.mkdir()
     (capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz").write_bytes(b"fake-trace")
     (capture_dir / "graph_capture_rank_0.2.pt.trace.json.gz").write_bytes(b"fake-trace")
 
     fake_completed = subprocess.CompletedProcess(
-        args=[], returncode=0, stdout="ok", stderr="",
+        args=[],
+        returncode=0,
+        stdout="ok",
+        stderr="",
     )
 
     def _fake_run(*args, **kwargs):
@@ -1293,7 +1500,9 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
         idempotency_key="prof-capture",
     )
     sub.register_executor("profile", pe)
-    with patch("inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch(
+        "inference_optimizer.orchestrator.action_executors.baseline.run_with_session_kill", side_effect=_fake_run
+    ):
         res = await sub.run_task(task)
     assert res.state == "succeeded"
     assert res.result["framework"] == "vllm"
@@ -1348,7 +1557,8 @@ async def test_trace_analyze_handler_tolerates_non_string_analysis_route(session
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_records_bypass_discovery_success(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """Deterministic route surfaces a kernel_journey discovery run labelled
     source="bypass" (with the real hot kernels), while version provenance stays
@@ -1366,8 +1576,13 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
             "status": "ok",
             "orchestrator_mode": "deterministic",
             "hot_kernels": [
-                {"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 42.0,
-                 "bottleneck": "memory", "reusable_native_kernel": True},
+                {
+                    "kernel_id": "k001",
+                    "name": "fused_moe",
+                    "gpu_pct": 42.0,
+                    "bottleneck": "memory",
+                    "reusable_native_kernel": True,
+                },
                 {"kernel_id": "k002", "name": "rms_norm", "gpu_pct": 7.5},
             ],
             "artifact_paths": {"kernel_candidates": "/tmp/kc.json"},
@@ -1404,7 +1619,8 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_records_bypass_discovery_failed(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """Fail-loud deterministic pipeline -> discovery run status=failed with the
     error text and an empty hot-kernel list, still labelled source="bypass"."""
@@ -1443,7 +1659,8 @@ async def test_trace_analyze_handler_records_bypass_discovery_failed(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """High-idle gate suppresses hot kernels but the run still succeeds -> a
     bypass discovery run with status=ok and hot_kernel_count=0."""
@@ -1483,7 +1700,8 @@ async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_agent_route_stays_tracelens(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """The LLM/agent route keeps source="tracelens" (regression guard for the
     bypass relabel)."""
@@ -1552,7 +1770,8 @@ async def test_trace_analyze_handler_surfaces_candidates_path(session_dir, monke
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_backfills_workload_context_from_state(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """When the payload omits framework/gpu_type/model, the handler falls back to SharedState for the real workload context."""
     from inference_optimizer.orchestrator.shared_state import SharedState
@@ -1585,7 +1804,8 @@ async def test_trace_analyze_handler_backfills_workload_context_from_state(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_surfaces_trace_report_path(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """The handler must forward the TraceLens v0.3 analysis.md path."""
     captured: dict = {}
@@ -1613,34 +1833,46 @@ async def test_trace_analyze_handler_surfaces_trace_report_path(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_persists_trace_report_to_candidates(
-    session_dir, tmp_path, monkeypatch,
+    session_dir,
+    tmp_path,
+    monkeypatch,
 ):
     """Disk candidates must carry the TraceLens report path for GEAK prompts."""
     report_path = tmp_path / "analysis.md"
     report_path.write_text("# TraceLens Report\n", encoding="utf-8")
     candidates_path = tmp_path / "kernel_candidates.json"
     candidates_path.write_text(
-        json.dumps({
-            "hot_kernels": [{
-                "kernel_id": "k1",
-                "name": "paged_attention",
-                "source_file": "/sgl-workspace/sglang/kernels/paged.py",
-                "reusable_native_kernel": True,
-            }],
-        }),
+        json.dumps(
+            {
+                "hot_kernels": [
+                    {
+                        "kernel_id": "k1",
+                        "name": "paged_attention",
+                        "source_file": "/sgl-workspace/sglang/kernels/paged.py",
+                        "reusable_native_kernel": True,
+                    }
+                ],
+            }
+        ),
         encoding="utf-8",
     )
 
     async def fake_run_subprocess(cmd, *, timeout_sec):
-        return 0, json.dumps({
-            "status": "ok",
-            "hot_kernels": json.loads(candidates_path.read_text(encoding="utf-8"))["hot_kernels"],
-            "trace_report_path": str(report_path),
-            "artifact_paths": {
-                "kernel_candidates": str(candidates_path),
-                "trace_report_path": str(report_path),
-            },
-        }), ""
+        return (
+            0,
+            json.dumps(
+                {
+                    "status": "ok",
+                    "hot_kernels": json.loads(candidates_path.read_text(encoding="utf-8"))["hot_kernels"],
+                    "trace_report_path": str(report_path),
+                    "artifact_paths": {
+                        "kernel_candidates": str(candidates_path),
+                        "trace_report_path": str(report_path),
+                    },
+                }
+            ),
+            "",
+        )
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
 
@@ -1659,7 +1891,9 @@ async def test_trace_analyze_handler_persists_trace_report_to_candidates(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_backfills_runtime_metadata_from_config(
-    session_dir, tmp_path, monkeypatch,
+    session_dir,
+    tmp_path,
+    monkeypatch,
 ):
     """GEAK candidates must inherit the materialized Magpie workload config."""
     from inference_optimizer.orchestrator.shared_state import SharedState
@@ -1691,23 +1925,33 @@ benchmark:
 
     candidates_path = tmp_path / "kernel_candidates.json"
     candidates_path.write_text(
-        json.dumps({
-            "hot_kernels": [{
-                "kernel_id": "k1",
-                "name": "paged_attention",
-                "source_file": "/sgl-workspace/sglang/kernels/paged.py",
-                "reusable_native_kernel": True,
-            }],
-        }),
+        json.dumps(
+            {
+                "hot_kernels": [
+                    {
+                        "kernel_id": "k1",
+                        "name": "paged_attention",
+                        "source_file": "/sgl-workspace/sglang/kernels/paged.py",
+                        "reusable_native_kernel": True,
+                    }
+                ],
+            }
+        ),
         encoding="utf-8",
     )
 
     async def fake_run_subprocess(cmd, *, timeout_sec):
-        return 0, json.dumps({
-            "status": "ok",
-            "hot_kernels": json.loads(candidates_path.read_text(encoding="utf-8"))["hot_kernels"],
-            "artifact_paths": {"kernel_candidates": str(candidates_path)},
-        }), ""
+        return (
+            0,
+            json.dumps(
+                {
+                    "status": "ok",
+                    "hot_kernels": json.loads(candidates_path.read_text(encoding="utf-8"))["hot_kernels"],
+                    "artifact_paths": {"kernel_candidates": str(candidates_path)},
+                }
+            ),
+            "",
+        )
 
     monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
 
@@ -1775,9 +2019,11 @@ benchmark:
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_uses_artifact_trace_report_path(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """TraceLens now surfaces the upstream analysis.md as trace_report_path."""
+
     async def fake_run_subprocess(cmd, *, timeout_sec):
         payload = {
             "status": "ok",
@@ -1818,11 +2064,14 @@ async def test_trace_analyze_handler_requires_kernel_agent_root(session_dir, mon
 
 # T4 — TraceLens permanent failure stays failed (no fallback): the handler preserves ``status=failed`` and appends structured diagnostics instead of rewriting to ok+empty kernels.
 
+
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_t4_keeps_tool_failure_failed(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """When tracelens_analysis.py returns ``status=failed`` the handler keeps the failure status, clears stale candidates, and appends a diagnostic warning."""
+
     async def fake_run_subprocess(cmd, *, timeout_sec):
         payload = {
             "status": "failed",
@@ -1841,9 +2090,7 @@ async def test_trace_analyze_handler_t4_keeps_tool_failure_failed(
         session_dir=session_dir,
     )
     assert res["status"] == "failed"
-    assert res["hot_kernels"] == [], (
-        "stale hot_kernels must be cleared on tool failure"
-    )
+    assert res["hot_kernels"] == [], "stale hot_kernels must be cleared on tool failure"
     warnings = res.get("trace_health_warnings") or []
     assert any(w.get("code") == "tracelens_analysis_failed" for w in warnings), (
         "operator must see WHY hot_kernels[] is empty"
@@ -1856,7 +2103,8 @@ async def test_trace_analyze_handler_t4_keeps_tool_failure_failed(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_t4_passes_through_idle_warning(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """A T3 idle-gate ``trace_health_warnings`` (status=ok, empty hot_kernels) must pass through verbatim."""
     idle_warning = {
@@ -1889,9 +2137,11 @@ async def test_trace_analyze_handler_t4_passes_through_idle_warning(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_t4_defaults_warnings_to_empty_list(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """With no ``trace_health_warnings`` (steady state), the handler still surfaces an empty list (no ``None`` guard needed downstream)."""
+
     async def fake_run_subprocess(cmd, *, timeout_sec):
         payload = {
             "status": "ok",
@@ -1910,6 +2160,7 @@ async def test_trace_analyze_handler_t4_defaults_warnings_to_empty_list(
 
 
 # T5 — trace_health_warnings must reach the Orchestration LLM: record_trace_analyze keeps the warning list and _format_last_trace_analyze surfaces it inline.
+
 
 def test_record_trace_analyze_persists_trace_health_warnings(session_dir):
     """``record_trace_analyze`` keeps ``trace_health_warnings`` verbatim in ``last_trace_analyze`` for next-tick rendering."""
@@ -1956,46 +2207,76 @@ def test_record_trace_analyze_persists_task_groups(session_dir):
 
     state = SharedState.load_or_init(session_dir)
     groups = [
-        {"primary_kernel_id": "k004", "kernel_ids": ["k003", "k004"],
-         "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py"},
-        {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"],
-         "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py"},
+        {
+            "primary_kernel_id": "k004",
+            "kernel_ids": ["k003", "k004"],
+            "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
+        },
+        {
+            "primary_kernel_id": "k002",
+            "kernel_ids": ["k001", "k002"],
+            "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
+        },
     ]
     state.record_trace_analyze(
         {"trace_input": "/tmp/trace"},
         {
             "status": "ok",
             "hot_kernels": [
-                {"kernel_id": "k001", "gpu_pct": 8.0, "reusable_native_kernel": True,
-                 "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py"},
-                {"kernel_id": "k002", "gpu_pct": 25.0, "reusable_native_kernel": True,
-                 "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py"},
-                {"kernel_id": "k003", "gpu_pct": 12.0, "reusable_native_kernel": True,
-                 "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py"},
-                {"kernel_id": "k004", "gpu_pct": 38.0, "reusable_native_kernel": True,
-                 "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py"},
+                {
+                    "kernel_id": "k001",
+                    "gpu_pct": 8.0,
+                    "reusable_native_kernel": True,
+                    "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
+                },
+                {
+                    "kernel_id": "k002",
+                    "gpu_pct": 25.0,
+                    "reusable_native_kernel": True,
+                    "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
+                },
+                {
+                    "kernel_id": "k003",
+                    "gpu_pct": 12.0,
+                    "reusable_native_kernel": True,
+                    "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
+                },
+                {
+                    "kernel_id": "k004",
+                    "gpu_pct": 38.0,
+                    "reusable_native_kernel": True,
+                    "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
+                },
             ],
             "task_groups": groups,
         },
     )
     assert state.last_trace_analyze.get("task_groups") == groups
     # After k002 + k004 attempted, group-aware collapse reports no untried kernels.
-    state.record_kernel_opt({
-        "status": "failed", "kernel_id": "k002",
-        "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-        "error_class": "subtask_exception",
-    })
-    state.record_kernel_opt({
-        "status": "ok", "kernel_id": "k004",
-        "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-        "proposal": {"decision": "KEEP", "reasons": []},
-        "verification": {"micro_speedup": 1.17,
-                         "compile_passed": True, "correctness_passed": True,
-                         "best_artifact_path": "/tmp/k004.py"},
-    })
+    state.record_kernel_opt(
+        {
+            "status": "failed",
+            "kernel_id": "k002",
+            "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
+            "error_class": "subtask_exception",
+        }
+    )
+    state.record_kernel_opt(
+        {
+            "status": "ok",
+            "kernel_id": "k004",
+            "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
+            "proposal": {"decision": "KEEP", "reasons": []},
+            "verification": {
+                "micro_speedup": 1.17,
+                "compile_passed": True,
+                "correctness_passed": True,
+                "best_artifact_path": "/tmp/k004.py",
+            },
+        }
+    )
     assert state.untried_hot_reusable_kernels() == [], (
-        "k001/k003 must be filtered out because their groups have an "
-        "attempted member (k002 / k004 respectively)"
+        "k001/k003 must be filtered out because their groups have an attempted member (k002 / k004 respectively)"
     )
 
 
@@ -2029,8 +2310,7 @@ def test_record_select_kernels_filters_invalid_warning_entries(session_dir):
             "trace_health_warnings": [
                 "not-a-dict",
                 {"severity": "warning"},  # missing 'code'
-                {"code": "high_gpu_idle_pct", "idle_pct": 30.0,
-                 "threshold_pct": 20.0},
+                {"code": "high_gpu_idle_pct", "idle_pct": 30.0, "threshold_pct": 20.0},
                 None,
             ],
         },
@@ -2108,15 +2388,13 @@ def test_format_last_trace_analyze_omits_warnings_suffix_in_steady_state(session
         },
     )
     rendered = state._format_last_trace_analyze()
-    assert "warnings=" not in rendered, (
-        "no warnings → no warnings= suffix; this keeps existing prompt "
-        "snapshots stable"
-    )
+    assert "warnings=" not in rendered, "no warnings → no warnings= suffix; this keeps existing prompt snapshots stable"
 
 
 @pytest.mark.asyncio
 async def test_t5_handler_to_sharedstate_e2e_idle_warning_reaches_prompt(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """End-to-end: T3 idle warning flows handler → SharedState.last_trace_analyze → Orchestration prompt line."""
     from inference_optimizer.orchestrator.shared_state import SharedState
@@ -2160,7 +2438,8 @@ async def test_t5_handler_to_sharedstate_e2e_idle_warning_reaches_prompt(
 
 @pytest.mark.asyncio
 async def test_t5_handler_to_sharedstate_e2e_failure_warning_reaches_prompt(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """T4: a permanent TraceLens failure warning must reach the Orchestration prompt."""
     from inference_optimizer.orchestrator.shared_state import SharedState
@@ -2189,7 +2468,8 @@ async def test_t5_handler_to_sharedstate_e2e_failure_warning_reaches_prompt(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
-    session_dir, monkeypatch,
+    session_dir,
+    monkeypatch,
 ):
     """When the tool emits ``status=failed`` plus a pre-existing warnings list, the handler appends the failure warning rather than overwriting."""
     pre_existing = {
@@ -2250,7 +2530,8 @@ def test_optimization_wrapper_timeout_sec_geak_env_override(monkeypatch):
 async def test_run_optimization_handler_missing_kernel_id(session_dir):
     # ``source_file`` short-circuits the ``missing_trace_analyze`` guard so the legacy missing-kernel_id path is exercised.
     res = await krh.run_optimization_handler(
-        {"source_file": "/tmp/dummy.py"}, session_dir=session_dir,
+        {"source_file": "/tmp/dummy.py"},
+        session_dir=session_dir,
     )
     assert res["status"] == "failed"
     assert "kernel_id" in res["error"]
@@ -2285,8 +2566,10 @@ async def test_run_optimization_handler_forwards_extra_sglang_args(session_dir):
         "dry_run": True,
         "_single_kernel": True,
     }
-    with patch.object(krh, "_validate_reusable_native_kernel", return_value=None), \
-         patch.object(krh, "_run_subprocess", side_effect=fake_run):
+    with (
+        patch.object(krh, "_validate_reusable_native_kernel", return_value=None),
+        patch.object(krh, "_run_subprocess", side_effect=fake_run),
+    ):
         res = await krh.run_optimization_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -2314,8 +2597,10 @@ def test_run_optimization_handler_backfills_target_platform_from_state(session_d
         "dry_run": True,
         "_single_kernel": True,
     }
-    with patch.object(krh, "_validate_reusable_native_kernel", return_value=None), \
-         patch.object(krh, "_run_subprocess", side_effect=fake_run):
+    with (
+        patch.object(krh, "_validate_reusable_native_kernel", return_value=None),
+        patch.object(krh, "_run_subprocess", side_effect=fake_run),
+    ):
         res = asyncio.run(
             krh.run_optimization_handler(payload, session_dir=session_dir),
         )
@@ -2344,43 +2629,52 @@ def _write_candidates_json(tmp_path, payload):
 def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
     """Two reusable kernels in the same task_group dispatch as ONE candidate (the primary), with the full group attached."""
     # PR-I: rows must carry gpu_pct >= 3.0 to pass the default hot-kernel gate.
-    candidates_path = _write_candidates_json(tmp_path, {
-        "hot_kernels": [
-            {
-                "kernel_id": "k001", "name": "rms_norm_prefill",
-                "source_file": "/sgl-workspace/aiter/rmsnorm.py",
-                "reusable_native_kernel": True,
-                "duration_us": 100.0, "gpu_pct": 12.0,
-            },
-            {
-                "kernel_id": "k002", "name": "rms_norm_decode",
-                "source_file": "/sgl-workspace/aiter/rmsnorm.py",
-                "reusable_native_kernel": True,
-                "duration_us": 50.0, "gpu_pct": 8.0,
-            },
-            {
-                "kernel_id": "k003", "name": "other_kernel",
-                "source_file": "/sgl-workspace/aiter/other.py",
-                "reusable_native_kernel": True,
-                "duration_us": 30.0, "gpu_pct": 4.5,
-            },
-        ],
-        "task_groups": [
-            {
-                "task_group_id": "tg001",
-                "function_name": "rms_norm",
-                "source_path": "/sgl-workspace/aiter/rmsnorm.py",
-                "definition_line": 10,
-                "primary_kernel_id": "k001",
-                "kernel_ids": ["k001", "k002"],
-                "rows": [
-                    {"kernel_id": "k001", "name": "rms_norm_prefill"},
-                    {"kernel_id": "k002", "name": "rms_norm_decode"},
-                ],
-                "aggregate_duration_us": 150.0,
-            },
-        ],
-    })
+    candidates_path = _write_candidates_json(
+        tmp_path,
+        {
+            "hot_kernels": [
+                {
+                    "kernel_id": "k001",
+                    "name": "rms_norm_prefill",
+                    "source_file": "/sgl-workspace/aiter/rmsnorm.py",
+                    "reusable_native_kernel": True,
+                    "duration_us": 100.0,
+                    "gpu_pct": 12.0,
+                },
+                {
+                    "kernel_id": "k002",
+                    "name": "rms_norm_decode",
+                    "source_file": "/sgl-workspace/aiter/rmsnorm.py",
+                    "reusable_native_kernel": True,
+                    "duration_us": 50.0,
+                    "gpu_pct": 8.0,
+                },
+                {
+                    "kernel_id": "k003",
+                    "name": "other_kernel",
+                    "source_file": "/sgl-workspace/aiter/other.py",
+                    "reusable_native_kernel": True,
+                    "duration_us": 30.0,
+                    "gpu_pct": 4.5,
+                },
+            ],
+            "task_groups": [
+                {
+                    "task_group_id": "tg001",
+                    "function_name": "rms_norm",
+                    "source_path": "/sgl-workspace/aiter/rmsnorm.py",
+                    "definition_line": 10,
+                    "primary_kernel_id": "k001",
+                    "kernel_ids": ["k001", "k002"],
+                    "rows": [
+                        {"kernel_id": "k001", "name": "rms_norm_prefill"},
+                        {"kernel_id": "k002", "name": "rms_norm_decode"},
+                    ],
+                    "aggregate_duration_us": 150.0,
+                },
+            ],
+        },
+    )
     selected = krh._batch_kernel_candidates({"candidates_path": str(candidates_path)})
     # k001 (primary) + k003 (ungrouped) = 2 dispatches, not 3.
     kernel_ids = [c.get("kernel_id") for c in selected]
@@ -2396,34 +2690,41 @@ def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
 def test_batch_kernel_candidates_falls_back_when_primary_is_non_reusable(tmp_path):
     """When the group's primary_kernel_id is non-reusable, dispatch falls back to the first reusable member instead of dropping the group."""
     # PR-I: rows must carry gpu_pct >= 3.0 to be retained by the dispatcher.
-    candidates_path = _write_candidates_json(tmp_path, {
-        "hot_kernels": [
-            {
-                "kernel_id": "k001", "name": "rocblas_sgemm_call",
-                "source_file": "/sgl-workspace/aiter/foo.py",
-                "reusable_native_kernel": False,  # primary rejected
-                "duration_us": 200.0, "gpu_pct": 22.0,
-            },
-            {
-                "kernel_id": "k002", "name": "rms_norm_call",
-                "source_file": "/sgl-workspace/aiter/foo.py",
-                "reusable_native_kernel": True,
-                "duration_us": 50.0, "gpu_pct": 5.5,
-            },
-        ],
-        "task_groups": [
-            {
-                "task_group_id": "tg001",
-                "function_name": "foo",
-                "primary_kernel_id": "k001",
-                "kernel_ids": ["k001", "k002"],
-                "rows": [
-                    {"kernel_id": "k001"},
-                    {"kernel_id": "k002"},
-                ],
-            },
-        ],
-    })
+    candidates_path = _write_candidates_json(
+        tmp_path,
+        {
+            "hot_kernels": [
+                {
+                    "kernel_id": "k001",
+                    "name": "rocblas_sgemm_call",
+                    "source_file": "/sgl-workspace/aiter/foo.py",
+                    "reusable_native_kernel": False,  # primary rejected
+                    "duration_us": 200.0,
+                    "gpu_pct": 22.0,
+                },
+                {
+                    "kernel_id": "k002",
+                    "name": "rms_norm_call",
+                    "source_file": "/sgl-workspace/aiter/foo.py",
+                    "reusable_native_kernel": True,
+                    "duration_us": 50.0,
+                    "gpu_pct": 5.5,
+                },
+            ],
+            "task_groups": [
+                {
+                    "task_group_id": "tg001",
+                    "function_name": "foo",
+                    "primary_kernel_id": "k001",
+                    "kernel_ids": ["k001", "k002"],
+                    "rows": [
+                        {"kernel_id": "k001"},
+                        {"kernel_id": "k002"},
+                    ],
+                },
+            ],
+        },
+    )
     selected = krh._batch_kernel_candidates({"candidates_path": str(candidates_path)})
     # k002 (the only reusable member) replaces the rejected primary.
     assert [c["kernel_id"] for c in selected] == ["k002"]
@@ -2433,22 +2734,27 @@ def test_batch_kernel_candidates_falls_back_when_primary_is_non_reusable(tmp_pat
 def test_batch_kernel_candidates_legacy_path_unchanged_without_task_groups(tmp_path):
     """With no task_groups[] (legacy runs), the candidate list matches pre-PR-B behaviour."""
     # PR-I: legacy fixture carries gpu_pct >= 3.0 so the hot-kernel gate doesn't drop k001 (orthogonal to PR-I).
-    candidates_path = _write_candidates_json(tmp_path, {
-        "hot_kernels": [
-            {
-                "kernel_id": "k001", "name": "rms_norm",
-                "source_file": "/sgl-workspace/aiter/rmsnorm.py",
-                "reusable_native_kernel": True,
-                "gpu_pct": 11.0,
-            },
-            {
-                "kernel_id": "k002", "name": "vendor",
-                "source_file": "/sgl-workspace/aiter/vendor.py",
-                "reusable_native_kernel": False,
-                "gpu_pct": 9.0,
-            },
-        ],
-    })
+    candidates_path = _write_candidates_json(
+        tmp_path,
+        {
+            "hot_kernels": [
+                {
+                    "kernel_id": "k001",
+                    "name": "rms_norm",
+                    "source_file": "/sgl-workspace/aiter/rmsnorm.py",
+                    "reusable_native_kernel": True,
+                    "gpu_pct": 11.0,
+                },
+                {
+                    "kernel_id": "k002",
+                    "name": "vendor",
+                    "source_file": "/sgl-workspace/aiter/vendor.py",
+                    "reusable_native_kernel": False,
+                    "gpu_pct": 9.0,
+                },
+            ],
+        },
+    )
     selected = krh._batch_kernel_candidates({"candidates_path": str(candidates_path)})
     assert [c["kernel_id"] for c in selected] == ["k001"]
     assert "task_group" not in selected[0]
@@ -2467,17 +2773,19 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
         captured["session_dir"] = session_dir
         return {"status": "ok", "hot_kernels": ["kernel_a", "kernel_b"]}
 
-    with patch.dict(krh.KERNEL_REQUEST_HANDLERS,
-                     {"trace_analyze": fake_handler}):
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"trace_analyze": fake_handler}):
         try:
-            await c._handle_intent("orchestration", Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel",
-                    "kind": "trace_analyze",
-                    "params": {"trace_input": "/tmp/fake-trace.json.gz"},
-                },
-            ))
+            await c._handle_intent(
+                "orchestration",
+                Intent(
+                    type=IntentType.REQUEST,
+                    payload={
+                        "target_agent": "kernel",
+                        "kind": "trace_analyze",
+                        "params": {"trace_input": "/tmp/fake-trace.json.gz"},
+                    },
+                ),
+            )
             req_msgs = await c.bus.tail(topic="request", to_agent="kernel")
             assert req_msgs, "request must be mirrored to kernel inbox"
             req_id = req_msgs[0].msg_id
@@ -2504,13 +2812,16 @@ async def test_coordinator_request_unknown_kind_routes_to_llm(session_dir):
     """REQUEST with no handler is mirrored to the kernel inbox (LLM responder path), no auto-RESPONSE."""
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        await c._handle_intent("orchestration", Intent(
-            type=IntentType.REQUEST,
-            payload={
-                "target_agent": "kernel",
-                "kind": "invent_brand_new_kind",  # NOT in registry
-            },
-        ))
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={
+                    "target_agent": "kernel",
+                    "kind": "invent_brand_new_kind",  # NOT in registry
+                },
+            ),
+        )
         req_msgs = await c.bus.tail(topic="request", to_agent="kernel")
         assert req_msgs, "request must be mirrored even when no handler"
         # No auto-response should have been emitted.
@@ -2528,13 +2839,15 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
     async def bad_handler(payload, *, session_dir):
         raise RuntimeError("boom")
 
-    with patch.dict(krh.KERNEL_REQUEST_HANDLERS,
-                     {"trace_analyze": bad_handler}):
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"trace_analyze": bad_handler}):
         try:
-            await c._handle_intent("orchestration", Intent(
-                type=IntentType.REQUEST,
-                payload={"target_agent": "kernel", "kind": "trace_analyze"},
-            ))
+            await c._handle_intent(
+                "orchestration",
+                Intent(
+                    type=IntentType.REQUEST,
+                    payload={"target_agent": "kernel", "kind": "trace_analyze"},
+                ),
+            )
             resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")
             assert resp_msgs
             r = resp_msgs[0]
@@ -2593,20 +2906,22 @@ async def test_coordinator_injects_candidates_path_for_run_optimization(
         captured["kwargs"] = kwargs
         return {"status": "ok"}
 
-    with patch.dict(krh.KERNEL_REQUEST_HANDLERS,
-                     {"run_optimization": fake_handler}):
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"run_optimization": fake_handler}):
         try:
-            await c._handle_intent("orchestration", Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel",
-                    "kind": "run_optimization",
-                    "params": {
-                        "kernel_id": "k001",
-                        "candidates_path": explicit,
+            await c._handle_intent(
+                "orchestration",
+                Intent(
+                    type=IntentType.REQUEST,
+                    payload={
+                        "target_agent": "kernel",
+                        "kind": "run_optimization",
+                        "params": {
+                            "kernel_id": "k001",
+                            "candidates_path": explicit,
+                        },
                     },
-                },
-            ))
+                ),
+            )
             assert captured["payload"].get("candidates_path") == explicit
         finally:
             await c.stop()
@@ -2648,17 +2963,16 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
         }
 
     def record_partial(result: dict) -> None:
-        recorded.append({
-            "kernel_id": result.get("kernel_id"),
-            "decision": (result.get("proposal") or {}).get("decision"),
-        })
+        recorded.append(
+            {
+                "kernel_id": result.get("kernel_id"),
+                "decision": (result.get("proposal") or {}).get("decision"),
+            }
+        )
 
-    with patch.object(krh, "_run_kernel_backend_sequence",
-                       side_effect=fake_sequence):
+    with patch.object(krh, "_run_kernel_backend_sequence", side_effect=fake_sequence):
         await krh._run_optimization_batch(
-            payload={"candidates_path": "/dummy",
-                     "backend_order": "geak,claude,codex",
-                     "max_parallel": 3},
+            payload={"candidates_path": "/dummy", "backend_order": "geak,claude,codex", "max_parallel": 3},
             candidates=candidates,
             session_dir=session_dir,
             record_partial=record_partial,
@@ -2700,31 +3014,34 @@ async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
-                "proposal": {"decision": "NEEDS_REVIEW",
-                             "reasons": ["correctness missing"]},
-                "verification": {"micro_speedup": 1.30,
-                                 "correctness_passed": False,
-                                 "best_artifact_path": "/tmp/geak.py"},
+                "proposal": {"decision": "NEEDS_REVIEW", "reasons": ["correctness missing"]},
+                "verification": {
+                    "micro_speedup": 1.30,
+                    "correctness_passed": False,
+                    "best_artifact_path": "/tmp/geak.py",
+                },
             }
         if backend == "claude":
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
-                "proposal": {"decision": "REVERT",
-                             "reasons": ["micro 0.9 regression"]},
-                "verification": {"micro_speedup": 0.9,
-                                 "correctness_passed": True,
-                                 "best_artifact_path": "/tmp/claude.py"},
+                "proposal": {"decision": "REVERT", "reasons": ["micro 0.9 regression"]},
+                "verification": {
+                    "micro_speedup": 0.9,
+                    "correctness_passed": True,
+                    "best_artifact_path": "/tmp/claude.py",
+                },
             }
         if backend == "codex":
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
-                "proposal": {"decision": "KEEP",
-                             "reasons": ["ready for integrate"]},
-                "verification": {"micro_speedup": 1.17,
-                                 "correctness_passed": True,
-                                 "best_artifact_path": "/tmp/codex.py"},
+                "proposal": {"decision": "KEEP", "reasons": ["ready for integrate"]},
+                "verification": {
+                    "micro_speedup": 1.17,
+                    "correctness_passed": True,
+                    "best_artifact_path": "/tmp/codex.py",
+                },
             }
         raise AssertionError(f"unexpected backend {backend!r}")
 
@@ -2735,8 +3052,7 @@ async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
     }
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy",
-             "backend_order": "geak,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
             candidate,
             session_dir=session_dir,
         )
@@ -2761,18 +3077,18 @@ async def test_backend_ladder_breaks_on_first_keep(session_dir):
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "KEEP", "reasons": []},
-                "verification": {"micro_speedup": 1.50,
-                                 "correctness_passed": True,
-                                 "best_artifact_path": "/tmp/geak.py"},
+                "verification": {
+                    "micro_speedup": 1.50,
+                    "correctness_passed": True,
+                    "best_artifact_path": "/tmp/geak.py",
+                },
             }
         raise AssertionError(f"ladder must NOT run {backend!r} after GEAK KEEP")
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy",
-             "backend_order": "geak,claude,codex"},
-            {"kernel_id": "k004", "source_file": "/p/moe_op.py",
-             "reusable_native_kernel": True},
+            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
         )
 
@@ -2786,37 +3102,36 @@ async def test_backend_ladder_falls_back_to_highest_micro_when_no_keep(
     session_dir,
 ):
     """If NO backend KEEPs, the ladder picks the highest-micro non-KEEP."""
+
     async def fake_single(child, *, session_dir):
         backend = child["backends"]
         if backend == "geak":
             return {
-                "status": "ok", "kernel_id": child["kernel_id"],
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "NEEDS_REVIEW", "reasons": []},
-                "verification": {"micro_speedup": 1.30,
-                                 "best_artifact_path": "/tmp/geak.py"},
+                "verification": {"micro_speedup": 1.30, "best_artifact_path": "/tmp/geak.py"},
             }
         if backend == "claude":
             return {
-                "status": "ok", "kernel_id": child["kernel_id"],
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "NEEDS_REVIEW", "reasons": []},
-                "verification": {"micro_speedup": 1.45,
-                                 "best_artifact_path": "/tmp/claude.py"},
+                "verification": {"micro_speedup": 1.45, "best_artifact_path": "/tmp/claude.py"},
             }
         if backend == "codex":
             return {
-                "status": "ok", "kernel_id": child["kernel_id"],
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "REVERT", "reasons": []},
-                "verification": {"micro_speedup": 0.8,
-                                 "best_artifact_path": "/tmp/codex.py"},
+                "verification": {"micro_speedup": 0.8, "best_artifact_path": "/tmp/codex.py"},
             }
         raise AssertionError(backend)
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy",
-             "backend_order": "geak,claude,codex"},
-            {"kernel_id": "k004", "source_file": "/p/moe_op.py",
-             "reusable_native_kernel": True},
+            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
         )
 
@@ -2838,28 +3153,32 @@ async def test_backend_sequence_parallel_runs_oob_even_when_geak_keeps(session_d
         calls.append(backend)
         if backend == "geak":
             return {
-                "status": "ok", "kernel_id": child["kernel_id"],
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "KEEP", "reasons": []},
-                "verification": {"micro_speedup": 1.20,
-                                 "correctness_passed": True,
-                                 "best_artifact_path": "/tmp/geak.py"},
+                "verification": {
+                    "micro_speedup": 1.20,
+                    "correctness_passed": True,
+                    "best_artifact_path": "/tmp/geak.py",
+                },
             }
         if backend == "claude":
             return {
-                "status": "ok", "kernel_id": child["kernel_id"],
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "KEEP", "reasons": []},
-                "verification": {"micro_speedup": 1.50,
-                                 "correctness_passed": True,
-                                 "best_artifact_path": "/tmp/claude.py"},
+                "verification": {
+                    "micro_speedup": 1.50,
+                    "correctness_passed": True,
+                    "best_artifact_path": "/tmp/claude.py",
+                },
             }
         raise AssertionError(f"unexpected backend {backend!r}")
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy",
-             "backend_order": "geak,claude,codex"},
-            {"kernel_id": "k004", "source_file": "/p/moe_op.py",
-             "reusable_native_kernel": True},
+            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
             parallel_backends=True,
         )
@@ -2879,37 +3198,36 @@ async def test_backend_sequence_parallel_runs_oob_even_when_geak_keeps(session_d
 async def test_backend_sequence_parallel_keeps_geak_when_oob_lower(session_dir):
     """GPU-rich mode races both, but if GEAK is the strongest it still
     wins the best-selection contest."""
+
     async def fake_single(child, *, session_dir):
         backend = child["backends"]
         if backend == "geak":
             return {
-                "status": "ok", "kernel_id": child["kernel_id"],
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "KEEP", "reasons": []},
-                "verification": {"micro_speedup": 1.60,
-                                 "best_artifact_path": "/tmp/geak.py"},
+                "verification": {"micro_speedup": 1.60, "best_artifact_path": "/tmp/geak.py"},
             }
         if backend == "claude":
             return {
-                "status": "ok", "kernel_id": child["kernel_id"],
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "KEEP", "reasons": []},
-                "verification": {"micro_speedup": 1.10,
-                                 "best_artifact_path": "/tmp/claude.py"},
+                "verification": {"micro_speedup": 1.10, "best_artifact_path": "/tmp/claude.py"},
             }
         if backend == "codex":
             return {
-                "status": "ok", "kernel_id": child["kernel_id"],
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "NEEDS_REVIEW", "reasons": []},
-                "verification": {"micro_speedup": 1.05,
-                                 "best_artifact_path": "/tmp/codex.py"},
+                "verification": {"micro_speedup": 1.05, "best_artifact_path": "/tmp/codex.py"},
             }
         raise AssertionError(f"unexpected backend {backend!r}")
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy",
-             "backend_order": "geak,claude,codex"},
-            {"kernel_id": "k004", "source_file": "/p/moe_op.py",
-             "reusable_native_kernel": True},
+            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
             parallel_backends=True,
         )
@@ -2930,33 +3248,31 @@ async def test_backend_sequence_parallel_oob_ladder_still_falls_back(session_dir
         calls.append(backend)
         if backend == "geak":
             return {
-                "status": "ok", "kernel_id": child["kernel_id"],
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "NEEDS_REVIEW", "reasons": []},
-                "verification": {"micro_speedup": 1.30,
-                                 "best_artifact_path": "/tmp/geak.py"},
+                "verification": {"micro_speedup": 1.30, "best_artifact_path": "/tmp/geak.py"},
             }
         if backend == "claude":
             return {
-                "status": "ok", "kernel_id": child["kernel_id"],
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "REVERT", "reasons": []},
-                "verification": {"micro_speedup": 0.9,
-                                 "best_artifact_path": "/tmp/claude.py"},
+                "verification": {"micro_speedup": 0.9, "best_artifact_path": "/tmp/claude.py"},
             }
         if backend == "codex":
             return {
-                "status": "ok", "kernel_id": child["kernel_id"],
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "KEEP", "reasons": []},
-                "verification": {"micro_speedup": 1.45,
-                                 "best_artifact_path": "/tmp/codex.py"},
+                "verification": {"micro_speedup": 1.45, "best_artifact_path": "/tmp/codex.py"},
             }
         raise AssertionError(f"unexpected backend {backend!r}")
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy",
-             "backend_order": "geak,claude,codex"},
-            {"kernel_id": "k004", "source_file": "/p/moe_op.py",
-             "reusable_native_kernel": True},
+            {"candidates_path": "/dummy", "backend_order": "geak,claude,codex"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
             parallel_backends=True,
         )
@@ -2981,17 +3297,16 @@ async def test_backend_sequence_parallel_noop_without_geak(session_dir):
         backend = child["backends"]
         calls.append(backend)
         return {
-            "status": "ok", "kernel_id": child["kernel_id"],
+            "status": "ok",
+            "kernel_id": child["kernel_id"],
             "proposal": {"decision": "KEEP", "reasons": []},
-            "verification": {"micro_speedup": 1.2,
-                             "best_artifact_path": f"/tmp/{backend}.py"},
+            "verification": {"micro_speedup": 1.2, "best_artifact_path": f"/tmp/{backend}.py"},
         }
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
             {"candidates_path": "/dummy", "backend_order": "claude,codex"},
-            {"kernel_id": "k004", "source_file": "/p/moe_op.py",
-             "reusable_native_kernel": True},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
             parallel_backends=True,
         )
@@ -3019,17 +3334,14 @@ async def test_backend_sequence_forge_keep_short_circuits(session_dir):
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
                 "proposal": {"decision": "KEEP", "reasons": []},
-                "verification": {"micro_speedup": 1.05,
-                                 "best_artifact_path": "/tmp/forge.py"},
+                "verification": {"micro_speedup": 1.05, "best_artifact_path": "/tmp/forge.py"},
             }
         raise AssertionError(f"forge KEEP must short-circuit before {backend!r}")
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy",
-             "backend_order": "forge,geak,claude,codex"},
-            {"kernel_id": "k004", "source_file": "/p/moe_op.py",
-             "reusable_native_kernel": True},
+            {"candidates_path": "/dummy", "backend_order": "forge,geak,claude,codex"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
             parallel_backends=True,
         )
@@ -3069,9 +3381,7 @@ async def test_batch_serializes_when_forge_in_ladder(session_dir, monkeypatch):
     monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
 
     out = await krh._run_optimization_batch(
-        {"candidates_path": "/dummy",
-         "backend_order": "forge,geak,claude,codex",
-         "max_parallel": 8},
+        {"candidates_path": "/dummy", "backend_order": "forge,geak,claude,codex", "max_parallel": 8},
         [
             {"kernel_id": "k001", "source_file": "/p/a.py"},
             {"kernel_id": "k002", "source_file": "/p/b.py"},
@@ -3092,7 +3402,11 @@ async def test_batch_threads_parallel_backends_flag(session_dir, monkeypatch):
     seen_flags: list[bool] = []
 
     async def fake_sequence(
-        base_payload, candidate, *, session_dir, parallel_backends=False,
+        base_payload,
+        candidate,
+        *,
+        session_dir,
+        parallel_backends=False,
     ):
         seen_flags.append(parallel_backends)
         return {
@@ -3164,15 +3478,16 @@ async def test_batch_handler_isolates_sub_task_exceptions_from_gather(
         }
 
     def record_partial(result: dict) -> None:
-        recorded.append({
-            "kernel_id": result.get("kernel_id"),
-            "status": result.get("status"),
-            "decision": (result.get("proposal") or {}).get("decision"),
-            "error_class": result.get("error_class"),
-        })
+        recorded.append(
+            {
+                "kernel_id": result.get("kernel_id"),
+                "status": result.get("status"),
+                "decision": (result.get("proposal") or {}).get("decision"),
+                "error_class": result.get("error_class"),
+            }
+        )
 
-    with patch.object(krh, "_run_kernel_backend_sequence",
-                       side_effect=fake_sequence):
+    with patch.object(krh, "_run_kernel_backend_sequence", side_effect=fake_sequence):
         result = await krh._run_optimization_batch(
             payload={"candidates_path": "/dummy"},
             candidates=candidates,
@@ -3220,30 +3535,32 @@ async def test_coordinator_streams_batch_results_and_dedups_final_record(
 
     async def fake_handler(payload, *, session_dir, **kwargs):
         captured["payload"] = dict(payload)
-        return {"status": "ok", "decision": "KEEP", "new_tput": 4620.0,
-                "gain_pct": 2.7, "kernel_id": "k001"}
+        return {"status": "ok", "decision": "KEEP", "new_tput": 4620.0, "gain_pct": 2.7, "kernel_id": "k001"}
 
-    with patch.dict(krh.KERNEL_REQUEST_HANDLERS,
-                     {"integrate": fake_handler}):
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"integrate": fake_handler}):
         try:
-            await c._handle_intent("orchestration", Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel",
-                    "kind": "integrate",
-                    "params": {
-                        "kernel_id": "k001",
-                        "patch_path": "/tmp/k001.py",
-                        "target_file": "/p/moe_op.py",
-                        # no base_tput intentionally
+            await c._handle_intent(
+                "orchestration",
+                Intent(
+                    type=IntentType.REQUEST,
+                    payload={
+                        "target_agent": "kernel",
+                        "kind": "integrate",
+                        "params": {
+                            "kernel_id": "k001",
+                            "patch_path": "/tmp/k001.py",
+                            "target_file": "/p/moe_op.py",
+                            # no base_tput intentionally
+                        },
                     },
-                },
-            ))
+                ),
+            )
         finally:
             await c.stop()
 
-    assert captured["payload"].get("base_tput") == 4500.0, \
+    assert captured["payload"].get("base_tput") == 4500.0, (
         "Coordinator must auto-inject base_tput from current_best.tput"
+    )
 
 
 @pytest.mark.asyncio
@@ -3265,79 +3582,92 @@ async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
 
     async def fake_handler(payload, *, session_dir, **kwargs):
         captured["payload"] = dict(payload)
-        return {"status": "ok", "decision": "NEEDS_REVIEW", "new_tput": 4400.0,
-                "gain_pct": 0.0, "kernel_id": "k009"}
+        return {"status": "ok", "decision": "NEEDS_REVIEW", "new_tput": 4400.0, "gain_pct": 0.0, "kernel_id": "k009"}
 
-    with patch.dict(krh.KERNEL_REQUEST_HANDLERS,
-                     {"integrate": fake_handler}):
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"integrate": fake_handler}):
         try:
-            await c._handle_intent("orchestration", Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel",
-                    "kind": "integrate",
-                    "params": {
-                        "kernel_id": "k009",
-                        "patch_path": "/tmp/k009.py",
-                        "target_file": "/p/rmsnorm.py",
-                        "base_tput": 4200.0,  # operator override
+            await c._handle_intent(
+                "orchestration",
+                Intent(
+                    type=IntentType.REQUEST,
+                    payload={
+                        "target_agent": "kernel",
+                        "kind": "integrate",
+                        "params": {
+                            "kernel_id": "k009",
+                            "patch_path": "/tmp/k009.py",
+                            "target_file": "/p/rmsnorm.py",
+                            "base_tput": 4200.0,  # operator override
+                        },
                     },
-                },
-            ))
+                ),
+            )
         finally:
             await c.stop()
 
-    assert captured["payload"].get("base_tput") == 4200.0, \
+    assert captured["payload"].get("base_tput") == 4200.0, (
         "Explicit base_tput must take precedence over current_best.tput"
+    )
 
 
 @pytest.fixture
 def _candidates_factory(tmp_path):
     """Write a kernel_candidates.json fixture and return its path."""
+
     def _make(hot_kernels, task_groups=None):
         path = tmp_path / "kernel_candidates.json"
-        path.write_text(json.dumps({
-            "hot_kernels": hot_kernels,
-            "task_groups": task_groups or [],
-            "reusable_native_kernel_ids": [],
-        }))
+        path.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": hot_kernels,
+                    "task_groups": task_groups or [],
+                    "reusable_native_kernel_ids": [],
+                }
+            )
+        )
         return str(path)
+
     return _make
 
 
 def test_batch_candidates_filters_rejected_kernel_ids(
-    session_dir, _candidates_factory,
+    session_dir,
+    _candidates_factory,
 ):
     """PR-C: a kernel on rejected_kernel_ids must not appear in the next batch, even if still in kernel_candidates.json."""
     from inference_optimizer.orchestrator.shared_state import SharedState
-    cpath = _candidates_factory([
-        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-        {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-    ])
+
+    cpath = _candidates_factory(
+        [
+            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
+            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
+        ]
+    )
     state = SharedState.load_or_init(session_dir)
     state.rejected_kernel_ids = ["k001"]
     state.save(session_dir)
 
     out = krh._batch_kernel_candidates(
-        {"candidates_path": cpath}, session_dir=session_dir,
+        {"candidates_path": cpath},
+        session_dir=session_dir,
     )
     out_ids = sorted(c.get("kernel_id") for c in out)
     assert out_ids == ["k002"]
 
 
 def test_batch_candidates_filters_kernels_with_recorded_attempts(
-    session_dir, _candidates_factory,
+    session_dir,
+    _candidates_factory,
 ):
     """PR-C max_attempts=1 default: any prior attempt skips the kernel in the next batch."""
     from inference_optimizer.orchestrator.shared_state import SharedState
-    cpath = _candidates_factory([
-        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-        {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-    ])
+
+    cpath = _candidates_factory(
+        [
+            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
+            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
+        ]
+    )
     state = SharedState.load_or_init(session_dir)
     # k001 has an attempt recorded but is not yet on the rejected list (PARTIAL below max_partial).
     state.kernel_opt_attempts = {
@@ -3346,22 +3676,23 @@ def test_batch_candidates_filters_kernels_with_recorded_attempts(
     state.save(session_dir)
 
     out = krh._batch_kernel_candidates(
-        {"candidates_path": cpath}, session_dir=session_dir,
+        {"candidates_path": cpath},
+        session_dir=session_dir,
     )
     assert [c.get("kernel_id") for c in out] == ["k002"]
 
 
 def test_batch_candidates_task_group_falls_back_to_live_member(
-    session_dir, _candidates_factory,
+    session_dir,
+    _candidates_factory,
 ):
     """When the primary (k002) is rejected, the task_group still dispatches via the next live member (k001)."""
     from inference_optimizer.orchestrator.shared_state import SharedState
+
     cpath = _candidates_factory(
         hot_kernels=[
-            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
-             "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
-             "source_file": "/p/moe_op.py"},
+            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
+            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
         ],
         task_groups=[
             {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
@@ -3372,7 +3703,8 @@ def test_batch_candidates_task_group_falls_back_to_live_member(
     state.save(session_dir)
 
     out = krh._batch_kernel_candidates(
-        {"candidates_path": cpath}, session_dir=session_dir,
+        {"candidates_path": cpath},
+        session_dir=session_dir,
     )
     # Group dispatches as k001 with the original task_group attached.
     assert len(out) == 1
@@ -3381,18 +3713,17 @@ def test_batch_candidates_task_group_falls_back_to_live_member(
 
 
 def test_batch_candidates_skips_group_when_all_members_rejected(
-    session_dir, _candidates_factory,
+    session_dir,
+    _candidates_factory,
 ):
     """If every member of a task_group is unusable, the group skips cleanly."""
     from inference_optimizer.orchestrator.shared_state import SharedState
+
     cpath = _candidates_factory(
         hot_kernels=[
-            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
-             "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True,
-             "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k009", "gpu_pct": 10.0, "reusable_native_kernel": True,
-             "source_file": "/p/rmsnorm.py"},
+            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
+            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
+            {"kernel_id": "k009", "gpu_pct": 10.0, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
         ],
         task_groups=[
             {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
@@ -3403,7 +3734,8 @@ def test_batch_candidates_skips_group_when_all_members_rejected(
     state.save(session_dir)
 
     out = krh._batch_kernel_candidates(
-        {"candidates_path": cpath}, session_dir=session_dir,
+        {"candidates_path": cpath},
+        session_dir=session_dir,
     )
     out_ids = sorted(c.get("kernel_id") for c in out)
     # moe_op.py group fully retired; only k009 remains.
@@ -3411,68 +3743,75 @@ def test_batch_candidates_skips_group_when_all_members_rejected(
 
 
 def test_batch_candidates_skips_in_flight_kernels(
-    session_dir, _candidates_factory,
+    session_dir,
+    _candidates_factory,
 ):
     """In-flight defense: a status/ko-*.json with state=running for k004 keeps it out of the next batch."""
-    cpath = _candidates_factory([
-        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-        {"kernel_id": "k004", "gpu_pct": 9.7, "reusable_native_kernel": True,
-         "source_file": "/p/rmsnorm.py"},
-    ])
-    # Plant a running status file for k004.
-    status_dir = (
-        session_dir / "kernel-agent" / "runs" / session_dir.name
-        / "status" / "kernel_optimization"
+    cpath = _candidates_factory(
+        [
+            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
+            {"kernel_id": "k004", "gpu_pct": 9.7, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
+        ]
     )
+    # Plant a running status file for k004.
+    status_dir = session_dir / "kernel-agent" / "runs" / session_dir.name / "status" / "kernel_optimization"
     status_dir.mkdir(parents=True, exist_ok=True)
-    (status_dir / "ko-deadbeef.json").write_text(json.dumps({
-        "state": "running",
-        "current_step": "run_backends",
-        "pid": 123456,
-        "last_lines": ["kernel_id=k004", "selected_backends=geak"],
-    }))
+    (status_dir / "ko-deadbeef.json").write_text(
+        json.dumps(
+            {
+                "state": "running",
+                "current_step": "run_backends",
+                "pid": 123456,
+                "last_lines": ["kernel_id=k004", "selected_backends=geak"],
+            }
+        )
+    )
 
     out = krh._batch_kernel_candidates(
-        {"candidates_path": cpath}, session_dir=session_dir,
+        {"candidates_path": cpath},
+        session_dir=session_dir,
     )
     out_ids = sorted(c.get("kernel_id") for c in out)
     assert out_ids == ["k001"]
 
 
 def test_batch_candidates_below_min_gpu_pct_skipped(
-    session_dir, _candidates_factory, monkeypatch,
+    session_dir,
+    _candidates_factory,
+    monkeypatch,
 ):
     """min_gpu_pct env=5.0 keeps tiny rmsnorm kernels out of the batch."""
     monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "5.0")
-    cpath = _candidates_factory([
-        {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-        {"kernel_id": "k005", "gpu_pct": 2.8, "reusable_native_kernel": True,
-         "source_file": "/p/rmsnorm.py"},
-    ])
+    cpath = _candidates_factory(
+        [
+            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
+            {"kernel_id": "k005", "gpu_pct": 2.8, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
+        ]
+    )
     out = krh._batch_kernel_candidates(
-        {"candidates_path": cpath}, session_dir=session_dir,
+        {"candidates_path": cpath},
+        session_dir=session_dir,
     )
     out_ids = sorted(c.get("kernel_id") for c in out)
     assert out_ids == ["k001"]
 
 
 def test_batch_candidates_default_min_gpu_pct_matches_sharedstate_gate(
-    session_dir, _candidates_factory,
+    session_dir,
+    _candidates_factory,
 ):
     """PR-I: ``_batch_kernel_candidates`` default (3.0) must match ``SharedState.untried_hot_reusable_kernels``'s gate so a sub-threshold kernel can't sneak in via task_group fallback."""
-    cpath = _candidates_factory([
-        {"kernel_id": "k001", "gpu_pct": 38.0, "reusable_native_kernel": True,
-         "source_file": "/p/moe_op.py"},
-        {"kernel_id": "k006", "gpu_pct": 1.3, "reusable_native_kernel": True,
-         "source_file": "/p/rmsnorm.py"},
-        {"kernel_id": "k008", "gpu_pct": 3.13, "reusable_native_kernel": True,
-         "source_file": "/p/rmsnorm.py"},
-    ])
+    cpath = _candidates_factory(
+        [
+            {"kernel_id": "k001", "gpu_pct": 38.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
+            {"kernel_id": "k006", "gpu_pct": 1.3, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
+            {"kernel_id": "k008", "gpu_pct": 3.13, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
+        ]
+    )
     # Default 3.0 filters out k006 (1.3) but keeps k001 (38) and k008 (3.13).
     out = krh._batch_kernel_candidates(
-        {"candidates_path": cpath}, session_dir=session_dir,
+        {"candidates_path": cpath},
+        session_dir=session_dir,
     )
     out_ids = sorted(c.get("kernel_id") for c in out)
     assert "k006" not in out_ids, out_ids
@@ -3480,21 +3819,25 @@ def test_batch_candidates_default_min_gpu_pct_matches_sharedstate_gate(
     assert "k008" in out_ids
 
 
-
 def test_in_flight_kernel_ids_returns_running_only(session_dir):
-    status_dir = (
-        session_dir / "kernel-agent" / "runs" / session_dir.name
-        / "status" / "kernel_optimization"
-    )
+    status_dir = session_dir / "kernel-agent" / "runs" / session_dir.name / "status" / "kernel_optimization"
     status_dir.mkdir(parents=True, exist_ok=True)
-    (status_dir / "ko-aaa.json").write_text(json.dumps({
-        "state": "running",
-        "last_lines": ["kernel_id=k001"],
-    }))
-    (status_dir / "ko-bbb.json").write_text(json.dumps({
-        "state": "succeeded",
-        "last_lines": ["kernel_id=k002"],
-    }))
+    (status_dir / "ko-aaa.json").write_text(
+        json.dumps(
+            {
+                "state": "running",
+                "last_lines": ["kernel_id=k001"],
+            }
+        )
+    )
+    (status_dir / "ko-bbb.json").write_text(
+        json.dumps(
+            {
+                "state": "succeeded",
+                "last_lines": ["kernel_id=k002"],
+            }
+        )
+    )
     out = krh._in_flight_kernel_ids(session_dir)
     assert out == {"k001"}
 
@@ -3504,6 +3847,7 @@ def test_resolve_integrate_payload_falls_back_to_kernel_opt_attempts_ledger(
 ):
     """``_resolve_integrate_payload`` looks up patch_path / source_file from the per-kernel ``kernel_opt_attempts`` ledger so any queued KEEP can integrate."""
     from inference_optimizer.orchestrator.shared_state import SharedState
+
     state = SharedState.load_or_init(session_dir)
     # Two KEEPs landed but last_kernel_opt only holds the strongest (k009).
     state.last_kernel_opt = {
@@ -3514,12 +3858,16 @@ def test_resolve_integrate_payload_falls_back_to_kernel_opt_attempts_ledger(
     }
     state.kernel_opt_attempts = {
         "k009": {
-            "last_decision": "KEEP", "last_micro_speedup": 4.13,
-            "last_artifact_path": "/tmp/k009.py", "last_source_file": "/p/rmsnorm.py",
+            "last_decision": "KEEP",
+            "last_micro_speedup": 4.13,
+            "last_artifact_path": "/tmp/k009.py",
+            "last_source_file": "/p/rmsnorm.py",
         },
         "k001": {
-            "last_decision": "KEEP", "last_micro_speedup": 2.0,
-            "last_artifact_path": "/tmp/k001.py", "last_source_file": "/p/moe_op.py",
+            "last_decision": "KEEP",
+            "last_micro_speedup": 2.0,
+            "last_artifact_path": "/tmp/k001.py",
+            "last_source_file": "/p/moe_op.py",
         },
     }
     state.save(session_dir)
@@ -3530,7 +3878,9 @@ def test_resolve_integrate_payload_falls_back_to_kernel_opt_attempts_ledger(
         session_dir=session_dir,
     )
     assert missing is None, missing
-    assert resolved.get("patch_path") == "/tmp/k001.py", \
+    assert resolved.get("patch_path") == "/tmp/k001.py", (
         "patch_path must fall back to kernel_opt_attempts[k001].last_artifact_path"
-    assert resolved.get("source_file") == "/p/moe_op.py", \
+    )
+    assert resolved.get("source_file") == "/p/moe_op.py", (
         "source_file must fall back to kernel_opt_attempts[k001].last_source_file"
+    )

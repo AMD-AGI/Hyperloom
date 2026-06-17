@@ -15,7 +15,16 @@ from pathlib import Path
 
 
 def _load_model_config_dict(model_path: str) -> dict | None:
-    """Best-effort parse of ``<model_path>/config.json`` into a dict; returns ``None`` on any failure."""
+    """Best-effort parse of ``<model_path>/config.json`` into a dict; returns ``None`` on any failure.
+
+    Args:
+        model_path: Filesystem path to the model directory.
+
+    Returns:
+        The parsed ``config.json`` dict, or ``None`` when the path is empty,
+        the file is missing/unreadable, the JSON is invalid, or it is not a
+        dict.
+    """
     if not model_path:
         return None
     cfg_path = Path(model_path) / "config.json"
@@ -33,14 +42,24 @@ def _load_model_config_dict(model_path: str) -> dict | None:
         return None
     if not isinstance(data, dict):
         logging.warning(
-            "model_config_not_a_dict: %s (got %s)", cfg_path, type(data).__name__,
+            "model_config_not_a_dict: %s (got %s)",
+            cfg_path,
+            type(data).__name__,
         )
         return None
     return data
 
 
 def _config_architectures(config: dict) -> list[str]:
-    """Normalise ``config["architectures"]`` to a list of non-empty strings (scalar wrapped; absent -> [])."""
+    """Normalise ``config["architectures"]`` to a list of non-empty strings (scalar wrapped; absent -> []).
+
+    Args:
+        config: A parsed model config dict.
+
+    Returns:
+        The non-empty architecture strings; a lone scalar is wrapped and a
+        missing key yields ``[]``.
+    """
     arches_raw = config.get("architectures")
     if isinstance(arches_raw, list):
         return [str(a).strip() for a in arches_raw if str(a or "").strip()]
@@ -72,6 +91,12 @@ def _path_looks_like_gemma2(model_path: str) -> bool:
     Word-boundary match on the directory name (gemma2 / gemma-2 / gemma_2),
     so a not-yet-materialized Hub-id style path still gets the workaround
     without false-positives on names like notgemma2 / gemma25.
+
+    Args:
+        model_path: Filesystem or Hub-id style path to the model.
+
+    Returns:
+        ``True`` when the path's final component looks like a Gemma2 name.
     """
     if not model_path:
         return False
@@ -79,7 +104,15 @@ def _path_looks_like_gemma2(model_path: str) -> bool:
 
 
 def _config_gemma2_scopes(data: dict) -> list[dict]:
-    """Return [top-level, text_config?] scopes for Gemma2 inspection."""
+    """Return [top-level, text_config?] scopes for Gemma2 inspection.
+
+    Args:
+        data: A parsed model config dict.
+
+    Returns:
+        The top-level config plus its nested ``text_config`` when that is a
+        dict.
+    """
     scopes = [data]
     nested = data.get("text_config")
     if isinstance(nested, dict):
@@ -88,7 +121,15 @@ def _config_gemma2_scopes(data: dict) -> list[dict]:
 
 
 def _config_is_gemma2(data: dict) -> bool:
-    """True when a parsed config dict declares Gemma2 (top level or text_config)."""
+    """True when a parsed config dict declares Gemma2 (top level or text_config).
+
+    Args:
+        data: A parsed model config dict.
+
+    Returns:
+        ``True`` when any scope declares the Gemma2 ``model_type`` or
+        architecture.
+    """
     for cfg in _config_gemma2_scopes(data):
         if str(cfg.get("model_type") or "").strip().lower() == GEMMA2_MODEL_TYPE:
             return True
@@ -103,6 +144,13 @@ def _config_has_model_identity(data: dict) -> bool:
     Used to decide whether a non-Gemma2 verdict is trustworthy: a config that
     clearly identifies another model (e.g. llama) must NOT fall back to the path
     heuristic, while an empty/residual config (``{}``, no model_type) should.
+
+    Args:
+        data: A parsed model config dict.
+
+    Returns:
+        ``True`` when any scope carries a non-empty ``model_type`` or
+        ``architectures``.
     """
     for cfg in _config_gemma2_scopes(data):
         if str(cfg.get("model_type") or "").strip():
@@ -118,6 +166,13 @@ def _model_is_gemma2(model_path: str) -> bool:
     Falls back to a path heuristic when config.json is missing/unreadable OR
     present-but-unidentifiable (empty dict / no model_type/architectures). A
     config that clearly identifies a non-Gemma2 model is trusted as-is.
+
+    Args:
+        model_path: Filesystem path to the model directory.
+
+    Returns:
+        ``True`` when the model is detected as Gemma2 via config.json or the
+        path heuristic.
     """
     data = _load_model_config_dict(model_path)
     if data is not None:

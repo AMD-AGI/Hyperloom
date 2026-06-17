@@ -34,8 +34,13 @@ def _load(unique_name: str):
 
 def _ns(**overrides):
     base = dict(
-        framework="sglang", model="/m/x", tp=8, ep=1, nnodes=1,
-        dist_init_port=5000, extra_args="",
+        framework="sglang",
+        model="/m/x",
+        tp=8,
+        ep=1,
+        nnodes=1,
+        dist_init_port=5000,
+        extra_args="",
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -58,7 +63,9 @@ def test_sglang_cmd_single_node_omits_distributed_flags():
 def test_sglang_cmd_multi_node_includes_distributed_flags():
     lm = _load("ldn_sglang_multi")
     cmd = lm._build_sglang_cmd(
-        _ns(nnodes=2, dist_init_port=5000), node_rank=1, leader="10.0.0.9",
+        _ns(nnodes=2, dist_init_port=5000),
+        node_rank=1,
+        leader="10.0.0.9",
     )
     assert cmd[cmd.index("--nnodes") + 1] == "2"
     assert cmd[cmd.index("--node-rank") + 1] == "1"
@@ -69,7 +76,8 @@ def test_sglang_cmd_ep_and_extra_args():
     lm = _load("ldn_sglang_ep")
     cmd = lm._build_sglang_cmd(
         _ns(ep=8, extra_args="--mem-fraction-static 0.7"),
-        node_rank=0, leader="x",
+        node_rank=0,
+        leader="x",
     )
     assert cmd[cmd.index("--ep-size") + 1] == "8"
     assert "--mem-fraction-static" in cmd and "0.7" in cmd

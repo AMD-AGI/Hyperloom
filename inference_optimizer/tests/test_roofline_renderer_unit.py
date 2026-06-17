@@ -9,6 +9,7 @@ from inference_optimizer.breakdown.reporters._renderers import roofline as rl
 
 # ---- _snapshot_kv ----
 
+
 def test_snapshot_kv_empty():
     assert rl._snapshot_kv("Baseline", None) == ""
     assert rl._snapshot_kv("Baseline", {}) == ""
@@ -16,8 +17,12 @@ def test_snapshot_kv_empty():
 
 def test_snapshot_kv_full():
     snap = {
-        "snapshot_id": "s1", "ts": "t0", "compute_pct": 70,
-        "idle_pct": 10, "comm_pct": 5, "top_bottleneck": "compute",
+        "snapshot_id": "s1",
+        "ts": "t0",
+        "compute_pct": 70,
+        "idle_pct": 10,
+        "comm_pct": 5,
+        "top_bottleneck": "compute",
         "top_kernel": {"name": "gemm", "gpu_pct": 40, "efficiency_pct": 80, "bound_type": "compute"},
     }
     out = rl._snapshot_kv("Baseline", snap)
@@ -32,6 +37,7 @@ def test_snapshot_kv_non_dict_top_kernel():
 
 # ---- _delta_block ----
 
+
 def test_delta_block_empty():
     assert rl._delta_block(None) == ""
     assert rl._delta_block({}) == ""
@@ -44,6 +50,7 @@ def test_delta_block_table():
 
 
 # ---- render ----
+
 
 def test_render_absent():
     assert rl.render({}).skipped is True
@@ -64,8 +71,12 @@ def test_render_full_entry():
                 "source_path": "/x/final.json",
                 "mode": "vs_baseline",
                 "baseline": {
-                    "snapshot_id": "b", "top_kernel": {
-                        "name": "attn", "gpu_pct": 50, "efficiency_pct": 60, "bound_type": "memory",
+                    "snapshot_id": "b",
+                    "top_kernel": {
+                        "name": "attn",
+                        "gpu_pct": 50,
+                        "efficiency_pct": 60,
+                        "bound_type": "memory",
                     },
                 },
                 "latest": {"snapshot_id": "l"},

@@ -44,7 +44,7 @@ class Config:
 
     Attributes:
         session_dir (Path): Directory containing the session's storage
-            (including ``conductor.db``).
+            (including ``coordinator.db``).
         robustness_server_url (str): Primary M1 data source endpoint;
             empty means skip the server and use only the local probe.
         llm_model (str): Model name used for LLM-driven root-cause
@@ -68,13 +68,13 @@ class Config:
     robustness_server_url: str = ""
 
     @property
-    def conductor_db_path(self) -> Path:
-        """Filesystem path to the session's conductor SQLite database.
+    def coordinator_db_path(self) -> Path:
+        """Filesystem path to the session's Coordinator SQLite database.
 
         Returns:
-            Path: ``session_dir/storage/conductor.db``.
+            Path: ``session_dir/storage/coordinator.db``.
         """
-        return self.session_dir / "storage" / "conductor.db"
+        return self.session_dir / "storage" / "coordinator.db"
 
     # -- thresholds --
     gpu_temp_warn_c: float = 85.0
@@ -230,10 +230,10 @@ class Config:
 
     # -- I state-integrity signals (2026-05-19) --
     state_integrity_enabled: bool = True
-    state_wal_bytes_warn_threshold: int = 1 * 1024 * 1024 * 1024     # 1 GiB
+    state_wal_bytes_warn_threshold: int = 1 * 1024 * 1024 * 1024  # 1 GiB
     state_wal_bytes_critical_threshold: int = 4 * 1024 * 1024 * 1024  # 4 GiB
     state_stale_lease_min_age_s: float = 60.0
-    state_inbox_bloat_warn_bytes: int = 100 * 1024 * 1024     # 100 MiB
+    state_inbox_bloat_warn_bytes: int = 100 * 1024 * 1024  # 100 MiB
     state_inbox_bloat_critical_bytes: int = 500 * 1024 * 1024  # 500 MiB
 
     # -- J external-deps signals (2026-05-19) --
@@ -262,27 +262,31 @@ class Config:
     # gpu_memory_leaked "no live owner" check matches every legitimate VRAM
     # holder; vLLM v1 / Ray / aiter JIT entries are critical or EngineCore-
     # children get mis-classified as "not a server".
-    server_process_patterns: list[str] = field(default_factory=lambda: [
-        # SGLang
-        "sglang.srt",
-        "sglang.launch_server",
-        # vLLM
-        "vllm.entrypoints",
-        "vllm serve",
-        "vllm.v1.engine.core",
-        "vllm.engine.async_llm_engine",
-        "EngineCore",
-        # Magpie / InferenceX
-        "Magpie",
-        "inferencex",
-        # Ray + JIT compilation
-        "ray::IDLE",
-        "raylet",
-        "hipcc",
-    ])
-    benchmark_process_patterns: list[str] = field(default_factory=lambda: [
-        "benchmark_serving",
-    ])
+    server_process_patterns: list[str] = field(
+        default_factory=lambda: [
+            # SGLang
+            "sglang.srt",
+            "sglang.launch_server",
+            # vLLM
+            "vllm.entrypoints",
+            "vllm serve",
+            "vllm.v1.engine.core",
+            "vllm.engine.async_llm_engine",
+            "EngineCore",
+            # Magpie / InferenceX
+            "Magpie",
+            "inferencex",
+            # Ray + JIT compilation
+            "ray::IDLE",
+            "raylet",
+            "hipcc",
+        ]
+    )
+    benchmark_process_patterns: list[str] = field(
+        default_factory=lambda: [
+            "benchmark_serving",
+        ]
+    )
 
     @classmethod
     async def discover(cls) -> "Config":
@@ -301,7 +305,8 @@ class Config:
         workload_uid = _discover_workload_uid()
         disable_local_probe = _env_bool("ROBUSTNESS_DISABLE_LOCAL_PROBE", False)
         enable_cluster_pod_metrics = _env_bool(
-            "ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS", False,
+            "ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS",
+            False,
         )
         nodes = _env_int("ROBUSTNESS_NODES", 1)
 
@@ -336,7 +341,7 @@ def _discover_session_dir() -> Path:
 
     Checks the ``SESSION_DIR`` environment variable, then the known
     candidate paths and the current working directory for a
-    ``storage/conductor.db`` marker.
+    ``storage/coordinator.db`` marker.
 
     Returns:
         Path: The discovered session directory, or the last candidate
@@ -349,13 +354,13 @@ def _discover_session_dir() -> Path:
             return p
 
     for candidate in SESSION_DIR_CANDIDATES:
-        db = candidate / "storage" / "conductor.db"
+        db = candidate / "storage" / "coordinator.db"
         if db.exists():
             log.info("Session dir discovered at: %s", candidate)
             return candidate
 
     cwd = Path.cwd()
-    db = cwd / "storage" / "conductor.db"
+    db = cwd / "storage" / "coordinator.db"
     if db.exists():
         log.info("Session dir is cwd: %s", cwd)
         return cwd
@@ -402,9 +407,7 @@ def _discover_llm_credentials() -> tuple[str, str]:
     """
     base_url = os.environ.get("OPENAI_BASE_URL", "")
     api_key = (
-        os.environ.get("SAFE_API_KEY", "")
-        or os.environ.get("OPENAI_API_KEY", "")
-        or os.environ.get("LLM_API_KEY", "")
+        os.environ.get("SAFE_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "") or os.environ.get("LLM_API_KEY", "")
     )
     return base_url, api_key
 
@@ -423,6 +426,9 @@ def _discover_workload_uid() -> str:
 
     Lets a RayJob sandbox opt into hierarchy-based pod discovery; single-node
     runs leave every key unset and fall back to ``list_session_pods``.
+
+    Returns:
+        The first non-empty workload-uid env value, or ``""`` if none set.
     """
     for key in _WORKLOAD_UID_ENV_KEYS:
         value = (os.environ.get(key) or "").strip()

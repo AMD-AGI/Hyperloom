@@ -32,7 +32,16 @@ _EXHAUSTED_MAX_GAIN_PCT: float = 1.0
 
 
 def _load_journal_entries(session_dir: Path, shared_state: Any) -> list[Any]:
-    """Return journal entries (empty on miss); header fields are read-only here."""
+    """Return journal entries (empty on miss); header fields are read-only here.
+
+    Args:
+        session_dir: The session directory holding the optimization journal.
+        shared_state: The session's shared state, read for journal header
+            fields.
+
+    Returns:
+        The journal entries, or ``[]`` when the journal cannot be loaded.
+    """
     try:
         journal = Journal.load_or_create(
             session_dir,
@@ -46,7 +55,15 @@ def _load_journal_entries(session_dir: Path, shared_state: Any) -> list[Any]:
 
 
 def _exhausted_clusters(entries: list[Any]) -> list[dict[str, Any]]:
-    """Group repeated REVERT / no_promote attempts by (kind, change); dead ends first."""
+    """Group repeated REVERT / no_promote attempts by (kind, change); dead ends first.
+
+    Args:
+        entries: The optimization journal entries to cluster.
+
+    Returns:
+        Exhausted-cluster dicts (``kind`` / ``change`` / ``count`` /
+        ``max_gain``) sorted by attempt count descending.
+    """
     clusters: dict[tuple[str, str], dict[str, Any]] = {}
     for e in entries:
         outcome = getattr(e, "outcome", "")
@@ -54,31 +71,37 @@ def _exhausted_clusters(entries: list[Any]) -> list[dict[str, Any]]:
             continue
         key = (str(getattr(e, "kind", "")), str(getattr(e, "change", "")))
         row = clusters.setdefault(
-            key, {"kind": key[0], "change": key[1], "count": 0, "max_gain": None},
+            key,
+            {"kind": key[0], "change": key[1], "count": 0, "max_gain": None},
         )
         row["count"] += 1
         gain = getattr(e, "gain_pct", None)
         if isinstance(gain, (int, float)):
-            row["max_gain"] = (
-                gain if row["max_gain"] is None else max(row["max_gain"], gain)
-            )
+            row["max_gain"] = gain if row["max_gain"] is None else max(row["max_gain"], gain)
     dead = [
-        r for r in clusters.values()
-        if r["count"] >= _EXHAUSTED_MIN_ATTEMPTS
-        and (r["max_gain"] is None or r["max_gain"] < _EXHAUSTED_MAX_GAIN_PCT)
+        r
+        for r in clusters.values()
+        if r["count"] >= _EXHAUSTED_MIN_ATTEMPTS and (r["max_gain"] is None or r["max_gain"] < _EXHAUSTED_MAX_GAIN_PCT)
     ]
     dead.sort(key=lambda r: r["count"], reverse=True)
     return dead
 
 
 def _stalled_cycle_count(shared_state: Any) -> int:
-    """Consecutive most-recent macro-cycles that produced no explore winner."""
+    """Consecutive most-recent macro-cycles that produced no explore winner.
+
+    Args:
+        shared_state: The session's shared state, read for explore winners
+            history and the current macro cycle.
+
+    Returns:
+        The count of consecutive most-recent macro-cycles with no explore
+        winner.
+    """
     search = getattr(shared_state, "explore_search", None) or {}
     wh = search.get("winners_history") if isinstance(search, dict) else None
     cycles_with_winner = {
-        row.get("cycle")
-        for row in (wh or [])
-        if isinstance(row, dict) and row.get("cycle") is not None
+        row.get("cycle") for row in (wh or []) if isinstance(row, dict) and row.get("cycle") is not None
     }
     cycle = int(getattr(shared_state, "macro_cycle", 0) or 0)
     stalled = 0
@@ -99,13 +122,19 @@ def build_trajectory_digest(
     Deterministic aggregation only (no model call). Surfaces stall depth,
     exhausted directions to avoid, and the dominant roofline bottleneck with a
     suggested specialist lever to redirect exploration.
+
+    Args:
+        session_dir: The session directory holding the optimization journal.
+        shared_state: The session's shared state.
+        max_directions: Maximum number of exhausted directions to list.
+
+    Returns:
+        The advisory trajectory-review block, or ``""`` when there is nothing
+        to report.
     """
     try:
         entries = _load_journal_entries(Path(session_dir), shared_state)
-        snaps = [
-            s for s in (getattr(shared_state, "roofline_snapshots", None) or [])
-            if isinstance(s, dict)
-        ]
+        snaps = [s for s in (getattr(shared_state, "roofline_snapshots", None) or []) if isinstance(s, dict)]
         dead = _exhausted_clusters(entries)
         stalled = _stalled_cycle_count(shared_state)
         if not dead and not snaps and stalled == 0:
@@ -114,10 +143,7 @@ def build_trajectory_digest(
         lines: list[str] = []
         validated = getattr(shared_state, "cumulative_gain_validated", None)
         if isinstance(validated, (int, float)):
-            lines.append(
-                f"progress: validated_gain={validated:.2f}%  "
-                f"stalled_cycles={stalled}"
-            )
+            lines.append(f"progress: validated_gain={validated:.2f}%  stalled_cycles={stalled}")
         elif stalled:
             lines.append(f"progress: stalled_cycles={stalled}")
 
@@ -125,15 +151,9 @@ def build_trajectory_digest(
             lines.append("exhausted_directions (avoid re-proposing):")
             for row in dead[:max_directions]:
                 gain = row["max_gain"]
-                gain_str = (
-                    f"max_gain {gain:.2f}%" if isinstance(gain, (int, float))
-                    else "no positive gain"
-                )
+                gain_str = f"max_gain {gain:.2f}%" if isinstance(gain, (int, float)) else "no positive gain"
                 change = row["change"] or "(unspecified)"
-                lines.append(
-                    f"  - [{row['kind']}] {change}: "
-                    f"{row['count']} non-promoting attempts, {gain_str}"
-                )
+                lines.append(f"  - [{row['kind']}] {change}: {row['count']} non-promoting attempts, {gain_str}")
 
         if snaps:
             direction, pct = dominant_direction(snaps[-1])
@@ -146,10 +166,7 @@ def build_trajectory_digest(
 
         if not lines:
             return ""
-        lines.append(
-            "advisory only: redirect exploration with this; it does not gate "
-            "phase advance."
-        )
+        lines.append("advisory only: redirect exploration with this; it does not gate phase advance.")
         return "\n".join(lines)
     except Exception:  # noqa: BLE001 — review must never crash
         log.exception("trajectory_reviewer: build_trajectory_digest failed")

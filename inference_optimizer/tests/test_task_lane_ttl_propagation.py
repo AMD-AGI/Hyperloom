@@ -30,7 +30,9 @@ def test_roofline_lanes_ttl():
 def test_integrate_patch_lanes_ttl():
     lanes, ttl = _resolve(_Stub(), "integrate_patch")
     assert lanes == [
-        "server_lifecycle", "workspace_mutation", "benchmark_lane",
+        "server_lifecycle",
+        "workspace_mutation",
+        "benchmark_lane",
     ]
     assert ttl == 3600
 
@@ -44,6 +46,7 @@ def test_unknown_action_falls_back_to_no_lanes():
 def test_missing_registry_falls_back():
     class _NoReg:
         action_registry = None
+
     lanes, ttl = _resolve(_NoReg(), "specialist")
     assert lanes == []
     assert ttl == 0
@@ -51,10 +54,8 @@ def test_missing_registry_falls_back():
 
 def test_resolved_lanes_are_dispatcher_known():
     from inference_optimizer.orchestrator.resource_lock import KNOWN_LANES
-    for kind in ("specialist", "roofline", "profile",
-                 "integrate_patch", "explore"):
+
+    for kind in ("specialist", "roofline", "profile", "integrate_patch", "explore"):
         lanes, _ = _resolve(_Stub(), kind)
         for lane in lanes:
-            assert lane in KNOWN_LANES, (
-                f"{kind} resolved unknown dispatcher lane {lane!r}"
-            )
+            assert lane in KNOWN_LANES, f"{kind} resolved unknown dispatcher lane {lane!r}"

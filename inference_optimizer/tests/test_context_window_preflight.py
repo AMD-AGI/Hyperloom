@@ -12,7 +12,6 @@ import argparse
 import json
 from pathlib import Path
 
-import pytest
 
 from inference_optimizer import cli
 
@@ -138,20 +137,14 @@ def test_max_model_len_uses_full_headroom_when_window_large(tmp_path):
     model = tmp_path / "ctx32768"
     _write_config(model, max_position_embeddings=32768)
     # native window is comfortably above desired -> keep ISL+OSL+headroom.
-    assert (
-        cli._resolve_max_model_len(1024, 1024, str(model))
-        == 1024 + 1024 + cli._MAX_MODEL_LEN_HEADROOM
-    )
+    assert cli._resolve_max_model_len(1024, 1024, str(model)) == 1024 + 1024 + cli._MAX_MODEL_LEN_HEADROOM
 
 
 def test_max_model_len_fallback_when_maxpos_unknown(tmp_path):
     model = tmp_path / "noconfig"
     model.mkdir()
     # No config.json -> cannot clamp -> keep the headroom default (prior behaviour).
-    assert (
-        cli._resolve_max_model_len(1024, 1024, str(model))
-        == 1024 + 1024 + cli._MAX_MODEL_LEN_HEADROOM
-    )
+    assert cli._resolve_max_model_len(1024, 1024, str(model)) == 1024 + 1024 + cli._MAX_MODEL_LEN_HEADROOM
 
 
 # follow-up #1: the preflight stop_reason must be a canonical STOP_REASON_VOCAB term written via set_stop_reason().

@@ -29,7 +29,9 @@ def _init_git_repo(path: Path) -> str:
         subprocess.run(argv, cwd=path, check=True, capture_output=True)
     out = subprocess.run(
         ["git", "-C", str(path), "rev-parse", "--short", "HEAD"],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     )
     return out.stdout.strip()
 
@@ -37,7 +39,8 @@ def _init_git_repo(path: Path) -> str:
 def test_kernel_journey_absent_without_substreams(tmp_path: Path) -> None:
     # Only an unrelated section recorded -> kernel_journey must not appear.
     instrument.record_phase_event(
-        tmp_path, action="profile",
+        tmp_path,
+        action="profile",
         entry={"task_id": "t1", "status": "succeeded"},
     )
     out = assemble_parts(tmp_path)
@@ -46,35 +49,69 @@ def test_kernel_journey_absent_without_substreams(tmp_path: Path) -> None:
 
 def test_kernel_journey_composes_full_lifecycle(tmp_path: Path) -> None:
     instrument.record_kernel_discovery(
-        tmp_path, source="tracelens", status="success",
+        tmp_path,
+        source="tracelens",
+        status="success",
         hot_kernels=[
-            {"kernel_id": "k001", "name": "moe", "gpu_pct": 42.0,
-             "bottleneck": "memory", "reusable_native_kernel": True,
-             "recommended_backends": ["geak", "oob"]},
+            {
+                "kernel_id": "k001",
+                "name": "moe",
+                "gpu_pct": 42.0,
+                "bottleneck": "memory",
+                "reusable_native_kernel": True,
+                "recommended_backends": ["geak", "oob"],
+            },
             {"kernel_id": "k002", "name": "ln", "gpu_pct": 7.5},
         ],
         scan={"splitter_mode": "auto", "candidates_path": str(tmp_path / "c.json")},
     )
     instrument.record_kernel_dispatch(
-        tmp_path, kernel_id="k001", dispatched=True,
-        backends=["geak", "claude"], orchestration_commit="abc1234",
+        tmp_path,
+        kernel_id="k001",
+        dispatched=True,
+        backends=["geak", "claude"],
+        orchestration_commit="abc1234",
     )
     instrument.record_kernel_dispatch(
-        tmp_path, kernel_id="k002", dispatched=False,
+        tmp_path,
+        kernel_id="k002",
+        dispatched=False,
         skip_reason="non_reusable_kernel",
     )
-    instrument.record_kernel_backend_result(tmp_path, {
-        "kernel_id": "k001", "run_id": "r1", "attempts": [
-            {"attempt_id": "a1", "backend": "geak", "status": "succeeded",
-             "decision": "KEEP", "micro_speedup": 1.8, "compile_passed": True,
-             "correctness_passed": "pass", "duration_sec": 120.5},
-            {"attempt_id": "a2", "backend": "claude", "status": "failed",
-             "decision": "FAILED", "error": "compile err"},
-        ],
-    })
+    instrument.record_kernel_backend_result(
+        tmp_path,
+        {
+            "kernel_id": "k001",
+            "run_id": "r1",
+            "attempts": [
+                {
+                    "attempt_id": "a1",
+                    "backend": "geak",
+                    "status": "succeeded",
+                    "decision": "KEEP",
+                    "micro_speedup": 1.8,
+                    "compile_passed": True,
+                    "correctness_passed": "pass",
+                    "duration_sec": 120.5,
+                },
+                {
+                    "attempt_id": "a2",
+                    "backend": "claude",
+                    "status": "failed",
+                    "decision": "FAILED",
+                    "error": "compile err",
+                },
+            ],
+        },
+    )
     instrument.record_kernel_e2e(
-        tmp_path, kernel_id="k001", integrated=True, e2e_gain_pct=3.2,
-        validated=True, decision="KEEP", patch_path="patches/k001.patch",
+        tmp_path,
+        kernel_id="k001",
+        integrated=True,
+        e2e_gain_pct=3.2,
+        validated=True,
+        decision="KEEP",
+        patch_path="patches/k001.patch",
         target_file="moe.py",
     )
 
@@ -82,8 +119,7 @@ def test_kernel_journey_composes_full_lifecycle(tmp_path: Path) -> None:
     kj = out["kernel_journey"]
 
     # Raw substreams are popped, never leaking into the envelope.
-    for raw in ("kernel_discovery", "kernel_dispatch",
-                "kernel_backend_result", "kernel_e2e"):
+    for raw in ("kernel_discovery", "kernel_dispatch", "kernel_backend_result", "kernel_e2e"):
         assert raw not in out
 
     assert len(kj["discovery_runs"]) == 1
@@ -110,12 +146,16 @@ def test_kernel_journey_composes_full_lifecycle(tmp_path: Path) -> None:
 def test_kernel_backend_result_keeps_retries_across_runs(tmp_path: Path) -> None:
     # Same kernel/backend, two different runs -> two distinct attempts.
     for run in ("r1", "r2"):
-        instrument.record_kernel_backend_result(tmp_path, {
-            "kernel_id": "k001", "run_id": run, "attempts": [
-                {"attempt_id": "", "backend": "geak", "status": "failed",
-                 "decision": "FAILED"},
-            ],
-        })
+        instrument.record_kernel_backend_result(
+            tmp_path,
+            {
+                "kernel_id": "k001",
+                "run_id": run,
+                "attempts": [
+                    {"attempt_id": "", "backend": "geak", "status": "failed", "decision": "FAILED"},
+                ],
+            },
+        )
     out = assemble_parts(tmp_path)
     attempts = out["kernel_journey"]["kernels"][0]["backend_attempts"]
     assert len(attempts) == 2
@@ -124,11 +164,18 @@ def test_kernel_backend_result_keeps_retries_across_runs(tmp_path: Path) -> None
 def test_kernel_backend_result_records_pre_dispatch_failure(tmp_path: Path) -> None:
     # Backend failed before running any attempt (empty attempts + failed status)
     # -> a synthetic FAILED marker so the failure is visible in kernel_journey.
-    instrument.record_kernel_backend_result(tmp_path, {
-        "kernel_id": "k001", "run_id": "r1", "attempts": [],
-        "status": "failed", "error_class": "non_reusable_kernel",
-        "error": "empty kernel shape", "backend": "geak",
-    })
+    instrument.record_kernel_backend_result(
+        tmp_path,
+        {
+            "kernel_id": "k001",
+            "run_id": "r1",
+            "attempts": [],
+            "status": "failed",
+            "error_class": "non_reusable_kernel",
+            "error": "empty kernel shape",
+            "backend": "geak",
+        },
+    )
     out = assemble_parts(tmp_path)
     attempts = out["kernel_journey"]["kernels"][0]["backend_attempts"]
     assert len(attempts) == 1
@@ -145,16 +192,30 @@ def test_backend_attempt_maps_kernel_agent_field_names(tmp_path: Path) -> None:
     # kernel-agent emits elapsed_s / created_at / error_type and keeps the
     # achieved speedup at the kernel level in verification (best attempt). The
     # recorder must map those onto the journey attempt + entry.
-    instrument.record_kernel_backend_result(tmp_path, {
-        "kernel_id": "k001", "run_id": "r1",
-        "verification": {"micro_speedup": 1.42, "best_attempt_id": "a1"},
-        "attempts": [
-            {"attempt_id": "a1", "backend": "geak", "status": "completed",
-             "elapsed_s": 87.5, "created_at": "2026-06-12T00:00:00Z"},
-            {"attempt_id": "a2", "backend": "claude", "status": "timeout",
-             "error_type": "timeout", "elapsed_s": 12.0},
-        ],
-    })
+    instrument.record_kernel_backend_result(
+        tmp_path,
+        {
+            "kernel_id": "k001",
+            "run_id": "r1",
+            "verification": {"micro_speedup": 1.42, "best_attempt_id": "a1"},
+            "attempts": [
+                {
+                    "attempt_id": "a1",
+                    "backend": "geak",
+                    "status": "completed",
+                    "elapsed_s": 87.5,
+                    "created_at": "2026-06-12T00:00:00Z",
+                },
+                {
+                    "attempt_id": "a2",
+                    "backend": "claude",
+                    "status": "timeout",
+                    "error_type": "timeout",
+                    "elapsed_s": 12.0,
+                },
+            ],
+        },
+    )
     out = assemble_parts(tmp_path)
     entry = out["kernel_journey"]["kernels"][0]
     a1, a2 = entry["backend_attempts"]
@@ -171,15 +232,22 @@ def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
     # Discovery + backend recording feed the top-level versions map (one object
     # per tool, keyed by tool name), and no longer inline `tool` per element.
     instrument.record_kernel_discovery(
-        tmp_path, source="tracelens", status="success",
+        tmp_path,
+        source="tracelens",
+        status="success",
         hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 10.0}],
         scan={},
     )
-    instrument.record_kernel_backend_result(tmp_path, {
-        "kernel_id": "k1", "run_id": "r1", "attempts": [
-            {"attempt_id": "a1", "backend": "geak", "status": "completed"},
-        ],
-    })
+    instrument.record_kernel_backend_result(
+        tmp_path,
+        {
+            "kernel_id": "k1",
+            "run_id": "r1",
+            "attempts": [
+                {"attempt_id": "a1", "backend": "geak", "status": "completed"},
+            ],
+        },
+    )
     out = assemble_parts(tmp_path)
     versions = out["versions"]
     assert isinstance(versions, dict)
@@ -190,11 +258,52 @@ def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
     assert "tool" not in out["kernel_journey"]["kernels"][0]["backend_attempts"][0]
 
 
+def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
+    # forge is its own backend (NOT folded into oob): a forge attempt keeps
+    # backend="forge" in the journey and mints a distinct versions["forge"]
+    # provenance entry (via _TOOL_PROVENANCE), so A8b can group by forge version.
+    sha = _init_git_repo(tmp_path)
+    instrument.record_kernel_discovery(
+        tmp_path,
+        source="tracelens",
+        status="success",
+        hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 10.0}],
+        scan={},
+    )
+    instrument.record_kernel_backend_result(
+        tmp_path,
+        {
+            "kernel_id": "k1",
+            "run_id": "r1",
+            "attempts": [
+                {
+                    "attempt_id": "a1",
+                    "backend": "forge",
+                    "status": "completed",
+                    "metadata": {"root_dir": str(tmp_path)},
+                },
+            ],
+        },
+    )
+    out = assemble_parts(tmp_path)
+    # The attempt keeps its own backend label in the journey.
+    atts = out["kernel_journey"]["kernels"][0]["backend_attempts"]
+    assert atts[0]["backend"] == "forge"
+    # Distinct provenance entry, NOT merged into oob.
+    versions = out["versions"]
+    assert versions["forge"]["tool"] == "forge"
+    assert versions["forge"]["version"] == sha
+    assert "oob" not in versions
+
+
 def test_discovery_run_carries_duration(tmp_path: Path) -> None:
     instrument.record_kernel_discovery(
-        tmp_path, source="tracelens", status="success",
+        tmp_path,
+        source="tracelens",
+        status="success",
         hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 10.0}],
-        scan={}, duration_sec=4.2,
+        scan={},
+        duration_sec=4.2,
     )
     out = assemble_parts(tmp_path)
     assert out["kernel_journey"]["discovery_runs"][0]["duration_sec"] == 4.2
@@ -205,7 +314,10 @@ def test_bypass_discovery_decouples_source_from_version_tool(tmp_path: Path) -> 
     # dashboard, but it runs the same TraceLens toolchain -> version provenance
     # must stay under "tracelens" and NOT mint an empty versions["bypass"].
     instrument.record_kernel_discovery(
-        tmp_path, source="bypass", tool="tracelens", status="success",
+        tmp_path,
+        source="bypass",
+        tool="tracelens",
+        status="success",
         hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 12.0}],
         scan={"analysis_route": "bypass", "candidates_path": str(tmp_path / "c.json")},
         duration_sec=1.5,
@@ -226,7 +338,9 @@ def test_discovery_tool_defaults_to_source(tmp_path: Path) -> None:
     # Back-compat: callers that omit ``tool`` keep version provenance keyed by
     # ``source`` (the historical behavior for the tracelens route).
     instrument.record_kernel_discovery(
-        tmp_path, source="tracelens", status="success",
+        tmp_path,
+        source="tracelens",
+        status="success",
         hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 9.0}],
         scan={},
     )
@@ -243,18 +357,30 @@ def test_tool_version_probe_git_strategies(tmp_path: Path) -> None:
     # tracelens -> git describe (--always falls back to the short sha here).
     meta_tl = instrument._tool_metadata("tracelens", root=str(tmp_path))
     assert meta_tl["version"]  # non-empty describe output
+    # forge -> git short SHA (own backend, $FORGE_PATH-rooted); same strategy
+    # as geak so a real session mints a populated versions["forge"].
+    meta_forge = instrument._tool_metadata("forge", root=str(tmp_path))
+    assert meta_forge["commit"] == sha
+    assert meta_forge["version"] == sha
     # A caller-supplied version always wins over the probe.
     meta_explicit = instrument._tool_metadata(
-        "geak", root=str(tmp_path), version="v9.9",
+        "geak",
+        root=str(tmp_path),
+        version="v9.9",
     )
     assert meta_explicit["version"] == "v9.9"
 
 
 def test_tool_version_probe_cmd_and_dist() -> None:
     # CLI strategy: python3 --version is always available in CI.
-    assert instrument._probe_tool_version(
-        ("cmd", ("python3", "--version")), "",
-    ).lower().startswith("python")
+    assert (
+        instrument._probe_tool_version(
+            ("cmd", ("python3", "--version")),
+            "",
+        )
+        .lower()
+        .startswith("python")
+    )
     # dist strategy resolves an installed package and rejects bogus 0.0.0.
     assert instrument._dist_version(("pytest",))
     assert instrument._dist_version(("definitely-not-a-real-dist-xyz",)) == ""
@@ -265,22 +391,34 @@ def test_attach_kernel_roofline_enriches_journey() -> None:
 
     kernel_journey = {
         "discovery_runs": [],
-        "kernels": [{
-            "kernel_id": "k001", "name": "moe", "gpu_pct": 42.0,
-            "bound_type": "",
-            "discovery": {
-                "kernel_id": "k001", "bound_type": "",
-                "arithmetic_intensity": None, "efficiency_percent": None,
-            },
-            "backend_attempts": [],
-        }],
+        "kernels": [
+            {
+                "kernel_id": "k001",
+                "name": "moe",
+                "gpu_pct": 42.0,
+                "bound_type": "",
+                "discovery": {
+                    "kernel_id": "k001",
+                    "bound_type": "",
+                    "arithmetic_intensity": None,
+                    "efficiency_percent": None,
+                },
+                "backend_attempts": [],
+            }
+        ],
     }
     kernel_roofline = {
-        "kernels": [{
-            "kernel_id": "k001", "name": "moe", "bound_type": "memory",
-            "arithmetic_intensity": 3.5, "flops_per_byte": 2.1,
-            "efficiency_percent": 61.0, "rocprof_roofline": {"foo": "bar"},
-        }],
+        "kernels": [
+            {
+                "kernel_id": "k001",
+                "name": "moe",
+                "bound_type": "memory",
+                "arithmetic_intensity": 3.5,
+                "flops_per_byte": 2.1,
+                "efficiency_percent": 61.0,
+                "rocprof_roofline": {"foo": "bar"},
+            }
+        ],
     }
     _attach_kernel_roofline(kernel_journey, kernel_roofline)
     entry = kernel_journey["kernels"][0]
@@ -297,18 +435,20 @@ def test_merge_phase_timeline_unit_keeps_collector_and_dedups() -> None:
     from inference_optimizer.breakdown.exporter import _merge_phase_timeline
 
     collector = [
-        {"action": "baseline", "ts": "2026-06-12T00:00:01Z", "change": "baseline",
-         "decision": "promoted"},
-        {"action": "kernel_opt", "ts": "2026-06-12T00:00:02Z",
-         "change": "kernel_opt:k001", "kernel_id": "k001", "decision": "KEEP"},
+        {"action": "baseline", "ts": "2026-06-12T00:00:01Z", "change": "baseline", "decision": "promoted"},
+        {
+            "action": "kernel_opt",
+            "ts": "2026-06-12T00:00:02Z",
+            "change": "kernel_opt:k001",
+            "kernel_id": "k001",
+            "decision": "KEEP",
+        },
     ]
     fragment = [
         # Same attempt as the collector baseline row -> must dedupe (no dup).
-        {"action": "baseline", "ts": "2026-06-12T00:00:01Z", "task_id": "t1",
-         "decision": "promoted"},
+        {"action": "baseline", "ts": "2026-06-12T00:00:01Z", "task_id": "t1", "decision": "promoted"},
         # An audit row the on-disk state lost -> must be appended.
-        {"action": "explore", "ts": "2026-06-12T00:00:03Z", "task_id": "t2",
-         "decision": "promoted"},
+        {"action": "explore", "ts": "2026-06-12T00:00:03Z", "task_id": "t2", "decision": "promoted"},
     ]
     merged = _merge_phase_timeline(fragment, collector)
     actions = [e["action"] for e in merged]
@@ -330,37 +470,57 @@ def test_build_phase_timeline_merges_journal_and_kernel_lanes(
 
     (tmp_path / "reports").mkdir(parents=True, exist_ok=True)
     (tmp_path / "reports" / "optimization_journal.json").write_text(
-        json.dumps({"entries": [
-            {"ts": "2026-06-12T00:00:01Z", "kind": "baseline",
-             "change": "baseline", "outcome": "KEEP", "phase": "EXPLORE",
-             "throughput_after": 5000.0},
-            {"ts": "2026-06-12T00:00:05Z", "kind": "explore",
-             "change": "explore", "outcome": "REVERT", "phase": "EXPLORE",
-             "gain_pct": -2.0},
-        ]}),
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "ts": "2026-06-12T00:00:01Z",
+                        "kind": "baseline",
+                        "change": "baseline",
+                        "outcome": "KEEP",
+                        "phase": "EXPLORE",
+                        "throughput_after": 5000.0,
+                    },
+                    {
+                        "ts": "2026-06-12T00:00:05Z",
+                        "kind": "explore",
+                        "change": "explore",
+                        "outcome": "REVERT",
+                        "phase": "EXPLORE",
+                        "gain_pct": -2.0,
+                    },
+                ]
+            }
+        ),
         encoding="utf-8",
     )
     (tmp_path / "state.json").write_text(
-        json.dumps({
-            "kernel_opt_attempts": {
-                "k001": {"last_ts": "2026-06-12T00:00:03Z",
-                         "history": [{"ts": "2026-06-12T00:00:03Z",
-                                      "decision": "KEEP"}]},
-            },
-            "kernel_integrate_attempts": {
-                "patch-1": {"kernel_id": "k001", "patch_path": "/p.diff",
-                            "attempts": [{"ts": "2026-06-12T00:00:04Z",
-                                          "status": "ok", "decision": "KEEP",
-                                          "gain_pct": 3.0}]},
-            },
-        }),
+        json.dumps(
+            {
+                "kernel_opt_attempts": {
+                    "k001": {
+                        "last_ts": "2026-06-12T00:00:03Z",
+                        "history": [{"ts": "2026-06-12T00:00:03Z", "decision": "KEEP"}],
+                    },
+                },
+                "kernel_integrate_attempts": {
+                    "patch-1": {
+                        "kernel_id": "k001",
+                        "patch_path": "/p.diff",
+                        "attempts": [
+                            {"ts": "2026-06-12T00:00:04Z", "status": "ok", "decision": "KEEP", "gain_pct": 3.0}
+                        ],
+                    },
+                },
+            }
+        ),
         encoding="utf-8",
     )
     # Record an audit-action fragment -> triggers the v3 assembled/merge path.
     instrument.record_phase_event(
-        tmp_path, action="baseline",
-        entry={"task_id": "t1", "ts": "2026-06-12T00:00:01Z",
-               "status": "succeeded", "decision": "promoted"},
+        tmp_path,
+        action="baseline",
+        entry={"task_id": "t1", "ts": "2026-06-12T00:00:01Z", "status": "succeeded", "decision": "promoted"},
     )
 
     out = exporter.build(tmp_path)

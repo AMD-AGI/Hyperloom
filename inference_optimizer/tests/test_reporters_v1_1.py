@@ -29,37 +29,41 @@ def test_decision_journal_skipped_when_empty() -> None:
 
 
 def test_decision_journal_renders_round_and_variants() -> None:
-    bd = _base_breakdown(decision_journal=[{
-        "ts": "2026-05-15T10:00:00+00:00",
-        "phase": "params",
-        "round_id": "params-001",
-        "baseline_ref_tput": 1000.0,
-        "variants": [
+    bd = _base_breakdown(
+        decision_journal=[
             {
-                "name": "ncds_16",
-                "outcome": "round_winner",
-                "gain_pct_vs_base": 0.56,
-                "output_throughput": 1005.6,
-                "status": "succeeded",
-            },
-            {
-                "name": "bad_knob",
-                "outcome": "rejected",
-                "gain_pct_vs_base": -2.0,
-                "reject_reason": "not_keep",
-                "status": "succeeded",
-            },
-        ],
-        "round_decision": {
-            "outcome": "discarded",
-            "best_variant_name": "ncds_16",
-            "gain_vs_cb_pct": 0.56,
-            "promotion_rule": "below_threshold",
-            "promotion_rule_detail": "gain_vs_cb=0.56% < threshold",
-            "keep_threshold_pct": 1.0,
-            "variants_tested_count": 2,
-        },
-    }])
+                "ts": "2026-05-15T10:00:00+00:00",
+                "phase": "params",
+                "round_id": "params-001",
+                "baseline_ref_tput": 1000.0,
+                "variants": [
+                    {
+                        "name": "ncds_16",
+                        "outcome": "round_winner",
+                        "gain_pct_vs_base": 0.56,
+                        "output_throughput": 1005.6,
+                        "status": "succeeded",
+                    },
+                    {
+                        "name": "bad_knob",
+                        "outcome": "rejected",
+                        "gain_pct_vs_base": -2.0,
+                        "reject_reason": "not_keep",
+                        "status": "succeeded",
+                    },
+                ],
+                "round_decision": {
+                    "outcome": "discarded",
+                    "best_variant_name": "ncds_16",
+                    "gain_vs_cb_pct": 0.56,
+                    "promotion_rule": "below_threshold",
+                    "promotion_rule_detail": "gain_vs_cb=0.56% < threshold",
+                    "keep_threshold_pct": 1.0,
+                    "variants_tested_count": 2,
+                },
+            }
+        ]
+    )
     sec = render_dj(bd)
     assert not sec.skipped
     assert "params-001" in sec.markdown_block
@@ -85,32 +89,36 @@ def test_kernel_profiling_renders_top_kernels(tmp_path: Path) -> None:
     bd = _base_breakdown(
         detail_level="verbose",
         session={"session_id": "kp-test", "session_dir": str(tmp_path)},
-        kernel_profiling=[{
-            "run_id": "run-a",
-            "task_id": "sid-1",
-            "ts": "2026-05-15T11:00:00+00:00",
-            "framework": "sglang",
-            "launch": {
-                "framework_args": "python -m sglang.launch_server --tp 8",
-                "framework_args_source": "yaml_cmd",
-            },
-            "artifacts": {
-                "tracelens_status_json": "kernel-agent/runs/sid-1/status/tracelens_analysis/run-a.json",
-                "tracelens_log": rel_log,
-                "trace_paths": ["runs/profile/t1/torch_trace/foo.trace.json.gz"],
-            },
-            "outputs": {
-                "tool": "tracelens_analysis",
-                "analysis_summary": "3 compute-bound kernels",
-                "top_kernels": [{
-                    "kernel_id": "k0",
-                    "name": "gemm_kernel",
-                    "gpu_pct": 12.5,
-                    "duration_us": 90000,
-                    "bottleneck": "compute",
-                }],
-            },
-        }],
+        kernel_profiling=[
+            {
+                "run_id": "run-a",
+                "task_id": "sid-1",
+                "ts": "2026-05-15T11:00:00+00:00",
+                "framework": "sglang",
+                "launch": {
+                    "framework_args": "python -m sglang.launch_server --tp 8",
+                    "framework_args_source": "yaml_cmd",
+                },
+                "artifacts": {
+                    "tracelens_status_json": "kernel-agent/runs/sid-1/status/tracelens_analysis/run-a.json",
+                    "tracelens_log": rel_log,
+                    "trace_paths": ["runs/profile/t1/torch_trace/foo.trace.json.gz"],
+                },
+                "outputs": {
+                    "tool": "tracelens_analysis",
+                    "analysis_summary": "3 compute-bound kernels",
+                    "top_kernels": [
+                        {
+                            "kernel_id": "k0",
+                            "name": "gemm_kernel",
+                            "gpu_pct": 12.5,
+                            "duration_us": 90000,
+                            "bottleneck": "compute",
+                        }
+                    ],
+                },
+            }
+        ],
     )
     sec = render_kp(bd)
     assert not sec.skipped
@@ -130,12 +138,14 @@ def test_kernel_profiling_standard_hides_cli_log_tail(tmp_path: Path) -> None:
     bd = _base_breakdown(
         detail_level="standard",
         session={"session_id": "kp-test", "session_dir": str(tmp_path)},
-        kernel_profiling=[{
-            "run_id": "run-b",
-            "task_id": "t1",
-            "artifacts": {"tracelens_log": "logs/run.log"},
-            "outputs": {"tool": "tracelens_analysis", "top_kernels": []},
-        }],
+        kernel_profiling=[
+            {
+                "run_id": "run-b",
+                "task_id": "t1",
+                "artifacts": {"tracelens_log": "logs/run.log"},
+                "outputs": {"tool": "tracelens_analysis", "top_kernels": []},
+            }
+        ],
     )
     sec = render_kp(bd)
     assert "secret-tail-line" not in sec.markdown_block
@@ -143,19 +153,23 @@ def test_kernel_profiling_standard_hides_cli_log_tail(tmp_path: Path) -> None:
 
 def test_compose_includes_v1_1_sections_in_report() -> None:
     bd = _base_breakdown(
-        decision_journal=[{
-            "phase": "backends",
-            "round_id": "b-1",
-            "variants": [{"name": "v1", "outcome": "promoted", "gain_pct_vs_base": 5.0}],
-            "round_decision": {"outcome": "promoted", "promotion_rule": "single_shot"},
-        }],
-        kernel_profiling=[{
-            "run_id": "p1",
-            "task_id": "t1",
-            "outputs": {"tool": "magpie_torch_profiler", "top_kernels": []},
-            "artifacts": {},
-            "launch": {},
-        }],
+        decision_journal=[
+            {
+                "phase": "backends",
+                "round_id": "b-1",
+                "variants": [{"name": "v1", "outcome": "promoted", "gain_pct_vs_base": 5.0}],
+                "round_decision": {"outcome": "promoted", "promotion_rule": "single_shot"},
+            }
+        ],
+        kernel_profiling=[
+            {
+                "run_id": "p1",
+                "task_id": "t1",
+                "outputs": {"tool": "magpie_torch_profiler", "top_kernels": []},
+                "artifacts": {},
+                "launch": {},
+            }
+        ],
         workload={"model_name": "m", "framework": "sglang", "gpu_type": "MI300X"},
         baseline={"throughput_tok_s_per_gpu": 100.0},
         final={"cumulative_gain_pct_validated": 5.0},

@@ -36,42 +36,50 @@ from inference_optimizer.orchestrator.system_prompts.critic_prompt_builder impor
 # 1. intent_parser — envelope schema accepts verdict OR verdict_map
 def _envelope(**payload: Any) -> dict[str, Any]:
     return {
-        "intents": [{
-            "intent_type": "review_verdict",
-            "payload": payload,
-        }],
+        "intents": [
+            {
+                "intent_type": "review_verdict",
+                "payload": payload,
+            }
+        ],
     }
 
 
 def test_intent_parser_accepts_legacy_single_verdict():
-    intents = validate_envelope(_envelope(
-        target_proposal_msg_id="msg-1",
-        verdict="approve",
-        reasoning="ok",
-    ))
+    intents = validate_envelope(
+        _envelope(
+            target_proposal_msg_id="msg-1",
+            verdict="approve",
+            reasoning="ok",
+        )
+    )
     assert len(intents) == 1
     assert intents[0].type is IntentType.REVIEW_VERDICT
     assert intents[0].payload["verdict"] == "approve"
 
 
 def test_intent_parser_accepts_per_variant_verdict_map():
-    intents = validate_envelope(_envelope(
-        target_proposal_msg_id="msg-1",
-        verdict_map={
-            "v_a": {"verdict": "approve", "rationale": "looks promising"},
-            "v_b": {"verdict": "reject",  "rationale": "kb says no"},
-        },
-    ))
+    intents = validate_envelope(
+        _envelope(
+            target_proposal_msg_id="msg-1",
+            verdict_map={
+                "v_a": {"verdict": "approve", "rationale": "looks promising"},
+                "v_b": {"verdict": "reject", "rationale": "kb says no"},
+            },
+        )
+    )
     assert intents[0].payload["verdict_map"]["v_a"]["verdict"] == "approve"
 
 
 def test_intent_parser_rejects_both_verdict_and_verdict_map():
     with pytest.raises(IntentValidationError) as exc:
-        validate_envelope(_envelope(
-            target_proposal_msg_id="msg-1",
-            verdict="approve",
-            verdict_map={"v_a": {"verdict": "reject"}},
-        ))
+        validate_envelope(
+            _envelope(
+                target_proposal_msg_id="msg-1",
+                verdict="approve",
+                verdict_map={"v_a": {"verdict": "reject"}},
+            )
+        )
     assert "mutually exclusive" in str(exc.value)
 
 
@@ -83,27 +91,33 @@ def test_intent_parser_rejects_neither_verdict_nor_verdict_map():
 
 def test_intent_parser_rejects_empty_verdict_map():
     with pytest.raises(IntentValidationError):
-        validate_envelope(_envelope(
-            target_proposal_msg_id="msg-1",
-            verdict_map={},
-        ))
+        validate_envelope(
+            _envelope(
+                target_proposal_msg_id="msg-1",
+                verdict_map={},
+            )
+        )
 
 
 def test_intent_parser_rejects_verdict_map_entry_missing_verdict():
     with pytest.raises(IntentValidationError) as exc:
-        validate_envelope(_envelope(
-            target_proposal_msg_id="msg-1",
-            verdict_map={"v_a": {"rationale": "no verdict key"}},
-        ))
+        validate_envelope(
+            _envelope(
+                target_proposal_msg_id="msg-1",
+                verdict_map={"v_a": {"rationale": "no verdict key"}},
+            )
+        )
     assert "missing required 'verdict'" in str(exc.value)
 
 
 def test_intent_parser_rejects_non_dict_verdict_map_entry():
     with pytest.raises(IntentValidationError):
-        validate_envelope(_envelope(
-            target_proposal_msg_id="msg-1",
-            verdict_map={"v_a": "approve"},
-        ))
+        validate_envelope(
+            _envelope(
+                target_proposal_msg_id="msg-1",
+                verdict_map={"v_a": "approve"},
+            )
+        )
 
 
 # 2. PolicyGate — verdict_map content validation
@@ -117,28 +131,38 @@ def _critic_intent(**payload: Any) -> Intent:
 
 
 def test_policy_gate_accepts_legacy_single_verdict(gate):
-    gate.validate_intent("critic", _critic_intent(
-        target_proposal_msg_id="msg-1", verdict="approve",
-    ))
+    gate.validate_intent(
+        "critic",
+        _critic_intent(
+            target_proposal_msg_id="msg-1",
+            verdict="approve",
+        ),
+    )
 
 
 def test_policy_gate_accepts_per_variant_verdict_map(gate):
-    gate.validate_intent("critic", _critic_intent(
-        target_proposal_msg_id="msg-1",
-        verdict_map={
-            "v_a": {"verdict": "approve"},
-            "v_b": {"verdict": "reject", "rationale": "no"},
-        },
-    ))
+    gate.validate_intent(
+        "critic",
+        _critic_intent(
+            target_proposal_msg_id="msg-1",
+            verdict_map={
+                "v_a": {"verdict": "approve"},
+                "v_b": {"verdict": "reject", "rationale": "no"},
+            },
+        ),
+    )
 
 
 def test_policy_gate_rejects_when_both_present(gate):
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("critic", _critic_intent(
-            target_proposal_msg_id="msg-1",
-            verdict="approve",
-            verdict_map={"v_a": {"verdict": "approve"}},
-        ))
+        gate.validate_intent(
+            "critic",
+            _critic_intent(
+                target_proposal_msg_id="msg-1",
+                verdict="approve",
+                verdict_map={"v_a": {"verdict": "approve"}},
+            ),
+        )
     assert exc.value.rule == "payload"
     # PolicyGate says "exactly one ..."; intent_parser says "mutually exclusive". Either is valid.
     msg = str(exc.value) + " " + (exc.value.hint or "")
@@ -148,21 +172,27 @@ def test_policy_gate_rejects_when_both_present(gate):
 def test_policy_gate_rejects_when_neither_present(gate):
     """Defense in depth — PolicyGate still rejects even though intent_parser fires first."""
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("critic", _critic_intent(
-            target_proposal_msg_id="msg-1",
-        ))
+        gate.validate_intent(
+            "critic",
+            _critic_intent(
+                target_proposal_msg_id="msg-1",
+            ),
+        )
     assert exc.value.rule == "payload"
 
 
 def test_policy_gate_rejects_unknown_per_variant_verdict(gate):
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("critic", _critic_intent(
-            target_proposal_msg_id="msg-1",
-            verdict_map={
-                "v_a": {"verdict": "approve"},
-                "v_b": {"verdict": "obliterate"},  # not in REVIEW_VERDICTS
-            },
-        ))
+        gate.validate_intent(
+            "critic",
+            _critic_intent(
+                target_proposal_msg_id="msg-1",
+                verdict_map={
+                    "v_a": {"verdict": "approve"},
+                    "v_b": {"verdict": "obliterate"},  # not in REVIEW_VERDICTS
+                },
+            ),
+        )
     assert "verdict_map" in str(exc.value)
     assert "obliterate" in str(exc.value)
 
@@ -205,15 +235,17 @@ class _StubBus:
         self.messages: list[_BusMessage] = []
 
     async def append_and_seq(self, msg: Any) -> Any:  # noqa: ANN401
-        self.messages.append(_BusMessage(
-            from_agent=getattr(msg, "from_agent", ""),
-            to_agent=getattr(msg, "to_agent", ""),
-            topic=getattr(msg, "topic", ""),
-            payload=dict(getattr(msg, "payload", {}) or {}),
-            in_reply_to=getattr(msg, "in_reply_to", "") or "",
-            priority=int(getattr(msg, "priority", 1) or 1),
-            msg_id=getattr(msg, "msg_id", ""),
-        ))
+        self.messages.append(
+            _BusMessage(
+                from_agent=getattr(msg, "from_agent", ""),
+                to_agent=getattr(msg, "to_agent", ""),
+                topic=getattr(msg, "topic", ""),
+                payload=dict(getattr(msg, "payload", {}) or {}),
+                in_reply_to=getattr(msg, "in_reply_to", "") or "",
+                priority=int(getattr(msg, "priority", 1) or 1),
+                msg_id=getattr(msg, "msg_id", ""),
+            )
+        )
         return None
 
 
@@ -258,9 +290,7 @@ def _seed_explore_proposal(
     variants: list[str] | None = None,
 ) -> PendingProposal:
     variants = variants or ["v_a", "v_b", "v_c", "v_d"]
-    grid = [
-        {"name": vn, "extra_args": f"--flag-{vn}"} for vn in variants
-    ]
+    grid = [{"name": vn, "extra_args": f"--flag-{vn}"} for vn in variants]
     pending = PendingProposal(
         proposal_msg_id=msg_id,
         from_agent="orchestration",
@@ -363,6 +393,7 @@ async def test_verdict_for_unknown_proposal_logs_observation(coord):
 # 4. Critic prompt — OUTPUT PROTOCOL documents the single-verdict shape
 def _critic_prompt_text() -> str:
     from inference_optimizer.orchestrator.action_registry import ActionRegistry
+
     registry = ActionRegistry()
     registry.load()
     return build_critic_prompt(
@@ -404,6 +435,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
         async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
             create_calls.append(dict(kwargs))
             from inference_optimizer.orchestrator.task_registry import Task
+
             return (
                 Task(
                     task_id="t-explore-filtered",
@@ -431,7 +463,8 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
 
     coord.shared_state = _MoreState()
     await coord._materialize_approved_proposal(
-        pending, approved_variant_names={"v_a", "v_c"},
+        pending,
+        approved_variant_names={"v_a", "v_c"},
     )
     assert create_calls, "materialize must enqueue a task"
     grid = create_calls[0]["params"]["grid"]
@@ -455,6 +488,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
         async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
             create_calls.append(dict(kwargs))
             from inference_optimizer.orchestrator.task_registry import Task
+
             return (
                 Task(
                     task_id="t-explore-full",
@@ -468,7 +502,8 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
 
     coord.tasks = _StubTaskRegistry()
     pending = _seed_explore_proposal(
-        coord, variants=["v_a", "v_b", "v_c"],
+        coord,
+        variants=["v_a", "v_b", "v_c"],
     )
 
     @dataclass
@@ -532,6 +567,7 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
         async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
             create_calls.append(dict(kwargs))
             from inference_optimizer.orchestrator.task_registry import Task
+
             return (
                 Task(
                     task_id="t-explore-direct",
@@ -545,10 +581,8 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
 
     coord.tasks = _TaskRegistry()
     grid = [
-        {"name": "v_a", "extra_args": "--flag-a",
-         "provenance": "specialist:serving_specialist"},
-        {"name": "v_b", "extra_args": "--flag-b",
-         "provenance": "specialist:serving_specialist"},
+        {"name": "v_a", "extra_args": "--flag-a", "provenance": "specialist:serving_specialist"},
+        {"name": "v_b", "extra_args": "--flag-b", "provenance": "specialist:serving_specialist"},
     ]
     intent = Intent(
         type=IntentType.DELEGATE,
@@ -592,6 +626,7 @@ def test_default_specialist_max_proposals_is_twelve():
     from inference_optimizer.orchestrator.system_prompts.specialist_prompt_builder import (
         DEFAULT_SPECIALIST_MAX_PROPOSALS as PROMPT_DEFAULT,
     )
+
     assert DEFAULT_SPECIALIST_MAX_PROPOSALS == 12
     assert PROMPT_DEFAULT == 12
 
@@ -619,11 +654,13 @@ class TestCriticPromptBuilder:
     @pytest.fixture
     def registry(self):
         from inference_optimizer.orchestrator.action_registry import ActionRegistry
+
         return ActionRegistry().load()
 
     @staticmethod
     def _rules_path():
         from inference_optimizer.paths import asset_system_prompts_dir
+
         return asset_system_prompts_dir() / "critic.md"
 
     def test_section_headers_present(self, registry):
@@ -633,6 +670,7 @@ class TestCriticPromptBuilder:
         from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
             default_enabled_actions,
         )
+
         text = build_critic_prompt(
             action_registry=registry,
             enabled_actions=default_enabled_actions(no_kernel=False),
@@ -660,6 +698,7 @@ class TestCriticPromptBuilder:
         from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
             default_enabled_actions,
         )
+
         kwargs = dict(
             action_registry=registry,
             enabled_actions=default_enabled_actions(no_kernel=False),
@@ -675,6 +714,7 @@ class TestCriticPromptBuilder:
         from inference_optimizer.orchestrator.system_prompts.critic_prompt_builder import (
             build_critic_prompt,
         )
+
         text = build_critic_prompt(
             action_registry=registry,
             enabled_actions=registry.names(),
@@ -693,6 +733,7 @@ class TestCriticPromptBuilder:
         from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
             default_enabled_actions,
         )
+
         for no_kernel in (False, True):
             enabled = default_enabled_actions(no_kernel=no_kernel)
             text = build_critic_prompt(
@@ -703,9 +744,7 @@ class TestCriticPromptBuilder:
                 max_minutes=60,
                 rules_fragment_path=self._rules_path(),
             )
-            assert "validate_stack" in text, (
-                f"validate_stack missing (no_kernel={no_kernel})"
-            )
+            assert "validate_stack" in text, f"validate_stack missing (no_kernel={no_kernel})"
 
     def test_no_kernel_mode_drops_kernel_owned(self, registry):
         from inference_optimizer.orchestrator.system_prompts.critic_prompt_builder import (
@@ -714,6 +753,7 @@ class TestCriticPromptBuilder:
         from inference_optimizer.orchestrator.system_prompts.prompt_builder import (
             default_enabled_actions,
         )
+
         text = build_critic_prompt(
             action_registry=registry,
             enabled_actions=default_enabled_actions(no_kernel=True),
@@ -724,9 +764,7 @@ class TestCriticPromptBuilder:
         )
         assert "## 5. KERNEL-OWNED CARVE-OUT" not in text
         for name in ("kernel_opt", "integrate", "deep_kernel_analysis"):
-            assert f"**{name}**" not in text, (
-                f"{name} should not appear in no-kernel catalogue"
-            )
+            assert f"**{name}**" not in text, f"{name} should not appear in no-kernel catalogue"
 
 
 # critic_robustness breakdown renderer (formerly test_critic_robustness_renderer_units.py)
@@ -738,10 +776,12 @@ class TestCriticRobustnessRenderer:
         from inference_optimizer.breakdown.reporters._renderers import (
             critic_robustness as cr_mod,
         )
+
         return cr_mod.render({"critic_robustness": payload})
 
     def test_empty_returns_skipped(self):
         from inference_optimizer.breakdown.reporters.base import RenderedSection
+
         out = self._render([])
         assert isinstance(out, RenderedSection)
         assert out.section_id == "critic_robustness"
@@ -754,26 +794,30 @@ class TestCriticRobustnessRenderer:
         assert any("prompt-only" in w for w in out.warnings)
 
     def test_empty_payloads_v2_is_skipped(self):
-        out = self._render([
-            {"prompt": "x", "response": None, "decision": "", "rationale": ""},
-        ])
+        out = self._render(
+            [
+                {"prompt": "x", "response": None, "decision": "", "rationale": ""},
+            ]
+        )
         assert out.skipped is True
         assert any("non-actionable" in w for w in out.warnings)
 
     def test_populated_payload_renders_markdown_table(self):
-        out = self._render([
-            {
-                "ts": "2026-05-13T01:01:01Z",
-                "action": "kernel_opt",
-                "decision": "KEEP",
-                "pass_count": 3,
-                "fail_count": 1,
-                "rationale": "Improved attention kernel reduces decode latency by 4%.",
-            },
-            {
-                "prompt": "raw fallback",
-            },
-        ])
+        out = self._render(
+            [
+                {
+                    "ts": "2026-05-13T01:01:01Z",
+                    "action": "kernel_opt",
+                    "decision": "KEEP",
+                    "pass_count": 3,
+                    "fail_count": 1,
+                    "rationale": "Improved attention kernel reduces decode latency by 4%.",
+                },
+                {
+                    "prompt": "raw fallback",
+                },
+            ]
+        )
         assert out.skipped is False
         assert "decision" in out.markdown_block
         assert "kernel_opt" in out.markdown_block
@@ -782,6 +826,7 @@ class TestCriticRobustnessRenderer:
         from inference_optimizer.breakdown.reporters._renderers import (
             critic_robustness as cr_mod,
         )
+
         rows = [
             {
                 "decision": "KEEP",
@@ -804,6 +849,7 @@ class TestN38ActionVerdictClass:
         from inference_optimizer.orchestrator.action_registry import (
             ActionMetadata,
         )
+
         fields = {f.name for f in ActionMetadata.__dataclass_fields__.values()}
         assert "verdict_class" in fields, (
             "ActionMetadata must declare verdict_class field so per-action "
@@ -814,6 +860,7 @@ class TestN38ActionVerdictClass:
         from inference_optimizer.orchestrator.action_registry import (
             ActionRegistry,
         )
+
         reg = ActionRegistry().load()
         all_actions = reg.all()
         assert all_actions, "expected ActionRegistry to load >= 1 action"
@@ -828,6 +875,7 @@ class TestN38ActionVerdictClass:
         from inference_optimizer.orchestrator.action_registry import (
             ActionRegistry,
         )
+
         reg = ActionRegistry().load()
 
         def klass(name: str) -> str:
@@ -839,9 +887,16 @@ class TestN38ActionVerdictClass:
         for n in ("report", "session_breakdown", "target_analysis"):
             assert klass(n) == "archival", n
         registered_exploration = (
-            "baseline", "profile", "roofline", "explore", "sweep",
-            "kernel_opt", "operator_tuning", "vendor_kernel_config",
-            "deep_kernel_analysis", "recover",
+            "baseline",
+            "profile",
+            "roofline",
+            "explore",
+            "sweep",
+            "kernel_opt",
+            "operator_tuning",
+            "vendor_kernel_config",
+            "deep_kernel_analysis",
+            "recover",
         )
         for n in registered_exploration:
             if reg.get(n) is None:
@@ -852,6 +907,7 @@ class TestN38ActionVerdictClass:
         from inference_optimizer.orchestrator.backends.critic_agent import (
             CriticAgentBackend,
         )
+
         root = tmp_path / "critic-agent"
         (root / "runtime").mkdir(parents=True)
         (root / "runtime" / "cli.py").write_text("# stub")
@@ -859,11 +915,15 @@ class TestN38ActionVerdictClass:
         sd.mkdir()
 
         def _fake_client_factory():
-            class _C: pass
+            class _C:
+                pass
+
             return _C()
 
         def _fake_runtime_caller_factory():
-            def _caller(call): return None
+            def _caller(call):
+                return None
+
             return _caller
 
         backend = CriticAgentBackend(
@@ -875,7 +935,8 @@ class TestN38ActionVerdictClass:
             action_verdict_policy={"baseline": "exploration", "integrate": "promotion"},
         )
         assert backend.action_verdict_policy == {
-            "baseline": "exploration", "integrate": "promotion",
+            "baseline": "exploration",
+            "integrate": "promotion",
         }
 
     def test_critic_agent_backend_injects_policy_into_judge_bundle(self, tmp_path):
@@ -885,6 +946,7 @@ class TestN38ActionVerdictClass:
             CriticAgentBackend,
             RuntimeCall,
         )
+
         root = tmp_path / "critic-agent"
         (root / "runtime").mkdir(parents=True)
         (root / "runtime" / "cli.py").write_text("# stub")
@@ -894,19 +956,35 @@ class TestN38ActionVerdictClass:
         captured_bundle: dict = {}
 
         class _FakeAsyncOpenAI:
-            def __init__(self): self.chat = _FakeChat(captured_bundle)
+            def __init__(self):
+                self.chat = _FakeChat(captured_bundle)
+
         class _FakeChat:
-            def __init__(self, bucket): self.completions = _FakeCompletions(bucket)
+            def __init__(self, bucket):
+                self.completions = _FakeCompletions(bucket)
+
         class _FakeCompletions:
-            def __init__(self, bucket): self._b = bucket
+            def __init__(self, bucket):
+                self._b = bucket
+
             async def create(self, *, model, messages, max_completion_tokens):
                 user_msg = messages[-1]["content"]
                 self._b["user_prompt"] = user_msg
+
                 class _Choice:
-                    message = type("M", (), {"content": _json.dumps({
-                        "review_verdicts": [],
-                    })})()
+                    message = type(
+                        "M",
+                        (),
+                        {
+                            "content": _json.dumps(
+                                {
+                                    "review_verdicts": [],
+                                }
+                            )
+                        },
+                    )()
                     finish_reason = "stop"
+
                 return type("R", (), {"choices": [_Choice()]})()
 
         def _fake_runtime_caller_factory():
@@ -922,9 +1000,15 @@ class TestN38ActionVerdictClass:
                     }
                     call.out_path.write_text(_json.dumps(bundle), encoding="utf-8")
                 else:
-                    call.out_path.write_text(_json.dumps({
-                        "intent_envelope": {"intents": []},
-                    }), encoding="utf-8")
+                    call.out_path.write_text(
+                        _json.dumps(
+                            {
+                                "intent_envelope": {"intents": []},
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
             return _caller
 
         backend = CriticAgentBackend(
@@ -934,7 +1018,8 @@ class TestN38ActionVerdictClass:
             runtime_caller_factory=_fake_runtime_caller_factory,
             static_context={"model": "m", "framework": "sglang"},
             action_verdict_policy={
-                "params": "exploration", "integrate": "promotion",
+                "params": "exploration",
+                "integrate": "promotion",
             },
         )
         asyncio.run(backend.run(prompt="hello"))
@@ -947,10 +1032,8 @@ class TestN38ActionVerdictClass:
 
     def test_critic_md_mentions_action_verdict_policy_lookup(self):
         from pathlib import Path as _Path
-        p = (
-            _Path(__file__).resolve().parent.parent
-            / "orchestrator" / "system_prompts" / "critic.md"
-        )
+
+        p = _Path(__file__).resolve().parent.parent / "orchestrator" / "system_prompts" / "critic.md"
         text = p.read_text(encoding="utf-8")
         assert "action_verdict_policy" in text, (
             "critic.md must mention action_verdict_policy so the LLM-critic "

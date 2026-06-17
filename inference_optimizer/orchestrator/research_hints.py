@@ -19,12 +19,18 @@ from .. import session_paths
 
 log = logging.getLogger("hyperloom.research_hints")
 
-_HINT_FIELDS = ("what", "expected_impact", "accuracy_risk", "source",
-                "domain_tags", "status")
+_HINT_FIELDS = ("what", "expected_impact", "accuracy_risk", "source", "domain_tags", "status")
 
 
 def _coerce_hint(raw: Any) -> dict[str, Any] | None:
-    """Normalize one incoming hint; return ``None`` when it has no source."""
+    """Normalize one incoming hint; return ``None`` when it has no source.
+
+    Args:
+        raw: A raw incoming hint value.
+
+    Returns:
+        The normalized hint dict, or ``None`` when it lacks a source/claim.
+    """
     if not isinstance(raw, dict):
         return None
     source = str(raw.get("source") or "").strip()
@@ -48,12 +54,26 @@ def _coerce_hint(raw: Any) -> dict[str, Any] | None:
 
 
 def _hint_key(hint: dict[str, Any]) -> str:
-    """Dedup key for append-merge: claim + source (case-insensitive)."""
+    """Dedup key for append-merge: claim + source (case-insensitive).
+
+    Args:
+        hint: A normalized hint dict.
+
+    Returns:
+        The case-insensitive dedup key string.
+    """
     return f"{hint['what'].lower()}::{hint['source'].lower()}"
 
 
 def load_hints(session_dir: Path) -> list[dict[str, Any]]:
-    """Return the structured hints written so far (empty on miss/parse error)."""
+    """Return the structured hints written so far (empty on miss/parse error).
+
+    Args:
+        session_dir: Session directory to read hints from.
+
+    Returns:
+        The list of normalized hint dicts (empty on miss/parse error).
+    """
     path = session_paths.research_hints_json(session_dir)
     try:
         if not path.exists():
@@ -85,8 +105,7 @@ def _render_md(hints: list[dict[str, Any]]) -> str:
     lines = ["# Research Hints", ""]
     if not hints:
         lines += [
-            "_No proven priors collected yet (scout produced an empty set "
-            + "or all sources are unreachable)._",
+            "_No proven priors collected yet (scout produced an empty set " + "or all sources are unreachable)._",
             "",
         ]
         return "\n".join(lines)
@@ -117,7 +136,11 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def write_hints_skeleton(session_dir: Path) -> None:
-    """Ensure both hint artifacts exist before the scout returns (PRELUDE invariant; preserves prior hints)."""
+    """Ensure both hint artifacts exist before the scout returns (PRELUDE invariant; preserves prior hints).
+
+    Args:
+        session_dir: Session directory whose hint artifacts are ensured.
+    """
     md_path = session_paths.research_hints_md(session_dir)
     if md_path.exists():
         return
@@ -145,9 +168,18 @@ def _persist(session_dir: Path, hints: list[dict[str, Any]]) -> None:
 
 
 def append_hints(
-    session_dir: Path, incoming: list[Any],
+    session_dir: Path,
+    incoming: list[Any],
 ) -> tuple[int, int]:
-    """Append-merge ``incoming`` scout hints; returns ``(added, dropped)`` (dropped = missing-source rejects; duplicates not re-added)."""
+    """Append-merge ``incoming`` scout hints; returns ``(added, dropped)`` (dropped = missing-source rejects; duplicates not re-added).
+
+    Args:
+        session_dir: Session directory to merge hints into.
+        incoming: Raw incoming hint values from the scout.
+
+    Returns:
+        A ``(added, dropped)`` tuple of counts.
+    """
     existing = load_hints(session_dir)
     seen = {_hint_key(h) for h in existing}
     added = 0
@@ -168,7 +200,14 @@ def append_hints(
 
 
 def _coerce_per_conc(raw: Any) -> dict[str, Any] | None:
-    """Drop a per-concurrency target row that lacks a source."""
+    """Drop a per-concurrency target row that lacks a source.
+
+    Args:
+        raw: A raw per-concurrency target row value.
+
+    Returns:
+        The normalized row dict, or ``None`` when it lacks a source.
+    """
     if not isinstance(raw, dict):
         return None
     if not str(raw.get("source") or "").strip():
@@ -181,9 +220,18 @@ def _coerce_per_conc(raw: Any) -> dict[str, Any] | None:
 
 
 def write_competitor_target(
-    session_dir: Path, target: Any,
+    session_dir: Path,
+    target: Any,
 ) -> bool:
-    """Persist ``competitor_target.json`` after dropping sourceless rows; ``True`` when ≥1 sourced row was written."""
+    """Persist ``competitor_target.json`` after dropping sourceless rows; ``True`` when ≥1 sourced row was written.
+
+    Args:
+        session_dir: Session directory to write the target into.
+        target: The competitor target payload.
+
+    Returns:
+        True when at least one sourced row was written, else False.
+    """
     if not isinstance(target, dict):
         return False
     per_conc_in = target.get("per_conc") or []
@@ -212,7 +260,14 @@ def write_competitor_target(
 
 
 def load_competitor_target(session_dir: Path) -> dict[str, Any] | None:
-    """Read ``competitor_target.json`` keeping only sourced per-conc rows; ``None`` when absent/malformed/sourceless. Fail-soft."""
+    """Read ``competitor_target.json`` keeping only sourced per-conc rows; ``None`` when absent/malformed/sourceless. Fail-soft.
+
+    Args:
+        session_dir: Session directory to read the target from.
+
+    Returns:
+        The competitor target dict, or ``None`` when absent/malformed/sourceless.
+    """
     path = session_paths.competitor_target_json(session_dir)
     try:
         if not path.exists():
@@ -240,9 +295,18 @@ def load_competitor_target(session_dir: Path) -> dict[str, Any] | None:
 
 
 def _match_target_row(
-    target: dict[str, Any], conc: int | None,
+    target: dict[str, Any],
+    conc: int | None,
 ) -> dict[str, Any] | None:
-    """Pick the per-conc target row nearest ``conc`` (highest-throughput row when conc unknown)."""
+    """Pick the per-conc target row nearest ``conc`` (highest-throughput row when conc unknown).
+
+    Args:
+        target: A competitor target dict carrying ``per_conc`` rows.
+        conc: The concurrency to match, or ``None``.
+
+    Returns:
+        The best-matching per-conc row, or ``None`` when there are no rows.
+    """
     rows = target.get("per_conc") or []
     if not rows:
         return None
@@ -266,7 +330,17 @@ def gap_analysis(
     our_tpot_ms: float | None,
     conc: int | None = None,
 ) -> dict[str, Any] | None:
-    """Compute advisory throughput/latency gaps against a competitor row; ``None`` when no comparable row. ``primary_gap`` is "latency" when TPOT ratio outweighs throughput gap."""
+    """Compute advisory throughput/latency gaps against a competitor row; ``None`` when no comparable row. ``primary_gap`` is "latency" when TPOT ratio outweighs throughput gap.
+
+    Args:
+        target: A competitor target dict, or ``None``.
+        our_tput_per_gpu: Our achieved throughput per GPU, when known.
+        our_tpot_ms: Our achieved TPOT in milliseconds, when known.
+        conc: Concurrency to match the target row against.
+
+    Returns:
+        A gap-analysis dict, or ``None`` when no comparable row exists.
+    """
     if not target:
         return None
     row = _match_target_row(target, conc)
@@ -311,11 +385,21 @@ def full_gap_summary(
     *,
     tpot_ratio_threshold: float = 1.3,
 ) -> str:
-    """Render an advisory "External target gap" block (empty when no gap; advisory only, never gates)."""
+    """Render an advisory "External target gap" block (empty when no gap; advisory only, never gates).
+
+    Args:
+        gap: A gap-analysis dict, or ``None``.
+        tpot_ratio_threshold: TPOT ratio above which latency is called out.
+
+    Returns:
+        The advisory block text, or ``""`` when there is no gap.
+    """
     if not gap:
         return ""
-    lines = ["External target gap (advisory) — competitor numbers are "
-             + "LLM-authored with sources; treat as direction, not a gate."]
+    lines = [
+        "External target gap (advisory) — competitor numbers are "
+        + "LLM-authored with sources; treat as direction, not a gate."
+    ]
     tg = gap.get("throughput_gap_pct")
     tr = gap.get("tpot_ratio")
     ig = gap.get("interactivity_gap_pct")
@@ -353,16 +437,51 @@ def _to_num(value: Any) -> float | None:
 
 # Direction keywords for cutting per-output-token latency (flag variants aligning with a dominant TPOT gap; advisory).
 _LATENCY_DIRECTION_KEYWORDS: tuple[str, ...] = (
-    "mtp", "speculative", "eagle", "medusa", "decode", "comm", "overlap",
-    "allreduce", "all_reduce", "quantized_allreduce", "cuda_graph",
-    "cudagraph", "fused", "fuse",
+    "mtp",
+    "speculative",
+    "eagle",
+    "medusa",
+    "decode",
+    "comm",
+    "overlap",
+    "allreduce",
+    "all_reduce",
+    "quantized_allreduce",
+    "cuda_graph",
+    "cudagraph",
+    "fused",
+    "fuse",
 )
 
-_STOPWORDS: frozenset[str] = frozenset({
-    "the", "and", "for", "with", "use", "using", "enable", "enabled",
-    "via", "this", "that", "from", "into", "per", "set", "than", "more",
-    "less", "when", "then", "case", "mode", "flag", "flags", "value",
-})
+_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "with",
+        "use",
+        "using",
+        "enable",
+        "enabled",
+        "via",
+        "this",
+        "that",
+        "from",
+        "into",
+        "per",
+        "set",
+        "than",
+        "more",
+        "less",
+        "when",
+        "then",
+        "case",
+        "mode",
+        "flag",
+        "flags",
+        "value",
+    }
+)
 
 
 def _tokens(text: str) -> set[str]:
@@ -391,7 +510,16 @@ def match_variants_to_priors(
     *,
     primary_gap: str | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Annotate which variants align with proven priors (advisory; informs ordering only). Returns ``{name: {hints, latency_aligned}}`` for variants matching a hint or a dominant latency gap."""
+    """Annotate which variants align with proven priors (advisory; informs ordering only). Returns ``{name: {hints, latency_aligned}}`` for variants matching a hint or a dominant latency gap.
+
+    Args:
+        variants: Candidate variant dicts to annotate.
+        hints: Normalized prior hint dicts.
+        primary_gap: The dominant external gap (e.g. ``"latency"``), when known.
+
+    Returns:
+        Mapping of variant name to its match info dict.
+    """
     out: dict[str, dict[str, Any]] = {}
     latency_dominant = str(primary_gap or "").strip().lower() == "latency"
     hint_tokens: list[tuple[str, set[str]]] = []
@@ -414,8 +542,7 @@ def match_variants_to_priors(
             continue
         text = " ".join(
             str(variant.get(k) or "")
-            for k in ("name", "extra_server_args", "extra_sglang_args",
-                      "candidate_extra_server_args", "description")
+            for k in ("name", "extra_server_args", "extra_sglang_args", "candidate_extra_server_args", "description")
         )
         text += " " + " ".join(str(t) for t in (variant.get("domain_tags") or []))
         vtoks = _tokens(text)
@@ -423,10 +550,7 @@ def match_variants_to_priors(
         for what, toks in hint_tokens:
             if vtoks & toks:
                 matched_hints.append(what)
-        latency_aligned = bool(
-            latency_dominant
-            and any(kw in vtoks for kw in _LATENCY_DIRECTION_KEYWORDS)
-        )
+        latency_aligned = bool(latency_dominant and any(kw in vtoks for kw in _LATENCY_DIRECTION_KEYWORDS))
         if matched_hints or latency_aligned:
             out[name] = {
                 "hints": matched_hints,
@@ -442,9 +566,21 @@ def priors_match_summary(
     primary_gap: str | None = None,
     max_rows: int = 12,
 ) -> str:
-    """Render an advisory block flagging variants that match priors (empty when none; advisory ordering only)."""
+    """Render an advisory block flagging variants that match priors (empty when none; advisory ordering only).
+
+    Args:
+        variants: Candidate variant dicts to check.
+        hints: Normalized prior hint dicts.
+        primary_gap: The dominant external gap, when known.
+        max_rows: Maximum number of variant rows to render.
+
+    Returns:
+        The advisory block text, or ``""`` when no variants match.
+    """
     matches = match_variants_to_priors(
-        variants, hints, primary_gap=primary_gap,
+        variants,
+        hints,
+        primary_gap=primary_gap,
     )
     if not matches:
         return ""
@@ -466,9 +602,19 @@ def priors_match_summary(
 
 
 def summarise_for_prompt(
-    session_dir: Path, *, max_entries: int = 8,
+    session_dir: Path,
+    *,
+    max_entries: int = 8,
 ) -> str:
-    """Compact advisory block of proven priors for the orchestration prompt (empty when none; advisory only)."""
+    """Compact advisory block of proven priors for the orchestration prompt (empty when none; advisory only).
+
+    Args:
+        session_dir: Session directory to load hints from.
+        max_entries: Maximum number of hint entries to render inline.
+
+    Returns:
+        The advisory prompt block text, or ``""`` when there are no hints.
+    """
     hints = load_hints(session_dir)
     if not hints:
         return ""
@@ -479,15 +625,10 @@ def summarise_for_prompt(
     for h in hints[:max_entries]:
         impact = h["expected_impact"] or "?"
         risk = h["accuracy_risk"] or "?"
-        lines.append(
-            f"- {h['what']} (impact={impact}, accuracy_risk={risk}, "
-            f"source={h['source']})"
-        )
+        lines.append(f"- {h['what']} (impact={impact}, accuracy_risk={risk}, source={h['source']})")
     extra = len(hints) - max_entries
     if extra > 0:
-        lines.append(
-            f"... and {extra} more in research_hints.md."
-        )
+        lines.append(f"... and {extra} more in research_hints.md.")
     return "\n".join(lines)
 
 

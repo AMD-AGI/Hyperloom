@@ -103,11 +103,23 @@ DEFAULT_DIFF_FETCH_TIMEOUT_SEC: float = 30.0
 # resets HEAD to the pre-apply sha so a failed REJECT can't clobber prior KEEPs.
 def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
     """``git rev-parse HEAD`` in ``framework_root``; ``(sha, stderr)``,
-    sha None on failure."""
+    sha None on failure.
+
+    Args:
+        framework_root: The git checkout to read HEAD from.
+
+    Returns:
+        A ``(sha, stderr)`` tuple; ``sha`` is ``None`` on failure with the
+        error text in ``stderr``.
+    """
     cmd = ["git", "-C", str(framework_root), "rev-parse", "HEAD"]
     try:
         cp = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30.0, check=False,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+            check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return None, f"git rev-parse spawn failed: {exc!r}"
@@ -119,11 +131,24 @@ def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
 def _git_reset_hard(framework_root: Path, sha: str) -> tuple[bool, str]:
     """Revert ``framework_root`` to ``sha``: ``git reset --hard`` +
     ``git clean -fd`` (discards untracked files the candidate added) so a
-    failed candidate can't leak state into the next candidate's baseline."""
+    failed candidate can't leak state into the next candidate's baseline.
+
+    Args:
+        framework_root: The git checkout to reset.
+        sha: The commit sha to reset ``--hard`` to.
+
+    Returns:
+        A ``(ok, stderr)`` tuple; ``ok`` is False on failure with the error
+        text in ``stderr``.
+    """
     cmd = ["git", "-C", str(framework_root), "reset", "--hard", sha]
     try:
         cp = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=60.0, check=False,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+            check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return False, f"git reset --hard spawn failed: {exc!r}"
@@ -132,7 +157,11 @@ def _git_reset_hard(framework_root: Path, sha: str) -> tuple[bool, str]:
     clean_cmd = ["git", "-C", str(framework_root), "clean", "-fd"]
     try:
         cp2 = subprocess.run(
-            clean_cmd, capture_output=True, text=True, timeout=60.0, check=False,
+            clean_cmd,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+            check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return False, f"git clean -fd spawn failed: {exc!r}"
@@ -142,16 +171,30 @@ def _git_reset_hard(framework_root: Path, sha: str) -> tuple[bool, str]:
 
 
 def _git_commit_keep(
-    framework_root: Path, message: str,
+    framework_root: Path,
+    message: str,
 ) -> tuple[str | None, str]:
     """``git add -A && git commit`` with a forced hyperloom identity (``-c``,
     Magpie clones may lack user.email), returning the new HEAD sha. ``add -A``
     (not ``commit -am``) so add-only PRs' new files land in the KEEP commit
-    instead of polluting the next candidate's baseline."""
+    instead of polluting the next candidate's baseline.
+
+    Args:
+        framework_root: The git checkout to commit into.
+        message: The commit message for the KEEP commit.
+
+    Returns:
+        A ``(new_sha, stderr)`` tuple; ``new_sha`` is ``None`` on failure with
+        the error text in ``stderr``.
+    """
     add = ["git", "-C", str(framework_root), "add", "-A"]
     try:
         cp_add = subprocess.run(
-            add, capture_output=True, text=True, timeout=60.0, check=False,
+            add,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+            check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return None, f"git add -A spawn failed: {exc!r}"
@@ -159,14 +202,23 @@ def _git_commit_keep(
         return None, cp_add.stderr.strip()
     cmd = [
         "git",
-        "-c", "user.email=framework-pr@hyperloom.local",
-        "-c", "user.name=hyperloom framework_pr",
-        "-C", str(framework_root),
-        "commit", "-m", message,
+        "-c",
+        "user.email=framework-pr@hyperloom.local",
+        "-c",
+        "user.name=hyperloom framework_pr",
+        "-C",
+        str(framework_root),
+        "commit",
+        "-m",
+        message,
     ]
     try:
         cp = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=60.0, check=False,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+            check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return None, f"git commit spawn failed: {exc!r}"
@@ -180,7 +232,15 @@ def _git_commit_keep(
 
 def _candidate_slug(candidate: dict[str, Any]) -> str:
     """Filesystem-safe candidate id (variant names + paths). Prefer
-    ``repo/pr_number``."""
+    ``repo/pr_number``.
+
+    Args:
+        candidate: The PR metadata row.
+
+    Returns:
+        A filesystem-safe slug derived from the candidate's repo / pr_number
+        / ref.
+    """
     repo = str(candidate.get("repo") or "").replace("/", "-")
     pr = candidate.get("pr_number")
     if repo and pr not in (None, "", 0):
@@ -192,20 +252,43 @@ def _candidate_slug(candidate: dict[str, Any]) -> str:
 
 
 def _fetch_diff_to_path(
-    diff_url: str, dest: Path, *, timeout_sec: float,
+    diff_url: str,
+    dest: Path,
+    *,
+    timeout_sec: float,
 ) -> tuple[bool, str]:
     """Curl ``diff_url`` into ``dest`` (.patch path); returns ``(ok, stderr)``.
     Uses curl (not aiohttp) for consistent HTTPS_PROXY behaviour in
-    restricted-network sessions."""
+    restricted-network sessions.
+
+    Args:
+        diff_url: The unified-diff URL to download.
+        dest: Destination ``.patch`` path to write.
+        timeout_sec: Per-request curl timeout in seconds.
+
+    Returns:
+        A ``(ok, stderr)`` tuple; ``ok`` is False on failure with the error
+        text in ``stderr``.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "curl", "-fsSL", "--retry", "2", "--max-time",
-        str(int(timeout_sec)), "-o", str(dest), diff_url,
+        "curl",
+        "-fsSL",
+        "--retry",
+        "2",
+        "--max-time",
+        str(int(timeout_sec)),
+        "-o",
+        str(dest),
+        diff_url,
     ]
     try:
         cp = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=timeout_sec + 5.0, check=False,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec + 5.0,
+            check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return False, f"curl spawn / timeout: {exc!r}"
@@ -217,7 +300,9 @@ def _fetch_diff_to_path(
 
 
 def _run_git(
-    args: list[str], *, timeout: float = 120.0,
+    args: list[str],
+    *,
+    timeout: float = 120.0,
 ) -> tuple[bool, str, str]:
     """Run ``git <args>`` capturing output. Returns ``(ok, stdout, stderr)``.
     Never raises (spawn / timeout failures map to ``(False, "", reason)``).
@@ -233,7 +318,10 @@ def _run_git(
     try:
         cp = subprocess.run(
             ["git", *args],
-            capture_output=True, text=True, timeout=timeout, check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return False, "", f"git spawn/timeout failed: {exc!r}"
@@ -244,7 +332,14 @@ def _run_git(
 
 def _normalize_repo_id(url_or_slug: str) -> str:
     """Reduce a repo URL / slug to a canonical lowercase ``owner/name`` token.
-    Tolerates https, ssh, and bare ``Owner/Name`` forms."""
+    Tolerates https, ssh, and bare ``Owner/Name`` forms.
+
+    Args:
+        url_or_slug: A repo URL or slug in any supported form.
+
+    Returns:
+        The canonical lowercase ``owner/name`` token, or ``""`` when empty.
+    """
     s = (url_or_slug or "").strip().lower()
     if not s:
         return ""
@@ -263,17 +358,25 @@ def _normalize_repo_id(url_or_slug: str) -> str:
 
 
 def _candidate_is_same_repo(
-    candidate: dict[str, Any], framework_root: Path,
+    candidate: dict[str, Any],
+    framework_root: Path,
 ) -> bool:
     """True unless we can positively prove the candidate lives in a different
     repo than the framework_root's origin (where checkout-head's fetch would
     resolve the wrong ref).
 
     Fails OPEN when inconclusive (no candidate repo, unreadable / non-GitHub
-    origin); only fires when both sides yield differing ``owner/name`` tokens."""
-    cand_repo = _normalize_repo_id(
-        str(candidate.get("repo") or candidate.get("discovered_repo_url") or "")
-    )
+    origin); only fires when both sides yield differing ``owner/name`` tokens.
+
+    Args:
+        candidate: The PR metadata row (carries the candidate repo).
+        framework_root: The live framework checkout whose origin is compared.
+
+    Returns:
+        True unless the candidate is positively proven to live in a different
+        repo than ``framework_root``'s origin.
+    """
+    cand_repo = _normalize_repo_id(str(candidate.get("repo") or candidate.get("discovered_repo_url") or ""))
     if not cand_repo or "/" not in cand_repo:
         return True
     ok, out, _err = _run_git(
@@ -307,6 +410,16 @@ def _materialize_pr_diff_via_worktree(
 
     Head ref order: ``candidate.head_sha`` → ``candidate.ref`` →
     ``refs/pull/<pr_number>/head``.
+
+    Args:
+        framework_root: The live framework checkout to fetch the PR head into.
+        candidate: The PR metadata row (head_sha / ref / pr_number).
+        dest: Destination ``.patch`` path the net diff is written to.
+        timeout_sec: Per-git-operation timeout in seconds.
+
+    Returns:
+        A ``(ok, err)`` tuple; ``ok`` is False on failure with the error text
+        in ``err``.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     root = str(framework_root)
@@ -333,21 +446,18 @@ def _materialize_pr_diff_via_worktree(
         if not head_sha:
             # FETCH_HEAD now points at the fetched head.
             ok2, out2, err2 = _run_git(
-                ["-C", root, "rev-parse", "FETCH_HEAD"], timeout=30.0,
+                ["-C", root, "rev-parse", "FETCH_HEAD"],
+                timeout=30.0,
             )
             if not ok2 or not out2.strip():
                 return False, f"could not resolve FETCH_HEAD: {err2}"
             head_sha = out2.strip()
     if not head_sha:
-        return False, (
-            "checkout-head: no head_sha / ref / pr_number on candidate; "
-            "cannot resolve PR head"
-        )
+        return False, ("checkout-head: no head_sha / ref / pr_number on candidate; cannot resolve PR head")
 
     # Isolated worktree at the fetched head (clean any stale prior-run dir).
     wt_dir = dest.parent / f"wt-{_candidate_slug(candidate)}"
-    _run_git(["-C", root, "worktree", "remove", "--force", str(wt_dir)],
-             timeout=60.0)
+    _run_git(["-C", root, "worktree", "remove", "--force", str(wt_dir)], timeout=60.0)
     ok, _out, err = _run_git(
         ["-C", root, "worktree", "add", "--detach", str(wt_dir), head_sha],
         timeout=timeout_sec,
@@ -358,13 +468,15 @@ def _materialize_pr_diff_via_worktree(
         # Diff against the merge-base so applying introduces only the PR's
         # own commits, not the full divergence from the live HEAD.
         ok_hb, base_out, _e = _run_git(
-            ["-C", root, "rev-parse", "HEAD"], timeout=30.0,
+            ["-C", root, "rev-parse", "HEAD"],
+            timeout=30.0,
         )
         live_head = base_out.strip() if ok_hb else ""
         merge_base = ""
         if live_head:
             ok_mb, mb_out, _mb_e = _run_git(
-                ["-C", root, "merge-base", live_head, head_sha], timeout=60.0,
+                ["-C", root, "merge-base", live_head, head_sha],
+                timeout=60.0,
             )
             if ok_mb and mb_out.strip():
                 merge_base = mb_out.strip()
@@ -418,12 +530,8 @@ class FrameworkPrExecutor:
             diff_fetch_timeout_sec (float): Default timeout for fetching /
                 materializing the candidate diff.
         """
-        self.session_dir = (
-            Path(session_dir) if session_dir else _resolve_session_dir()
-        )
-        self.default_config_path = (
-            Path(default_config_path) if default_config_path else None
-        )
+        self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
+        self.default_config_path = Path(default_config_path) if default_config_path else None
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
         self.diff_fetch_timeout_sec = float(diff_fetch_timeout_sec)
@@ -455,8 +563,7 @@ class FrameworkPrExecutor:
                 "status": "failed",
                 "error_class": "missing_param",
                 "error": (
-                    "framework_pr requires params.candidate (the PR metadata "
-                    "row produced by `fa phase-discover`)"
+                    "framework_pr requires params.candidate (the PR metadata row produced by `fa phase-discover`)"
                 ),
             }
         batch_id = str(params.get("batch_id") or "")
@@ -504,7 +611,8 @@ class FrameworkPrExecutor:
                     patch_paths.append(pp.resolve())
                 else:
                     log.warning(
-                        "framework_pr: explicit patch %r not found", p,
+                        "framework_pr: explicit patch %r not found",
+                        p,
                     )
             # Refuse to bench an unpatched tree when every explicit patch
             # was missing (else measurements reflect the unmodified root).
@@ -516,24 +624,20 @@ class FrameworkPrExecutor:
                     "batch_id": batch_id,
                     "patches_applied": [],
                     "patches_reverted": [],
-                    "reason": (
-                        "all explicit patches were missing from disk; "
-                        "refusing to benchmark unpatched tree"
-                    ),
+                    "reason": ("all explicit patches were missing from disk; refusing to benchmark unpatched tree"),
                     "missing_patches": [str(p) for p in explicit_patches],
                     "workspace": str(output_root),
                 }
         else:
             diff_url = str(candidate.get("diff_url") or "").strip()
-            apply_mode = str(
-                params.get("apply_mode")
-                or candidate.get("apply_mode")
-                or "",
-            ).strip().lower()
-            prefer_checkout = bool(
-                params.get("prefer_checkout")
-                or candidate.get("prefer_checkout")
+            apply_mode = (
+                str(
+                    params.get("apply_mode") or candidate.get("apply_mode") or "",
+                )
+                .strip()
+                .lower()
             )
+            prefer_checkout = bool(params.get("prefer_checkout") or candidate.get("prefer_checkout"))
             # Checkout-headable only with a resolvable head ref
             # (head_sha / ref / pr_number).
             has_checkout_ref = bool(
@@ -541,17 +645,13 @@ class FrameworkPrExecutor:
                 or str(candidate.get("ref") or "").strip()
                 or candidate.get("pr_number") not in (None, "", 0)
             )
-            explicit_checkout = (
-                apply_mode in {"checkout_head", "checkout-head", "checkout"}
-                or prefer_checkout
-            )
-            use_checkout_head = explicit_checkout or (
-                not diff_url and has_checkout_ref
-            )
+            explicit_checkout = apply_mode in {"checkout_head", "checkout-head", "checkout"} or prefer_checkout
+            use_checkout_head = explicit_checkout or (not diff_url and has_checkout_ref)
             # Same-repo guard: checkout-head fetches from the live origin, so
             # a cross-repo candidate would fetch the wrong ref → use diff_url.
             if use_checkout_head and not _candidate_is_same_repo(
-                candidate, framework_root,
+                candidate,
+                framework_root,
             ):
                 log.info(
                     "framework_pr: candidate repo %r differs from live "
@@ -568,29 +668,29 @@ class FrameworkPrExecutor:
                     "batch_id": batch_id,
                     "patches_applied": [],
                     "patches_reverted": [],
-                    "reason": (
-                        "candidate carries no diff_url, no explicit "
-                        "patches, and no head ref to check out"
-                    ),
+                    "reason": ("candidate carries no diff_url, no explicit patches, and no head ref to check out"),
                     "workspace": str(output_root),
                 }
             dest = output_root / f"{slug}.patch"
             if use_checkout_head:
                 patch_source_mode = "checkout_head"
                 ok, err = _materialize_pr_diff_via_worktree(
-                    framework_root, candidate, dest,
+                    framework_root,
+                    candidate,
+                    dest,
                     timeout_sec=self.diff_fetch_timeout_sec * 4.0,
                 )
                 if not ok and diff_url:
                     # Fall back to diff_url so a worktree/fetch hiccup doesn't
                     # strand an otherwise-applyable candidate.
                     log.warning(
-                        "framework_pr: checkout-head failed (%s); "
-                        "falling back to diff_url", err,
+                        "framework_pr: checkout-head failed (%s); falling back to diff_url",
+                        err,
                     )
                     patch_source_mode = "diff_url_fallback"
                     ok, err = _fetch_diff_to_path(
-                        diff_url, dest,
+                        diff_url,
+                        dest,
                         timeout_sec=self.diff_fetch_timeout_sec,
                     )
                 if not ok:
@@ -610,7 +710,9 @@ class FrameworkPrExecutor:
             else:
                 patch_source_mode = "diff_url"
                 ok, err = _fetch_diff_to_path(
-                    diff_url, dest, timeout_sec=self.diff_fetch_timeout_sec,
+                    diff_url,
+                    dest,
+                    timeout_sec=self.diff_fetch_timeout_sec,
                 )
                 if not ok:
                     return {
@@ -634,10 +736,7 @@ class FrameworkPrExecutor:
             return {
                 "status": "apply_failed",
                 "error_class": "no_pre_apply_sha",
-                "error": (
-                    f"could not capture HEAD sha in {framework_root}: "
-                    f"{sha_err or 'unknown'}"
-                ),
+                "error": (f"could not capture HEAD sha in {framework_root}: {sha_err or 'unknown'}"),
                 "candidate": candidate,
                 "batch_id": batch_id,
                 "patches_applied": [],
@@ -653,15 +752,19 @@ class FrameworkPrExecutor:
             if not ok:
                 ok2, err2 = _git_apply(framework_root, patch, three_way=True)
                 if not ok2:
-                    apply_errors.append({
-                        "patch": str(patch),
-                        "stderr": err + " | -3 retry: " + err2,
-                    })
+                    apply_errors.append(
+                        {
+                            "patch": str(patch),
+                            "stderr": err + " | -3 retry: " + err2,
+                        }
+                    )
                     break
             applied.append(patch)
         if apply_errors:
             reverted = self._revert_patches(
-                framework_root, applied, pre_apply_sha=pre_apply_sha,
+                framework_root,
+                applied,
+                pre_apply_sha=pre_apply_sha,
             )
             return {
                 "status": "apply_failed",
@@ -697,7 +800,9 @@ class FrameworkPrExecutor:
             )
         except FrameworkScriptMismatchError as exc:
             reverted = self._revert_patches(
-                framework_root, applied, pre_apply_sha=pre_apply_sha,
+                framework_root,
+                applied,
+                pre_apply_sha=pre_apply_sha,
             )
             return {
                 "status": "reverted",
@@ -712,7 +817,9 @@ class FrameworkPrExecutor:
             }
         except Exception as exc:  # noqa: BLE001
             reverted = self._revert_patches(
-                framework_root, applied, pre_apply_sha=pre_apply_sha,
+                framework_root,
+                applied,
+                pre_apply_sha=pre_apply_sha,
             )
             return {
                 "status": "reverted",
@@ -737,31 +844,25 @@ class FrameworkPrExecutor:
         )
         new_tput = bench_result.get("output_throughput")
         delta_pct: float | None = None
-        if (
-            isinstance(new_tput, (int, float)) and new_tput > 0
-            and base_tput > 0
-        ):
+        if isinstance(new_tput, (int, float)) and new_tput > 0 and base_tput > 0:
             delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
 
         accuracy_pass = gate_evidence.get("accuracy_pass")
         gate_pass = (
-            delta_pct is not None
-            and delta_pct >= keep_threshold_pct
-            and (accuracy_pass is None or accuracy_pass)
+            delta_pct is not None and delta_pct >= keep_threshold_pct and (accuracy_pass is None or accuracy_pass)
         )
 
         if not gate_pass:
             reverted = self._revert_patches(
-                framework_root, applied, pre_apply_sha=pre_apply_sha,
+                framework_root,
+                applied,
+                pre_apply_sha=pre_apply_sha,
             )
             reasons: list[str] = []
             if delta_pct is None:
                 reasons.append("no measurable throughput")
             elif delta_pct < keep_threshold_pct:
-                reasons.append(
-                    f"throughput delta {delta_pct:+.2f}% < keep_threshold "
-                    f"{keep_threshold_pct:.2f}%"
-                )
+                reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
             if accuracy_pass is False:
                 reasons.append("accuracy regression detected")
             await self._write_kb_record(
@@ -796,7 +897,9 @@ class FrameworkPrExecutor:
             # Commit failed — reset to pre_apply_sha so the next candidate
             # doesn't see a dirty baseline.
             reverted = self._revert_patches(
-                framework_root, applied, pre_apply_sha=pre_apply_sha,
+                framework_root,
+                applied,
+                pre_apply_sha=pre_apply_sha,
             )
             return {
                 "status": "apply_failed",
@@ -836,17 +939,15 @@ class FrameworkPrExecutor:
             "keep_threshold_pct": keep_threshold_pct,
             "keep_commit_sha": keep_sha,
             "patch_source_mode": patch_source_mode,
-            "reason": (
-                f"throughput delta {delta_pct:+.2f}% >= "
-                f"{keep_threshold_pct:.2f}%"
-            ),
+            "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
             "bench_result": bench_result,
             "workspace": str(output_root),
         }
 
     # KB writeback (D2, Arbor-into-Hyperloom)
     async def _write_kb_record(
-        self, *,
+        self,
+        *,
         candidate: dict[str, Any],
         outcome: str,
         tps_delta_pct: float,
@@ -858,13 +959,20 @@ class FrameworkPrExecutor:
 
         Best-effort: candidates lacking both ``pr_url`` and ``head_sha``
         (no dedup key) are skipped; write errors are logged + swallowed.
+
+        Args:
+            candidate: The PR metadata row (provides the dedup key).
+            outcome: The outcome label to record (e.g. integrated / reverted).
+            tps_delta_pct: The measured throughput delta percentage.
+            patch_path: Path to the applied patch (for provenance).
+            extra: The runner ``extra`` mapping (provides the shared state /
+                session id).
         """
         pr_url = str(candidate.get("pr_url") or "").strip()
         pr_sha = str(candidate.get("head_sha") or "").strip()
         if not pr_url and not pr_sha:
             log.warning(
-                "framework_pr: candidate lacks pr_url/head_sha; "
-                "KB writeback skipped",
+                "framework_pr: candidate lacks pr_url/head_sha; KB writeback skipped",
             )
             return
         session_id = ""
@@ -881,9 +989,11 @@ class FrameworkPrExecutor:
                 session_id=session_id,
             )
             log.info(
-                "framework_pr: wrote KB record to %s (outcome=%s "
-                "pr_url=%s tps_delta=%+.2f%%)",
-                written, outcome, pr_url, float(tps_delta_pct),
+                "framework_pr: wrote KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",
+                written,
+                outcome,
+                pr_url,
+                float(tps_delta_pct),
             )
         except Exception as exc:  # noqa: BLE001 — KB write is best-effort
             log.warning("framework_pr: KB writeback failed: %r", exc)
@@ -900,6 +1010,15 @@ class FrameworkPrExecutor:
         <pre_apply_sha>`` (prior KEEPs are committed past that sha, so they
         survive). Returns the patches reverted (full ``applied`` on success,
         empty on failure) for telemetry / schema compat.
+
+        Args:
+            framework_root: The git checkout to reset, or ``None`` (no-op).
+            applied: The patches applied this candidate.
+            pre_apply_sha: The HEAD sha captured before this candidate applied.
+
+        Returns:
+            The reverted patches (full ``applied`` on success, ``[]`` on
+            failure or no-op).
         """
         if framework_root is None or not applied:
             return []
@@ -907,35 +1026,38 @@ class FrameworkPrExecutor:
         if not ok:
             log.error(
                 "framework_pr: git reset --hard %s failed in %s: %s",
-                pre_apply_sha, framework_root, err,
+                pre_apply_sha,
+                framework_root,
+                err,
             )
             return []
         return list(applied)
 
     async def _bench_candidate(
-        self, *,
+        self,
+        *,
         params: dict[str, Any],
         output_root: Path,
         slug: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run a 1-variant Magpie bench under the patched server + accuracy
-        gate. Mirrors :meth:`IntegratePatchExecutor._bench_patch`."""
-        config_path = Path(
-            params.get("config_path")
-            or self.default_config_path
-            or default_baseline_config()
-        )
+        gate. Mirrors :meth:`IntegratePatchExecutor._bench_patch`.
+
+        Args:
+            params: The task params (config / model / bench knobs).
+            output_root: The per-task workspace root for the bench.
+            slug: The candidate slug used to name the variant.
+
+        Returns:
+            A ``(bench, gate_evidence)`` tuple: the bench result dict and a
+            dict carrying the ``accuracy_pass`` verdict.
+        """
+        config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not config_path.exists():
-            raise RuntimeError(
-                f"framework_pr bench: config not found at {config_path}"
-            )
-        resolved_model = (
-            str(params.get("model_path") or "").strip()
-            or os.environ.get("MODEL_PATH", "").strip()
-        )
+            raise RuntimeError(f"framework_pr bench: config not found at {config_path}")
+        resolved_model = str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
         resolved_gpu = (
-            str(params.get("gpu_type") or "").strip().lower()
-            or os.environ.get("GPU_TYPE", "").strip().lower()
+            str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
         )
         override_script = sanitize_script_name(params.get("benchmark_script"))
         override_result_dir = sanitize_result_dir(params.get("result_dir"))
@@ -982,9 +1104,7 @@ class FrameworkPrExecutor:
                 "itl_ms": getattr(r, "itl_ms", None),
                 "result_dir": str(getattr(r, "result_dir", "")),
                 "error": getattr(r, "error", "") or "",
-                "nonfatal_warnings": list(
-                    getattr(r, "nonfatal_warnings", []) or []
-                ),
+                "nonfatal_warnings": list(getattr(r, "nonfatal_warnings", []) or []),
             }
 
         accuracy_pass: bool | None = None
@@ -998,13 +1118,11 @@ class FrameworkPrExecutor:
                 eval_results = parse_eval_results(bench["result_dir"])
                 if eval_results.get("score") is not None:
                     accuracy_pass = accuracy_passed(
-                        eval_results["score"], float(baseline_accuracy),
+                        eval_results["score"],
+                        float(baseline_accuracy),
                     )
             except Exception:  # noqa: BLE001
-                log.exception(
-                    "framework_pr: accuracy gate parse failed; "
-                    "treating as None (gate skipped)"
-                )
+                log.exception("framework_pr: accuracy gate parse failed; treating as None (gate skipped)")
 
         return bench, {"accuracy_pass": accuracy_pass}
 

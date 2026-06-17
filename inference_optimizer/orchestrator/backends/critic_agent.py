@@ -104,7 +104,15 @@ _BARE_JSON_RE = re.compile(r"(\{[^{}]*\"review_verdicts\"[\s\S]*\})", re.DOTALL)
 
 
 def _extract_review_json(text: str) -> dict[str, Any] | None:
-    """Pull the first valid review JSON out of a model reply, or ``None``."""
+    """Pull the first valid review JSON out of a model reply, or ``None``.
+
+    Args:
+        text: The raw model reply that may contain a review JSON object.
+
+    Returns:
+        The first dict containing a ``"review_verdicts"`` key, or ``None`` when
+        no parseable review object is found.
+    """
     if not text:
         return None
     for m in _FENCED_JSON_RE.finditer(text):
@@ -150,7 +158,16 @@ fake that writes the desired ``judge_bundle.json`` / ``emit.json`` to
 
 def _assistant_message_with_tool_calls(msg: Any) -> dict[str, Any]:
     """Re-serialize an OpenAI assistant message that issued tool_calls
-    (minimal dict shape, pydantic v1/v2 compatible)."""
+    (minimal dict shape, pydantic v1/v2 compatible).
+
+    Args:
+        msg: The OpenAI assistant message object carrying ``content`` and
+            ``tool_calls``.
+
+    Returns:
+        A minimal assistant-message dict with role, content, and a normalized
+        ``tool_calls`` list suitable for re-sending to the API.
+    """
     return {
         "role": "assistant",
         "content": getattr(msg, "content", None),
@@ -181,15 +198,18 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
             the subprocess times out, cannot start, or exits non-zero.
     """
     cmd = [
-        sys.executable, "-m", "runtime.cli", call.phase,
-        "--request", str(call.request_path),
-        "--out", str(call.out_path),
+        sys.executable,
+        "-m",
+        "runtime.cli",
+        call.phase,
+        "--request",
+        str(call.request_path),
+        "--out",
+        str(call.out_path),
     ]
     if call.phase == "commit-review":
         if call.review_path is None:
-            raise BackendError(
-                "commit-review invocation missing --review path"
-            )
+            raise BackendError("commit-review invocation missing --review path")
         cmd += ["--review", str(call.review_path)]
 
     try:
@@ -208,21 +228,28 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
         ) from exc
     except FileNotFoundError as exc:
         raise BackendError(
-            f"critic-agent runtime.cli {call.phase} could not start "
-            f"(python={sys.executable!r}, cwd={call.cwd}): {exc}"
+            f"critic-agent runtime.cli {call.phase} could not start (python={sys.executable!r}, cwd={call.cwd}): {exc}"
         ) from exc
 
     if proc.returncode != 0:
         # AGENTS.md §Exit codes: 0 success; 2 adapter bug (host → needs_review).
         raise BackendError(
-            f"critic-agent runtime.cli {call.phase} exited rc={proc.returncode}: "
-            f"stderr={proc.stderr.strip()[:500]!r}"
+            f"critic-agent runtime.cli {call.phase} exited rc={proc.returncode}: stderr={proc.stderr.strip()[:500]!r}"
         )
 
 
 # Cross-domain enrichment helper for cross-domain (scope=domains) proposals.
 def _proposal_scope_literal(proposal: dict[str, Any]) -> str:
-    """Read the ``scope`` dial off a proposal (top-level or nested ``params``)."""
+    """Read the ``scope`` dial off a proposal (top-level or nested ``params``).
+
+    Args:
+        proposal: A proposal dict that may carry ``scope`` at the top level or
+            under ``params``.
+
+    Returns:
+        The stripped scope string, or an empty string when absent or the
+        proposal is not a dict.
+    """
     if not isinstance(proposal, dict):
         return ""
     top = proposal.get("scope")
@@ -258,7 +285,13 @@ def _verdict_references_kb(review: dict[str, Any] | None) -> bool:
 
 def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None:
     """Set ``review_constraints.cross_domain`` + rule descriptors when any
-    proposal is cross-domain (unified ``scope == 'domains'`` dial). Idempotent."""
+    proposal is cross-domain (unified ``scope == 'domains'`` dial). Idempotent.
+
+    Args:
+        judge_bundle: The judge bundle to enrich in place; its
+            ``review_constraints`` are updated when a cross-domain proposal is
+            present.
+    """
     proposals = judge_bundle.get("proposals") or []
     if not isinstance(proposals, list):
         return
@@ -266,10 +299,8 @@ def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None
         SCOPE_DOMAINS_LITERAL,
         cross_domain_rule_descriptors,
     )
-    has_cross_domain = any(
-        _proposal_scope_literal(p) == SCOPE_DOMAINS_LITERAL
-        for p in proposals
-    )
+
+    has_cross_domain = any(_proposal_scope_literal(p) == SCOPE_DOMAINS_LITERAL for p in proposals)
     if not has_cross_domain:
         return
     rc = judge_bundle.setdefault("review_constraints", {})
@@ -356,11 +387,15 @@ class CriticAgentBackend:
     _turn_idx: int = field(default=0, init=False, repr=False)
     _skill_preamble: str | None = field(default=None, init=False, repr=False)
     _static_context: dict[str, Any] = field(
-        default_factory=dict, init=False, repr=False,
+        default_factory=dict,
+        init=False,
+        repr=False,
     )
     _web_tool_clients: Any = field(default=None, init=False, repr=False)
     _web_tool_schemas: list[dict[str, Any]] = field(
-        default_factory=list, init=False, repr=False,
+        default_factory=list,
+        init=False,
+        repr=False,
     )
     _web_tool_max_turns: int = field(default=0, init=False, repr=False)
     calls: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
@@ -392,19 +427,20 @@ class CriticAgentBackend:
         if critic_root_str not in sys.path:
             sys.path.insert(0, critic_root_str)
         if self.kb_mode not in ("inmemory", "live"):
-            raise BackendError(
-                f"CriticAgentBackend: kb_mode={self.kb_mode!r} not in "
-                f"{{'inmemory','live'}}"
-            )
+            raise BackendError(f"CriticAgentBackend: kb_mode={self.kb_mode!r} not in {{'inmemory','live'}}")
 
         if self.runtime_caller_factory is not None:
             # Assign on the instance to avoid descriptor binding as a method.
             object.__setattr__(
-                self, "_runtime_caller", self.runtime_caller_factory(),
+                self,
+                "_runtime_caller",
+                self.runtime_caller_factory(),
             )
         else:
             object.__setattr__(
-                self, "_runtime_caller", _default_runtime_caller,
+                self,
+                "_runtime_caller",
+                _default_runtime_caller,
             )
 
         if self.codex_client_factory is not None:
@@ -413,22 +449,14 @@ class CriticAgentBackend:
             try:
                 from openai import AsyncOpenAI  # type: ignore[import-not-found]
             except ImportError as exc:  # pragma: no cover
-                raise BackendError(
-                    "openai SDK not installed; run `pip install openai>=1.50`"
-                ) from exc
-            api_key = (
-                os.environ.get("ANTHROPIC_AUTH_TOKEN")
-                or os.environ.get("OPENAI_API_KEY")
-            )
+                raise BackendError("openai SDK not installed; run `pip install openai>=1.50`") from exc
+            api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("OPENAI_API_KEY")
             if not api_key:
                 raise BackendError(
                     "ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY not set "
                     "(CriticAgentBackend cannot reach Codex for review reasoning)"
                 )
-            base_url = (
-                os.environ.get("OPENAI_BASE_URL")
-                or os.environ.get("ANTHROPIC_BASE_URL")
-            )
+            base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
             kwargs: dict[str, Any] = {"api_key": api_key}
             if base_url:
                 kwargs["base_url"] = base_url
@@ -463,9 +491,9 @@ class CriticAgentBackend:
             )
         except ImportError as exc:
             log.warning(
-                "critic_agent_backend: runtime.web_tools not importable from "
-                "%s (%s); web tools disabled",
-                self.critic_agent_root, exc,
+                "critic_agent_backend: runtime.web_tools not importable from %s (%s); web tools disabled",
+                self.critic_agent_root,
+                exc,
             )
             return
 
@@ -476,14 +504,12 @@ class CriticAgentBackend:
 
         try:
             clients = (
-                self.web_tool_clients_factory(cfg)
-                if self.web_tool_clients_factory is not None
-                else _build_clients(cfg)
+                self.web_tool_clients_factory(cfg) if self.web_tool_clients_factory is not None else _build_clients(cfg)
             )
         except Exception as exc:  # noqa: BLE001 — never let setup kill critic
             log.warning(
-                "critic_agent_backend: failed to construct web tool clients "
-                "(%s); web tools disabled", exc,
+                "critic_agent_backend: failed to construct web tool clients (%s); web tools disabled",
+                exc,
             )
             return
 
@@ -493,10 +519,7 @@ class CriticAgentBackend:
             available_names.add("web_search")
         if clients.fetch is not None:
             available_names.add("web_fetch")
-        schemas = [
-            s for s in schemas
-            if s.get("function", {}).get("name") in available_names
-        ]
+        schemas = [s for s in schemas if s.get("function", {}).get("name") in available_names]
         if not schemas or (clients.search is None and clients.fetch is None):
             log.info(
                 "critic_agent_backend: web tools enabled by config but no "
@@ -607,10 +630,7 @@ class CriticAgentBackend:
         try:
             judge_bundle = json.loads(judge_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise BackendError(
-                f"CriticAgentBackend: failed to read judge_bundle from "
-                f"{judge_path}: {exc}"
-            ) from exc
+            raise BackendError(f"CriticAgentBackend: failed to read judge_bundle from {judge_path}: {exc}") from exc
 
         # Layer per-action verdict policy onto review_constraints.
         if self.action_verdict_policy:
@@ -654,62 +674,65 @@ class CriticAgentBackend:
         try:
             emit = json.loads(emit_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise BackendError(
-                f"CriticAgentBackend: failed to read emit.json from "
-                f"{emit_path}: {exc}"
-            ) from exc
+            raise BackendError(f"CriticAgentBackend: failed to read emit.json from {emit_path}: {exc}") from exc
 
         envelope = emit.get("intent_envelope")
         if not isinstance(envelope, dict):
             raise BackendError(
-                f"CriticAgentBackend: emit.json missing intent_envelope "
-                f"(got keys={sorted(emit.keys())!r})"
+                f"CriticAgentBackend: emit.json missing intent_envelope (got keys={sorted(emit.keys())!r})"
             )
         try:
             intents = validate_envelope(envelope)
         except IntentValidationError as exc:
-            raise NoIntentEmitted(
-                f"critic_agent_envelope_invalid: {exc}"
-            ) from exc
+            raise NoIntentEmitted(f"critic_agent_envelope_invalid: {exc}") from exc
 
         kb_skipped = judge_bundle.get("kb_read_skipped_reason")
         required_context = list(judge_bundle.get("required_context") or [])
         verdicts_summary = [
-            (i.payload.get("verdict"), i.payload.get("source"))
-            for i in intents if i.type.value == "review_verdict"
+            (i.payload.get("verdict"), i.payload.get("source")) for i in intents if i.type.value == "review_verdict"
         ]
         assess_injected = self._kb_assess_inject_enabled()
         kb_assess_trace = self._build_kb_assess_trace(
-            judge_bundle, review, injected=assess_injected,
+            judge_bundle,
+            review,
+            injected=assess_injected,
         )
         kb_priors_trace = self._build_kb_priors_trace(judge_bundle, review)
         log.info(
             "critic_agent_backend turn=%d session=%s proposals=%d "
             "verdicts=%s kb_skipped=%s required_context=%s finish=%s "
             "kb_assess_mode=%s kb_assess_verdicts=%d kb_priors=%d",
-            turn_idx, session_id, len(proposals),
-            verdicts_summary, kb_skipped, required_context, llm_finish,
+            turn_idx,
+            session_id,
+            len(proposals),
+            verdicts_summary,
+            kb_skipped,
+            required_context,
+            llm_finish,
             kb_assess_trace.get("mode") or "n/a",
             kb_assess_trace.get("verdict_count") or 0,
             kb_priors_trace.get("prior_count") or 0,
         )
-        self.calls.append({
-            "turn_idx": turn_idx,
-            "proposals": len(proposals),
-            "verdicts": verdicts_summary,
-            "kb_skipped": kb_skipped,
-            "required_context": required_context,
-            "finish_reason": llm_finish,
-            "workdir": str(workdir),
-            "kb_assess_mode": kb_assess_trace.get("mode"),
-            "kb_assess_verdicts": kb_assess_trace.get("verdict_count") or 0,
-            "kb_priors_count": kb_priors_trace.get("prior_count") or 0,
-        })
+        self.calls.append(
+            {
+                "turn_idx": turn_idx,
+                "proposals": len(proposals),
+                "verdicts": verdicts_summary,
+                "kb_skipped": kb_skipped,
+                "required_context": required_context,
+                "finish_reason": llm_finish,
+                "workdir": str(workdir),
+                "kb_assess_mode": kb_assess_trace.get("mode"),
+                "kb_assess_verdicts": kb_assess_trace.get("verdict_count") or 0,
+                "kb_priors_count": kb_priors_trace.get("prior_count") or 0,
+            }
+        )
 
         # Author-time breakdown capture: record this critic iteration before the
         # workdir can be pruned (composed into critic_robustness at assembly).
         try:
             from ...breakdown.recorder import instrument
+
             instrument.record_critic_iteration(
                 self.session_dir,
                 iter_n=turn_idx,
@@ -739,10 +762,7 @@ class CriticAgentBackend:
                 "judge_bundle_path": str(judge_path),
                 "kb_read_skipped_reason": kb_skipped,
                 "required_context": required_context,
-                "kb_writes": [
-                    w.get("result", {}).get("status")
-                    for w in (emit.get("kb_writes") or [])
-                ],
+                "kb_writes": [w.get("result", {}).get("status") for w in (emit.get("kb_writes") or [])],
                 "session_id": session_id,
                 "turn_idx": turn_idx,
             },
@@ -808,6 +828,10 @@ class CriticAgentBackend:
         manifest.json (model / framework / gpu_type / model_path / tp /
         workload / precision); empty values dropped. Any read error logs a
         WARNING and returns ``{}``.
+
+        Returns:
+            A context dict built from the manifest's non-empty fields, or an
+            empty dict when the manifest is missing or unreadable.
         """
         path = manifest_path(self.session_dir)
         try:
@@ -823,9 +847,10 @@ class CriticAgentBackend:
             return {}
         except (OSError, json.JSONDecodeError) as exc:
             log.warning(
-                "critic_agent_backend: failed to load manifest.json at %s "
-                "(%s: %s); request.context will be empty",
-                path, type(exc).__name__, exc,
+                "critic_agent_backend: failed to load manifest.json at %s (%s: %s); request.context will be empty",
+                path,
+                type(exc).__name__,
+                exc,
             )
             return {}
 
@@ -875,7 +900,8 @@ class CriticAgentBackend:
         # L4 — point the runtime at the sibling robustness findings JSONL;
         # set here because the robustness CLI's env never reaches us.
         env.setdefault(
-            "ROBUSTNESS_AGENT_SESSION_DIR", str(self.session_dir),
+            "ROBUSTNESS_AGENT_SESSION_DIR",
+            str(self.session_dir),
         )
 
         # Dead-letter dir under the session so cron replays don't cross sessions.
@@ -894,8 +920,7 @@ class CriticAgentBackend:
                 env[k] = v
             if not env.get("KB_BASE_URL"):
                 raise BackendError(
-                    "CriticAgentBackend: kb_mode=live but KB_BASE_URL is not "
-                    "set (export it or pass via kb_env=...)"
+                    "CriticAgentBackend: kb_mode=live but KB_BASE_URL is not set (export it or pass via kb_env=...)"
                 )
         return env
 
@@ -920,6 +945,7 @@ class CriticAgentBackend:
         """
         try:
             from ..trace.langfuse_emitter import get_emitter
+
             emitter = get_emitter(self.session_dir)
             if not emitter.enabled:
                 return
@@ -933,9 +959,7 @@ class CriticAgentBackend:
                         "iter": turn_idx,
                         "mode": kb_assess.get("mode"),
                         "verdict_count": kb_assess.get("verdict_count") or 0,
-                        "referenced_in_verdict": bool(
-                            kb_assess.get("referenced_in_verdict")
-                        ),
+                        "referenced_in_verdict": bool(kb_assess.get("referenced_in_verdict")),
                     },
                 )
             if kb_priors:
@@ -947,9 +971,7 @@ class CriticAgentBackend:
                         "kind": "kb_priors",
                         "iter": turn_idx,
                         "prior_count": kb_priors.get("prior_count") or 0,
-                        "referenced_in_verdict": bool(
-                            kb_priors.get("referenced_in_verdict")
-                        ),
+                        "referenced_in_verdict": bool(kb_priors.get("referenced_in_verdict")),
                     },
                 )
         except Exception:  # noqa: BLE001 — trace must never break the review
@@ -967,7 +989,8 @@ class CriticAgentBackend:
         if self.kb_assess_inject is not None:
             return bool(self.kb_assess_inject)
         return os.environ.get(
-            "CORTEX_KB_ASSESS_INJECT", "",
+            "CORTEX_KB_ASSESS_INJECT",
+            "",
         ).strip().lower() in ("1", "true", "yes", "on")
 
     @staticmethod
@@ -1004,9 +1027,7 @@ class CriticAgentBackend:
             "verdict_count": len(verdicts),
             "injected": bool(injected),
             "mode": "injected" if injected else "dry_run",
-            "referenced_in_verdict": (
-                _verdict_references_kb(review) if injected else False
-            ),
+            "referenced_in_verdict": (_verdict_references_kb(review) if injected else False),
         }
 
     @staticmethod
@@ -1034,9 +1055,7 @@ class CriticAgentBackend:
         skipped = judge_bundle.get("kb_read_skipped_reason")
         if not trace and not by_proposal and not for_decision and not skipped:
             return {}
-        total = sum(
-            len(v) for v in by_proposal.values() if isinstance(v, list)
-        ) + len(for_decision)
+        total = sum(len(v) for v in by_proposal.values() if isinstance(v, list)) + len(for_decision)
         return {
             "configured": bool(trace.get("configured")),
             "mode": trace.get("mode"),
@@ -1091,9 +1110,7 @@ class CriticAgentBackend:
         # fetched + traced (see _build_kb_assess_trace) but kept out of the
         # prompt so they cannot steer the decision.
         if self._kb_assess_inject_enabled():
-            bundle_view["kb_assess_by_proposal"] = judge_bundle.get(
-                "kb_assess_by_proposal"
-            )
+            bundle_view["kb_assess_by_proposal"] = judge_bundle.get("kb_assess_by_proposal")
         bundle_text = json.dumps(bundle_view, ensure_ascii=False, indent=2)
         user_prompt = (
             f"{preamble}\n\n"
@@ -1124,9 +1141,9 @@ class CriticAgentBackend:
             # Empty list → commit-review emits a heartbeat; don't raise.
             review = {"review_verdicts": []}
             log.warning(
-                "critic_agent_backend: model reply contained no parseable "
-                "review_verdicts JSON (chars=%d, finish=%s)",
-                len(text), finish,
+                "critic_agent_backend: model reply contained no parseable review_verdicts JSON (chars=%d, finish=%s)",
+                len(text),
+                finish,
             )
         return review, text, finish
 
@@ -1138,6 +1155,16 @@ class CriticAgentBackend:
         web_search / web_fetch up to ``self._web_tool_max_turns`` before a
         final text-only reply. Returns ``(text, finish_reason)``; tool-exec
         failures are reported back to the model, never raised.
+
+        Args:
+            messages: The running chat-completions message list; tool-use turns
+                are appended in place.
+
+        Returns:
+            A tuple of the final reply text and the final finish reason.
+
+        Raises:
+            BackendError: If any Codex chat-completions API call fails.
         """
         tools = self._web_tool_schemas
         max_turns = self._web_tool_max_turns if tools else 0
@@ -1175,17 +1202,20 @@ class CriticAgentBackend:
 
             log.info(
                 "critic_agent_backend tool-call turn=%d count=%d tools=%s",
-                turn, len(tool_calls),
+                turn,
+                len(tool_calls),
                 [tc.function.name for tc in tool_calls if tc.function],
             )
             messages.append(_assistant_message_with_tool_calls(msg))
             for tc in tool_calls:
                 tool_result = await self._execute_tool_call(tc)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": tool_result,
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": tool_result,
+                    }
+                )
 
         # Exhausted max_turns mid-tool-use: force a final no-tool reply.
         try:
@@ -1205,13 +1235,19 @@ class CriticAgentBackend:
 
     @staticmethod
     def _accumulate_usage(
-        acc: dict[str, int], usage: Any,
+        acc: dict[str, int],
+        usage: Any,
     ) -> None:
         """Fold one OpenAI ``resp.usage`` into the running token accumulator.
 
         OpenAI reports ``prompt_tokens`` / ``completion_tokens``; map them
         onto the canonical in/out counters. Missing / bad values contribute
         0 so a single malformed response never corrupts the running sum.
+
+        Args:
+            acc: The running accumulator with ``input_tokens`` /
+                ``output_tokens`` keys, updated in place.
+            usage: An OpenAI usage object (or ``None``) to fold into ``acc``.
         """
         if usage is None:
             return
@@ -1220,9 +1256,7 @@ class CriticAgentBackend:
         except (TypeError, ValueError):
             pass
         try:
-            acc["output_tokens"] += int(
-                getattr(usage, "completion_tokens", 0) or 0
-            )
+            acc["output_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
         except (TypeError, ValueError):
             pass
 
@@ -1233,6 +1267,10 @@ class CriticAgentBackend:
         ``component=critic``. tick/phase are unknown to the critic backend
         (it runs as its own reactor) — the collector backfills from the ts
         window. Best-effort: never raises into the review path.
+
+        Args:
+            usage_acc: Accumulated token counts with ``input_tokens`` /
+                ``output_tokens`` keys for this reasoning loop.
         """
         try:
             record = LLMCallRecord(
@@ -1246,7 +1284,8 @@ class CriticAgentBackend:
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break review
             log.debug(
-                "full-trace: critic llm_call append failed", exc_info=True,
+                "full-trace: critic llm_call append failed",
+                exc_info=True,
             )
 
     def _record_critic_conversation(
@@ -1265,13 +1304,15 @@ class CriticAgentBackend:
         (it runs as its own reactor); the collector backfills from the ts
         window. Best-effort: never raises into the review path. No-op when
         both prompt and reply are empty.
+
+        Args:
+            system_prompt: Optional system prompt prepended to the recorded
+                prompt.
+            user_prompt: The judge-bundle user prompt the critic reasoned over.
+            response: The model's externally-visible reply text.
         """
         try:
-            prompt = (
-                f"{system_prompt}\n---\n{user_prompt}"
-                if system_prompt
-                else user_prompt
-            )
+            prompt = f"{system_prompt}\n---\n{user_prompt}" if system_prompt else user_prompt
             if not prompt and not response:
                 return
             record = ConversationRecord(
@@ -1285,7 +1326,8 @@ class CriticAgentBackend:
             append_conversation(session_dir=self.session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break review
             log.debug(
-                "full-trace: critic conversation append failed", exc_info=True,
+                "full-trace: critic conversation append failed",
+                exc_info=True,
             )
 
     async def _execute_tool_call(self, tool_call: Any) -> str:

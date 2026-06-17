@@ -54,7 +54,8 @@ _APPLY_TOOL_PATH = Path(__file__).resolve().parent / "apply_kernel_patch.py"
 @pytest.fixture(scope="module")
 def apply_tool() -> types.ModuleType:
     spec = importlib.util.spec_from_file_location(
-        "_apply_kernel_patch_cpp_itfs_under_test", _APPLY_TOOL_PATH,
+        "_apply_kernel_patch_cpp_itfs_under_test",
+        _APPLY_TOOL_PATH,
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -123,7 +124,9 @@ def test_invalidate_skips_non_cpp_itfs_target(apply_tool, tmp_path: Path) -> Non
     _make_cache_dir(build_dir, "gemm_abc")
 
     out = apply_tool._invalidate_aiter_cpp_itfs_cache(
-        target, tmp_path / "backup", build_dir_override=build_dir,
+        target,
+        tmp_path / "backup",
+        build_dir_override=build_dir,
     )
     assert out["status"] == "skipped"
     assert out["is_cpp_itfs"] is False
@@ -148,7 +151,9 @@ def test_invalidate_scopes_to_module_md_names(apply_tool, tmp_path: Path) -> Non
 
     backup = tmp_path / "backup"
     out = apply_tool._invalidate_aiter_cpp_itfs_cache(
-        target, backup, build_dir_override=build_dir,
+        target,
+        backup,
+        build_dir_override=build_dir,
     )
 
     assert out["status"] == "ok"
@@ -167,7 +172,8 @@ def test_invalidate_scopes_to_module_md_names(apply_tool, tmp_path: Path) -> Non
 
 
 def test_invalidate_falls_back_to_build_root_without_md_name(
-    apply_tool, tmp_path: Path,
+    apply_tool,
+    tmp_path: Path,
 ) -> None:
     d = tmp_path / "aiter" / "csrc" / "cpp_itfs" / "mystery"
     d.mkdir(parents=True)
@@ -179,7 +185,9 @@ def test_invalidate_falls_back_to_build_root_without_md_name(
     _make_cache_dir(build_dir, "beta_2")
 
     out = apply_tool._invalidate_aiter_cpp_itfs_cache(
-        target, tmp_path / "backup", build_dir_override=build_dir,
+        target,
+        tmp_path / "backup",
+        build_dir_override=build_dir,
     )
     assert out["status"] == "ok"
     assert out["scope"] == "build_root"
@@ -196,7 +204,9 @@ def test_invalidate_skips_when_build_dir_missing(apply_tool, tmp_path: Path) -> 
     (pa_dir / "pa_ragged.py").write_text('MD_NAME = "pa_ragged"\n')
 
     out = apply_tool._invalidate_aiter_cpp_itfs_cache(
-        target, tmp_path / "backup", build_dir_override=tmp_path / "nope",
+        target,
+        tmp_path / "backup",
+        build_dir_override=tmp_path / "nope",
     )
     assert out["status"] == "skipped"
     assert out["is_cpp_itfs"] is True
@@ -207,7 +217,8 @@ def test_invalidate_skips_when_build_dir_missing(apply_tool, tmp_path: Path) -> 
 
 
 def test_invalidate_refuses_to_clobber_existing_backup(
-    apply_tool, tmp_path: Path,
+    apply_tool,
+    tmp_path: Path,
 ) -> None:
     pa_dir = tmp_path / "aiter" / "csrc" / "cpp_itfs" / "pa"
     pa_dir.mkdir(parents=True)
@@ -223,7 +234,9 @@ def test_invalidate_refuses_to_clobber_existing_backup(
     (backup / "cpp_itfs_cache" / "pa_ragged_HASHA" / "stale.txt").write_text("old")
 
     out = apply_tool._invalidate_aiter_cpp_itfs_cache(
-        target, backup, build_dir_override=build_dir,
+        target,
+        backup,
+        build_dir_override=build_dir,
     )
     assert out["status"] == "failed"
     assert "already exists" in out["error"]
@@ -246,7 +259,9 @@ def test_restore_round_trip(apply_tool, tmp_path: Path) -> None:
 
     backup = tmp_path / "backup"
     invalidate = apply_tool._invalidate_aiter_cpp_itfs_cache(
-        target, backup, build_dir_override=build_dir,
+        target,
+        backup,
+        build_dir_override=build_dir,
     )
     assert invalidate["status"] == "ok"
     assert not (build_dir / "pa_ragged_HASHA").exists()
@@ -262,9 +277,12 @@ def test_restore_round_trip(apply_tool, tmp_path: Path) -> None:
 
 
 def test_restore_skips_when_no_backup(apply_tool) -> None:
-    assert apply_tool._restore_aiter_cpp_itfs_cache(
-        {"status": "skipped", "is_cpp_itfs": False},
-    )["status"] == "skipped"
+    assert (
+        apply_tool._restore_aiter_cpp_itfs_cache(
+            {"status": "skipped", "is_cpp_itfs": False},
+        )["status"]
+        == "skipped"
+    )
     assert apply_tool._restore_aiter_cpp_itfs_cache({})["status"] == "skipped"
 
 
@@ -285,12 +303,14 @@ def test_verify_stale_when_no_fresh_lib_so(apply_tool, tmp_path: Path) -> None:
     old_mtime = invalidated_unix - 1000.0
     os.utime(old / "lib.so", (old_mtime, old_mtime))
 
-    out = apply_tool.verify_cpp_itfs_rebuilt({
-        "is_cpp_itfs": True,
-        "build_dir": str(build_dir),
-        "module_names": ["pa_ragged"],
-        "invalidated_unix": invalidated_unix,
-    })
+    out = apply_tool.verify_cpp_itfs_rebuilt(
+        {
+            "is_cpp_itfs": True,
+            "build_dir": str(build_dir),
+            "module_names": ["pa_ragged"],
+            "invalidated_unix": invalidated_unix,
+        }
+    )
     assert out["verified"] is False
     assert out["status"] == "stale"
 
@@ -302,12 +322,14 @@ def test_verify_ok_when_fresh_lib_so(apply_tool, tmp_path: Path) -> None:
     new_mtime = invalidated_unix + 5.0
     os.utime(fresh / "lib.so", (new_mtime, new_mtime))
 
-    out = apply_tool.verify_cpp_itfs_rebuilt({
-        "is_cpp_itfs": True,
-        "build_dir": str(build_dir),
-        "module_names": ["pa_ragged"],
-        "invalidated_unix": invalidated_unix,
-    })
+    out = apply_tool.verify_cpp_itfs_rebuilt(
+        {
+            "is_cpp_itfs": True,
+            "build_dir": str(build_dir),
+            "module_names": ["pa_ragged"],
+            "invalidated_unix": invalidated_unix,
+        }
+    )
     assert out["verified"] is True
     assert out["status"] == "ok"
     assert any("pa_ragged_HASHA" in p for p in out["fresh_lib_so"])
@@ -330,7 +352,9 @@ _FAKE_REBUILD_OK = {
 
 
 def test_apply_then_revert_invalidates_and_restores_cpp_itfs_cache(
-    apply_tool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    apply_tool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = tmp_path / "sgl-workspace" / "aiter"
     pa_dir = repo / "csrc" / "cpp_itfs" / "pa"
@@ -354,8 +378,10 @@ def test_apply_then_revert_invalidates_and_restores_cpp_itfs_cache(
     # build-dir resolver to "aiter not importable". Patching the narrow
     # helper avoids globally mocking importlib.find_spec, which would break
     # unrelated lazy imports during apply.
-    with patch.object(apply_tool, "_aiter_jit_build_dir", return_value=None), \
-         patch.object(apply_tool, "_run_rebuild", return_value=dict(_FAKE_REBUILD_OK)):
+    with (
+        patch.object(apply_tool, "_aiter_jit_build_dir", return_value=None),
+        patch.object(apply_tool, "_run_rebuild", return_value=dict(_FAKE_REBUILD_OK)),
+    ):
         result = apply_tool.apply_kernel_patch(
             patch_path=patch_file,
             target_file=target,
@@ -386,7 +412,9 @@ def test_apply_then_revert_invalidates_and_restores_cpp_itfs_cache(
 
 
 def test_non_cpp_itfs_apply_leaves_cpp_itfs_cache_untouched(
-    apply_tool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    apply_tool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A non-cpp_itfs (sglang) target must NOT touch $HOME/.aiter/build."""
     target = tmp_path / "sgl-workspace" / "sglang" / "sgl-kernel" / "csrc" / "x.cu"
@@ -400,8 +428,10 @@ def test_non_cpp_itfs_apply_leaves_cpp_itfs_cache_untouched(
     build_dir = aiter_root / "build"
     _make_cache_dir(build_dir, "pa_ragged_HASHA", b"must-survive")
 
-    with patch.object(apply_tool, "_aiter_jit_build_dir", return_value=None), \
-         patch.object(apply_tool, "_run_rebuild", return_value=dict(_FAKE_REBUILD_OK)):
+    with (
+        patch.object(apply_tool, "_aiter_jit_build_dir", return_value=None),
+        patch.object(apply_tool, "_run_rebuild", return_value=dict(_FAKE_REBUILD_OK)),
+    ):
         result = apply_tool.apply_kernel_patch(
             patch_path=patch_file,
             target_file=target,

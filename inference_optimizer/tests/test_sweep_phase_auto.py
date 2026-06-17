@@ -18,7 +18,9 @@ import pytest
 
 from inference_optimizer.orchestrator.agent_role import default_role_registry
 from inference_optimizer.orchestrator.backends.mock_backend import (
-    MockBackend, MockTurn, ScriptedPlan,
+    MockBackend,
+    MockTurn,
+    ScriptedPlan,
 )
 from inference_optimizer.orchestrator.coordinator import Coordinator
 from inference_optimizer.orchestrator.shared_state import SharedState
@@ -94,7 +96,8 @@ def coord(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_drain_pending_keep_integrates_records_result_once(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ):
     """SWEEP entry drain must record integrate results so the same KEEP is not retried until cap."""
     c = Coordinator.__new__(Coordinator)
@@ -185,16 +188,18 @@ def test_pending_keep_kernel_ids_do_not_retry_needs_review():
             "last_source_file": "/tmp/moe.cu",
         },
     }
-    state.record_kernel_integrate_result({
-        "status": "ok",
-        "decision": "NEEDS_REVIEW",
-        "kernel_id": "k004",
-        "patch_path": "/tmp/k004_opt.cu",
-        "target_file": "/tmp/rmsnorm.cu",
-        "new_tput": 100.8,
-        "gain_pct": 0.8,
-        "workspace": "/tmp/integrate-k004",
-    })
+    state.record_kernel_integrate_result(
+        {
+            "status": "ok",
+            "decision": "NEEDS_REVIEW",
+            "kernel_id": "k004",
+            "patch_path": "/tmp/k004_opt.cu",
+            "target_file": "/tmp/rmsnorm.cu",
+            "new_tput": 100.8,
+            "gain_pct": 0.8,
+            "workspace": "/tmp/integrate-k004",
+        }
+    )
 
     assert state.pending_keep_kernel_ids() == ["k001"]
     assert state.next_pending_keep_kernel_id() == "k001"
@@ -242,22 +247,25 @@ def _stack_validation_coordinator(tmp_path: Path) -> Coordinator:
         {"action": "integrate", "kernel_id": "k_prev", "tput": 110.0},
     ]
     for kid, gain in (("k001", 0.6), ("k004", 0.8)):
-        c.shared_state.record_kernel_integrate_result({
-            "status": "ok",
-            "decision": "NEEDS_REVIEW",
-            "kernel_id": kid,
-            "patch_path": f"/tmp/{kid}_opt.cu",
-            "target_file": f"/tmp/{kid}.cu",
-            "new_tput": 100.0 + gain,
-            "gain_pct": gain,
-            "workspace": f"/tmp/integrate-{kid}",
-        })
+        c.shared_state.record_kernel_integrate_result(
+            {
+                "status": "ok",
+                "decision": "NEEDS_REVIEW",
+                "kernel_id": kid,
+                "patch_path": f"/tmp/{kid}_opt.cu",
+                "target_file": f"/tmp/{kid}.cu",
+                "new_tput": 100.0 + gain,
+                "gain_pct": gain,
+                "workspace": f"/tmp/integrate-{kid}",
+            }
+        )
     return c
 
 
 @pytest.mark.asyncio
 async def test_stack_validation_reverts_when_no_gain_over_current_best(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ):
     """Stack worse than current_best (110) but above baseline (100) must REVERT.
 
@@ -279,7 +287,8 @@ async def test_stack_validation_reverts_when_no_gain_over_current_best(
 
 @pytest.mark.asyncio
 async def test_stack_validation_keeps_on_positive_increment_over_current_best(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ):
     """A real increment over current_best (110 -> 112, +1.8%) must KEEP."""
     c = _stack_validation_coordinator(tmp_path)
@@ -304,16 +313,18 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
         current_best={"action": "baseline", "tput": 100.0},
     )
     for kid, gain in (("k001", 0.6), ("k004", 0.8)):
-        c.shared_state.record_kernel_integrate_result({
-            "status": "ok",
-            "decision": "NEEDS_REVIEW",
-            "kernel_id": kid,
-            "patch_path": f"/tmp/{kid}_opt.cu",
-            "target_file": f"/tmp/{kid}.cu",
-            "new_tput": 100.0 + gain,
-            "gain_pct": gain,
-            "workspace": f"/tmp/integrate-{kid}",
-        })
+        c.shared_state.record_kernel_integrate_result(
+            {
+                "status": "ok",
+                "decision": "NEEDS_REVIEW",
+                "kernel_id": kid,
+                "patch_path": f"/tmp/{kid}_opt.cu",
+                "target_file": f"/tmp/{kid}.cu",
+                "new_tput": 100.0 + gain,
+                "gain_pct": gain,
+                "workspace": f"/tmp/integrate-{kid}",
+            }
+        )
 
     validation_calls = 0
 
@@ -349,19 +360,23 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
     assert c.shared_state.cumulative_gain_validated == pytest.approx(2.0)
     assert validation_calls == 1
     resolved_entries = [
-        entry for entry in c.shared_state.kernel_integrate_attempts.values()
+        entry
+        for entry in c.shared_state.kernel_integrate_attempts.values()
         if entry.get("kernel_id") in {"k001", "k004"}
     ]
     assert all(entry["stack_resolved"] is True for entry in resolved_entries)
-    assert {
-        entry["stack_validation_kernel_id"] for entry in resolved_entries
-    } == {"k001+k004"}
+    assert {entry["stack_validation_kernel_id"] for entry in resolved_entries} == {"k001+k004"}
 
+    # Re-invoking must be a no-op (idempotent): the stack is already validated,
+    # so the call count must not advance. Compare against the snapshot rather
+    # than the literal so the idempotency intent is explicit.
+    calls_before_recall = validation_calls
     await c._maybe_validate_positive_needs_review_stack()
 
-    assert validation_calls == 1
+    assert validation_calls == calls_before_recall
     stack_entries = [
-        item for item in c.shared_state.optimization_stack
+        item
+        for item in c.shared_state.optimization_stack
         if isinstance(item, dict) and item.get("kernel_id") == "k001+k004"
     ]
     assert stack_entries
@@ -378,16 +393,18 @@ async def test_recovers_pending_stack_validation_after_crash(tmp_path: Path):
         current_best={"action": "baseline", "tput": 100.0},
     )
     for kid, gain in (("k001", 0.6), ("k004", 0.8)):
-        c.shared_state.record_kernel_integrate_result({
-            "status": "ok",
-            "decision": "NEEDS_REVIEW",
-            "kernel_id": kid,
-            "patch_path": f"/tmp/{kid}_opt.cu",
-            "target_file": f"/tmp/{kid}.cu",
-            "new_tput": 100.0 + gain,
-            "gain_pct": gain,
-            "workspace": f"/tmp/integrate-{kid}",
-        })
+        c.shared_state.record_kernel_integrate_result(
+            {
+                "status": "ok",
+                "decision": "NEEDS_REVIEW",
+                "kernel_id": kid,
+                "patch_path": f"/tmp/{kid}_opt.cu",
+                "target_file": f"/tmp/{kid}.cu",
+                "new_tput": 100.0 + gain,
+                "gain_pct": gain,
+                "workspace": f"/tmp/integrate-{kid}",
+            }
+        )
     stack = c._stack_entries_for_validation(["k001", "k004"])
     c._mark_stack_validation_in_progress(stack, "k001+k004")
     c.shared_state.pending_stack_validation_result = {
@@ -425,7 +442,8 @@ async def test_recovers_pending_stack_validation_after_crash(tmp_path: Path):
     assert c.shared_state.current_best["kernel_id"] == "k001+k004"
     assert not c.shared_state.pending_stack_validation_result
     resolved = [
-        entry for entry in c.shared_state.kernel_integrate_attempts.values()
+        entry
+        for entry in c.shared_state.kernel_integrate_attempts.values()
         if entry.get("kernel_id") in {"k001", "k004"}
     ]
     assert all(entry.get("stack_resolved") for entry in resolved)
@@ -460,7 +478,8 @@ def test_positive_needs_review_integrates_skip_in_progress_entries():
 
 @pytest.mark.asyncio
 async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ):
     """Stack validation must run even when has_keep_pending_integrate is False."""
     c = Coordinator.__new__(Coordinator)
@@ -474,16 +493,18 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
     c.role_registry = {"kernel": object()}
     # All KEEPs already integrated as NEEDS_REVIEW — no pending KEEP
     for kid, gain in (("k001", 0.6), ("k004", 0.8)):
-        c.shared_state.record_kernel_integrate_result({
-            "status": "ok",
-            "decision": "NEEDS_REVIEW",
-            "kernel_id": kid,
-            "patch_path": f"/tmp/{kid}_opt.cu",
-            "target_file": f"/tmp/{kid}.cu",
-            "new_tput": 100.0 + gain,
-            "gain_pct": gain,
-            "workspace": f"/tmp/integrate-{kid}",
-        })
+        c.shared_state.record_kernel_integrate_result(
+            {
+                "status": "ok",
+                "decision": "NEEDS_REVIEW",
+                "kernel_id": kid,
+                "patch_path": f"/tmp/{kid}_opt.cu",
+                "target_file": f"/tmp/{kid}.cu",
+                "new_tput": 100.0 + gain,
+                "gain_pct": gain,
+                "workspace": f"/tmp/integrate-{kid}",
+            }
+        )
     assert not c.shared_state.has_keep_pending_integrate
 
     validation_calls = []
@@ -519,7 +540,8 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
 
 @pytest.mark.asyncio
 async def test_drain_uses_current_best_tput_not_baseline(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ):
     """Drain should pass current_best.tput (not baseline) so multi-KEEP gain is incremental."""
     c = Coordinator.__new__(Coordinator)
@@ -568,10 +590,14 @@ async def test_drain_uses_current_best_tput_not_baseline(
     assert len(captured_payloads) == 1
     # Should use current_best.tput (110.0), not baseline (100.0)
     assert captured_payloads[0]["base_tput"] == 110.0
+
+
 def test_build_sweep_params_defaults_when_no_recipe():
     """No warm_start_recipe → SKILL.md defaults + source='skill_md_default'."""
     from inference_optimizer.orchestrator.action_executors.sweep import (
-        DEFAULT_CONC_VALUES, DEFAULT_ISL_OSL, DEFAULT_NUM_PROMPTS_FACTOR,
+        DEFAULT_CONC_VALUES,
+        DEFAULT_ISL_OSL,
+        DEFAULT_NUM_PROMPTS_FACTOR,
     )
 
     state = _BareState()
@@ -587,8 +613,8 @@ def test_build_sweep_params_full_recipe_override():
     state = _BareState(
         warm_start_recipe={
             "sweep_grid": {
-                "conc_values":      [8, 32, 128],
-                "isl_osl_configs":  ["1024:1024", "4096:4096"],
+                "conc_values": [8, 32, 128],
+                "isl_osl_configs": ["1024:1024", "4096:4096"],
                 "num_prompts_factor": 7,
             },
         },
@@ -603,7 +629,8 @@ def test_build_sweep_params_full_recipe_override():
 def test_build_sweep_params_partial_recipe_per_field_fallback():
     """Recipe overriding only conc_values → that field from recipe, the rest from defaults, source=cortex_recipe."""
     from inference_optimizer.orchestrator.action_executors.sweep import (
-        DEFAULT_ISL_OSL, DEFAULT_NUM_PROMPTS_FACTOR,
+        DEFAULT_ISL_OSL,
+        DEFAULT_NUM_PROMPTS_FACTOR,
     )
 
     state = _BareState(
@@ -726,7 +753,7 @@ async def test_enqueue_internal_sweep_task_cortex_recipe_propagates(coord):
     """Recipe-driven grid surfaces as source='cortex_recipe' on the task."""
     coord.shared_state.warm_start_recipe = {
         "sweep_grid": {
-            "conc_values":     [128],
+            "conc_values": [128],
             "isl_osl_configs": ["1024:1024"],
         },
     }
@@ -761,7 +788,7 @@ async def test_on_enter_sweep_cortex_recipe_evidence(coord):
     """Recipe-driven grid surfaces grid_source='cortex_recipe' + a recipe-derived combos count."""
     coord.shared_state.warm_start_recipe = {
         "sweep_grid": {
-            "conc_values":     [8, 32],
+            "conc_values": [8, 32],
             "isl_osl_configs": ["1024:1024", "4096:4096", "8192:1024"],
         },
     }
@@ -794,6 +821,7 @@ async def test_on_enter_sweep_idempotent_on_reentry(coord):
 @pytest.mark.asyncio
 async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     """If the enqueue raises, the hook records ``auto_sweep_error`` and returns without propagating."""
+
     async def _boom(*args, **kwargs):
         raise RuntimeError("simulated DB outage")
 
@@ -819,9 +847,9 @@ async def test_phase_transition_into_sweep_enqueues_sweep_e2e(tmp_path: Path):
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle_plan),
-        "kernel":        MockBackend(idle_plan),
-        "critic":        MockBackend(idle_plan),
-        "robustness":    MockBackend(idle_plan),
+        "kernel": MockBackend(idle_plan),
+        "critic": MockBackend(idle_plan),
+        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=session_dir,
@@ -838,7 +866,7 @@ async def test_phase_transition_into_sweep_enqueues_sweep_e2e(tmp_path: Path):
     coord.shared_state.last_profile_trace = "/tmp/dummy.trace.json.gz"
     coord.shared_state.phase_history = [
         {"to_phase": "EXPLORE", "evidence": {}, "reason": "prelude_done"},
-        {"to_phase": "KERNEL",  "evidence": {}, "reason": "plateau_explore"},
+        {"to_phase": "KERNEL", "evidence": {}, "reason": "plateau_explore"},
     ]
 
     # Simulate a real KERNEL → SWEEP transition.
@@ -863,7 +891,8 @@ async def test_phase_transition_into_sweep_enqueues_sweep_e2e(tmp_path: Path):
     assert evidence.get("auto_sweep_enqueued") is True
     assert evidence.get("auto_sweep_task_id")
     assert evidence.get("auto_sweep_grid_source") in (
-        "cortex_recipe", "skill_md_default",
+        "cortex_recipe",
+        "skill_md_default",
     )
 
 
@@ -875,12 +904,10 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle_plan),
-        "critic":        MockBackend(idle_plan),
-        "robustness":    MockBackend(idle_plan),
+        "critic": MockBackend(idle_plan),
+        "robustness": MockBackend(idle_plan),
     }
-    role_registry = {
-        k: v for k, v in default_role_registry().items() if k != "kernel"
-    }
+    role_registry = {k: v for k, v in default_role_registry().items() if k != "kernel"}
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
@@ -939,6 +966,7 @@ def _make_policy_gate(*, shared_state):
         default_role_registry,
     )
     from inference_optimizer.orchestrator.policy import PolicyGate
+
     return PolicyGate(
         role_registry=default_role_registry(),
         shared_state=shared_state,
@@ -1082,7 +1110,8 @@ def test_sweep_singleton_bypass_flag_lets_operator_force_second_sweep():
 def test_validate_intent_denies_llm_sweep_delegate_in_active_sweep_phase():
     """Through full ``validate_intent``: a sweep delegate in active SWEEP fires the singleton rule before ``_validate_phase_action``."""
     from inference_optimizer.protocol.intent import (
-        Intent, IntentType,
+        Intent,
+        IntentType,
     )
     from inference_optimizer.orchestrator.policy import PolicyDenied
 
@@ -1106,7 +1135,8 @@ def test_validate_intent_denies_llm_sweep_delegate_in_active_sweep_phase():
 def test_validate_intent_denies_llm_sweep_propose_in_active_sweep_phase():
     """Same shape on propose_action."""
     from inference_optimizer.protocol.intent import (
-        Intent, IntentType,
+        Intent,
+        IntentType,
     )
     from inference_optimizer.orchestrator.policy import PolicyDenied
 

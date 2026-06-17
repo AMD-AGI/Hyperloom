@@ -33,6 +33,10 @@ _TERM_GRACE_SECONDS = 5.0
 def new_session_kwargs() -> dict:
     """``Popen`` kwargs so the child gets its own POSIX session (killable via
     ``os.killpg``). Returns ``{}`` on non-POSIX.
+
+    Returns:
+        A kwargs dict to splat into ``Popen``; ``{"start_new_session": True}``
+        on POSIX, otherwise an empty dict.
     """
     if os.name == "posix":
         return {"start_new_session": True}
@@ -44,6 +48,13 @@ def _process_group_alive(pgid: int) -> bool:
 
     ``killpg(pgid, 0)`` raises ``ProcessLookupError`` once the group is empty;
     any other ``OSError`` (e.g. sandbox ``EPERM``) is treated as "still alive".
+
+    Args:
+        pgid: The POSIX process-group id to probe.
+
+    Returns:
+        True if the group still has at least one member (or liveness is
+        indeterminate), False once the group is empty or on non-POSIX.
     """
     if os.name != "posix":
         return False
@@ -72,7 +83,9 @@ def _signal_group(pgid: int, sig: int) -> None:
     except OSError as exc:
         log.warning(
             "_subprocess_kill: killpg(%d, %d) failed: %s",
-            pgid, sig, exc,
+            pgid,
+            sig,
+            exc,
         )
 
 
@@ -88,6 +101,12 @@ def kill_my_spawned_server(
     warning on unexpected signalling failure). Requires the child to have been
     launched with :func:`new_session_kwargs` so its pgid is distinct from
     Hyperloom's own; asserted defensively below.
+
+    Args:
+        proc: The spawned process whose tree should be reaped; ``None`` is a
+            no-op.
+        grace_seconds: Seconds to wait after SIGTERM before SIGKILLing
+            survivors.
     """
     if proc is None:
         return
@@ -110,8 +129,9 @@ def kill_my_spawned_server(
         return
     except OSError as exc:
         log.warning(
-            "_subprocess_kill: getpgid(%d) failed: %s; falling back to "
-            "single-pid terminate", proc.pid, exc,
+            "_subprocess_kill: getpgid(%d) failed: %s; falling back to single-pid terminate",
+            proc.pid,
+            exc,
         )
         try:
             proc.terminate()
@@ -127,7 +147,8 @@ def kill_my_spawned_server(
             "without start_new_session=True — that is a Hyperloom bug, "
             "fix the launch site instead of widening this helper's "
             "scope.",
-            pgid, proc.pid,
+            pgid,
+            proc.pid,
         )
         return
 
@@ -149,7 +170,8 @@ def kill_my_spawned_server(
             "_subprocess_kill: proc.wait() did not return within 1s "
             "after SIGKILL'ing pgid=%d (pid=%d). The reaper may be "
             "wedged; leaving the zombie for init to collect.",
-            pgid, proc.pid,
+            pgid,
+            proc.pid,
         )
     except OSError:
         pass
@@ -212,17 +234,21 @@ class _StreamCapture:
         self._stderr_chunks: list[str | bytes] = []
         self._threads: list[threading.Thread] = []
         if proc.stdout is not None:
-            self._threads.append(threading.Thread(
-                target=self._pump,
-                args=(proc.stdout, self._stdout_chunks, sys.stdout),
-                daemon=True,
-            ))
+            self._threads.append(
+                threading.Thread(
+                    target=self._pump,
+                    args=(proc.stdout, self._stdout_chunks, sys.stdout),
+                    daemon=True,
+                )
+            )
         if proc.stderr is not None:
-            self._threads.append(threading.Thread(
-                target=self._pump,
-                args=(proc.stderr, self._stderr_chunks, sys.stderr),
-                daemon=True,
-            ))
+            self._threads.append(
+                threading.Thread(
+                    target=self._pump,
+                    args=(proc.stderr, self._stderr_chunks, sys.stderr),
+                    daemon=True,
+                )
+            )
 
     def start(self) -> None:
         """Start the capture threads."""
@@ -296,6 +322,7 @@ class _StreamCapture:
         except Exception:  # noqa: BLE001 - logging must not break subprocess
             pass
 
+
 # Bytes read from the tail of ``server.log`` per scan (markers always land near
 # the end of the bootstrap traceback).
 _SERVER_LOG_TAIL_BYTES: int = 65536
@@ -306,6 +333,13 @@ def _server_log_shows_death(path: str) -> bool:
 
     Best-effort and never raises: a missing / unreadable log (server hasn't
     written yet) reads as "not dead" so a slow cold start is never misjudged.
+
+    Args:
+        path: Filesystem path to the server's ``server.log``.
+
+    Returns:
+        True if the log tail contains a terminal engine/worker-init marker,
+        False otherwise (including when the log is missing or unreadable).
     """
     try:
         with open(path, "rb") as fh:
@@ -330,6 +364,15 @@ def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
     excerpt keeps a couple of lines of context around the marker so the
     operator-facing ``error`` field is actionable. Best-effort: a missing /
     unreadable log reads as "no marker" (returns ``None``).
+
+    Args:
+        path: Filesystem path to the server's ``server.log``.
+        max_chars: Maximum length of the returned excerpt; the tail is kept
+            when the excerpt is longer.
+
+    Returns:
+        A short multi-line excerpt around the first terminal init marker, or
+        ``None`` when no fatal marker is present.
     """
     try:
         with open(path, "rb") as fh:
@@ -344,7 +387,7 @@ def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
     for idx, line in enumerate(lines):
         if any(marker in line for marker in _SERVER_DEAD_MARKERS):
             start = max(0, idx - 2)
-            excerpt = "\n".join(lines[start:idx + 3]).strip()
+            excerpt = "\n".join(lines[start : idx + 3]).strip()
             if not excerpt:
                 return None
             return excerpt[-max_chars:]
@@ -385,6 +428,30 @@ def run_with_session_kill(
     ``returncode = SERVER_DEAD_RETURNCODE`` is returned (does NOT raise). This
     turns a crashed-but-hung server (parent never exits, ``/health`` polled
     forever) into a fast fail instead of a ~2h hard-timeout stall.
+
+    Args:
+        cmd: The command and arguments to execute.
+        env: Optional environment mapping for the child process.
+        cwd: Optional working directory for the child process.
+        timeout: Hard timeout in seconds; ``TimeoutExpired`` is re-raised on
+            elapse, as with ``subprocess.run``.
+        text: Whether to capture stdout/stderr as ``str`` (vs ``bytes``).
+        soft_deadline_sec: Optional deadline firing before ``timeout``; on
+            elapse the tree is reaped and ``OVERTIME_KILL_RETURNCODE`` is
+            returned without raising.
+        server_log_path: Optional path to the spawned server's ``server.log``
+            to enable the server-liveness watchdog.
+        server_dead_grace_sec: Grace period a terminal init marker must persist
+            before the watchdog reaps the tree; defaults to the
+            ``INFERENCE_OPTIMIZER_SERVER_DEAD_GRACE_SEC`` env value or 120s.
+
+    Returns:
+        A ``CompletedProcess`` carrying the child's returncode (or one of the
+        sentinel returncodes when a soft deadline or the watchdog fired) plus
+        its captured stdout/stderr.
+
+    Raises:
+        subprocess.TimeoutExpired: When the hard ``timeout`` elapses.
     """
     if server_dead_grace_sec is None:
         try:
@@ -428,15 +495,15 @@ def run_with_session_kill(
         except _ServerDeadDetected as exc:
             kill_my_spawned_server(proc)
             stdout, stderr = (
-                capture.finish(timeout=2.0)
-                if capture is not None
-                else ("" if text else b"", "" if text else b"")
+                capture.finish(timeout=2.0) if capture is not None else ("" if text else b"", "" if text else b"")
             )
             log.warning(
                 "_subprocess_kill: server-liveness watchdog reaped tree — "
                 "engine/worker init died but parent hung (marker=%r, "
                 "grace=%.1fs, elapsed=%.1fs); returncode=%d.",
-                exc.marker, exc.grace_sec, exc.elapsed_sec,
+                exc.marker,
+                exc.grace_sec,
+                exc.elapsed_sec,
                 SERVER_DEAD_RETURNCODE,
             )
             return subprocess.CompletedProcess(
@@ -448,14 +515,14 @@ def run_with_session_kill(
         except _SoftDeadlineExceeded as exc:
             kill_my_spawned_server(proc)
             stdout, stderr = (
-                capture.finish(timeout=2.0)
-                if capture is not None
-                else ("" if text else b"", "" if text else b"")
+                capture.finish(timeout=2.0) if capture is not None else ("" if text else b"", "" if text else b"")
             )
             log.info(
                 "_subprocess_kill: soft_deadline_sec=%.1fs exceeded "
                 "(elapsed=%.1fs); reaped tree with sentinel returncode=%d.",
-                exc.deadline_sec, exc.elapsed_sec, OVERTIME_KILL_RETURNCODE,
+                exc.deadline_sec,
+                exc.elapsed_sec,
+                OVERTIME_KILL_RETURNCODE,
             )
             return subprocess.CompletedProcess(
                 args=cmd,
@@ -485,10 +552,7 @@ class _SoftDeadlineExceeded(Exception):
             deadline_sec (float): The soft deadline that was exceeded.
             elapsed_sec (float): The actual wall-clock elapsed at trip time.
         """
-        super().__init__(
-            f"soft deadline {deadline_sec:.1f}s elapsed "
-            f"(actual={elapsed_sec:.1f}s)"
-        )
+        super().__init__(f"soft deadline {deadline_sec:.1f}s elapsed (actual={elapsed_sec:.1f}s)")
         self.deadline_sec = float(deadline_sec)
         self.elapsed_sec = float(elapsed_sec)
 
@@ -501,7 +565,11 @@ class _ServerDeadDetected(Exception):
     """
 
     def __init__(
-        self, *, marker: str, grace_sec: float, elapsed_sec: float,
+        self,
+        *,
+        marker: str,
+        grace_sec: float,
+        elapsed_sec: float,
     ) -> None:
         """Build the error message describing the hung-after-death condition.
 
@@ -542,13 +610,33 @@ def _communicate_with_soft_deadline(
 
     The ``hard_timeout`` is always honoured so a stuck child can't dodge the
     gates.
+
+    Args:
+        proc: The running child process to wait on.
+        hard_timeout: Hard timeout in seconds; always enforced.
+        soft_deadline_sec: Optional soft deadline that trips before the hard
+            timeout.
+        server_log_path: Optional path to the server's ``server.log`` enabling
+            the liveness watchdog.
+        server_dead_grace_sec: Grace period a terminal init marker must persist
+            before the watchdog trips.
+        capture: Optional stream capture whose threads are joined to assemble
+            the returned output.
+
+    Returns:
+        A ``(stdout, stderr)`` tuple (``str`` or ``bytes`` per the capture
+        mode).
+
+    Raises:
+        _SoftDeadlineExceeded: When the soft deadline elapses.
+        _ServerDeadDetected: When a terminal init marker persists past the
+            grace window.
+        subprocess.TimeoutExpired: When the hard timeout elapses.
     """
     watchdog_active = bool(server_log_path) and (
         server_dead_grace_sec is not None and float(server_dead_grace_sec) > 0.0
     )
-    soft_active = (
-        soft_deadline_sec is not None and float(soft_deadline_sec) > 0.0
-    )
+    soft_active = soft_deadline_sec is not None and float(soft_deadline_sec) > 0.0
     if capture is None and not soft_active and not watchdog_active:
         return proc.communicate(timeout=hard_timeout)
     if capture is not None and not soft_active and not watchdog_active:
@@ -565,7 +653,8 @@ def _communicate_with_soft_deadline(
         if soft_active and deadline_sec is not None:
             if deadline_sec - elapsed <= 0.0:
                 raise _SoftDeadlineExceeded(
-                    deadline_sec=deadline_sec, elapsed_sec=elapsed,
+                    deadline_sec=deadline_sec,
+                    elapsed_sec=elapsed,
                 )
         if watchdog_active and grace_sec is not None:
             if _server_log_shows_death(server_log_path):  # type: ignore[arg-type]
