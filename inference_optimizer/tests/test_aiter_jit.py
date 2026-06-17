@@ -10,10 +10,24 @@ start: compiler-process detection, the live/dead/unknown branching, and the
 import os
 import time
 
-import psutil
+import pytest
+
+try:
+    import psutil
+except ModuleNotFoundError:  # psutil is an optional runtime dependency
+    psutil = None
 
 from inference_optimizer.orchestrator.action_executors import _aiter_jit
 from inference_optimizer.orchestrator.action_executors import baseline
+
+
+# The ``_any_live_compiler`` probe degrades to ``None`` when psutil is absent
+# (see _aiter_jit), so only the tests that drive psutil directly require it; the
+# sweep / _resolve_timeout tests monkeypatch ``_any_live_compiler`` and run
+# regardless.
+requires_psutil = pytest.mark.skipif(
+    psutil is None, reason="psutil not installed (optional runtime dependency)"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +78,7 @@ def _patch_process_iter(monkeypatch, procs):
 # ---------------------------------------------------------------------------
 # _any_live_compiler
 # ---------------------------------------------------------------------------
+@requires_psutil
 def test_any_live_compiler_true_on_name_match(monkeypatch):
     _patch_process_iter(monkeypatch, [
         _FakeProc(name="bash"),
@@ -72,6 +87,7 @@ def test_any_live_compiler_true_on_name_match(monkeypatch):
     assert _aiter_jit._any_live_compiler() is True
 
 
+@requires_psutil
 def test_any_live_compiler_false_when_no_compiler(monkeypatch):
     _patch_process_iter(monkeypatch, [
         _FakeProc(name="bash"),
@@ -80,6 +96,7 @@ def test_any_live_compiler_false_when_no_compiler(monkeypatch):
     assert _aiter_jit._any_live_compiler() is False
 
 
+@requires_psutil
 def test_any_live_compiler_matches_cmdline_when_name_is_wrapper(monkeypatch):
     # hipcc is a perl/bash wrapper, so ``name`` may surface as perl while the
     # cmdline's first token is the real hipcc path.
@@ -89,6 +106,7 @@ def test_any_live_compiler_matches_cmdline_when_name_is_wrapper(monkeypatch):
     assert _aiter_jit._any_live_compiler() is True
 
 
+@requires_psutil
 def test_any_live_compiler_none_on_enumeration_error(monkeypatch):
     def _boom(attrs=None):
         raise psutil.Error("boom")
@@ -97,6 +115,7 @@ def test_any_live_compiler_none_on_enumeration_error(monkeypatch):
     assert _aiter_jit._any_live_compiler() is None
 
 
+@requires_psutil
 def test_any_live_compiler_skips_dead_procs(monkeypatch):
     class _RaisingProc:
         @property

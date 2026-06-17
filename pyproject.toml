@@ -34,6 +34,10 @@ test = [
     "pytest-asyncio>=1.0",
     "respx>=0.21",
     "requests>=2.28",
+    # Exercises the optional psutil-based live-compiler probe in _aiter_jit
+    # (psutil stays an optional runtime dep — the probe degrades to None when
+    # it is absent — but the test suite needs it to cover that path).
+    "psutil>=5.9",
 ]
 # CI / local mirror of the coverage job: ``pip install -e ".[test,ci]"``.
 # ``tomli`` is only required on Python <3.11 when inline scripts read
